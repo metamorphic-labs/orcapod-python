@@ -5,7 +5,7 @@
 <!-- RELEASE-DAY: replace "unreleased" with the publish date (YYYY-MM-DD) and resolve every
      line marked PLACEHOLDER below. See superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
 
-Everything merged to `main` since `v0.1.2` (29 pull requests). `0.1.3` and `0.1.4` were
+Everything merged to `main` since `v0.1.2` (30 pull requests). `0.1.3` and `0.1.4` were
 patch releases cut from a separate branch; their one fix is also in this release (see
 *Fixed*), so upgrading from `0.1.4` loses nothing.
 
