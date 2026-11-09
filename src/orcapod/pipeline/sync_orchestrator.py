@@ -174,9 +174,6 @@ class SyncPipelineOrchestrator:
             An ArrowTableStream.
         """
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-        from orcapod.utils.lazy_module import LazyModule
-
-        pa = LazyModule("pyarrow")
 
         if not buf:
             # Build an empty stream preserving declared field nullability.
