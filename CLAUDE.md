@@ -144,6 +144,9 @@ follow `AGENT_COORDINATION.md` at the project root. In short:
 - The coordinator approves obvious plans and specs itself and raises only critical decisions
   (public API, hash or stored-schema changes, new dependencies, scope growth, release) to
   the developer.
+- Every wave opens with a discussion of its key decision points, and the developer selects
+  what is dispatched. Issues the developer did not file are suggestions to triage, not
+  decisions.
 
 Load the version-matched guides (`orca skills get orca-cli`, `orca skills get orchestration`)
 before running Orca commands.

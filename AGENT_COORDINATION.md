@@ -36,14 +36,23 @@ recorded.
 
 1. **Read each issue.** Read the issue, its comments, relations, and any open PR or branch.
    Confirm it is still valid against `main` (a fix may already have landed).
-2. **Settle scope with the developer.** Agree which issues are in the wave and which
+2. **Open every wave with a decision discussion.** Before dispatching a wave, present the
+   developer with the candidate issues and the key decision points for each: what would
+   change, who is affected, the options, and a recommendation. Dispatch only what the
+   developer selects. Proposing a wave is not approval to start it.
+3. **Treat issues the developer did not file as suggestions.** An issue filed by anyone
+   else, including one filed by a coordinator or worker from a finding, records a request
+   or an observation, not a decision to do the work. The developer triages it in the wave
+   discussion: accept, reshape, defer, or decline. Check the issue's creator before
+   assuming its proposed fix or its priority is settled.
+4. **Settle scope with the developer.** Agree which issues are in the wave and which
    decisions the developer has already made. An issue that needs a design decision is not
    ready to dispatch until the decision is made, or the spec says to stop and ask.
-3. **Check for overlap.** Two workers must not edit the same file region. Where overlap is
+5. **Check for overlap.** Two workers must not edit the same file region. Where overlap is
    unavoidable (`DESIGN_ISSUES.md`, `CLAUDE.md`, a shared operator base class), name the
    overlap in both specs and say who owns the shared part. Sequence the issues instead if
    the overlap is substantial.
-4. **Move the issues to In Progress** in Linear once the developer approves the wave.
+6. **Move the issues to In Progress** in Linear once the developer approves the wave.
 
 ## Dispatch
 
