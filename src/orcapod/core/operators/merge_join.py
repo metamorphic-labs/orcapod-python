@@ -17,6 +17,30 @@ else:
     pl = LazyModule("polars")
 
 
+def _list_array(values: list[Any], element_type: "pa.DataType | None") -> "pa.Array":
+    """Build the Arrow array for a merged (list-valued) column.
+
+    With rows present the type is inferred from the values. With zero rows
+    inference yields a ``null``-typed array, which cannot be a non-nullable
+    field and does not match the predicted ``list[T]`` schema, so the list
+    type is built from ``element_type`` instead.
+
+    Args:
+        values: One list per output row.
+        element_type: Arrow type of the column's elements before merging, or
+            ``None`` if unknown.
+
+    Returns:
+        The list array for the merged column.
+    """
+    if values or element_type is None:
+        return pa.array(values)
+    if isinstance(element_type, pa.ExtensionType):
+        # Arrow cannot embed an extension type in a list value field.
+        element_type = element_type.storage_type
+    return pa.array(values, type=pa.list_(element_type))
+
+
 class MergeJoin(BinaryOperator):
     """
     Binary operator that joins two streams, merging colliding data columns
@@ -218,11 +242,13 @@ class MergeJoin(BinaryOperator):
         COMMON_JOIN_KEY = "_common"
         # COMMON_JOIN_KEY is a temporary column that gets dropped after the join
         output_nullable.pop(COMMON_JOIN_KEY, None)
+        # Use int8 explicitly so a zero-row table doesn't produce a null-typed
+        # column that Polars rejects as a join key (same as Join).
         left_table = left_table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(left_table))
+            0, COMMON_JOIN_KEY, pa.array([0] * len(left_table), type=pa.int8())
         )
         right_table = right_table.add_column(
-            0, COMMON_JOIN_KEY, pa.array([0] * len(right_table))
+            0, COMMON_JOIN_KEY, pa.array([0] * len(right_table), type=pa.int8())
         )
 
         join_keys = list(shared_tag_keys | {COMMON_JOIN_KEY})
@@ -296,16 +322,17 @@ class MergeJoin(BinaryOperator):
                     storage_array = pa.array(merged_vals, type=list_ext_type.storage_type)
                     merged_array = pa.ExtensionArray.from_storage(list_ext_type, storage_array)
                 else:
-                    merged_array = pa.array(merged_vals)
+                    merged_array = _list_array(merged_vals, elem_arrow_type)
             else:
-                merged_array = pa.array(merged_vals)
+                merged_array = _list_array(merged_vals, elem_arrow_type)
             joined = joined.add_column(col_idx, left_col_name, merged_array)
 
             if has_source:
                 source_idx = joined.column_names.index(left_source_col)
+                source_elem_type = joined.schema.field(left_source_col).type
                 joined = joined.drop(left_source_col)
                 joined = joined.drop(right_source_col)
-                source_array = pa.array(merged_sources)
+                source_array = _list_array(merged_sources, source_elem_type)
                 joined = joined.add_column(source_idx, left_source_col, source_array)
 
         # Handle remaining Polars-generated _right suffixed columns
