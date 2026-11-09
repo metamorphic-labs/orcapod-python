@@ -16,7 +16,7 @@ uv add orcapod
 For the latest development version, install directly from GitHub:
 
 ```bash
-uv add git+https://github.com/walkerlab/orcapod-python.git
+uv add git+https://github.com/nauticalab/orcapod-python.git
 ```
 
 ## Quick example

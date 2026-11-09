@@ -1,5 +1,9 @@
 # Orcapod Python
-Orcapod's Python library for developing reproducbile scientific pipelines.
+Orcapod's Python library for developing reproducible scientific pipelines.
+
+User documentation lives in [`docs/`](docs/index.md) (start with
+[Getting Started](docs/getting-started.md)) and is built with `uv run mkdocs build --strict`.
+Every Python sample in the docs is executed by `tests/test_docs/`.
 
 ## Releasing
 
@@ -74,7 +78,7 @@ While the following is subject to change based on future development, it represe
 ### Construct PIPELINE using with pipeline
 
   "Compile" PIPELINE
-  - auto_compile=False is default
+  - auto_compile=True is the default (compile runs when the `with` block exits)
   - Walk the DAG, wrap each element in a node that owns execution logic, fixates input stream, attaches caching
   - Nodes (function, operator) are associated with storage/DB
   - If a function node has no executor, Pipeline.compile() assigns LocalExecutor() by default — so capture/logging works out of the box without explicit executor setup
