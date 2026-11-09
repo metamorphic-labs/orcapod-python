@@ -295,7 +295,7 @@ Not itemised at the time. Its two breaking changes — the `NodeConfig` → `Pod
 `NodeConfig` split (ITL-512) and the move of SpikeInterface support to a separate package
 (ITL-473) — are described under *Breaking changes and migration* in `0.2.0`. For the full
 list of changes see the
-[v0.1.1...v0.1.2 comparison](https://github.com/nauticalab/orcapod-python/compare/v0.1.1...v0.1.2).
+[v0.1.1...v0.1.2 comparison](https://github.com/metamorphic-labs/orcapod-python/compare/v0.1.1...v0.1.2).
 
 ## [0.1.1] — 2026-06-29
 

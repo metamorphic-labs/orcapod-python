@@ -31,7 +31,7 @@ Releases are triggered from the GitHub Actions UI — no manual `git tag` step r
 1. **Merge your branch into `main`** — open a PR, get it reviewed, merge it.
 
 2. **Trigger the release workflow** — go to
-   **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
+   **[Actions → Release → Run workflow](https://github.com/metamorphic-labs/orcapod-python/actions/workflows/release.yml)**
    in the GitHub UI, enter the version (e.g. `0.1.0`), optionally enter a branch name
    (defaults to `main`), and click **Run workflow**.
 
@@ -68,7 +68,7 @@ workflow.
 **Example:** cutting `v0.1.1` from `hotfix/0.1.x`:
 
 1. **Trigger the release workflow** — go to
-   **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
+   **[Actions → Release → Run workflow](https://github.com/metamorphic-labs/orcapod-python/actions/workflows/release.yml)**
 2. In the **Use workflow from** dropdown, keep `main` selected (so the workflow version
    includes the `Branch` field — do not select `hotfix/0.1.x` here)
 3. Set **Version** to `0.1.1`
@@ -134,7 +134,7 @@ separate `release-sync.yml` that runs on every push to `main`.
 
 Before cutting the first release with this system active, a workspace admin must:
 
-1. **Set the `LINEAR_ACCESS_KEY` repo secret** in `nauticalab/orcapod-python` GitHub
+1. **Set the `LINEAR_ACCESS_KEY` repo secret** in `metamorphic-labs/orcapod-python` GitHub
    settings (`Settings → Secrets and variables → Actions → New repository secret`).
    Use the same Linear API key as `metamorphic-brain/axon`.
 
