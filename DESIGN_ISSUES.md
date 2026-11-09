@@ -1706,3 +1706,41 @@ the printed output against the output shown in the sample, and which builds the 
 `mkdocs build --strict`. Fixed every failing sample and the wrong prose to match the code;
 library behaviour was not changed. What the docs still do not cover is listed in
 `superpowers/plans/2026-11-09-docs-gap-report.md`.
+
+## System tag run stability (ITL-817)
+
+### ST1 — Tag column order through `Join` / `MergeJoin` depended on `PYTHONHASHSEED`
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-817
+
+`Join.static_process` and `MergeJoin.binary_static_process` built `tag_columns` from a `set`,
+so the order of user tag columns on every emitted `Tag` changed from process to process.
+`FunctionJobNode._load_cached_entries` rebuilds cached rows with the compile-time tag order,
+so a node output mixing cached and freshly computed rows could not be concatenated:
+`SyncPipelineOrchestrator._materialize_as_stream` raised
+`ArrowInvalid: Schema at index N was different`.
+
+**Fix:** Both operators now emit tags in the order `output_schema` predicts (first appearance
+across the inputs, in call order). `arrow_utils.concat_tables_by_name` aligns per-row tables
+by column name in both buffer materializers, so any operator that emits a different column
+order is tolerated. Column order only: `arrow_hasher.hash_table` ignores column order, so no
+record ID, system tag, `content_hash` or `pipeline_hash` changes.
+
+### ST2 — Default source record IDs are positional
+**Status:** open
+**Severity:** high
+**Issue:** ITL-817
+
+Without `record_id_column`, `stream_builder._make_provenance_token` derives a row's record ID
+from its position (`row_{index}`). When the same rows arrive in a different order under the
+same `source_id`, record IDs move between rows while user tags and data stay correct. Every
+identity built on system tags then changes: a `sink_pod` re-delivers every row on every run
+and invocation records carry another row's lineage. This reproduces the signature reported
+in ITL-817 exactly; whether it is the reporter's cause depends on how their sources are built.
+
+The behavior is now documented on `ArrowTableSource`, `SourceStreamBuilder.build` and in
+`docs/concepts/sources.md`, and `record_id_column` is pinned as order-independent by
+`tests/test_pipeline/test_system_tag_run_stability.py`. Changing the default to a
+content-derived record ID invalidates stored identities and is proposed, not implemented, in
+`superpowers/specs/2026-11-09-itl-817-content-derived-record-ids.md`.

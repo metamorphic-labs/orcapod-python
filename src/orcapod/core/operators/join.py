@@ -212,10 +212,20 @@ class Join(NonZeroInputOperator):
         reordered_columns = [col for col in table.column_names if col in tag_keys]
         reordered_columns += [col for col in table.column_names if col not in tag_keys]
 
+        # ``tag_keys`` is a set, so its iteration order depends on
+        # PYTHONHASHSEED. Emit the tag columns in the order ``output_schema``
+        # predicts (first appearance across the inputs, in call order) so every
+        # process, and every row served from a node's cache, agrees on it.
+        tag_order: list[str] = []
+        for input_stream in streams:
+            for key in input_stream.keys()[0]:
+                if key not in tag_order:
+                    tag_order.append(key)
+
         result_table = table.select(reordered_columns)
         return ArrowTableStream(
             result_table,
-            tag_columns=tuple(tag_keys),
+            tag_columns=tuple(tag_order),
         )
 
     # ------------------------------------------------------------------

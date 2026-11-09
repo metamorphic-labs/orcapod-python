@@ -66,6 +66,14 @@ source adds two of them, `_tag_source_id::<hash>` and `_tag_record_id::<hash>`, 
 is the source's pipeline hash. These columns are used internally during
 [joins](operators.md) to maintain provenance through multi-stream operations.
 
+Each row's system tag carries a record ID derived from the source's `source_id` and a
+per-row token. By default that token is the row's position, so the record ID is stable only
+while the rows arrive in the same order: reorder them under the same `source_id` and each
+row inherits another row's lineage, which makes downstream caches and `sink_pod` completion
+tracking miss. Sources that accept `record_id_column` use that column's value instead, so the
+record ID follows the row. Set it to a column that is unique per row whenever row order can
+vary between runs.
+
 These columns are hidden by default. You can reveal them using `ColumnConfig`:
 
 ```python

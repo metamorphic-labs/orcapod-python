@@ -46,6 +46,15 @@ def _make_provenance_token(record_id_column: str | None, row_index: int, row: di
     When *record_id_column* is given the token is ``"{column}={value}"``,
     giving a stable, human-readable key that survives row reordering.
     When no column is specified the fallback is ``"row_{index}"``.
+
+    The fallback is positional: the token names a row position, not a row.
+    If the same rows are supplied in a different order under the same
+    ``source_id``, each row inherits the record ID of whichever row used to
+    occupy its position. Downstream record identities (``FunctionJobNode``
+    pipeline entries, ``SideEffectPod`` completion records) are derived from
+    the record ID, so they stop matching and lineage is attributed to the
+    wrong row. Pass ``record_id_column`` whenever row order is not guaranteed
+    to be identical between runs.
     """
     if record_id_column is not None:
         return f"{record_id_column}={row[record_id_column]}"
@@ -119,7 +128,10 @@ class SourceStreamBuilder:
             table: Arrow table with nullable flags already set correctly.
             tag_columns: Column names forming the tag for each row.
             source_id: Canonical source name. Defaults to table hash.
-            record_id_column: Column for stable record IDs in provenance.
+            record_id_column: Column whose value identifies a row, giving
+                record IDs that follow the row regardless of its position.
+                When ``None`` the record ID is derived from the row's position
+                (``row_{index}``), so it is stable only while row order is.
             system_tag_columns: Additional system-level tag columns.
 
         Returns:
