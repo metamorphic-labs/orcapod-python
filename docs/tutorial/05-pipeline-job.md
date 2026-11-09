@@ -101,9 +101,12 @@ those two units found its answer already stored.
 Each recorded step is a **node** of the job. `job.nodes` lists them by name:
 
 ```python
-print(list(job.nodes))
-# ['sessions', 'units', 'SelectDataColumns_1', 'SelectDataColumns_2', 'SelectDataColumns_3', 'Join', 'rates', 'GroupBy', 'session_means']
+print(sorted(job.nodes))
+# ['GroupBy', 'Join', 'SelectDataColumns_1', 'SelectDataColumns_2', 'SelectDataColumns_3', 'rates', 'session_means', 'sessions', 'units']
 ```
+
+(`sorted` is only there to make this page reproducible: `list(job.nodes)` gives the same
+names, in an order that can differ from one Python session to the next.)
 
 - A source is listed under its `source_id`.
 - A function pod is listed under the `label` you gave it. Without a label it gets the
@@ -193,13 +196,16 @@ job.run()
 
 print(len(calls))
 # 142
-print(job.nodes["session_means"].as_pandas_df().head(2))
+means = job.nodes["session_means"].as_pandas_df()
+print(means.sort_values(["subject_id", "session"], ignore_index=True).head(2))
 #   subject_id session  mean_rate_hz
 # 0   mouse_01      s1      6.033333
 # 1   mouse_01      s2      6.793750
 ```
 
-No calls. The results came from the files in `workshop_db/`:
+No calls. The results came from the files in `workshop_db/`. Rows read back from a store are
+not guaranteed to come in the order they were first computed in, which is why the sample
+sorts them before printing. Sort whenever the order matters to you.
 
 ```python
 from pathlib import Path
@@ -262,18 +268,18 @@ job.run()
 print("rows:", job.nodes["depth_mm"].as_table().num_rows)
 # rows: 64
 print("function calls in this run:", n_calls)
-# function calls in this run: 59
+# function calls in this run: 54
 ```
 
 ??? success "Solution"
-    The first run prints `rows: 64` and `function calls in this run: 59`. Fifty-nine, not
+    The first run prints `rows: 64` and `function calls in this run: 54`. Fifty-four, not
     64, because some units share a depth and identical inputs are computed once.
 
     The second run prints `rows: 64` and `function calls in this run: 0`. It is a new Python
     process, with a new job object and a new database object. The only thing it shares with
     the first run is the `exercise_db` directory, and that is enough.
 
-    Delete `exercise_db/` and run the script once more: 59 calls again.
+    Delete `exercise_db/` and run the script once more: 54 calls again.
 
 **2.** In the main example, what would `list(job.nodes)` show if you removed both `label=`
 arguments? Predict, then try it with a new job over an `InMemoryArrowDatabase`.
@@ -291,8 +297,8 @@ arguments? Predict, then try it with a new job over an `InMemoryArrowDatabase`.
         mean_rate.pod(
             rates.group_by(["subject_id", "session"]).select_data_columns(["rate_hz"])
         )
-    print(list(unlabelled.nodes)[-3:])
-    # ['firing_rate', 'GroupBy', 'mean_rate']
+    print(sorted(unlabelled.nodes))
+    # ['GroupBy', 'Join', 'SelectDataColumns_1', 'SelectDataColumns_2', 'SelectDataColumns_3', 'firing_rate', 'mean_rate', 'sessions', 'units']
     ```
 
     Labels become useful when the same function is applied in two places of one pipeline.

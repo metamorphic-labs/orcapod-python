@@ -169,12 +169,12 @@ rates = firing_rate.pod(
     sessions.select_data_columns(["duration_s"]),
 )
 print(rates.as_pandas_df().head(5))
-#   session subject_id  unit  probe    rate_hz
-# 0      s1   mouse_01     0  imec0   2.483333
-# 1      s1   mouse_01     1  imec0   5.433333
-# 2      s1   mouse_01     2  imec0  11.033333
-# 3      s1   mouse_01     3  imec0   9.983333
-# 4      s1   mouse_01     0  imec1   3.583333
+#   subject_id session  probe  unit    rate_hz
+# 0   mouse_01      s1  imec0     0   2.483333
+# 1   mouse_01      s1  imec0     1   5.433333
+# 2   mouse_01      s1  imec0     2  11.033333
+# 3   mouse_01      s1  imec0     3   9.983333
+# 4   mouse_01      s1  imec1     0   3.583333
 print(rates.as_table().num_rows)
 # 64
 ```
