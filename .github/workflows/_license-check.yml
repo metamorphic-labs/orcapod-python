@@ -4,10 +4,10 @@ on:
   workflow_call:
     inputs:
       branch:
-        description: 'Branch to check out'
+        description: 'Branch to check out; empty checks out the ref that triggered the caller'
         required: false
         type: string
-        default: main
+        default: ''
 
 jobs:
   license-check:
