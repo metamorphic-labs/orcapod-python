@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Iterator
-from itertools import repeat
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod import contexts
@@ -262,44 +261,53 @@ class ArrowTableStream(StreamBase):
         self._cached_elements = None
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, Data]]:
-        """
-        Iterates over the data in the stream.
-        Each data is represented as a tuple of (TagProtocol, DataProtocol).
+        """Iterates over the rows of the stream as ``(Tag, Data)`` pairs.
+
+        Every row of the backing table is yielded exactly once, in table order,
+        regardless of how the tag, data and source-info columns are chunked.
+
+        Yields:
+            A ``(Tag, Data)`` tuple for each row.
         """
         # TODO: make it work with table batch stream
         if self._cached_elements is None:
             cached_elements = []
-            tag_present = len(self._all_tag_columns) > 0
-            if tag_present:
-                tags = self._table.select(self._all_tag_columns)
-                tag_batches = tags.to_batches()
-            else:
-                tag_batches = repeat(Tag({}))
+            tag_columns = list(self._all_tag_columns)
+            data_columns = list(self._data_columns)
+            empty_tag = Tag({}) if not tag_columns else None
 
-            # TODO: come back and clean up this logic
+            # Indexed by absolute row position: the source-info table has its
+            # own chunk layout, so it must never be indexed batch-locally.
+            source_info_rows = self._source_info_table.to_pylist()
 
-            data = self._table.select(self._data_columns)
-
-            for tag_batch, data_batch in zip(tag_batches, data.to_batches()):
-                for i in range(len(data_batch)):
-                    if tag_present:
+            # Batch the whole table once. ``Table.to_batches`` cuts at the union
+            # of the chunk boundaries of every column, so the tag and data
+            # columns of a batch always cover the same rows. Batching the tag
+            # and data selections separately and zipping them drops or
+            # mis-pairs rows whenever the two are chunked differently.
+            row_offset = 0
+            for batch in self._table.to_batches():
+                tag_batch = batch.select(tag_columns) if tag_columns else None
+                data_batch = batch.select(data_columns)
+                for i in range(batch.num_rows):
+                    if tag_batch is not None:
                         tag = Tag(
                             tag_batch.slice(i, 1),  # type: ignore
                             data_context=self.data_context,
                         )
-
                     else:
-                        tag = cast(Tag, tag_batch)
+                        tag = cast(Tag, empty_tag)
 
                     data = Data(
                         data_batch.slice(i, 1),
-                        source_info=self._source_info_table.slice(i, 1).to_pylist()[0],
+                        source_info=source_info_rows[row_offset + i],
                         data_context=self.data_context,
                     )
 
                     yield tag, data
 
                     cached_elements.append((tag, data))
+                row_offset += batch.num_rows
             self._cached_elements = cached_elements
         else:
             yield from self._cached_elements
