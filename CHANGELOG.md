@@ -197,10 +197,12 @@ not on PyPI at the time of writing; install it from its repository.
 - CI: the Python 3.11 release test job no longer destroys its own virtualenv; every
   GitHub Action is pinned to a commit SHA and upgraded to its Node 24 major.
   (ITL-618, ITL-619 #254; ITL-621 #256)
-- PLACEHOLDER (pending merge): `pygraphviz` removed from the runtime dependencies. Nothing
-  imported it, and it had to be compiled against the Graphviz C headers on every install.
-  Installing `orcapod` no longer needs a compiler or Graphviz development headers.
-  (ITL-134 #267) — this must merge before the cut; see *Known limitations* if it does not.
+- `pygraphviz` removed from the runtime dependencies. It was declared but never
+  imported, and it is built from source against the Graphviz C headers, so installing
+  `orcapod` failed on systems without `libgraphviz-dev` (or with a Graphviz newer than
+  `pygraphviz` supports). Installing `orcapod` no longer needs a C toolchain or Graphviz
+  headers. Rendering pipeline graphs still uses the pure-Python `graphviz` package and
+  therefore the optional Graphviz `dot` binary at render time. (ITL-134 #267)
 
 ### Fixed
 
@@ -266,9 +268,6 @@ not on PyPI at the time of writing; install it from its repository.
 - **`ray` is pinned to `2.48.0`** in the `ray` extra.
 - **There is no `orcapod.__version__`.** Read the installed version with
   `importlib.metadata.version("orcapod")`.
-- PLACEHOLDER (delete once ITL-134 #267 is merged): installing `orcapod` requires a C
-  compiler and the Graphviz headers, because `pygraphviz` is a runtime dependency that is
-  compiled at install time. On current Ubuntu it does not build at all.
 - The SpikeInterface extension is not published on PyPI.
 
 ## [0.1.4] — 2026-07-17
