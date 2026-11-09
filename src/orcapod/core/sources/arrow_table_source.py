@@ -49,6 +49,17 @@ class ArrowTableSource(RootSource):
     automatically, because the all-nullable Arrow default is never intentional
     in those paths.  ``ArrowTableSource`` is unique in accepting a pre-existing
     ``pa.Table`` whose schema may already be deliberate.
+
+    Record identity
+    ---------------
+    Every row gets a record ID system tag derived from ``source_id`` and a
+    per-row token.  With ``record_id_column`` the token is that column's value,
+    so the ID follows the row.  Without it the token is the row's position
+    (``row_0``, ``row_1``, ...): supplying the same rows in a different order
+    under the same ``source_id`` moves each record ID to a different row, which
+    invalidates downstream pipeline entries and ``SideEffectPod`` completion
+    records and misattributes lineage.  Set ``record_id_column`` to a column
+    that is unique per row whenever row order can vary between runs.
     """
 
     def __init__(
