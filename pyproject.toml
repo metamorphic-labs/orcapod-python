@@ -36,12 +36,17 @@ requires-python = ">=3.11.0"
 license = { text = "MIT License" }
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 
 [project.urls]
 Homepage = "https://github.com/nauticalab/orcapod-python"
+Repository = "https://github.com/nauticalab/orcapod-python"
+Changelog = "https://github.com/nauticalab/orcapod-python/blob/main/CHANGELOG.md"
+Issues = "https://github.com/nauticalab/orcapod-python/issues"
 
 [project.optional-dependencies]
 redis = ["redis>=6.2.0"]

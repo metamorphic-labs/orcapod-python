@@ -1,6 +1,303 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] — unreleased
+
+<!-- RELEASE-DAY: replace "unreleased" with the publish date (YYYY-MM-DD) and resolve every
+     line marked PLACEHOLDER below. See superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
+
+Everything merged to `main` since `v0.1.2` (29 pull requests). `0.1.3` and `0.1.4` were
+patch releases cut from a separate branch; their one fix is also in this release (see
+*Fixed*), so upgrading from `0.1.4` loses nothing.
+
+**Read *Breaking changes and migration* before upgrading an existing pipeline database.**
+A pipeline or result database written by any `0.1.x` release cannot be read by `0.2.0`
+until it is migrated or explicitly ignored.
+
+### Breaking changes and migration
+
+#### Stored hash columns are now `large_binary`; pipeline and result databases are versioned (ITL-535 #232, ITL-539 #241)
+
+Every orcapod-produced hash column in the pipeline database (pdb) and result database
+(rdb) is now stored as `large_binary` (the prefixed digest) instead of `large_string`:
+`__node_content_hash`, `__input_data_hash`, `__output_data_hash`, the function variation
+hashes `function_signature_hash` / `function_content_hash`, the operator node's
+`__node_content_hash`, and the side-effect invocation log's `record_id_hash`.
+
+Storage paths now carry a schema version: pipeline tables live under
+`<node identity path>/pdb_v1`, result tables under `<pod uri>/rdb_v1`, and side-effect
+tracking tables under a `tdb_v1` suffix. A table written by `0.1.x` (no suffix) is a
+"v0" table.
+
+**What you will see.** The first time a function node or result cache touches a v0 table
+it raises `orcapod.errors.SchemaVersionError`. Nothing is read or overwritten.
+
+**Migration — choose one per node:**
+
+1. *Migrate in place* (keeps cached results). For Delta Lake databases, from the shell:
+
+   ```bash
+   orcapod migrate result-db   <result_db_path> <record_path> [<record_path> ...]
+   orcapod migrate pipeline-db <pipeline_db_path> <result_db_path> <node_path> [<node_path> ...]
+   ```
+
+   Both accept `--dry-run` (count without writing) and `--json-summary`. For any other
+   database backend, or from Python:
+
+   ```python
+   from orcapod.migrations import migrate_node, migrate_result_v0_to_v1
+
+   migrate_result_v0_to_v1(result_db, result_path)   # the pod's result table
+   migrate_node(function_job_node)                    # the node's pipeline table
+   ```
+
+   Migration copies rows to the versioned path and leaves the v0 table untouched; it is
+   idempotent, so it can be re-run.
+
+2. *Ignore and recompute.* Opt a node out of the check and let it recompute from scratch:
+
+   ```python
+   from orcapod.types import NodeConfig
+   node.node_config = NodeConfig(ignore_schema=("v0",))
+   ```
+
+**Not covered by the migration tool:** tables written by an *operator* node
+(`OperatorJobNode`). Those have no version check and no migration; an existing table
+fails with an Arrow schema mismatch on the next write and must be dropped and recreated.
+See *Known limitations*.
+
+`ArrowDatabaseProtocol` gains a required `table_exists(path) -> bool` method. Custom
+database backends must implement it.
+
+#### `record_id` no longer includes the node content hash (ITL-533 #236)
+
+The preimage of a pipeline record's `record_id` is now the system tag columns plus
+`__input_data_hash` only. `__node_content_hash` is no longer part of it (it is still
+stored on each row, and still used to isolate nodes that share a table).
+
+**Effect:** every `record_id` and `__pipeline_base_entry_id` value differs from the one
+`0.1.x` computed for the same input. `orcapod migrate pipeline-db` /
+`migrate_pipeline_v0_to_v1` recompute both, so a migrated database is consistent. Any
+`record_id` you stored *outside* orcapod (logs, external tables, filenames) no longer
+matches.
+
+#### Function-pod signature hashes changed for orcapod logical types (ITL-638 #262)
+
+A function pod's signature hash used to embed the full import path of an annotated
+orcapod type (`orcapod.logical_types.file_type.File`). It now uses the type's stable
+registered name (`orcapod.file`), so moving a module inside orcapod can no longer
+invalidate caches.
+
+**Effect — one-time cache invalidation:** any function pod whose parameters or return
+annotation mention `op.File`, `op.Directory`, `op.Path` or `op.UUID` (directly or inside
+`list[...]`, `X | None`, etc.) gets a new signature hash. Its previously cached results
+are not found and are recomputed on the next run. Migrating the database does not avoid
+this. Functions annotated only with builtins and user-defined types are unaffected — their
+hashes are byte-identical (enforced by golden-value tests).
+
+#### `Schema` objects are hashed by `SchemaHandler` (ITL-639 #263)
+
+`Schema` values now reach their dedicated handler instead of being hashed as a plain
+mapping. **No hash value changes** — the eight golden schema hashes are byte-identical.
+The one behavioural difference: hashing a `Schema` that contains a Python type with no
+Arrow translation now raises a descriptive error at hash time instead of producing a
+hash for a schema that could never be stored.
+
+#### `op.Directory(ignore=...)` matches relative POSIX paths (ITL-603 #247)
+
+Glob patterns are matched against the path relative to the directory root with
+`PurePosixPath.match()`, not against the bare entry name. Bare patterns such as `"*.pyc"`
+behave as before. Patterns containing `/` (for example `"build/*.o"`), which previously
+never matched anything, now exclude files — which changes the directory's content hash.
+A callable passed as `ignore` now receives a relative `PurePosixPath` rather than an
+absolute `UPath`; callables that only read `.name` are unaffected.
+
+#### `SideEffectFunctionPod` removed; context injection moved into `FunctionPod` (ITL-532 #231)
+
+Only relevant if you tracked `main` between releases — none of this was in a published
+version. The `orcapod.core.side_effect_function` module, `SideEffectFunctionNodeProtocol`,
+`SideEffectFunctionInvocation` and `record_side_effect_function_pod_invocation` are gone.
+Use `@function_pod(ctx_arg=...)` / `FunctionPod.from_fn(..., ctx_arg_name=...)`.
+`@side_effect_function_pod` remains as a thin alias.
+
+#### Shipped in 0.1.2 but never recorded here
+
+These two breaking changes were released in `0.1.2` without a changelog entry. They are
+listed for anyone upgrading from `0.1.1` or earlier.
+
+**`NodeConfig` split into `PodConfig` and `NodeConfig` (ITL-512 #221).**
+
+| Before | After |
+|---|---|
+| `NodeConfig(max_concurrency=N)` | `PodConfig(max_concurrency=N)` |
+| `FunctionPod(pf, node_config=NodeConfig(...))` | `FunctionPod(pf, pod_config=PodConfig(...))` |
+| `pod.node_config` | `pod.pod_config` |
+| `resolve_concurrency(node_config, pipeline_config)` | `resolve_concurrency(pod_config, pipeline_config)` |
+| `NodeConfig.is_result_ephemeral: bool` | `NodeConfig.is_result_ephemeral: bool \| None` |
+
+`is_result_ephemeral` can no longer be set when constructing a `FunctionPod`. Set it on
+the node (`node.node_config = NodeConfig(is_result_ephemeral=True)`) or for a whole job
+(`job.apply_node_config(NodeConfig(is_result_ephemeral=True))`).
+
+**SpikeInterface support moved to a separate package (ITL-473 #220).** Core `orcapod` no
+longer contains or depends on any SpikeInterface code: `LogicalSIRecording`, the
+`BaseSorting`, `Motion` and `SortingAnalyzer` logical types, and the `spikeinterface`
+optional dependency are gone. They live in
+[`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface),
+which registers itself through the new `op.register_extension()` hook. That package is
+not on PyPI at the time of writing; install it from its repository.
+
+### Added
+
+- **`GroupBy` operator** — the first many→one operator. `GroupBy(by=[...])` (also
+  `stream.group_by(...)`) collapses rows sharing a tag tuple into one row; group keys stay
+  scalar tags and every other column becomes list-valued. Output is deterministic across
+  runs and input orderings. (NPIPE-204 #250)
+- **`SideEffectPod`** with `track_completion` and `drop_on_failure`, plus the `@sink_pod`,
+  `@tap_pod` and `@side_effect_pod` decorators. The user function receives an
+  `InvocationContext` on every call. (ITL-525 #228)
+- **Context injection for function pods** — `@function_pod(ctx_arg=...)` /
+  `FunctionPod.from_fn(..., ctx_arg_name=...)` passes an `InvocationContext` to the
+  function. (ITL-532 #231, #234)
+- **Post-run hooks** — `FunctionPod.add_post_run_hook()` and
+  `@function_pod(post_run_hooks=[...])` fire after every invocation (computed, cache hit,
+  or error). New public types: `InvocationStatus`, `RunStats`, `PodContext`,
+  `PostRunPayload`, `HookConfig`, `PostRunHook`. (ITL-523 #226)
+- `PostRunPayload.invocation_context`; `InvocationContext` and `InvocationHashConfig` are
+  exported from `orcapod`. (ITL-531 #237)
+- **`EmptyData`** — a payload-free token emitted when an upstream ephemeral result is
+  missing, so downstream nodes can still be served from their own cache. New errors
+  `EmptyDataAccessError`, `EmptyDataHashMissingError`, `EphemeralResultMissingError`.
+  Pipeline rows now persist `__output_data_hash`. (ITL-534 #229)
+- **Schema versioning and migration** — `orcapod.migrations` package
+  (`migrate_node`, `migrate_pipeline_v0_to_v1`, `migrate_result_v0_to_v1`,
+  `MigrationResult`), the `orcapod migrate pipeline-db` / `result-db` CLI commands,
+  `SchemaVersionError`, `NodeConfig.ignore_schema`, `ContentHash.from_prefixed_digest()`,
+  and `ArrowDatabaseProtocol.table_exists()`. (ITL-535 #232)
+- **`ListLogicalType`** — `list[T]` and `set[T]` columns whose element is a logical type
+  (`list[uuid.UUID]`, `list[File]`, `list[MyDataclass]`, nested lists) now round-trip
+  through Parquet and Delta Lake with the element type preserved. (ITL-173 #251)
+- `match_mtime` flag on the file-hash cache backends and
+  `enable_file_hash_caching(match_mtime=...)`; with `False`, lookups match on path and
+  size only, for filesystems with unreliable mtimes. (ITL-522 #225)
+- Hash computation site reference in the documentation (ITL-529 #238) and the
+  side-effect pods design spec (ITL-524 #227).
+- PLACEHOLDER (pending merge): `NodeConfig.missing_cache_policy`
+  (`"recompute"` / `"as_empty"` / `"strict"`) and `CacheMissError`. (ITL-604 #248) —
+  keep this line if #248 merges before the cut, otherwise delete it.
+
+### Changed
+
+- All hash columns stored in pipeline, result and tracking tables are `large_binary`. See
+  *Breaking changes and migration*. (ITL-535 #232, ITL-539 #241)
+- `record_id` preimage no longer includes `__node_content_hash`. See *Breaking changes
+  and migration*. (ITL-533 #236)
+- `op.Directory(ignore=...)` matches relative POSIX paths. See *Breaking changes and
+  migration*. (ITL-603 #247)
+- Release workflow accepts an optional `branch` input (defaults to `main`). (#239)
+- CI: the Python 3.11 release test job no longer destroys its own virtualenv; every
+  GitHub Action is pinned to a commit SHA and upgraded to its Node 24 major.
+  (ITL-618, ITL-619 #254; ITL-621 #256)
+- PLACEHOLDER (pending merge): `pygraphviz` removed from the runtime dependencies. Nothing
+  imported it, and it had to be compiled against the Graphviz C headers on every install.
+  Installing `orcapod` no longer needs a compiler or Graphviz development headers.
+  (ITL-134 #267) — this must merge before the cut; see *Known limitations* if it does not.
+
+### Fixed
+
+- `RayExecutor` no longer fails when it has no remote options: `ray.remote` is applied
+  directly instead of being called with an empty option set. This is the fix released as
+  `0.1.3` / `0.1.4`. (#233, ITL-544 #235)
+- Function-pod signature hashes no longer depend on orcapod's internal module layout.
+  (ITL-638 #262)
+- `Schema` hashing is routed through `SchemaHandler`; the handler was unreachable and was
+  missing from the `v0.1` context spec. (ITL-639 #263)
+- Empty Arrow tables keep the declared field nullability. Previously a function that
+  failed under `error_policy="continue"` produced an all-nullable empty table, and a
+  downstream `Join` aborted the whole pipeline. (ITL-563 #242)
+- Extension-typed columns can be read back after Delta Lake compaction, which rewrites
+  `large_string` storage as `string`. (ITL-602 #246)
+- List-backed logical types (`list[File]`, `set[File]`, …): the Polars round-trip in
+  `Join` / `MergeJoin` no longer raises, content hashing hashes file contents rather than
+  path strings, and `MergeJoin` keeps the extension type on merged columns. (ITL-627 #257)
+- `Data` can represent list-valued source-info provenance; `MergeJoin` inside a pipeline
+  job no longer fails with `ArrowTypeError`. `Batch` and `GroupBy` can aggregate
+  logical-typed columns such as `Path`. (NPIPE-204 #250)
+- `PollingSource`:
+  - runs its full asynchronous polling loop inside a `PipelineJob` instead of a single
+    synchronous snapshot (ITL-615 #255);
+  - no longer leaks a synthetic `_content_hash` column into its data schema, which raised
+    `SchemaInconsistencyError` on the third fetch (ITL-616 #259);
+  - no longer loses rows when `iter_data()` / `as_table()` are called while the async loop
+    is running (ITL-617 #260);
+  - no longer crashes on a zero-row batch; the Arrow schema is established once, from the
+    declared schema or the first non-empty batch (ENG-952 #261).
+- PLACEHOLDER (pending merge): `iter_data` dropped rows when columns had mismatched chunk
+  layouts. (ITL-816)
+- PLACEHOLDER (pending merge): `MergeJoin` on an empty input. (ITL-813)
+- PLACEHOLDER (pending merge): system tags misaligned across runs after a join. (ITL-817)
+
+### Known limitations
+
+- **Operator-node tables have no migration path.** `OperatorJobNode` stores
+  `__node_content_hash` as `large_binary` but has neither a schema-version check nor a
+  migration utility. An operator-node table written by `0.1.x` fails with an Arrow schema
+  mismatch on the next write; drop and recreate it. (ITL-539; `DESIGN_ISSUES.md` ON1)
+- **The migration CLI only opens Delta Lake databases.** Other backends must use the
+  Python API in `orcapod.migrations`.
+- **Migration does not rescue caches invalidated by ITL-638.** Pods annotated with
+  orcapod logical types recompute once regardless.
+- **Hash-stability regression checks are incomplete.** Golden-value tests cover schema
+  hashes and type-annotation hashing; broader coverage is tracked in ITL-626 and may land
+  after this release.
+- **`dict[str, list[T]]` with a logical-type `T`** (a list nested inside a dict value)
+  does not round-trip; two tests are marked expected-failure. (PLT-1732)
+- **`set[T]` round-trips only for logical-type elements**, not primitives such as
+  `set[int]`. (ITL-611, open)
+- **Rendering a pipeline graph needs the Graphviz `dot` executable** on `PATH`. Everything
+  else works without Graphviz.
+- **Delta Lake on S3 is not covered by automated tests.** The S3 integration tests skip in
+  every environment because the MinIO image they start no longer exists. (ITL-819)
+- **The SpiralDB backend is not verified by this release.** Its integration tests have
+  been failing on `main` since at least 2026-08-26 with `403 Permission table:view
+  denied` from the SpiralDB test project — a credentials problem on the test project, not
+  a code change — so the `spiraldb` extra ships untested against a live service.
+- **Tested on Python 3.11 and 3.12 only.** `requires-python` is `>=3.11` with no upper
+  bound; newer interpreters are not exercised in CI.
+- **`ray` is pinned to `2.48.0`** in the `ray` extra.
+- **There is no `orcapod.__version__`.** Read the installed version with
+  `importlib.metadata.version("orcapod")`.
+- PLACEHOLDER (delete once ITL-134 #267 is merged): installing `orcapod` requires a C
+  compiler and the Graphviz headers, because `pygraphviz` is a runtime dependency that is
+  compiled at install time. On current Ubuntu it does not build at all.
+- The SpikeInterface extension is not published on PyPI.
+
+## [0.1.4] — 2026-07-17
+
+Patch release cut from a maintenance branch, not from `main`.
+
+### Fixed
+
+- `RayExecutor`: build the Ray remote function inside the cache-miss branch so a new
+  `ray.remote` decorator is not created on every call.
+
+## [0.1.3] — 2026-07-17
+
+Patch release cut from a maintenance branch, not from `main`.
+
+### Fixed
+
+- `RayExecutor`: `ray.remote` cannot be pre-configured with an empty option set; apply it
+  directly when there are no remote options.
+
+## [0.1.2] — 2026-07-10
+
+Not itemised at the time. Its two breaking changes — the `NodeConfig` → `PodConfig` /
+`NodeConfig` split (ITL-512) and the move of SpikeInterface support to a separate package
+(ITL-473) — are described under *Breaking changes and migration* in `0.2.0`. For the full
+list of changes see the
+[v0.1.1...v0.1.2 comparison](https://github.com/nauticalab/orcapod-python/compare/v0.1.1...v0.1.2).
+
+## [0.1.1] — 2026-06-29
 
 ### New
 

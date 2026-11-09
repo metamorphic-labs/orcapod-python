@@ -1,11 +1,41 @@
 # Orcapod Python
-Orcapod's Python library for developing reproducbile scientific pipelines.
+Orcapod's Python library for developing reproducible scientific pipelines.
+
+## Installation
+
+Orcapod requires Python 3.11 or newer and is tested on Python 3.11 and 3.12.
+
+```bash
+pip install orcapod
+# or, in a uv-managed project
+uv add orcapod
+```
+
+Optional features are installed as extras:
+
+| Extra | Adds |
+|-------|------|
+| `orcapod[ray]` | Distributed execution with `RayExecutor` |
+| `orcapod[redis]` | Redis-backed caching |
+| `orcapod[postgresql]` | PostgreSQL connector and hash cache |
+| `orcapod[spiraldb]` | SpiralDB database backend |
+| `orcapod[all]` | All of the above |
+
+SpikeInterface support lives in a separate package,
+[`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
+
+Rendering a pipeline graph needs the [Graphviz](https://graphviz.org/download/) `dot`
+executable on your `PATH`.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes, including the migration steps for
+databases written by an earlier release.
 
 ## Releasing
 
-To cut a release, tag a commit on `main` — `hatch-vcs` derives the version
-automatically and CI publishes to PyPI. See [RELEASING.md](RELEASING.md) for the
-full workflow.
+Releases are cut from the GitHub Actions **Release** workflow, which runs the tests,
+tags the commit, and publishes to PyPI. The version comes from the tag via `hatch-vcs`,
+so there is no version number to bump in the source tree. See
+[RELEASING.md](RELEASING.md) for the full workflow.
 
 ## Continuous Integration
 

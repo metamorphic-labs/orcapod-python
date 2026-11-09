@@ -8,6 +8,22 @@ This document describes how to cut a release of `orcapod` to PyPI.
 - There are no long-lived branches (the historical `dev` branch has been retired).
 - No back-merges are needed.
 
+## Before You Cut
+
+Do these on `main` before triggering the workflow:
+
+1. **Update `CHANGELOG.md`** — rename the top section to the version being released, set
+   its date, and make sure breaking changes carry migration notes. The GitHub Release
+   body is generated from PR titles; `CHANGELOG.md` is the curated record.
+2. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
+   releasing. The Release workflow re-runs the unit tests on Python 3.11 and 3.12
+   and the license check, but not the PostgreSQL or SpiralDB integration jobs.
+3. **Check the version is free** — the tag must not exist on origin, and the version must
+   not exist on PyPI or TestPyPI. Neither index allows a version to be uploaded twice.
+
+Per-release checklists live in `superpowers/plans/` (for example
+`2026-11-09-v0.2-release-checklist.md`).
+
 ## Cutting a Release
 
 Releases are triggered from the GitHub Actions UI — no manual `git tag` step required.
@@ -61,6 +77,30 @@ workflow.
 
 The workflow will confirm the branch exists, run tests against it, create the `v0.1.1`
 tag at its tip, and publish to PyPI — identical to a normal release.
+
+## If a Run Fails Part-Way
+
+The `build` job pushes the `vX.Y.Z` tag to origin *before* anything is published, so a
+failure in a later job leaves the tag behind.
+
+| Failed job | State left behind | Recovery |
+|-----------|-------------------|----------|
+| `test` or `license-check` | Nothing | Fix on `main`, trigger a new run |
+| `build`, before "Push release tag" | Nothing | Fix, trigger a new run |
+| `build`, after "Push release tag" | Tag on origin, no artifact | Delete the tag (`git push origin :refs/tags/vX.Y.Z`), then trigger a new run |
+| `publish-testpypi` | Tag on origin | Use **Re-run failed jobs** on the same run — do not start a new run, which would fail creating a tag that already exists |
+| `publish-pypi` | Tag on origin, version on TestPyPI | Use **Re-run failed jobs**. If the upload to PyPI itself partly succeeded, the version is burned: release the next patch version instead |
+| `linear-sync` / `linear-complete` | Release is published | Re-run the failed job; these do not affect PyPI |
+
+Never delete a tag whose version has reached PyPI.
+
+## Release Lineage
+
+`v0.1.3` and `v0.1.4` were cut from a maintenance branch and are **not** ancestors of
+`main`; `git describe` on `main` therefore reports a distance from `v0.1.2`. This does not
+affect a release from `main`, because the workflow creates the release tag on the commit
+being built and `hatch-vcs` reads that tag. The fix those two releases carried is on
+`main`. The commit tagged `v0.1.4` is reachable only through its tag.
 
 ## Tag Format
 
