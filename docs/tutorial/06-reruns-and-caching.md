@@ -195,8 +195,10 @@ A stored result is reused when **all** of these are the same as when it was comp
 
 Change any one and the affected rows are computed. Change none and nothing is.
 
-Orcapod implements this with two hashes that every stream carries. You do not need them to
-use Orcapod, but they explain the rule:
+Orcapod implements this with hashes. A **hash** is a short fingerprint computed from some
+content: the same content always gives the same hash, and different content gives, in
+practice, a different one. Every stream carries two of them. You do not need them to use
+Orcapod, but they explain the rule:
 
 ```python
 units = CSVSource(

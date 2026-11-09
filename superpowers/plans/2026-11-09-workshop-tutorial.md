@@ -1,6 +1,6 @@
 # Self-Paced Workshop Tutorial Implementation Plan (PLT-4864)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Ship a self-paced, tested tutorial (parts 0-10) for next week's workshop, with one
 synthetic dataset, the two prerequisite concept pages, a troubleshooting page, working
@@ -125,22 +125,22 @@ These are the facts the pages are written from. Each was observed, not read.
 
 ### Task 1: Dataset generator (TDD)
 
-- [ ] Write `tests/test_docs/test_workshop_data.py`: two runs into two directories give the
+- [x] Write `tests/test_docs/test_workshop_data.py`: two runs into two directories give the
   same relative file list and identical bytes; total size under 2 MB; `subjects.csv` has 4
   data rows, `sessions.csv` 8, `units.csv` 64; for each unit row, `n_spikes` equals the number
   of rows for that unit in the matching `spikes_<probe>.csv`;
   `python docs/tutorial/workshop_data.py out` exits 0 and prints `Wrote 27 files`.
-- [ ] Run it: `uv run --no-sync pytest tests/test_docs/test_workshop_data.py -q` → fails
+- [x] Run it: `uv run --no-sync pytest tests/test_docs/test_workshop_data.py -q` → fails
   (module does not exist).
-- [ ] Add `docs/tutorial/workshop_data.py` (from the scratch draft used for the probes).
-- [ ] Run again → passes. Commit `feat(docs): add deterministic workshop dataset generator`.
+- [x] Add `docs/tutorial/workshop_data.py` (from the scratch draft used for the probes).
+- [x] Run again → passes. Commit `feat(docs): add deterministic workshop dataset generator`.
 
 ### Task 2: Harness covers the new pages (TDD)
 
-- [ ] In `test_doc_samples.py`, extend `test_doc_pages_are_discovered` with
+- [x] In `test_doc_samples.py`, extend `test_doc_pages_are_discovered` with
   `docs/tutorial/01-first-stream.md`, `docs/concepts/pipeline-job.md`,
   `docs/troubleshooting.md`; run → fails.
-- [ ] Extend `DOC_PAGES` with `docs/tutorial/*.md` and `docs/troubleshooting.md`; add
+- [x] Extend `DOC_PAGES` with `docs/tutorial/*.md` and `docs/troubleshooting.md`; add
   `REPO_ROOT / "docs" / "tutorial"` to the subprocess `PYTHONPATH`. (The test stays red until
   the pages exist; it goes green in Task 3.)
 
@@ -152,64 +152,64 @@ with collapsed solutions; "Next" link. Terms are defined at first use. For each 
 it, run `uv run --no-sync python -m tests.test_docs._doc_samples docs/tutorial/<page>` with
 the harness environment, correct the shown output from what was printed, re-run until green.
 
-- [ ] `index.md`, `00-setup.md` (install, extras, check command, the warnings to ignore, get
+- [x] `index.md`, `00-setup.md` (install, extras, check command, the warnings to ignore, get
   the dataset).
-- [ ] `01-first-stream.md` (`CSVSource`, `DictSource`, tags vs data, `output_schema`, `keys`,
+- [x] `01-first-stream.md` (`CSVSource`, `DictSource`, tags vs data, `output_schema`, `keys`,
   `iter_data`, `as_pandas_df`; exercises: choose tags for `units.csv`; provoke the two
   construction errors).
-- [ ] `02-function-pods.md` (`firing_rate`; annotations; multiple outputs; exact-column rule
+- [x] `02-function-pods.md` (`firing_rate`; annotations; multiple outputs; exact-column rule
   and `select_data_columns`; exercise: fix a pod that fails on a wide stream).
-- [ ] `03-operators.md` (`join`, `semi_join`, `map_data`, `polars_filter`, `Join` vs
+- [x] `03-operators.md` (`join`, `semi_join`, `map_data`, `polars_filter`, `Join` vs
   `MergeJoin`; the two known bugs stated plainly; exercise: subjects + units, filtered).
-- [ ] `04-many-rows-into-one.md` (`group_by`, `batch`, pod over `list[float]`; exercise:
+- [x] `04-many-rows-into-one.md` (`group_by`, `batch`, pod over `list[float]`; exercise:
   per-session mean from per-probe rows).
-- [ ] `05-pipeline-job.md` (record, run, `job.nodes`, in-memory vs Delta store; exercise: run
+- [x] `05-pipeline-job.md` (record, run, `job.nodes`, in-memory vs Delta store; exercise: run
   a script twice).
-- [ ] `06-reruns-and-caching.md` (new rows; edited body; major version; identity in brief;
+- [x] `06-reruns-and-caching.md` (new rows; edited body; major version; identity in brief;
   exercise: which of four edits recompute).
-- [ ] `07-files.md` (`op.File`, `op.Directory`, `Path` outputs, file hash caching; exercise:
+- [x] `07-files.md` (`op.File`, `op.Directory`, `Path` outputs, file hash caching; exercise:
   one output file per session).
-- [ ] `08-inspecting-and-tracing.md` (meta and provenance columns, `get_all_records`,
+- [x] `08-inspecting-and-tracing.md` (meta and provenance columns, `get_all_records`,
   `as_source`, `show_graph`).
-- [ ] `09-when-things-go-wrong.md` (reading the common errors, error policy, status and
+- [x] `09-when-things-go-wrong.md` (reading the common errors, error policy, status and
   captured logs; links to the troubleshooting page).
-- [ ] `10-where-next.md` (sink pods, context injection, executors, `PollingSource`,
+- [x] `10-where-next.md` (sink pods, context injection, executors, `PollingSource`,
   save/load; short samples only where verified).
-- [ ] Commit per two or three pages: `docs(tutorial): add parts N-M`.
+- [x] Commit per two or three pages: `docs(tutorial): add parts N-M`.
 
 ### Task 4: Concept pages and troubleshooting
 
-- [ ] `docs/concepts/pipeline-job.md`, `docs/concepts/file-types.md`,
+- [x] `docs/concepts/pipeline-job.md`, `docs/concepts/file-types.md`,
   `docs/troubleshooting.md`; cross-link from `function-pods.md`, `file-hash-caching.md`,
   `getting-started.md`, `index.md` where the old text pointed at a section.
-- [ ] `mkdocs.yml` nav. `uv run --no-sync pytest tests/test_docs/test_mkdocs_build.py -q`.
-- [ ] Commit `docs(concepts): add PipelineJob and file types pages, troubleshooting`.
+- [x] `mkdocs.yml` nav. `uv run --no-sync pytest tests/test_docs/test_mkdocs_build.py -q`.
+- [x] Commit `docs(concepts): add PipelineJob and file types pages, troubleshooting`.
 
 ### Task 5: Stale hands-on material (TDD)
 
-- [ ] `tests/test_docs/test_examples.py`: run `examples/save_and_load_pipelines.py` with
+- [x] `tests/test_docs/test_examples.py`: run `examples/save_and_load_pipelines.py` with
   `cwd=tmp_path`, assert exit code 0 and that stdout contains `loaded job`. Run → fails with
   the `AttributeError` from the gap report.
-- [ ] Rewrite the example (build, run, save, load, read stored records). Run → passes.
-- [ ] `git rm notebooks/tutorials/01_introduction_to_orcapod.ipynb`; grep the repo for
+- [x] Rewrite the example (build, run, save, load, read stored records). Run → passes.
+- [x] `git rm notebooks/tutorials/01_introduction_to_orcapod.ipynb`; grep the repo for
   references to it.
-- [ ] Commit `fix(examples): replace broken save/load example; remove stale notebook`.
+- [x] Commit `fix(examples): replace broken save/load example; remove stale notebook`.
 
 ### Task 6: Facilitator notes, agent instructions, DESIGN_ISSUES
 
-- [ ] `superpowers/plans/2026-11-09-workshop-facilitator-notes.md`.
-- [ ] `CLAUDE.md` and `.zed/rules` "Documentation samples": add `docs/tutorial/`,
+- [x] `superpowers/plans/2026-11-09-workshop-facilitator-notes.md`.
+- [x] `CLAUDE.md` and `.zed/rules` "Documentation samples": add `docs/tutorial/`,
   `docs/troubleshooting.md`, the `workshop_data` import, and the example test.
-- [ ] One appended `DESIGN_ISSUES.md` entry for this issue, listing the library findings.
+- [x] One appended `DESIGN_ISSUES.md` entry for this issue, listing the library findings.
 
 ### Task 7: Verify and ship
 
-- [ ] Time the harness: `uv run --no-sync pytest tests/test_docs -q --durations=20`; target
+- [x] Time the harness: `uv run --no-sync pytest tests/test_docs -q --durations=20`; target
   about a minute for the sample run.
-- [ ] `uv run --no-sync pytest tests/` — full suite; record pre-existing failures and skips by
+- [x] `uv run --no-sync pytest tests/` — full suite; record pre-existing failures and skips by
   name.
-- [ ] `git fetch`; if #271 merged, rebase onto `origin/main` and re-run.
-- [ ] Push, open the PR against `main` (`Fixes PLT-4864`, `Part of PLT-4816`), attach to
+- [x] `git fetch`; if #271 merged, rebase onto `origin/main` and re-run.
+- [x] Push, open the PR against `main` (`Fixes PLT-4864`, `Part of PLT-4816`), attach to
   Linear, set the worktree PR, send `worker_done`.
 
 ## Self-review
