@@ -347,9 +347,15 @@ class MergeJoin(BinaryOperator):
             [joined.column(i) for i in range(joined.num_columns)],
             schema=result_schema,
         )
+        # ``all_tag_keys`` is a set, so its iteration order depends on
+        # PYTHONHASHSEED. Emit the tag columns in the order ``output_schema``
+        # predicts (left tags, then tags only the right stream has).
+        ordered_tag_keys = tuple(left_tag_keys) + tuple(
+            k for k in right_tag_keys if k not in left_tag_keys
+        )
         return ArrowTableStream(
             joined,
-            tag_columns=tuple(all_tag_keys),
+            tag_columns=ordered_tag_keys,
         )
 
     def identity_structure(self) -> Any:
