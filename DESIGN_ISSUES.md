@@ -1744,3 +1744,48 @@ The behavior is now documented on `ArrowTableSource`, `SourceStreamBuilder.build
 `tests/test_pipeline/test_system_tag_run_stability.py`. Changing the default to a
 content-derived record ID invalidates stored identities and is proposed, not implemented, in
 `superpowers/specs/2026-11-09-itl-817-content-derived-record-ids.md`.
+
+---
+
+## Workshop tutorial (PLT-4864)
+
+### TUT1 — Newcomer-facing defects found while writing the tutorial
+**Status:** open
+**Severity:** medium
+**Issue:** PLT-4864 (related: ITL-821, ITL-817, ITL-807)
+
+Writing `docs/tutorial/` against the library exercised paths the existing docs did not. The
+tutorial and `docs/troubleshooting.md` describe each of these as it behaves today; none is
+fixed here (this work does not touch `src/`).
+
+1. **`polars_filter` with an expression predicate cannot be hashed.**
+   `stream.polars_filter(pl.col("x") > 0).pipeline_hash()` raises `TypeError:
+   SemanticAwarePythonHasher (strict): no implementation of PythonTypeHandlerProtocol
+   registered for type 'polars.expr.expr.Expr'`. The filter therefore fails upstream of a
+   `Join` and anywhere inside a `PipelineJob`; only equality constraints
+   (`polars_filter(x=1)`) work there.
+2. **`SemiJoin` does not reconcile `string` and `large_string` tag columns.** A `CSVSource`
+   (Arrow `string`) semi-joined with a `DictSource` or any stream that passed through
+   `PolarsFilter` (`large_string`) raises `ArrowInvalid: Incompatible data types for
+   corresponding join field keys`. `Join` on the same pair works.
+3. **`CSVSource` rejects a `pathlib.Path`** (`TypeError: 'PosixPath' object is not
+   iterable`).
+4. **`list(job.nodes)` order depends on `PYTHONHASHSEED`** for source nodes
+   (`['units', 'sessions', ...]` on half of the seeds, `['sessions', 'units', ...]` on the
+   others). Cosmetic, but it makes printed listings unreproducible.
+5. **A `sink_pod` / `tap_pod` function without the context parameter fails at run time**
+   (`TypeError: ... got an unexpected keyword argument 'ctx'`), not at decoration time.
+6. **A loaded job is harder to inspect than it needs to be.** `as_table()` on a loaded
+   function node raises `RuntimeError: ... no function pod and no database attached` even
+   when a store was passed to `PipelineJob.load` (`get_all_records()` works), and loaded
+   operator nodes are labelled `SelectDataColumns:semantic_v0.1:<hash>` where the original
+   job had `SelectDataColumns`.
+7. **A function node read before `run()` returns an empty table** without any indication
+   that the job has not run.
+8. **`PipelineJob` has no `show_graph`**; it is `job.pipeline.show_graph()`.
+9. **Rows read back from a `DeltaTableDatabase` on a re-run come in a different order** from
+   the first run. Not wrong, but undocumented before this tutorial.
+
+The re-run recomputation caused by set-ordered tag columns (ST1 above) was also found
+independently here; `tests/test_docs/test_rerun_computes_nothing.py` pins the fixed
+behaviour under five hash seeds.
