@@ -5,6 +5,9 @@ unchanged file — across pipeline runs or between `op.File` and `op.Directory`
 accesses — skips the disk read entirely. This page explains how the cache
 works, how to turn it on, and when it helps.
 
+If you have not used `op.File` and `op.Directory` yet, read
+[File and Path Types](file-types.md) first.
+
 ## FileHasher, HashCacher, and CachedFileHasher
 
 `FileHasher` is the base hasher. When you call `hash_file(path)` on it, it

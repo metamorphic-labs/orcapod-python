@@ -214,6 +214,9 @@ print("function calls:", len(calls))
     version, e.g. `@function_pod(output_keys="bmi", version="v1.0")` (the default is
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
 
+[Pipelines and Jobs](pipeline-job.md) covers jobs in full: nodes, stores, pipeline
+blueprints, and saving and loading.
+
 A node from a job that has run also provides:
 
 - **`get_all_records()`** -- every record stored for this function as a PyArrow Table,
