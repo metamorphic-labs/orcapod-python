@@ -507,7 +507,7 @@ class Data(Datagram):
 
     def with_columns(
         self,
-        column_types: "Mapping[str, type] | None" = None,
+        column_types: "Mapping[str, DataType | pa.DataType] | None" = None,
         **updates: DataValue,
     ) -> Self:
         new_p = super().with_columns(column_types=column_types, **updates)

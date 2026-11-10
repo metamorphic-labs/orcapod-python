@@ -227,14 +227,16 @@ class TestDatagramArrowBacked:
         assert d._data_table is not None
         assert d._data_dict is not None
 
-    def test_update_after_dict_load_invalidates_table(self):
-        """Once the dict is loaded, update() goes through the dict path and
-        sets _data_table=None so the old Arrow table is not silently reused."""
+    def test_update_after_dict_load_stays_arrow_native(self):
+        """Even with the dict loaded, update() rewrites the Arrow table (keeping
+        each column's Arrow type, ITL-834) and invalidates the stale dict cache."""
         d = Datagram(arrow_table(a=1, b=2))
         _ = d.as_dict()  # force dict load
         d2 = d.update(a=99)
-        assert d2._data_dict is not None
-        assert d2._data_table is None
+        assert d2._data_table is not None
+        assert d2._data_dict is None
+        assert d2.as_dict() == {"a": 99, "b": 2}
+        assert d.as_dict() == {"a": 1, "b": 2}
 
 
 # ---------------------------------------------------------------------------

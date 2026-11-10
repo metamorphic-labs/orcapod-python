@@ -32,7 +32,7 @@ from orcapod.core.base import ContentIdentifiableBase
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, DataValue, Schema, SchemaLike
+from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -688,8 +688,10 @@ class Datagram(ContentIdentifiableBase):
                 f"Following columns were not found: {sorted(missing)}"
             )
 
-        if self._data_table is not None and self._data_dict is None:
-            # Arrow-native update: preserves type precision without loading full dict
+        if self._data_table is not None:
+            # Arrow-native update whenever the Arrow table is known (even if the
+            # dict cache is also loaded): each updated column keeps its exact
+            # Arrow field, and untouched columns are carried through verbatim.
             sub_schema = arrow_utils.schema_select(
                 self._data_table.schema, list(updates.keys())
             )
@@ -711,9 +713,65 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_table = None
             return new_d
 
+    def _new_columns_table(
+        self,
+        updates: dict[str, DataValue],
+        column_types: "Mapping[str, DataType | pa.DataType]",
+    ) -> "pa.Table":
+        """Build a one-row Arrow table holding only the genuinely new columns.
+
+        Each column's Arrow type comes from ``column_types`` when given there:
+        a ``pa.DataType`` is used verbatim (nullable only when the value is
+        ``None``), a Python type is converted. Columns absent from
+        ``column_types`` are inferred from their value.
+
+        Args:
+            updates: New column names mapped to their values.
+            column_types: Declared types for some or all of the new columns.
+
+        Returns:
+            A one-row table whose columns follow the order of ``updates``.
+        """
+        arrow_fields: dict[str, pa.Field[pa.DataType]] = {}
+        python_schema: dict[str, DataType] = {}
+        for name in updates:
+            if name not in column_types:
+                continue
+            declared = column_types[name]
+            if isinstance(declared, pa.DataType):
+                arrow_fields[name] = pa.field(
+                    name, declared, nullable=updates[name] is None
+                )
+            else:
+                python_schema[name] = declared
+        inferred_names = [n for n in updates if n not in column_types]
+        if inferred_names:
+            python_schema.update(
+                infer_python_schema_from_pylist_data(
+                    [{n: updates[n] for n in inferred_names}]
+                )
+            )
+
+        tables: list[pa.Table] = []
+        if python_schema:
+            tables.append(
+                self.converter.python_dicts_to_arrow_table(
+                    [{n: updates[n] for n in python_schema}],
+                    python_schema=python_schema,
+                )
+            )
+        if arrow_fields:
+            tables.append(
+                self.converter.python_dicts_to_arrow_table(
+                    [{n: updates[n] for n in arrow_fields}],
+                    arrow_schema=pa.schema(list(arrow_fields.values())),
+                )
+            )
+        return arrow_utils.hstack_tables(*tables).select(list(updates))
+
     def with_columns(
         self,
-        column_types: "Mapping[str, type] | None" = None,
+        column_types: "Mapping[str, DataType | pa.DataType] | None" = None,
         **updates: DataValue,
     ) -> Self:
         if not updates:
@@ -731,15 +789,20 @@ class Datagram(ContentIdentifiableBase):
                 f"Use update() to modify existing columns."
             )
 
-        if self._data_table is not None and self._data_dict is None:
-            new_data_table = self.converter.python_dicts_to_arrow_table(
-                [updates],
-                python_schema=dict(column_types) if column_types else None,
-            )
+        has_arrow_types = column_types is not None and any(
+            isinstance(t, pa.DataType) for t in column_types.values()
+        )
+        if self._data_table is not None or has_arrow_types:
+            # Arrow-native path whenever an Arrow type is known — the table is
+            # loaded (even if the dict cache is too) or the caller declared an
+            # Arrow type. Existing columns keep their exact Arrow fields; only
+            # the new columns are typed (declared) or inferred (undeclared).
             new_d = self.copy(include_cache=False)
             new_d._data_table = arrow_utils.hstack_tables(
-                self._data_table, new_data_table
+                self._ensure_data_table(),
+                self._new_columns_table(updates, column_types or {}),
             )
+            new_d._data_dict = None
             new_d._data_python_schema = None
             new_d._data_arrow_schema = None
             return new_d
@@ -748,7 +811,14 @@ class Datagram(ContentIdentifiableBase):
             new_data = {**self._data_dict, **updates}
             schema = dict(self._ensure_python_schema())
             if column_types:
-                schema.update(column_types)
+                # No Arrow types reach this branch (they take the Arrow path).
+                schema.update(
+                    {
+                        k: t
+                        for k, t in column_types.items()
+                        if not isinstance(t, pa.DataType)
+                    }
+                )
             inferred = infer_python_schema_from_pylist_data([new_data])
             new_schema = Schema(
                 {k: schema.get(k, inferred.get(k, str)) for k in new_data}

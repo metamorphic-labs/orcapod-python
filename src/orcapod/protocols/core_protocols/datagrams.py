@@ -14,7 +14,7 @@ from orcapod.protocols.hashing_protocols import (
     ContentIdentifiableProtocol,
     DataContextAwareProtocol,
 )
-from orcapod.types import ColumnConfig, DataValue, Schema, SourceInfoValue
+from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SourceInfoValue
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -499,7 +499,7 @@ class DatagramProtocol(ContentIdentifiableProtocol, DataContextAwareProtocol, Pr
 
     def with_columns(
         self,
-        column_types: Mapping[str, type] | None = None,
+        column_types: Mapping[str, DataType | pa.DataType] | None = None,
         **updates: DataValue,
     ) -> Self:
         """
@@ -507,10 +507,14 @@ class DatagramProtocol(ContentIdentifiableProtocol, DataContextAwareProtocol, Pr
 
         Adds new data columns to the datagram. Will error if any specified
         column already exists - use update() to modify existing columns.
+        Existing columns keep their exact Arrow types.
 
         Args:
-            column_types: Optional type specifications for new columns. If not provided, the column type is
-                inferred from the provided values. If value is None, the column type defaults to `str`.
+            column_types: Optional type specifications for new columns. Each entry is
+                either a Python type (converted to Arrow as usual) or a ``pa.DataType``
+                (used verbatim, nullable only when the value is ``None``). Columns
+                without an entry have their type inferred from the provided value; a
+                ``None`` value is inferred as ``str | None``.
             **kwargs: New columns as keyword arguments.
 
         Returns:
