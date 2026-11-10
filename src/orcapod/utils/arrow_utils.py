@@ -3,11 +3,11 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Collection, Sequence
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 from orcapod.hashing.hash_utils import combine_hashes
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig
+from orcapod.types import ColumnConfig, SourceInfoValue
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -761,6 +761,37 @@ def split_by_column_groups(
     return (remaining_table, *tables)
 
 
+# TODO(NPIPE-204): this only understands scalars and ``list[T]``. Structured
+# source-info values (a struct/dataclass token, or a mapping) will need their own
+# branches, and the recursion should dispatch on a logical type rather than on
+# ``isinstance(value, list)``. Deriving the type from the first element is also a
+# shortcut: it is correct for the homogeneous lists many->one operators produce,
+# but not in general. Raised in review on PR #250.
+def source_info_arrow_type(value: SourceInfoValue) -> "pa.DataType":
+    """Return the Arrow type of one source-info provenance token.
+
+    This is the single definition of the source-info type rule, used wherever a
+    token arrives as a Python value with no Arrow type attached (``Data``
+    serializing its source info, ``prepare_prefixed_columns`` broadcasting a
+    supplied token). A token is a string, ``None``, or a list of tokens, one per
+    member of a many->one operator; aggregating an already aggregated stream
+    nests the list again (ITL-849). Scalars and ``None`` map to
+    ``large_string``; a list maps to ``large_list`` of its element's type,
+    recursively. An empty list defaults to ``large_list<large_string>``.
+
+    Args:
+        value: The provenance token.
+
+    Returns:
+        The Arrow type of the token.
+    """
+    if isinstance(value, list):
+        if not value:
+            return pa.large_list(pa.large_string())
+        return pa.large_list(source_info_arrow_type(value[0]))
+    return pa.large_string()
+
+
 def prepare_prefixed_columns(
     table: "pa.Table | pa.RecordBatch",
     prefix_info: Collection[str]
@@ -866,15 +897,14 @@ def prepare_prefixed_columns(
                 value = value_lut
 
             if value is not None:
-                # Concrete value supplied — column is never null.
-                # TODO: clean up the logic here
-                if not isinstance(value, str) and isinstance(value, Collection):
-                    # TODO: this won't work other data types!!!
-                    column_values = pa.array(
-                        [value] * num_rows, type=pa.list_(pa.large_string())
-                    )
-                else:
-                    column_values = pa.array([value] * num_rows, type=pa.large_string())
+                # Concrete token supplied as a Python value — column is never
+                # null. No Arrow type is attached, so the source-info rule
+                # types it (a list token, nested or not, keeps its depth).
+                # Every caller passes source-info tokens here.
+                token = cast(SourceInfoValue, value)
+                column_values = pa.array(
+                    [token] * num_rows, type=source_info_arrow_type(token)
+                )
                 col_nullable = False
             elif col_name in existing_columns:
                 # Pass-through from the source table — inherit its nullable flag.

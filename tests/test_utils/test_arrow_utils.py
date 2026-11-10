@@ -3,7 +3,7 @@
 import pyarrow as pa
 import pytest
 
-from orcapod.types import ColumnConfig
+from orcapod.types import ColumnConfig, SourceInfoValue
 from orcapod.utils.arrow_utils import (
     add_source_info,
     apply_column_config,
@@ -964,3 +964,57 @@ class TestConcatTablesByName:
         """An empty sequence raises ``ValueError`` instead of reaching ``pa.concat_tables``."""
         with pytest.raises(ValueError, match="empty sequence of tables"):
             concat_tables_by_name([])
+
+
+class TestPreparePrefixedColumnsSourceInfoTokens:
+    """Python-supplied source-info tokens are typed by ``source_info_arrow_type`` (ITL-849).
+
+    A token is a string, ``None``, or -- after a many->one operator -- a list of
+    tokens, which a second aggregation nests again. Before ITL-849 every list
+    token was typed ``list<large_string>``, so a nested token raised
+    ``ArrowTypeError: Expected bytes, got a 'list' object``.
+    """
+
+    @staticmethod
+    def _source_column(token: SourceInfoValue) -> tuple[pa.DataType, bool]:
+        """Broadcast ``token`` and return the ``_source_v`` type and nullability."""
+        table = pa.table({"v": pa.array([1, 2], type=pa.int64())})
+        _, prefixed = prepare_prefixed_columns(table, {"_source_": {"v": token}})
+        result = prefixed["_source_"]
+        assert result.column("_source_v").to_pylist() == [token, token]
+        field = result.schema.field("_source_v")
+        return field.type, field.nullable
+
+    def test_string_token_is_large_string(self) -> None:
+        assert self._source_column("tok") == (pa.large_string(), False)
+
+    def test_none_token_is_nullable_large_string(self) -> None:
+        assert self._source_column(None) == (pa.large_string(), True)
+
+    def test_list_token_is_large_list_of_large_string(self) -> None:
+        assert self._source_column(["a", "b"]) == (
+            pa.large_list(pa.large_string()),
+            False,
+        )
+
+    def test_nested_list_token_nests_the_list_type(self) -> None:
+        assert self._source_column([["a"], ["b", "c"]]) == (
+            pa.large_list(pa.large_list(pa.large_string())),
+            False,
+        )
+
+    def test_stream_with_nested_source_info_iterates(self) -> None:
+        """``ArrowTableStream(source_info=...)`` accepts a nested token."""
+        from orcapod.core.streams import ArrowTableStream
+
+        token: SourceInfoValue = [["a", None], ["b"]]
+        stream = ArrowTableStream(
+            pa.table({"id": [1, 2], "v": [10, 20]}),
+            tag_columns=["id"],
+            source_info={"v": token},
+        )
+        assert [d.source_info()["v"] for _, d in stream.iter_data()] == [token, token]
+        schema = stream.as_table(columns={"source": True}).schema
+        assert schema.field("_source_v").type == pa.large_list(
+            pa.large_list(pa.large_string())
+        )
