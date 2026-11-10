@@ -117,9 +117,9 @@ developer.
   The full `uv run pytest tests/` suite must pass before a PR, and pre-existing failures
   are reported, not hidden.
 - **Lint, format and types.** New and changed code is ruff-clean, ruff-formatted, and adds
-  no basedpyright errors or warnings (the org's type check fails on warnings). Never
-  regenerate the type baseline to hide a new diagnostic. The commands are in the
-  "Lint, format and type checks" section of `CLAUDE.md`.
+  no new basedpyright errors (and no needless new warnings). Never regenerate the type
+  baseline to hide a new diagnostic. The commands and details are in the "Lint, format and
+  type checks" section of `CLAUDE.md`.
 - **Out-of-scope findings.** Report a newly found bug or design problem to the coordinator
   rather than fixing it. Do not widen the issue.
 - **Finishing.** Rebase onto current `origin/main` and rerun the suite if `main` moved.
