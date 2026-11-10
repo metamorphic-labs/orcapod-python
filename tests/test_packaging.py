@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tarfile
 import tomllib
 import zipfile
+from importlib.metadata import version
 from pathlib import Path
 from typing import cast
 
@@ -118,3 +120,71 @@ def test_license_is_shipped_in_sdist_and_wheel(built_dists: tuple[Path, Path]) -
         licenses = [n for n in zf.namelist() if n.endswith(suffix)]
         assert len(licenses) == 1
         assert zf.read(licenses[0]) == expected
+
+
+_BLOCK_GENERATED_VERSION = """
+import importlib.abc
+import sys
+
+
+class _BlockGeneratedVersion(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "orcapod._version":
+            raise ImportError("simulated source tree without _version.py")
+        return None
+
+
+sys.meta_path.insert(0, _BlockGeneratedVersion())
+"""
+
+_HIDE_DISTRIBUTION_METADATA = """
+import importlib.metadata
+
+
+def _not_installed(name):
+    raise importlib.metadata.PackageNotFoundError(name)
+
+
+importlib.metadata.version = _not_installed
+"""
+
+
+def _run_python(script: str) -> str:
+    """Run ``script`` in a fresh interpreter and return its stripped stdout.
+
+    A subprocess keeps simulated import failures out of the test process.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _orcapod_version(prelude: str) -> str:
+    """Return ``orcapod.__version__`` as seen after running ``prelude``."""
+    return _run_python(f"{prelude}\nimport orcapod\nprint(orcapod.__version__)\n")
+
+
+def test_version_comes_from_generated_version_file() -> None:
+    """``orcapod.__version__`` is the hatch-vcs generated version (ITL-827)."""
+    script = (
+        "import orcapod\n"
+        "from orcapod import _version\n"
+        "print(orcapod.__version__, _version.__version__)\n"
+    )
+    reported, generated = _run_python(script).split()
+    assert reported == generated
+
+
+def test_version_falls_back_to_distribution_metadata() -> None:
+    """Without ``_version.py`` the installed distribution metadata is used."""
+    assert _orcapod_version(_BLOCK_GENERATED_VERSION) == version("orcapod")
+
+
+def test_version_has_placeholder_when_nothing_is_available() -> None:
+    """With neither ``_version.py`` nor metadata, import still succeeds."""
+    prelude = _BLOCK_GENERATED_VERSION + _HIDE_DISTRIBUTION_METADATA
+    assert _orcapod_version(prelude) == "0.0.0+unknown"
