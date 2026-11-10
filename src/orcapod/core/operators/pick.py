@@ -5,16 +5,30 @@ from __future__ import annotations
 import logging
 import typing
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils import arrow_utils
+from orcapod.utils.lazy_module import LazyModule
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+else:
+    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
+
+
+def _field_type(field: "pa.Field[Any]") -> "pa.DataType":
+    """Return a field's Arrow type (typed wrapper over the partially typed stubs)."""
+    return cast("pa.DataType", field.type)
 
 
 class Pick(UnaryOperator):
@@ -51,12 +65,37 @@ class Pick(UnaryOperator):
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
         self._mode: str = ""
+        self._converter: TypeConverterProtocol | None = None
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
         # fail_on_miss intentionally excluded — it controls error behaviour,
         # not the functional transformation.
         return (self.__class__.__name__, self.column, self.key, self.out)
+
+    def _value_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
+        """Return the Arrow type of the value picked from a ``column_type`` column.
+
+        The value type is read from the input column's Arrow type: a ``map``
+        yields its item type, and the ``list<struct<key, value>>`` encoding of
+        ``dict[K, V]`` yields the ``value`` field's type. Only when no Arrow
+        type is available that way (e.g. a logical struct type) is the type
+        derived from the resolved Python output type.
+
+        Args:
+            column_type: Arrow type of the picked column.
+
+        Returns:
+            The Arrow type of the extracted value.
+        """
+        if isinstance(column_type, pa.MapType):
+            return cast("pa.DataType", column_type.item_type)
+        if isinstance(column_type, (pa.ListType, pa.LargeListType)):
+            entry = cast("pa.DataType", column_type.value_type)
+            if isinstance(entry, pa.StructType) and entry.get_field_index("value") >= 0:
+                return _field_type(entry.field("value"))
+        assert self._converter is not None, "validate_unary_input must run first"
+        return self._converter.python_type_to_arrow_type(self._output_type)
 
     # ------------------------------------------------------------------
     # Validation
@@ -90,6 +129,9 @@ class Pick(UnaryOperator):
                 f"Choose a different name to avoid clobbering existing data."
             )
 
+        self._converter = contexts.resolve_context(
+            stream.data_context_key
+        ).type_converter
         col_type = data_schema[self.column]
         origin = typing.get_origin(col_type)
 
@@ -201,21 +243,27 @@ class Pick(UnaryOperator):
         old_src = data.source_info().get(self.column)
         new_src = f"{old_src}[{self.key!r}]" if old_src else None
 
+        value_type = self._value_arrow_type(
+            _field_type(data.arrow_schema().field(self.column))
+        )
         if self.out is None:
-            # Replace column in-place: drop the old (with its stale type),
-            # then re-add under the same name with the resolved output type.
+            # Replace column in place: drop the old (with its stale type), re-add
+            # it under the same name with the value's Arrow type, and restore the
+            # original column order.
+            column_order = list(data.keys())
             new_data = (
                 data.drop(self.column)
                 .with_columns(
-                    column_types={self.column: self._output_type},
+                    column_types={self.column: value_type},
                     **{self.column: extracted},
                 )
+                .select(*column_order)
                 .with_source_info(**{self.column: new_src})
             )
         else:
             # Add new column; original stays unchanged.
             new_data = data.with_columns(
-                column_types={self.out: self._output_type},
+                column_types={self.out: value_type},
                 **{self.out: extracted},
             ).with_source_info(**{self.out: new_src})
 
@@ -252,16 +300,24 @@ class Pick(UnaryOperator):
         if not out_rows:
             # All packets were skipped (fail_on_miss=False).  Return an empty
             # stream with the correct output schema — this is not an error.
+            # The schema is the input's Arrow schema (large-normalized, as for
+            # a non-empty result) with only the projected column changed.
             tag_columns, _ = stream.keys()
-            tag_schema, data_schema = self.unary_output_schema(stream)
-            combined_schema = {**dict(tag_schema), **dict(data_schema)}
-            empty_table = (
-                stream.data_context.type_converter.python_dicts_to_arrow_table(
-                    [], python_schema=combined_schema
-                )
+            input_schema = arrow_utils.normalize_schema_to_large_types(
+                stream.as_table().schema
             )
+            value_field = pa.field(
+                self.out or self.column,
+                self._value_arrow_type(_field_type(input_schema.field(self.column))),
+                nullable=type(None) in typing.get_args(self._output_type),
+            )
+            if self.out is None:
+                position = input_schema.get_field_index(self.column)
+                output_schema = input_schema.set(position, value_field)
+            else:
+                output_schema = input_schema.append(value_field)
             return ArrowTableStream(
-                empty_table,
+                output_schema.empty_table(),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
             )
