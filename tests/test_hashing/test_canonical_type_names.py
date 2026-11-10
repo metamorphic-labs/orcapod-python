@@ -170,8 +170,9 @@ class TestCanonicalModuleName:
 class TestTypeHandlers:
     def test_type_object_handler_uses_public_module(self):
         handler = TypeObjectHandler()
-        assert handler.handle(P.PurePath, None) == "type:pathlib.PurePath"  # type: ignore[arg-type]
-        assert handler.handle(P.Path, None) == "type:pathlib.Path"  # type: ignore[arg-type]
+        hasher = get_default_context().semantic_hasher
+        assert handler.handle(P.PurePath, hasher) == "type:pathlib.PurePath"
+        assert handler.handle(P.Path, hasher) == "type:pathlib.Path"
 
     @pytest.mark.parametrize(
         ("tp", "expected"),

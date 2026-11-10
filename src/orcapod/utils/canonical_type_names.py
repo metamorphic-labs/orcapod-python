@@ -63,7 +63,9 @@ def canonical_module_name(obj: object) -> str | None:
     parts = module.split(".")
     if parts[0] not in sys.stdlib_module_names:
         return module
-    private_at = next((i for i, part in enumerate(parts) if i > 0 and part.startswith("_")), None)
+    private_at = next(
+        (i for i, part in enumerate(parts) if i > 0 and part.startswith("_")), None
+    )
     if private_at is None or module in _LEGACY_PRIVATE_STDLIB_MODULES:
         return module
 
@@ -138,5 +140,7 @@ def stabilize_type_names(text: str, *annotations: object) -> str:
         module = tp.__module__
         canonical = canonical_module_name(tp)
         if canonical is not None and canonical != module:
-            text = text.replace(f"{module}.{tp.__qualname__}", f"{canonical}.{tp.__qualname__}")
+            text = text.replace(
+                f"{module}.{tp.__qualname__}", f"{canonical}.{tp.__qualname__}"
+            )
     return text

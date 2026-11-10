@@ -1699,3 +1699,34 @@ CI job failed.
 **Fix:** Removed `pygraphviz` from `pyproject.toml` and `uv.lock`, and dropped
 `libgraphviz-dev` from all workflows (the `graphviz` apt package stays for `dot`).
 `tests/test_packaging.py` guards against re-adding it.
+
+---
+
+## `src/orcapod/utils/canonical_type_names.py`
+
+### PY313 — Type names in identity strings depended on the Python version
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-825
+
+Python 3.13 moved the `pathlib` classes into the private `pathlib._local` module, so
+`pathlib.Path.__module__` is `pathlib._local` there and `pathlib` on 3.11/3.12. Every
+identity string built from a type's `__module__`, or from `repr`/`str`/
+`inspect.formatannotation` of a type, therefore differed by interpreter:
+`canonical_annotation_str`, `get_function_signature` and `get_function_components`
+(the `function_signature_hash` and `function_content_hash` stored with every cached result
+of a `PythonDataFunction`), `TypeObjectHandler` for unregistered types such as `PurePath`,
+and the schema strings in `PythonDataFunction.to_config()` (a pipeline config saved on 3.12
+failed to bind on 3.13). `uri`, `content_hash`, `pipeline_hash` and record ids were not
+affected, because `pathlib.Path` resolves to the registered `orcapod.path` logical type.
+
+**Fix:** `canonical_module_name` resolves a standard-library type defined in a private
+submodule to the public module that exports the same object, and all the sites above go
+through it. Private submodules that were already the defining module on 3.11/3.12
+(`concurrent.futures._base`, `zipfile._path`, ...) are frozen in
+`_LEGACY_PRIVATE_STDLIB_MODULES`, so no string or hash changes on those versions.
+`tests/test_hashing/test_canonical_type_names.py` pins the names and golden hashes.
+
+**Known remainder:** `zipfile.Path` is `zipfile.Path` on 3.11 and `zipfile._path.Path` on
+3.12/3.13. This predates 3.13 and is left as is, because aligning it would change existing
+strings on 3.11 or 3.12.
