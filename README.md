@@ -10,8 +10,9 @@ User documentation lives in [`docs/`](docs/index.md) (start with
 ## Releasing
 
 To cut a release, tag a commit on `main` — `hatch-vcs` derives the version
-automatically and CI publishes to PyPI. See [RELEASING.md](RELEASING.md) for the
-full workflow.
+automatically and the release workflow publishes the package. Orcapod is distributed through
+the organization's internal package index; the release workflow still targets PyPI and has
+not been moved to that index yet. See [RELEASING.md](RELEASING.md) for the full workflow.
 
 ## Continuous Integration
 

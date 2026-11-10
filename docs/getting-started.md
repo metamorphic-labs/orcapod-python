@@ -114,8 +114,9 @@ A few things to note about function pods:
   exactly -- one parameter per data column. A stream with extra data columns is rejected;
   narrow it first with `source.select_data_columns([...])`
   (see [Function Pods](concepts/function-pods.md#input-columns-must-match-exactly)).
-- **Type annotations are required.** Orcapod uses them to build the output schema and to
-  validate compatibility when the pod is applied.
+- **Type annotations define the schemas.** Orcapod uses them to build the output schema and
+  to validate compatibility when the pod is applied. A parameter without an annotation needs
+  its type in the decorator's `input_schema` mapping instead.
 - **`output_keys` names the output columns.** Since the function returns a tuple of two
   values, `output_keys` must be a list of two names. For a function returning a single
   value, pass a single string (e.g., `output_keys="result"`).

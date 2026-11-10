@@ -72,8 +72,8 @@ is set up (ITL-810 owns the version and install strings).
 `docs/getting-started.md` walks source → inspect → function pod → inspect result, and all 11
 samples run. Fixed: the shown schema output was out of date in two samples
 (`Schema({'experiment': <class 'str'>})` is now printed as `Schema({'experiment': str})`).
-Added: the exact-column rule, that type annotations are required, and a pointer to
-`PipelineJob` for keeping results.
+Added: the exact-column rule, that every parameter needs a type (an annotation or an
+`input_schema` entry), and a pointer to `PipelineJob` for keeping results.
 
 ### Sources — partly covered
 
@@ -98,13 +98,13 @@ than it looks — see "Things a newcomer will trip on".
 
 - **Extra columns (ITL-807).** The page said a pod extracts the columns it needs from a wider
   stream. It does not: an extra data column, a missing column for a parameter without a
-  default, or a column of a different type raises `ValueError` (a parameter with a default may
-  be left out; the default is used). The page now states the strict rule and shows the
+  default, or a column of an incompatible type raises `ValueError` (a parameter with a default
+  may be left out; the default is used). The page now states the strict rule and shows the
   `SelectDataColumns` step.
   Whether to relax the behaviour is the open v0.3 decision.
 - **Multiple input streams.** The sample used undefined names; it is now runnable.
-- Type annotations are required on every parameter (`ValueError` at decoration time
-  otherwise); this was not stated.
+- Every parameter needs a type, from an annotation or the decorator's `input_schema`
+  (`ValueError` at decoration time otherwise); this was not stated.
 
 Missing entirely:
 

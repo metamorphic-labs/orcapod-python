@@ -40,8 +40,9 @@ with identical schemas and the same computational graph have the same pipeline h
 they are fed by completely different sources.
 
 **Used for:** database scoping. Pipeline hash determines the database table path where results
-are stored. This means that two pipeline nodes with the same function and the same
-input schema share the same database table -- regardless of which source produced the data.
+are stored. This means that two pipeline nodes with the same function, the same input schema
+and the same upstream steps share the same database table -- regardless of which source
+produced the data.
 This is a powerful feature: it means that running the same function on new data automatically
 benefits from results already cached for previous data with the same schema.
 
@@ -123,8 +124,12 @@ a different `source_id`.
 ### DB path scoping
 
 The pipeline hash determines the database table path. Two nodes that apply the same function
-to sources with the same schema will write to and read from the same table. This is
-intentional: it maximizes cache reuse across pipeline runs.
+to sources with the same schema, through the same upstream steps, will write to and read from
+the same table. This is intentional: it maximizes cache reuse across pipeline runs. A
+schema-preserving step added upstream (a filter, say) changes the pipeline hash and so the
+table. This is the default `table_scope="pipeline_hash"` of a node; a node built with
+`table_scope="content_hash"` also adds its content hash to the path, giving each source its
+own table.
 
 ### Change detection
 

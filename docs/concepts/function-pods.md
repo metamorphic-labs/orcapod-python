@@ -27,9 +27,9 @@ Key points:
 - **Function parameters** must match the input stream's data columns exactly: one data
   column per parameter, with the same names. A parameter with a default value may be left out
   of the stream, and the default is used. See [Input columns must match exactly](#input-columns-must-match-exactly).
-- **Type annotations** are required on every parameter and are used to validate schema
-  compatibility. A parameter without an annotation raises `ValueError` when the pod is
-  created.
+- **Parameter types** are used to validate schema compatibility. Give each parameter a type
+  annotation, or supply its type through the decorator's `input_schema` mapping. A parameter
+  with neither raises `ValueError` when the pod is created.
 
 The decorated function still works as a normal Python function. The pod is accessible via the
 `.pod` attribute:
@@ -92,9 +92,10 @@ The function pod preserves tags and replaces data columns with the function's ou
 A function pod is strict about its input: the stream's data columns must be exactly the
 function's parameters. Orcapod does **not** pick the columns it needs out of a wider stream.
 A stream with an extra data column, a missing column for a parameter without a default, or a
-column of a different type is rejected with `ValueError` as soon as the pod is applied. (A
-parameter that has a default value may be left out of the stream; the function then uses the
-default.)
+column whose type is incompatible with its parameter is rejected with `ValueError` as soon as
+the pod is applied. Types need to be compatible, not identical: a `str` column is accepted for
+a `str | Path` parameter but rejected for an `int` one. (A parameter that has a default value
+may be left out of the stream; the function then uses the default.)
 
 ```python
 wide = DictSource(
