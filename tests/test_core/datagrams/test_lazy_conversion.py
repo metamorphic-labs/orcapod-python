@@ -277,12 +277,14 @@ class TestDatagramCopy:
         d2 = d.copy(include_cache=True)
         assert d2._content_hash_cache  # preserved on copy with cache
 
-    def test_copy_without_cache_drops_meta_table(self):
+    def test_copy_without_cache_keeps_meta_table(self):
+        """The meta table carries the meta columns' Arrow types (ITL-834), so a
+        cache-less copy keeps it rather than rebuilding it from Python types."""
         d = Datagram({"a": 1, f"{META}info": "v1"})
         _ = d.as_table(all_info=True)  # builds meta table
         assert d._meta_table is not None
         d2 = d.copy(include_cache=False)
-        assert d2._meta_table is None
+        assert d2._meta_table is d._meta_table
 
     def test_copy_without_cache_drops_context_table(self):
         d = Datagram({"a": 1})

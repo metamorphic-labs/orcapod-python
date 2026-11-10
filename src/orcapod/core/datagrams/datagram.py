@@ -558,6 +558,29 @@ class Datagram(ContentIdentifiableBase):
         merged = dict(self._meta_python_schema)
         merged.update(new_inferred)
         new_d._meta_python_schema = Schema(merged)
+        # Carry the Arrow fields of untouched meta columns verbatim; only the
+        # columns being set are (re)built from their Python types.
+        old_table = self._ensure_meta_table()
+        tables: list[pa.Table] = []
+        if old_table is not None:
+            tables.append(
+                old_table.drop_columns(
+                    [c for c in prefixed if c in old_table.column_names]
+                )
+            )
+        if prefixed:
+            tables.append(
+                self.converter.python_dicts_to_arrow_table(
+                    [prefixed],
+                    python_schema=Schema({k: merged[k] for k in prefixed}),
+                )
+            )
+        meta_names = list(new_d.meta_columns)
+        new_d._meta_table = (
+            arrow_utils.hstack_tables(*tables).select(meta_names)
+            if meta_names
+            else None
+        )
         return new_d
 
     def drop_meta_columns(self, *keys: str, ignore_missing: bool = False) -> Self:
@@ -576,6 +599,12 @@ class Datagram(ContentIdentifiableBase):
         # with_meta_columns for rationale).
         new_d._meta_python_schema = Schema(
             {k: v for k, v in self._meta_python_schema.items() if k not in prefixed}
+        )
+        # Remaining meta columns keep their Arrow fields verbatim.
+        old_table = self._ensure_meta_table()
+        remaining = list(new_d.meta_columns)
+        new_d._meta_table = (
+            old_table.select(remaining) if old_table is not None and remaining else None
         )
         return new_d
 
@@ -864,12 +893,12 @@ class Datagram(ContentIdentifiableBase):
         new_d._meta = dict(self._meta)
         new_d._meta_python_schema = Schema(self._meta_python_schema)
 
-        if include_cache:
-            new_d._meta_table = self._meta_table
-            new_d._context_table = self._context_table
-        else:
-            new_d._meta_table = None
-            new_d._context_table = None
+        # The meta Arrow table is not just a cache: for an Arrow-born datagram it
+        # holds the meta columns' exact Arrow types, which rebuilding from the
+        # Python schema would lose (e.g. int8 -> int64). It always matches
+        # ``_meta`` here; the meta mutators replace it when they change ``_meta``.
+        new_d._meta_table = self._meta_table
+        new_d._context_table = self._context_table if include_cache else None
 
         return new_d
 
