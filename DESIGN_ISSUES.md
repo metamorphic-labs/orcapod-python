@@ -1699,3 +1699,26 @@ CI job failed.
 **Fix:** Removed `pygraphviz` from `pyproject.toml` and `uv.lock`, and dropped
 `libgraphviz-dev` from all workflows (the `graphviz` apt package stays for `dot`).
 `tests/test_packaging.py` guards against re-adding it.
+
+---
+
+## Tooling
+
+### TOOL1 — Type-check debt recorded in the basedpyright baseline
+**Status:** open
+**Severity:** medium
+**Issue:** ITL-826
+
+The org required CI runs `basedpyright` in its default (`recommended`) mode. The code was
+never type-checked, so ITL-826 recorded the existing errors in
+`.basedpyright/baseline.json` instead of fixing them: the check passes and any new error
+fails it. Baselined errors on 07e5a2ea plus the ITL-826 lint fixes: 1999 in total
+(tests/ 1238, src/ 673, test-objective/ 84, examples/ 3, superpowers/ 1); the baseline also
+records about 30,400 warnings. Largest error rules: `reportArgumentType`,
+`reportMissingTypeArgument`, `reportAttributeAccessIssue`.
+
+Pay it down directory by directory, starting with `src/`, and regenerate the baseline only
+to remove fixed entries. Known items worth fixing first: `orcapod.hashing` exports nine
+names from a `legacy_core` module that no longer exists, so they are always `None`
+(`tests/test_hashing/generate_pathset_data_hashes.py` would call one); and 26 import
+cycles reported in `src/`.
