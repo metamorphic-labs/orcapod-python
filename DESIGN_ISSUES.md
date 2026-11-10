@@ -1748,7 +1748,10 @@ same.
 
 **Fix:** Merged columns are `list<input type>` via `arrow_utils.aggregated_list_type` /
 `list_array` (shared with `build_aggregated_table`), empty or not; extension elements keep the
-`ListLogicalType` path. Colliding inputs whose Arrow types differ only in width or layout promote
-to the permissive common type, so the result stays commutative. `MergeJoin` and `PolarsFilter`
+`ListLogicalType` path. Colliding data columns whose Arrow types differ (accepted before, since
+validation compares Python types) now raise `InputValidationError` when the join executes; cast
+one side. `MergeJoin` and `PolarsFilter`
 restore pass-through columns' input types after the Polars round-trip
-(`arrow_utils.restore_column_types`). The rule is recorded under "Arrow types" in `CLAUDE.md`.
+(`arrow_utils.restore_column_types`); this changes layouts only, not content hashes. A shared
+tag key whose inputs disagree keeps the joined type (follow-up: ITL-835). The rule is recorded
+under "Arrow types" in `CLAUDE.md`.

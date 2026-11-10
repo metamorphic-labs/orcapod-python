@@ -26,6 +26,7 @@ from orcapod.contexts import get_default_type_converter
 from orcapod.core.operators import MergeJoin, PolarsFilter
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
+from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
@@ -57,25 +58,24 @@ ELEMENT_CASES: list[tuple[pa.DataType, list[Any]]] = [
     ),
 ]
 
-# Pairs that collide (same Python type) but differ in Arrow type, and the
-# permissive promotion the merged element gets.
-PROMOTED_PAIRS: list[tuple[pa.DataType, pa.DataType, pa.DataType, list[Any]]] = [
-    (pa.int8(), pa.int64(), pa.int64(), [1, 2]),
-    (pa.string(), pa.large_string(), pa.large_string(), ["a", "b"]),
-    (pa.float32(), pa.float64(), pa.float64(), [1.5, 2.5]),
-    (pa.binary(), pa.large_binary(), pa.large_binary(), [b"a", b"b"]),
+# Pairs that collide (same Python type) but differ in Arrow type. MergeJoin
+# accepted these until ITL-832; they must now be rejected when the join runs.
+DIFFERING_PAIRS: list[tuple[pa.DataType, pa.DataType, list[Any]]] = [
+    (pa.int8(), pa.int64(), [1, 2]),
+    (pa.string(), pa.large_string(), ["a", "b"]),
+    (pa.float32(), pa.float64(), [1.5, 2.5]),
+    (pa.binary(), pa.large_binary(), [b"a", b"b"]),
     (
         pa.timestamp("ms"),
-        pa.timestamp("us"),
         pa.timestamp("us"),
         [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)],
     ),
     (
-        pa.list_(pa.int8()),
-        pa.large_list(pa.int32()),
-        pa.large_list(pa.int32()),
-        [[1], [2]],
+        pa.decimal128(5, 2),
+        pa.decimal128(7, 2),
+        [decimal.Decimal("1.00"), decimal.Decimal("2.50")],
     ),
+    (pa.list_(pa.int8()), pa.large_list(pa.int32()), [[1], [2]]),
 ]
 
 
@@ -209,31 +209,38 @@ class TestMergedColumnElementType:
         assert len(pa.concat_tables(tables)) == rows
 
 
-class TestPromotedElementType:
-    """Colliding columns whose Arrow types differ merge into the common type."""
+class TestDifferingArrowTypes:
+    """Colliding columns must have identical Arrow types, checked at execution."""
 
     @pytest.mark.parametrize(
-        ("left_type", "right_type", "promoted", "values"), PROMOTED_PAIRS, ids=_ids
+        ("left_type", "right_type", "values"), DIFFERING_PAIRS, ids=_ids
     )
     @pytest.mark.parametrize("rows", [0, 2])
-    def test_promoted_and_commutative(
+    def test_rejected_at_execution_not_at_build(
         self,
         left_type: pa.DataType,
         right_type: pa.DataType,
-        promoted: pa.DataType,
         values: list[Any],
         rows: int,
     ) -> None:
-        """Both argument orders give ``list<promoted>`` and the same values."""
+        """Building the join passes; running it raises in either argument order.
+
+        Streams expose only Python schemas, under which both sides agree, so
+        validation cannot see the mismatch; the join raises once it reads the
+        input tables.
+        """
         left, right = _pair(left_type, right_type, values, rows)
         op = MergeJoin()
-        forward = op.static_process(left, right)
-        backward = op.static_process(right, left)
-
-        for result in (forward, backward):
-            assert result.as_table().schema.field("x").type == pa.list_(promoted)
-            _assert_matches_prediction(op, result, left, right)
-        assert forward.as_table().equals(backward.as_table())
+        for first, second in ((left, right), (right, left)):
+            op.validate_inputs(first, second)
+            stream = op(first, second)
+            with pytest.raises(InputValidationError, match="cast one side") as info:
+                stream.as_table()
+            assert "'x'" in str(info.value)
+            assert str(left_type) in str(info.value)
+            assert str(right_type) in str(info.value)
+            with pytest.raises(InputValidationError, match="cast one side"):
+                op.static_process(first, second)
 
 
 def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
@@ -322,7 +329,11 @@ class TestPassThroughColumns:
         ]
 
     def test_shared_tag_type_is_commutative(self) -> None:
-        """A shared tag stored as ``string`` and ``large_string`` promotes either way."""
+        """A shared tag the inputs disagree on keeps the joined type in both orders.
+
+        No promotion and no rejection for tag keys: the type is what the join
+        produced before ITL-832 (``large_string``), whichever input comes first.
+        """
         left, right = _sources(2)
         op = MergeJoin()
         forward = op.static_process(left, right).as_table(all_info=True)
@@ -344,3 +355,65 @@ class TestPassThroughColumns:
         assert len(result.as_table()) == 1
         for field in output_schema:
             assert field.type == input_schema.field(field.name).type, field.name
+
+
+def _row_hashes(stream: StreamProtocol) -> list[tuple[str, str]]:
+    """Return each row's (tag content hash, data content hash)."""
+    return [
+        (tag.content_hash().to_hex(), data.content_hash().to_hex())
+        for tag, data in stream.iter_data()
+    ]
+
+
+def _in_pre_fix_layout(stream: StreamProtocol) -> ArrowTableStream:
+    """Rebuild ``stream`` with the column types the code before ITL-832 emitted.
+
+    Before the fix, ``MergeJoin`` and ``PolarsFilter`` kept the Arrow types
+    Polars produced (large layouts) while setting nullability exactly as they
+    still do. So this swaps in the types of a Polars round-trip and keeps every
+    field's nullability, isolating the type change the fix makes.
+    """
+    table = stream.as_table(columns={"source": True, "system_tags": True})
+    polars_schema = pl.DataFrame(table).to_arrow().schema
+    pre_fix_schema = pa.schema(
+        [
+            field.with_type(polars_schema.field(field.name).type)
+            for field in table.schema
+        ]
+    )
+    tag_columns, _ = stream.keys()
+    return ArrowTableStream(table.cast(pre_fix_schema), tag_columns=tag_columns)
+
+
+def _string_like_types(stream: StreamProtocol) -> dict[str, pa.DataType]:
+    """Return the Arrow types of the pass-through columns ``s``, ``b``, ``l``, ``st``."""
+    schema = stream.as_table().schema
+    return {name: schema.field(name).type for name in ("s", "b", "l", "st")}
+
+
+class TestPassThroughContentHashes:
+    """Restoring pass-through layouts leaves every row's content hash unchanged.
+
+    The developer approved the pass-through fix on the condition that content
+    hashes do not change. The Arrow hasher ignores layout (``string`` versus
+    ``large_string``, ``list`` versus ``large_list``), so the rows must hash the
+    same in the restored layout and in the pre-fix (Polars) layout.
+    """
+
+    def test_polars_filter_row_hashes_unchanged(self) -> None:
+        """Filter output rows hash exactly as they did before the fix."""
+        source, _ = _sources(2)
+        fixed = PolarsFilter(predicates=[pl.lit(True)]).static_process(source)
+        pre_fix = _in_pre_fix_layout(fixed)
+
+        assert _string_like_types(fixed) != _string_like_types(pre_fix)
+        assert _row_hashes(fixed) == _row_hashes(pre_fix)
+
+    def test_merge_join_row_hashes_unchanged(self) -> None:
+        """MergeJoin output with pass-through columns hashes as before the fix."""
+        left, right = _sources(2)
+        fixed = MergeJoin().static_process(left, right)
+        pre_fix = _in_pre_fix_layout(fixed)
+
+        assert _string_like_types(fixed) != _string_like_types(pre_fix)
+        assert _row_hashes(fixed) == _row_hashes(pre_fix)

@@ -349,9 +349,10 @@ from the data. Aggregating operators (`Batch`, `GroupBy`, `MergeJoin`) build a `
 from the input field's type via `arrow_utils.aggregated_list_type` (directly or through
 `build_aggregated_table`). An operator that round-trips through Polars restores pass-through
 columns' input types afterwards (`arrow_utils.restore_column_types`, or
-`restore_schema_nullability` when nullability is restored too). Inputs that collide with
-different widths or layouts promote to their common type (`pa.unify_schemas(...,
-promote_options="permissive")`), which keeps commutative operators commutative.
+`restore_schema_nullability` when nullability is restored too). Never silently promote one
+input's type to another's: `MergeJoin` rejects colliding data columns whose Arrow types differ
+(width, `string`/`large_string`, timestamp unit, decimal precision). Streams expose only Python
+schemas, so such Arrow-level checks run when the operator executes, not at graph-build time.
 
 ### Important implementation details
 
@@ -364,8 +365,8 @@ promote_options="permissive")`), which keeps commutative operators commutative.
 - `DerivedSource` before `run()` → raises `ValueError` (no computed records).
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted
-  `list[T]` with source columns reordered to match. `T` is the inputs' Arrow type (promoted to
-  the common type when the two differ only in width or layout).
+  `list[T]` with source columns reordered to match. `T` is the inputs' Arrow type, which must
+  be identical on both sides (checked at execution; raises `InputValidationError`).
 - Operators predict their output schema (including system tag column names) without
   performing the actual computation. Verify a prediction against
   `unary_static_process(stream).output_schema(...)`, **not** against `process(...)` (which
