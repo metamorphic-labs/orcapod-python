@@ -48,9 +48,10 @@ beyond "every name resolves and the build is clean", and the internal directorie
 
 `docs/index.md` shows `pip install orcapod` and `uv add orcapod`, nothing else. Fixed here:
 the page also showed an install-from-GitHub command and `mkdocs.yml` had a `repo_url`, both
-pointing at a stale location. The repository is private and Orcapod is published to the
-organization's internal package index, not public PyPI, so the git install, the PyPI link
-and the site's repository link were removed. The section now lists the supported Python
+pointing at a stale location. The repository is private and Orcapod is distributed through
+the organization's internal package index, so the git install, the PyPI link and the site's
+repository link were removed. (Releases up to 0.1.4 are on public PyPI; the page does not
+point readers there.) The section now lists the supported Python
 versions (3.11, 3.12 and 3.13) and marks the exact install command as pending.
 
 Missing: the exact install command and index URL, the optional extras (`redis`, `ray`,
