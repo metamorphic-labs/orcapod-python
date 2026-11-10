@@ -1716,8 +1716,8 @@ identity string built from a type's `__module__`, or from `repr`/`str`/
 `canonical_annotation_str`, `get_function_signature` and `get_function_components`
 (the `function_signature_hash` and `function_content_hash` stored with every cached result
 of a `PythonDataFunction`), `TypeObjectHandler` for unregistered types such as `PurePath`,
-and the schema strings in `PythonDataFunction.to_config()` (a pipeline config saved on 3.12
-failed to bind on 3.13). `uri`, `content_hash`, `pipeline_hash` and record ids were not
+the schema strings in `PythonDataFunction.to_config()` (a pipeline config saved on 3.12
+failed to bind on 3.13), and the `ListSource` tag-function hash in `signature` mode. `uri`, `content_hash`, `pipeline_hash` and record ids were not
 affected, because `pathlib.Path` resolves to the registered `orcapod.path` logical type.
 
 **Fix:** `canonical_module_name` resolves a standard-library type defined in a private

@@ -8,6 +8,7 @@ from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.protocols.core_protocols import TagProtocol
 from orcapod.types import SchemaLike
 from orcapod.utils import arrow_utils
+from orcapod.utils.canonical_type_names import stabilize_type_names
 
 if TYPE_CHECKING:
     pass
@@ -100,7 +101,14 @@ class ListSource(RootSource):
         elif self._tag_function_hash_mode == "signature":
             import inspect
 
-            return str(inspect.signature(self._tag_function))
+            sig = inspect.signature(self._tag_function)
+            # Name relocated stdlib types (``pathlib._local.Path`` on Python 3.13)
+            # by their public module so the string is the same on every version.
+            return stabilize_type_names(
+                str(sig),
+                *(p.annotation for p in sig.parameters.values()),
+                sig.return_annotation,
+            )
         else:  # "content"
             import inspect
 
