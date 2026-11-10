@@ -39,6 +39,8 @@ from orcapod.core.operators import (
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import constants
+from orcapod.types import SourceInfoValue
 
 INT = pa.int64()
 STR = pa.large_string()
@@ -56,10 +58,13 @@ def _stream(
     tags: list[str],
     *,
     nullable: bool = True,
+    source_info: dict[str, SourceInfoValue] | None = None,
 ) -> ArrowTableStream:
     """Build a stream from ``{name: (arrow_type, values)}``.
 
     Pass an empty ``values`` list for every column to get a zero-row stream.
+    ``source_info`` maps data columns to a source-info value; columns left out
+    get a null one.
     """
     table = pa.Table.from_arrays(
         [pa.array(values, type=arrow_type) for arrow_type, values in columns.values()],
@@ -70,7 +75,7 @@ def _stream(
             ]
         ),
     )
-    return ArrowTableStream(table, tag_columns=tags)
+    return ArrowTableStream(table, tag_columns=tags, source_info=source_info)
 
 
 def _int_stream(
@@ -327,12 +332,13 @@ class TestMergeJoinEmptyInput:
     def test_colliding_column_type_matches_non_empty_result(self, arrow_type, values):
         """An empty result types a merged column exactly as a non-empty one does.
 
+        This holds for the merged data column and for its source-info column.
         Otherwise empty and non-empty results of the same join could not be
         concatenated.
         """
 
-        def merged_type(rows: int) -> pa.DataType:
-            """Return the merged column's Arrow type for ``rows`` input rows."""
+        def merged_type(rows: int) -> tuple[pa.DataType, pa.DataType]:
+            """Return the merged data and source-info Arrow types for ``rows`` rows."""
             streams = [
                 _stream(
                     {
@@ -341,11 +347,17 @@ class TestMergeJoinEmptyInput:
                     },
                     ["probe"],
                     nullable=False,
+                    source_info={"x": "origin"},
                 )
                 for _ in range(2)
             ]
-            table = MergeJoin().static_process(*streams).as_table()
-            return table.schema.field("x").type
+            table = (
+                MergeJoin().static_process(*streams).as_table(columns={"source": True})
+            )
+            return (
+                table.schema.field("x").type,
+                table.schema.field(f"{constants.SOURCE_PREFIX}x").type,
+            )
 
         assert merged_type(0) == merged_type(2)
 
