@@ -1,14 +1,17 @@
 # Orcapod Python
 Orcapod's Python library for developing reproducible scientific pipelines.
 
+User documentation lives in [`docs/`](docs/index.md) (start with
+[Getting Started](docs/getting-started.md)) and is built with `uv run mkdocs build --strict`.
+`tests/test_docs/` executes the Python samples in this README, `docs/index.md`,
+`docs/getting-started.md`, `docs/concepts/` and `docs/reference/`, except the two samples in
+`docs/concepts/file-hash-caching.md` that need a PostgreSQL server.
+
 ## Installation
 
-Orcapod requires Python 3.11 or newer and is tested on Python 3.11, 3.12 and 3.13.
-
-Orcapod is published to the organization's internal Python package registry.
-
-> **Open item:** the registry URL, authentication and install command are to be supplied
-> by the developer.
+Orcapod supports Python 3.11, 3.12 and 3.13. It is installed from the organization's
+internal package index; the index URL and the exact install command are not settled yet
+(see [Installation](docs/index.md#installation)).
 
 Optional features are installed as extras:
 
@@ -23,12 +26,9 @@ Optional features are installed as extras:
 SpikeInterface support lives in a separate package,
 [`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
 
-Rendering a pipeline graph needs the [Graphviz](https://graphviz.org/download/) `dot`
-executable on your `PATH`.
-
 See [CHANGELOG.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md)
-for release notes, including the migration steps for
-databases written by an earlier release.
+for release notes, including the migration steps for databases written by an earlier
+release.
 
 ## Releasing
 
@@ -36,10 +36,10 @@ Releases are cut from the GitHub Actions **Release** workflow, which runs the te
 tags the commit. The version comes from the tag via `hatch-vcs`, so there is no version
 number to bump in the source tree.
 
-**Do not run the Release workflow until it publishes to the internal registry.** The
-internal registry supersedes PyPI as the publish target, but the workflow's TestPyPI and
-PyPI publishing jobs are still active: a run would publish to public PyPI. See
-[RELEASING.md](RELEASING.md) for the full workflow.
+**Do not run the Release workflow until it publishes to the internal package index.**
+Orcapod is distributed through that index, but the workflow's TestPyPI and PyPI publishing
+jobs are still active: a run would publish to public PyPI. See [RELEASING.md](RELEASING.md)
+for the full workflow.
 
 ## Continuous Integration
 
@@ -113,7 +113,7 @@ While the following is subject to change based on future development, it represe
 ### Construct PIPELINE using with pipeline
 
   "Compile" PIPELINE
-  - auto_compile=False is default
+  - auto_compile=True is the default (compile runs when the `with` block exits)
   - Walk the DAG, wrap each element in a node that owns execution logic, fixates input stream, attaches caching
   - Nodes (function, operator) are associated with storage/DB
   - If a function node has no executor, Pipeline.compile() assigns LocalExecutor() by default — so capture/logging works out of the box without explicit executor setup

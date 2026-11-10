@@ -39,6 +39,7 @@ nav:
     - Operators: concepts/operators.md
     - Function Pods: concepts/function-pods.md
     - Identity & Hashing: concepts/identity.md
+    - File Hash Caching: concepts/file-hash-caching.md
   - API Reference:
     - Overview: api/index.md
     - Sources: api/sources.md

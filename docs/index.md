@@ -7,11 +7,12 @@ content-addressable, and reproducible by design.
 
 ## Installation
 
-Orcapod is published to the organization's internal Python package registry.
+Orcapod supports Python 3.11, 3.12 and 3.13. Install it from your organization's internal
+package index by pointing pip or uv at that index.
 
-!!! note "Open item"
-    The registry URL, authentication and install command are to be supplied by the
-    developer.
+!!! note "Install command pending"
+    The index URL and the exact install command are not settled yet; this section will give
+    them once they are. Until then, ask the Orcapod maintainers which index to use.
 
 Rendering pipeline graphs additionally requires the [Graphviz](https://graphviz.org/download/)
 `dot` binary on your `PATH`. It is optional: everything else works without it, and no
