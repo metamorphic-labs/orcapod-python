@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -106,8 +106,8 @@ class ListSource(RootSource):
             # by their public module so the string is the same on every version.
             return stabilize_type_names(
                 str(sig),
-                *(p.annotation for p in sig.parameters.values()),
-                sig.return_annotation,
+                *(cast(object, p.annotation) for p in sig.parameters.values()),
+                cast(object, sig.return_annotation),
             )
         else:  # "content"
             import inspect

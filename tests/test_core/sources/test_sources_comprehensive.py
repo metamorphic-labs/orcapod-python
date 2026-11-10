@@ -682,7 +682,7 @@ class TestSourceRegistryAdditional:
         assert pairs == srcs
 
 
-def _path_tag_fn(element: Path, idx: int) -> dict[str, Path | str]:
+def _path_tag_fn(element: Path, _idx: int) -> dict[str, Path | str]:
     return {"label": str(element)}
 
 
@@ -690,7 +690,7 @@ def _path_tag_fn(element: Path, idx: int) -> dict[str, Path | str]:
 # Install live type objects, as a module without the __future__ import has.
 _path_tag_fn.__annotations__ = {
     "element": Path,
-    "idx": int,
+    "_idx": int,
     "return": dict[str, Path | str],
 }
 
@@ -706,6 +706,7 @@ class TestListSourceSignatureModePythonVersionIndependence:
             expected_tag_keys=["label"],
             tag_function_hash_mode="signature",
         )
-        assert src._hash_tag_function() == (
-            "(element: pathlib.Path, idx: int) -> dict[str, pathlib.Path | str]"
+        # The pre-hash string is the subject; no public accessor exposes it.
+        assert src._hash_tag_function() == (  # pyright: ignore[reportPrivateUsage]
+            "(element: pathlib.Path, _idx: int) -> dict[str, pathlib.Path | str]"
         )

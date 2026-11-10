@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
+from typing import cast
 
 # Standard-library private submodules that were already the defining module of
 # publicly exported classes on Python 3.11 and/or 3.12 (found by walking every
@@ -99,7 +100,7 @@ def _iter_types(annotation: object, _seen: set[int] | None = None) -> Iterator[t
     Walks generic aliases and unions through ``__origin__`` and ``__args__``,
     and the parameter lists nested inside them.
     """
-    seen = _seen if _seen is not None else set()
+    seen = _seen if _seen is not None else set[int]()
     if id(annotation) in seen:
         return
     seen.add(id(annotation))
@@ -107,15 +108,15 @@ def _iter_types(annotation: object, _seen: set[int] | None = None) -> Iterator[t
     if isinstance(annotation, type):
         yield annotation
     if isinstance(annotation, (list, tuple)):
-        for item in annotation:
+        for item in cast("list[object] | tuple[object, ...]", annotation):
             yield from _iter_types(item, seen)
         return
-    origin = getattr(annotation, "__origin__", None)
+    origin: object = getattr(annotation, "__origin__", None)
     if origin is not None:
         yield from _iter_types(origin, seen)
-    args = getattr(annotation, "__args__", None)
+    args: object = getattr(annotation, "__args__", None)
     if isinstance(args, tuple):
-        for arg in args:
+        for arg in cast("tuple[object, ...]", args):
             yield from _iter_types(arg, seen)
 
 

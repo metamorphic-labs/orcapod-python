@@ -7,6 +7,11 @@ code as it was before the fix; the same literal must be produced on every
 supported Python version.
 """
 
+# ``golden_fn`` and ``golden_pod_fn`` take parameters only for their annotations.
+# Their source text is part of the golden hashes, so a line-level ignore inside
+# them would change the values under test; the rule is disabled for this file.
+# pyright: reportUnusedParameter=false
+
 import collections.abc as cabc
 import concurrent.futures
 import datetime
@@ -19,6 +24,7 @@ import pathlib as P
 import re
 import typing
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -52,11 +58,11 @@ EXPECTED_CANONICAL: list[tuple[object, str]] = [
     (P.PurePosixPath, "pathlib.PurePosixPath"),
     (P.PureWindowsPath, "pathlib.PureWindowsPath"),
     (P.Path | str, "pathlib.Path | str"),
-    (typing.Optional[P.Path], "NoneType | pathlib.Path"),
+    (typing.Optional[P.Path], "NoneType | pathlib.Path"),  # pyright: ignore[reportDeprecated]  # legacy form under test
     (list[P.Path], "list[pathlib.Path]"),
     (dict[str, P.Path], "dict[str, pathlib.Path]"),
     (tuple[P.Path, ...], "tuple[pathlib.Path, Ellipsis]"),
-    (typing.List[P.PurePath], "list[pathlib.PurePath]"),
+    (typing.List[P.PurePath], "list[pathlib.PurePath]"),  # pyright: ignore[reportDeprecated]  # legacy form under test
     (cabc.Iterable[P.Path], "collections.abc.Iterable[pathlib.Path]"),
     # other stdlib types users plausibly annotate with
     (datetime.datetime, "datetime.datetime"),
@@ -80,9 +86,9 @@ EXPECTED_CANONICAL: list[tuple[object, str]] = [
     (cabc.Mapping[str, int], "collections.abc.Mapping[str, int]"),
     (cabc.Callable[[int], str], "collections.abc.Callable[int, str]"),
     (typing.Any, "Any"),
-    (typing.Sequence[int], "collections.abc.Sequence[int]"),
+    (typing.Sequence[int], "collections.abc.Sequence[int]"),  # pyright: ignore[reportDeprecated]  # legacy form under test
     (typing.Literal["a", "b"], "Literal['a', 'b']"),
-    (typing.Union[int, str], "int | str"),
+    (typing.Union[int, str], "int | str"),  # pyright: ignore[reportDeprecated]  # legacy form under test
     (type(None), "NoneType"),
     (int, "int"),
     (bytes, "bytes"),
@@ -119,7 +125,9 @@ class TestCanonicalAnnotationStrings:
         EXPECTED_CANONICAL,
         ids=[expected for _, expected in EXPECTED_CANONICAL],
     )
-    def test_canonical_string_is_version_independent(self, annotation, expected):
+    def test_canonical_string_is_version_independent(
+        self, annotation: object, expected: str
+    ):
         assert canonical_annotation_str(annotation) == expected
 
     def test_registered_logical_type_still_wins(self):
@@ -191,7 +199,7 @@ class TestTypeHandlers:
             ),
         ],
     )
-    def test_type_object_hash_golden(self, tp, expected):
+    def test_type_object_hash_golden(self, tp: type[object], expected: str):
         hasher = get_default_context().semantic_hasher
         assert hasher.hash_object(tp).to_string() == expected
 
@@ -217,14 +225,18 @@ class TestFunctionSignatureGolden:
         [get_function_components, function_info.get_function_components],
         ids=["hash_utils", "function_info"],
     )
-    def test_components_annotations_line(self, get_components):
+    def test_components_annotations_line(
+        self, get_components: Callable[[Callable[..., object]], list[str]]
+    ):
         annotations = [
             c for c in get_components(golden_fn) if c.startswith("annotations:")
         ]
         assert annotations == [
-            "annotations:a:<class 'pathlib.Path'>;b:pathlib.Path | str;"
-            "c:list[pathlib.Path];d:dict[str, pathlib.Path];"
-            "e:<class 'datetime.datetime'>;return:<class 'pathlib.Path'>"
+            (
+                "annotations:a:<class 'pathlib.Path'>;b:pathlib.Path | str;"
+                "c:list[pathlib.Path];d:dict[str, pathlib.Path];"
+                "e:<class 'datetime.datetime'>;return:<class 'pathlib.Path'>"
+            )
         ]
 
     def test_extractor_without_converter(self):
@@ -248,14 +260,14 @@ class TestFunctionPodGolden:
     def data_function(self) -> PythonDataFunction:
         return PythonDataFunction(golden_pod_fn, output_keys="out")
 
-    def test_function_signature_hash(self, data_function):
+    def test_function_signature_hash(self, data_function: PythonDataFunction):
         variation = data_function.get_function_variation_data()
         assert variation["function_signature_hash"] == (
             b"semantic_v0.1:\x1cT\x97A$\x9d%\xac\x1e\xd4t\xa0#7\xe3Q\x1f*\xa5{"
             b"\xa8\xfa\xee\xe2E\xf6\xa5\xf7\x80\x8d\xd7\x8b"
         )
 
-    def test_function_content_hash(self, data_function):
+    def test_function_content_hash(self, data_function: PythonDataFunction):
         variation = data_function.get_function_variation_data()
         # Covers the ``annotations:`` component, which embeds ``str(type)``.
         assert variation["function_content_hash"] == (
@@ -263,7 +275,7 @@ class TestFunctionPodGolden:
             b"\xa2V\xe2\x05\xcf\x82\xe0H\x96\x0f\xd5\xc6\xa1"
         )
 
-    def test_uri(self, data_function):
+    def test_uri(self, data_function: PythonDataFunction):
         assert data_function.uri == (
             "golden_pod_fn",
             "semantic_v0.1:31aba778a6c9ac8dbb60b16fef30be2cae1dff221f29f44ac2cf83950893f9d0",
