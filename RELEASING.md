@@ -33,8 +33,7 @@ Do these on `main` before triggering the workflow:
    its date, and make sure breaking changes carry migration notes. The GitHub Release
    body is generated from PR titles; `CHANGELOG.md` is the curated record.
 2. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
-   releasing. The Release workflow re-runs the unit tests on Python 3.11 and 3.12
-   <!-- PLACEHOLDER (ITL-825 #275): add 3.13 once #275/#276 merge and the Release workflow tests it. -->
+   releasing. The Release workflow re-runs the unit tests on Python 3.11, 3.12 and 3.13
    and the license check, but not the PostgreSQL or SpiralDB integration jobs.
 3. **Check the version is free** — the tag must not exist on origin. **(superseded)** The
    version must not exist on PyPI or TestPyPI; neither index allows a version to be
@@ -66,7 +65,7 @@ Releases are triggered from the GitHub Actions UI — no manual `git tag` step r
                                                  └─ linear-sync ──────────────────────┴─ linear-complete
    ```
 
-   - Pre-flight: branch validation, then tests on Python 3.11 and 3.12 and license check (parallel after validation)
+   - Pre-flight: branch validation, then tests on Python 3.11, 3.12 and 3.13 and license check (parallel after validation)
    - Build: normalises version, creates local tag, builds wheel + sdist, pushes tag to origin
    - TestPyPI **(superseded)**: publishes to test.pypi.org first as a staging step
    - PyPI **(superseded)**: publishes to pypi.org and creates a GitHub Release with generated release notes

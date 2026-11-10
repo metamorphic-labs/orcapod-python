@@ -128,6 +128,45 @@ version. The `orcapod.core.side_effect_function` module, `SideEffectFunctionNode
 Use `@function_pod(ctx_arg=...)` / `FunctionPod.from_fn(..., ctx_arg_name=...)`.
 `@side_effect_function_pod` remains as a thin alias.
 
+#### `MergeJoin` keeps its inputs' Arrow types where both inputs agree on them (ITL-832 #278)
+
+PLACEHOLDER (pending merge of #278): keep this section if #278 merges before the cut,
+otherwise delete it and its *Changed* line.
+
+1. A merged (colliding) data column whose two inputs have the same Arrow type `T` is now
+   `list<T>`, instead of the type Arrow inferred from the Python values. Element types
+   change for `int8` / `int16` / `int32` / unsigned ints (were `int64`), `float32` (was
+   `double`), `large_string` (was `string`), `large_binary` (was `binary`), nested lists
+   of narrow ints (were `list<int64>`), non-microsecond timestamps with rows (were
+   `timestamp[us]`), and decimals (precision was taken from the data, e.g.
+   `decimal128(5, 2)` became `decimal128(3, 2)`). The outer layout stays `list`. The
+   Python-level `output_schema()` and `pipeline_hash` are unchanged.
+2. Row content hashes (and record ids derived from them downstream) change **only** for
+   rows with such a merged column whose element width, unit or precision changes (narrow
+   ints, unsigned ints, `float32`, non-µs timestamps, decimals, nested narrow lists).
+   Stored `MergeJoin` results for such joins are not matched and are recomputed.
+   Layout-only changes (`string` ↔ `large_string`, `binary` ↔ `large_binary`, `list` ↔
+   `large_list`) do not change hashes.
+3. Pass-through columns of `MergeJoin` and `PolarsFilter` keep their input Arrow types
+   instead of Polars' large layouts: `string`, `binary`, `list` and struct-child strings
+   stay as they were, and system-tag record ids stay `fixed_size_binary[16]` (were
+   `large_binary`). The stored Arrow schemas of these outputs change; content hashes and
+   record ids do not.
+4. Nothing changes yet for inputs that **disagree** on a column's Arrow type (for example
+   a `CSVSource` `string` column colliding with a `DictSource` `large_string` one, which
+   still merges into `list<string>`). That rule is not yet defined; see *Known
+   limitations*.
+
+#### `Index` and `Pick` keep the Arrow types of columns they do not touch (ITL-834)
+
+PLACEHOLDER (PR not yet opened): replace with the final wording and PR number from the
+ITL-834 PR if it merges before the cut, otherwise delete this section and its *Changed*
+line.
+
+`Index` and `Pick`, and the datagram mutators behind them, no longer change the Arrow
+types of columns they do not touch. This is breaking for stored rows that passed through
+`Index` or `Pick` with narrow numeric columns.
+
 #### Shipped in 0.1.2 but never recorded here
 
 These two breaking changes were released in `0.1.2` without a changelog entry. They are
@@ -210,12 +249,24 @@ not on PyPI at the time of writing; install it from its repository.
   `pygraphviz` supports). Installing `orcapod` no longer needs a C toolchain or Graphviz
   headers. Rendering pipeline graphs still uses the pure-Python `graphviz` package and
   therefore the optional Graphviz `dot` binary at render time. (ITL-134 #267)
-- PLACEHOLDER (pending merge): CI runs the organization's required checks — `ruff`,
-  `ruff format`, `basedpyright` and `pytest` on Python 3.11, 3.12 and 3.13. (ITL-826 #276)
-- PLACEHOLDER (pending merge): Python 3.13 is supported; canonical type names and hashes
-  are identical on 3.11–3.13. (ITL-825 #275, carried by #276)
-- PLACEHOLDER (pending merge): the license changes from MIT to proprietary. Final wording
-  comes from the ITL-827 PR; this PR does not change the license text. (ITL-827)
+- **Python 3.13 is supported.** Canonical type names, and the hashes derived from them,
+  are identical on Python 3.11, 3.12 and 3.13, and unchanged on 3.11 and 3.12.
+  (ITL-825 #275, merged through #276)
+- The repository meets the organization's required CI: `ruff` lint and format,
+  `basedpyright` with a baseline, and tests on Python 3.11–3.13. Six tests that had been
+  hidden by duplicated test-class names now run. (ITL-826 #276)
+- PLACEHOLDER (pending merge of #278): `MergeJoin` merged columns keep their inputs'
+  Arrow element types, and `MergeJoin` and `PolarsFilter` keep pass-through columns'
+  Arrow types. See *Breaking changes and migration*. (ITL-832 #278)
+- PLACEHOLDER (PR not yet opened): `Index` and `Pick`, and the datagram mutators behind
+  them, no longer change the Arrow types of columns they do not touch. See *Breaking
+  changes and migration*. (ITL-834)
+- PLACEHOLDER (pending merge of #277): the license is proprietary
+  (`LicenseRef-Metamorphic-Proprietary`), and the `LICENSE` file ships in the wheel and
+  the sdist; `pymongo` and `pyyaml` are removed from the runtime dependencies;
+  `basedpyright` and `typing_extensions` move to the `dev` group; the sdist contains only
+  the package source and its metadata files; `orcapod.__version__` is added. (ITL-827
+  #277)
 
 ### Fixed
 
@@ -270,19 +321,25 @@ not on PyPI at the time of writing; install it from its repository.
   `set[int]`. (ITL-611, open)
 - **Rendering a pipeline graph needs the Graphviz `dot` executable** on `PATH`. Everything
   else works without Graphviz.
-- **Delta Lake on S3 is not covered by automated tests.** The S3 integration tests skip in
-  every environment because the MinIO image they start no longer exists. (ITL-819)
+- **Delta Lake on S3 is not covered by automated tests.** The S3 integration tests do not
+  run in CI; they skip in every environment because the MinIO image they start no longer
+  exists. (ITL-819)
+- **The rule for multi-input operators whose inputs disagree on a column's Arrow type is
+  not yet defined** (for example `int8` vs `int64`, `string` vs `large_string`, a
+  timestamp unit or a decimal precision, on a colliding data column or a shared tag key).
+  The current result type is not a guarantee and may change in a later release. These
+  disagreements are not visible when the graph is built, because `output_schema()`
+  reports Python types. (ITL-835)
 - **The SpiralDB backend is not verified by this release.** Its integration tests have
   been failing on `main` since at least 2026-08-26 with `403 Permission table:view
   denied` from the SpiralDB test project — a credentials problem on the test project, not
   a code change — so the `spiraldb` extra ships untested against a live service.
-- **Tested on Python 3.11 and 3.12 only.** `requires-python` is `>=3.11` with no upper
-  bound; newer interpreters are not exercised in CI.
-  PLACEHOLDER (ITL-825 #275): once #275 merges, change this item to "Tested on Python
-  3.11, 3.12 and 3.13".
+- **Tested on Python 3.11, 3.12 and 3.13 only.** `requires-python` is `>=3.11` with no
+  upper bound; newer interpreters are not exercised in CI.
 - **`ray` is pinned to `2.48.0`** in the `ray` extra.
 - **There is no `orcapod.__version__`.** Read the installed version with
-  `importlib.metadata.version("orcapod")`.
+  `importlib.metadata.version("orcapod")`. PLACEHOLDER (pending merge of #277): delete
+  this item if #277 merges before the cut.
 - The SpikeInterface extension is not published on PyPI.
 
 ## [0.1.4] — 2026-07-17

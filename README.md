@@ -3,8 +3,7 @@ Orcapod's Python library for developing reproducible scientific pipelines.
 
 ## Installation
 
-Orcapod requires Python 3.11 or newer and is tested on Python 3.11 and 3.12.
-<!-- PLACEHOLDER (ITL-825 #275): once #275 merges, say "tested on Python 3.11, 3.12 and 3.13". -->
+Orcapod requires Python 3.11 or newer and is tested on Python 3.11, 3.12 and 3.13.
 
 Orcapod is published to the organization's internal Python package registry.
 
@@ -46,8 +45,8 @@ PyPI publishing jobs are still active: a run would publish to public PyPI. See
 
 This project uses GitHub Actions for continuous integration:
 
-- **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11 and 3.12. PostgreSQL integration tests are excluded.
-  <!-- PLACEHOLDER (ITL-825 #275, ITL-826 #276): update the Python versions and job list once #276 merges. -->
+- **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11, 3.12 and 3.13. PostgreSQL integration tests are excluded.
+- **Python — Required CI** (set by the organization): `ruff` lint and format, `basedpyright`, and `pytest` on Python 3.11, 3.12 and 3.13.
 - **Run PostgreSQL Tests**: Runs only the `@pytest.mark.postgres` integration tests against a PostgreSQL 16 service container.
 
 ### Running Tests Locally
