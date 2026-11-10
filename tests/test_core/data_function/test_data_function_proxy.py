@@ -248,8 +248,7 @@ class TestConfigPythonVersionIndependence:
     def _make_path_function() -> PythonDataFunction:
         from pathlib import Path
 
-        # The parameters exist only for the schema derived from them.
-        def stem(p: Path, alt: Path | None, many: list[Path]) -> Path:  # pyright: ignore[reportUnusedParameter]
+        def stem(p: Path, alt: Path | None, many: list[Path]) -> Path:  # pyright: ignore[reportUnusedParameter]  # params exist only for the schema derived from their annotations
             return p
 
         return PythonDataFunction(stem, output_keys="out", version="v1.0")
