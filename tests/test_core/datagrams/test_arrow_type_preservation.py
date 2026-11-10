@@ -98,6 +98,7 @@ LOAD = pytest.mark.parametrize(
 
 
 def _build(cls: type[Datagram], load_dict: bool) -> Datagram:
+    """Build a datagram over the typed table, optionally loading its dict cache."""
     d = cls(_typed_table(), meta_info={"other": "x"})
     if load_dict:
         _ = d["i8"]
@@ -106,6 +107,7 @@ def _build(cls: type[Datagram], load_dict: bool) -> Datagram:
 
 
 def _all_types(d: Datagram) -> dict[str, pa.DataType]:
+    """Map every column of ``d`` (all info included) to its Arrow type."""
     return {f.name: f.type for f in d.as_table(all_info=True).schema}
 
 
@@ -159,6 +161,7 @@ class TestNewColumnTypes:
     def test_arrow_typed_new_column_used_verbatim(
         self, cls: type[Datagram], load_dict: bool
     ) -> None:
+        """A declared ``pa.DataType`` is used verbatim and non-nullable for a non-null value."""
         out = _build(cls, load_dict).with_columns(column_types={"a": pa.int8()}, a=5)
         field = out.as_table().schema.field("a")
         assert field.type == pa.int8()
@@ -169,6 +172,7 @@ class TestNewColumnTypes:
     def test_python_typed_new_column_unchanged(
         self, cls: type[Datagram], load_dict: bool
     ) -> None:
+        """A declared Python type is converted exactly as before."""
         out = _build(cls, load_dict).with_columns(column_types={"n": int}, n=3)
         field = out.as_table().schema.field("n")
         assert field.type == pa.int64()
@@ -178,6 +182,7 @@ class TestNewColumnTypes:
     def test_partial_column_types_keeps_all_new_columns(
         self, cls: type[Datagram], load_dict: bool
     ) -> None:
+        """New columns missing from ``column_types`` are inferred, not dropped."""
         out = _build(cls, load_dict).with_columns(column_types={"a": float}, a=1, b="x")
         types = _all_types(out)
         assert types["a"] == pa.float64()
@@ -188,6 +193,7 @@ class TestNewColumnTypes:
     def test_new_columns_appended_and_readable(
         self, cls: type[Datagram], load_dict: bool
     ) -> None:
+        """New columns are appended after the existing ones and read back."""
         out = _build(cls, load_dict).with_columns(new=3)
         assert list(out.keys()) == [*DATA_COLUMNS, "new"]
         assert out["new"] == 3

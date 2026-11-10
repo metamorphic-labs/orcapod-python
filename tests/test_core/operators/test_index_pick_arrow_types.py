@@ -48,6 +48,7 @@ Row = tuple[TagProtocol, DataProtocol]
 
 
 def _path_column(n: int) -> pa.ChunkedArray[Any]:
+    """Build a column of ``n`` ``Path`` values in orcapod's logical Arrow type."""
     converter = get_default_type_converter()
     return converter.python_dicts_to_arrow_table(
         [{"p": Path(f"/{i}")} for i in range(n)], python_schema={"p": Path}
@@ -94,6 +95,7 @@ UNTOUCHED_DATA = tuple(c for c in _base_columns() if c not in TAGS)
 
 
 def _source(**targets: Column) -> ArrowTableSource:
+    """Build a non-nullable source of the base columns plus ``targets``."""
     columns = {**_base_columns(), **targets}
     table = pa.table(list(columns.values()), names=list(columns))
     table = table.cast(pa.schema([f.with_nullable(False) for f in table.schema]))
@@ -101,21 +103,25 @@ def _source(**targets: Column) -> ArrowTableSource:
 
 
 def _index_source(hit: bool = True) -> ArrowTableSource:
+    """Build an ``Index`` source whose ``lst`` rows hit or miss index 0."""
     values = [[7, 8], [9, 10]] if hit else [[], []]
     return _source(lst=pa.array(values, pa.list_(pa.int8())))
 
 
 def _pick_source(hit: bool = True) -> ArrowTableSource:
+    """Build a ``Pick`` source whose ``d`` rows hit or miss key ``k``."""
     key = "k" if hit else "other"
     rows = [[{"key": key, "value": 1}], [{"key": key, "value": 2}]]
     return _source(d=pa.array(rows, _dict_type(pa.int16())))
 
 
 def _types(table: pa.Table) -> dict[str, pa.DataType]:
+    """Map each column of ``table`` to its Arrow type."""
     return {f.name: f.type for f in table.schema}
 
 
 def _input_types(stream: StreamProtocol) -> dict[str, pa.DataType]:
+    """Map each input column to its large-normalized Arrow type."""
     schema = normalize_schema_to_large_types(stream.as_table().schema)
     return {f.name: f.type for f in schema}
 
@@ -150,6 +156,7 @@ COLUMN = pytest.mark.parametrize("column", [*TAGS, *UNTOUCHED_DATA])
 
 
 def _rows_by_tag(stream: StreamProtocol) -> dict[Any, Row]:
+    """Index the stream's rows by their ``TAG`` value."""
     return {tag[TAG]: (tag, data) for tag, data in stream.iter_data()}
 
 
@@ -346,6 +353,7 @@ def test_fail_on_miss_raises(case: OpCase, out: str | None) -> None:
 
 
 async def _run_async(op: UnaryOperator, source: StreamProtocol) -> list[Row]:
+    """Run ``op`` over ``source`` through the async channel path."""
     op.validate_inputs(source)
     input_ch: Channel[Row] = Channel(buffer_size=16)
     output_ch: Channel[Row] = Channel(buffer_size=16)
@@ -424,6 +432,7 @@ def _assert_pass_through(
     expected: dict[str, pa.DataType],
     actual: dict[str, pa.DataType],
 ) -> None:
+    """Assert every untouched column keeps its input type (width, not layout)."""
     # Width, not layout: Arrow-native operators keep ``string`` where the
     # datagram path normalizes to ``large_string``; both hash the same.
     checked = 0

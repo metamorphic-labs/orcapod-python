@@ -540,6 +540,18 @@ class Datagram(ContentIdentifiableBase):
         return dict(self._meta)
 
     def with_meta_columns(self, **meta_updates: DataValue) -> Self:
+        """Return a copy with meta columns added or overwritten.
+
+        Untouched meta columns keep their Arrow fields verbatim; only the
+        columns being set are built from their Python types.
+
+        Args:
+            **meta_updates: Meta column values, keyed with or without the
+                meta prefix.
+
+        Returns:
+            A new datagram with the updated meta columns.
+        """
         prefixed = {
             k
             if k.startswith(constants.META_PREFIX)
@@ -584,6 +596,20 @@ class Datagram(ContentIdentifiableBase):
         return new_d
 
     def drop_meta_columns(self, *keys: str, ignore_missing: bool = False) -> Self:
+        """Return a copy without the given meta columns.
+
+        The remaining meta columns keep their Arrow fields verbatim.
+
+        Args:
+            *keys: Meta column names, with or without the meta prefix.
+            ignore_missing: If True, names that are not present are skipped.
+
+        Returns:
+            A new datagram without the dropped meta columns.
+
+        Raises:
+            KeyError: If a column is missing and ``ignore_missing`` is False.
+        """
         prefixed = {
             k if k.startswith(constants.META_PREFIX) else f"{constants.META_PREFIX}{k}"
             for k in keys
@@ -613,6 +639,20 @@ class Datagram(ContentIdentifiableBase):
     # ------------------------------------------------------------------
 
     def select(self, *column_names: str) -> Self:
+        """Return a copy holding only the given data columns.
+
+        When the Arrow table is loaded the selected columns keep their Arrow
+        fields; the cached Arrow schema is reset in either case.
+
+        Args:
+            *column_names: Data columns to keep, in the order given.
+
+        Returns:
+            A new datagram with only the selected data columns.
+
+        Raises:
+            ValueError: If any named column does not exist.
+        """
         if self._data_table is not None:
             missing = set(column_names) - set(self._data_table.column_names)
             if missing:
@@ -640,6 +680,23 @@ class Datagram(ContentIdentifiableBase):
             return new_d
 
     def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
+        """Return a copy without the given data columns.
+
+        When the Arrow table is loaded the remaining columns keep their Arrow
+        fields; the cached Arrow schema is reset in either case.
+
+        Args:
+            *column_names: Data columns to drop.
+            ignore_missing: If True, names that are not present are skipped.
+
+        Returns:
+            A new datagram without the dropped data columns.
+
+        Raises:
+            KeyError: If a column is missing and ``ignore_missing`` is False.
+            ValueError: If a dict-backed datagram would be left with no data
+                columns.
+        """
         if self._data_table is not None:
             missing = set(column_names) - set(self._data_table.column_names)
             if missing and not ignore_missing:
@@ -676,6 +733,19 @@ class Datagram(ContentIdentifiableBase):
             return new_d
 
     def rename(self, column_mapping: Mapping[str, str]) -> Self:
+        """Return a copy with data columns renamed.
+
+        When the Arrow table is loaded each renamed column keeps its Arrow
+        type; the cached Arrow schema is reset in either case.
+
+        Args:
+            column_mapping: Old column names mapped to new ones. Columns not
+                in the mapping keep their names.
+
+        Returns:
+            A new datagram with the renamed columns, or ``self`` if the
+            mapping is empty.
+        """
         if not column_mapping:
             return self
         if self._data_table is not None:
@@ -702,6 +772,21 @@ class Datagram(ContentIdentifiableBase):
             return new_d
 
     def update(self, **updates: DataValue) -> Self:
+        """Return a copy with values of existing data columns replaced.
+
+        Whenever the Arrow table is loaded, each updated column keeps its
+        exact Arrow field and untouched columns are carried through verbatim.
+
+        Args:
+            **updates: Existing column names mapped to their new values.
+
+        Returns:
+            A new datagram with the updated values, or ``self`` if no updates
+            are given.
+
+        Raises:
+            KeyError: If any named column does not exist.
+        """
         if not updates:
             return self
 
@@ -745,8 +830,8 @@ class Datagram(ContentIdentifiableBase):
     def _new_columns_table(
         self,
         updates: dict[str, DataValue],
-        column_types: "Mapping[str, DataType | pa.DataType]",
-    ) -> "pa.Table":
+        column_types: Mapping[str, DataType | pa.DataType],
+    ) -> pa.Table:
         """Build a one-row Arrow table holding only the genuinely new columns.
 
         Each column's Arrow type comes from ``column_types`` when given there:
@@ -800,9 +885,30 @@ class Datagram(ContentIdentifiableBase):
 
     def with_columns(
         self,
-        column_types: "Mapping[str, DataType | pa.DataType] | None" = None,
+        column_types: Mapping[str, DataType | pa.DataType] | None = None,
         **updates: DataValue,
     ) -> Self:
+        """Return a copy with new data columns added.
+
+        Whenever the Arrow table is loaded, or an Arrow type is declared, the
+        Arrow path is taken: existing columns keep their exact Arrow fields
+        and only the new columns are typed (declared) or inferred
+        (undeclared). A dict-only datagram without declared Arrow types keeps
+        its Python-schema behaviour.
+
+        Args:
+            column_types: Optional types for some or all new columns. A
+                ``pa.DataType`` is used verbatim (nullable only when the value
+                is ``None``); a Python type is converted.
+            **updates: New column names mapped to their values.
+
+        Returns:
+            A new datagram with the added columns, or ``self`` if no columns
+            are given.
+
+        Raises:
+            ValueError: If any named column already exists.
+        """
         if not updates:
             return self
 
@@ -864,6 +970,19 @@ class Datagram(ContentIdentifiableBase):
     # ------------------------------------------------------------------
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
+        """Return a shallow copy of this datagram.
+
+        The data Arrow table and the meta Arrow table are shared (Arrow tables
+        are immutable), so a copy keeps every column's exact Arrow type.
+
+        Args:
+            include_cache: If True, cached content hashes and the context
+                table are carried over.
+            preserve_id: If True, the copy keeps this datagram's UUID.
+
+        Returns:
+            A new datagram of the same class.
+        """
         new_d = object.__new__(self.__class__)
 
         # Fields from ContentIdentifiableBase / DataContextMixin

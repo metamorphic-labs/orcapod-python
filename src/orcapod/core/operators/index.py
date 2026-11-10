@@ -26,11 +26,6 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def _field_type(field: "pa.Field[Any]") -> "pa.DataType":
-    """Return a field's Arrow type (typed wrapper over the partially typed stubs)."""
-    return cast("pa.DataType", field.type)
-
-
 class Index(UnaryOperator):
     """Extract an element from a list-typed data column by position.
 
@@ -236,7 +231,7 @@ class Index(UnaryOperator):
         new_src = f"{old_src}[{self.i}]" if old_src else None
 
         element_type = self._element_arrow_type(
-            _field_type(data.arrow_schema().field(self.column))
+            arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
         )
         if self.out is None:
             # Replace column in place: drop the old (with its stale type), re-add
@@ -300,14 +295,16 @@ class Index(UnaryOperator):
             )
             element_field = pa.field(
                 self.out or self.column,
-                self._element_arrow_type(_field_type(input_schema.field(self.column))),
+                self._element_arrow_type(
+                    arrow_utils.column_arrow_type(input_schema, self.column)
+                ),
                 nullable=type(None) in typing.get_args(self._output_type),
             )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)
-                output_schema = input_schema.set(position, element_field)
+                output_schema = input_schema.set(position, element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             else:
-                output_schema = input_schema.append(element_field)
+                output_schema = input_schema.append(element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
                 output_schema.empty_table(),
                 tag_columns=tag_columns,

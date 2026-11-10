@@ -26,11 +26,6 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def _field_type(field: "pa.Field[Any]") -> "pa.DataType":
-    """Return a field's Arrow type (typed wrapper over the partially typed stubs)."""
-    return cast("pa.DataType", field.type)
-
-
 class Pick(UnaryOperator):
     """Extract a value from a struct- or dict-typed data column by key.
 
@@ -93,7 +88,7 @@ class Pick(UnaryOperator):
         if isinstance(column_type, (pa.ListType, pa.LargeListType)):
             entry = cast("pa.DataType", column_type.value_type)
             if isinstance(entry, pa.StructType) and entry.get_field_index("value") >= 0:
-                return _field_type(entry.field("value"))
+                return cast("pa.DataType", entry.field("value").type)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
         assert self._converter is not None, "validate_unary_input must run first"
         return self._converter.python_type_to_arrow_type(self._output_type)
 
@@ -244,7 +239,7 @@ class Pick(UnaryOperator):
         new_src = f"{old_src}[{self.key!r}]" if old_src else None
 
         value_type = self._value_arrow_type(
-            _field_type(data.arrow_schema().field(self.column))
+            arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
         )
         if self.out is None:
             # Replace column in place: drop the old (with its stale type), re-add
@@ -308,14 +303,16 @@ class Pick(UnaryOperator):
             )
             value_field = pa.field(
                 self.out or self.column,
-                self._value_arrow_type(_field_type(input_schema.field(self.column))),
+                self._value_arrow_type(
+                    arrow_utils.column_arrow_type(input_schema, self.column)
+                ),
                 nullable=type(None) in typing.get_args(self._output_type),
             )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)
-                output_schema = input_schema.set(position, value_field)
+                output_schema = input_schema.set(position, value_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             else:
-                output_schema = input_schema.append(value_field)
+                output_schema = input_schema.append(value_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
                 output_schema.empty_table(),
                 tag_columns=tag_columns,

@@ -52,6 +52,7 @@ CLS = pytest.mark.parametrize(
 
 
 def _build(cls: type[Datagram], load_dict: bool) -> Datagram:
+    """Build a datagram with narrow meta columns, optionally loading its dict cache."""
     table = pa.table(
         [
             pa.array([1], pa.int8()),
@@ -70,6 +71,7 @@ def _build(cls: type[Datagram], load_dict: bool) -> Datagram:
 
 
 def _meta_types(d: Datagram) -> dict[str, pa.DataType]:
+    """Map each meta column of ``d`` to its Arrow type."""
     return {
         f.name: f.type
         for f in d.as_table(all_info=True).schema

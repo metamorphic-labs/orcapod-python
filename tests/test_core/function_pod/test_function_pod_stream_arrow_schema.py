@@ -22,6 +22,7 @@ class _DictBornStream(ArrowTableStream):
     """Yields dict-born rows whose tag gained a column after its schema was cached."""
 
     def iter_data(self, *args: Any, **kwargs: Any) -> Iterator[tuple[Tag, Data]]:
+        """Yield dict-born rows, each tag extended after its schema was cached."""
         for row in self.as_table().to_pylist():
             tag = Tag({"id": row["id"]})
             _ = tag.arrow_schema(all_info=True)  # cache the schema
