@@ -30,3 +30,19 @@ Not a CodeRabbit finding. The repository is private and Orcapod is distributed o
 PyPI, so commit `c19e71ba` makes `pip install orcapod` / `uv add orcapod` the only install path
 in `docs/index.md` and removes `repo_url` from `mkdocs.yml` (the published site no longer
 links to a repository readers cannot open).
+
+## Round 2 — review of `13d5834c`
+
+The push was first rate-limited; the review ran after `@coderabbitai review` once the limit
+reset. Review: https://github.com/metamorphic-labs/orcapod-python/pull/271#pullrequestreview-5834990800
+
+| # | Finding | Location | Verdict | Reason | Commit / reply |
+|---|---------|----------|---------|--------|----------------|
+| 2.1 | The design-issue entry says every Python block is run; two PostgreSQL blocks are skipped | `DESIGN_ISSUES.md:1703-1705` | FIX | True, same over-claim as 1.4. Entry now names the two skipped samples. | `ccc29cd8`, [thread](https://github.com/metamorphic-labs/orcapod-python/pull/271#discussion_r4519765747) |
+| 2.2 | The exact-match rule ignores parameters with defaults | `docs/concepts/function-pods.md:91-94` and summary line 27 | FIX | True, checked on `main`: `def bmi(weight, height=0.1)` applied to a stream with only `weight` runs and uses the default. Both places now say a defaulted parameter may be left out; extra columns, missing required columns and wrong types are still rejected. | `ccc29cd8`, [thread](https://github.com/metamorphic-labs/orcapod-python/pull/271#discussion_r4519765752) |
+| 2.3 | After rebinding a job to fewer rows and rerunning, `iter_data()` / `as_table()` can still show the removed rows | `docs/concepts/identity.md:108-119` | DISMISS | Measured on `main`: a `PipelineJob` run over 3 rows, then rebuilt over the same store and source with 1 row, gives `iter_data()` = `as_table()` = 1 row, while `get_all_records()` returns all 3. The page's statement ("its current inputs only") is what the code does; the removed rows are visible only through `get_all_records()`, which the page now says (2.4). | [thread](https://github.com/metamorphic-labs/orcapod-python/pull/271#discussion_r4519765764) |
+| 2.4 | "`get_all_records()` returns everything stored in the shared table" is wrong: rows of other nodes are filtered out | `docs/concepts/identity.md:118-119` | PARTIAL | Right problem (the node filters on its own content hash, measured in 1.2). Reworded in user terms rather than the suggested "this node's content hash": rows from earlier runs of the same job and source are included, rows other nodes wrote to the shared table (e.g. another `source_id`) are not. Same wording as `function-pods.md` after 1.2. | `ccc29cd8`, [thread](https://github.com/metamorphic-labs/orcapod-python/pull/271#discussion_r4519765776) |
+| 2.5 | The plan allows skipping "deliberately schematic" samples, against the CLAUDE.md rule (review body, marked unverified) | `superpowers/plans/2026-11-09-plt-4816-docs-audit.md:54-55` | FIX | True: CLAUDE.md allows the marker only for missing infrastructure. No page uses it otherwise (the only two markers are the PostgreSQL samples), so only the plan's wording changed. | `ccc29cd8`, round comment |
+| 2.6 | Pre-merge check "Linked Issues": no tutorial (repeat of 1.8) | PR | DISMISS (2nd time) | Same as 1.8: this PR is "Part of PLT-4816"; the tutorial is in #274. The check will keep failing on this PR by construction. | round comment |
+
+Local suite after the round: same command as round 1 — 4827 passed, 93 skipped, 2 xfailed.
