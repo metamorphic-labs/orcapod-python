@@ -408,7 +408,10 @@ not on PyPI at the time of writing; install it from its repository.
   struct values raises `TypeError`. Zero-row inputs work. (ITL-839)
 - **`Data.select` and `Data.drop` leave the removed column's source-info column**
   (`_source_<column>`) behind, visible with `all_info=True`. (ITL-838)
-- **Nullability preservation is not yet audited** across all operators and pods. (ITL-842)
+- **Arrow schema and data preservation is not yet audited across every operation**, sync and
+  async. Each operator fixed in this release was checked by hand; a test harness covering
+  every operator, pod, source, node and execution path is deferred (ITL-846), including its
+  nullability part (ITL-842).
 - **There is no written rule for which data context an element uses.** Operators use their
   input stream's context for data, but an operator's own context still decides its
   `content_hash` and `pipeline_hash`, and `MergeJoin` uses its left input's context without
