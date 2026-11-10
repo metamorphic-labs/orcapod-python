@@ -50,28 +50,33 @@ _ID_COLUMNS = (
 
 
 def add_xy(x: int, y: int) -> int:
+    """Record the call and return ``x + y``."""
     CALLS.append("add_xy")
     return x + y
 
 
 def times_two(z: int) -> int:
+    """Record the call and return ``z * 2``."""
     CALLS.append("times_two")
     return z * 2
 
 
 def add_one(x: int) -> int:
+    """Record the call and return ``x + 1``."""
     CALLS.append("add_one")
     return x + 1
 
 
 @pytest.fixture(autouse=True)
 def _reset_calls() -> Iterator[None]:
+    """Start and end every test with an empty call log."""
     CALLS.clear()
     yield
     CALLS.clear()
 
 
 def _source() -> ArrowTableSource:
+    """Build the three-row source with tokens ``S::row_0`` to ``S::row_2``."""
     table = pa.table(
         {
             "id": pa.array(["a", "b", "c"], pa.large_string()),
@@ -84,6 +89,7 @@ def _source() -> ArrowTableSource:
 
 
 def _pod(function: Callable[..., int], output_key: str) -> FunctionPod:
+    """Wrap ``function`` in a ``FunctionPod`` with one output key."""
     data_function = PythonDataFunction(function, output_keys=output_key)
     # PythonDataFunction does not structurally match DataFunctionProtocol yet
     # (same pre-existing mismatch as the baselined FunctionPod(pf) calls in tests).
@@ -103,6 +109,7 @@ def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
 
 
 def _run(job: PipelineJob, orchestrator: str = "sync") -> None:
+    """Run ``job`` with the sync or the async orchestrator."""
     if orchestrator == "async":
         _ = job.run(orchestrator=AsyncPipelineOrchestrator())
     else:
@@ -110,6 +117,7 @@ def _run(job: PipelineJob, orchestrator: str = "sync") -> None:
 
 
 def _function_node(job: PipelineJob, label: str) -> FunctionJobNode:
+    """Return the job's function node named ``label``."""
     node = job.nodes[label]
     assert isinstance(node, FunctionJobNode)
     return node
@@ -126,16 +134,19 @@ def _tag_rows(job: PipelineJob, label: str) -> list[dict[str, Any]]:
 
 
 def _column(rows: Sequence[dict[str, Any]], column: str) -> list[Any]:
+    """Return the values of ``column`` across ``rows``."""
     return [row[column] for row in rows]
 
 
 def _input_tokens(column: str) -> list[str | None]:
+    """Return the source's own token for ``column`` on each row."""
     tokens = [data.source_info()[column] for _, data in _source().iter_data()]
     assert all(isinstance(t, str) for t in tokens)
     return [t if isinstance(t, str) else None for t in tokens]
 
 
 def _output_tokens(job: PipelineJob, label: str, column: str) -> list[Any]:
+    """Return the node's output token for ``column`` on each row, sorted by tag."""
     rows = sorted(
         _function_node(job, label).iter_data(),
         key=lambda row: str(row[0].as_dict()["id"]),
@@ -150,6 +161,7 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     def broadcasting(
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
     ) -> tuple[pa.Table, tuple[str, ...]]:
+        """Stamp row 0's source info on every row, then build the table."""
         row_zero = rows[0][1].source_info()
         return original(
             [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
@@ -163,6 +175,7 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 class TestFreshRunStoresPerRowSourceInfo:
     def test_source_into_function(self, orchestrator: str):
+        """A function fed by a source stores each input row's own tokens."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         rows = _tag_rows(job, "direct")
@@ -170,11 +183,13 @@ class TestFreshRunStoresPerRowSourceInfo:
         assert _column(rows, "_source_y") == _input_tokens("y")
 
     def test_operator_into_function(self, orchestrator: str):
+        """A function fed through an operator stores each row's own tokens."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         assert _column(_tag_rows(job, "via_op"), "_source_x") == _input_tokens("x")
 
     def test_function_into_function(self, orchestrator: str):
+        """A function fed by a function stores each upstream output's token."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         stored = _column(_tag_rows(job, "second"), "_source_z")
@@ -189,6 +204,7 @@ class TestStoreWrittenBeforeFix:
     def test_rerun_keeps_old_rows_and_runs_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ):
+        """A re-run serves old rows from the cache without rewriting them."""
         store = InMemoryArrowDatabase()
         with monkeypatch.context() as patch:
             _broadcast_row_zero(patch)
@@ -220,6 +236,7 @@ class TestDropOnlyTagTables:
     def _pre_fix_store(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> tuple[DeltaTableDatabase, dict[str, list[dict[str, Any]]]]:
+        """Write a Delta store the pre-fix way and read its tag tables back."""
         store = DeltaTableDatabase(tmp_path)
         with monkeypatch.context() as patch:
             _broadcast_row_zero(patch)
@@ -234,6 +251,7 @@ class TestDropOnlyTagTables:
         return store, before
 
     def _drop_tag_table(self, tmp_path: Path, label: str) -> None:
+        """Delete the node's ``pdb_v1`` tag table on disk."""
         node = _function_node(_job(InMemoryArrowDatabase()), label)
         path = tmp_path.joinpath(_JOB, *node._versioned_pipeline_path)  # pyright: ignore[reportPrivateUsage]  # dropping the real table on disk
         assert path.name == "pdb_v1" and path.is_dir()
@@ -242,6 +260,7 @@ class TestDropOnlyTagTables:
     def test_all_tag_tables_rebuilt_without_recomputation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """Dropped tag tables refill correctly with no function re-run."""
         _, before = self._pre_fix_store(tmp_path, monkeypatch)
         for label in _FUNCTION_NODES:
             self._drop_tag_table(tmp_path, label)
@@ -266,6 +285,7 @@ class TestDropOnlyTagTables:
     def test_dropping_one_tag_table_leaves_the_others(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """Dropping one tag table leaves the others as they were."""
         _, before = self._pre_fix_store(tmp_path, monkeypatch)
         self._drop_tag_table(tmp_path, "direct")
 

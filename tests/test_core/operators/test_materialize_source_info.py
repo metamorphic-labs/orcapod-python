@@ -51,6 +51,7 @@ Row = tuple[TagProtocol, DataProtocol]
 
 
 def _non_null(table: pa.Table) -> pa.Table:
+    """Return ``table`` with every top-level field declared non-nullable."""
     return table.cast(pa.schema([f.with_nullable(False) for f in table.schema]))
 
 
@@ -68,6 +69,7 @@ def _source(n: int = 4, offset: int = 0) -> ArrowTableSource:
 
 
 def _list_source(n: int = 3) -> ArrowTableSource:
+    """Build a source whose data column ``x`` holds non-null ``large_list<int64>`` values."""
     table = pa.table(
         {
             "id": pa.array([f"k{i}" for i in range(n)], pa.large_string()),
@@ -78,6 +80,7 @@ def _list_source(n: int = 3) -> ArrowTableSource:
 
 
 def _tokens(rows: Sequence[Row], column: str = "x") -> list[Any]:
+    """Return each row's source-info token for ``column``, in row order."""
     return [data.source_info()[column] for _, data in rows]
 
 
@@ -93,6 +96,7 @@ def _keyed(rows: Sequence[Row]) -> list[tuple[str, dict[str, Any], dict[str, Any
 
 
 async def _feed(stream: StreamProtocol) -> Channel[Row]:
+    """Return a closed channel holding every (Tag, Data) pair of ``stream``."""
     channel: Channel[Row] = Channel(buffer_size=64)
     for item in stream.iter_data():
         await channel.writer.send(item)
@@ -101,7 +105,10 @@ async def _feed(stream: StreamProtocol) -> Channel[Row]:
 
 
 def _run_async(op: StaticOutputOperatorPod, *streams: StreamProtocol) -> list[Row]:
+    """Run ``op.async_execute`` over ``streams`` and collect what it emits."""
+
     async def go() -> list[Row]:
+        """Drive the coroutine under test."""
         inputs = [(await _feed(s)).reader for s in streams]
         output: Channel[Row] = Channel(buffer_size=64)
         await op.async_execute(
@@ -115,6 +122,7 @@ def _run_async(op: StaticOutputOperatorPod, *streams: StreamProtocol) -> list[Ro
 
 
 def _stored_source(node: OperatorJobNode, column: str = "x") -> list[Any]:
+    """Return the node's stored ``_source_<column>`` values, sorted by tag."""
     records = node.get_all_records(columns={"source": True})
     assert records is not None
     rows = sorted(records.to_pylist(), key=lambda r: repr(r["id"]))
@@ -122,6 +130,7 @@ def _stored_source(node: OperatorJobNode, column: str = "x") -> list[Any]:
 
 
 def _source_fields(table: pa.Table) -> dict[str, pa.Field[pa.DataType]]:
+    """Return the ``_source_*`` fields of ``table``'s schema, keyed by name."""
     return {
         f.name: f for f in table.schema if f.name.startswith(constants.SOURCE_PREFIX)
     }
@@ -134,6 +143,7 @@ def _source_fields(table: pa.Table) -> dict[str, pa.Field[pa.DataType]]:
 
 class TestMaterializeToStream:
     def test_scalar_tokens_kept_per_row(self):
+        """Scalar tokens of every data column stay with their own row."""
         rows = list(_source().iter_data())
         expected = _tokens(rows)
         assert len(set(expected)) == len(
@@ -146,6 +156,7 @@ class TestMaterializeToStream:
         assert _tokens(list(stream.iter_data()), "y") == _tokens(rows, "y")
 
     def test_list_tokens_kept_per_row(self):
+        """List-valued tokens (after ``Batch``) stay with their own row."""
         rows = list(Batch(2)(_source(5)).iter_data())  # batches of 2, 2, 1
         expected = _tokens(rows)
         assert [len(t) for t in expected] == [2, 2, 1]
@@ -155,15 +166,18 @@ class TestMaterializeToStream:
         assert _tokens(list(stream.iter_data())) == expected
 
     def test_single_row(self):
+        """A single row materializes with its own tokens."""
         rows = list(_source(1).iter_data())
         stream = StaticOutputOperatorPod._materialize_to_stream(rows)
         assert _tokens(list(stream.iter_data())) == _tokens(rows)
 
     def test_zero_rows_raises(self):
+        """Materializing zero rows still raises ``ValueError``."""
         with pytest.raises(ValueError, match="empty list of rows"):
             _ = StaticOutputOperatorPod._materialize_to_stream([])
 
     def test_none_source_info_rows(self):
+        """A ``None`` token on row 0 does not spread to the other rows."""
         rows = list(_source(3).iter_data())
         # Row 0 has no token, the others keep theirs.
         rows[0] = (rows[0][0], rows[0][1].with_source_info(x=None))
@@ -175,17 +189,20 @@ class TestMaterializeToStream:
         assert _tokens(list(stream.iter_data())) == expected
 
     def test_none_source_info_after_row_zero(self):
+        """A ``None`` token after row 0 is kept rather than overwritten."""
         rows = list(_source(3).iter_data())
         rows[2] = (rows[2][0], rows[2][1].with_source_info(x=None))
         stream = StaticOutputOperatorPod._materialize_to_stream(rows)
         assert _tokens(list(stream.iter_data())) == _tokens(rows)
 
     def test_all_none_source_info(self):
+        """Rows with no tokens at all materialize with ``None`` tokens."""
         rows = [(t, d.with_source_info(x=None)) for t, d in _source(3).iter_data()]
         stream = StaticOutputOperatorPod._materialize_to_stream(rows)
         assert _tokens(list(stream.iter_data())) == [None, None, None]
 
     def test_data_columns_and_types_unchanged(self):
+        """Data values and the output schema are those of the input."""
         src = _source()
         rows = list(src.iter_data())
         stream = StaticOutputOperatorPod._materialize_to_stream(rows)
@@ -204,6 +221,7 @@ class TestSourceInfoArrowFields:
     """
 
     def test_scalar_tokens_non_nullable_large_string(self):
+        """Scalar token fields stay non-nullable ``large_string``."""
         stream = StaticOutputOperatorPod._materialize_to_stream(
             list(_source().iter_data())
         )
@@ -214,6 +232,7 @@ class TestSourceInfoArrowFields:
         }
 
     def test_list_tokens_non_nullable_large_list(self):
+        """List token fields stay non-nullable ``large_list<large_string>``."""
         rows = list(Batch(2)(_source(4)).iter_data())
         stream = StaticOutputOperatorPod._materialize_to_stream(rows)
         field = _source_fields(stream.as_table(columns={"source": True}))["_source_x"]
@@ -226,6 +245,7 @@ class TestSourceInfoArrowFields:
 
     @pytest.mark.parametrize("none_row", [0, 2])
     def test_field_nullable_when_a_token_is_none(self, none_row: int):
+        """A token field is nullable exactly when some row's token is ``None``."""
         rows = list(_source(3).iter_data())
         rows[none_row] = (rows[none_row][0], rows[none_row][1].with_source_info(x=None))
         stream = StaticOutputOperatorPod._materialize_to_stream(rows)
@@ -257,28 +277,33 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
     def test_unary_async_matches_sync(
         self, make_op: Callable[[], StaticOutputOperatorPod]
     ):
+        """The async path emits the same rows and tokens as the sync path."""
         src = _source(5)
         sync_rows = list(make_op()(src).iter_data())
         async_rows = _run_async(make_op(), src)
         assert _keyed(async_rows) == _keyed(sync_rows)
 
     def test_polars_filter_tokens_follow_rows(self):
+        """Async ``PolarsFilter`` keeps each row's own token."""
         src = _source(4)
         out = _run_async(PolarsFilter(), src)
         assert _tokens(out) == _tokens(list(src.iter_data()))
 
     def test_batch_lists_hold_member_tokens(self):
+        """Each async ``Batch(2)`` list holds its members' tokens in order."""
         src = _source(5)
         inputs = _tokens(list(src.iter_data()))
         out = _run_async(Batch(2), src)
         assert _tokens(out) == [inputs[0:2], inputs[2:4], inputs[4:5]]
 
     def test_batch_all_holds_member_tokens(self):
+        """Async ``Batch(0)`` holds every input token in order."""
         src = _source(4)
         out = _run_async(Batch(0), src)
         assert _tokens(out) == [_tokens(list(src.iter_data()))]
 
     def test_group_by_lists_hold_member_tokens(self):
+        """Each async ``GroupBy`` list holds its members' tokens."""
         src = _source(4)
         inputs = _tokens(list(src.iter_data()))
         out = _run_async(GroupBy(by=["g"]), src)
@@ -286,6 +311,7 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
         assert by_group == {0: [inputs[0], inputs[2]], 1: [inputs[1], inputs[3]]}
 
     def test_merge_join_async_matches_sync(self):
+        """Async ``MergeJoin`` matches sync and pairs each row's own tokens."""
         left, right = _source(3), _source(3, offset=1)
         sync_rows = list(MergeJoin()(left, right).iter_data())
         async_rows = _run_async(MergeJoin(), left, right)
@@ -315,7 +341,10 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
     def test_zero_rows_emit_nothing(
         self, make_op: Callable[[], StaticOutputOperatorPod]
     ):
+        """Async ``Batch`` over an empty channel emits nothing."""
+
         async def go() -> list[Row]:
+            """Drive the coroutine under test."""
             empty: Channel[Row] = Channel(buffer_size=4)
             await empty.writer.close()
             output: Channel[Row] = Channel(buffer_size=4)
@@ -334,12 +363,14 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
 
 class TestIndexPickKeepPerRowSourceInfo:
     def test_index(self):
+        """``Index`` derives each row's token from that row's own token."""
         src = _list_source(3)
         inputs = _tokens(list(src.iter_data()))
         out = list(Index(column="x", i=0)(src).iter_data())
         assert _tokens(out) == [f"{t}[0]" for t in inputs]
 
     def test_pick(self):
+        """``Pick`` derives each row's token from that row's own token."""
         src = DictSource(
             [
                 {"animal": "cat", "scores": {"speed": 8}},
@@ -358,6 +389,7 @@ class TestIndexPickKeepPerRowSourceInfo:
         }
 
     def test_index_single_row(self):
+        """``Index`` on a single row keeps that row's token."""
         src = _list_source(1)
         out = list(Index(column="x", i=1)(src).iter_data())
         assert _tokens(out) == [f"{_tokens(list(src.iter_data()))[0]}[1]"]
@@ -369,11 +401,13 @@ class TestIndexPickKeepPerRowSourceInfo:
 
 
 def _run_node(node: OperatorJobNode, src: StreamProtocol, mode: str) -> None:
+    """Run ``node`` over ``src`` with ``execute`` or ``async_execute``."""
     if mode == "execute":
         _ = node.execute(src)
         return
 
     async def go() -> None:
+        """Drive the coroutine under test."""
         output: Channel[Row] = Channel(buffer_size=64)
         await node.async_execute([(await _feed(src)).reader], output.writer)
         _ = await output.reader.collect()
@@ -384,6 +418,7 @@ def _run_node(node: OperatorJobNode, src: StreamProtocol, mode: str) -> None:
 @pytest.mark.parametrize("mode", ["execute", "async_execute"])
 class TestOperatorNodeStoresPerRowSourceInfo:
     def test_select(self, mode: str):
+        """An operator node stores each row's own token."""
         src = _source(3)
         node = OperatorJobNode(
             SelectDataColumns(["x"]),
@@ -395,6 +430,7 @@ class TestOperatorNodeStoresPerRowSourceInfo:
         assert _stored_source(node) == _tokens(list(src.iter_data()))
 
     def test_batch(self, mode: str):
+        """An operator node stores one token per batch member."""
         src = _source(3)
         node = OperatorJobNode(
             Batch(2),
@@ -410,6 +446,7 @@ class TestOperatorNodeStoresPerRowSourceInfo:
 
 class TestSyncOrchestratorMaterialization:
     def _source_node(self, src: ArrowTableSource) -> SourceJobNode:
+        """Wrap ``src`` in a ``SourceJobNode``."""
         tag_schema, data_schema = src.output_schema()
         return SourceJobNode(
             name="src",
@@ -419,6 +456,7 @@ class TestSyncOrchestratorMaterialization:
         )
 
     def test_buffer_keeps_per_row_tokens(self):
+        """A source node's buffer keeps per-row tokens and its pipeline hash."""
         node = self._source_node(_source(3))
         buf = list(node.iter_data())
         stream = SyncPipelineOrchestrator._materialize_as_stream(buf, node)
@@ -426,6 +464,7 @@ class TestSyncOrchestratorMaterialization:
         assert stream.pipeline_hash() == node.pipeline_hash()
 
     def test_buffer_keeps_list_tokens(self):
+        """An operator node's buffer keeps list tokens and the node's hashes."""
         src = _source(4)
         node = OperatorJobNode(Batch(2), [src])
         node.run()
@@ -440,6 +479,7 @@ class TestSyncOrchestratorMaterialization:
         )
 
     def test_empty_buffer(self):
+        """An empty buffer still builds an empty stream."""
         node = self._source_node(_source(3))
         stream = SyncPipelineOrchestrator._materialize_as_stream([], node)
         assert stream.as_table().num_rows == 0
@@ -451,6 +491,7 @@ class TestSyncOrchestratorMaterialization:
 
 
 def _pin_source() -> ArrowTableSource:
+    """Build the fixed three-row source whose node hashes are pinned below."""
     table = pa.table(
         {
             "id": pa.array(["a", "b", "c"], pa.large_string()),
@@ -462,6 +503,7 @@ def _pin_source() -> ArrowTableSource:
 
 
 def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
+    """Return the stored ``_record_hash`` of each row, keyed by the ``id`` tag."""
     assert node._pipeline_database is not None
     records = node._pipeline_database.get_all_records(
         node.node_identity_path, record_id_column=node.HASH_COLUMN_NAME
@@ -482,6 +524,7 @@ class TestIdentityPinned:
     """
 
     def test_operator_node_identity_and_row_zero_record_hash(self):
+        """Node hashes, data, schema and row 0's record hash match ``ab544982``."""
         src = _pin_source()
         node = OperatorJobNode(
             SelectDataColumns(["x"]),
@@ -551,6 +594,7 @@ class TestStoreWrittenBeforeFix:
     def _node(
         self, db: ArrowDatabaseProtocol, mode: CacheMode = CacheMode.LOG
     ) -> OperatorJobNode:
+        """Build the pinned ``SelectDataColumns`` operator node on ``db``."""
         return OperatorJobNode(
             SelectDataColumns(["x"]),
             [_pin_source()],
@@ -559,6 +603,7 @@ class TestStoreWrittenBeforeFix:
         )
 
     def test_rerun_after_pre_fix_store(self):
+        """A LOG re-run adds corrected rows next to the old ones; REPLAY sees both."""
         db = InMemoryArrowDatabase()
         old = self._node(db)
         _write_pre_fix_rows(old, _pin_source())
@@ -627,6 +672,7 @@ class TestStoreWrittenBeforeFix:
 
 
 def _stored_rows(node: OperatorJobNode, column: str) -> list[Any]:
+    """Return the node's stored values of ``column``, in storage order."""
     records = node.get_all_records(columns={"source": True})
     assert records is not None
     return records.column(column).to_pylist()
