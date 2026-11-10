@@ -61,6 +61,9 @@ version-file = "src/orcapod/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/orcapod"]
 
+[tool.hatch.build.targets.sdist]
+only-include = ["src/orcapod", "README.md", "LICENSE"]
+
 
 [dependency-groups]
 dev = [
