@@ -428,6 +428,10 @@ then through the data context's type converter — never call `pa.array(values)`
 inference widens `int8` to `int64`, `float32` to `double`, and takes decimal precision from the
 data. The rules:
 
+- **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
+  expands or converts a type implicitly; the only exception is normalization to large variants.
+  Inputs that disagree on a column's type are an error naming the column and both types, on
+  every execution path (sync and async).
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
   to `large_list`, recursively). Width, nullability and logical (extension) types are never

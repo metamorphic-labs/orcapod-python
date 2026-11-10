@@ -321,13 +321,13 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
 
 
 # Pre-existing provenance defects, not type re-inference: out of scope for
-# ITL-837 and reported for follow-up issues. Strict, so a fix flags them.
+# ITL-837 and tracked elsewhere. Strict, so a fix flags them.
 _FIRST_ROW_SOURCE_INFO = (
-    "DESIGN_ISSUES O3: _materialize_to_stream gives every row the first row's "
+    "ITL-845 (DESIGN_ISSUES O3): _materialize_to_stream gives every row the first row's "
     "source info; it backs barrier-mode async_execute"
 )
 _FIRST_ROW_SOURCE_INFO_SYNC = (
-    "DESIGN_ISSUES O3: _materialize_to_stream gives every row the first row's "
+    "ITL-845 (DESIGN_ISSUES O3): _materialize_to_stream gives every row the first row's "
     "source info; it backs the sync unary_static_process of Index and Pick"
 )
 _DROPPED_SOURCE_INFO = (
@@ -369,15 +369,28 @@ def test_async_provenance_equals_sync(case: Case) -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Sync SemiJoin fails in Polars when either input has a nested data "
-        "column (struct, list): 'not supported in join non-key field'; reported "
-        "for a follow-up."
+        "ITL-846: sync SemiJoin fails in Polars when either input has a nested "
+        "data column (struct, list): 'not supported in join non-key field'."
     ),
 )
 def test_semijoin_with_nested_columns() -> None:
     """SemiJoin over inputs with struct and list data columns, both paths."""
     sources = (source_a(), source_b())
     assert_equivalent(sync_rows(SemiJoin(), *sources), async_rows(SemiJoin(), *sources))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "ITL-846: ArrowHasher.hash_schema passes live extension types to starfix, "
+        "which cannot hash them (hash_table normalizes them first)."
+    ),
+)
+def test_arrow_hasher_hash_schema_with_extension_type() -> None:
+    """``hash_schema`` hashes a schema with a logical (extension) column."""
+    schema = pa.schema([pa.field("p", _logical_column([Path("/a")], Path).type)])
+    _ = get_default_context().arrow_hasher.hash_schema(schema)  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
 
 
 # ── the issue's own example, pinned ────────────────────────────────────────
