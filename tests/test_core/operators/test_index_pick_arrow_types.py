@@ -14,6 +14,7 @@ for ITL-834, so expected types are the large-normalized input types.
 
 from __future__ import annotations
 
+import inspect
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.channels import Channel
-from orcapod.contexts import get_default_type_converter
+from orcapod.contexts import DataContext, get_default_type_converter
 from orcapod.core.operators import (
     DropDataColumns,
     DropTagColumns,
@@ -38,6 +39,7 @@ from orcapod.core.operators import (
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.sources import ArrowTableSource
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.types import DataType
 from orcapod.utils.arrow_utils import normalize_schema_to_large_types
 
 TAG = "tg"
@@ -577,3 +579,150 @@ async def test_row_wise_operator_streaming_pass_through_types(
             **{f.name: f.type for f in data.arrow_schema()},
         }
         _assert_pass_through(case, expected, actual)
+
+
+# ── context use: the stream's context is read once, at validation ──────────
+# ``async_execute`` has no stream, so Index and Pick resolve the fallback
+# element Arrow type (needed only for logical input columns) from the stream's
+# context in ``validate_unary_input`` and keep only that resolved type.
+
+
+def _list_path_source() -> ArrowTableSource:
+    """Build a source whose ``lp`` column is ``list[Path]`` (a logical type)."""
+    lists = get_default_type_converter().python_dicts_to_arrow_table(
+        [{"lp": [Path("/a"), Path("/b")]}, {"lp": [Path("/c")]}],
+        python_schema={"lp": list[Path]},
+    )
+    return _source(lp=lists.column("lp"))
+
+
+@pytest.mark.asyncio
+async def test_index_logical_element_arrow_type_streaming() -> None:
+    """The streaming path of Index on ``list[Path]`` yields the ``Path`` logical type."""
+    source = _list_path_source()
+    rows = await _run_async(Index("lp", 0), source)
+    expected = _input_types(source)["p"]
+    assert [data["lp"] for _, data in rows] == [Path("/a"), Path("/c")]
+    for _, data in rows:
+        assert data.arrow_schema().field("lp").type == expected
+
+
+CONTEXT_CASES = pytest.mark.parametrize(
+    ("make_op", "make_source"),
+    [
+        (lambda: Index("lst", 0), _index_source),
+        (lambda: Index("lp", 0), _list_path_source),
+        (lambda: Pick("d", "k"), _pick_source),
+    ],
+    ids=["index", "index-logical", "pick"],
+)
+
+
+@CONTEXT_CASES
+def test_no_converter_or_context_held_after_validation(
+    make_op: Callable[[], UnaryOperator],
+    make_source: Callable[[], ArrowTableSource],
+) -> None:
+    """Validation keeps resolved types only, never a converter or a context.
+
+    The only context-like attribute is ``_data_context``, which every operator
+    inherits from its base class; Index and Pick add none of their own.
+    """
+    op = make_op()
+    op.validate_inputs(make_source())
+    attributes: dict[str, object] = vars(op)
+    held = [
+        name
+        for name, value in attributes.items()
+        if isinstance(value, DataContext) or hasattr(value, "python_type_to_arrow_type")
+    ]
+    assert held == ["_data_context"]
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        Index._process_one,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
+        Index._element_arrow_type,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
+        Index.async_execute,
+        Pick._process_one,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
+        Pick._value_arrow_type,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
+        Pick.async_execute,
+    ],
+    ids=[
+        "Index._process_one",
+        "Index._element_arrow_type",
+        "Index.async_execute",
+        "Pick._process_one",
+        "Pick._value_arrow_type",
+        "Pick.async_execute",
+    ],
+)
+def test_row_time_code_never_reads_a_converter_or_context(
+    method: Callable[..., object],
+) -> None:
+    """Per-row code uses only types resolved at validation from the stream's context."""
+    source = inspect.getsource(method)
+    assert "converter" not in source
+    assert "data_context" not in source
+
+
+def _validate_with_unmappable(
+    op: UnaryOperator,
+    source: ArrowTableSource,
+    unmappable: DataType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate ``op`` while the stream's converter cannot map ``unmappable``."""
+    converter = source.data_context.type_converter
+    original = converter.python_type_to_arrow_type
+
+    def fake(python_type: DataType) -> pa.DataType:
+        if python_type is unmappable:
+            raise ValueError(f"Unsupported Python type: {python_type!r}")
+        return original(python_type)
+
+    monkeypatch.setattr(converter, "python_type_to_arrow_type", fake)
+    op.validate_inputs(source)
+    monkeypatch.undo()
+
+
+def test_unmappable_fallback_is_not_raised_when_not_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmappable output type raises neither at validation nor on Arrow-typed rows."""
+    source = _index_source()
+    op = Index("lst", 0)
+    _validate_with_unmappable(op, source, int, monkeypatch)
+    result = op.unary_static_process(source)
+    assert [data["lst"] for _, data in result.iter_data()] == [7, 9]
+
+
+def test_unmappable_fallback_raises_where_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A logical column whose element type is unmappable raises a clear error at use."""
+    source = _list_path_source()
+    op = Index("lp", 0)
+    _validate_with_unmappable(op, source, Path, monkeypatch)
+    with pytest.raises(ValueError, match=r"Index: .*'lp'.*Path"):
+        _ = op.unary_static_process(source)
+
+
+def test_pick_fallback_value_type_resolved_at_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pick's fallback value type comes from validation; an unmappable one raises at use.
+
+    No registered logical type implements ``pick_field`` yet, so the fallback is
+    reached here through the helper directly.
+    """
+    struct_type = pa.struct([("k", pa.int16())])
+    op = Pick("d", "k")
+    op.validate_inputs(_pick_source())
+    assert op._value_arrow_type(struct_type) == pa.int64()  # pyright: ignore[reportPrivateUsage]  # fallback is unreachable publicly
+
+    unmappable = Pick("d", "k")
+    _validate_with_unmappable(unmappable, _pick_source(), int, monkeypatch)
+    with pytest.raises(ValueError, match=r"Pick: .*'d'.*int"):
+        _ = unmappable._value_arrow_type(struct_type)  # pyright: ignore[reportPrivateUsage]  # fallback is unreachable publicly

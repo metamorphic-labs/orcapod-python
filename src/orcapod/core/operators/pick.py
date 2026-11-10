@@ -7,13 +7,11 @@ import typing
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -66,7 +64,11 @@ class Pick(UnaryOperator):
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
         self._mode: str = ""
-        self._converter: TypeConverterProtocol | None = None
+        # Fallback Arrow type of the value, resolved at validation from the
+        # stream's context (``async_execute`` has no stream). ``None`` with a
+        # reason when the stream's converter cannot map the value type.
+        self._value_arrow_type_fallback: pa.DataType | None = None
+        self._value_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
@@ -93,14 +95,19 @@ class Pick(UnaryOperator):
         The value type is read from the input column's Arrow type: a ``map``
         yields its item type, and the ``list<struct<key, value>>`` encoding of
         ``dict[K, V]`` yields the ``value`` field's type. Only when no Arrow
-        type is available that way (e.g. a logical struct type) is the type
-        derived from the resolved Python output type.
+        type is available that way (e.g. a logical struct type) is the fallback
+        used: the Arrow type of the resolved Python output type, resolved at
+        validation from the stream's context.
 
         Args:
             column_type: Arrow type of the picked column.
 
         Returns:
             The Arrow type of the extracted value.
+
+        Raises:
+            ValueError: If the fallback is needed but the stream's context
+                could not map the output type to an Arrow type.
         """
         if isinstance(column_type, pa.MapType):
             return cast("pa.DataType", column_type.item_type)
@@ -108,8 +115,14 @@ class Pick(UnaryOperator):
             entry = cast("pa.DataType", column_type.value_type)
             if isinstance(entry, pa.StructType) and entry.get_field_index("value") >= 0:
                 return cast("pa.DataType", entry.field("value").type)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        assert self._converter is not None, "validate_unary_input must run first"
-        return self._converter.python_type_to_arrow_type(self._output_type)
+        if self._value_arrow_type_fallback is None:
+            raise ValueError(
+                f"Pick: cannot derive the Arrow type of key {self.key!r} of column"
+                + f" {self.column!r}: output type {self._output_type!r} has no"
+                + " Arrow type in the stream's context"
+                + f" ({self._value_arrow_type_error or 'not validated'})."
+            )
+        return self._value_arrow_type_fallback
 
     # ------------------------------------------------------------------
     # Validation
@@ -143,9 +156,9 @@ class Pick(UnaryOperator):
                 f"Choose a different name to avoid clobbering existing data."
             )
 
-        self._converter = contexts.resolve_context(
-            stream.data_context_key
-        ).type_converter
+        # StreamProtocol omits data_context, which every concrete stream (StreamBase)
+        # provides; the same debt is baselined in Batch and GroupBy (ITL-844).
+        converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
         col_type = data_schema[self.column]
         origin = typing.get_origin(col_type)
 
@@ -157,7 +170,6 @@ class Pick(UnaryOperator):
         else:
             # Extension type — delegate to logical type's pick_field via the
             # stream's own type converter (not a global default).
-            converter = stream.data_context.type_converter
             lt = converter.get_logical_type(col_type)
             if lt is None:
                 raise InputValidationError(
@@ -168,6 +180,17 @@ class Pick(UnaryOperator):
             # May raise NotImplementedError for types not yet implemented
             self._output_type = lt.pick_field(self.key)
             self._mode = "struct"
+
+        # Resolved now because the streaming path has no stream. A failure is
+        # deferred to the point of use: most columns never need the fallback.
+        try:
+            self._value_arrow_type_fallback = converter.python_type_to_arrow_type(
+                self._output_type
+            )
+            self._value_arrow_type_error = ""
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            self._value_arrow_type_fallback = None
+            self._value_arrow_type_error = str(exc)
 
     # ------------------------------------------------------------------
     # Schema prediction

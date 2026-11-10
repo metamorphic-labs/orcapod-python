@@ -97,3 +97,28 @@ scope per the issue (no hash change). Tests compare against the large-normalized
       PipelineJob round trip through a DB — compare schemas and content hashes.
 - [ ] 7. Full suite on 3.11/3.12/3.13; ruff + basedpyright on changed files; DESIGN_ISSUES entry.
 - [ ] 8. Rebase, PR ("Fixes ITL-834", breaking-change note), worker_done.
+
+## Review round: operators use the stream's context (developer, 2026-11-10)
+
+Developer comments on PR 279 (`index.py:67`, `index.py:138`): `Index`/`Pick` cached
+`self._converter = contexts.resolve_context(stream.data_context_key).type_converter`,
+re-implementing context resolution that `stream.data_context` already does. Approved rule:
+operators use the stream's context only, and nothing in `Index`/`Pick` reads a converter or
+`self.data_context` after validation.
+
+`async_execute` has no stream, and `DataProtocol` exposes no converter. So the converter is used
+once, in `validate_unary_input`, to resolve the fallback Arrow type of the extracted element (used
+only for logical input columns such as `list[Path]` or `dict[str, Path]`). Only that resolved type
+is cached, the same way `_output_type` is. If the eager conversion fails, validation does not
+raise. The cached type stays `None`, and a `ValueError` naming the operator, column and output
+type is raised only where the fallback is actually needed, which keeps the previous lazy
+behaviour.
+
+- [x] Failing tests: Pick on `dict[str, Path]` (logical column), sync and async; Index on
+      `list[Path]`, async; deferred conversion error (validation passes, non-logical rows work,
+      logical rows raise a clear `ValueError`); no converter/context held after validation, and
+      the row-time code paths never touch a converter or `data_context`.
+- [x] Refactor `Index` and `Pick`: drop `_converter`, its assert, `resolve_context` and the
+      `contexts` / `TypeConverterProtocol` imports if unused.
+- [x] ruff, basedpyright (exit code), suite on 3.11/3.12/3.13; one commit; one push; reply on
+      both threads (do not resolve them).

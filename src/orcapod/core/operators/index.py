@@ -7,13 +7,11 @@ import typing
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -64,7 +62,11 @@ class Index(UnaryOperator):
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]
         self._mode: str = ""
-        self._converter: TypeConverterProtocol | None = None
+        # Fallback Arrow type of the element, resolved at validation from the
+        # stream's context (``async_execute`` has no stream). ``None`` with a
+        # reason when the stream's converter cannot map the element type.
+        self._element_arrow_type_fallback: pa.DataType | None = None
+        self._element_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
@@ -89,20 +91,31 @@ class Index(UnaryOperator):
         The element type is read from the input column's Arrow type, so a
         ``list<int8>`` column yields ``int8``. Only when the column is a
         logical (extension) type, whose storage drops the element's logical
-        identity, is the type derived from the resolved Python element type.
+        identity, is the fallback used: the Arrow type of the resolved Python
+        element type, resolved at validation from the stream's context.
 
         Args:
             column_type: Arrow type of the indexed column.
 
         Returns:
             The Arrow type of the extracted element.
+
+        Raises:
+            ValueError: If the fallback is needed but the stream's context
+                could not map the element type to an Arrow type.
         """
         if isinstance(
             column_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
         ):
             return cast("pa.DataType", column_type.value_type)
-        assert self._converter is not None, "validate_unary_input must run first"
-        return self._converter.python_type_to_arrow_type(self._output_type)
+        if self._element_arrow_type_fallback is None:
+            raise ValueError(
+                "Index: cannot derive the Arrow type of the element of column"
+                + f" {self.column!r}: output type {self._output_type!r} has no"
+                + " Arrow type in the stream's context"
+                + f" ({self._element_arrow_type_error or 'not validated'})."
+            )
+        return self._element_arrow_type_fallback
 
     # ------------------------------------------------------------------
     # Validation
@@ -135,9 +148,9 @@ class Index(UnaryOperator):
                 f"Choose a different name to avoid clobbering existing data."
             )
 
-        self._converter = contexts.resolve_context(
-            stream.data_context_key
-        ).type_converter
+        # StreamProtocol omits data_context, which every concrete stream (StreamBase)
+        # provides; the same debt is baselined in Batch and GroupBy (ITL-844).
+        converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
         col_type = data_schema[self.column]
         origin = typing.get_origin(col_type)
 
@@ -148,7 +161,6 @@ class Index(UnaryOperator):
         else:
             # Extension type — delegate to logical type's index_element via the
             # stream's own type converter (not a global default).
-            converter = stream.data_context.type_converter
             lt = converter.get_logical_type(col_type)
             if lt is None:
                 raise InputValidationError(
@@ -159,6 +171,17 @@ class Index(UnaryOperator):
             # May raise NotImplementedError for types not yet implemented
             self._output_type = lt.index_element()
             self._mode = "extension"
+
+        # Resolved now because the streaming path has no stream. A failure is
+        # deferred to the point of use: most columns never need the fallback.
+        try:
+            self._element_arrow_type_fallback = converter.python_type_to_arrow_type(
+                self._output_type
+            )
+            self._element_arrow_type_error = ""
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            self._element_arrow_type_fallback = None
+            self._element_arrow_type_error = str(exc)
 
     # ------------------------------------------------------------------
     # Schema prediction
