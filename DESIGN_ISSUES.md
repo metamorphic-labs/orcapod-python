@@ -804,9 +804,15 @@ provenance into the concatenated table before constructing the stream.
 `StaticOutputOperatorPod._rows_to_table`, and no longer pass `source_info` to
 `ArrowTableStream`, so each row's own `_source_*` columns pass through. A `_source_*` field
 is non-nullable unless some row's token is `None`, which keeps stored schemas and Arrow types
-as they were. Data values, content and pipeline hashes, and function-node record IDs do not
-change; an operator node's stored `_record_hash` changes for each row whose token was wrong.
-Regression tests: `tests/test_core/operators/test_materialize_source_info.py`.
+as they were. The sync orchestrator materializes every node's buffer this way, so the fix
+also corrects the input provenance written to function-node tag tables. Data values, content
+and pipeline hashes, and function-node record IDs do not change; an operator node's stored
+`_record_hash` changes for each row whose token was wrong. Rows stored before the fix keep
+their wrong tokens and are not rewritten or recomputed; dropping the pipeline tables (keeping
+`_result/`) and re-running refills them correctly without re-running functions. Correcting
+stored values is tracked in ITL-853. Regression tests:
+`tests/test_core/operators/test_materialize_source_info.py`,
+`tests/test_pipeline/test_tag_table_source_info.py`.
 
 ---
 
