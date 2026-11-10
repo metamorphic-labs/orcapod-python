@@ -12,6 +12,7 @@ import xxhash
 from upath import UPath
 
 from orcapod.types import ContentHash, PathLike
+from orcapod.utils.canonical_type_names import stabilize_type_names
 
 if TYPE_CHECKING:
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
@@ -55,7 +56,10 @@ def canonical_annotation_str(
     the same converter so nested orcapod types are also canonicalized.
 
     Non-union, non-generic types not found in the converter fall through to
-    ``inspect.formatannotation``, preserving existing behaviour exactly.
+    ``inspect.formatannotation``. Standard-library types defined in a private
+    submodule are named by the public module that exports them
+    (``pathlib.Path``, not ``pathlib._local.Path``), so the string is the same
+    on every Python version.
 
     Args:
         annotation: A type annotation object.
@@ -84,13 +88,11 @@ def canonical_annotation_str(
         args = getattr(annotation, "__args__", None) or ()
         origin_str = canonical_annotation_str(origin, type_converter)
         if args:
-            args_str = ", ".join(
-                canonical_annotation_str(a, type_converter) for a in args
-            )
+            args_str = ", ".join(canonical_annotation_str(a, type_converter) for a in args)
             return f"{origin_str}[{args_str}]"
         return origin_str
 
-    return inspect.formatannotation(annotation)
+    return stabilize_type_names(inspect.formatannotation(annotation), annotation)
 
 
 def combine_hashes(
@@ -140,9 +142,7 @@ def _to_path(file_path: PathLike) -> Path | UPath:
     return Path(file_path)
 
 
-def hash_file(
-    file_path: PathLike, algorithm="sha256", buffer_size=65536
-) -> ContentHash:
+def hash_file(file_path: PathLike, algorithm="sha256", buffer_size=65536) -> ContentHash:
     """Calculate the hash of a file using the specified algorithm.
 
     Supports both local ``pathlib.Path`` and remote ``UPath`` objects.
@@ -260,12 +260,10 @@ def get_function_signature(
 
     param_strs = []
     for name, param in sig.parameters.items():
-        param_str = str(param)
         annotation = param.annotation
-        if annotation is not inspect.Parameter.empty and is_union_annotation(
-            annotation
-        ):
-            old_ann = inspect.formatannotation(annotation)
+        param_str = stabilize_type_names(str(param), annotation)
+        if annotation is not inspect.Parameter.empty and is_union_annotation(annotation):
+            old_ann = stabilize_type_names(inspect.formatannotation(annotation), annotation)
             new_ann = canonical_annotation_str(annotation)
             # Replace ": <old_ann>" with ": <new_ann>" (first occurrence only).
             # The ": " prefix distinguishes the annotation from the default value.
@@ -288,7 +286,7 @@ def get_function_signature(
         if is_union_annotation(ret):
             fn_string += f"-> {canonical_annotation_str(ret)}"
         else:
-            fn_string += f"-> {ret}"
+            fn_string += f"-> {stabilize_type_names(str(ret), ret)}"
     return fn_string
 
 
@@ -376,7 +374,9 @@ def get_function_components(
         and func.__annotations__
     ):
         sorted_annotations = sorted(func.__annotations__.items())
-        annotations_str = ";".join(f"{k}:{v}" for k, v in sorted_annotations)
+        annotations_str = ";".join(
+            f"{k}:{stabilize_type_names(str(v), v)}" for k, v in sorted_annotations
+        )
         components.append(f"annotations:{annotations_str}")
 
     if include_code_properties:

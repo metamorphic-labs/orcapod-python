@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from orcapod.types import ContentHash, Schema
+from orcapod.utils.canonical_type_names import canonical_type_name
 
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import (
@@ -86,7 +87,10 @@ class TypeObjectHandler:
     *type_converter* to their stable ``logical_type_name``
     (e.g. ``"type:orcapod.file"`` for ``op.File``).
     Falls back to ``"type:<module>.<qualname>"`` for unregistered types or
-    when no ``type_converter`` is provided.
+    when no ``type_converter`` is provided. The module is the canonical one
+    from ``canonical_type_name``, so standard-library types that moved into a
+    private submodule (``pathlib._local`` on Python 3.13) hash identically on
+    every Python version.
 
     Args:
         type_converter: Optional ``TypeConverterProtocol``.  When provided,
@@ -108,9 +112,7 @@ class TypeObjectHandler:
             lt = self._type_converter.get_logical_type(obj)
             if lt is not None:
                 return f"type:{lt.logical_type_name}"
-        module: str = obj.__module__ or "<unknown>"
-        qualname: str = obj.__qualname__
-        return f"type:{module}.{qualname}"
+        return f"type:{canonical_type_name(obj)}"
 
 
 class SpecialFormHandler:

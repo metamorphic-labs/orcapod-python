@@ -353,3 +353,10 @@ Prefixes are computed from SystemConstant in system_constants.py.
   ArrowNotImplementedError on any logical-typed column (e.g. a pod annotated -> Path).
   The helper builds the list over the element's storage type and wraps it in the outer
   list[<element>] extension type from ListLogicalType.
+- Never build an identity or hash input from a type's raw __module__, or from
+  repr/str/inspect.formatannotation of a type, without going through
+  utils/canonical_type_names.py (canonical_module_name, canonical_type_name,
+  stabilize_type_names). The standard library moves classes between modules across Python
+  versions (pathlib.Path.__module__ is pathlib._local on 3.13), so the raw value makes
+  hashes differ by interpreter. Private stdlib submodules that already existed on 3.11/3.12
+  are frozen in _LEGACY_PRIVATE_STDLIB_MODULES; never add a newer one there.

@@ -2,6 +2,8 @@ import ast
 import inspect
 from collections.abc import Callable
 
+from orcapod.utils.canonical_type_names import stabilize_type_names
+
 
 def _is_in_string(line: str, pos: int) -> bool:
     """Helper to check if a position in a line is inside a string literal."""
@@ -245,7 +247,9 @@ def get_function_components(
         and func.__annotations__
     ):
         sorted_annotations = sorted(func.__annotations__.items())
-        annotations_str = ";".join(f"{k}:{v}" for k, v in sorted_annotations)
+        annotations_str = ";".join(
+            f"{k}:{stabilize_type_names(str(v), v)}" for k, v in sorted_annotations
+        )
         components.append(f"annotations:{annotations_str}")
 
     # Add default parameter values

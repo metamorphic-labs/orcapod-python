@@ -684,3 +684,32 @@ class TestSourceRegistryAdditional:
             self.registry.register(name, src)
         pairs = dict(self.registry.items())
         assert pairs == srcs
+
+
+def _path_tag_fn(element: Path, idx: int) -> dict[str, Path | str]:
+    return {"label": str(element)}
+
+
+# This module uses postponed annotations, which would leave plain strings here.
+# Install live type objects, as a module without the __future__ import has.
+_path_tag_fn.__annotations__ = {
+    "element": Path,
+    "idx": int,
+    "return": dict[str, Path | str],
+}
+
+
+class TestListSourceSignatureModePythonVersionIndependence:
+    """ITL-825: the 'signature' tag-function hash must not embed ``pathlib._local``."""
+
+    def test_signature_hash_string_matches_python_312(self):
+        src = ListSource(
+            name="val",
+            data=[1, 2, 3],
+            tag_function=_path_tag_fn,
+            expected_tag_keys=["label"],
+            tag_function_hash_mode="signature",
+        )
+        assert src._hash_tag_function() == (
+            "(element: pathlib.Path, idx: int) -> dict[str, pathlib.Path | str]"
+        )
