@@ -314,6 +314,18 @@ print(filt(source).as_table().to_pylist())
 `Index(column, i)` extracts one element from a list-typed data column (for example, a column
 produced by `Batch` or `GroupBy`). See the [API reference](../api/operators.md).
 
+With `out=None` the extracted value replaces the column in place; with `out="name"` it is added
+as a new column and the original is kept. A row whose list is too short, or whose dict lacks the
+key, is skipped (or raises `RuntimeError` with `fail_on_miss=True`).
+
+Every other column keeps its input Arrow type, and the extracted column takes the input's
+element or value Arrow type (a `list<int8>` column yields `int8`), both normalized to their
+large variants as described in [Arrow types of operator outputs](#arrow-types-of-operator-outputs)
+(a `list<string>` column yields `large_string`). The extracted column is
+`NOT NULL`: its predicted type (`int`, not `int | None`) is not Optional, so an element or value
+that is `None` raises `ValueError` naming the operator, the column and the row's tag, whatever
+`fail_on_miss` is.
+
 ## Arrow types of operator outputs
 
 `output_schema()` reports Python types, but every column also has an Arrow type, and
