@@ -2085,7 +2085,9 @@ GroupBy→Batch, GroupBy→GroupBy), sync and async. Batch→GroupBy is rejected
 **Fix:** `iter_data` hands each row's source info to `Data` as Arrow columns, batched together
 with the tag and data columns so rows still pair up across chunk layouts (ITL-816), so the
 stream's type is kept instead of re-inferred. `arrow_utils.source_info_arrow_type` (moved from
-`tag_data`) is the one source-info type rule and types Python-supplied tokens at any depth.
+`tag_data`) is the one source-info type rule and types Python-supplied tokens at any depth:
+each list level takes its element type from the first element that is not `None` or an empty
+list, so `[[], [["a"]]]` is three levels deep. `Data`'s Python source-info type is read off it.
 The result is a list of the incoming list type (`large_list<large_list<...>>`, element types
 exactly the large-normalized inputs, `Path` as `list[list[orcapod.path]]`). The predicted schema
 equals the materialized one. Hashes of pipelines that already worked are unchanged.

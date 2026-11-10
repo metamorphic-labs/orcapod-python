@@ -15,6 +15,7 @@ from orcapod.utils.arrow_utils import (
     normalize_table_view_types,
     normalize_view_types,
     prepare_prefixed_columns,
+    source_info_arrow_type,
 )
 
 
@@ -1018,3 +1019,64 @@ class TestPreparePrefixedColumnsSourceInfoTokens:
         assert schema.field("_source_v").type == pa.large_list(
             pa.large_list(pa.large_string())
         )
+
+
+class TestSourceInfoArrowType:
+    """``source_info_arrow_type`` types a token at its full nesting depth (ITL-849).
+
+    An empty list or ``None`` says nothing about the levels below it, so each
+    list level takes its element type from the first element that does.
+    """
+
+    @pytest.mark.parametrize(
+        ("token", "expected"),
+        [
+            ("tok", pa.large_string()),
+            (None, pa.large_string()),
+            ([], pa.large_list(pa.large_string())),
+            (["a", "b"], pa.large_list(pa.large_string())),
+            ([None, "a"], pa.large_list(pa.large_string())),
+            ([None, None], pa.large_list(pa.large_string())),
+            ([[], []], pa.large_list(pa.large_list(pa.large_string()))),
+            ([[], ["a"]], pa.large_list(pa.large_list(pa.large_string()))),
+            ([None, ["a"]], pa.large_list(pa.large_list(pa.large_string()))),
+            (
+                [[], [["a"]]],
+                pa.large_list(pa.large_list(pa.large_list(pa.large_string()))),
+            ),
+            (
+                [[None], [["a"]]],
+                pa.large_list(pa.large_list(pa.large_list(pa.large_string()))),
+            ),
+        ],
+        ids=repr,
+    )
+    def test_type_has_the_full_depth(
+        self, token: SourceInfoValue, expected: pa.DataType
+    ) -> None:
+        assert source_info_arrow_type(token) == expected
+        # The type must hold the token itself.
+        held = pa.Table.from_arrays([pa.array([token], type=expected)], names=["t"])
+        assert held.column("t").to_pylist() == [token]
+
+    @pytest.mark.parametrize("token", [[[], [["a"]]], [None, ["a"]]], ids=repr)
+    def test_data_serializes_a_token_with_an_uninformative_first_element(
+        self, token: SourceInfoValue
+    ) -> None:
+        """``Data.as_table`` no longer raises when the first element is empty or None."""
+        from orcapod.core.datagrams import Data
+
+        data = Data({"x": 1}, source_info={"x": token})
+        field = data.as_table(columns={"source": True}).schema.field("_source_x")
+        assert field.type == source_info_arrow_type(token)
+        assert data.as_table(columns={"source": True}).column(
+            "_source_x"
+        ).to_pylist() == [token]
+
+    def test_data_schema_matches_the_serialized_depth(self) -> None:
+        """``Data.schema`` reports the same depth as the Arrow type it serializes."""
+        from orcapod.core.datagrams import Data
+
+        data = Data({"x": 1}, source_info={"x": [[], [["a"]]]})
+        schema = data.schema(columns={"source": True})
+        assert schema["_source_x"] == list[list[list[str]]]

@@ -326,9 +326,9 @@ def test_nested_source_info_pairs_with_its_own_row(
 def test_iter_data_keeps_the_source_info_arrow_type() -> None:
     """``Data`` receives the stream's source-info column, not a re-inferred type.
 
-    The first element of this token is an empty list, so typing it from its
-    value (``source_info_arrow_type``) would give one list level too few.
-    ``iter_data`` passes the Arrow column through instead (ITL-849).
+    The first element of this token is an empty list, which says nothing about
+    the depth below it. ``iter_data`` passes the Arrow column through
+    (ITL-849), and ``Data`` serializes the token at its full depth.
     """
     source_type = pa.large_list(NESTED_SOURCE_TYPE)
     tokens = [[[], [["a"]]], [[["b"]], [["c"], []]]]
@@ -340,4 +340,8 @@ def test_iter_data_keeps_the_source_info_arrow_type() -> None:
         }
     )
     stream = ArrowTableStream(table, tag_columns=["id"])
-    assert [data.source_info()["x"] for _, data in stream.iter_data()] == tokens
+    rows = list(stream.iter_data())
+    assert [data.source_info()["x"] for _, data in rows] == tokens
+    for _, data in rows:
+        source_table = data.as_table(columns={"source": True})
+        assert source_table.schema.field(SOURCE_X).type == source_type

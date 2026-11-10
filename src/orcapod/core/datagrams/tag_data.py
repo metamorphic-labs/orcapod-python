@@ -245,26 +245,30 @@ class Tag(Datagram):
 # ---------------------------------------------------------------------------
 
 
-# TODO(NPIPE-204): this helper only understands scalars and ``list[T]``; see the
-# matching note on ``arrow_utils.source_info_arrow_type``, whose Arrow-type rule
-# it mirrors. Structured source-info values will need their own branches.
 def _source_info_python_type(value: "SourceInfoValue") -> DataType:
     """Derive the Python type for a single source-info value.
 
-    Mirrors ``arrow_utils.source_info_arrow_type`` for the ``Schema``
-    representation, and shares its list-only limitation -- see the TODO there.
+    Read off ``arrow_utils.source_info_arrow_type``, the one source-info type
+    rule, so the ``Schema`` and the Arrow table always agree on a token's depth.
 
     Args:
         value: The stored provenance token.
 
     Returns:
-        ``str`` for scalars and unknowns, ``list[...]`` for lists.
+        ``str`` for scalars and unknowns, ``list[...]`` nested to the token's
+        depth for lists.
     """
-    if isinstance(value, list):
-        if not value:
-            return list[str]
-        return list[_source_info_python_type(value[0])]  # type: ignore[misc]
-    return str
+    import pyarrow as _pa
+
+    arrow_type = arrow_utils.source_info_arrow_type(value)
+    depth = 0
+    while _pa.types.is_large_list(arrow_type):
+        arrow_type = arrow_type.value_type
+        depth += 1
+    python_type: DataType = str
+    for _ in range(depth):
+        python_type = list[python_type]  # type: ignore[valid-type]
+    return python_type
 
 
 class Data(Datagram):
