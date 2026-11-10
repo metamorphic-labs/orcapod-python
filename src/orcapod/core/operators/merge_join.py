@@ -17,7 +17,7 @@ else:
     pl = LazyModule("polars")
 
 
-def _list_array(values: list[Any], element_type: "pa.DataType | None") -> "pa.Array":
+def _list_array(values: list[Any], element_type: "pa.DataType | None") -> "pa.Array[Any]":
     """Build the Arrow array for a merged (list-valued) column.
 
     With rows present the type is inferred from the values. With zero rows
@@ -180,6 +180,21 @@ class MergeJoin(BinaryOperator):
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
     ) -> StreamProtocol:
+        """Inner-join two streams on their shared tags, merging colliding data columns.
+
+        A data column present in both streams becomes a sorted two-element
+        list per row, with its source-info column reordered to match. System
+        tag columns are renamed with each stream's pipeline hash and canonical
+        position. A zero-row input yields a zero-row result with the same
+        column types as a non-empty one.
+
+        Args:
+            left_stream: The left input stream.
+            right_stream: The right input stream.
+
+        Returns:
+            The joined stream, with tag columns first.
+        """
         n_char = self.orcapod_config.hashing.system_tag_n_char
 
         # Determine canonical ordering for system tag positions
@@ -332,7 +347,7 @@ class MergeJoin(BinaryOperator):
                 source_elem_type = joined.schema.field(left_source_col).type
                 joined = joined.drop(left_source_col)
                 joined = joined.drop(right_source_col)
-                source_array = _list_array(merged_sources, source_elem_type)
+                source_array = _list_array(merged_sources or [], source_elem_type)
                 joined = joined.add_column(source_idx, left_source_col, source_array)
 
         # Handle remaining Polars-generated _right suffixed columns

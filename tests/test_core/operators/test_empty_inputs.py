@@ -13,7 +13,8 @@ delegates straight back to the operator and would make the check circular.
 
 from __future__ import annotations
 
-from typing import Any
+import types
+from typing import Any, Union, get_args, get_origin
 
 import polars as pl
 import pyarrow as pa
@@ -37,6 +38,7 @@ from orcapod.core.operators import (
 )
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
+from orcapod.protocols.core_protocols import StreamProtocol
 
 INT = pa.int64()
 STR = pa.large_string()
@@ -85,7 +87,7 @@ def _int_stream(
     )
 
 
-def _filtered_empty(tags: list[str], data: list[str]) -> ArrowTableStream:
+def _filtered_empty(tags: list[str], data: list[str]) -> StreamProtocol:
     """Build an empty stream the way a pipeline does: a filter dropping every row.
 
     Unlike a hand-built zero-row table, the result carries system-tag and
@@ -96,6 +98,26 @@ def _filtered_empty(tags: list[str], data: list[str]) -> ArrowTableStream:
     empty = PolarsFilter(predicates=[pl.lit(False)]).static_process(source)
     assert len(empty.as_table()) == 0
     return empty
+
+
+def _ignoring_nullability(schema: Any) -> dict[str, frozenset[Any]]:
+    """Map each field of ``schema`` to its type with ``| None`` stripped.
+
+    Lets two schemas be compared on field names and types while tolerating a
+    difference in nullability only.
+
+    Args:
+        schema: A ``Schema`` (field name to Python type).
+
+    Returns:
+        Field name to the set of non-``None`` members of its type.
+    """
+    normalized = {}
+    for name, python_type in schema.items():
+        is_union = get_origin(python_type) in (Union, types.UnionType)
+        members = get_args(python_type) if is_union else (python_type,)
+        normalized[name] = frozenset(members) - {type(None)}
+    return normalized
 
 
 def _assert_empty_result(
@@ -145,6 +167,8 @@ def _assert_empty_result(
 
 
 class TestJoinEmptyInput:
+    """``Join`` over two or three streams of which at least one has no rows."""
+
     def test_issue_snippet(self):
         """The reproduction from ITL-813, verbatim."""
         full = ArrowTableStream(
@@ -166,6 +190,7 @@ class TestJoinEmptyInput:
         ids=["first-empty", "second-empty", "all-empty"],
     )
     def test_two_streams(self, empty_positions):
+        """Two inputs, with the first, the second, or both empty."""
         data_columns = ["n_units", "bins"]
         streams = [
             _int_stream(["probe"], [col], 0 if i in empty_positions else 2)
@@ -179,6 +204,7 @@ class TestJoinEmptyInput:
         ids=["first-empty", "second-empty", "third-empty", "two-empty", "all-empty"],
     )
     def test_three_streams(self, empty_positions):
+        """Three inputs, with one, two, or all of them empty."""
         data_columns = ["n_units", "bins", "depth"]
         streams = [
             _int_stream(["probe"], [col], 0 if i in empty_positions else 2)
@@ -216,6 +242,8 @@ MERGE_SIDES = {
 
 
 class TestMergeJoinEmptyInput:
+    """``MergeJoin`` with the left, the right, or both inputs empty."""
+
     def test_issue_snippet(self):
         """The ``MergeJoin`` reproduction from the ITL-813 correction."""
         full = ArrowTableStream(
@@ -233,6 +261,7 @@ class TestMergeJoinEmptyInput:
 
     @pytest.mark.parametrize("rows", MERGE_SIDES.values(), ids=MERGE_SIDES.keys())
     def test_non_colliding_columns(self, rows):
+        """Without a colliding data column every output column stays scalar."""
         left_rows, right_rows = rows
         streams = [
             _int_stream(["probe"], ["n_units"], left_rows),
@@ -261,9 +290,11 @@ class TestMergeJoinEmptyInput:
 
     @pytest.mark.parametrize("rows", MERGE_SIDES.values(), ids=MERGE_SIDES.keys())
     def test_colliding_string_column(self, rows):
+        """A colliding non-numeric column is typed ``list[str]`` with no rows."""
         left_rows, right_rows = rows
 
         def make(n: int) -> ArrowTableStream:
+            """Build a stream of ``n`` rows with an ``int`` tag and a ``str`` column."""
             return _stream(
                 {
                     "probe": (INT, list(range(n))),
@@ -280,6 +311,7 @@ class TestMergeJoinEmptyInput:
         assert data_schema["label"] == list[str]
 
     def test_no_shared_tags(self):
+        """With no shared tag the helper key is the only join key."""
         streams = [
             _int_stream(["probe"], ["n_units"], 2),
             _int_stream(["session"], ["bins"], 0),
@@ -298,14 +330,17 @@ class TestMergeJoinEmptyInput:
         # Only the default config is compared in full. With system tags the
         # materialized fields are non-nullable while the prediction keeps the
         # inputs' nullable flags; that mismatch also occurs with rows present
-        # and is reported on ITL-813 rather than fixed there.
+        # and is reported on ITL-813 rather than fixed there. Names and types
+        # are still compared below, ignoring nullability only.
         result = _assert_empty_result(
             op, streams, {"probe", "n_units", "bins"}, schema_configs=({},)
         )
         config = {"system_tags": True}
         tag_schema, _ = result.output_schema(columns=config)
         predicted_tag_schema, _ = op.output_schema(*streams, columns=config)
-        assert set(tag_schema) == set(predicted_tag_schema)
+        assert _ignoring_nullability(tag_schema) == _ignoring_nullability(
+            predicted_tag_schema
+        )
         assert len(tag_schema) > 1, "expected system-tag columns in the result"
         assert len(result.as_table(columns=config)) == 0
 
@@ -316,6 +351,7 @@ class TestMergeJoinEmptyInput:
 
 
 def _empty_dict_stream() -> ArrowTableStream:
+    """Build a zero-row stream with a map-valued data column (for ``Pick``)."""
     return _stream(
         {"probe": (INT, []), "stats": (pa.map_(STR, INT), [])},
         ["probe"],
@@ -324,6 +360,7 @@ def _empty_dict_stream() -> ArrowTableStream:
 
 
 def _empty_list_stream() -> ArrowTableStream:
+    """Build a zero-row stream with a list-valued data column (for ``Index``)."""
     return _stream(
         {"probe": (INT, []), "spikes": (pa.large_list(INT), [])},
         ["probe"],
@@ -471,4 +508,5 @@ class TestOtherOperatorsEmptyInput:
     def test_zero_rows_with_predicted_schema(
         self, make_op, make_streams, expected_columns
     ):
+        """Each operator returns zero rows with its predicted schema."""
         _assert_empty_result(make_op(), make_streams(), expected_columns)
