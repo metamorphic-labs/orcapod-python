@@ -1224,6 +1224,85 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
     )
 
 
+def aggregated_list_type(
+    element_type: pa.DataType, type_converter: TypeConverterProtocol
+) -> pa.DataType:
+    """Return the list type for a column that aggregates ``element_type`` values.
+
+    This is the one construction every aggregating operator (``Batch``,
+    ``GroupBy``, ``MergeJoin``) uses for its ``list[T]`` columns, so that the
+    element keeps the Arrow type the input column already has (``int8`` stays
+    ``int8``, ``large_string`` stays ``large_string``) instead of whatever
+    Arrow would infer from the Python values.
+
+    Arrow cannot embed an extension type inside a list value field, so for an
+    extension element the outer ``list[<element>]`` extension type supplied by
+    ``ListLogicalType`` (through the type converter) is returned instead.
+
+    Args:
+        element_type: Arrow type of the input column being aggregated.
+        type_converter: The stream's type converter, used to resolve an
+            extension element's Python type and its list extension type.
+
+    Returns:
+        ``pa.list_(element_type)``, or the ``list[...]`` extension type for an
+        extension element.
+    """
+    if isinstance(element_type, pa.ExtensionType):
+        element_python_type = type_converter.arrow_type_to_python_type(element_type)
+        return type_converter.python_type_to_arrow_type(list[element_python_type])
+    return pa.list_(element_type)
+
+
+def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array:
+    """Build a list array of exactly ``list_type`` from Python values.
+
+    The type never depends on ``values``, so an empty array has the same type
+    as a non-empty one. An extension ``list_type`` is built over its storage
+    type and then wrapped.
+
+    Args:
+        values: One Python list per row, holding storage values for an
+            extension element.
+        list_type: The target type, normally from ``aggregated_list_type``.
+
+    Returns:
+        The list array.
+    """
+    if isinstance(list_type, pa.ExtensionType):
+        storage = pa.array(values, type=list_type.storage_type)
+        return pa.ExtensionArray.from_storage(list_type, storage)
+    return pa.array(values, type=list_type)
+
+
+def restore_column_types(
+    table: pa.Table, reference_types: Mapping[str, pa.DataType]
+) -> pa.Table:
+    """Give columns back the Arrow types they had before a Polars round-trip.
+
+    Polars stores strings, binaries and lists in their large layouts and has
+    no ``fixed_size_binary``, so ``string`` comes back as ``large_string``,
+    ``list`` as ``large_list`` and so on. This casts every column named in
+    ``reference_types`` back to its reference type. Nullability and columns
+    not in ``reference_types`` are left exactly as they are; use
+    ``restore_schema_nullability`` to restore both.
+
+    Args:
+        table: The table produced by the round-trip.
+        reference_types: Column name to the Arrow type to restore.
+
+    Returns:
+        The table cast to the restored types.
+    """
+    fields = [
+        field.with_type(reference_types[field.name])
+        if field.name in reference_types
+        else field
+        for field in table.schema
+    ]
+    return table.cast(pa.schema(fields, metadata=table.schema.metadata))
+
+
 def build_aggregated_table(
     rows: "Sequence[Mapping[str, Any]]",
     input_schema: "pa.Schema",
@@ -1266,17 +1345,14 @@ def build_aggregated_table(
         if field.name not in member_columns:
             fields.append(field)
             continue
-        if isinstance(field.type, pa.ExtensionType):
-            element_python_type = type_converter.arrow_type_to_python_type(field.type)
-            list_type = type_converter.python_type_to_arrow_type(
-                list[element_python_type]
-            )
+        list_type = aggregated_list_type(field.type, type_converter)
+        if isinstance(list_type, pa.ExtensionType):
             extension_overrides[field.name] = list_type
             fields.append(
                 pa.field(field.name, list_type.storage_type, nullable=False)
             )
         else:
-            fields.append(pa.field(field.name, pa.list_(field.type), nullable=False))
+            fields.append(pa.field(field.name, list_type, nullable=False))
 
     table = pa.Table.from_pylist(list(rows), schema=pa.schema(fields))
 
