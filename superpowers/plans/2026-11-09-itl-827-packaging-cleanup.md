@@ -132,3 +132,31 @@ and add `"__version__"` to `__all__`. Check ruff + basedpyright report nothing n
 - [ ] Build; clean venv `uv venv` + `uv pip install <wheel>` (no overrides); `uv pip check`; smoke pipeline (DictSource -> function pod) and print `orcapod.__version__`.
 - [ ] License checks: repo command (`uv sync --locked --dev` + `_license-check.yml` command) and org command (`uv run --no-dev --with pip-licenses pip-licenses --allow-only=<org default> --partial-match --ignore-packages <org default>`), both exit 0; show the orcapod line.
 - [ ] Rebase on origin/main, push, PR "Fixes ITL-827".
+
+## Addendum: developer decision on unused runtime dependencies (2026-11-09)
+
+The developer reversed the earlier "keep" decision: remove a runtime dependency that is unused
+anywhere, and move one used only by tests to the dev group.
+
+Evidence (imports, `LazyModule`/`import_module` strings, entry points and plugin loading over
+`src/`, `tests/`, `test-objective/`, `examples/`, `bench/`, `notebooks/`, `docs/`, `design/`;
+reverse dependencies from `uv tree --all-groups --invert`):
+
+- `pymongo`: no reference anywhere; nothing else depends on it. Removed.
+- `pyyaml`: imported only by two `notebooks/old_tutorials/` notebooks, which target a package
+  that no longer exists; `ray` (extra) and dev tools (pre-commit, mkdocs, omegaconf) declare it
+  themselves. Removed.
+- `typing_extensions`: imported only by `tests/test_logical_types/test_protocols.py`
+  (`get_protocol_members`, stdlib only from 3.13); `pydantic` and others still pull it in at
+  runtime. Moved to the dev group.
+- Kept, not clear-cut: `tzdata` (no import; time-zone database for `zoneinfo`/pyarrow on
+  systems without one, also required by pandas) and `s3fs` (no import; the fsspec
+  implementation `UPath` loads by name for `s3://` URIs).
+
+### Task 6: drop and move the unused dependencies
+
+- [ ] Failing tests `test_unused_package_is_not_a_dependency[pymongo|pyyaml]` and
+  `test_typing_extensions_is_a_dev_dependency_only` (PEP 503 name normalization).
+- [ ] Edit `pyproject.toml`; `uv lock`; trim the lock to the `orcapod` block plus the removed
+  `pymongo` package block; `uv lock --check`.
+- [ ] Re-run the clean install, smoke test and both license checks.

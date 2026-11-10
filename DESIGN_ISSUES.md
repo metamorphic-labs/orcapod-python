@@ -1717,6 +1717,7 @@ packed the whole repository (`tests/`, `superpowers/`, `docs/`, `notebooks/`, `C
 `license = { text = "LicenseRef-Metamorphic-Proprietary" }`, the identifier the org license
 check allows (and added it to the repo's own `_license-check.yml` allow-list). No license
 classifier is declared: pip-licenses prefers classifiers, so `License :: Other/Proprietary
-License` would fail both checks. Moved `basedpyright` to the dev group, restricted the sdist
+License` would fail both checks. Moved `basedpyright` and `typing_extensions` (only a test
+imports it) to the dev group, dropped the unused `pymongo` and `pyyaml`, restricted the sdist
 with `only-include` (3.37 MB to 0.47 MB), and added `orcapod.__version__`.
 `tests/test_packaging.py` builds both distributions and pins their contents.

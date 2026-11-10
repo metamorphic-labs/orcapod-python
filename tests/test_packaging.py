@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,27 @@ def test_basedpyright_is_a_dev_dependency_only() -> None:
     dev = [d.lower() for d in _pyproject_strings("dependency-groups", "dev")]
     assert not [d for d in runtime if d.startswith("basedpyright")]
     assert [d for d in dev if d.startswith("basedpyright")]
+
+
+def _names(requirements: list[str]) -> set[str]:
+    """Return the PEP 503 normalized names of PEP 508 requirement strings."""
+    names = (re.split(r"[\s<>=!~;\[]", r, maxsplit=1)[0] for r in requirements)
+    return {re.sub(r"[-_.]+", "-", name).lower() for name in names}
+
+
+@pytest.mark.parametrize("name", ["pymongo", "pyyaml"])
+def test_unused_package_is_not_a_dependency(name: str) -> None:
+    """Nothing in the repository imports these, so users must not install them."""
+    assert name not in _names(_pyproject_strings("project", "dependencies"))
+    assert name not in _names(_pyproject_strings("dependency-groups", "dev"))
+
+
+def test_typing_extensions_is_a_dev_dependency_only() -> None:
+    """Only a test imports ``typing_extensions``; ``src/`` does not (ITL-827)."""
+    runtime = _names(_pyproject_strings("project", "dependencies"))
+    dev = _names(_pyproject_strings("dependency-groups", "dev"))
+    assert "typing-extensions" not in runtime
+    assert "typing-extensions" in dev
 
 
 @pytest.fixture(scope="module")
