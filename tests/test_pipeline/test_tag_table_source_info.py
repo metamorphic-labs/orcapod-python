@@ -34,19 +34,14 @@ from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
 
 CALLS: list[str] = []
 
 _JOB = "tags"
 _FUNCTION_NODES = ("direct", "second", "via_op")
-# Columns that identify a tag-table row and its cached result.
-_ID_COLUMNS = (
-    "__pipeline_base_entry_id",
-    "__pipeline_recomputation_index",
-    "__input_data_hash",
-    "__output_data_hash",
-    "__data_id",
-)
+# Columns that identify a tag-table row and its cached result (plus the system tags).
+_ID_COLUMNS = ("__data_id", "__input_data_hash", "__output_data_hash")
 
 
 def add_xy(x: int, y: int) -> int:
@@ -124,13 +119,17 @@ def _function_node(job: PipelineJob, label: str) -> FunctionJobNode:
 
 
 def _tag_rows(job: PipelineJob, label: str) -> list[dict[str, Any]]:
-    """The node's tag-table rows, sorted by tag."""
-    node = _function_node(job, label)
-    database = node._pipeline_database  # pyright: ignore[reportPrivateUsage]  # the tag table itself is what is under test
-    assert database is not None
-    table = database.get_all_records(node._versioned_pipeline_path)  # pyright: ignore[reportPrivateUsage]  # same
+    """The node's stored records (tag-table rows joined to results), sorted by tag."""
+    table = _function_node(job, label).get_all_records(
+        columns={"source": True, "meta": True, "system_tags": True}
+    )
     assert table is not None
     return sorted(table.to_pylist(), key=lambda row: str(row["id"]))
+
+
+def _ids(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a stored row's identifying columns: IDs, data hashes, system tags."""
+    return {c: v for c, v in row.items() if c in _ID_COLUMNS or c.startswith("_tag_")}
 
 
 def _column(rows: Sequence[dict[str, Any]], column: str) -> list[Any]:
@@ -253,8 +252,10 @@ class TestDropOnlyTagTables:
     def _drop_tag_table(self, tmp_path: Path, label: str) -> None:
         """Delete the node's ``pdb_v1`` tag table on disk."""
         node = _function_node(_job(InMemoryArrowDatabase()), label)
-        path = tmp_path.joinpath(_JOB, *node._versioned_pipeline_path)  # pyright: ignore[reportPrivateUsage]  # dropping the real table on disk
-        assert path.name == "pdb_v1" and path.is_dir()
+        path = tmp_path.joinpath(
+            _JOB, *node.node_identity_path, PIPELINE_DB_SCHEMA_VERSION
+        )
+        assert path.is_dir()
         shutil.rmtree(path)
 
     def test_all_tag_tables_rebuilt_without_recomputation(
@@ -277,9 +278,7 @@ class TestDropOnlyTagTables:
         assert len(set(_column(after["second"], "_source_z"))) == 3
         for label in _FUNCTION_NODES:
             for old, new in zip(before[label], after[label], strict=True):
-                assert {c: new[c] for c in _ID_COLUMNS} == {
-                    c: old[c] for c in _ID_COLUMNS
-                }
+                assert _ids(new) == _ids(old)
                 assert new["__computed"] is False
 
     def test_dropping_one_tag_table_leaves_the_others(

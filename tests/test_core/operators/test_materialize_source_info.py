@@ -121,6 +121,37 @@ def _run_async(op: StaticOutputOperatorPod, *streams: StreamProtocol) -> list[Ro
     return asyncio.run(go())
 
 
+def _materialize(rows: Sequence[Row]) -> StreamProtocol:
+    """Call ``StaticOutputOperatorPod._materialize_to_stream``, the helper under test."""
+    # Non-public on purpose: these tests are about this helper itself.
+    return StaticOutputOperatorPod._materialize_to_stream(rows)  # pyright: ignore[reportPrivateUsage]
+
+
+def _materialize_buffer(buf: Sequence[Row], node: Any) -> StreamProtocol:
+    """Call ``SyncPipelineOrchestrator._materialize_as_stream``, the helper under test."""
+    # Non-public on purpose: these tests are about this helper itself.
+    return SyncPipelineOrchestrator._materialize_as_stream(list(buf), node)  # pyright: ignore[reportPrivateUsage]
+
+
+def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every materialization stamp row 0's source info, as before ITL-845."""
+    # Non-public on purpose: re-creating the pre-fix behaviour has no public hook.
+    original = StaticOutputOperatorPod._rows_to_table  # pyright: ignore[reportPrivateUsage]
+
+    def broadcasting(
+        rows: Sequence[Row],
+    ) -> tuple[pa.Table, tuple[str, ...]]:
+        """Stamp row 0's source info on every row, then build the table."""
+        row_zero = rows[0][1].source_info()
+        return original(
+            [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
+        )
+
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
+    )
+
+
 def _stored_source(node: OperatorJobNode, column: str = "x") -> list[Any]:
     """Return the node's stored ``_source_<column>`` values, sorted by tag."""
     records = node.get_all_records(columns={"source": True})
@@ -150,7 +181,7 @@ class TestMaterializeToStream:
             expected
         )  # distinct, so the test is not vacuous
 
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
 
         assert _tokens(list(stream.iter_data())) == expected
         assert _tokens(list(stream.iter_data()), "y") == _tokens(rows, "y")
@@ -161,20 +192,20 @@ class TestMaterializeToStream:
         expected = _tokens(rows)
         assert [len(t) for t in expected] == [2, 2, 1]
 
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
 
         assert _tokens(list(stream.iter_data())) == expected
 
     def test_single_row(self):
         """A single row materializes with its own tokens."""
         rows = list(_source(1).iter_data())
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
         assert _tokens(list(stream.iter_data())) == _tokens(rows)
 
     def test_zero_rows_raises(self):
         """Materializing zero rows still raises ``ValueError``."""
         with pytest.raises(ValueError, match="empty list of rows"):
-            _ = StaticOutputOperatorPod._materialize_to_stream([])
+            _ = _materialize([])
 
     def test_none_source_info_rows(self):
         """A ``None`` token on row 0 does not spread to the other rows."""
@@ -184,7 +215,7 @@ class TestMaterializeToStream:
         expected = _tokens(rows)
         assert expected[0] is None and None not in expected[1:]
 
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
 
         assert _tokens(list(stream.iter_data())) == expected
 
@@ -192,20 +223,20 @@ class TestMaterializeToStream:
         """A ``None`` token after row 0 is kept rather than overwritten."""
         rows = list(_source(3).iter_data())
         rows[2] = (rows[2][0], rows[2][1].with_source_info(x=None))
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
         assert _tokens(list(stream.iter_data())) == _tokens(rows)
 
     def test_all_none_source_info(self):
         """Rows with no tokens at all materialize with ``None`` tokens."""
         rows = [(t, d.with_source_info(x=None)) for t, d in _source(3).iter_data()]
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
         assert _tokens(list(stream.iter_data())) == [None, None, None]
 
     def test_data_columns_and_types_unchanged(self):
         """Data values and the output schema are those of the input."""
         src = _source()
         rows = list(src.iter_data())
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
         assert stream.as_table().equals(src.as_table())
         assert stream.output_schema() == src.output_schema()
 
@@ -222,9 +253,7 @@ class TestSourceInfoArrowFields:
 
     def test_scalar_tokens_non_nullable_large_string(self):
         """Scalar token fields stay non-nullable ``large_string``."""
-        stream = StaticOutputOperatorPod._materialize_to_stream(
-            list(_source().iter_data())
-        )
+        stream = _materialize(list(_source().iter_data()))
         fields = _source_fields(stream.as_table(columns={"source": True}))
         assert fields == {
             "_source_x": pa.field("_source_x", pa.large_string(), nullable=False),
@@ -234,7 +263,7 @@ class TestSourceInfoArrowFields:
     def test_list_tokens_non_nullable_large_list(self):
         """List token fields stay non-nullable ``large_list<large_string>``."""
         rows = list(Batch(2)(_source(4)).iter_data())
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
         field = _source_fields(stream.as_table(columns={"source": True}))["_source_x"]
         assert field == pa.field(
             "_source_x", pa.large_list(pa.large_string()), nullable=False
@@ -248,7 +277,7 @@ class TestSourceInfoArrowFields:
         """A token field is nullable exactly when some row's token is ``None``."""
         rows = list(_source(3).iter_data())
         rows[none_row] = (rows[none_row][0], rows[none_row][1].with_source_info(x=None))
-        stream = StaticOutputOperatorPod._materialize_to_stream(rows)
+        stream = _materialize(rows)
         fields = _source_fields(stream.as_table(columns={"source": True}))
         assert fields["_source_x"] == pa.field(
             "_source_x", pa.large_string(), nullable=True
@@ -459,7 +488,7 @@ class TestSyncOrchestratorMaterialization:
         """A source node's buffer keeps per-row tokens and its pipeline hash."""
         node = self._source_node(_source(3))
         buf = list(node.iter_data())
-        stream = SyncPipelineOrchestrator._materialize_as_stream(buf, node)
+        stream = _materialize_buffer(buf, node)
         assert _tokens(list(stream.iter_data())) == _tokens(buf)
         assert stream.pipeline_hash() == node.pipeline_hash()
 
@@ -469,7 +498,7 @@ class TestSyncOrchestratorMaterialization:
         node = OperatorJobNode(Batch(2), [src])
         node.run()
         buf = list(node.iter_data())
-        stream = SyncPipelineOrchestrator._materialize_as_stream(buf, node)
+        stream = _materialize_buffer(buf, node)
         assert _tokens(list(stream.iter_data())) == _tokens(buf)
         assert stream.pipeline_hash() == node.pipeline_hash()
         assert stream.content_hash() == node.content_hash()
@@ -481,7 +510,7 @@ class TestSyncOrchestratorMaterialization:
     def test_empty_buffer(self):
         """An empty buffer still builds an empty stream."""
         node = self._source_node(_source(3))
-        stream = SyncPipelineOrchestrator._materialize_as_stream([], node)
+        stream = _materialize_buffer([], node)
         assert stream.as_table().num_rows == 0
 
 
@@ -504,8 +533,10 @@ def _pin_source() -> ArrowTableSource:
 
 def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
     """Return the stored ``_record_hash`` of each row, keyed by the ``id`` tag."""
-    assert node._pipeline_database is not None
-    records = node._pipeline_database.get_all_records(
+    # Non-public on purpose: no public view exposes the stored record hash.
+    database = node._pipeline_database  # pyright: ignore[reportPrivateUsage]
+    assert database is not None
+    records = database.get_all_records(
         node.node_identity_path, record_id_column=node.HASH_COLUMN_NAME
     )
     assert records is not None
@@ -573,14 +604,6 @@ PRE_FIX_RECORD_IDS = frozenset(
 )
 
 
-def _write_pre_fix_rows(node: OperatorJobNode, src: StreamProtocol) -> None:
-    """Store ``src`` the way the pre-fix code did: row 0's tokens on every row."""
-    rows = list(SelectDataColumns(["x"])(src).iter_data())
-    row_zero = rows[0][1].source_info()
-    broadcast = [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
-    node._store_output_stream(StaticOutputOperatorPod._materialize_to_stream(broadcast))
-
-
 class TestStoreWrittenBeforeFix:
     """What a user sees when a store written by pre-fix ``main`` is re-run.
 
@@ -602,11 +625,13 @@ class TestStoreWrittenBeforeFix:
             cache_mode=mode,
         )
 
-    def test_rerun_after_pre_fix_store(self):
+    def test_rerun_after_pre_fix_store(self, monkeypatch: pytest.MonkeyPatch):
         """A LOG re-run adds corrected rows next to the old ones; REPLAY sees both."""
         db = InMemoryArrowDatabase()
         old = self._node(db)
-        _write_pre_fix_rows(old, _pin_source())
+        with monkeypatch.context() as patch:
+            _broadcast_row_zero(patch)
+            _ = old.execute(_pin_source())
         tokens = _tokens(list(_pin_source().iter_data()))
         assert _stored_source(old) == [tokens[0]] * 3
 
@@ -639,11 +664,17 @@ class TestStoreWrittenBeforeFix:
         """
         db = DeltaTableDatabase(tmp_path)
         old = self._node(db)
-        rows = list(SelectDataColumns(["x"])(_pin_source()).iter_data())
-        row_zero = rows[0][1].source_info()
-        table = StaticOutputOperatorPod._materialize_to_stream(
-            [(t, d.with_source_info(**row_zero)) for t, d in rows]
-        ).as_table(columns={"source": True, "system_tags": True})
+        table = SelectDataColumns(["x"])(_pin_source()).as_table(
+            columns={"source": True, "system_tags": True}
+        )
+        # Old rows as v0.1.x stored them: row 0's token on every row.
+        position = table.schema.get_field_index("_source_x")
+        row_zero = table.column("_source_x")[0]
+        table = table.set_column(
+            position,
+            table.schema.field(position),
+            pa.array([row_zero.as_py()] * table.num_rows, row_zero.type),
+        )
         table = table.append_column(
             "_node_content_hash",
             pa.array(
