@@ -17,7 +17,7 @@ full workflow.
 
 This project uses GitHub Actions for continuous integration:
 
-- **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11 and 3.12. PostgreSQL integration tests are excluded.
+- **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11, 3.12 and 3.13. PostgreSQL integration tests are excluded.
 - **Run PostgreSQL Tests**: Runs only the `@pytest.mark.postgres` integration tests against a PostgreSQL 16 service container.
 
 ### Running Tests Locally

@@ -48,11 +48,14 @@ beyond "every name resolves and the build is clean", and the internal directorie
 
 `docs/index.md` shows `pip install orcapod` and `uv add orcapod`, nothing else. Fixed here:
 the page also showed an install-from-GitHub command and `mkdocs.yml` had a `repo_url`, both
-pointing at a stale location. The repository is private and Orcapod is distributed only
-through PyPI, so the git install and the site's repository link were removed.
+pointing at a stale location. The repository is private and Orcapod is published to the
+organization's internal package index, not public PyPI, so the git install, the PyPI link
+and the site's repository link were removed. The section now lists the supported Python
+versions (3.11, 3.12 and 3.13) and marks the exact install command as pending.
 
-Missing: supported Python versions, the optional extras (`redis`, `ray`, `postgresql`,
-`spiraldb`), and a "check your install" snippet. Two things a workshop will hit on day one:
+Missing: the exact install command and index URL, the optional extras (`redis`, `ray`,
+`postgresql`, `spiraldb`), and a "check your install" snippet. Two things a workshop will hit
+on day one:
 
 - `pygraphviz` is a declared dependency and needs the Graphviz C headers to build. On a
   machine without them `uv sync` fails. (Being removed under ITL-134.)
@@ -61,8 +64,8 @@ Missing: supported Python versions, the optional extras (`redis`, `ray`, `postgr
   `DeltaTableDatabase` writes print `WARN deltalake_core::writer::stats Skipping column ...`
   lines. Harmless, but a newcomer will ask.
 
-Whether `uv add orcapod` installs the v0.2 release could not be checked from here; verify once
-the release is cut (ITL-810 owns the version and install strings).
+The index URL and install command are not known yet; fill them in once the internal registry
+is set up (ITL-810 owns the version and install strings).
 
 ### First pipeline — covered well
 
