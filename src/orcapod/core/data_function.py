@@ -29,6 +29,7 @@ from orcapod.protocols.core_protocols.executor import (
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.types import DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
+from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
 from orcapod.utils.lazy_module import LazyModule
 
@@ -750,10 +751,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 "callable_name": self._function_name,
                 "version": self._version,
                 "input_data_schema": {
-                    k: str(v) for k, v in self.input_data_schema.items()
+                    k: stabilize_type_names(str(v), v)
+                    for k, v in self.input_data_schema.items()
                 },
                 "output_data_schema": {
-                    k: str(v) for k, v in self.output_data_schema.items()
+                    k: stabilize_type_names(str(v), v)
+                    for k, v in self.output_data_schema.items()
                 },
                 "output_keys": list(self._output_keys) if self._output_keys else None,
             },
