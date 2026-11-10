@@ -10,8 +10,11 @@ User documentation lives in [`docs/`](docs/index.md) (start with
 ## Installation
 
 Orcapod supports Python 3.11, 3.12 and 3.13. It is installed from the organization's
-internal package index; the index URL and the exact install command are not settled yet
-(see [Installation](docs/index.md#installation)).
+internal package index.
+
+> **Open item — pending the internal registry:** releases are blocked until the internal
+> package index is available. Its URL, authentication and the exact install command will be
+> given here once it exists (see [Installation](docs/index.md#installation)).
 
 Optional features are installed as extras:
 
@@ -36,9 +39,9 @@ Releases are cut from the GitHub Actions **Release** workflow, which runs the te
 tags the commit. The version comes from the tag via `hatch-vcs`, so there is no version
 number to bump in the source tree.
 
-**Do not run the Release workflow until it publishes to the internal package index.**
-Orcapod is distributed through that index, but the workflow's TestPyPI and PyPI publishing
-jobs are still active: a run would publish to public PyPI. See [RELEASING.md](RELEASING.md)
+**Do not run the Release workflow until it publishes to the internal package index** (the
+open item under *Installation*). The workflow's TestPyPI and PyPI publishing jobs are still
+active: a run would publish to public PyPI. See [RELEASING.md](RELEASING.md)
 for the full workflow.
 
 ## Continuous Integration

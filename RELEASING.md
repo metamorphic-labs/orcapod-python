@@ -4,13 +4,14 @@ This document describes how to cut a release of `orcapod`.
 
 ## Publish target — PyPI is superseded
 
-> **OPEN ITEM — Publish target: internal registry (URL, auth and install instructions to be
-> supplied by the developer).**
+> **OPEN ITEM — Publish target: pending the internal registry. Releasing is BLOCKED until
+> the organization's internal Python package registry is available.** Its URL,
+> authentication and install command will be filled in once the registry exists.
 
-As of 2026-11-09, Orcapod is published to the organization's internal Python package
+As of 2026-11-09, Orcapod is to be published to the organization's internal Python package
 registry, not to public PyPI, until public development resumes in January 2027. The
-Release workflow (`.github/workflows/release.yml`) still publishes to TestPyPI and PyPI and
-has not been changed yet. Every step below that publishes to, checks or installs from
+Release workflow (`.github/workflows/release.yml`) still publishes to TestPyPI and PyPI;
+switching it to the internal registry is not yet possible. Every step below that publishes to, checks or installs from
 PyPI or TestPyPI is marked **(superseded)**; do not rely on it. These steps are rewritten
 in one pass once the registry details are known.
 

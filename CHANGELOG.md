@@ -2,16 +2,19 @@
 
 ## [0.2.0] — unreleased
 
-<!-- RELEASE-DAY: replace "unreleased" with the publish date (YYYY-MM-DD) and resolve every
-     line marked PLACEHOLDER below. See superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
+<!-- RELEASE-DAY: replace "unreleased" with the publish date (YYYY-MM-DD), resolve the
+     publish target open item below, then delete this comment. See
+     superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
 
-> **OPEN ITEM — Publish target: internal registry (URL, auth and install instructions to be
-> supplied by the developer).** `0.2.0` is published to the organization's internal Python
-> package registry, not to public PyPI, until public development resumes in January 2027.
-> Publishing to PyPI / TestPyPI is superseded; the Release workflow still targets them and
-> is changed once the registry details are known.
+> **OPEN ITEM — Publish target: pending the internal registry. The release is BLOCKED until
+> the organization's internal Python package registry is available.** `0.2.0` will be
+> published there, not to public PyPI, until public development resumes in January 2027.
+> The registry URL, authentication and install command will be filled in once the registry
+> exists. Publishing to PyPI / TestPyPI is superseded; the Release workflow still targets
+> them, and switching it to the internal registry is not yet possible.
 
-Everything merged to `main` since `v0.1.2` (30 pull requests). `0.1.3` and `0.1.4` were
+Everything merged to `main` since `v0.1.2` (39 pull requests, counting these release notes,
+#269). `0.1.3` and `0.1.4` were
 patch releases cut from a separate branch; their one fix is also in this release (see
 *Fixed*), so upgrading from `0.1.4` loses nothing.
 
@@ -128,44 +131,102 @@ version. The `orcapod.core.side_effect_function` module, `SideEffectFunctionNode
 Use `@function_pod(ctx_arg=...)` / `FunctionPod.from_fn(..., ctx_arg_name=...)`.
 `@side_effect_function_pod` remains as a thin alias.
 
-#### `MergeJoin` keeps its inputs' Arrow types where both inputs agree on them (ITL-832 #278)
+#### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-813, ITL-832 #278)
 
-PLACEHOLDER (pending merge of #278): keep this section if #278 merges before the cut,
-otherwise delete it and its *Changed* line.
+`MergeJoin` no longer infers Arrow types from Python values, and it no longer fails on a
+zero-row input: a result with a zero-row input has the same column types as a non-empty
+one. Every output column of `MergeJoin` and `PolarsFilter` takes the large-normalized form
+of its input Arrow type: `string` becomes `large_string`, `binary` becomes `large_binary`
+and `list` becomes `large_list`, recursively. Width, nullability and logical types are
+never changed. List columns built by `MergeJoin` (merged columns), `Batch` and `GroupBy`
+are `large_list` of the normalized element, or, for a logical element such as `Path`, that
+element's logical list type (`list[orcapod.path]`). Merged source-info columns are
+`large_list<large_string>`.
 
-1. A merged (colliding) data column whose two inputs have the same Arrow type `T` is now
-   `list<T>`, instead of the type Arrow inferred from the Python values. Element types
-   change for `int8` / `int16` / `int32` / unsigned ints (were `int64`), `float32` (was
-   `double`), `large_string` (was `string`), `large_binary` (was `binary`), nested lists
-   of narrow ints (were `list<int64>`), non-microsecond timestamps with rows (were
-   `timestamp[us]`), and decimals (precision was taken from the data, e.g.
-   `decimal128(5, 2)` became `decimal128(3, 2)`). The outer layout stays `list`. The
-   Python-level `output_schema()` and `pipeline_hash` are unchanged.
-2. Row content hashes (and record ids derived from them downstream) change **only** for
-   rows with such a merged column whose element width, unit or precision changes (narrow
-   ints, unsigned ints, `float32`, non-µs timestamps, decimals, nested narrow lists).
-   Stored `MergeJoin` results for such joins are not matched and are recomputed.
-   Layout-only changes (`string` ↔ `large_string`, `binary` ↔ `large_binary`, `list` ↔
-   `large_list`) do not change hashes.
-3. Pass-through columns of `MergeJoin` and `PolarsFilter` keep their input Arrow types
-   instead of Polars' large layouts: `string`, `binary`, `list` and struct-child strings
-   stay as they were, and system-tag record ids stay `fixed_size_binary[16]` (were
-   `large_binary`). The stored Arrow schemas of these outputs change; content hashes and
-   record ids do not.
-4. Nothing changes yet for inputs that **disagree** on a column's Arrow type (for example
-   a `CSVSource` `string` column colliding with a `DictSource` `large_string` one, which
-   still merges into `list<string>`). That rule is not yet defined; see *Known
-   limitations*.
+| Column | 0.1.x | 0.2.0 |
+|---|---|---|
+| `MergeJoin` merged column, `int8` input | `list<int64>` | `large_list<int8>` |
+| `MergeJoin` merged column, `float32` input | `list<double>` | `large_list<float>` |
+| `MergeJoin` merged column, `timestamp[ms]` input | `list<timestamp[us]>` | `large_list<timestamp[ms]>` |
+| `MergeJoin` merged column, `decimal128(5, 2)` input | precision taken from the data (e.g. `decimal128(3, 2)`) | `large_list<decimal128(5, 2)>` |
+| `MergeJoin` merged column, `string` input | `list<string>` | `large_list<large_string>` |
+| `MergeJoin` result with a zero-row input | raised `ValueError` | same types as a non-empty result |
+| `Batch` / `GroupBy` list column, `int8` input | `list<int8>` | `large_list<int8>` |
+| `MergeJoin` / `PolarsFilter` system-tag record ID | `large_binary` | `fixed_size_binary[16]`, as the input has |
 
-#### `Index` and `Pick` keep the Arrow types of columns they do not touch (ITL-834)
+**Inputs that disagree:** when the two inputs of `MergeJoin` give a colliding data column
+or a shared tag column different Arrow types, both are normalized first. If they are then
+the same (for example `string` and `large_string`), the join proceeds. Otherwise (for
+example `int8` and `int64`, two timestamp units, or two decimal precisions) it raises
+`InputValidationError` naming the column and both types; cast one input explicitly. This
+used to produce a type inferred from the values, or a Polars `SchemaError`. The check runs
+when the join executes: `output_schema()` reports Python types, so such a disagreement is
+not visible when the graph is built.
 
-PLACEHOLDER (PR not yet opened): replace with the final wording and PR number from the
-ITL-834 PR if it merges before the cut, otherwise delete this section and its *Changed*
-line.
+**Hashes:** large and non-large variants hash identically, so normalization and `list` →
+`large_list` change no hash. The change is confined to `MergeJoin` merged columns whose
+inputs used to be re-inferred to a different type: integers and floats narrower than
+`int64` / `double` (which used to widen), timestamps with a unit other than microseconds
+(which became `timestamp[us]`), and decimals (whose precision came from the data). The data
+content hash of each row containing such a merged column changes, and so does the stored
+record of any operator node or function node that consumes it; a function pod downstream
+misses its cache once and recomputes. Tag hashes, stream `content_hash` and `pipeline_hash`
+are unchanged.
 
-`Index` and `Pick`, and the datagram mutators behind them, no longer change the Arrow
-types of columns they do not touch. This is breaking for stored rows that passed through
-`Index` or `Pick` with narrow numeric columns.
+**Stored schemas:** an existing table written with `list<...>` aggregates (from `Batch`,
+`GroupBy` or `MergeJoin`) will receive `large_list<...>` batches.
+
+**Nested nullability:** `normalize_to_large_types` now keeps every nested field's
+nullability and metadata. A column such as `list<item: int64 not null>` keeps its non-null
+item flag through `Data`, operators and storage instead of losing it. `Data`, `Tag`, stream
+and source hashes are unchanged; only the stored Arrow schema of such columns changes.
+
+**Struct Python types:** `struct<b: string>` and `struct<b: large_string>` now map to one
+synthesized Python class. Hashes are unchanged.
+
+**Logical list elements:** an aggregating operator (`Batch`, `GroupBy`, `MergeJoin`) over a
+column whose extension type has no logical list type in the type converter (for example
+PyArrow's canonical `arrow.uuid`) raises a `ValueError` naming the column. It used to fail
+with `ArrowNotImplementedError: extension`.
+
+#### `Index` and `Pick` keep their input Arrow types (ITL-834 #279)
+
+`Index` and `Pick` rebuilt every data column from Python values, so columns they only pass
+through widened (`int8` → `int64`, `float32` → `double`, `list<int8>` →
+`large_list<int64>`). They now keep the input Arrow types of every tag and data column, and
+the extracted column takes the element's type (`Index` on `list<int8>` gives `int8`; `Pick`
+gives the dict's value type). Outputs are large-normalized as above. An in-place `Index` /
+`Pick` keeps the column in its position, and a result in which every row was skipped has
+the input's Arrow schema. Extracting a `None` element where the predicted output type is
+not optional raises `ValueError` naming the operator, the column and the row's tag.
+
+**Hashes:** rows that pass through `Index` or `Pick` with columns narrower than `int64` /
+`double` (or lists and structs of such types) get different data content hashes than on
+`0.1.x`, and so does every function pod downstream of them: such pipelines miss their
+cache once and recompute. Inputs that are already `int64`, `double` or strings give the
+same types and hashes as before. Stream `content_hash` and `pipeline_hash` are unchanged.
+
+The underlying datagram fixes:
+
+- `Datagram.with_columns` and `update` keep the Arrow table whenever it is loaded: existing
+  columns keep their exact Arrow fields, and `update` keeps each updated column's field.
+  `with_columns` (and `Data.with_columns` / `DatagramProtocol.with_columns`) accepts a
+  `pa.DataType` or a `pa.Field` in `column_types`; Python types behave as before.
+- Meta (`__`-prefixed) columns keep their Arrow types through every mutator.
+- `arrow_schema()` is no longer stale after a mutation of a datagram built from a dict.
+  `FunctionPodStream.as_table()` could drop such a row's added tag column silently.
+- `Index` and `Pick` use the input stream's data context to type the extracted column.
+
+#### `Join` and `MergeJoin` column order follows argument symmetry (ITL-817 #272)
+
+The order of tag and data columns in a `Join` or `MergeJoin` output now follows the
+operator's declared argument symmetry. Both are commutative, so they take their inputs in
+canonical `pipeline_hash` order and list columns by first appearance across them:
+`Join()(a, b)` and `Join()(b, a)` give identical `keys()`, `output_schema()`, `as_table()`
+columns and per-row `Tag` / `Data` keys, in every process. Ordered operators such as
+`SemiJoin` keep operand order. Code that reads these columns by position may see a
+different order than on `0.1.x`; address columns by name. No hash, system tag, record ID
+or stored value changes, because hashing does not depend on column order.
 
 #### Shipped in 0.1.2 but never recorded here
 
@@ -255,18 +316,23 @@ not on PyPI at the time of writing; install it from its repository.
 - The repository meets the organization's required CI: `ruff` lint and format,
   `basedpyright` with a baseline, and tests on Python 3.11–3.13. Six tests that had been
   hidden by duplicated test-class names now run. (ITL-826 #276)
-- PLACEHOLDER (pending merge of #278): `MergeJoin` merged columns keep their inputs'
-  Arrow element types, and `MergeJoin` and `PolarsFilter` keep pass-through columns'
-  Arrow types. See *Breaking changes and migration*. (ITL-832 #278)
-- PLACEHOLDER (PR not yet opened): `Index` and `Pick`, and the datagram mutators behind
-  them, no longer change the Arrow types of columns they do not touch. See *Breaking
-  changes and migration*. (ITL-834)
-- PLACEHOLDER (pending merge of #277): the license is proprietary
-  (`LicenseRef-Metamorphic-Proprietary`), and the `LICENSE` file ships in the wheel and
-  the sdist; `pymongo` and `pyyaml` are removed from the runtime dependencies;
-  `basedpyright` and `typing_extensions` move to the `dev` group; the sdist contains only
-  the package source and its metadata files; `orcapod.__version__` is added. (ITL-827
-  #277)
+- `MergeJoin`, `PolarsFilter`, `Batch` and `GroupBy` keep their inputs' Arrow types,
+  normalized to large variants, and `MergeJoin` accepts zero-row inputs. See *Breaking
+  changes and migration*. (ITL-813, ITL-832 #278)
+- `Index` and `Pick` keep their input Arrow types, and `Datagram.with_columns` accepts Arrow
+  types. See *Breaking changes and migration*. (ITL-834 #279)
+- `Join` and `MergeJoin` column order follows argument symmetry. See *Breaking changes and
+  migration*. (ITL-817 #272)
+- Packaging: the license is proprietary (`LicenseRef-Metamorphic-Proprietary`), and the
+  `LICENSE` file ships in the wheel and the sdist; `pymongo` and `pyyaml` are removed from
+  the runtime dependencies; `basedpyright` and `typing_extensions` move to the `dev` group;
+  the sdist contains only the package source, `README.md`, `LICENSE` and the package
+  metadata; `orcapod.__version__` is added. (ITL-827 #277)
+- Documentation: every Python sample in `README.md`, `docs/index.md`,
+  `docs/getting-started.md`, `docs/concepts/` and `docs/reference/` is executed by the test
+  suite, and `mkdocs build --strict` runs in the tests. (PLT-4816 #271) A runbook for
+  coordinating issue-specific agents is added for contributors (`AGENT_COORDINATION.md`).
+  (ITL-818 #266)
 
 ### Fixed
 
@@ -301,8 +367,11 @@ not on PyPI at the time of writing; install it from its repository.
   data when the tag and data columns have different chunk layouts (which result-cache
   hits could produce), and rows after the first record batch get their own source info.
   Public API, schemas, hashes and record ids are unchanged. (ITL-816 #270)
-- PLACEHOLDER (pending merge): `MergeJoin` on an empty input. (ITL-813)
-- PLACEHOLDER (pending merge): system tags misaligned across runs after a join. (ITL-817)
+- `MergeJoin` no longer raises on a zero-row input. (ITL-813 #278)
+- A function node whose output mixed cached and freshly computed rows could fail in the
+  orchestrator with `ArrowInvalid: Schema at index N was different`, because cached rows
+  came back with a different column order. Buffer materialization now aligns rows by
+  column name. (ITL-817 #272)
 
 ### Known limitations
 
@@ -326,12 +395,43 @@ not on PyPI at the time of writing; install it from its repository.
 - **Delta Lake on S3 is not covered by automated tests.** The S3 integration tests do not
   run in CI; they skip in every environment because the MinIO image they start no longer
   exists. (ITL-819)
-- **The rule for multi-input operators whose inputs disagree on a column's Arrow type is
-  not yet defined** (for example `int8` vs `int64`, `string` vs `large_string`, a
-  timestamp unit or a decimal precision, on a colliding data column or a shared tag key).
-  The current result type is not a guarantee and may change in a later release. These
-  disagreements are not visible when the graph is built, because `output_schema()`
-  reports Python types. (ITL-835)
+- **Arrow types are not part of `Schema`, and the rule for inputs whose Arrow types disagree
+  is not settled for every operator.** `output_schema()` reports Python types, so a
+  disagreement such as `int8` vs `int64` or `string` vs `large_string` is not visible when
+  the graph is built. `MergeJoin` normalizes both inputs and raises `InputValidationError`
+  if they still differ (see *Breaking changes and migration*); the other multi-input
+  operators do not apply that rule yet. (ITL-835)
+- **Large-variant normalization is not applied everywhere.** `MergeJoin`, `PolarsFilter`,
+  `Index`, `Pick`, `Batch` and `GroupBy` emit large variants; `Join`, `SemiJoin`, `MapTags`,
+  `MapData`, the column-selection operators and sources keep whatever layout their input
+  has (`string` stays `string`). This is layout only and changes no hash. (ITL-841)
+- **`Join`'s asynchronous path re-infers column types from Python values**, so narrow
+  columns widen (`int8` to `int64`) and row content hashes differ from the synchronous path.
+  A function pod downstream of an asynchronous `Join` over narrow columns records different
+  input hashes than in synchronous mode, so cache hits do not carry over between the two
+  modes. (ITL-837)
+- **`MergeJoin` cannot merge non-empty struct columns**: a colliding data column holding
+  struct values raises `TypeError`. Zero-row inputs work. (ITL-839)
+- **`Data.select` and `Data.drop` leave the removed column's source-info column**
+  (`_source_<column>`) behind, visible with `all_info=True`. (ITL-838)
+- **Nullability preservation is not yet audited** across all operators and pods. (ITL-842)
+- **There is no written rule for which data context an element uses.** Operators use their
+  input stream's context for data, but an operator's own context still decides its
+  `content_hash` and `pipeline_hash`, and `MergeJoin` uses its left input's context without
+  checking the right one. (ITL-843, ITL-844)
+- **Column order cannot be chosen.** `Join` and `MergeJoin` list columns in their canonical
+  order, which may differ from the order of the call; address columns by name. (ITL-840)
+- **A source's default record ID is positional.** Without `record_id_column`, a row's
+  record ID comes from its `source_id` and its position. A row that moves to another
+  position under the same `source_id` is treated as a new entry: a function node records it
+  again (same tag values, a different record ID) and a `sink_pod` delivers it again. A
+  function's stored result for that data is reused, not recomputed, and no result is
+  paired with the wrong row. When row order can vary between runs, pass a stable
+  `source_id` and set `record_id_column` to a column unique per row. (ITL-817,
+  `DESIGN_ISSUES.md` RS2)
+- **CI tests only the locked dependency versions.** Users get the newest versions the
+  `pyproject.toml` ranges allow, which CI does not exercise (ITL-823), and the policy that
+  every install uses `uv.lock` is not yet enforced everywhere (ITL-822).
 - **The SpiralDB backend is not verified by this release.** Its integration tests have
   been failing on `main` since at least 2026-08-26 with `403 Permission table:view
   denied` from the SpiralDB test project — a credentials problem on the test project, not
@@ -339,9 +439,6 @@ not on PyPI at the time of writing; install it from its repository.
 - **Tested on Python 3.11, 3.12 and 3.13 only.** `requires-python` is `>=3.11` with no
   upper bound; newer interpreters are not exercised in CI.
 - **`ray` is pinned to `2.48.0`** in the `ray` extra.
-- **There is no `orcapod.__version__`.** Read the installed version with
-  `importlib.metadata.version("orcapod")`. PLACEHOLDER (pending merge of #277): delete
-  this item if #277 merges before the cut.
 - The SpikeInterface extension is not published on PyPI.
 
 ## [0.1.4] — 2026-07-17
@@ -435,51 +532,6 @@ recomputed.
 Orcapod code that needs to inspect or clean Arrow schema metadata.
 
 ### Breaking Changes
-
-#### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-832, ITL-813)
-
-`MergeJoin` no longer infers Arrow types from Python values, and it no longer fails on a
-zero-row input. Every output column of `MergeJoin` and `PolarsFilter` takes the
-large-normalized form of its input Arrow type: `string` becomes `large_string`, `binary`
-becomes `large_binary` and `list` becomes `large_list`, recursively. Width, nullability and
-logical types are kept.
-
-| Column | Before | After |
-|---|---|---|
-| `MergeJoin` merged column, `int8` input | `list<int64>` | `large_list<int8>` |
-| `MergeJoin` merged column, `float32` input | `list<double>` | `large_list<float>` |
-| `MergeJoin` merged column, `string` / `large_string` input | `list<string>` | `large_list<large_string>` |
-| `MergeJoin` merged column, `decimal128(5, 2)` input | precision taken from the data | `large_list<decimal128(5, 2)>` |
-| `MergeJoin` merged source-info column | `list<string>` | `large_list<large_string>` |
-| `MergeJoin` result with a zero-row input | raised | same types as a non-empty result |
-| `Batch` / `GroupBy` list column, `int8` input | `list<int8>` | `large_list<int8>` |
-| `MergeJoin` / `PolarsFilter` pass-through `string` column | `large_string` (via Polars) | `large_string` |
-
-**Inputs that disagree:** when the two inputs of `MergeJoin` give a colliding data column or a
-shared tag column different Arrow types, both are normalized first. If they are then the same
-(for example `string` and `large_string`), the join proceeds. Otherwise (for example `int8` and
-`int64`, two timestamp units, or two decimal precisions) it now raises `InputValidationError`
-naming the column and both types; cast one input explicitly. This used to produce a type
-inferred from the values, or a Polars `SchemaError`.
-
-**Hashes:** large and non-large variants hash identically, so normalization and
-`list` → `large_list` change no content hash. The one change is that a merged column narrower
-than `int64`/`double` no longer widens, so the data content hash of each row containing such a
-merged column changes, along with the stored record of any operator node or function node that
-consumes it. Tag hashes and pipeline hashes are unchanged.
-
-**Nested nullability:** `normalize_to_large_types` now keeps every nested field's nullability
-and metadata. A column such as `list<item: int64 not null>` keeps its non-null item flag
-through `Data`, operators and storage instead of losing it. Measured `Data`, `Tag`, stream
-and source hashes are unchanged; only the stored Arrow schema of such columns changes.
-
-**Struct Python types:** `struct<b: string>` and `struct<b: large_string>` now map to one
-synthesized Python class. Hashes are unchanged.
-
-**Logical list elements:** an aggregating operator (`Batch`, `GroupBy`, `MergeJoin`) over a
-column whose extension type has no logical list type in the type converter (for example
-PyArrow's canonical `arrow.uuid`) raises a `ValueError` naming the column. It used to fail
-with `ArrowNotImplementedError: extension`.
 
 #### `pathlib.Path` and `upath.UPath` no longer hash file content (ITL-450)
 
