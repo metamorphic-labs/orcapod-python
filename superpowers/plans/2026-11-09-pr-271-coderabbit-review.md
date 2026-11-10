@@ -46,3 +46,16 @@ reset. Review: https://github.com/metamorphic-labs/orcapod-python/pull/271#pullr
 | 2.6 | Pre-merge check "Linked Issues": no tutorial (repeat of 1.8) | PR | DISMISS (2nd time) | Same as 1.8: this PR is "Part of PLT-4816"; the tutorial is in #274. The check will keep failing on this PR by construction. | round comment |
 
 Local suite after the round: same command as round 1 — 4827 passed, 93 skipped, 2 xfailed.
+
+## Round 3 — review of `4e1b7f8d`
+
+Review: https://github.com/metamorphic-labs/orcapod-python/pull/271#pullrequestreview-5835110890.
+No inline comments; two review-body items and the repeated pre-merge check.
+
+| # | Finding | Location | Verdict | Reason | Commit / reply |
+|---|---------|----------|---------|--------|----------------|
+| 3.1 | Pass `check=False` explicitly to `subprocess.run` when the return code is inspected (review body, marked unverified, from an org "learning") | `tests/test_docs/test_mkdocs_build.py:26-40` | FIX | Both calls inspect `proc.returncode` themselves; an explicit `check=False` states that. Ruff in this repo does not enable `PLW1510`, so this is a stated org preference, not a lint error. No behaviour change. | `aa902e23`, round comment |
+| 3.2 | Same, second call | `tests/test_docs/test_doc_samples.py:273-280` | FIX | As 3.1. | `aa902e23`, round comment |
+| 3.3 | Pre-merge check "Linked Issues": no tutorial (third time) | PR | DISMISS (3rd time) | As 1.8 and 2.6. This is the stop condition in the brief (a finding dismissed twice is repeated); it is reported to the coordinator instead of being argued again. | round comment |
+
+Local suite after the round: same command as round 1 — 4827 passed, 93 skipped, 2 xfailed.
