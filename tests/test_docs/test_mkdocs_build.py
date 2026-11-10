@@ -17,8 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_mkdocs_build_strict(tmp_path: Path):
+    """The site builds with no warnings; skipped when the docs tools are absent."""
     pytest.importorskip("mkdocs", reason="mkdocs is in the 'dev' dependency group")
-    pytest.importorskip("mkdocstrings", reason="mkdocstrings is in the 'dev' dependency group")
+    pytest.importorskip(
+        "mkdocstrings", reason="mkdocstrings is in the 'dev' dependency group"
+    )
 
     proc = subprocess.run(
         [
@@ -39,6 +42,6 @@ def test_mkdocs_build_strict(tmp_path: Path):
     problems = [
         line for line in output.splitlines() if "WARNING" in line or "ERROR" in line
     ]
-    assert proc.returncode == 0, (
-        "mkdocs build --strict failed:\n" + "\n".join(problems or output.splitlines()[-30:])
+    assert proc.returncode == 0, "mkdocs build --strict failed:\n" + "\n".join(
+        problems or output.splitlines()[-30:]
     )

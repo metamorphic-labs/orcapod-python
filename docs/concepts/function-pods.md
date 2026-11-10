@@ -216,8 +216,11 @@ print("function calls:", len(calls))
 
 A node from a job that has run also provides:
 
-- **`get_all_records()`** -- every record stored for this function as a PyArrow Table,
-  including rows computed by earlier runs with other inputs
+- **`get_all_records()`** -- every record this step of the job has stored, as a PyArrow
+  Table, including rows computed by earlier runs of the same job over the same source with
+  other inputs. It is not an export of everything the function ever computed: results the
+  function produced in a job with a different name, or from a source with a different
+  `source_id`, are not included
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
   of another pipeline
 

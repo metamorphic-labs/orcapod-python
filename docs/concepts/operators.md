@@ -178,7 +178,7 @@ Pass `batch_size=N` to create fixed-size batches instead of grouping everything.
 batch may be smaller; pass `drop_partial_batch=True` to discard it:
 
 ```python
-batch = Batch(batch_size=10, drop_partial_batch=False)
+batch = Batch(batch_size=10, drop_partial_batch=True)
 ```
 
 ### GroupBy
