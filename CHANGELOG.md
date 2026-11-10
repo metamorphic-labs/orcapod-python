@@ -142,7 +142,7 @@ Types that differ only in layout (`string` and `large_string`) still join.
 
 **Also fixed:** `Datagram.copy()` gave a copy of an Arrow-backed datagram an empty Python
 `schema()` when the schema had not been computed yet; async `Index` and `Pick` returned such
-rows.
+rows (ITL-859).
 
 #### `pathlib.Path` and `upath.UPath` no longer hash file content (ITL-450)
 

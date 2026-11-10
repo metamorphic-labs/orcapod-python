@@ -298,7 +298,7 @@ class TestDatagramCopy:
         """A copy of an Arrow-backed datagram whose Python schema is not yet
         computed derives it later, rather than holding an empty schema (ITL-837)."""
         d = Data(pa.table({"a": pa.array([1], pa.int8()), "b": pa.array(["x"])}))
-        # Private on purpose: the bug is about a schema not yet computed, which no public API exposes.
+        # Private on purpose (ITL-859): the bug is a schema not yet computed, which no public API exposes.
         assert d._data_python_schema is None
         d2 = d.copy(include_cache=include_cache)
         assert dict(d2.schema()) == {"a": int | None, "b": str | None}

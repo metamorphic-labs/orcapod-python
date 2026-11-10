@@ -2101,7 +2101,7 @@ before. The new `Tag`/`Data` take the left (canonically first) input datagram's
 raises `InputValidationError` on both paths through `arrow_utils.resolve_disagreeing_types`
 (moved there from `MergeJoin` so both operators share one rule); the sync path used to keep the
 right input's type silently. `Datagram.copy()` no longer turns a lazy Python schema into an
-empty one (it broke `schema()` of async `Index`/`Pick` rows).
+empty one (it broke `schema()` of async `Index`/`Pick` rows; ITL-859).
 `tests/test_core/operators/test_async_sync_equivalence.py` runs every operator with its own
 async path through both paths and compares types, nullability, column order, system tags,
 content and schema hashes; differences that are not type re-inference are strict xfails:
