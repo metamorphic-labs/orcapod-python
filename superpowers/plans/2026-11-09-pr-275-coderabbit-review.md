@@ -10,13 +10,17 @@ scope, or contradicts a project rule).
 
 | Round | Finding | Location | Verdict | Reason | Commit / reply |
 |---|---|---|---|---|---|
+| 1 (review of d4b30454) | `stabilize_type_names` replaces names one at a time, so a shorter name can rewrite the start of a longer one; sort replacements by length | `src/orcapod/utils/canonical_type_names.py:140-146` | PARTIAL | The cited case (outer class + nested class) already gives the right output: both resolve to the same public module. The real defect is a resolved name that is a prefix of a *different, unresolved* name (`json._impl._Exported` inside `json._impl._ExportedExtra`), or a name inside a longer dotted path. Sorting by length does not fix that, because the unresolved name never enters the replacement map. Fixed with one regex pass over whole dotted names, longest first. Reproduced by 2 failing tests first. Output for every real type is unchanged (438-value probe identical on 3.11/3.12/3.13). | bb25648e, thread 4520061937 |
+| 1 | Ruff F401: unused `types` import | `tests/test_core/sources/test_sources_comprehensive.py:275` | DISMISS | Pre-existing on `main` (07e5a2ea) and not on a line this PR touches. Repo-wide ruff debt is being fixed separately on `main` (ITL-826); fixing it here would conflict with that work. | thread 4520061943 |
+| 1 | Ruff F841: unused local `combined` | `tests/test_hashing/test_hash_utils.py:268` | DISMISS | Same: pre-existing on `main` (line 264 there), not touched by this PR, and owned by ITL-826. | thread 4520061948 |
+| 1 | Pre-merge checks (Description, Title, Linked Issues, Out of Scope, Docstring Coverage 81.25%) | summary comment | — | All passed; nothing to do. | round summary comment |
 
 ## Coordinator items (not CodeRabbit)
 
 | Item | Verdict | Notes | Commit |
 |---|---|---|---|
 | README line 14 still says Python 3.11 and 3.12 | Deferred | PR #269 owns README version text; not edited here. | — |
-| 72 new basedpyright warnings in files this PR touches (org typecheck fails on warnings) | FIX | Typing-only changes; canonical strings and hashes byte-identical (438-value probe on 3.11/3.12/3.13). See counts below. | (this commit) |
+| 72 new basedpyright warnings in files this PR touches (org typecheck fails on warnings) | FIX | Typing-only changes; canonical strings and hashes byte-identical (438-value probe on 3.11/3.12/3.13). See counts below. | d4b30454 |
 
 ### basedpyright per-file counts (errors + warnings)
 

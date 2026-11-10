@@ -20,6 +20,7 @@ import enum
 import fractions
 import io
 import ipaddress
+import json
 import pathlib as P
 import re
 import typing
@@ -173,6 +174,51 @@ class TestCanonicalModuleName:
     def test_stabilize_is_a_noop_without_relocated_types(self):
         text = "x: tests._local.Thing = <class 'int'>"
         assert stabilize_type_names(text, int, _UserDefined) == text
+
+
+class _Exported:
+    """Stands in for a stdlib class defined privately and re-exported."""
+
+    class Inner:
+        pass
+
+
+class _ExportedExtra:
+    """A private class whose name extends ``_Exported`` but is not re-exported."""
+
+
+@pytest.fixture
+def relocated_json_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``_Exported`` look like ``json._impl._Exported``, re-exported by ``json``."""
+    for cls in (_Exported, _Exported.Inner, _ExportedExtra):
+        monkeypatch.setattr(cls, "__module__", "json._impl")
+    monkeypatch.setattr(json, "_Exported", _Exported, raising=False)
+
+
+@pytest.mark.usefixtures("relocated_json_types")
+class TestStabilizeOverlappingNames:
+    """A relocated name must only be rewritten where it is a whole qualified name."""
+
+    def test_fixture_resolves_only_the_exported_classes(self):
+        assert canonical_module_name(_Exported) == "json"
+        assert canonical_module_name(_Exported.Inner) == "json"
+        assert canonical_module_name(_ExportedExtra) == "json._impl"
+
+    def test_longer_unresolved_name_sharing_a_prefix_is_untouched(self):
+        text = "json._impl._Exported | json._impl._ExportedExtra"
+        assert stabilize_type_names(text, _Exported, _ExportedExtra) == (
+            "json._Exported | json._impl._ExportedExtra"
+        )
+
+    def test_nested_class_is_rewritten_once(self):
+        text = "json._impl._Exported.Inner, json._impl._Exported"
+        assert stabilize_type_names(text, _Exported, _Exported.Inner) == (
+            "json._Exported.Inner, json._Exported"
+        )
+
+    def test_name_inside_a_longer_dotted_path_is_untouched(self):
+        text = "x.json._impl._Exported"
+        assert stabilize_type_names(text, _Exported) == text
 
 
 class TestTypeHandlers:
