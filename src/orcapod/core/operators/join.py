@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -204,16 +205,9 @@ class Join(NonZeroInputOperator):
             # the tag join keys; everything else (meta columns, their derived
             # source-info columns, etc.) must be unique.
             join_key_set = tag_keys.intersection(next_tag_keys) | {COMMON_JOIN_KEY}
-            existing_names = set(table.column_names)
-            rename_map = {}
-            for col in next_table.column_names:
-                if col not in join_key_set and col in existing_names:
-                    new_name = f"{col}_{idx}"
-                    counter = idx
-                    while new_name in existing_names or new_name in rename_map.values():
-                        counter += 1
-                        new_name = f"{col}_{counter}"
-                    rename_map[col] = new_name
+            rename_map = self._collision_renames(
+                set(table.column_names), next_table.column_names, join_key_set, idx
+            )
 
             # Build a reference schema for next_table with rename_map applied to
             # field names, preserving nullable flags — must be done BEFORE the
@@ -289,6 +283,41 @@ class Join(NonZeroInputOperator):
             result_table,
             tag_columns=tuple(tag_order),
         )
+
+    @staticmethod
+    def _collision_renames(
+        existing: Collection[str],
+        incoming: Iterable[str],
+        keep: Collection[str],
+        index: int,
+    ) -> dict[str, str]:
+        """Name the incoming columns that collide with the accumulated ones.
+
+        The single definition of Join's collision renaming, shared by
+        ``static_process`` and the async ``_merge_data``. A colliding column
+        ``c`` of the input at canonical position ``index`` becomes
+        ``c_{index}``, or ``c_{index + 1}``, ... when that name is taken by an
+        accumulated column or by an earlier rename.
+
+        Args:
+            existing: The column names already in the accumulated result.
+            incoming: The next input's column names, in order.
+            keep: Names that are legitimately shared (the join keys).
+            index: The next input's canonical position.
+
+        Returns:
+            A map from each colliding incoming name to its new name.
+        """
+        rename_map: dict[str, str] = {}
+        for col in incoming:
+            if col not in keep and col in existing:
+                new_name = f"{col}_{index}"
+                counter = index
+                while new_name in existing or new_name in rename_map.values():
+                    counter += 1
+                    new_name = f"{col}_{counter}"
+                rename_map[col] = new_name
+        return rename_map
 
     # ------------------------------------------------------------------
     # Async execution
@@ -504,7 +533,7 @@ class Join(NonZeroInputOperator):
                         current_reader,
                         renamed_readers[i],
                         target_writer,
-                        self._merge_pair_passthrough,
+                        partial(self._merge_pair_passthrough, right_index=i),
                     )
                 )
 
@@ -750,21 +779,29 @@ class Join(NonZeroInputOperator):
         return Tag(table, system_tags=system_tags, data_context=data_context_key)
 
     @staticmethod
-    def _merge_data(left: DataProtocol, right: DataProtocol) -> DataProtocol:
+    def _merge_data(
+        left: DataProtocol, right: DataProtocol, right_index: int
+    ) -> DataProtocol:
         """Merge two data datagrams as Arrow, left columns first.
 
         Every column keeps the Arrow type it already has, and the source info
-        of both sides is carried over.
+        of both sides is carried over. Meta columns are carried over too: the
+        left side's first, then the right side's, renamed where they collide
+        exactly as ``static_process`` renames them (``_collision_renames``).
 
         Args:
-            left: The canonically earlier data.
+            left: The canonically earlier data (in a staggered join, the
+                result of the joins so far).
             right: The later data.
+            right_index: The canonical position of ``right``'s input, which
+                picks the suffix of a renamed meta column.
 
         Returns:
             The merged data, in the context of ``left``.
 
         Raises:
-            InputValidationError: If both sides have a column of the same name.
+            InputValidationError: If both sides have a data column of the same
+                name.
         """
         from orcapod.core.datagrams import Data
 
@@ -772,6 +809,19 @@ class Join(NonZeroInputOperator):
         if overlap := set(left_table.column_names) & set(right_table.column_names):
             raise InputValidationError(
                 f"Join: inputs share data columns {sorted(overlap)}."
+            )
+        # Only meta (``__``) names can collide here: the data columns are
+        # disjoint (checked above), and the columns ``static_process`` also
+        # holds (tags, ``_source_``, ``_tag::``) never start with ``__``, so
+        # these names suffice to rename exactly as it does.
+        left_table = left.as_table(columns={"meta": True})
+        right_table = right.as_table(columns={"meta": True})
+        renames = Join._collision_renames(
+            set(left_table.column_names), right_table.column_names, (), right_index
+        )
+        if renames:
+            right_table = right_table.rename_columns(
+                [renames.get(name, name) for name in right_table.column_names]
             )
         return Data(
             arrow_utils.hstack_tables(left_table, right_table),
@@ -811,7 +861,8 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt)
+        # The right input is the second in canonical order.
+        return merged_tag, Join._merge_data(left_pkt, right_pkt, right_index=1)
 
     @staticmethod
     def _merge_pair_passthrough(
@@ -819,12 +870,14 @@ class Join(NonZeroInputOperator):
         left_pkt: DataProtocol,
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
+        right_index: int,
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, passing system tags through without renaming.
 
         Used in the staggered chain where system tags have already been
         pre-renamed by ``_rename_sys_tags``. The merged row is built from the
         inputs' Arrow tables, in the left (canonically first) tag's context.
+        ``right_index`` is the right input's canonical position.
         """
         # Combine system tags (already renamed)
         merged_sys: dict[str, DataValue] = {}
@@ -838,7 +891,7 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt)
+        return merged_tag, Join._merge_data(left_pkt, right_pkt, right_index)
 
     @staticmethod
     def _sort_merged_system_tags(merged_sys: dict) -> dict:

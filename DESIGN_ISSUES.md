@@ -2109,3 +2109,7 @@ ITL-845 (O3, row-0 source info), ITL-838 (`Data.select`/`drop` keep dropped colu
 info), ITL-846 (sync `SemiJoin` over nested columns; `ArrowHasher.hash_schema` on extension
 types). The developer's principle behind the shared-key error: Orcapod is type strict and
 performs no implicit type expansion or conversion, except normalization to large variants.
+The async merge also carries each input's `Data` meta (`__`) columns, which it used to drop,
+renaming collisions through `Join._collision_renames`, the helper `static_process` now shares
+(ITL-854); their order differs from sync only for a raw `ArrowTableStream` that lists its `__`
+columns as data and whose meta collides or mixes with other streams (strict xfail, ITL-858).

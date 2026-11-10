@@ -127,6 +127,8 @@ Python values, so each column's Arrow type was inferred again: an `int16` tag or
 data column became `int64`, and a `dict` column could not be built at all. It now builds the
 merged row from the input rows' Arrow tables, for two inputs and for three or more. Types,
 nullability, column order, system tags and content hashes now equal those of the sync path.
+It also keeps each input's `Data` meta (`__`-prefixed) columns, which it used to drop,
+renaming colliding ones (`__x_1`) exactly as the sync path does (ITL-854).
 
 **Hashes:** the `Tag` and `Data` content hashes of rows produced by an async `Join` over
 columns narrower than `int64`/`double` change (they now equal the sync values), along with the

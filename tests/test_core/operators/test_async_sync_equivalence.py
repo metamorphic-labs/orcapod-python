@@ -43,6 +43,7 @@ from orcapod.core.operators import (
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
     DataProtocol,
@@ -391,6 +392,227 @@ def test_arrow_hasher_hash_schema_with_extension_type() -> None:
     """``hash_schema`` hashes a schema with a logical (extension) column."""
     schema = pa.schema([pa.field("p", _logical_column([Path("/a")], Path).type)])
     _ = get_default_context().arrow_hasher.hash_schema(schema)  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+
+
+# ── Data meta columns (ITL-854) ─────────────────────────────────────────────
+
+
+def _meta_table(data: DataProtocol) -> pa.Table:
+    """The data's meta (``__``-prefixed) columns alone, in their stored order."""
+    return data.as_table(columns={"meta": True}).select(list(data.meta_columns))
+
+
+def assert_same_meta(expected: list[Row], actual: list[Row]) -> None:
+    """Assert the async rows carry the sync rows' meta columns.
+
+    Names, order, Arrow types, nullability and values must all match.
+    """
+    for (_, data), (_, sync_data) in _paired(expected, actual):
+        assert list(data.meta_columns) == list(sync_data.meta_columns)
+        assert data.arrow_schema(columns={"meta": True}) == sync_data.arrow_schema(
+            columns={"meta": True}
+        )
+        assert _meta_table(data).schema == _meta_table(sync_data).schema
+        assert _meta_table(data).to_pylist() == _meta_table(sync_data).to_pylist()
+
+
+def _with_meta(source: StreamProtocol, meta: dict[str, Column]) -> ArrowTableStream:
+    """``source`` as a stream whose every ``Data`` also carries ``meta`` columns."""
+    table = source.as_table(columns={"source": True, "system_tags": True})
+    for name, column in meta.items():
+        table = table.append_column(name, column)
+    tags = source.keys()[0]
+    return ArrowTableStream(table, tag_columns=tags)
+
+
+def _meta_columns(prefix: str, n_rows: int, nested: bool = True) -> dict[str, Column]:
+    """Meta columns named after ``prefix``: non-null ``int8``, nullable ``string``
+    and, when ``nested``, nullable ``list<int8>``."""
+    columns: dict[str, Column] = {
+        f"__{prefix}_i8": pa.array(range(n_rows), pa.int8()),
+        f"__{prefix}_s": pa.array(
+            [None if i == 1 else f"{prefix}{i}" for i in range(n_rows)], pa.string()
+        ),
+    }
+    if nested:
+        columns[f"__{prefix}_l"] = pa.array(
+            [[i] for i in range(n_rows)], pa.list_(pa.int8())
+        )
+    table = pa.table(list(columns.values()), names=list(columns))
+    schema = pa.schema(
+        [f.with_nullable(f.name != f"__{prefix}_i8") for f in table.schema]
+    )
+    table = table.cast(schema)
+    return {name: table.column(name) for name in table.column_names}
+
+
+# Sync SemiJoin rejects nested non-key columns (ITL-846, xfailed above), and a
+# meta column is a non-key column of its Polars join.
+SCALAR_META_ONLY = {"semijoin"}
+
+
+def _meta_case(case: Case) -> Case:
+    """``case`` with each source carrying its own, distinctly named meta columns."""
+    nested = case.label not in SCALAR_META_ONLY
+
+    def make_sources() -> tuple[StreamProtocol, ...]:
+        sources = case.make_sources()
+        return tuple(
+            _with_meta(s, _meta_columns(f"m{i}", s.as_table().num_rows, nested))
+            for i, s in enumerate(sources)
+        )
+
+    return Case(case.label, case.make_op, make_sources)
+
+
+# Operators whose paths disagree on meta columns in ways that are not a local
+# Join-style fix. Strict, so a fix flags them.
+_MATERIALIZE_DROPS_META = (
+    "ITL-846: barrier-mode async_execute rebuilds its input with "
+    "_materialize_to_stream, which drops Data meta columns; the rebuilt stream's "
+    "pipeline hash then differs, so system-tag names and canonical order differ too"
+)
+_SYNC_DROPS_META = (
+    "ITL-846: the sync path drops Data meta columns that the async path keeps (a raw "
+    "ArrowTableStream lists its __ columns as data columns, so the sync selection "
+    "or _materialize_to_stream discards them)"
+)
+META_XFAIL: dict[str, str] = {
+    "merge_join": _MATERIALIZE_DROPS_META,
+    "batch_2": _MATERIALIZE_DROPS_META,
+    "batch_all": _MATERIALIZE_DROPS_META,
+    "group_by": _MATERIALIZE_DROPS_META,
+    "polars_filter": _MATERIALIZE_DROPS_META,
+    "select_data_columns": _SYNC_DROPS_META,
+    "index": _SYNC_DROPS_META,
+    "pick": _SYNC_DROPS_META,
+}
+META_CASES = [
+    pytest.param(
+        _meta_case(c),
+        id=c.label,
+        marks=[pytest.mark.xfail(strict=True, reason=META_XFAIL[c.label])]
+        if c.label in META_XFAIL
+        else [],
+    )
+    for c in CASES
+]
+
+
+@pytest.mark.parametrize("case", META_CASES)
+def test_async_meta_equals_sync(case: Case) -> None:
+    """The async path carries the sync path's Data meta columns (ITL-854)."""
+    sources = case.make_sources()
+    expected = sync_rows(case.make_op(), *sources)
+    actual = async_rows(case.make_op(), *sources)
+    assert_equivalent(expected, actual)
+    assert_same_meta(expected, actual)
+
+
+def _meta_stream(
+    source_id: str, value_column: str, meta: Sequence[str]
+) -> ArrowTableStream:
+    """A two-row stream on tag ``k: int16`` with ``int8`` meta columns ``meta``."""
+    columns: dict[str, Column] = {
+        "k": pa.array([1, 2], pa.int16()),
+        value_column: pa.array([3, 4], pa.int8()),
+    }
+    source = _source(columns, tags=("k",), source_id=source_id)
+    offset = sum(map(ord, source_id))
+    return _with_meta(
+        source,
+        {
+            name: pa.array([offset + i, offset + i + 1], pa.int8())
+            for i, name in enumerate(meta)
+        },
+    )
+
+
+def static_rows(*sources: StreamProtocol) -> list[Row]:
+    """The rows of sync ``Join.static_process``, which skips input validation.
+
+    ``process`` rejects inputs whose schemas share a column. A raw
+    ``ArrowTableStream`` lists its ``__`` columns in its schema, so colliding
+    meta columns reach the join only this way.
+    """
+    return list(Join().static_process(*sources).iter_data())
+
+
+COLLIDING_META = [
+    pytest.param(
+        lambda: (
+            _meta_stream("a", "va", ["__u_a", "__m"]),
+            _meta_stream("b", "vb", ["__u_b", "__m"]),
+        ),
+        id="two",
+    ),
+    pytest.param(
+        lambda: (
+            _meta_stream("a", "va", ["__m"]),
+            _meta_stream("b", "vb", ["__m"]),
+            _meta_stream("c", "vc", ["__m"]),
+        ),
+        id="three",
+    ),
+]
+
+
+@pytest.mark.parametrize("make_sources", COLLIDING_META)
+def test_join_colliding_meta_async_equals_sync(
+    make_sources: Callable[[], tuple[StreamProtocol, ...]],
+) -> None:
+    """Colliding meta columns get the sync path's ``_<index>`` renames on both paths."""
+    sources = make_sources()
+    expected = static_rows(*sources)
+    actual = async_rows(Join(), *sources)
+    assert_equivalent(expected, actual)
+    assert_same_meta(expected, actual)
+    assert any(name.startswith("__m_") for name in expected[0][1].meta_columns)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ITL-858: sync Join puts the columns an input's output_schema lists first; a "
+        "raw ArrowTableStream lists its __ columns, so with colliding meta the sync "
+        "meta order is not the canonical concatenation the async path emits "
+        "(async_execute never sees input schemas)."
+    ),
+)
+def test_join_meta_order_schema_dependent() -> None:
+    """Three inputs ``[__u_i, __m]``: sync moves the unique names forward."""
+    sources = (
+        _meta_stream("a", "va", ["__u_a", "__m"]),
+        _meta_stream("b", "vb", ["__u_b", "__m"]),
+        _meta_stream("c", "vc", ["__u_c", "__m"]),
+    )
+    assert_same_meta(static_rows(*sources), async_rows(Join(), *sources))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ITL-857: Join's collision rename checks only the accumulated columns, not the "
+        "next input's own names: __x renamed to __x_1 duplicates that input's own __x_1 "
+        "(Polars DuplicateError on the sync path; the shared rename fails async too)."
+    ),
+)
+@pytest.mark.parametrize(
+    "metas",
+    [
+        pytest.param((["__x"], ["__x", "__x_1"]), id="two"),
+        pytest.param((["__x"], ["__x"], ["__x", "__x_1"]), id="three"),
+    ],
+)
+def test_join_meta_rename_collides_with_own_column(
+    metas: tuple[list[str], ...],
+) -> None:
+    """An input already holding ``__x_1`` must not get a second ``__x_1``."""
+    sources = [
+        _meta_stream(source_id, f"v{source_id}", meta)
+        for source_id, meta in zip("abc", metas)
+    ]
+    assert_same_meta(static_rows(*sources), async_rows(Join(), *sources))
 
 
 # ── the issue's own example, pinned ────────────────────────────────────────
