@@ -771,8 +771,9 @@ explicitly on `StaticOutputPod`.
 ---
 
 ### O3 — `_materialize_to_stream` broadcasts row 0's provenance to every row
-**Status:** open
+**Status:** resolved
 **Severity:** high
+**Issue:** ITL-845
 
 `StaticOutputOperatorPod._materialize_to_stream` (`core/operators/static_output_pod.py:223`)
 reads the source info of the *first* row and applies it to the whole concatenated table:
@@ -798,6 +799,14 @@ That crash is now fixed, which converts a loud failure into a quiet wrong answer
 
 Fix: build the source-info mapping per row rather than once from row 0, or push the
 provenance into the concatenated table before constructing the stream.
+
+**Fix:** Both materializers build their table with one helper,
+`StaticOutputOperatorPod._rows_to_table`, and no longer pass `source_info` to
+`ArrowTableStream`, so each row's own `_source_*` columns pass through. A `_source_*` field
+is non-nullable unless some row's token is `None`, which keeps stored schemas and Arrow types
+as they were. Data values, content and pipeline hashes, and function-node record IDs do not
+change; an operator node's stored `_record_hash` changes for each row whose token was wrong.
+Regression tests: `tests/test_core/operators/test_materialize_source_info.py`.
 
 ---
 

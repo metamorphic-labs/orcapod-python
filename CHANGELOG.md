@@ -73,6 +73,32 @@ recomputed.
 `has_extension_metadata` are available as semi-public utilities for other
 Orcapod code that needs to inspect or clean Arrow schema metadata.
 
+### Fixed
+
+#### Materialized rows keep their own source info (ITL-845)
+
+When rows were collected and turned back into a stream, every row got the source-info
+(`_source_*`) tokens of the first row, so rows after the first were attributed to row 0. This
+affected the async path of every operator that collects its input (`MergeJoin`, `Batch`,
+`GroupBy`, `PolarsFilter` and the other barrier operators), sync `Index` and `Pick`, operator
+nodes (`OperatorJobNode.execute` and `async_execute`), and the sync orchestrator's buffers.
+After `Batch`, a batch could even list more tokens than it had members. Each row now keeps
+its own tokens.
+
+**What changes:** only `_source_*` values. Data values, Arrow types and stored schemas,
+content hashes, pipeline hashes and function-node record IDs are unchanged. An operator
+node's stored per-row `_record_hash` covers the `_source_*` columns, so it changes for every
+row whose token was wrong (rows after the first, and every row stored by the async path of
+`Batch`, `GroupBy` and `MergeJoin`); rows whose token was right keep their ID.
+
+**Existing tables are not repaired.** Tables written before this fix keep the wrong tokens
+for rows after the first. With the default `table_scope="pipeline_hash"`, a node never reads
+the rows of an operator-node table written by v0.1.x, because they lack this version's
+`__node_content_hash` run column. Operator-node tables written with `cache_mode=LOG` by an
+unreleased build of `main` from c398e7d4 up to this fix are read: re-running such a node in
+LOG mode stores the corrected rows next to the old ones, so `get_all_records()` and a later
+REPLAY node return the old rows as well as the new ones. Cleanup guidance: _pending_.
+
 ### Breaking Changes
 
 #### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-832, ITL-813)
