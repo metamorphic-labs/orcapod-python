@@ -32,10 +32,9 @@ dependencies = [
 ]
 readme = "README.md"
 requires-python = ">=3.11.0"
-license = { text = "MIT License" }
+license = { text = "LicenseRef-Metamorphic-Proprietary" }
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 
