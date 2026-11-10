@@ -16,7 +16,7 @@ tracked in ITL-853.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -83,21 +83,22 @@ def _source() -> ArrowTableSource:
     return ArrowTableSource(table, tag_columns=["id"], source_id="S")
 
 
+def _pod(function: Callable[..., int], output_key: str) -> FunctionPod:
+    data_function = PythonDataFunction(function, output_keys=output_key)
+    # PythonDataFunction does not structurally match DataFunctionProtocol yet
+    # (same pre-existing mismatch as the baselined FunctionPod(pf) calls in tests).
+    return FunctionPod(data_function)  # pyright: ignore[reportArgumentType]
+
+
 def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
     """source -> add_xy ("direct") -> times_two ("second"); source -> Select -> add_one."""
     src = _source()
     job = PipelineJob(name=_JOB, store=store)
     with job:
-        z = FunctionPod(PythonDataFunction(add_xy, output_keys="z"))(
-            src, label="direct"
-        )
-        _ = FunctionPod(PythonDataFunction(times_two, output_keys="w"))(
-            z, label="second"
-        )
+        z = _pod(add_xy, "z")(src, label="direct")
+        _ = _pod(times_two, "w")(z, label="second")
         selected = SelectDataColumns(["x"])(src, label="sel")
-        _ = FunctionPod(PythonDataFunction(add_one, output_keys="z"))(
-            selected, label="via_op"
-        )
+        _ = _pod(add_one, "z")(selected, label="via_op")
     return job
 
 
