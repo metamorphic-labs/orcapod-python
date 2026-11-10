@@ -9,13 +9,10 @@ Tests the three system tag evolution rules from the design specification:
 from __future__ import annotations
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.operators import Batch, Join, MapTags, PolarsFilter, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
-from orcapod.core.streams import ArrowTableStream
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig
 
 
 # ---------------------------------------------------------------------------

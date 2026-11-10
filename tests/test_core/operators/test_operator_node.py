@@ -17,7 +17,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from orcapod.core.nodes.operator_node import OperatorJobNode, OperatorNode
+from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import (
     DropDataColumns,
     Join,

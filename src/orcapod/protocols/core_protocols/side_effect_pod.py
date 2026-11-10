@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 
 if TYPE_CHECKING:
-    from orcapod.protocols.core_protocols.pod import ArgumentGroup, PodProtocol
+    from orcapod.protocols.core_protocols.pod import ArgumentGroup
     from orcapod.protocols.core_protocols.streams import StreamProtocol
     from orcapod.side_effects import SideEffectPodConfig, SideEffectPodStream
     from orcapod.types import ColumnConfig, Schema

@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 
 import pyarrow as pa
-import pytest
 
 from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.databases.in_memory_databases import InMemoryArrowDatabase

@@ -45,14 +45,14 @@ class TestSideEffectFunctionPodSchema:
         # Pod's exposed input schema excludes 'ctx' (pod-level filter)
         assert "ctx" not in pod.input_data_schema
         assert "value" in pod.input_data_schema
-        assert pod.input_data_schema["value"] == int
+        assert pod.input_data_schema["value"] is int
 
         # Underlying data function retains full schema (ctx included)
         assert "ctx" in pod._data_function.input_data_schema
 
         # Output schema has the declared key
         assert "result" in pod._data_function.output_data_schema
-        assert pod._data_function.output_data_schema["result"] == str
+        assert pod._data_function.output_data_schema["result"] is str
 
     def test_sf02_custom_ctx_arg_name(self):
         """SF-02: ctx_arg_name='context' — stripped and injected by correct name."""
@@ -361,7 +361,7 @@ class TestSideEffectFunctionJobNodeAsync:
             assert f"async_{i}" in output_values
 
 
-class TestSideEffectFunctionPodDecorator:
+class TestSideEffectFunctionPodDecoratorForms:
     """Tests for the side_effect_function_pod decorator."""
 
     def test_direct_decoration_returns_function_pod(self):
@@ -451,7 +451,6 @@ class TestSideEffectCtxCollision:
         from orcapod.side_effects import SideEffectPod
         import pyarrow as pa
         from orcapod.core.streams import ArrowTableStream
-        from orcapod.side_effects import InvocationContext
 
         calls = []
 

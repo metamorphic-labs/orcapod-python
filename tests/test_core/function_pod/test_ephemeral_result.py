@@ -655,7 +655,7 @@ class TestPipelineInjectsStore:
 
         job = PipelineJob(name="test_pipeline")
         with job:
-            output = pod(stream)
+            pod(stream)
 
         ephemeral_store = InMemoryArrowDatabase()
         job.set_ephemeral_store(ephemeral_store)

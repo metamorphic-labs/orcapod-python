@@ -63,7 +63,6 @@ from __future__ import annotations
 import random
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode

@@ -674,7 +674,6 @@ def test_list_of_int_produces_no_extension_type(tmp_path: Path) -> None:
 def test_schema_round_trip_list_of_uuid(tmp_path: Path) -> None:
     """arrow_schema_to_python_schema then python_schema_to_arrow_schema is identity for list[UUID]."""
     import uuid
-    import pyarrow as pa
     from orcapod.contexts import create_registry
 
     converter = create_registry().get_context().type_converter

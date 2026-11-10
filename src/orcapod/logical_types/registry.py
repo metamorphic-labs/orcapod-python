@@ -6,7 +6,6 @@ extension type in both PyArrow's and Polars' global registries.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import TYPE_CHECKING, Iterable

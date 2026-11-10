@@ -52,14 +52,14 @@ class TestCtxArgSchema:
         # Pod's exposed input schema excludes 'ctx'
         assert "ctx" not in pod.input_data_schema
         assert "value" in pod.input_data_schema
-        assert pod.input_data_schema["value"] == int
+        assert pod.input_data_schema["value"] is int
 
         # Underlying data function retains full schema (ctx included for hashing)
         assert "ctx" in pod._data_function.input_data_schema
 
         # Output schema has the declared key
         assert "result" in pod._data_function.output_data_schema
-        assert pod._data_function.output_data_schema["result"] == str
+        assert pod._data_function.output_data_schema["result"] is str
 
     def test_ctx02_ctx_arg_name_property(self):
         """Scenario 2: pod.ctx_arg_name reflects the configured arg name."""

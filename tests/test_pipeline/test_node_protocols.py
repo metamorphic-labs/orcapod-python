@@ -14,6 +14,16 @@ from orcapod.protocols.node_protocols import (
     is_function_node,
     is_operator_node,
 )
+import pyarrow as pa
+from orcapod.core.sources import ArrowTableSource
+from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.channels import Channel
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.core.nodes.operator_node import OperatorJobNode as OperatorNode
+from orcapod.core.operators.join import Join
+from orcapod.core.operators import SelectDataColumns
 
 
 class TestSourceNodeProtocol:
@@ -158,11 +168,6 @@ class TestTypeGuardDispatch:
         assert is_operator_node(node)
 
 
-import pyarrow as pa
-from orcapod.core.sources import ArrowTableSource
-from orcapod.core.nodes.source_node import SourceJobNode
-
-
 def _make_source_job_node(table, tag_col="key"):
     """Helper: create a SourceJobNode wrapping a concrete source.
 
@@ -231,9 +236,6 @@ class TestSourceNodeExecute:
         assert len(result) == 3
 
 
-from orcapod.channels import Channel
-
-
 class TestSourceNodeAsyncExecuteProtocol:
     @pytest.mark.asyncio
     async def test_tightened_signature(self):
@@ -283,11 +285,6 @@ class TestSourceNodeAsyncExecuteProtocol:
 # ===========================================================================
 # FunctionNode.execute() with observer
 # ===========================================================================
-
-from orcapod.core.function_pod import FunctionPod
-from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.nodes import FunctionNode
-from orcapod.core.nodes.function_node import FunctionJobNode
 
 
 def double_value(value: int) -> int:
@@ -440,9 +437,6 @@ class TestFunctionNodeAsyncExecute:
 # OperatorNode.execute() with observer + cache check
 # ===========================================================================
 
-from orcapod.core.nodes.operator_node import OperatorJobNode as OperatorNode
-from orcapod.core.operators.join import Join
-
 
 class TestOperatorNodeExecute:
     def _make_join_node(self):
@@ -496,8 +490,6 @@ class TestOperatorNodeExecute:
 # ===========================================================================
 # OperatorNode.async_execute() with observer
 # ===========================================================================
-
-from orcapod.core.operators import SelectDataColumns
 
 
 class TestOperatorNodeAsyncExecute:

@@ -18,8 +18,8 @@ from orcapod.protocols import core_protocols as cp
 from orcapod.types import CacheMode, NodeConfig
 
 if TYPE_CHECKING:
-    from orcapod.core.nodes import FunctionNode, GraphNode, OperatorNode
-    from orcapod.core.nodes.source_node import SourceNode
+    from pathlib import Path
+
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
     from orcapod.pipeline.graph import Pipeline

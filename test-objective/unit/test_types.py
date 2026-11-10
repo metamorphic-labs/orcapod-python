@@ -18,7 +18,7 @@ class TestSchemaImmutableMapping:
     def test_schema_acts_as_mapping(self):
         s = Schema({"x": int, "y": str})
         assert "x" in s
-        assert s["x"] == int
+        assert s["x"] is int
         assert len(s) == 2
         assert set(s) == {"x", "y"}
 
@@ -124,7 +124,7 @@ class TestSchemaMerge:
         a = Schema({"x": int, "y": str})
         b = Schema({"x": int, "z": float})
         merged = a.merge(b)
-        assert merged["x"] == int
+        assert merged["x"] is int
         assert "z" in merged
 
     def test_merge_raises_on_type_conflict(self):
@@ -202,12 +202,12 @@ class TestSchemaWithValues:
     def test_with_values_overrides_existing_type(self):
         s = Schema({"x": int})
         updated = s.with_values({"x": float})
-        assert updated["x"] == float
+        assert updated["x"] is float
 
     def test_with_values_does_not_mutate_original(self):
         s = Schema({"x": int})
         s.with_values({"x": float})
-        assert s["x"] == int
+        assert s["x"] is int
 
 
 # ---------------------------------------------------------------------------

@@ -160,7 +160,7 @@ class TestGoldenStability:
             if current != expected:
                 mismatches[key] = {"expected": expected, "current": current}
         assert not mismatches, (
-            f"Unexpected hash changes in stable annotations:\n"
+            "Unexpected hash changes in stable annotations:\n"
             + "\n".join(f"  {k}: {v}" for k, v in mismatches.items())
         )
 
@@ -175,7 +175,7 @@ class TestGoldenStability:
             if current != expected:
                 mismatches[key] = {"expected": expected, "current": current}
         assert not mismatches, (
-            f"Unexpected hash changes in stable functions:\n"
+            "Unexpected hash changes in stable functions:\n"
             + "\n".join(f"  {k}: {v}" for k, v in mismatches.items())
         )
 
@@ -195,7 +195,7 @@ class TestGoldenCanonical:
             if current == expected:
                 unchanged[key] = current
         assert not unchanged, (
-            f"Expected these annotation hashes to change after the fix, but they didn't:\n"
+            "Expected these annotation hashes to change after the fix, but they didn't:\n"
             + "\n".join(f"  {k}: {v}" for k, v in unchanged.items())
         )
 
@@ -210,7 +210,7 @@ class TestGoldenCanonical:
             if current == expected:
                 unchanged[key] = current
         assert not unchanged, (
-            f"Expected these function hashes to change after the fix, but they didn't:\n"
+            "Expected these function hashes to change after the fix, but they didn't:\n"
             + "\n".join(f"  {k}: {v}" for k, v in unchanged.items())
         )
 

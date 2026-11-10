@@ -5,6 +5,12 @@ from __future__ import annotations
 import pytest
 
 from orcapod.logical_types.base_logical_type import BaseLogicalType
+import dataclasses
+from orcapod.core.operators import Pick
+from orcapod.core.sources import DictSource
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.errors import InputValidationError
+from orcapod.core.operators import Index
 
 
 class ConcreteLogicalType(BaseLogicalType):
@@ -23,14 +29,6 @@ def test_base_logical_type_index_element_raises():
     lt = ConcreteLogicalType()
     with pytest.raises(NotImplementedError, match="does not support index"):
         lt.index_element()
-
-
-import dataclasses
-
-from orcapod.core.operators import Pick
-from orcapod.core.sources import DictSource
-from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.errors import InputValidationError
 
 
 # Module-level dataclass — must be at top level so it has a stable FQCN
@@ -96,7 +94,7 @@ def test_pick_dict_str_int_type_resolution():
 
     # Schema: output column must be int, not dict
     tag_schema, data_schema = result.output_schema()
-    assert data_schema["counts"] == int, (
+    assert data_schema["counts"] is int, (
         f"Expected int output type but got {data_schema['counts']}"
     )
 
@@ -116,7 +114,7 @@ def test_pick_dict_default_out(dict_stream):
     tag_schema, data_schema = result.output_schema()
 
     assert "scores" in data_schema
-    assert data_schema["scores"] == int
+    assert data_schema["scores"] is int
 
     rows = list(result.iter_data())
     assert len(rows) == 3
@@ -138,7 +136,7 @@ def test_pick_dict_explicit_out(dict_stream):
 
     assert "scores" in data_schema  # original preserved
     assert "speed_score" in data_schema
-    assert data_schema["speed_score"] == int
+    assert data_schema["speed_score"] is int
 
     rows = list(result.iter_data())
     assert [data["speed_score"] for _, data in rows] == [8, 7, 10]
@@ -221,8 +219,6 @@ def _make_list_stream(rows: list[dict]) -> ArrowTableStream:
 
 # ── build-time validation tests: Index ───────────────────────────────────────
 
-from orcapod.core.operators import Index
-
 
 def test_index_missing_column_raises():
     stream = _make_list_stream([{"id": 1, "items": [10, 20]}])
@@ -253,7 +249,7 @@ def test_index_list_default_out():
     tag_schema, data_schema = result.output_schema()
 
     assert "vals" in data_schema
-    assert data_schema["vals"] == int
+    assert data_schema["vals"] is int
 
     rows = list(result.iter_data())
     assert len(rows) == 2
@@ -279,7 +275,7 @@ def test_index_list_explicit_out():
 
     assert "vals" in data_schema  # original preserved
     assert "first" in data_schema
-    assert data_schema["first"] == int
+    assert data_schema["first"] is int
 
     rows = list(result.iter_data())
     assert [data["first"] for _, data in rows] == [10, 40]
@@ -349,7 +345,7 @@ def test_chained_pick_then_index():
     tag_schema, data_schema = result.output_schema()
 
     assert "data" in data_schema
-    assert data_schema["data"] == int
+    assert data_schema["data"] is int
 
     rows = list(result.iter_data())
     assert [data["data"] for _, data in rows] == [20, 50]
@@ -390,7 +386,7 @@ def test_composition_with_join():
 
     assert "meta" in data_schema  # now holds str, not dict
     assert "value" in data_schema
-    assert data_schema["meta"] == str
+    assert data_schema["meta"] is str
 
     rows = list(result.iter_data())
     assert len(rows) == 2

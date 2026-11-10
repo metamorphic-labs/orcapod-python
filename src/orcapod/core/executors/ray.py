@@ -123,9 +123,9 @@ class RayExecutor(PythonFunctionExecutorBase):
             try:
                 import cloudpickle
 
-                def _pickle_logger(l: logging.Logger) -> tuple:
+                def _pickle_logger(lgr: logging.Logger) -> tuple:
                     # Root logger has name "root" but must be fetched as ""
-                    name = "" if isinstance(l, logging.RootLogger) else l.name
+                    name = "" if isinstance(lgr, logging.RootLogger) else lgr.name
                     return logging.getLogger, (name,)
 
                 if logging.Logger not in cloudpickle.CloudPickler.dispatch:

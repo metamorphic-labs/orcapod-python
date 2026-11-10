@@ -11,7 +11,6 @@ Tests mathematical properties that operators must satisfy:
 from __future__ import annotations
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.operators import (
     DropDataColumns,

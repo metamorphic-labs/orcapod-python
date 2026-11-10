@@ -1,7 +1,6 @@
 """Tests for ExecutionObserverProtocol and NoOpObserver."""
 
 import inspect
-import pytest
 from orcapod.pipeline.observer import NoOpObserver
 from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 

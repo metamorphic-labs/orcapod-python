@@ -422,8 +422,8 @@ class TestMergeJoinOutputSchema:
         op = MergeJoin()
         _, data_schema = op.output_schema(left_stream, right_stream)
 
-        assert data_schema["extra_left"] == str
-        assert data_schema["extra_right"] == str
+        assert data_schema["extra_left"] is str
+        assert data_schema["extra_right"] is str
 
     def test_tag_schema_is_union(self, left_stream, right_stream):
         """Tag schema should be the union of both input tag schemas."""

@@ -270,7 +270,6 @@ class TestDeltaTableSourceNullability:
         source = DeltaTableSource(delta_mixed_nullable_path, tag_columns=["id"])
         _, data_schema = source.output_schema()
         # label is nullable=True in the Delta schema → must be str | None
-        import types
 
         assert data_schema["label"] == str | None
 

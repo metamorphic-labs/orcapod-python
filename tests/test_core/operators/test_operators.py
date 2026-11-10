@@ -903,12 +903,12 @@ class TestJoinOutputSchemaSystemTags:
             if not col_name.startswith(constants.SYSTEM_TAG_PREFIX):
                 continue
             if col_name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX):
-                assert col_type == bytes, (
+                assert col_type is bytes, (
                     f"record_id column '{col_name}' should map to bytes, "
                     f"got {col_type!r}"
                 )
             else:
-                assert col_type == str, (
+                assert col_type is str, (
                     f"source_id column '{col_name}' should map to str, got {col_type!r}"
                 )
 

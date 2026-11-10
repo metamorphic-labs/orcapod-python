@@ -9,7 +9,7 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
-from orcapod.pipeline import Pipeline, PipelineJob
+from orcapod.pipeline import PipelineJob
 
 
 def _make_source() -> ArrowTableSource:

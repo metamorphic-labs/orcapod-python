@@ -1,7 +1,6 @@
 """Tests for arrow_utils utility functions."""
 
 import pyarrow as pa
-import pytest
 
 from orcapod.types import ColumnConfig
 from orcapod.utils.arrow_utils import (

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import importlib
 from typing import Any
 
 import pytest

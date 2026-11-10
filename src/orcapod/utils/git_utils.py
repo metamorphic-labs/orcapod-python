@@ -60,7 +60,7 @@ def get_git_info(path):
             "repo_root": repo.working_dir,
         }
 
-    except:  # TODO: specify exception
+    except:  # noqa: E722 - TODO: specify exception; narrowing changes behaviour
         return None
 
 

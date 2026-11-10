@@ -104,7 +104,7 @@ class TestUnionInputStreamBinding:
         pod_stream = pod.process(make_str_stream())
         # The upstream stream's data schema must report the concrete str type
         _, input_data_schema = pod_stream.upstreams[0].output_schema()
-        assert input_data_schema["x"] == str
+        assert input_data_schema["x"] is str
 
     def test_bind_path_stream_succeeds(self):
         """Binding a Path-typed stream to a str | Path pod must succeed."""

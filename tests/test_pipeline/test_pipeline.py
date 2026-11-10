@@ -24,7 +24,7 @@ from orcapod.core.nodes import (
     SourceNode,
 )
 from orcapod.core.nodes.function_node import FunctionJobNode
-from orcapod.core.nodes.operator_node import OperatorJobNode, OperatorNodeBase
+from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import Join
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.sources import ArrowTableSource, CachedSource

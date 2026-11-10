@@ -295,7 +295,6 @@ class TestGetFunctionComponents:
             return True
 
         components = self._get(my_func)
-        combined = " ".join(components)
         assert any(c.startswith("name:") for c in components)
         assert any(c.startswith("module:") for c in components)
         assert any(c.startswith("source:") for c in components)

@@ -28,7 +28,6 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig
 
 
 # ---------------------------------------------------------------------------

@@ -525,7 +525,7 @@ class TestListExtensionHashing:
         """
         # Register the dataclass to get its Arrow extension type.
         ctx.type_converter.register_python_class(FileBundle)
-        ext_type = ctx.type_converter.python_type_to_arrow_type(FileBundle)
+        ctx.type_converter.python_type_to_arrow_type(FileBundle)
         # The storage is a struct<name: large_string, files: large_list<item: large_string>>.
         # We need to reconstruct the struct type with the list[File] extension type
         # for the `files` field so that visit_struct -> visit_extension(list[File]) fires.

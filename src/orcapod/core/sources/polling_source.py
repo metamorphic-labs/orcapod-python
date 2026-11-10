@@ -638,7 +638,6 @@ class PollingSource(RootSource, Generic[T]):
         no canonical schema has been established yet — the frame is silently
         skipped so that a spurious all-non-nullable schema is never recorded.
         """
-        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         # Handle Object-dtype columns (same pattern as DataFrameSource)
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]

@@ -20,7 +20,6 @@ import os
 import uuid
 from collections.abc import Iterator
 
-import pyarrow as pa
 import pytest
 
 psycopg = pytest.importorskip("psycopg")

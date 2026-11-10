@@ -1,6 +1,5 @@
 """Tests for _root/_scoped_path tracking on scoped database instances."""
 
-import pytest
 import pyarrow as pa
 from orcapod.databases.in_memory_databases import (
     InMemoryArrowDatabase as InMemoryDatabase,

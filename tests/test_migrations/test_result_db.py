@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import pyarrow as pa
-import pytest
 
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.migrations.result_db import migrate_result_v0_to_v1
-from orcapod.migrations.types import MigrationResult
 from orcapod.system_constants import RESULT_DB_SCHEMA_VERSION
 from orcapod.types import ContentHash
 

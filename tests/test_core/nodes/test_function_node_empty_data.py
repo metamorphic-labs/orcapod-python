@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import pyarrow as pa
 import pytest
-import asyncio
 
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.datagrams import Data
@@ -16,6 +15,7 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.system_constants import constants
 from orcapod.types import NodeConfig
+from orcapod.errors import EphemeralResultMissingError
 
 
 def double_value(value: int) -> int:
@@ -174,9 +174,6 @@ class TestLoadCachedEntriesEmptyData:
             assert isinstance(data, Data)
 
 
-from orcapod.errors import EphemeralResultMissingError
-
-
 class TestProcessDataInternalEmptyData:
     def test_cache_hit_returns_cached_result(self, ephemeral_node):
         """Downstream cache hit on EmptyData input returns the cached result."""
@@ -192,7 +189,7 @@ class TestProcessDataInternalEmptyData:
                 "value": pa.array([1], type=pa.int64()),
             }
         )
-        src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+        ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
 
         def triple_value(result: int) -> int:
             return result * 3
@@ -242,7 +239,7 @@ class TestProcessDataInternalEmptyData:
                 "value": pa.array([1], type=pa.int64()),
             }
         )
-        src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+        ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
 
         def triple_value(result: int) -> int:
             return result * 3

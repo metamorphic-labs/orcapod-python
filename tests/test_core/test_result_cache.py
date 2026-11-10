@@ -10,10 +10,8 @@ Covers:
 
 from __future__ import annotations
 
-from typing import Any
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.core.datagrams.tag_data import EmptyData

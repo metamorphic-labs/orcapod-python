@@ -359,7 +359,7 @@ class TestLogs:
 
     def test_contains_failure_traceback(self, results_root: Path):
         reader = ObservabilityReader(results_root)
-        df = reader.logs("node_b").filter(pl.col("success") == False)
+        df = reader.logs("node_b").filter(~pl.col("success"))
         assert len(df) == 1
         assert "ValueError: bad input" in df["traceback"].item()
         assert df["stderr_log"].item() == "Error processing subj_B"

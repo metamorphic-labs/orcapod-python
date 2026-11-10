@@ -844,7 +844,6 @@ class TestGenericExecutorDispatch:
 class TestLocalExecutorCallable:
     def test_execute_callable_with_async_fn(self):
         """LocalExecutor.execute_callable handles async functions via asyncio.run."""
-        import asyncio
 
         async def async_add(x: int, y: int) -> int:
             return x + y

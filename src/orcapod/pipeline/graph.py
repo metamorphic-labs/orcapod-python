@@ -22,7 +22,6 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import networkx as nx
     from orcapod.pipeline.dag import GraphProtocol
-    from orcapod.pipeline.execution_context import ExecutionContext
 else:
     nx = LazyModule("networkx")
 

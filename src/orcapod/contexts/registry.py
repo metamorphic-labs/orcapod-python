@@ -13,8 +13,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-_JSONSCHEMA_AVAILABLE = importlib.util.find_spec("jsonschema") is not None
-
 from orcapod.contexts.core import (
     ContextResolutionError,
     ContextValidationError,

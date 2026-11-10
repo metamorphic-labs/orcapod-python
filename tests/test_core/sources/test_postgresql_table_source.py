@@ -1,6 +1,9 @@
 """Unit tests for PostgreSQLTableSource."""
 
 from __future__ import annotations
+from unittest.mock import MagicMock, patch
+import pyarrow as pa
+import pytest
 
 
 # ===========================================================================
@@ -25,11 +28,6 @@ def test_in_core_sources_all():
 
     assert "PostgreSQLTableSource" in m.__all__
 
-
-from unittest.mock import MagicMock, patch
-
-import pyarrow as pa
-import pytest
 
 # ---------------------------------------------------------------------------
 # Shared helpers

@@ -507,7 +507,6 @@ class TestFormatConversions:
 
     def test_format_conversions_with_column_config(self):
         """Format conversions respect ColumnConfig."""
-        import polars as pl
 
         stream = _make_stream()
         df_default = stream.as_polars_df()

@@ -389,7 +389,6 @@ class TestCachedSourceWithSourceProxy:
     def _make_proxy(source):
         """Create a SourceProxy matching the given source's identity."""
         from orcapod.core.sources.source_proxy import SourceProxy
-        from orcapod.types import Schema
 
         tag_schema, data_schema = source.output_schema()
         return SourceProxy(

@@ -5,7 +5,6 @@ import pytest
 import pyarrow as pa
 
 from orcapod.core.streams import ArrowTableStream
-from orcapod.core.datagrams import Data, Tag
 
 
 def _make_stream(n: int = 3) -> ArrowTableStream:
@@ -76,7 +75,7 @@ class TestSideEffectPodConfig:
 class TestSideEffectInvocation:
     def test_construction(self):
         from orcapod.pipeline.pod_invocation import SideEffectInvocation
-        from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
+        from orcapod.side_effects import SideEffectPod
 
         calls = []
 
@@ -132,7 +131,7 @@ class TestSideEffectPodStandalone:
 
     def test_t2_passthrough_drop_on_failure_true_no_errors(self):
         """T2: All rows emitted when drop_on_failure=True and no errors."""
-        from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
+        from orcapod.side_effects import SideEffectPod
 
         calls = []
 
@@ -314,7 +313,6 @@ class TestSideEffectJobNodeSync:
     def test_t5_invocation_log_written_on_success(self):
         """T5: DB row written for each successful delivery."""
         import polars as pl
-        from orcapod.side_effects import SideEffectPod, SideEffectJobNode
 
         calls = []
 
@@ -815,7 +813,6 @@ class TestSideEffectInvocationLogHashType:
 
     def test_record_id_hash_bytes_stored_correctly(self):
         """The actual bytes are stored and retrievable unchanged."""
-        import pyarrow as pa
         from orcapod.databases import InMemoryArrowDatabase
         from orcapod.side_effects import _write_invocation_row
         from orcapod.types import ContentHash

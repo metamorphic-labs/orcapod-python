@@ -227,7 +227,7 @@ class AsyncPipelineOrchestrator:
                         predecessors = in_edges.get(node, [])
                         if not predecessors:
                             raise ValueError(
-                                f"SideEffectNode expects exactly 1 upstream, got 0"
+                                "SideEffectNode expects exactly 1 upstream, got 0"
                             )
                         input_reader = edge_readers[(predecessors[0], node)]
                         tg.create_task(

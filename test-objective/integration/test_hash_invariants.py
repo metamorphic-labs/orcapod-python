@@ -8,7 +8,6 @@ Tests the two parallel identity chains documented in the design spec:
 from __future__ import annotations
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import Join, SemiJoin

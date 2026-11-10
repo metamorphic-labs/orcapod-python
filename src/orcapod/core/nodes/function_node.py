@@ -689,8 +689,6 @@ class FunctionNode(FunctionNodeBase):
                 invoking ``as_node()``.
         """
         if self._function_pod is None:
-            from orcapod.pipeline.serialization import LoadStatus
-
             raise RuntimeError(
                 f"Cannot clone FunctionNode {self._label!r} into a blueprint: "
                 "the node is UNAVAILABLE (no live function pod was provided when "

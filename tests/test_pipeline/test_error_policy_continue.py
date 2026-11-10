@@ -84,4 +84,4 @@ def test_empty_buffer_schema_preserves_nullability():
     tag_schema, data_schema = stream.output_schema()
 
     # "result" is declared as int (required), must NOT become int | None
-    assert data_schema["result"] == int
+    assert data_schema["result"] is int

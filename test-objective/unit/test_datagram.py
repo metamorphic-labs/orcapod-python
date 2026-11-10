@@ -1,10 +1,8 @@
 """Specification-derived tests for Datagram."""
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.datagrams.datagram import Datagram
-from orcapod.types import ColumnConfig
 
 
 # ---------------------------------------------------------------------------

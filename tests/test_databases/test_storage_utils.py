@@ -1,6 +1,5 @@
 """Unit tests for orcapod.databases.storage_utils."""
 
-import pytest
 from upath import UPath
 
 from orcapod.databases.storage_utils import is_cloud_uri, parse_base_path

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import uuid as _uuid_module
-from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -442,7 +441,7 @@ def test_reconstruct_from_arrow_registers_nested_types():
     )
 
     # reconstruct_from_arrow for Outer should trigger registration of Inner as a side effect
-    lt = factory.reconstruct_from_arrow(
+    factory.reconstruct_from_arrow(
         outer_fqcn, outer_storage, {"category": "orcapod.dataclass"}, converter
     )
 
@@ -519,7 +518,6 @@ def test_import_from_fqcn_nested_class():
 
     # _OuterForNestedTest.Inner lives in this test module; its FQCN uses '.' for nesting
     module = _OuterForNestedTest.__module__
-    outer_qualname = _OuterForNestedTest.__qualname__
     inner_qualname = (
         _OuterForNestedTest.Inner.__qualname__
     )  # e.g. "_OuterForNestedTest.Inner"

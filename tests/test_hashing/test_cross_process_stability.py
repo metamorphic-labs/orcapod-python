@@ -25,7 +25,6 @@ import sys
 import textwrap
 
 import pyarrow as pa
-import pytest
 
 from orcapod.hashing.versioned_hashers import (
     get_versioned_semantic_arrow_hasher,

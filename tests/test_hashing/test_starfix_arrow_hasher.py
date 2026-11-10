@@ -24,7 +24,6 @@ Coverage
 
 from __future__ import annotations
 
-import pytest
 import pyarrow as pa
 
 from orcapod.hashing.arrow_hashers import StarfixArrowHasher

@@ -21,7 +21,6 @@ import pytest
 from deltalake import write_deltalake
 
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.nodes import FunctionNode, OperatorNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import Join
@@ -114,20 +113,20 @@ def delta_dir(tmp_path):
 def clinic_a(delta_dir):
     """Create clinic A's Delta tables and return (patients_path, labs_path)."""
     p = delta_dir / "clinic_a_patients"
-    l = delta_dir / "clinic_a_labs"
+    labs = delta_dir / "clinic_a_labs"
     _make_patients(p, ["p1", "p2", "p3"], [30, 45, 60])
-    _make_labs(l, ["p1", "p2", "p3"], [180, 220, 260])
-    return p, l
+    _make_labs(labs, ["p1", "p2", "p3"], [180, 220, 260])
+    return p, labs
 
 
 @pytest.fixture
 def clinic_b(delta_dir):
     """Create clinic B's Delta tables and return (patients_path, labs_path)."""
     p = delta_dir / "clinic_b_patients"
-    l = delta_dir / "clinic_b_labs"
+    labs = delta_dir / "clinic_b_labs"
     _make_patients(p, ["x1", "x2"], [28, 72])
-    _make_labs(l, ["x1", "x2"], [160, 290])
-    return p, l
+    _make_labs(labs, ["x1", "x2"], [160, 290])
+    return p, labs
 
 
 @pytest.fixture

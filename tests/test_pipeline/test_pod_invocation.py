@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 import pyarrow as pa
 
 from orcapod.core.function_pod import FunctionPod

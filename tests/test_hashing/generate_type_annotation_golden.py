@@ -21,11 +21,12 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from orcapod.hashing.defaults import get_default_semantic_hasher
-from orcapod.hashing.semantic_hashing.function_info_extractors import (
+# The imports below must follow the sys.path setup above.
+from orcapod.hashing.defaults import get_default_semantic_hasher  # noqa: E402
+from orcapod.hashing.semantic_hashing.function_info_extractors import (  # noqa: E402
     FunctionSignatureExtractor,
 )
-from tests.test_hashing.test_type_annotation_golden import (
+from tests.test_hashing.test_type_annotation_golden import (  # noqa: E402
     ANNOTATION_CASES,
     FUNCTION_CASES,
 )

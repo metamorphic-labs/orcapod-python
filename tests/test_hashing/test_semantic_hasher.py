@@ -1256,7 +1256,9 @@ class TestResolver:
         rec = SimpleRecord("hello", 1, semantic_hasher=obj_hasher)
 
         # Resolver that uses the calling hasher instead of the object's own hasher
-        resolver = lambda obj: calling_hasher.hash_object(obj.identity_structure())
+        def resolver(obj):
+            return calling_hasher.hash_object(obj.identity_structure())
+
         result = calling_hasher.hash_object(rec, resolver=resolver)
 
         assert result == calling_hasher.hash_object(rec.identity_structure())
@@ -1291,7 +1293,9 @@ class TestResolver:
         assert no_resolver_result == expected_no_resolver
 
         # With a resolver that uses calling_hasher for inner, the token differs
-        resolver = lambda obj: calling_hasher.hash_object(obj.identity_structure())
+        def resolver(obj):
+            return calling_hasher.hash_object(obj.identity_structure())
+
         resolver_result = calling_hasher.hash_object([inner], resolver=resolver)
         inner_via_calling = calling_hasher.hash_object(inner.identity_structure())
         expected_resolver = calling_hasher.hash_object([inner_via_calling])
@@ -1305,7 +1309,9 @@ class TestResolver:
         obj_hasher = SemanticAwarePythonHasher(hasher_id="inner_v1")
         inner = SimpleRecord("x", 1, semantic_hasher=obj_hasher)
 
-        resolver = lambda obj: calling_hasher.hash_object(obj.identity_structure())
+        def resolver(obj):
+            return calling_hasher.hash_object(obj.identity_structure())
+
         result_with_resolver = calling_hasher.hash_object((inner,), resolver=resolver)
         inner_hash = calling_hasher.hash_object(inner.identity_structure())
         expected = calling_hasher.hash_object((inner_hash,))
@@ -1317,7 +1323,9 @@ class TestResolver:
         obj_hasher = SemanticAwarePythonHasher(hasher_id="inner_v1")
         inner = SimpleRecord("v", 2, semantic_hasher=obj_hasher)
 
-        resolver = lambda obj: calling_hasher.hash_object(obj.identity_structure())
+        def resolver(obj):
+            return calling_hasher.hash_object(obj.identity_structure())
+
         result = calling_hasher.hash_object({"key": inner}, resolver=resolver)
         inner_hash = calling_hasher.hash_object(inner.identity_structure())
         expected = calling_hasher.hash_object({"key": inner_hash})
@@ -1327,7 +1335,10 @@ class TestResolver:
         """Resolver has no observable effect on primitive values."""
         h = make_hasher(strict=True)
         called = []
-        resolver = lambda obj: (called.append(obj), obj.content_hash())[1]
+
+        def resolver(obj):
+            return (called.append(obj), obj.content_hash())[1]
+
         for value in [42, "hello", None, True, 3.14]:
             h.hash_object(value, resolver=resolver)
         assert called == []
@@ -1336,7 +1347,10 @@ class TestResolver:
         """Resolver has no effect when the object is a ContentHash terminal."""
         h = make_hasher(strict=True)
         called = []
-        resolver = lambda obj: (called.append(obj), obj.content_hash())[1]
+
+        def resolver(obj):
+            return (called.append(obj), obj.content_hash())[1]
+
         ch = ContentHash("some_method", b"\xaa" * 32)
         result = h.hash_object(ch, resolver=resolver)
         assert result is ch

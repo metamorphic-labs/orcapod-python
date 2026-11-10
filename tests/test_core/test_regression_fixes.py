@@ -35,11 +35,9 @@ from orcapod.core.data_function import (
 from orcapod.core.sources.dict_source import DictSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.protocols.core_protocols import (
-    DataFunctionExecutorProtocol,
     DataFunctionProtocol,
     DataProtocol,
 )
-from orcapod.types import PodConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -563,7 +561,6 @@ class TestRayExecutorInitialization:
         to verify that wrap_future correctly bridges the concurrent.futures
         and asyncio worlds — not just pre-resolved futures.
         """
-        import asyncio
         import threading
         from concurrent.futures import Future
         from unittest.mock import MagicMock, patch

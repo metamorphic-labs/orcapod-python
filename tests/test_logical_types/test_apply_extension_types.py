@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 
 import pyarrow as pa
-import pytest
 
 from orcapod.logical_types.registry import (
     LogicalTypeRegistry,

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
 import pyarrow as pa
 
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.nodes.source_node import SourceNode, SourceJobNode
 from orcapod.pipeline import Pipeline

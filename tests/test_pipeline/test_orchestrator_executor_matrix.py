@@ -35,7 +35,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pyarrow as pa
-import pytest
 
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function import PythonDataFunction

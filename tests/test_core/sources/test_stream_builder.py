@@ -6,6 +6,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.sources.stream_builder import SourceStreamBuilder, SourceStreamResult
+from orcapod.core.sources.arrow_table_source import ArrowTableSource
 
 
 class TestSourceStreamBuilder:
@@ -135,9 +136,6 @@ class TestSourceStreamBuilderRespectsSchema:
         result_nullable = builder.build(nullable_table, tag_columns=["id"])
         result_non_nullable = builder.build(non_nullable_table, tag_columns=["id"])
         assert result_nullable.schema_hash != result_non_nullable.schema_hash
-
-
-from orcapod.core.sources.arrow_table_source import ArrowTableSource
 
 
 class TestArrowTableSourceUsesBuilder:

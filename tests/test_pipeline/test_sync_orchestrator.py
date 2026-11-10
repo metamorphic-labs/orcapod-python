@@ -6,7 +6,6 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.function_pod import FunctionPod
-from orcapod.core.operators import SelectDataColumns
 from orcapod.core.operators.join import Join
 from orcapod.core.operators.mappers import MapData
 from orcapod.core.data_function import PythonDataFunction

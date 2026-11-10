@@ -9,6 +9,11 @@ from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
 from orcapod.errors import UnboundSourceError
 from orcapod.pipeline.serialization import LoadStatus
 from orcapod.types import Schema
+from orcapod.core.nodes.function_node import FunctionNode
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.operators import Join
 
 
 class TestSourceNodeFromDescriptor:
@@ -99,11 +104,6 @@ class TestSourceNodeFromDescriptor:
         assert node2.pipeline_hash() == ph
 
 
-from orcapod.core.nodes.function_node import FunctionNode
-from orcapod.core.function_pod import FunctionPod
-from orcapod.core.data_function import PythonDataFunction
-
-
 def _sample_func(b: int) -> dict[str, int]:
     return {"result": b * 2}
 
@@ -168,10 +168,6 @@ class TestFunctionNodeFromDescriptor:
             databases={"pipeline": db, "result": db},
         )
         assert loaded.load_status in (LoadStatus.READ_ONLY, LoadStatus.UNAVAILABLE)
-
-
-from orcapod.core.nodes.operator_node import OperatorJobNode
-from orcapod.core.operators import Join
 
 
 class TestOperatorNodeFromDescriptor:
