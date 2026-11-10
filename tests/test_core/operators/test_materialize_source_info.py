@@ -420,7 +420,6 @@ class TestSyncOrchestratorMaterialization:
         stream = SyncPipelineOrchestrator._materialize_as_stream(buf, node)
         assert _tokens(list(stream.iter_data())) == _tokens(buf)
         assert stream.pipeline_hash() == node.pipeline_hash()
-        assert stream.content_hash() == node.content_hash()
 
     def test_buffer_keeps_list_tokens(self):
         src = _source(4)
@@ -429,6 +428,8 @@ class TestSyncOrchestratorMaterialization:
         buf = list(node.iter_data())
         stream = SyncPipelineOrchestrator._materialize_as_stream(buf, node)
         assert _tokens(list(stream.iter_data())) == _tokens(buf)
+        assert stream.pipeline_hash() == node.pipeline_hash()
+        assert stream.content_hash() == node.content_hash()
         fields = _source_fields(stream.as_table(columns={"source": True}))
         assert fields["_source_x"] == pa.field(
             "_source_x", pa.large_list(pa.large_string()), nullable=False
