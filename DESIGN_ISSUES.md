@@ -2061,3 +2061,48 @@ their values on `main` in `tests/test_semantic_types/test_struct_layout_identity
 unions do not have this problem: their Python types do not depend on child layouts. This is a
 workaround (`TODO(ITL-841)` in the code); ITL-841 revisits the treatment of large variants
 everywhere.
+
+---
+
+## `src/orcapod/core/operators/join.py` — async path
+
+### JA1 — `Join`'s async path rebuilt rows from Python values
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-837
+
+`Join.async_execute` merged each matched pair by building `Tag(merged_dict)` and
+`Data(merged_dict)` from `as_dict()` values (`_merge_pair_rename` for two inputs,
+`_merge_pair_passthrough` and `_rename_sys_tags` for the staggered path of three or more), so
+every column's Arrow type was inferred again: `int16` and `int8` became `int64`, nullability
+was lost, a `dict` column could not be built, and the Tag/Data content hashes differed from the
+sync path for the same rows. `Data.content_hash()` is the input hash a function node stores, so
+cache hits did not carry over between sync and async runs.
+
+The developer's standing rules, which the fix follows:
+
+- Never infer an Arrow type from Python values when the input already has one; no bare
+  `pa.array(values)` / `from_pylist` without a schema, no hand-written inference table. Where
+  no Arrow type is known, use the data context's type converter.
+- Arrow types are normalized to their large variants (`arrow_utils.normalize_to_large_types`).
+  Width, nullability (top level and nested), struct fields and logical types never change.
+  Anything else that disagrees is an error, never a promotion.
+- A list of a logical type is the logical list of that logical type.
+- Operators take the data context from the stream or the datagrams they are given, never from
+  `self.data_context` or a hand-called `contexts.resolve_context`; operators carry no
+  converter state.
+- `Join` is commutative: async output columns follow the sync path's canonical order.
+
+**Fix:** the async merge builds each row from the inputs' Arrow tables (`as_table()`): tag
+columns in canonical order with a shared key taking the right input's field as the sync path
+does, data columns stacked with `hstack_tables`, source info merged, system tags renamed as
+before. The new `Tag`/`Data` take the left (canonically first) input datagram's
+`data_context_key`. A shared tag key whose Arrow types still differ after large-normalization
+raises `InputValidationError` on both paths through `arrow_utils.resolve_disagreeing_types`
+(moved there from `MergeJoin` so both operators share one rule); the sync path used to keep the
+right input's type silently. `Datagram.copy()` no longer turns a lazy Python schema into an
+empty one (it broke `schema()` of async `Index`/`Pick` rows).
+`tests/test_core/operators/test_async_sync_equivalence.py` runs every operator with its own
+async path through both paths and compares types, nullability, column order, system tags,
+content and schema hashes; differences that are not type re-inference are strict xfails (O3
+provenance, ITL-838 `Data.select`/`drop` source info, SemiJoin over nested columns).

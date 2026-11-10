@@ -33,14 +33,16 @@ import pytest
 from orcapod.contexts import get_default_context, get_default_type_converter
 from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.core.operators import MergeJoin, PolarsFilter
-from orcapod.core.operators.merge_join import _resolve_disagreeing_types
 from orcapod.core.sources import CSVSource, DictSource
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
-from orcapod.utils.arrow_utils import normalize_to_large_types
+from orcapod.utils.arrow_utils import (
+    normalize_to_large_types,
+    resolve_disagreeing_types,
+)
 
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
 STRUCT = pa.struct([("a", pa.int8()), ("b", pa.string())])
@@ -350,8 +352,8 @@ class TestResolveDisagreeingTypes:
     ) -> None:
         """Layout-only differences resolve to the large variant, in either order."""
         del values
-        assert _resolve_disagreeing_types("c", left, right) == expected
-        assert _resolve_disagreeing_types("c", right, left) == expected
+        assert resolve_disagreeing_types("c", left, right, "MergeJoin") == expected
+        assert resolve_disagreeing_types("c", right, left, "MergeJoin") == expected
 
     @pytest.mark.parametrize(("left", "right", "values"), MISMATCHED_PAIRS, ids=_ids)
     def test_other_difference_raises(
@@ -361,7 +363,7 @@ class TestResolveDisagreeingTypes:
         del values
         for first, second in ((left, right), (right, left)):
             with pytest.raises(InputValidationError) as excinfo:
-                _resolve_disagreeing_types("col", first, second)
+                resolve_disagreeing_types("col", first, second, "MergeJoin")
             message = str(excinfo.value)
             assert "'col'" in message
             assert str(first) in message
@@ -371,7 +373,7 @@ class TestResolveDisagreeingTypes:
         """Structs whose fields differ are not layout variants of each other."""
         other = pa.struct([("a", pa.int8()), ("c", pa.string())])
         with pytest.raises(InputValidationError):
-            _resolve_disagreeing_types("s", STRUCT, other)
+            resolve_disagreeing_types("s", STRUCT, other, "MergeJoin")
 
 
 class TestDisagreeingInputs:

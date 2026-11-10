@@ -293,6 +293,16 @@ class TestDatagramCopy:
         d2 = d.copy(include_cache=False)
         assert d2._context_table is None
 
+    @pytest.mark.parametrize("include_cache", [True, False])
+    def test_copy_keeps_lazy_python_schema(self, include_cache):
+        """A copy of an Arrow-backed datagram whose Python schema is not yet
+        computed derives it later, rather than holding an empty schema (ITL-837)."""
+        d = Data(pa.table({"a": pa.array([1], pa.int8()), "b": pa.array(["x"])}))
+        assert d._data_python_schema is None
+        d2 = d.copy(include_cache=include_cache)
+        assert dict(d2.schema()) == {"a": int | None, "b": str | None}
+        assert d2.with_source_info(a="s").schema() == d.schema()
+
 
 # ---------------------------------------------------------------------------
 # Tag — lazy system-tags table

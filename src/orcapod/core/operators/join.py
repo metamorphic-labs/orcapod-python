@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -13,7 +13,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
 )
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, ContentHash, DataValue, Schema
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -237,6 +237,15 @@ class Join(NonZeroInputOperator):
                 )
 
             common_tag_keys = tag_keys.intersection(next_tag_keys)
+            # A shared tag key must have one Arrow type in both inputs (up to
+            # layout); otherwise Polars would join and keep one side's type.
+            for key in sorted(common_tag_keys):
+                _ = arrow_utils.resolve_disagreeing_types(
+                    key,
+                    arrow_utils.column_arrow_type(table.schema, key),
+                    arrow_utils.column_arrow_type(next_table.schema, key),
+                    "Join",
+                )
             common_tag_keys.add(COMMON_JOIN_KEY)
 
             # Capture the left-side schema before the Polars join, which sets all
@@ -615,24 +624,128 @@ class Join(NonZeroInputOperator):
 
         Used as a pre-processing step in ``_staggered_join`` so that
         downstream binary joins can pass system tags through without
-        modification.
+        modification. The tag's user columns keep their Arrow table.
         """
-        from orcapod.core.datagrams import Tag
-
         try:
             async for tag, pkt in ch_in:
                 sys_tags = tag.system_tags()
                 if sys_tags:
-                    renamed: dict = {}
+                    renamed: dict[str, DataValue] = {}
                     for k, v in sys_tags.items():
                         new_key = (
                             f"{k}{block_sep}{suffix}" if k.startswith(sys_prefix) else k
                         )
                         renamed[new_key] = v
-                    tag = Tag(tag.as_dict(), system_tags=renamed)
+                    tag = Join._build_tag(
+                        Join._merge_tag_tables(tag, None), renamed, tag.data_context_key
+                    )
                 await ch_out.send((tag, pkt))
         finally:
             await ch_out.close()
+
+    @staticmethod
+    def _merge_tag_tables(
+        left: TagProtocol, right: TagProtocol | None
+    ) -> "pa.Table | None":
+        """Merge two tags' user columns as Arrow, in Join's column order.
+
+        The left tag's columns come first, then the right tag's columns the
+        left lacks. The async path joins in canonical order, so this is the
+        order ``_joined_user_schemas`` defines. A shared (join-key) column
+        takes the right tag's field, as ``static_process`` does
+        (``restore_schema_nullability`` lets the last reference win); the
+        values are equal because the rows matched on it.
+
+        Every column keeps the Arrow type it already has: nothing is
+        re-inferred from Python values.
+
+        Args:
+            left: The canonically earlier tag.
+            right: The later tag, or ``None`` to take ``left``'s columns alone.
+
+        Returns:
+            The merged one-row table, or ``None`` when neither tag has user
+            columns (a tagless join).
+
+        Raises:
+            InputValidationError: If a shared column's large-normalized Arrow
+                types differ between the two tags
+                (``arrow_utils.resolve_disagreeing_types``).
+        """
+        tables = [left.as_table()]
+        if right is not None:
+            tables.append(right.as_table())
+        fields: dict[str, pa.Field[Any]] = {}  # pyright: ignore[reportExplicitAny]  # Field is invariant; Any admits every Arrow type
+        types: dict[str, pa.DataType] = {}
+        arrays: dict[str, Any] = {}  # pyright: ignore[reportExplicitAny]  # a pa.ChunkedArray of any type
+        for table in tables:
+            # A tag without user columns is a zero-column, zero-row table.
+            for index, name in enumerate(table.column_names):
+                arrow_type = table.schema.types[index]
+                if name in types:
+                    _ = arrow_utils.resolve_disagreeing_types(
+                        name, types[name], arrow_type, "Join"
+                    )
+                types[name] = arrow_type
+                fields[name] = table.schema.field(index)
+                arrays[name] = table.column(index)
+        if not fields:
+            return None
+        return pa.Table.from_arrays(
+            list(arrays.values()), schema=pa.schema(list(fields.values()))
+        )
+
+    @staticmethod
+    def _build_tag(
+        table: "pa.Table | None",
+        system_tags: Mapping[str, DataValue],
+        data_context_key: str,
+    ) -> TagProtocol:
+        """Build a ``Tag`` from a merged Arrow table and its system tags.
+
+        Args:
+            table: The tag's user columns, or ``None`` for a tag without any.
+            system_tags: The tag's system tags, already renamed and sorted.
+            data_context_key: The data context key of the incoming datagrams.
+
+        Returns:
+            The new tag.
+        """
+        from orcapod.core.datagrams import Tag
+
+        if table is None:
+            return Tag({}, system_tags=system_tags, data_context=data_context_key)
+        return Tag(table, system_tags=system_tags, data_context=data_context_key)
+
+    @staticmethod
+    def _merge_data(left: DataProtocol, right: DataProtocol) -> DataProtocol:
+        """Merge two data datagrams as Arrow, left columns first.
+
+        Every column keeps the Arrow type it already has, and the source info
+        of both sides is carried over.
+
+        Args:
+            left: The canonically earlier data.
+            right: The later data.
+
+        Returns:
+            The merged data, in the context of ``left``.
+
+        Raises:
+            InputValidationError: If both sides have a column of the same name.
+        """
+        from orcapod.core.datagrams import Data
+
+        left_table, right_table = left.as_table(), right.as_table()
+        if overlap := set(left_table.column_names) & set(right_table.column_names):
+            raise InputValidationError(
+                f"Join: inputs share data columns {sorted(overlap)}."
+            )
+        return Data(
+            arrow_utils.hstack_tables(left_table, right_table),
+            source_info={**left.source_info(), **right.source_info()},
+            data_context=left.data_context_key,
+        )
 
     @staticmethod
     def _merge_pair_rename(
@@ -646,22 +759,13 @@ class Join(NonZeroInputOperator):
         """Merge a matched pair, renaming system tags with per-side suffixes.
 
         Used for direct 2-input joins where system tags are renamed
-        during the merge (not pre-renamed).
+        during the merge (not pre-renamed). The merged row is built from the
+        inputs' Arrow tables, in the left (canonically first) tag's context.
         """
-        from orcapod.core.datagrams import Data, Tag
-
         sys_prefix = constants.SYSTEM_TAG_PREFIX
 
-        # Merge tag dicts — shared keys come from left
-        merged_tag_d: dict = {}
-        for k, v in left_tag.as_dict().items():
-            merged_tag_d[k] = v
-        for k, v in right_tag.as_dict().items():
-            if k not in merged_tag_d:
-                merged_tag_d[k] = v
-
         # Rename and merge system tags
-        merged_sys: dict = {}
+        merged_sys: dict[str, DataValue] = {}
         for i, tag in enumerate((left_tag, right_tag)):
             for k, v in tag.system_tags().items():
                 new_key = (
@@ -670,18 +774,12 @@ class Join(NonZeroInputOperator):
                 merged_sys[new_key] = v
 
         merged_sys = Join._sort_merged_system_tags(merged_sys)
-        merged_tag = Tag(merged_tag_d, system_tags=merged_sys)
-
-        # Merge data dicts (non-overlapping by Join's validation)
-        merged_pkt_d: dict = {}
-        merged_si: dict = {}
-        merged_pkt_d.update(left_pkt.as_dict())
-        merged_pkt_d.update(right_pkt.as_dict())
-        merged_si.update(left_pkt.source_info())
-        merged_si.update(right_pkt.source_info())
-
-        merged_pkt = Data(merged_pkt_d, source_info=merged_si)
-        return merged_tag, merged_pkt
+        merged_tag = Join._build_tag(
+            Join._merge_tag_tables(left_tag, right_tag),
+            merged_sys,
+            left_tag.data_context_key,
+        )
+        return merged_tag, Join._merge_data(left_pkt, right_pkt)
 
     @staticmethod
     def _merge_pair_passthrough(
@@ -693,37 +791,22 @@ class Join(NonZeroInputOperator):
         """Merge a matched pair, passing system tags through without renaming.
 
         Used in the staggered chain where system tags have already been
-        pre-renamed by ``_rename_sys_tags``.
+        pre-renamed by ``_rename_sys_tags``. The merged row is built from the
+        inputs' Arrow tables, in the left (canonically first) tag's context.
         """
-        from orcapod.core.datagrams import Data, Tag
-
-        # Merge tag dicts — shared keys come from left
-        merged_tag_d: dict = {}
-        for k, v in left_tag.as_dict().items():
-            merged_tag_d[k] = v
-        for k, v in right_tag.as_dict().items():
-            if k not in merged_tag_d:
-                merged_tag_d[k] = v
-
         # Combine system tags (already renamed)
-        merged_sys: dict = {}
+        merged_sys: dict[str, DataValue] = {}
         merged_sys.update(left_tag.system_tags())
         merged_sys.update(right_tag.system_tags())
 
         # Sort within same-provenance-path groups for commutativity
         merged_sys = Join._sort_merged_system_tags(merged_sys)
-        merged_tag = Tag(merged_tag_d, system_tags=merged_sys)
-
-        # Merge data dicts (non-overlapping by Join's validation)
-        merged_pkt_d: dict = {}
-        merged_si: dict = {}
-        merged_pkt_d.update(left_pkt.as_dict())
-        merged_pkt_d.update(right_pkt.as_dict())
-        merged_si.update(left_pkt.source_info())
-        merged_si.update(right_pkt.source_info())
-
-        merged_pkt = Data(merged_pkt_d, source_info=merged_si)
-        return merged_tag, merged_pkt
+        merged_tag = Join._build_tag(
+            Join._merge_tag_tables(left_tag, right_tag),
+            merged_sys,
+            left_tag.data_context_key,
+        )
+        return merged_tag, Join._merge_data(left_pkt, right_pkt)
 
     @staticmethod
     def _sort_merged_system_tags(merged_sys: dict) -> dict:
