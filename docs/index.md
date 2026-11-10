@@ -7,16 +7,16 @@ content-addressable, and reproducible by design.
 
 ## Installation
 
-Install from [PyPI](https://pypi.org/project/orcapod/) using [uv](https://docs.astral.sh/uv/):
+Install from [PyPI](https://pypi.org/project/orcapod/) with pip:
+
+```bash
+pip install orcapod
+```
+
+or, in a project managed with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv add orcapod
-```
-
-For the latest development version, install directly from GitHub:
-
-```bash
-uv add git+https://github.com/metamorphic-labs/orcapod-python.git
 ```
 
 Rendering pipeline graphs additionally requires the [Graphviz](https://graphviz.org/download/)

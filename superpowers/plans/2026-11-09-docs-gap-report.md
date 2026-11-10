@@ -46,9 +46,10 @@ beyond "every name resolves and the build is clean", and the internal directorie
 
 ### Install — thin
 
-`docs/index.md` shows `uv add orcapod` and a GitHub install. Fixed here: the GitHub URL and
-`mkdocs.yml` `repo_url` pointed at `walkerlab/orcapod-python`; the repository is
-`nauticalab/orcapod-python`.
+`docs/index.md` shows `pip install orcapod` and `uv add orcapod`, nothing else. Fixed here:
+the page also showed an install-from-GitHub command and `mkdocs.yml` had a `repo_url`, both
+pointing at a stale location. The repository is private and Orcapod is distributed only
+through PyPI, so the git install and the site's repository link were removed.
 
 Missing: supported Python versions, the optional extras (`redis`, `ray`, `postgresql`,
 `spiraldb`), and a "check your install" snippet. Two things a workshop will hit on day one:
