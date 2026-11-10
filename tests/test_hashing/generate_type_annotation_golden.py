@@ -8,6 +8,7 @@ Outputs: tests/test_hashing/hash_samples/type_annotation_golden.json
 Note: ANNOTATION_CASES and FUNCTION_CASES are imported from test_type_annotation_golden
 so that function hashes are produced with the correct module path (the test module).
 """
+
 from __future__ import annotations
 
 import json
@@ -29,14 +30,20 @@ from tests.test_hashing.test_type_annotation_golden import (
     FUNCTION_CASES,
 )
 
-GOLDEN_PATH = pathlib.Path(__file__).parent / "hash_samples" / "type_annotation_golden.json"
+GOLDEN_PATH = (
+    pathlib.Path(__file__).parent / "hash_samples" / "type_annotation_golden.json"
+)
 
 
 def main() -> None:
     hasher = get_default_semantic_hasher()
     extractor = FunctionSignatureExtractor(include_module=True, include_defaults=True)
 
-    result: dict = {"annotation_hashes": {}, "function_info_hashes": {}, "function_object_hashes": {}}
+    result: dict = {
+        "annotation_hashes": {},
+        "function_info_hashes": {},
+        "function_object_hashes": {},
+    }
 
     # Hash bare annotations through TypeObjectHandler
     for key, ann in ANNOTATION_CASES.items():

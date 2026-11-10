@@ -235,11 +235,13 @@ def delta_mixed_nullable_path(tmp_path: Path) -> Path:
     """Create a Delta table with a mix of nullable and non-nullable columns."""
     from deltalake import write_deltalake
 
-    schema = pa.schema([
-        pa.field("id",    pa.int64(),        nullable=False),
-        pa.field("label", pa.large_string(), nullable=True),
-        pa.field("score", pa.float64(),      nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("label", pa.large_string(), nullable=True),
+            pa.field("score", pa.float64(), nullable=False),
+        ]
+    )
     table = pa.table(
         {"id": [1, 2], "label": ["a", "b"], "score": [1.0, 2.0]},
         schema=schema,
@@ -256,9 +258,7 @@ class TestDeltaTableSourceNullability:
         self, delta_mixed_nullable_path: Path
     ) -> None:
         """Columns declared NOT NULL in the Delta schema must map to T, not T | None."""
-        source = DeltaTableSource(
-            delta_mixed_nullable_path, tag_columns=["id"]
-        )
+        source = DeltaTableSource(delta_mixed_nullable_path, tag_columns=["id"])
         _, data_schema = source.output_schema()
         # score is nullable=False in the Delta schema → must be float, not float | None
         assert data_schema["score"] is float
@@ -267,12 +267,11 @@ class TestDeltaTableSourceNullability:
         self, delta_mixed_nullable_path: Path
     ) -> None:
         """Columns declared nullable in the Delta schema must map to T | None."""
-        source = DeltaTableSource(
-            delta_mixed_nullable_path, tag_columns=["id"]
-        )
+        source = DeltaTableSource(delta_mixed_nullable_path, tag_columns=["id"])
         _, data_schema = source.output_schema()
         # label is nullable=True in the Delta schema → must be str | None
         import types
+
         assert data_schema["label"] == str | None
 
 
@@ -546,7 +545,9 @@ class TestArrowTableSourceAdditional:
     def test_system_tag_columns_forwarded_to_stream(self):
         """system_tag_columns passed at construction are preserved."""
         table = pa.table({"x": pa.array([1, 2], type=pa.int64())})
-        src = ArrowTableSource(table=table, system_tag_columns=["sys_col"], infer_nullable=True)
+        src = ArrowTableSource(
+            table=table, system_tag_columns=["sys_col"], infer_nullable=True
+        )
         assert "sys_col" in src._system_tag_columns
 
     def test_as_table_all_info_includes_system_tag_columns(self):
@@ -581,7 +582,9 @@ class TestArrowTableSourceAdditional:
             }
         )
         with pytest.raises(ValueError, match="tag_columns not found in table"):
-            ArrowTableSource(table=table, tag_columns=["nonexistent", "id"], infer_nullable=True)
+            ArrowTableSource(
+                table=table, tag_columns=["nonexistent", "id"], infer_nullable=True
+            )
 
     def test_tag_columns_all_missing_raises(self):
         """All tag_columns missing from the table raises ValueError."""
@@ -592,7 +595,9 @@ class TestArrowTableSourceAdditional:
             }
         )
         with pytest.raises(ValueError, match="tag_columns not found in table"):
-            ArrowTableSource(table=table, tag_columns=["foo", "bar"], infer_nullable=True)
+            ArrowTableSource(
+                table=table, tag_columns=["foo", "bar"], infer_nullable=True
+            )
 
     def test_tag_columns_all_valid_succeeds(self):
         """tag_columns that all exist in the table work correctly."""

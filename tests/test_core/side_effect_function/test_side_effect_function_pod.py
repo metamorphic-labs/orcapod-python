@@ -10,10 +10,12 @@ from orcapod.side_effects import InvocationContext
 
 def _make_stream(n: int = 3) -> ArrowTableStream:
     """Simple stream: tag=id (int), data=value (int)."""
-    schema = pa.schema([
-        pa.field("id", pa.int64(), nullable=False),
-        pa.field("value", pa.int64(), nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("value", pa.int64(), nullable=False),
+        ]
+    )
     table = pa.table(
         {"id": list(range(n)), "value": list(range(n))},
         schema=schema,
@@ -24,6 +26,7 @@ def _make_stream(n: int = 3) -> ArrowTableStream:
 def _make_pipeline_db():
     """Return a fresh in-memory ArrowDatabase."""
     from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
+
     return InMemoryArrowDatabase()
 
 
@@ -139,7 +142,9 @@ class TestSideEffectFunctionPodStreamStandalone:
             await asyncio.sleep(0)
             return f"async_{value}"
 
-        pod = FunctionPod.from_fn(my_async_fn, output_keys=["result"], ctx_arg_name="ctx")
+        pod = FunctionPod.from_fn(
+            my_async_fn, output_keys=["result"], ctx_arg_name="ctx"
+        )
         stream = _make_stream(2)
         rows = list(pod.process(stream).iter_data())
 
@@ -234,6 +239,7 @@ class TestSideEffectFunctionPodDecorator:
     def test_sf11_decorator_accessible_from_public_api(self):
         """SF-11: Decorator accessible from orcapod top-level; class removed."""
         import orcapod
+
         assert hasattr(orcapod, "side_effect_function_pod")
         assert hasattr(orcapod, "FunctionPod")
         # SideEffectFunctionPod class is no longer exported (unified into FunctionPod)
@@ -271,7 +277,8 @@ class TestSideEffectFunctionPodPipelineIntegration:
 
         # Find the side_effect_function node in the compiled graph
         sef_nodes = [
-            n for n in job.dag.nodes()
+            n
+            for n in job.dag.nodes()
             if getattr(n, "node_type", None) == "side_effect_function"
         ]
         assert len(sef_nodes) == 1
@@ -340,9 +347,7 @@ class TestSideEffectFunctionJobNodeAsync:
 
             await asyncio.gather(
                 feed(),
-                node.async_execute(
-                    ch_in.reader, ch_out.writer, run_id="test-run-sf13"
-                ),
+                node.async_execute(ch_in.reader, ch_out.writer, run_id="test-run-sf13"),
             )
             return await ch_out.reader.collect()
 

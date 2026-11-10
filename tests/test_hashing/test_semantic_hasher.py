@@ -24,7 +24,10 @@ from uuid import UUID
 
 import pytest
 
-from orcapod.hashing.defaults import get_default_arrow_hasher, get_default_semantic_hasher
+from orcapod.hashing.defaults import (
+    get_default_arrow_hasher,
+    get_default_semantic_hasher,
+)
 from orcapod.hashing.semantic_hashing.builtin_handlers import (
     register_builtin_python_type_handlers,
 )
@@ -297,7 +300,9 @@ class Unhandled:
 
 class TestStrictMode:
     def test_strict_raises_on_unknown_type(self, hasher):
-        with pytest.raises(TypeError, match="no implementation of PythonTypeHandlerProtocol registered"):
+        with pytest.raises(
+            TypeError, match="no implementation of PythonTypeHandlerProtocol registered"
+        ):
             hasher.hash_object(Unhandled(1))
 
     def test_non_strict_returns_content_hash(self, lenient_hasher):
@@ -1060,6 +1065,7 @@ class TestGlobalSingletons:
     def test_get_default_arrow_hasher_returns_protocol_instance(self):
         """get_default_arrow_hasher() returns the arrow hasher from the default context."""
         from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
+
         hasher = get_default_arrow_hasher()
         assert isinstance(hasher, ArrowHasherProtocol)
 
@@ -1485,32 +1491,38 @@ class TestTypeObjectHandlerWithRegistry:
     @pytest.fixture
     def type_converter(self):
         from orcapod.contexts import get_default_context
+
         return get_default_context().type_converter
 
     @pytest.fixture
     def handler(self, type_converter):
         from orcapod.hashing.semantic_hashing.builtin_handlers import TypeObjectHandler
+
         return TypeObjectHandler(type_converter=type_converter)
 
     def test_registered_file_returns_canonical_name(self, handler, hasher):
         import orcapod as op
+
         result = handler.handle(op.File, hasher)
         assert result == "type:orcapod.file"
 
     def test_registered_directory_returns_canonical_name(self, handler, hasher):
         import orcapod as op
+
         result = handler.handle(op.Directory, hasher)
         assert result == "type:orcapod.directory"
 
     def test_registered_path_returns_canonical_name(self, handler, hasher):
         """pathlib.Path (op.Path) resolves to 'type:orcapod.path', not 'type:pathlib.Path'."""
         from pathlib import Path
+
         result = handler.handle(Path, hasher)
         assert result == "type:orcapod.path"
 
     def test_registered_uuid_returns_canonical_name(self, handler, hasher):
         """uuid.UUID (op.UUID) resolves to 'type:orcapod.uuid', not 'type:uuid.UUID'."""
         import uuid
+
         result = handler.handle(uuid.UUID, hasher)
         assert result == "type:orcapod.uuid"
 
@@ -1521,6 +1533,7 @@ class TestTypeObjectHandlerWithRegistry:
     def test_custom_class_falls_back_to_module_qualname(self, handler, hasher):
         class _Local:
             pass
+
         result = handler.handle(_Local, hasher)
         assert "type:" in result
         assert "_Local" in result
@@ -1529,6 +1542,7 @@ class TestTypeObjectHandlerWithRegistry:
         """TypeObjectHandler with no type_converter always uses module.qualname."""
         from orcapod.hashing.semantic_hashing.builtin_handlers import TypeObjectHandler
         import orcapod as op
+
         handler_plain = TypeObjectHandler()  # no type_converter
         result = handler_plain.handle(op.File, hasher)
         # Without a type_converter, canonical resolution is unavailable

@@ -168,12 +168,22 @@ class TestJoin:
         """Per design, multi-input ops extend system tag column names with
         ::pipeline_hash:position. Sources (not raw streams) create system tags."""
         sa = ArrowTableSource(
-            pa.table({"id": pa.array([2, 3], type=pa.int64()), "a": pa.array([10, 20], type=pa.int64())}),
+            pa.table(
+                {
+                    "id": pa.array([2, 3], type=pa.int64()),
+                    "a": pa.array([10, 20], type=pa.int64()),
+                }
+            ),
             tag_columns=["id"],
             infer_nullable=True,
         )
         sb = ArrowTableSource(
-            pa.table({"id": pa.array([2, 3], type=pa.int64()), "b": pa.array([30, 40], type=pa.int64())}),
+            pa.table(
+                {
+                    "id": pa.array([2, 3], type=pa.int64()),
+                    "b": pa.array([30, 40], type=pa.int64()),
+                }
+            ),
             tag_columns=["id"],
             infer_nullable=True,
         )
@@ -220,12 +230,18 @@ class TestMergeJoin:
         # Create streams with some overlapping and some non-overlapping
         s1 = _make_stream(
             {"id": pa.array([1, 2], type=pa.int64())},
-            {"shared": pa.array([10, 20], type=pa.int64()), "only_left": pa.array([1, 2], type=pa.int64())},
+            {
+                "shared": pa.array([10, 20], type=pa.int64()),
+                "only_left": pa.array([1, 2], type=pa.int64()),
+            },
             ["id"],
         )
         s2 = _make_stream(
             {"id": pa.array([1, 2], type=pa.int64())},
-            {"shared": pa.array([30, 40], type=pa.int64()), "only_right": pa.array([3, 4], type=pa.int64())},
+            {
+                "shared": pa.array([30, 40], type=pa.int64()),
+                "only_right": pa.array([3, 4], type=pa.int64()),
+            },
             ["id"],
         )
         result = merge.process(s1, s2)
@@ -385,7 +401,10 @@ class TestSelectDataColumns:
     def test_select_data_columns(self):
         stream = _make_stream(
             {"id": pa.array([1, 2], type=pa.int64())},
-            {"a": pa.array([10, 20], type=pa.int64()), "b": pa.array([30, 40], type=pa.int64())},
+            {
+                "a": pa.array([10, 20], type=pa.int64()),
+                "b": pa.array([30, 40], type=pa.int64()),
+            },
             ["id"],
         )
         select = SelectDataColumns(columns=["a"])
@@ -413,7 +432,10 @@ class TestDropDataColumns:
     def test_drop_data_columns(self):
         stream = _make_stream(
             {"id": pa.array([1, 2], type=pa.int64())},
-            {"a": pa.array([10, 20], type=pa.int64()), "b": pa.array([30, 40], type=pa.int64())},
+            {
+                "a": pa.array([10, 20], type=pa.int64()),
+                "b": pa.array([30, 40], type=pa.int64()),
+            },
             ["id"],
         )
         drop = DropDataColumns(columns=["b"])

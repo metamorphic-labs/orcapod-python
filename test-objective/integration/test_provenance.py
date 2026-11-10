@@ -80,7 +80,10 @@ class TestNamePreserving:
     def test_select_preserves_system_tags(self):
         source = _make_source(
             {"id": pa.array([1, 2], type=pa.int64())},
-            {"a": pa.array([10, 20], type=pa.int64()), "b": pa.array([30, 40], type=pa.int64())},
+            {
+                "a": pa.array([10, 20], type=pa.int64()),
+                "b": pa.array([30, 40], type=pa.int64()),
+            },
             ["id"],
         )
         source_table = source.as_table(all_info=True)

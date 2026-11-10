@@ -56,9 +56,7 @@ class TestDataFunctionProxyInvocation:
         pf = _make_sample_function()
         proxy = _make_proxy_from_function(pf)
         data = Data({"age": 25})
-        with pytest.raises(
-            DataFunctionUnavailableError, match="double_age"
-        ):
+        with pytest.raises(DataFunctionUnavailableError, match="double_age"):
             proxy.call(data)
 
     @pytest.mark.asyncio
@@ -66,18 +64,14 @@ class TestDataFunctionProxyInvocation:
         pf = _make_sample_function()
         proxy = _make_proxy_from_function(pf)
         data = Data({"age": 25})
-        with pytest.raises(
-            DataFunctionUnavailableError, match="double_age"
-        ):
+        with pytest.raises(DataFunctionUnavailableError, match="double_age"):
             await proxy.async_call(data)
 
     def test_direct_call_raises_when_unbound(self):
         pf = _make_sample_function()
         proxy = _make_proxy_from_function(pf)
         data = Data({"age": 25})
-        with pytest.raises(
-            DataFunctionUnavailableError, match="double_age"
-        ):
+        with pytest.raises(DataFunctionUnavailableError, match="double_age"):
             proxy.direct_call(data)
 
     @pytest.mark.asyncio
@@ -85,9 +79,7 @@ class TestDataFunctionProxyInvocation:
         pf = _make_sample_function()
         proxy = _make_proxy_from_function(pf)
         data = Data({"age": 25})
-        with pytest.raises(
-            DataFunctionUnavailableError, match="double_age"
-        ):
+        with pytest.raises(DataFunctionUnavailableError, match="double_age"):
             await proxy.direct_async_call(data)
 
     def test_variation_data_empty_when_unbound(self):

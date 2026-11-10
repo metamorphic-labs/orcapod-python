@@ -11,6 +11,7 @@ from orcapod.types import ColumnConfig, ContentHash, Schema
 # Schema basics
 # ---------------------------------------------------------------------------
 
+
 class TestSchemaImmutableMapping:
     """Schema behaves as an immutable Mapping[str, DataType]."""
 
@@ -59,6 +60,7 @@ class TestSchemaRepr:
 
     def test_repr_custom_class(self):
         """Custom class types render using __name__."""
+
         class MyCustomType:
             pass
 
@@ -212,6 +214,7 @@ class TestSchemaWithValues:
 # ContentHash
 # ---------------------------------------------------------------------------
 
+
 class TestContentHash:
     """ContentHash is a frozen dataclass with method+digest."""
 
@@ -268,6 +271,7 @@ class TestContentHashConversions:
 # ---------------------------------------------------------------------------
 # ColumnConfig
 # ---------------------------------------------------------------------------
+
 
 class TestColumnConfig:
     """ColumnConfig is frozen, has .all() and .data_only() convenience methods."""

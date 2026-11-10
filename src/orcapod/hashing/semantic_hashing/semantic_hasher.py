@@ -108,7 +108,10 @@ class SemanticAwarePythonHasher:
         self._strict = strict
 
         if type_handler_registry is None:
-            from orcapod.hashing.defaults import get_default_python_type_handler_registry
+            from orcapod.hashing.defaults import (
+                get_default_python_type_handler_registry,
+            )
+
             self._registry = get_default_python_type_handler_registry()
         else:
             self._registry = type_handler_registry

@@ -1,4 +1,5 @@
 """Tests for Pick and Index operators."""
+
 from __future__ import annotations
 
 import pytest
@@ -8,6 +9,7 @@ from orcapod.logical_types.base_logical_type import BaseLogicalType
 
 class ConcreteLogicalType(BaseLogicalType):
     """Minimal concrete subclass for testing defaults."""
+
     pass
 
 
@@ -39,13 +41,14 @@ class _PickTestModel:
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def dict_stream() -> ArrowTableStream:
     """Stream with 1 tag and 1 dict[str, int] data column (with source info)."""
     return DictSource(
         [
-            {"animal": "cat",  "scores": {"speed": 8,  "stealth": 9}},
-            {"animal": "dog",  "scores": {"speed": 7,  "strength": 6}},
+            {"animal": "cat", "scores": {"speed": 8, "stealth": 9}},
+            {"animal": "dog", "scores": {"speed": 7, "strength": 6}},
             {"animal": "bird", "scores": {"speed": 10, "stealth": 7}},
         ],
         tag_columns=["animal"],
@@ -54,6 +57,7 @@ def dict_stream() -> ArrowTableStream:
 
 
 # ── build-time validation tests ───────────────────────────────────────────────
+
 
 def test_pick_missing_column_raises(dict_stream):
     with pytest.raises(InputValidationError, match="not found in data schema"):
@@ -67,6 +71,7 @@ def test_pick_out_collision_raises(dict_stream):
 
 # ── functional tests: Pick ────────────────────────────────────────────────────
 
+
 def test_pick_dict_str_int_type_resolution():
     """Picking a key from dict[str, int] yields int in the output schema and as values.
 
@@ -76,6 +81,7 @@ def test_pick_dict_str_int_type_resolution():
     - the actual extracted values are Python ints
     """
     from orcapod.contexts import get_default_type_converter
+
     converter = get_default_type_converter()
     table = converter.python_dicts_to_arrow_table(
         [
@@ -120,7 +126,9 @@ def test_pick_dict_default_out(dict_stream):
     # source token for 'scores' should now end with "['speed']"
     for _, data in rows:
         src = data.source_info().get("scores")
-        assert src is not None and src.endswith("['speed']"), f"unexpected source: {src}"
+        assert src is not None and src.endswith("['speed']"), (
+            f"unexpected source: {src}"
+        )
 
 
 def test_pick_dict_explicit_out(dict_stream):
@@ -128,7 +136,7 @@ def test_pick_dict_explicit_out(dict_stream):
     result = Pick("scores", "speed", out="speed_score")(dict_stream)
     tag_schema, data_schema = result.output_schema()
 
-    assert "scores" in data_schema       # original preserved
+    assert "scores" in data_schema  # original preserved
     assert "speed_score" in data_schema
     assert data_schema["speed_score"] == int
 
@@ -143,11 +151,12 @@ def test_pick_dict_explicit_out(dict_stream):
 def test_pick_dict_missing_key_skip():
     """Packets missing the key are skipped; others pass through."""
     from orcapod.contexts import get_default_type_converter
+
     converter = get_default_type_converter()
     table = converter.python_dicts_to_arrow_table(
         [
             {"id": 1, "data": {"x": 10}},
-            {"id": 2, "data": {"y": 20}},   # missing "x"
+            {"id": 2, "data": {"y": 20}},  # missing "x"
             {"id": 3, "data": {"x": 30}},
         ],
         python_schema={"id": int, "data": dict[str, int]},
@@ -164,6 +173,7 @@ def test_pick_dict_missing_key_skip():
 def test_pick_dict_missing_key_fail():
     """fail_on_miss=True raises RuntimeError when key is absent."""
     from orcapod.contexts import get_default_type_converter
+
     converter = get_default_type_converter()
     table = converter.python_dicts_to_arrow_table(
         [
@@ -181,6 +191,7 @@ def test_pick_dict_missing_key_fail():
 def test_pick_extension_type_not_implemented():
     """pick on a Pydantic/dataclass column raises NotImplementedError."""
     from orcapod.contexts import get_default_type_converter
+
     converter = get_default_type_converter()
     converter.register_python_class(_PickTestModel)
     table = converter.python_dicts_to_arrow_table(
@@ -195,9 +206,11 @@ def test_pick_extension_type_not_implemented():
 
 # ── helpers for Index tests ───────────────────────────────────────────────────
 
+
 def _make_list_stream(rows: list[dict]) -> ArrowTableStream:
     """Build a stream with an int tag and a list[int] data column."""
     from orcapod.contexts import get_default_type_converter
+
     converter = get_default_type_converter()
     table = converter.python_dicts_to_arrow_table(
         rows,
@@ -224,6 +237,7 @@ def test_index_out_collision_raises():
 
 
 # ── functional tests: Index ───────────────────────────────────────────────────
+
 
 def test_index_list_default_out():
     """index with out=None replaces the column in-place."""
@@ -263,7 +277,7 @@ def test_index_list_explicit_out():
     result = Index("vals", 0, out="first")(stream)
     tag_schema, data_schema = result.output_schema()
 
-    assert "vals" in data_schema       # original preserved
+    assert "vals" in data_schema  # original preserved
     assert "first" in data_schema
     assert data_schema["first"] == int
 
@@ -277,10 +291,12 @@ def test_index_list_explicit_out():
 
 def test_index_negative_index():
     """Negative index follows Python semantics (-1 is last element)."""
-    stream = _make_list_stream([
-        {"id": 1, "items": [10, 20, 30]},
-        {"id": 2, "items": [40, 50]},
-    ])
+    stream = _make_list_stream(
+        [
+            {"id": 1, "items": [10, 20, 30]},
+            {"id": 2, "items": [40, 50]},
+        ]
+    )
     result = Index("items", -1)(stream)
     rows = list(result.iter_data())
     assert [data["items"] for _, data in rows] == [30, 50]
@@ -288,11 +304,13 @@ def test_index_negative_index():
 
 def test_index_oob_skip():
     """Out-of-bounds packets are skipped when fail_on_miss=False."""
-    stream = _make_list_stream([
-        {"id": 1, "items": [10, 20, 30]},
-        {"id": 2, "items": [40]},          # index 2 is OOB
-        {"id": 3, "items": [70, 80, 90]},
-    ])
+    stream = _make_list_stream(
+        [
+            {"id": 1, "items": [10, 20, 30]},
+            {"id": 2, "items": [40]},  # index 2 is OOB
+            {"id": 3, "items": [70, 80, 90]},
+        ]
+    )
     result = Index("items", 2, fail_on_miss=False)(stream)
     rows = list(result.iter_data())
     assert len(rows) == 2
@@ -302,15 +320,18 @@ def test_index_oob_skip():
 
 def test_index_oob_fail():
     """fail_on_miss=True raises RuntimeError on out-of-bounds."""
-    stream = _make_list_stream([
-        {"id": 1, "items": [10, 20, 30]},
-        {"id": 2, "items": [40]},
-    ])
+    stream = _make_list_stream(
+        [
+            {"id": 1, "items": [10, 20, 30]},
+            {"id": 2, "items": [40]},
+        ]
+    )
     with pytest.raises(RuntimeError, match="fail_on_miss=True"):
         list(Index("items", 2, fail_on_miss=True)(stream).iter_data())
 
 
 # ── integration tests ──────────────────────────────────────────────────────────
+
 
 def test_chained_pick_then_index():
     """stream.pick('col', 'key').index('col', 1) chains correctly end-to-end."""
@@ -344,6 +365,7 @@ def test_chained_pick_then_index():
 def test_composition_with_join():
     """pick used in a pipeline that also includes join."""
     from orcapod.contexts import get_default_type_converter
+
     converter = get_default_type_converter()
 
     left_table = converter.python_dicts_to_arrow_table(
@@ -366,7 +388,7 @@ def test_composition_with_join():
     result = left.pick("meta", "label").join(right)
     tag_schema, data_schema = result.output_schema()
 
-    assert "meta" in data_schema    # now holds str, not dict
+    assert "meta" in data_schema  # now holds str, not dict
     assert "value" in data_schema
     assert data_schema["meta"] == str
 

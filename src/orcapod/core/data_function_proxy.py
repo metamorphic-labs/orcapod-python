@@ -298,8 +298,7 @@ class DataFunctionProxy(DataFunctionBase):
 
         if tuple(data_function.uri) != tuple(self._stored_uri):
             mismatches.append(
-                f"uri: expected {self._stored_uri!r}, "
-                f"got {tuple(data_function.uri)!r}"
+                f"uri: expected {self._stored_uri!r}, got {tuple(data_function.uri)!r}"
             )
 
         if self._stored_content_hash is not None:
@@ -311,9 +310,7 @@ class DataFunctionProxy(DataFunctionBase):
                 )
 
         if mismatches:
-            raise ValueError(
-                f"Cannot bind data function: {', '.join(mismatches)}"
-            )
+            raise ValueError(f"Cannot bind data function: {', '.join(mismatches)}")
 
         self._bound_function = data_function
 

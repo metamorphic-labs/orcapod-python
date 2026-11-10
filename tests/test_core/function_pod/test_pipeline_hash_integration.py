@@ -234,7 +234,9 @@ class TestRootSourcePipelineHash:
                 "val": pa.array([10, 20], type=pa.int64()),
             }
         )
-        src_with_tag = ArrowTableSource(table=table, tag_columns=["id"], infer_nullable=True)
+        src_with_tag = ArrowTableSource(
+            table=table, tag_columns=["id"], infer_nullable=True
+        )
         src_no_tag = ArrowTableSource(table=table, infer_nullable=True)
         assert src_with_tag.pipeline_hash() != src_no_tag.pipeline_hash()
 
@@ -307,7 +309,9 @@ class TestTableStreamPipelineHash:
             table=pa.table({"x": pa.array([1, 2, 3], type=pa.int64())}, schema=_schema)
         )
         # The source IS a stream; its pipeline_hash is schema-only
-        s = ArrowTableStream(pa.table({"x": pa.array([1, 2, 3], type=pa.int64())}, schema=_schema))
+        s = ArrowTableStream(
+            pa.table({"x": pa.array([1, 2, 3], type=pa.int64())}, schema=_schema)
+        )
         # Both have same schema, so same pipeline_hash
         assert src.pipeline_hash() == s.pipeline_hash()
 
@@ -431,9 +435,7 @@ class TestFunctionNodePipelineHashFix:
         assert node.node_identity_path[: len(pf_uri)] == pf_uri
         # With pipeline_hash scope (default): path ends with schema:{hash} only
         assert node.node_identity_path[-1].startswith("schema:")
-        assert not any(
-            seg.startswith("instance:") for seg in node.node_identity_path
-        )
+        assert not any(seg.startswith("instance:") for seg in node.node_identity_path)
 
 
 # ---------------------------------------------------------------------------

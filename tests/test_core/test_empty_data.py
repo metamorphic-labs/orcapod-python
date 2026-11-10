@@ -1,5 +1,6 @@
 # tests/test_core/test_empty_data.py
 """Tests for EmptyData and its associated exception types."""
+
 from __future__ import annotations
 
 import uuid

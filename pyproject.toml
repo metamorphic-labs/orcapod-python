@@ -95,6 +95,13 @@ dev = [
 ]
 
 
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+# Tutorial notebooks are not linted or formatted: reformatting rewrites their JSON, and
+# the ones under old_tutorials/ target a package that no longer exists.
+extend-exclude = ["notebooks"]
+
 [tool.coverage.run]
 omit = [
     "src/orcapod/extension_types/protocols.py",  # Protocol stubs — bodies are all `...`, not executable

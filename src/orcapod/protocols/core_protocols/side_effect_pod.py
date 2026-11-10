@@ -1,5 +1,6 @@
 # src/orcapod/protocols/core_protocols/side_effect_pod.py
 """SideEffectPodProtocol — protocol for side-effect pods."""
+
 from __future__ import annotations
 
 from collections.abc import Collection

@@ -41,10 +41,12 @@ def _write_delta(path: Path, table: pa.Table, *, mode: str = "error") -> None:
 
 
 def _make_patients(path: Path, ids: list[str], ages: list[int]) -> pa.Table:
-    schema = pa.schema([
-        pa.field("patient_id", pa.large_string(), nullable=False),
-        pa.field("age", pa.int64(), nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("patient_id", pa.large_string(), nullable=False),
+            pa.field("age", pa.int64(), nullable=False),
+        ]
+    )
     t = pa.table(
         {
             "patient_id": ids,
@@ -57,10 +59,12 @@ def _make_patients(path: Path, ids: list[str], ages: list[int]) -> pa.Table:
 
 
 def _make_labs(path: Path, ids: list[str], chols: list[int]) -> pa.Table:
-    schema = pa.schema([
-        pa.field("patient_id", pa.large_string(), nullable=False),
-        pa.field("cholesterol", pa.int64(), nullable=False),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("patient_id", pa.large_string(), nullable=False),
+            pa.field("cholesterol", pa.int64(), nullable=False),
+        ]
+    )
     t = pa.table(
         {
             "patient_id": ids,
@@ -198,10 +202,12 @@ class TestSourcePodCaching:
                     "patient_id": ["p1", "p2", "p3", "p4"],
                     "age": [30, 45, 60, 25],
                 },
-                schema=pa.schema([
-                    pa.field("patient_id", pa.large_string(), nullable=False),
-                    pa.field("age", pa.int64(), nullable=False),
-                ]),
+                schema=pa.schema(
+                    [
+                        pa.field("patient_id", pa.large_string(), nullable=False),
+                        pa.field("age", pa.int64(), nullable=False),
+                    ]
+                ),
             ),
             mode="overwrite",
         )
@@ -230,10 +236,12 @@ class TestSourcePodCaching:
                     "patient_id": ["p1", "p2", "p3", "p4"],
                     "age": [30, 45, 60, 25],
                 },
-                schema=pa.schema([
-                    pa.field("patient_id", pa.large_string(), nullable=False),
-                    pa.field("age", pa.int64(), nullable=False),
-                ]),
+                schema=pa.schema(
+                    [
+                        pa.field("patient_id", pa.large_string(), nullable=False),
+                        pa.field("age", pa.int64(), nullable=False),
+                    ]
+                ),
             ),
             mode="overwrite",
         )

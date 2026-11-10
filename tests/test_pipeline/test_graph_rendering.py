@@ -132,9 +132,7 @@ class TestGraphRenderer:
 
         assert "Custom Label" in dot_text
 
-    def test_generate_dot_with_custom_style_rules(
-        self, node_graph: OrcaDAG
-    ) -> None:
+    def test_generate_dot_with_custom_style_rules(self, node_graph: OrcaDAG) -> None:
         renderer = GraphRenderer()
         custom_rules = {
             "source": {
@@ -207,9 +205,7 @@ class TestNodeAttributes:
 
     def test_custom_rules_override_defaults(self, node_graph: OrcaDAG) -> None:
         renderer = GraphRenderer()
-        source_node = next(
-            n for n in node_graph.nodes() if isinstance(n, SourceNode)
-        )
+        source_node = next(n for n in node_graph.nodes() if isinstance(n, SourceNode))
         custom = {"source": {"fillcolor": "purple", "shape": "hexagon"}}
         attrs = renderer._get_node_attributes(source_node, style_rules=custom)
 
@@ -223,9 +219,7 @@ class TestNodeAttributes:
 
 
 class TestHtmlLabel:
-    def test_label_contains_node_type_and_label(
-        self, node_graph: OrcaDAG
-    ) -> None:
+    def test_label_contains_node_type_and_label(self, node_graph: OrcaDAG) -> None:
         renderer = GraphRenderer()
         for node in node_graph.nodes():
             attrs = renderer._get_node_attributes(node)
@@ -261,9 +255,7 @@ class TestConvenienceFunctions:
         assert "digraph" in dot_text
 
     def test_render_graph_dark_theme_function(self, node_graph: OrcaDAG) -> None:
-        dot_text = render_graph_dark_theme(
-            node_graph, raw_output=True, show=False
-        )
+        dot_text = render_graph_dark_theme(node_graph, raw_output=True, show=False)
 
         assert isinstance(dot_text, str)
         assert "digraph" in dot_text
@@ -310,17 +302,13 @@ class TestPipelineShowGraph:
         with pytest.raises(RuntimeError):
             job.pipeline.show_graph(raw_output=True, show=False)
 
-    def test_show_graph_returns_dot(
-        self, compiled_job: PipelineJob
-    ) -> None:
+    def test_show_graph_returns_dot(self, compiled_job: PipelineJob) -> None:
         dot_text = compiled_job.pipeline.show_graph(raw_output=True, show=False)
 
         assert isinstance(dot_text, str)
         assert "digraph" in dot_text
 
-    def test_show_graph_with_label_lut(
-        self, compiled_job: PipelineJob
-    ) -> None:
+    def test_show_graph_with_label_lut(self, compiled_job: PipelineJob) -> None:
         first_node = next(iter(compiled_job.pipeline.dag.nodes()))
         label_lut = {first_node: "MyCustomLabel"}
 
@@ -330,9 +318,7 @@ class TestPipelineShowGraph:
 
         assert "MyCustomLabel" in dot_text
 
-    def test_show_graph_with_style_rules(
-        self, compiled_job: PipelineJob
-    ) -> None:
+    def test_show_graph_with_style_rules(self, compiled_job: PipelineJob) -> None:
         custom = StyleRuleSets.create_custom_rules(source_bg="lime")
         dot_text = compiled_job.pipeline.show_graph(
             style_rules=custom, raw_output=True, show=False
@@ -358,14 +344,10 @@ class TestRenderGraphFullPath:
         assert "digraph" in result
 
     @requires_dot
-    def test_render_with_output_path(
-        self, node_graph: OrcaDAG, tmp_path
-    ) -> None:
+    def test_render_with_output_path(self, node_graph: OrcaDAG, tmp_path) -> None:
         output_file = str(tmp_path / "graph.png")
         renderer = GraphRenderer()
-        result = renderer.render_graph(
-            node_graph, show=False, output_path=output_file
-        )
+        result = renderer.render_graph(node_graph, show=False, output_path=output_file)
 
         assert isinstance(result, str)
         assert os.path.exists(output_file)
@@ -386,34 +368,24 @@ class TestRenderGraphFullPath:
         assert isinstance(result, str)
         assert "digraph" in result
 
-    def test_render_with_label_lut_full_path(
-        self, node_graph: OrcaDAG
-    ) -> None:
+    def test_render_with_label_lut_full_path(self, node_graph: OrcaDAG) -> None:
         first_node = next(iter(node_graph.nodes()))
         label_lut = {first_node: "FullPathLabel"}
         renderer = GraphRenderer()
-        result = renderer.render_graph(
-            node_graph, label_lut=label_lut, show=False
-        )
+        result = renderer.render_graph(node_graph, label_lut=label_lut, show=False)
 
         assert isinstance(result, str)
 
-    def test_render_with_style_rules_full_path(
-        self, node_graph: OrcaDAG
-    ) -> None:
+    def test_render_with_style_rules_full_path(self, node_graph: OrcaDAG) -> None:
         custom = StyleRuleSets.create_custom_rules(source_bg="coral")
         renderer = GraphRenderer()
-        result = renderer.render_graph(
-            node_graph, style_rules=custom, show=False
-        )
+        result = renderer.render_graph(node_graph, style_rules=custom, show=False)
 
         assert isinstance(result, str)
 
     def test_render_with_style_overrides(self, node_graph: OrcaDAG) -> None:
         renderer = GraphRenderer()
-        result = renderer.render_graph(
-            node_graph, show=False, dpi=72, rankdir="LR"
-        )
+        result = renderer.render_graph(node_graph, show=False, dpi=72, rankdir="LR")
 
         assert isinstance(result, str)
 
@@ -425,9 +397,7 @@ class TestConvenienceFunctionsFullPath:
         assert isinstance(result, str)
         assert "digraph" in result
 
-    def test_render_graph_dark_theme_no_show(
-        self, node_graph: OrcaDAG
-    ) -> None:
+    def test_render_graph_dark_theme_no_show(self, node_graph: OrcaDAG) -> None:
         result = render_graph_dark_theme(node_graph, show=False)
 
         assert isinstance(result, str)
@@ -442,9 +412,7 @@ class TestPipelineShowGraphFullPath:
         assert "digraph" in result
 
     @requires_dot
-    def test_show_graph_with_show_mocked(
-        self, compiled_job: PipelineJob
-    ) -> None:
+    def test_show_graph_with_show_mocked(self, compiled_job: PipelineJob) -> None:
         with (
             patch("matplotlib.pyplot.figure"),
             patch("matplotlib.pyplot.imshow"),

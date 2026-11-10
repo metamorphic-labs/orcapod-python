@@ -1,4 +1,5 @@
 """Tests for UniversalTypeConverter list[T] / set[T] extension type support."""
+
 from __future__ import annotations
 
 

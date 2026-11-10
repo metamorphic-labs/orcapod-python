@@ -1,4 +1,5 @@
 """Smoke tests for the PipelineJob API — basic lifecycle validation."""
+
 from __future__ import annotations
 
 import pyarrow as pa
@@ -12,10 +13,12 @@ from orcapod.pipeline import Pipeline, PipelineJob
 
 
 def _make_source() -> ArrowTableSource:
-    tbl = pa.table({
-        "id": pa.array([1, 2, 3], type=pa.int64()),
-        "x": pa.array([10, 20, 30], type=pa.int64()),
-    })
+    tbl = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "x": pa.array([10, 20, 30], type=pa.int64()),
+        }
+    )
     return ArrowTableSource(tbl, tag_columns=["id"], infer_nullable=True)
 
 
