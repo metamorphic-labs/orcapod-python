@@ -1732,7 +1732,7 @@ CI job failed.
 ## `src/orcapod/core/operators/merge_join.py` — Arrow types
 
 ### MJ2 — `MergeJoin` discards its inputs' Arrow types
-**Status:** resolved
+**Status:** in progress
 **Severity:** high
 **Issue:** ITL-832
 
@@ -1748,10 +1748,12 @@ same.
 
 **Fix:** Merged columns are `list<input type>` via `arrow_utils.aggregated_list_type` /
 `list_array` (shared with `build_aggregated_table`), empty or not; extension elements keep the
-`ListLogicalType` path. Colliding data columns whose Arrow types differ (accepted before, since
-validation compares Python types) now raise `InputValidationError` when the join executes; cast
-one side. `MergeJoin` and `PolarsFilter`
+`ListLogicalType` path. `MergeJoin` and `PolarsFilter`
 restore pass-through columns' input types after the Polars round-trip
-(`arrow_utils.restore_column_types`); this changes layouts only, not content hashes. A shared
-tag key whose inputs disagree keeps the joined type (follow-up: ITL-835). The rule is recorded
-under "Arrow types" in `CLAUDE.md`.
+(`arrow_utils.restore_column_types`); this changes layouts only, not content hashes. The rule is
+recorded under "Arrow types" in `CLAUDE.md`.
+
+**Still open:** when the two inputs disagree on a column's Arrow type (colliding data column or
+shared tag key), the behaviour is unchanged from before and the rule is pending a developer
+decision: `MergeJoin._resolve_disagreeing_types` (TODO ITL-832) is the single decision point, and
+`TestDisagreeingArrowTypes` pins today's behaviour. Follow-ups: ITL-835, ITL-829.

@@ -146,3 +146,15 @@ def restore_column_types(table, reference_types: Mapping[str, pa.DataType]) -> p
 - [ ] `uv run ruff check`, `uv run ruff format --check`, `uv run basedpyright` on changed files.
 - [ ] Full suite on 3.11, 3.12, 3.13 (`uv run --python 3.x pytest tests/`).
 - [ ] Rebase check vs origin/main (stacked on #268), push, PR (create-pr skill), link, worker_done.
+
+### Revision 2 (developer HOLD, 2026-11-09, supersedes the Q1 revision and the tag-key extension)
+
+- The rule for inputs whose Arrow types DISAGREE (colliding data columns and shared tag keys) is
+  paused. No rejection, no promotion: behaviour stays exactly as on the base commit (verified
+  identical on 64 cases), isolated in `merge_join._resolve_disagreeing_types` (TODO ITL-832), and
+  pinned by `TestDisagreeingArrowTypes` (which also passes against the base commit's code).
+- The rejection implementation is kept on the local-only branch
+  `itl-832-local-reject-differing-arrow-types` (commit 71e707c2) so it can be restored.
+- Everything undisputed stays: agreed types are respected for empty and non-empty results, the
+  shared list-construction helper, pass-through type restoration with the content-hash proof, and
+  the rule text.

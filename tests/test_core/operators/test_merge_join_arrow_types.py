@@ -24,9 +24,9 @@ import pytest
 
 from orcapod.contexts import get_default_type_converter
 from orcapod.core.operators import MergeJoin, PolarsFilter
+from orcapod.core.sources import CSVSource, DictSource
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
-from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
@@ -58,24 +58,104 @@ ELEMENT_CASES: list[tuple[pa.DataType, list[Any]]] = [
     ),
 ]
 
-# Pairs that collide (same Python type) but differ in Arrow type. MergeJoin
-# accepted these until ITL-832; they must now be rejected when the join runs.
-DIFFERING_PAIRS: list[tuple[pa.DataType, pa.DataType, list[Any]]] = [
-    (pa.int8(), pa.int64(), [1, 2]),
-    (pa.string(), pa.large_string(), ["a", "b"]),
-    (pa.float32(), pa.float64(), [1.5, 2.5]),
-    (pa.binary(), pa.large_binary(), [b"a", b"b"]),
+# Pairs whose Arrow types disagree while their Python types agree. What
+# MergeJoin should do with them is pending (ITL-832, _resolve_disagreeing_types);
+# until then the tests below pin the pre-ITL-832 behaviour, so the decision
+# shows up as a deliberate test change. Each entry: left type, right type,
+# values, and the expected outcome keyed by (rows, argument order) for a
+# colliding data column ("x" type) and for a shared tag key ("k" type, or the
+# name of the exception the join raises).
+_TS = [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)]
+_DEC = [decimal.Decimal("1.00"), decimal.Decimal("2.50")]
+DISAGREEING_PAIRS: list[
+    tuple[
+        pa.DataType, pa.DataType, list[Any], dict[tuple[int, str], str], dict[str, str]
+    ]
+] = [
+    (
+        pa.int8(),
+        pa.int64(),
+        [1, 2],
+        {
+            (2, "LR"): "list<item: int64>",
+            (2, "RL"): "list<item: int64>",
+            (0, "LR"): "list<item: int64>",
+            (0, "RL"): "list<item: int64>",
+        },
+        {"LR": "int8", "RL": "int64"},
+    ),
+    (
+        pa.float32(),
+        pa.float64(),
+        [1.5, 2.5],
+        {
+            (2, "LR"): "list<item: double>",
+            (2, "RL"): "list<item: double>",
+            (0, "LR"): "list<item: double>",
+            (0, "RL"): "list<item: double>",
+        },
+        {"LR": "float", "RL": "double"},
+    ),
+    (
+        pa.string(),
+        pa.large_string(),
+        ["a", "b"],
+        {
+            (2, "LR"): "list<item: string>",
+            (2, "RL"): "list<item: string>",
+            (0, "LR"): "list<item: string>",
+            (0, "RL"): "list<item: string>",
+        },
+        {"LR": "large_string", "RL": "large_string"},
+    ),
+    (
+        pa.binary(),
+        pa.large_binary(),
+        [b"a", b"b"],
+        {
+            (2, "LR"): "list<item: binary>",
+            (2, "RL"): "list<item: binary>",
+            (0, "LR"): "list<item: binary>",
+            (0, "RL"): "list<item: binary>",
+        },
+        {"LR": "large_binary", "RL": "large_binary"},
+    ),
+    (
+        pa.list_(pa.int64()),
+        pa.large_list(pa.int64()),
+        [[1], [2]],
+        {
+            (2, "LR"): "list<item: list<item: int64>>",
+            (2, "RL"): "list<item: list<item: int64>>",
+            (0, "LR"): "list<item: list<item: int64>>",
+            (0, "RL"): "list<item: list<item: int64>>",
+        },
+        {"LR": "large_list<item: int64>", "RL": "large_list<item: int64>"},
+    ),
     (
         pa.timestamp("ms"),
         pa.timestamp("us"),
-        [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)],
+        _TS,
+        {
+            (2, "LR"): "list<item: timestamp[us]>",
+            (2, "RL"): "list<item: timestamp[us]>",
+            (0, "LR"): "list<item: timestamp[ms]>",
+            (0, "RL"): "list<item: timestamp[us]>",
+        },
+        {"LR": "SchemaError", "RL": "SchemaError"},
     ),
     (
         pa.decimal128(5, 2),
         pa.decimal128(7, 2),
-        [decimal.Decimal("1.00"), decimal.Decimal("2.50")],
+        _DEC,
+        {
+            (2, "LR"): "list<item: decimal128(3, 2)>",
+            (2, "RL"): "list<item: decimal128(3, 2)>",
+            (0, "LR"): "list<item: decimal128(5, 2)>",
+            (0, "RL"): "list<item: decimal128(7, 2)>",
+        },
+        {"LR": "SchemaError", "RL": "SchemaError"},
     ),
-    (pa.list_(pa.int8()), pa.large_list(pa.int32()), [[1], [2]]),
 ]
 
 
@@ -209,38 +289,104 @@ class TestMergedColumnElementType:
         assert len(pa.concat_tables(tables)) == rows
 
 
-class TestDifferingArrowTypes:
-    """Colliding columns must have identical Arrow types, checked at execution."""
+def _ordered(
+    left: StreamProtocol, right: StreamProtocol, order: str
+) -> tuple[StreamProtocol, StreamProtocol]:
+    """Return the two streams in argument order ``"LR"`` or ``"RL"``."""
+    return (left, right) if order == "LR" else (right, left)
+
+
+class TestDisagreeingArrowTypes:
+    """Pin MergeJoin's behaviour when the inputs' Arrow types disagree.
+
+    The decision is pending (ITL-832): these pin what MergeJoin did before
+    ITL-832, so changing ``_resolve_disagreeing_types`` must change them too.
+    Validation passes for every pair, because the Python types agree.
+    """
 
     @pytest.mark.parametrize(
-        ("left_type", "right_type", "values"), DIFFERING_PAIRS, ids=_ids
+        ("left_type", "right_type", "values", "data_expected", "tag_expected"),
+        DISAGREEING_PAIRS,
+        ids=_ids,
     )
     @pytest.mark.parametrize("rows", [0, 2])
-    def test_rejected_at_execution_not_at_build(
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_colliding_data_column(
         self,
         left_type: pa.DataType,
         right_type: pa.DataType,
         values: list[Any],
+        data_expected: dict[tuple[int, str], str],
+        tag_expected: dict[str, str],
         rows: int,
+        order: str,
     ) -> None:
-        """Building the join passes; running it raises in either argument order.
-
-        Streams expose only Python schemas, under which both sides agree, so
-        validation cannot see the mismatch; the join raises once it reads the
-        input tables.
-        """
-        left, right = _pair(left_type, right_type, values, rows)
+        """A colliding column's merged type is inferred, as before ITL-832."""
+        del tag_expected
+        first, second = _ordered(*_pair(left_type, right_type, values, rows), order)
         op = MergeJoin()
-        for first, second in ((left, right), (right, left)):
-            op.validate_inputs(first, second)
-            stream = op(first, second)
-            with pytest.raises(InputValidationError, match="cast one side") as info:
-                stream.as_table()
-            assert "'x'" in str(info.value)
-            assert str(left_type) in str(info.value)
-            assert str(right_type) in str(info.value)
-            with pytest.raises(InputValidationError, match="cast one side"):
-                op.static_process(first, second)
+        op.validate_inputs(first, second)
+        table = op.static_process(first, second).as_table()
+        assert str(table.schema.field("x").type) == data_expected[(rows, order)]
+
+    @pytest.mark.parametrize(
+        ("left_type", "right_type", "values", "data_expected", "tag_expected"),
+        DISAGREEING_PAIRS,
+        ids=_ids,
+    )
+    @pytest.mark.parametrize("rows", [0, 2])
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_shared_tag_key(
+        self,
+        left_type: pa.DataType,
+        right_type: pa.DataType,
+        values: list[Any],
+        data_expected: dict[tuple[int, str], str],
+        tag_expected: dict[str, str],
+        rows: int,
+        order: str,
+    ) -> None:
+        """A shared tag key keeps the joined type, or the Polars join raises."""
+        del data_expected
+        left = _stream(
+            {"k": (left_type, [values[0]] * rows), "p": (pa.int64(), [0] * rows)},
+            ["k"],
+        )
+        right = _stream(
+            {"k": (right_type, [values[0]] * rows), "q": (pa.int64(), [0] * rows)},
+            ["k"],
+        )
+        first, second = _ordered(left, right, order)
+        op = MergeJoin()
+        op.validate_inputs(first, second)
+        expected = tag_expected[order]
+        if expected == "SchemaError":
+            with pytest.raises(pl.exceptions.SchemaError):
+                op.static_process(first, second).as_table()
+        else:
+            table = op.static_process(first, second).as_table()
+            assert str(table.schema.field("k").type) == expected
+            assert len(table) == rows * rows
+
+    def test_csv_and_dict_sources_on_a_string_column(self, tmp_path: Path) -> None:
+        """A CSV ``string`` column colliding with a dict ``large_string`` one merges.
+
+        This is the common real-world disagreement: today the merged column is
+        inferred as ``list<string>`` and the join succeeds.
+        """
+        csv_path = tmp_path / "labels.csv"
+        csv_path.write_text("id,label\n1,a\n2,b\n")
+        csv_source = CSVSource(str(csv_path), tag_columns=["id"])
+        dict_source = DictSource(
+            [{"id": 1, "label": "x"}, {"id": 2, "label": "y"}], tag_columns=["id"]
+        )
+        assert csv_source.as_table().schema.field("label").type == pa.string()
+        assert dict_source.as_table().schema.field("label").type == pa.large_string()
+
+        table = MergeJoin()(csv_source, dict_source).as_table()
+        assert table.schema.field("label").type == pa.list_(pa.string())
+        labels = table.sort_by("id").column("label").to_pylist()
+        assert labels == [["a", "x"], ["b", "y"]]
 
 
 def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
