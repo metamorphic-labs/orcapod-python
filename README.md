@@ -35,8 +35,11 @@ databases written by an earlier release.
 
 Releases are cut from the GitHub Actions **Release** workflow, which runs the tests and
 tags the commit. The version comes from the tag via `hatch-vcs`, so there is no version
-number to bump in the source tree. The workflow's PyPI publishing steps are superseded by
-the internal registry and have not been replaced yet. See
+number to bump in the source tree.
+
+**Do not run the Release workflow until it publishes to the internal registry.** The
+internal registry supersedes PyPI as the publish target, but the workflow's TestPyPI and
+PyPI publishing jobs are still active: a run would publish to public PyPI. See
 [RELEASING.md](RELEASING.md) for the full workflow.
 
 ## Continuous Integration

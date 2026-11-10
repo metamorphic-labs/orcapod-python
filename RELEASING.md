@@ -14,6 +14,11 @@ has not been changed yet. Every step below that publishes to, checks or installs
 PyPI or TestPyPI is marked **(superseded)**; do not rely on it. These steps are rewritten
 in one pass once the registry details are known.
 
+> **Stop: do not trigger the Release workflow** until `release.yml` publishes to the
+> internal registry. Its `publish-testpypi` and `publish-pypi` jobs are still active, so a
+> run that gets past `build` publishes the package to TestPyPI and public PyPI, and the
+> pushed tag and published version cannot be taken back.
+
 ## Branching Model
 
 - All development happens on feature branches off `main`.
@@ -45,7 +50,8 @@ Releases are triggered from the GitHub Actions UI — no manual `git tag` step r
 
 1. **Merge your branch into `main`** — open a PR, get it reviewed, merge it.
 
-2. **Trigger the release workflow** — go to
+2. **Trigger the release workflow** — **blocked: see "Stop" under *Publish target*
+   above.** Once the workflow publishes to the internal registry, go to
    **[Actions → Release → Run workflow](https://github.com/metamorphic-labs/orcapod-python/actions/workflows/release.yml)**
    in the GitHub UI, enter the version (e.g. `0.1.0`), optionally enter a branch name
    (defaults to `main`), and click **Run workflow**.
