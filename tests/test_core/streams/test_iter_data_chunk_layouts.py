@@ -7,6 +7,8 @@ columns, the data columns and the source-info columns of the backing table.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -20,16 +22,16 @@ WITH_SYSTEM_TAGS = ColumnConfig(system_tags=True)
 
 
 def _chunked(
-    values: list, sizes: list[int], arrow_type: pa.DataType
-) -> pa.ChunkedArray:
+    values: list[Any], sizes: list[int], arrow_type: pa.DataType
+) -> pa.ChunkedArray[Any]:
     """Cut ``values`` into a ``ChunkedArray`` with chunks of the given sizes."""
     assert sum(sizes) == len(values)
-    chunks = []
+    chunks: list[pa.Array[Any]] = []
     start = 0
     for size in sizes:
         chunks.append(pa.array(values[start : start + size], type=arrow_type))
         start += size
-    return pa.chunked_array(chunks, type=arrow_type)
+    return pa.chunked_array(chunks)
 
 
 def _chunked_stream(
@@ -45,7 +47,7 @@ def _chunked_stream(
     always detectable.
     """
     n = sum(data_sizes)
-    columns: dict[str, pa.ChunkedArray] = {}
+    columns: dict[str, pa.ChunkedArray[Any]] = {}
     if with_tags:
         columns["id"] = _chunked(list(range(n)), tag_sizes, pa.int64())
         columns["grp"] = _chunked(
@@ -57,7 +59,7 @@ def _chunked_stream(
         columns[SOURCE_X] = _chunked(
             [f"src::{i}" for i in range(n)], source_sizes, pa.large_string()
         )
-    table = pa.table(columns)
+    table = pa.Table.from_pydict(columns)
     return ArrowTableStream(table, tag_columns=["id", "grp"] if with_tags else [])
 
 
@@ -106,8 +108,7 @@ class TestIterDataChunkLayouts:
         stream = _chunked_stream(tag_sizes, data_sizes)
         pairs = list(stream.iter_data())
         assert [tag["id"] for tag, _ in pairs] == list(range(sum(data_sizes)))
-        for tag, data in pairs:
-            row = tag["id"]
+        for row, (tag, data) in enumerate(pairs):
             assert tag["grp"] == f"g{row}"
             assert data["x"] == row * 10
             assert data["y"] == f"v{row}"
@@ -150,8 +151,8 @@ def test_source_info_pairs_with_its_own_row(tag_sizes, data_sizes, source_sizes)
     stream = _chunked_stream(tag_sizes, data_sizes, source_sizes)
     pairs = list(stream.iter_data())
     assert len(pairs) == sum(data_sizes)
-    for tag, data in pairs:
-        row = tag["id"]
+    for row, (tag, data) in enumerate(pairs):
+        assert tag["id"] == row
         assert data["x"] == row * 10
         assert data.source_info()["x"] == f"src::{row}"
 
@@ -160,7 +161,7 @@ def test_source_info_pairs_with_its_own_row(tag_sizes, data_sizes, source_sizes)
 def test_stream_without_tag_columns_yields_every_row(data_sizes):
     """With no tag column of any kind, every row pairs with an empty tag."""
     n = sum(data_sizes)
-    table = pa.table(
+    table = pa.Table.from_pydict(
         {
             "x": _chunked([i * 10 for i in range(n)], data_sizes, pa.int64()),
             "y": _chunked(
@@ -200,7 +201,7 @@ def _system_tag_stream(
     ``tag_sizes`` the stream has no ordinary tag column at all.
     """
     n = sum(data_sizes)
-    columns: dict[str, pa.ChunkedArray] = {}
+    columns: dict[str, pa.ChunkedArray[Any]] = {}
     if tag_sizes is not None:
         columns["id"] = _chunked(list(range(n)), tag_sizes, pa.int64())
     columns[SYSTEM_TAG] = _chunked(
@@ -209,7 +210,8 @@ def _system_tag_stream(
     columns["x"] = _chunked([i * 10 for i in range(n)], data_sizes, pa.int64())
     columns["y"] = _chunked([f"v{i}" for i in range(n)], data_sizes, pa.large_string())
     return ArrowTableStream(
-        pa.table(columns), tag_columns=["id"] if tag_sizes is not None else []
+        pa.Table.from_pydict(columns),
+        tag_columns=["id"] if tag_sizes is not None else [],
     )
 
 
@@ -270,8 +272,7 @@ def test_system_tags_pair_with_ordinary_tags_and_data(
 
     pairs = list(stream.iter_data())
     assert [tag["id"] for tag, _ in pairs] == list(range(n))
-    for tag, data in pairs:
-        row = tag["id"]
+    for row, (tag, data) in enumerate(pairs):
         assert tag.as_dict() == {"id": row}
         assert tag.as_dict(columns=WITH_SYSTEM_TAGS) == {
             "id": row,
