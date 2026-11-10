@@ -1844,11 +1844,19 @@ Python types and cannot see it). Hashes: `list`/`large_list` and the other layou
 identically, so only a merged column narrower than `int64`/`double` changes its row hash (it no
 longer widens). Rules recorded under "Arrow types" in `CLAUDE.md`.
 
-**Still open:** `normalize_to_large_types` drops a list item's non-null flag, which changes the
-Arrow schema hash of such a column (pinned in
-`TestContentHashes.test_non_nullable_list_items_lose_nullability_under_normalization`; decision
-pending). Non-empty struct columns cannot be merged because values are sorted as Python objects
-(ITL-839; pinned by a strict xfail).
+`normalize_to_large_types` also dropped a list item's non-null flag (and map/union child
+flags), which changes the Arrow schema hash of such a column; it now rebuilds every nested
+field with `Field.with_type`, keeping name, nullability and metadata, so normalization is
+hash-preserving (`tests/test_utils/test_normalize_to_large_types.py`). Measured on
+`list<int64 not null>`, `struct<l: list<int8 not null>>` and
+`list<list<string not null> not null>` columns: `Data.content_hash` (the stored
+`input_data_hash`), `Tag.content_hash`, stream and source `content_hash` / `pipeline_hash`, and
+`Batch` output hashes are all unchanged; only the Arrow types now keep the nested non-null
+flags (a stored-schema change for such columns). The wider nullability audit across operators
+and pods is ITL-842.
+
+**Still open:** non-empty struct columns cannot be merged because values are sorted as Python
+objects (ITL-839; pinned by a strict xfail).
 
 ---
 
@@ -1977,7 +1985,7 @@ rely on. Paths are under `src/orcapod/`:
 ### TC1 — A struct's Python type depended on its children's string/list layouts
 **Status:** resolved
 **Severity:** medium
-**Issue:** ITL-832
+**Issue:** ITL-832 (follow-up: ITL-841)
 
 The type converter synthesized one `TypedDict` class per exact Arrow struct type, so
 `struct<b: string>` and `struct<b: large_string>` (hash-identical) became two different Python
@@ -1989,4 +1997,6 @@ and an operator that normalizes its output (ITL-832) could not match its predict
 the large-normalized struct, so both layouts share one class; width, nullability and logical
 types still distinguish structs. Content and pipeline hashes of struct columns are pinned to
 their values on `main` in `tests/test_semantic_types/test_struct_layout_identity.py`. Maps and
-unions do not have this problem: their Python types do not depend on child layouts.
+unions do not have this problem: their Python types do not depend on child layouts. This is a
+workaround (`TODO(ITL-841)` in the code); ITL-841 revisits the treatment of large variants
+everywhere.

@@ -420,9 +420,12 @@ data. The rules:
   `binary_static_process` before the join; `output_schema()` exposes only Python types, so such
   disagreements are invisible at graph-build time.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
-  `struct<b: string>` and `struct<b: large_string>` are one Python type.
-- Known exception: `normalize_to_large_types` drops a list item's non-null flag, which changes
-  the Arrow schema hash of such a column (decision pending).
+  `struct<b: string>` and `struct<b: large_string>` are one Python type (a workaround,
+  `TODO(ITL-841)`).
+- `normalize_to_large_types` changes layouts only: every nested field (list items, struct
+  children, map keys and items) keeps its name, nullability and metadata, so it never changes
+  a schema or value hash. Never rebuild a nested type as `pa.large_list(element_type)`, which
+  drops the item's non-null flag.
 
 ### Important implementation details
 

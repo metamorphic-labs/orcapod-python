@@ -1465,6 +1465,8 @@ class UniversalTypeConverter:
         large-normalized struct. Field widths, nullability and logical types
         still distinguish structs.
         """
+        # TODO(ITL-841): workaround so both layouts of a struct share one
+        # Python class; revisit with the treatment of large variants everywhere.
         struct_type = arrow_utils.normalize_to_large_types(struct_type)
 
         # Check cache first
