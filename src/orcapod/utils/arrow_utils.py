@@ -560,9 +560,12 @@ def concat_tables_by_name(tables: "Sequence[pa.Table]") -> "pa.Table":
 
     Returns:
         The concatenated table, with the first table's column order.
+
+    Raises:
+        ValueError: If ``tables`` is empty.
     """
     if not tables:
-        return pa.concat_tables(tables)
+        raise ValueError("Cannot concatenate an empty sequence of tables")
     names = tables[0].column_names
     name_set = set(names)
     aligned = [

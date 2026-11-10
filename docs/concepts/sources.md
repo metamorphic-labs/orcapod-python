@@ -55,10 +55,16 @@ multi-stream operations.
 Each row's system tag carries a record ID derived from the source's `source_id` and a
 per-row token. By default that token is the row's position, so the record ID is stable only
 while the rows arrive in the same order: reorder them under the same `source_id` and each
-row inherits another row's lineage, which makes downstream caches and `sink_pod` completion
-tracking miss. Sources that accept `record_id_column` use that column's value instead, so the
-record ID follows the row. Set it to a column that is unique per row whenever row order can
-vary between runs.
+moved row inherits another row's lineage. Downstream caches and `sink_pod` completion
+tracking then miss for those rows, because their keys combine the system tags with a hash of
+the row's input data. (Two rows that swap positions while carrying identical tags and
+identical input data keep matching, but each is credited with the other's lineage.)
+
+Sources that accept `record_id_column` use that column's value instead, so the record ID
+follows the row. Both halves of the record ID must be stable: when you omit `source_id` it
+defaults to a hash of the table, which changes when the rows are reordered. Whenever row
+order can vary between runs, pass an explicit, stable `source_id` **and** set
+`record_id_column` to a column that is unique per row.
 
 These columns are hidden by default. You can reveal them using `ColumnConfig`:
 

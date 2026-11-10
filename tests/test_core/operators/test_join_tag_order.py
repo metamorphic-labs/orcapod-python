@@ -36,7 +36,11 @@ print(json.dumps({{"tag": list(tag.keys()), "stream": list(stream.keys()[0])}}))
 def _tag_orders(operator: str, right_data: str, seed: int) -> dict[str, list[str]]:
     env = {**os.environ, "PYTHONHASHSEED": str(seed)}
     result = subprocess.run(
-        [sys.executable, "-c", _SCRIPT.format(operator=operator, right_data=right_data)],
+        [
+            sys.executable,
+            "-c",
+            _SCRIPT.format(operator=operator, right_data=right_data),
+        ],
         env=env,
         capture_output=True,
         text=True,

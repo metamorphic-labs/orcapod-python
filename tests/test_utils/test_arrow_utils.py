@@ -7,6 +7,7 @@ from orcapod.types import ColumnConfig
 from orcapod.utils.arrow_utils import (
     add_source_info,
     apply_column_config,
+    concat_tables_by_name,
     infer_schema_nullable,
     make_schema_non_nullable,
     normalize_extension_columns,
@@ -896,3 +897,18 @@ class TestFoldSystemTagValues:
         ).stdout.split()
         assert out[0] == self.EXPECTED_RID.hex()
         assert out[1] == self.EXPECTED_SID
+
+
+class TestConcatTablesByName:
+    """``concat_tables_by_name`` reconciles column order only."""
+
+    def test_aligns_reordered_columns_to_first_table(self) -> None:
+        first = pa.table({"a": [1], "b": [2]})
+        second = pa.table({"b": [4], "a": [3]})
+        result = concat_tables_by_name([first, second])
+        assert result.column_names == ["a", "b"]
+        assert result.to_pylist() == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+
+    def test_empty_input_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="empty sequence of tables"):
+            concat_tables_by_name([])

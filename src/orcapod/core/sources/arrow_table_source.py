@@ -56,10 +56,13 @@ class ArrowTableSource(RootSource):
     per-row token.  With ``record_id_column`` the token is that column's value,
     so the ID follows the row.  Without it the token is the row's position
     (``row_0``, ``row_1``, ...): supplying the same rows in a different order
-    under the same ``source_id`` moves each record ID to a different row, which
+    under the same ``source_id`` moves record IDs between rows, which
     invalidates downstream pipeline entries and ``SideEffectPod`` completion
-    records and misattributes lineage.  Set ``record_id_column`` to a column
-    that is unique per row whenever row order can vary between runs.
+    records for the moved rows and misattributes lineage.  ``source_id`` must
+    be stable too: when omitted it defaults to the table hash, which changes
+    with row order.  Whenever row order can vary between runs, pass an
+    explicit ``source_id`` and set ``record_id_column`` to a column that is
+    unique per row.
     """
 
     def __init__(

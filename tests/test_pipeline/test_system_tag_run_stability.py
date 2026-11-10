@@ -26,7 +26,7 @@ from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
-from orcapod.side_effects import sink_pod
+from orcapod.side_effects import SideEffectPod, sink_pod
 
 Key = tuple[tuple[str, Any], ...]
 
@@ -109,7 +109,9 @@ def _run_once(
             source_id="methods",
             record_id_column="w",
         )
-        sink_pod(deliver).process(scale.pod(Join()(probe_source, method_source)))
+        sink = sink_pod(deliver)
+        assert isinstance(sink, SideEffectPod)
+        sink.process(scale.pod(Join()(probe_source, method_source)))
     job.run()
     return delivered
 
@@ -162,7 +164,9 @@ class TestMaterializationAlignsColumnsByName:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("shared_key", [False, True], ids=["cross_product", "shared_key"])
+@pytest.mark.parametrize(
+    "shared_key", [False, True], ids=["cross_product", "shared_key"]
+)
 class TestSinkCompletionIsRunStable:
     def test_second_run_delivers_nothing(
         self, tmp_path: Any, sink_rows: dict[Key, dict[str, Any]], shared_key: bool

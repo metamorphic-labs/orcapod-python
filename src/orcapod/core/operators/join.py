@@ -216,6 +216,10 @@ class Join(NonZeroInputOperator):
         # PYTHONHASHSEED. Emit the tag columns in the order ``output_schema``
         # predicts (first appearance across the inputs, in call order) so every
         # process, and every row served from a node's cache, agrees on it.
+        # Call order, not the ``pipeline_hash`` order used for the table's
+        # physical columns: ``Join(a, b)`` and ``Join(b, a)`` therefore list
+        # the same tag keys in a different order. Consumers must match tag
+        # columns by name; no hash or record ID depends on their order.
         tag_order: list[str] = []
         for input_stream in streams:
             for key in input_stream.keys()[0]:

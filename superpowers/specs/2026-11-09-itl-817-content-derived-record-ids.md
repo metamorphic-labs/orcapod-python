@@ -14,11 +14,18 @@ caller names a `record_id_column`, and `"row_{index}"` otherwise.
 
 The default is positional. If the same rows arrive in a different order under the same
 `source_id`, record IDs move between rows while user tags and data stay with the right row.
-Everything keyed on system tags then changes:
+Everything keyed on the system tags of a moved row then changes:
 
-- a `sink_pod` re-delivers every row on every run (measured: 9/9/9 instead of 9/0/0);
-- `FunctionJobNode` pipeline entries miss, so rows are re-recorded each run;
+- a `sink_pod` re-delivers every moved row on every run (measured with all rows moved:
+  9/9/9 instead of 9/0/0);
+- `FunctionJobNode` pipeline entries miss for those rows, so they are re-recorded each run;
 - an invocation record carries another row's lineage.
+
+These keys are the system tags plus a hash of the row's input data, so a moved row normally
+misses rather than matching another row's entry. The exception is two rows that swap
+positions while carrying identical user tags and identical input data at the consuming node:
+their keys are unchanged, nothing is re-delivered, and each row is silently credited with
+the other's lineage.
 
 This is the signature reported in ITL-817. `DictSource`, `ListSource`, `DataFrameSource` and
 `DerivedSource` do not accept `record_id_column` at all, so they can only be positional.

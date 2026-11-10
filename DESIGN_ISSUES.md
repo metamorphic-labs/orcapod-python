@@ -1704,7 +1704,7 @@ CI job failed.
 
 ## System tag run stability (ITL-817)
 
-### ST1 — Tag column order through `Join` / `MergeJoin` depended on `PYTHONHASHSEED`
+### RS1 — Tag column order through `Join` / `MergeJoin` depended on `PYTHONHASHSEED`
 **Status:** resolved
 **Severity:** high
 **Issue:** ITL-817
@@ -1722,7 +1722,7 @@ by column name in both buffer materializers, so any operator that emits a differ
 order is tolerated. Column order only: `arrow_hasher.hash_table` ignores column order, so no
 record ID, system tag, `content_hash` or `pipeline_hash` changes.
 
-### ST2 — Default source record IDs are positional
+### RS2 — Default source record IDs are positional
 **Status:** open
 **Severity:** high
 **Issue:** ITL-817
@@ -1730,8 +1730,10 @@ record ID, system tag, `content_hash` or `pipeline_hash` changes.
 Without `record_id_column`, `stream_builder._make_provenance_token` derives a row's record ID
 from its position (`row_{index}`). When the same rows arrive in a different order under the
 same `source_id`, record IDs move between rows while user tags and data stay correct. Every
-identity built on system tags then changes: a `sink_pod` re-delivers every row on every run
-and invocation records carry another row's lineage. This reproduces the signature reported
+identity built on the system tags of a moved row then changes: a `sink_pod` re-delivers those
+rows on every run (all of them when every row moves) and invocation records carry another
+row's lineage. `record_id_column` alone does not prevent this when `source_id` is left to
+default, because the default `source_id` is the table hash, which also changes with row order. This reproduces the signature reported
 in ITL-817 exactly; whether it is the reporter's cause depends on how their sources are built.
 
 The behavior is now documented on `ArrowTableSource`, `SourceStreamBuilder.build` and in
