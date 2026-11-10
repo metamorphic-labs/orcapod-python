@@ -1,11 +1,14 @@
 """Tests for arrow_utils utility functions."""
 
 import pyarrow as pa
+import pytest
 
 from orcapod.types import ColumnConfig
 from orcapod.utils.arrow_utils import (
     add_source_info,
     apply_column_config,
+    column_arrow_type,
+    concat_tables_by_name,
     infer_schema_nullable,
     make_schema_non_nullable,
     normalize_extension_columns,
@@ -916,3 +919,48 @@ class TestFoldSystemTagValues:
         ).stdout.split()
         assert out[0] == self.EXPECTED_RID.hex()
         assert out[1] == self.EXPECTED_SID
+
+
+class TestColumnArrowType:
+    """``column_arrow_type`` returns a column's declared Arrow type verbatim."""
+
+    def test_returns_exact_declared_type(self) -> None:
+        """Narrow, layout-specific and nested types come back unchanged."""
+        schema = pa.schema(
+            [
+                pa.field("i8", pa.int8()),
+                pa.field("s", pa.string()),
+                pa.field("l8", pa.list_(pa.int8())),
+            ]
+        )
+        assert column_arrow_type(schema, "i8") == pa.int8()
+        assert column_arrow_type(schema, "s") == pa.string()
+        assert column_arrow_type(schema, "l8") == pa.list_(pa.int8())
+
+    def test_missing_column_raises_key_error(self) -> None:
+        """An absent column raises ``KeyError``, as ``Schema.field`` does."""
+        with pytest.raises(KeyError):
+            _ = column_arrow_type(pa.schema([pa.field("a", pa.int8())]), "b")
+
+    def test_duplicate_column_raises_key_error(self) -> None:
+        """An ambiguous (duplicated) column name raises ``KeyError``."""
+        schema = pa.schema([pa.field("a", pa.int8()), pa.field("a", pa.int16())])
+        with pytest.raises(KeyError):
+            _ = column_arrow_type(schema, "a")
+
+
+class TestConcatTablesByName:
+    """``concat_tables_by_name`` reconciles column order only."""
+
+    def test_aligns_reordered_columns_to_first_table(self) -> None:
+        """A table listing the same columns in another order takes the first table's order."""
+        first = pa.table({"a": [1], "b": [2]})
+        second = pa.table({"b": [4], "a": [3]})
+        result = concat_tables_by_name([first, second])
+        assert result.column_names == ["a", "b"]
+        assert result.to_pylist() == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+
+    def test_empty_input_raises_value_error(self) -> None:
+        """An empty sequence raises ``ValueError`` instead of reaching ``pa.concat_tables``."""
+        with pytest.raises(ValueError, match="empty sequence of tables"):
+            concat_tables_by_name([])

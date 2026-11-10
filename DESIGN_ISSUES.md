@@ -1709,6 +1709,35 @@ before v0.1.0 ship.
 
 ---
 
+## `src/orcapod/core/operators/merge_join.py`
+
+### MJ1 — `MergeJoin` raises when an input stream has zero rows
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-813
+
+`MergeJoin.binary_static_process` built two columns with `pa.array(...)` and no explicit
+type. `pa.array([])` is `null`-typed, so with a zero-row input:
+
+1. The `_common` helper join key was `null` on the empty side and `int64` on the other, and
+   Polars raised `SchemaError: datatypes of join keys don't match`.
+2. With both sides empty (or once 1 is fixed) the merged list column of a colliding data
+   column, and its source-info column, were `null`-typed, and schema reconstruction raised
+   `ValueError: A null type field may not be non-nullable`.
+
+`Join` had the same helper-key bug in 0.1.4; it was fixed on `main` as a side effect of
+ITL-563 but without tests.
+
+**Fix:** The helper key is typed `pa.int8()` (as in `Join`). Merged columns and their
+source-info columns are built with an explicit type taken from the inputs (see MJ2), never
+inferred from the values, so a zero-row result has exactly the types of a non-empty one and
+the predicted schema; the two concatenate. `tests/test_core/operators/test_empty_inputs.py`
+covers zero-row inputs for every operator, comparing the materialized schema with the
+predicted `output_schema()`; `test_merge_join_arrow_types.py` covers zero-row left, right
+and both inputs for every element type.
+
+---
+
 ## `docs/` (user-facing documentation)
 
 ### DOC1 — Documentation samples and behavioural claims had drifted from the code
@@ -1785,6 +1814,123 @@ CI job failed.
 
 ---
 
+### DEP2 — Packaging declared MIT, shipped a type checker to users and a 3.3 MB sdist
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-827
+
+`pyproject.toml` declared `MIT License` (with the OSI MIT classifier) although Orcapod is
+proprietary to Metamorphic Labs, and no LICENSE file existed. `basedpyright` sat in the
+runtime dependencies, so every `pip install orcapod` pulled in a type checker. The sdist
+packed the whole repository (`tests/`, `superpowers/`, `docs/`, `notebooks/`, `CLAUDE.md`,
+...), and `orcapod.__version__` did not exist.
+
+**Fix:** Added the org template LICENSE and declared
+`license = { text = "LicenseRef-Metamorphic-Proprietary" }`, the identifier the org license
+check allows (and added it to the repo's own `_license-check.yml` allow-list). No license
+classifier is declared: pip-licenses prefers classifiers, so `License :: Other/Proprietary
+License` would fail both checks. Moved `basedpyright` and `typing_extensions` (only a test
+imports it) to the dev group, dropped the unused `pymongo` and `pyyaml`, restricted the sdist
+with `only-include` (3.37 MB to 0.47 MB), and added `orcapod.__version__`.
+`tests/test_packaging.py` builds both distributions and pins their contents.
+
+---
+
+## `src/orcapod/core/operators/merge_join.py` — Arrow types
+
+### MJ2 — `MergeJoin` discards its inputs' Arrow types
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-832 (with ITL-813; related: ITL-835, ITL-839)
+
+`MergeJoin` built a merged (colliding) column with `pa.array(<python lists>)`, so Arrow inferred
+the element type from the values instead of keeping the input's: `int8`/`int16`/`int32`/`uint8`
+became `int64`, `float32` became `double`, nested lists widened their elements, and decimal
+precision came from the data (`decimal128(5, 2)` became `decimal128(3, 2)`). PR #268 (ITL-813)
+made the empty path mimic that inference with a hand-written table. When the two inputs gave a
+column different Arrow types, the result depended on the values and on argument order, or the
+Polars join raised.
+
+**Fix:** No Arrow type is inferred from Python values. Every output column of `MergeJoin` and
+`PolarsFilter` takes the large-normalized form of its input type
+(`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `list` to `large_list`,
+recursively; hash-identical), keeping width, nullability and logical types. Merged columns,
+and the list columns of `Batch` and `GroupBy`, are built by `arrow_utils.aggregated_list_type`:
+`large_list<normalized input element>`, or for a logical element its logical list type from the
+type converter (an error naming the column if the converter has none; the element is never
+stripped to its storage type). Merged source-info columns are `large_list<large_string>`. A
+column whose two inputs' types differ goes through `MergeJoin._resolve_disagreeing_types`:
+equal after normalization proceeds, anything else raises `InputValidationError` naming the
+column and both types, in `binary_static_process` before the join (`output_schema()` reports
+Python types and cannot see it). Hashes: `list`/`large_list` and the other layout pairs hash
+identically, so only a merged column narrower than `int64`/`double` changes its row hash (it no
+longer widens). Rules recorded under "Arrow types" in `CLAUDE.md`.
+
+`normalize_to_large_types` also dropped a list item's non-null flag (and map/union child
+flags), which changes the Arrow schema hash of such a column; it now rebuilds every nested
+field with `Field.with_type`, keeping name, nullability and metadata, so normalization is
+hash-preserving (`tests/test_utils/test_normalize_to_large_types.py`). Measured on
+`list<int64 not null>`, `struct<l: list<int8 not null>>` and
+`list<list<string not null> not null>` columns: `Data.content_hash` (the stored
+`input_data_hash`), `Tag.content_hash`, stream and source `content_hash` / `pipeline_hash`, and
+`Batch` output hashes are all unchanged; only the Arrow types now keep the nested non-null
+flags (a stored-schema change for such columns). The wider nullability audit across operators
+and pods is ITL-842.
+
+**Still open:** non-empty struct columns cannot be merged because values are sorted as Python
+objects (ITL-839; pinned by a strict xfail).
+
+---
+
+## System tag run stability (ITL-817)
+
+### RS1 — Tag column order through `Join` / `MergeJoin` depended on `PYTHONHASHSEED`
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-817
+
+`Join.static_process` and `MergeJoin.binary_static_process` built `tag_columns` from a `set`,
+so the order of user tag columns on every emitted `Tag` changed from process to process.
+`FunctionJobNode._load_cached_entries` rebuilds cached rows with the compile-time tag order,
+so a node output mixing cached and freshly computed rows could not be concatenated:
+`SyncPipelineOrchestrator._materialize_as_stream` raised
+`ArrowInvalid: Schema at index N was different`.
+
+**Fix:** Column order follows the operator's argument symmetry. `Join` and `MergeJoin` are
+commutative, so they list tag and data columns by first appearance across the inputs in
+canonical `pipeline_hash` order: `Join(a, b)` and `Join(b, a)` give the same keys, schema,
+table columns and per-row keys, in every process and on the async path. The order is defined
+once, in `output_schema` / `binary_output_schema`; `static_process` reads it back and lays
+the table out to match. `SemiJoin` is ordered and keeps the left operand's columns.
+`arrow_utils.concat_tables_by_name` aligns per-row tables by column name in both buffer
+materializers, so any operator that emits a different column order is tolerated. Column
+order only: `arrow_hasher.hash_table` and the semantic hasher ignore column and key order,
+so no record ID, system tag, `content_hash` or `pipeline_hash` changes.
+
+### RS2 — Default source record IDs are positional
+**Status:** open
+**Severity:** high
+**Issue:** ITL-817
+
+Without `record_id_column`, `stream_builder._make_provenance_token` derives a row's record ID
+from its position (`row_{index}`). When the same rows arrive in a different order under the
+same `source_id`, a moved row gets a different record ID while its user tags and data stay
+correct. Every identity built on the system tags of a moved row then changes, and because
+those identities also include the hash of the row's own data, the row is treated as a new
+entry: a `sink_pod` re-delivers it on every run (all rows when every row moves) and a
+function node records a second entry with identical tag values and a distinct record ID. No
+result is paired with the wrong row. `record_id_column` alone does not prevent this when `source_id` is left to
+default, because the default `source_id` is the table hash, which also changes with row order. This reproduces the signature reported
+in ITL-817 exactly; whether it is the reporter's cause depends on how their sources are built.
+
+The behavior is now documented on `ArrowTableSource`, `SourceStreamBuilder.build` and in
+`docs/concepts/sources.md`, and `record_id_column` is pinned as order-independent by
+`tests/test_pipeline/test_system_tag_run_stability.py`. Changing the default to a
+content-derived record ID invalidates stored identities and is proposed, not implemented, in
+`superpowers/specs/2026-11-09-itl-817-content-derived-record-ids.md`.
+
+---
+
 ## `src/orcapod/utils/canonical_type_names.py`
 
 ### PY313 — Type names in identity strings depended on the Python version
@@ -1853,3 +1999,65 @@ rely on. Paths are under `src/orcapod/`:
   (`pipeline/logging_observer.py:278`, `pipeline/status_observer.py:231`).
 - `DataFunctionProtocol` lacks `data_context`:
   `core/cached_function_pod.py:145,150,196,201`.
+
+---
+
+## `src/orcapod/core/datagrams/datagram.py`, `src/orcapod/core/operators/index.py`, `pick.py`
+
+### DG1 — Datagram mutators discard known Arrow types; Index/Pick re-infer every column
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-834
+
+`Datagram.with_columns` and `update` took the Arrow-native path only when the dict cache was
+not loaded. `Index`/`Pick` read `data[column]` first, so they fell into the dict path, which
+dropped the Arrow table and rebuilt every column from Python types: `int8 -> int64`,
+`float32 -> double`, `list<int8> -> large_list<int64>`, changing the content hash of columns
+the operators only pass through. The extracted column was typed from the Python element type
+(always `int64` for ints), and the all-rows-skipped path built its empty table from the
+predicted Python schema, widening tags too. Two sibling defects of the same class:
+`copy(include_cache=False)`, used by every mutator, discarded the meta Arrow table so narrow
+meta columns widened on any mutation; and dict-path `with_columns`/`select`/`drop`/`rename`
+copied a stale cached `_data_arrow_schema`, so `arrow_schema()` disagreed with `as_table()`
+(which let `FunctionPodStream.as_table` silently drop a column of a mutated dict-born row).
+
+**Fix:** `with_columns`/`update` use the Arrow table whenever it is loaded and carry existing
+fields verbatim; only genuinely new columns are typed (from `column_types`, which now also
+accepts a `pa.DataType` used verbatim) or inferred. The meta Arrow table is carried through
+`copy` and the meta mutators keep untouched meta fields. Dict-path mutators reset the cached
+Arrow schema. `Index`/`Pick` derive the extracted type from the input column's Arrow type,
+keep the in-place column's position, and build the empty result from the input's Arrow
+schema. Rule: whatever Arrow types the inputs have are respected; inferring from Python
+values is reserved for when no Arrow type is known.
+
+The extracted column's nullability is the same for every row and equals the predicted output
+type's: `column_types` also accepts a `pa.Field` (used verbatim, nullability included), and
+`Index`/`Pick` declare `NOT NULL` because an element's predicted type is never Optional. An
+extracted `None` raises `ValueError` naming the operator, column and row (before, a `None` in
+one row and a value in another gave the rows different nullability, so materializing failed in
+`pa.concat_tables`). Known limit: the type converter maps `list[int | None]` and
+`list[int]` to the same Arrow type and back to `list[int]`, so nullable elements cannot be
+declared today (ITL-835 territory).
+
+---
+
+## `src/orcapod/semantic_types/universal_converter.py` — struct Python types
+
+### TC1 — A struct's Python type depended on its children's string/list layouts
+**Status:** resolved
+**Severity:** medium
+**Issue:** ITL-832 (follow-up: ITL-841)
+
+The type converter synthesized one `TypedDict` class per exact Arrow struct type, so
+`struct<b: string>` and `struct<b: large_string>` (hash-identical) became two different Python
+classes with the same name. A stream with a `struct<b: string>` column therefore reported one
+class in `output_schema()` and another in its own `Data` rows (which normalize to large types),
+and an operator that normalizes its output (ITL-832) could not match its predicted schema.
+
+**Fix:** The converter keys the class by `normalize_to_large_types(struct)` and maps it back to
+the large-normalized struct, so both layouts share one class; width, nullability and logical
+types still distinguish structs. Content and pipeline hashes of struct columns are pinned to
+their values on `main` in `tests/test_semantic_types/test_struct_layout_identity.py`. Maps and
+unions do not have this problem: their Python types do not depend on child layouts. This is a
+workaround (`TODO(ITL-841)` in the code); ITL-841 revisits the treatment of large variants
+everywhere.
