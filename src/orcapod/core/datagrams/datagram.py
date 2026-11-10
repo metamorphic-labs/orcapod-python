@@ -907,10 +907,13 @@ class Datagram(ContentIdentifiableBase):
         """Return a copy with new data columns added.
 
         Whenever the Arrow table is loaded, or an Arrow type is declared, the
-        Arrow path is taken: existing columns keep their exact Arrow fields
-        and only the new columns are typed (declared) or inferred
-        (undeclared). A dict-only datagram without declared Arrow types keeps
-        its Python-schema behaviour.
+        Arrow path is taken and only the new columns are typed (declared) or
+        inferred (undeclared). If the Arrow table is loaded, existing columns
+        keep their exact Arrow fields. On a dict-only datagram with a declared
+        Arrow type, no Arrow fields are known yet, so existing columns are
+        converted from the Python schema, as ``as_table()`` would convert
+        them. A dict-only datagram without declared Arrow types keeps its
+        Python-schema behaviour.
 
         Args:
             column_types: Optional types for some or all new columns. A
@@ -949,8 +952,9 @@ class Datagram(ContentIdentifiableBase):
         if self._data_table is not None or has_arrow_types:
             # Arrow-native path whenever an Arrow type is known — the table is
             # loaded (even if the dict cache is too) or the caller declared an
-            # Arrow type. Existing columns keep their exact Arrow fields; only
-            # the new columns are typed (declared) or inferred (undeclared).
+            # Arrow type. Existing columns keep their Arrow fields (converted
+            # from the Python schema if the table was not loaded); only the new
+            # columns are typed (declared) or inferred (undeclared).
             new_d = self.copy(include_cache=False)
             new_d._data_table = arrow_utils.hstack_tables(
                 self._ensure_data_table(),
