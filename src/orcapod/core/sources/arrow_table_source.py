@@ -55,14 +55,17 @@ class ArrowTableSource(RootSource):
     Every row gets a record ID system tag derived from ``source_id`` and a
     per-row token.  With ``record_id_column`` the token is that column's value,
     so the ID follows the row.  Without it the token is the row's position
-    (``row_0``, ``row_1``, ...): supplying the same rows in a different order
-    under the same ``source_id`` moves record IDs between rows, which
-    invalidates downstream pipeline entries and ``SideEffectPod`` completion
-    records for the moved rows and misattributes lineage.  ``source_id`` must
-    be stable too: when omitted it defaults to the table hash, which changes
-    with row order.  Whenever row order can vary between runs, pass an
-    explicit ``source_id`` and set ``record_id_column`` to a column that is
-    unique per row.
+    (``row_0``, ``row_1``, ...), so a row supplied at a different position
+    under the same ``source_id`` gets a different record ID.  Downstream
+    pipeline entries and ``SideEffectPod`` completion records are keyed on
+    the system tags plus the hash of the row's data, so the moved row is
+    treated as a new entry: it is recorded again (two entries with identical
+    tag values but distinct record IDs) and delivered again by a
+    ``SideEffectPod``.  No result is paired with the wrong row, because every
+    key includes the row's own data hash.  ``source_id`` must be stable too:
+    when omitted it defaults to the table hash, which changes with row order.
+    Whenever row order can vary between runs, pass an explicit ``source_id``
+    and set ``record_id_column`` to a column that is unique per row.
     """
 
     def __init__(

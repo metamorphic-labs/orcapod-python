@@ -1716,11 +1716,16 @@ so a node output mixing cached and freshly computed rows could not be concatenat
 `SyncPipelineOrchestrator._materialize_as_stream` raised
 `ArrowInvalid: Schema at index N was different`.
 
-**Fix:** Both operators now emit tags in the order `output_schema` predicts (first appearance
-across the inputs, in call order). `arrow_utils.concat_tables_by_name` aligns per-row tables
-by column name in both buffer materializers, so any operator that emits a different column
-order is tolerated. Column order only: `arrow_hasher.hash_table` ignores column order, so no
-record ID, system tag, `content_hash` or `pipeline_hash` changes.
+**Fix:** Column order follows the operator's argument symmetry. `Join` and `MergeJoin` are
+commutative, so they list tag and data columns by first appearance across the inputs in
+canonical `pipeline_hash` order: `Join(a, b)` and `Join(b, a)` give the same keys, schema,
+table columns and per-row keys, in every process and on the async path. The order is defined
+once, in `output_schema` / `binary_output_schema`; `static_process` reads it back and lays
+the table out to match. `SemiJoin` is ordered and keeps the left operand's columns.
+`arrow_utils.concat_tables_by_name` aligns per-row tables by column name in both buffer
+materializers, so any operator that emits a different column order is tolerated. Column
+order only: `arrow_hasher.hash_table` and the semantic hasher ignore column and key order,
+so no record ID, system tag, `content_hash` or `pipeline_hash` changes.
 
 ### RS2 — Default source record IDs are positional
 **Status:** open
@@ -1729,10 +1734,12 @@ record ID, system tag, `content_hash` or `pipeline_hash` changes.
 
 Without `record_id_column`, `stream_builder._make_provenance_token` derives a row's record ID
 from its position (`row_{index}`). When the same rows arrive in a different order under the
-same `source_id`, record IDs move between rows while user tags and data stay correct. Every
-identity built on the system tags of a moved row then changes: a `sink_pod` re-delivers those
-rows on every run (all of them when every row moves) and invocation records carry another
-row's lineage. `record_id_column` alone does not prevent this when `source_id` is left to
+same `source_id`, a moved row gets a different record ID while its user tags and data stay
+correct. Every identity built on the system tags of a moved row then changes, and because
+those identities also include the hash of the row's own data, the row is treated as a new
+entry: a `sink_pod` re-delivers it on every run (all rows when every row moves) and a
+function node records a second entry with identical tag values and a distinct record ID. No
+result is paired with the wrong row. `record_id_column` alone does not prevent this when `source_id` is left to
 default, because the default `source_id` is the table hash, which also changes with row order. This reproduces the signature reported
 in ITL-817 exactly; whether it is the reporter's cause depends on how their sources are built.
 

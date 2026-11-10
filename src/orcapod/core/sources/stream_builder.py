@@ -51,15 +51,15 @@ def _make_provenance_token(
 
     The fallback is positional: the token names a row position, not a row.
     If the same rows are supplied in a different order under the same
-    ``source_id``, each moved row inherits the record ID of whichever row used
-    to occupy its position. Downstream record identities (``FunctionJobNode``
-    pipeline entries, ``SideEffectPod`` completion records) are derived from
-    the system tags plus the input data hash, so for moved rows they stop
-    matching and lineage is attributed to the wrong row. Rows that swap
-    positions while carrying identical tags and identical input data are the
-    exception: their identities still match, but each is credited with the
-    other's lineage. Pass ``record_id_column`` whenever row order is not
-    guaranteed to be identical between runs.
+    ``source_id``, a moved row gets a different record ID. Downstream record
+    identities (``FunctionJobNode`` pipeline entries, ``SideEffectPod``
+    completion records) are derived from the system tags plus the row's data
+    hash, so the moved row is treated as a new entry: it is recorded again,
+    giving two entries with identical tag values but distinct record IDs, and
+    a ``SideEffectPod`` delivers it again. Because every identity includes the
+    row's own data hash, no result is ever paired with the wrong row. Pass
+    ``record_id_column`` (with a stable ``source_id``) whenever row order is
+    not guaranteed to be identical between runs.
     """
     if record_id_column is not None:
         return f"{record_id_column}={row[record_id_column]}"
