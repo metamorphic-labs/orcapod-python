@@ -125,8 +125,8 @@ def test_wheel_contains_only_the_package(built_dists: tuple[Path, Path]) -> None
     wheel = built_dists[1]
     with zipfile.ZipFile(wheel) as zf:
         top_level = {name.split("/")[0] for name in zf.namelist()}
-    version = wheel.name.split("-")[1]
-    assert top_level == {"orcapod", f"orcapod-{version}.dist-info"}
+    wheel_version = wheel.name.split("-")[1]
+    assert top_level == {"orcapod", f"orcapod-{wheel_version}.dist-info"}
 
 
 def test_license_is_shipped_in_sdist_and_wheel(built_dists: tuple[Path, Path]) -> None:

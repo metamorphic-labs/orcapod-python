@@ -18,7 +18,7 @@
 - License checks: `pip-licenses` audits the installed `orcapod` itself (it reports `orcapod 0.1.3.dev30+g07e5a2ea3 MIT License`). The repo's `_license-check.yml` and the org's required `metamorphic-labs/shared-workflows` `ci-license-check.yml` both run `--allow-only ... --partial-match`. The org allow-list ends with `LicenseRef-Metamorphic-Proprietary`; a plain `Proprietary` would fail it.
 - Coordinator decision (ask, 2026-11-09): declare `LicenseRef-Metamorphic-Proprietary` in the prevailing org form, keep the LICENSE text exactly as the template's, and add the identifier to the repo's own `--allow-only` list (one line). Prevailing form across org repos (`gh search code`): `license = {text = "LicenseRef-Metamorphic-Proprietary"}` in 6 of 9 repos (3 use the PEP 639 string form).
 - `pip-licenses` defaults to `--from=mixed`, which prefers trove classifiers over the `License` metadata field. A `License :: Other/Proprietary License` classifier would therefore make pip-licenses report `Other/Proprietary License` and fail both allow-lists. Task 1 verifies this empirically; if confirmed, the classifier is not added (it "does not apply" because it would break the required check) and that is reported.
-- Runtime dependencies with no import in `src/`: `basedpyright` (dev tool, moved), `pymongo` (nothing depends on it), `pyyaml`, `typing_extensions` (transitive anyway). `s3fs` (fsspec plugin UPath needs for `s3://`), `tzdata` (pandas needs it), `gitpython` and `typer` (imported) are genuine runtime deps. Coordinator decision: keep `pymongo`, `pyyaml`, `typing_extensions`; report as follow-up.
+- Runtime dependencies with no import in `src/`: `basedpyright` (dev tool, moved), `pymongo` (nothing depends on it), `pyyaml`, `typing_extensions` (transitive anyway). `s3fs` (fsspec plugin UPath needs for `s3://`), `tzdata` (pandas needs it), `gitpython` and `typer` (imported) are genuine runtime deps. ~~Coordinator decision: keep `pymongo`, `pyyaml`, `typing_extensions`; report as follow-up.~~ Superseded by the developer decision in the addendum below: `pymongo` and `pyyaml` are removed, `typing_extensions` moves to the dev group.
 - hatch-vcs generates `src/orcapod/_version.py` (gitignored) defining `__version__: str`.
 - CI runs `uv run pytest -v -m "not postgres"`, with `uv` on PATH and `fetch-depth: 0`.
 
@@ -26,7 +26,7 @@
 
 - Create: `LICENSE`
 - Modify: `pyproject.toml` (`license`, classifiers, dependency lists, `[tool.hatch.build.targets.sdist]`)
-- Modify: `uv.lock` (basedpyright move only)
+- Modify: `uv.lock` (basedpyright move; per the addendum, also the `pymongo`/`pyyaml` removal and the `typing_extensions` move)
 - Modify: `.github/workflows/_license-check.yml` (append the identifier to `--allow-only`)
 - Modify: `src/orcapod/__init__.py` (`__version__` block and `__all__` entry)
 - Modify: `tests/test_packaging.py` (new tests)
