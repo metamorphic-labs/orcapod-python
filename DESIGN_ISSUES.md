@@ -882,6 +882,32 @@ and harmful for a reduction.
 
 ---
 
+### O6 — `MapTags` / `MapData` with `drop_unmapped=True` predict a schema their output does not have when no key matches
+**Status:** open
+**Severity:** medium
+**Issue:** ITL-820
+
+When no key of `name_map` names a column of the stream, `unary_static_process` returns the
+input stream unchanged (`core/operators/mappers.py:51-53` for `MapData`, `196-198` for
+`MapTags`), ignoring `drop_unmapped`. The predicted output schema does apply `drop_unmapped`
+and drops every data column (`MapData`) or every tag column (`MapTags`). So the schema and the
+rows disagree:
+
+```python
+s = DictSource(data=[{"a": "x", "b": "y", "v": 1, "w": 2}], tag_columns=["a", "b"])
+out = MapTags(name_map={"zz": "q"}, drop_unmapped=True)(s)
+out.keys()                  # ((), ('v', 'w'))
+out.as_table().column_names # ['a', 'b', 'v', 'w']
+# MapData(name_map={"zz": "q"}, drop_unmapped=True): keys() == (('a', 'b'), ()), same table
+```
+
+Found by CodeRabbit on PR #271 (docs). The concepts page does not document this case until the
+intended behaviour is decided: drop every unmapped column (what the flag says) or be a no-op.
+A fix needs a regression test comparing `output_schema()` with
+`unary_static_process(stream).output_schema()`.
+
+---
+
 ## `src/orcapod/core/` — AddResult pod and Pod Groups
 
 ### G1 — `AddResult`: a first-class pod type for data enrichment
@@ -1710,6 +1736,63 @@ predicted `output_schema()`.
 
 ---
 
+## `docs/` (user-facing documentation)
+
+### DOC1 — Documentation samples and behavioural claims had drifted from the code
+**Status:** resolved
+**Severity:** high
+**Issue:** PLT-4816 (related: ITL-807)
+
+Nothing executed the code samples in the user-facing docs, so they drifted as the library
+changed. Against `main` at `61d0f18e`, 24 of 45 samples failed, and several prose claims
+described behaviour the code does not have: that a function pod picks the columns it needs
+out of a wider stream (it rejects extra data columns — ITL-807), that editing a function's
+body invalidates its cached results (only its name, output schema and major version do), a
+database-backed `FunctionNode(..., pipeline_database=..., result_database=...)` API that no
+longer exists, `_tag::` as the system tag column prefix (the columns are `_tag_source_id::` and
+`_tag_record_id::`), and `op.enable_file_hash_caching` (the function is in `orcapod.contexts`).
+`mkdocs build --strict` also failed, on stale docstring parameters.
+
+**Fix:** Added `tests/test_docs/`, which runs every fenced `python` block in `README.md`,
+`docs/index.md`, `docs/getting-started.md`, `docs/concepts/` and `docs/reference/` (except the
+two PostgreSQL samples in `docs/concepts/file-hash-caching.md`, marked
+`<!-- docs-test: skip -->`) and checks the printed output against the output shown in the
+sample, and which builds the site with `mkdocs build --strict`. Fixed every failing sample and the wrong prose to match the code;
+library behaviour was not changed. What the docs still do not cover is listed in
+`superpowers/plans/2026-11-09-docs-gap-report.md`.
+
+---
+
+## `src/orcapod/core/streams/arrow_table_stream.py` — row iteration
+
+### ST4 — `iter_data` drops and mis-pairs rows when tag and data columns are chunked differently
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-816
+
+`ArrowTableStream.iter_data` called `to_batches()` separately on the tag-column selection and
+the data-column selection of the backing table and `zip`ped the two batch lists.
+`Table.to_batches()` cuts at the union of the chunk boundaries of the *selected* columns, so
+the two lists differ whenever tag and data columns have different chunk layouts — which is
+what the orchestrator produces when it rebuilds a node's output with
+`hstack_tables(concat_tables(tags), concat_tables(data))`. `zip` truncated to the shorter
+list (rows silently dropped: 6 rows from `as_table()`, 4 from `iter_data()`), and batches of
+unequal length paired a tag with another row's data or raised
+`Table must contain exactly one row`.
+
+A second bug of the same family sat in the same loop: per-row source info was read with
+`self._source_info_table.slice(i, 1)` where `i` is the index *within the current batch*, so
+in any multi-batch table every row after the first batch received the source info of a row in
+the first batch.
+
+**Fix:** `iter_data` now batches the whole backing table once
+(`self._table.to_batches()`, whose batches are aligned across all columns by construction),
+selects the tag and data columns out of each batch, and indexes source info by absolute row
+position. No table copy and no per-row `Table.slice`; measured no slower than before on a
+100k-row table. Regression tests: `tests/test_core/streams/test_iter_data_chunk_layouts.py`.
+
+---
+
 ## `pyproject.toml`
 
 ### DEP1 — Unused `pygraphviz` dependency breaks installs without Graphviz headers
@@ -1757,6 +1840,55 @@ recorded under "Arrow types" in `CLAUDE.md`.
 shared tag key), the behaviour is unchanged from before and the rule is pending a developer
 decision: `MergeJoin._resolve_disagreeing_types` (TODO ITL-835) is the single decision point, and
 `TestDisagreeingArrowTypes` pins today's behaviour. Follow-ups: ITL-835, ITL-829.
+
+---
+
+## System tag run stability (ITL-817)
+
+### RS1 — Tag column order through `Join` / `MergeJoin` depended on `PYTHONHASHSEED`
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-817
+
+`Join.static_process` and `MergeJoin.binary_static_process` built `tag_columns` from a `set`,
+so the order of user tag columns on every emitted `Tag` changed from process to process.
+`FunctionJobNode._load_cached_entries` rebuilds cached rows with the compile-time tag order,
+so a node output mixing cached and freshly computed rows could not be concatenated:
+`SyncPipelineOrchestrator._materialize_as_stream` raised
+`ArrowInvalid: Schema at index N was different`.
+
+**Fix:** Column order follows the operator's argument symmetry. `Join` and `MergeJoin` are
+commutative, so they list tag and data columns by first appearance across the inputs in
+canonical `pipeline_hash` order: `Join(a, b)` and `Join(b, a)` give the same keys, schema,
+table columns and per-row keys, in every process and on the async path. The order is defined
+once, in `output_schema` / `binary_output_schema`; `static_process` reads it back and lays
+the table out to match. `SemiJoin` is ordered and keeps the left operand's columns.
+`arrow_utils.concat_tables_by_name` aligns per-row tables by column name in both buffer
+materializers, so any operator that emits a different column order is tolerated. Column
+order only: `arrow_hasher.hash_table` and the semantic hasher ignore column and key order,
+so no record ID, system tag, `content_hash` or `pipeline_hash` changes.
+
+### RS2 — Default source record IDs are positional
+**Status:** open
+**Severity:** high
+**Issue:** ITL-817
+
+Without `record_id_column`, `stream_builder._make_provenance_token` derives a row's record ID
+from its position (`row_{index}`). When the same rows arrive in a different order under the
+same `source_id`, a moved row gets a different record ID while its user tags and data stay
+correct. Every identity built on the system tags of a moved row then changes, and because
+those identities also include the hash of the row's own data, the row is treated as a new
+entry: a `sink_pod` re-delivers it on every run (all rows when every row moves) and a
+function node records a second entry with identical tag values and a distinct record ID. No
+result is paired with the wrong row. `record_id_column` alone does not prevent this when `source_id` is left to
+default, because the default `source_id` is the table hash, which also changes with row order. This reproduces the signature reported
+in ITL-817 exactly; whether it is the reporter's cause depends on how their sources are built.
+
+The behavior is now documented on `ArrowTableSource`, `SourceStreamBuilder.build` and in
+`docs/concepts/sources.md`, and `record_id_column` is pinned as order-independent by
+`tests/test_pipeline/test_system_tag_run_stability.py`. Changing the default to a
+content-derived record ID invalidates stored identities and is proposed, not implemented, in
+`superpowers/specs/2026-11-09-itl-817-content-derived-record-ids.md`.
 
 ---
 
