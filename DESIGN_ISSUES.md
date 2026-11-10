@@ -1743,9 +1743,10 @@ strings on 3.11 or 3.12.
 The org required CI runs `basedpyright` in its default (`recommended`) mode. The code was
 never type-checked, so ITL-826 recorded the existing errors in
 `.basedpyright/baseline.json` instead of fixing them: the check passes and any new error
-fails it. Baselined errors on 07e5a2ea plus the ITL-826 lint fixes: 1999 in total
-(tests/ 1238, src/ 673, test-objective/ 84, examples/ 3, superpowers/ 1); the baseline also
-records about 30,400 warnings. Largest error rules: `reportArgumentType`,
+fails it. Baselined errors after the ITL-826 lint fixes and the ITL-825 merge: 1995 in
+total (tests/ 1238, src/ 669, test-objective/ 84, examples/ 3, superpowers/ 1); the baseline
+also records 30,279 warnings, which are reported but do not fail the check
+(`failOnWarnings = false`). Largest error rules: `reportArgumentType`,
 `reportMissingTypeArgument`, `reportAttributeAccessIssue`.
 
 Pay it down directory by directory, starting with `src/`, and regenerate the baseline only
