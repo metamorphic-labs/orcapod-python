@@ -1770,3 +1770,33 @@ rely on. Paths are under `src/orcapod/`:
   (`pipeline/logging_observer.py:278`, `pipeline/status_observer.py:231`).
 - `DataFunctionProtocol` lacks `data_context`:
   `core/cached_function_pod.py:145,150,196,201`.
+
+---
+
+## `src/orcapod/core/datagrams/datagram.py`, `src/orcapod/core/operators/index.py`, `pick.py`
+
+### DG1 — Datagram mutators discard known Arrow types; Index/Pick re-infer every column
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-834
+
+`Datagram.with_columns` and `update` took the Arrow-native path only when the dict cache was
+not loaded. `Index`/`Pick` read `data[column]` first, so they fell into the dict path, which
+dropped the Arrow table and rebuilt every column from Python types: `int8 -> int64`,
+`float32 -> double`, `list<int8> -> large_list<int64>`, changing the content hash of columns
+the operators only pass through. The extracted column was typed from the Python element type
+(always `int64` for ints), and the all-rows-skipped path built its empty table from the
+predicted Python schema, widening tags too. Two sibling defects of the same class:
+`copy(include_cache=False)`, used by every mutator, discarded the meta Arrow table so narrow
+meta columns widened on any mutation; and dict-path `with_columns`/`select`/`drop`/`rename`
+copied a stale cached `_data_arrow_schema`, so `arrow_schema()` disagreed with `as_table()`
+(which let `FunctionPodStream.as_table` silently drop a column of a mutated dict-born row).
+
+**Fix:** `with_columns`/`update` use the Arrow table whenever it is loaded and carry existing
+fields verbatim; only genuinely new columns are typed (from `column_types`, which now also
+accepts a `pa.DataType` used verbatim) or inferred. The meta Arrow table is carried through
+`copy` and the meta mutators keep untouched meta fields. Dict-path mutators reset the cached
+Arrow schema. `Index`/`Pick` derive the extracted type from the input column's Arrow type,
+keep the in-place column's position, and build the empty result from the input's Arrow
+schema. Rule: whatever Arrow types the inputs have are respected; inferring from Python
+values is reserved for when no Arrow type is known.
