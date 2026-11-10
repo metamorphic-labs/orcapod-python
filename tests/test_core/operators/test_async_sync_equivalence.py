@@ -461,20 +461,27 @@ _KEY_MESSAGE = r"column 'k': (\w+) in one input and (\w+) in the other"
 
 
 def _disagreeing_sources(
-    left_type: pa.DataType, right_type: pa.DataType
+    left_type: pa.DataType, right_type: pa.DataType, matching: bool = True
 ) -> tuple[ArrowTableSource, ArrowTableSource]:
+    """Two sources whose ``k`` types disagree; with ``matching=False`` no key matches."""
+    right_values = [1, 2] if matching else [10, 20]
     return (
         _key_source(pa.array([1, 2], left_type), "a", "l"),
-        _key_source(pa.array([1, 2], right_type), "b", "r"),
+        _key_source(pa.array(right_values, right_type), "b", "r"),
     )
 
 
+# The error must not depend on whether any key values match.
+MATCHING = pytest.mark.parametrize("matching", [True, False], ids=["match", "disjoint"])
+
+
 @KEYS
+@MATCHING
 def test_sync_join_rejects_disagreeing_key_types(
-    left_type: pa.DataType, right_type: pa.DataType
+    left_type: pa.DataType, right_type: pa.DataType, matching: bool
 ) -> None:
     """A shared tag key with different Arrow types is an error, never a conversion."""
-    left, right = _disagreeing_sources(left_type, right_type)
+    left, right = _disagreeing_sources(left_type, right_type, matching)
     for operands in ((left, right), (right, left)):
         with pytest.raises(InputValidationError, match=_KEY_MESSAGE) as excinfo:
             _ = Join().process(*operands).as_table()
@@ -484,11 +491,12 @@ def test_sync_join_rejects_disagreeing_key_types(
 
 
 @KEYS
+@MATCHING
 def test_async_join_rejects_disagreeing_key_types(
-    left_type: pa.DataType, right_type: pa.DataType
+    left_type: pa.DataType, right_type: pa.DataType, matching: bool
 ) -> None:
     """The async path rejects the same inputs with the same error."""
-    left, right = _disagreeing_sources(left_type, right_type)
+    left, right = _disagreeing_sources(left_type, right_type, matching)
     for operands in ((left, right), (right, left)):
         # The merge runs inside the join's task group, which wraps the error.
         with pytest.raises(ExceptionGroup) as excinfo:
@@ -496,9 +504,10 @@ def test_async_join_rejects_disagreeing_key_types(
         assert excinfo.group_contains(InputValidationError, match=_KEY_MESSAGE)
 
 
-def test_join_rejects_disagreeing_key_types_three_inputs() -> None:
+@MATCHING
+def test_join_rejects_disagreeing_key_types_three_inputs(matching: bool) -> None:
     """The check also applies to the staggered (three-input) path, sync and async."""
-    left, right = _disagreeing_sources(pa.int16(), pa.int32())
+    left, right = _disagreeing_sources(pa.int16(), pa.int32(), matching)
     third = _key_source(pa.array([1, 2], pa.int16()), "c", "t")
     with pytest.raises(InputValidationError, match=_KEY_MESSAGE):
         _ = Join().process(left, right, third).as_table()

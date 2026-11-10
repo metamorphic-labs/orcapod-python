@@ -580,6 +580,11 @@ class Join(NonZeroInputOperator):
                         this_keys = set(tag.keys())
                         other_keys = set(buffers[other][0][0].keys())
                         shared_keys = tuple(sorted(this_keys & other_keys))
+                        # Check the key types once, on the first row of each side,
+                        # so the error does not depend on whether any values match.
+                        self._check_shared_key_types(
+                            tag, buffers[other][0][0], shared_keys
+                        )
                         needs_reindex = True
 
                     # One-time re-index of rows buffered before shared_keys
@@ -611,6 +616,33 @@ class Join(NonZeroInputOperator):
                             await output.send(merge_fn(ot, op, tag, pkt))
         finally:
             await output.close()
+
+    @staticmethod
+    def _check_shared_key_types(
+        first: TagProtocol, second: TagProtocol, keys: Sequence[str]
+    ) -> None:
+        """Raise if a shared tag key has disagreeing Arrow types in two inputs.
+
+        The async counterpart of the check ``static_process`` runs on the input
+        tables before its join, applied to the first row of each side.
+
+        Args:
+            first: A tag from one input.
+            second: A tag from the other input.
+            keys: The tag columns the two inputs share.
+
+        Raises:
+            InputValidationError: If a key's large-normalized Arrow types differ
+                (``arrow_utils.resolve_disagreeing_types``).
+        """
+        first_schema, second_schema = first.arrow_schema(), second.arrow_schema()
+        for key in keys:
+            _ = arrow_utils.resolve_disagreeing_types(
+                key,
+                arrow_utils.column_arrow_type(first_schema, key),
+                arrow_utils.column_arrow_type(second_schema, key),
+                "Join",
+            )
 
     @staticmethod
     async def _rename_sys_tags(
