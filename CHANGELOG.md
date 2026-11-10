@@ -13,9 +13,8 @@
 > exists. Publishing to PyPI / TestPyPI is superseded; the Release workflow still targets
 > them, and switching it to the internal registry is not yet possible.
 
-Everything merged to `main` since `v0.1.2` (39 pull requests, counting these release notes,
-#269). `0.1.3` and `0.1.4` were
-patch releases cut from a separate branch; their one fix is also in this release (see
+Everything merged to `main` since `v0.1.2`. `0.1.3` and `0.1.4` were patch releases cut
+from a separate branch; their one fix is also in this release (see
 *Fixed*), so upgrading from `0.1.4` loses nothing.
 
 **Read *Breaking changes and migration* before upgrading an existing pipeline database.**
@@ -405,11 +404,6 @@ not on PyPI at the time of writing; install it from its repository.
   `Index`, `Pick`, `Batch` and `GroupBy` emit large variants; `Join`, `SemiJoin`, `MapTags`,
   `MapData`, the column-selection operators and sources keep whatever layout their input
   has (`string` stays `string`). This is layout only and changes no hash. (ITL-841)
-- **`Join`'s asynchronous path re-infers column types from Python values**, so narrow
-  columns widen (`int8` to `int64`) and row content hashes differ from the synchronous path.
-  A function pod downstream of an asynchronous `Join` over narrow columns records different
-  input hashes than in synchronous mode, so cache hits do not carry over between the two
-  modes. (ITL-837)
 - **`MergeJoin` cannot merge non-empty struct columns**: a colliding data column holding
   struct values raises `TypeError`. Zero-row inputs work. (ITL-839)
 - **`Data.select` and `Data.drop` leave the removed column's source-info column**
