@@ -1701,9 +1701,10 @@ longer exists, `_tag::` as the system tag column prefix (the columns are `_tag_s
 `mkdocs build --strict` also failed, on stale docstring parameters.
 
 **Fix:** Added `tests/test_docs/`, which runs every fenced `python` block in `README.md`,
-`docs/index.md`, `docs/getting-started.md`, `docs/concepts/` and `docs/reference/` and checks
-the printed output against the output shown in the sample, and which builds the site with
-`mkdocs build --strict`. Fixed every failing sample and the wrong prose to match the code;
+`docs/index.md`, `docs/getting-started.md`, `docs/concepts/` and `docs/reference/` (except the
+two PostgreSQL samples in `docs/concepts/file-hash-caching.md`, marked
+`<!-- docs-test: skip -->`) and checks the printed output against the output shown in the
+sample, and which builds the site with `mkdocs build --strict`. Fixed every failing sample and the wrong prose to match the code;
 library behaviour was not changed. What the docs still do not cover is listed in
 `superpowers/plans/2026-11-09-docs-gap-report.md`.
 

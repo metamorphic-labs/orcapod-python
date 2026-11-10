@@ -115,8 +115,10 @@ ways:
 This means that adding new data to a source only triggers computation for the new rows --
 previously computed results are served from the cache. The node's own stream
 (`iter_data()`, `as_table()`) contains the results for its current inputs only;
-`get_all_records()` returns everything stored in the shared table, including rows from
-earlier runs over other inputs.
+`get_all_records()` also returns rows stored by earlier runs of the same node -- same job
+name, same source -- over inputs that are no longer present. It does not return rows that
+other nodes wrote to the same shared table, such as the same function run over a source with
+a different `source_id`.
 
 ### DB path scoping
 

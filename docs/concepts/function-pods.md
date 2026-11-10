@@ -24,8 +24,9 @@ Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
   column; a list of strings means the function returns multiple values.
-- **Function parameters** must match the input stream's data columns exactly: one parameter
-  per data column, with the same names. See [Input columns must match exactly](#input-columns-must-match-exactly).
+- **Function parameters** must match the input stream's data columns exactly: one data
+  column per parameter, with the same names. A parameter with a default value may be left out
+  of the stream, and the default is used. See [Input columns must match exactly](#input-columns-must-match-exactly).
 - **Type annotations** are required on every parameter and are used to validate schema
   compatibility. A parameter without an annotation raises `ValueError` when the pod is
   created.
@@ -90,8 +91,10 @@ The function pod preserves tags and replaces data columns with the function's ou
 
 A function pod is strict about its input: the stream's data columns must be exactly the
 function's parameters. Orcapod does **not** pick the columns it needs out of a wider stream.
-A stream with an extra data column, a missing one, or a column of a different type is
-rejected with `ValueError` as soon as the pod is applied:
+A stream with an extra data column, a missing column for a parameter without a default, or a
+column of a different type is rejected with `ValueError` as soon as the pod is applied. (A
+parameter that has a default value may be left out of the stream; the function then uses the
+default.)
 
 ```python
 wide = DictSource(
