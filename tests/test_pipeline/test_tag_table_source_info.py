@@ -1,16 +1,21 @@
 """Function-node tag tables store each input row's own source info (ITL-845).
 
 A ``FunctionJobNode`` writes one tag-table (pipeline DB, ``pdb_v1``) row per input,
-carrying that input's ``_source_*`` provenance tokens. The sync orchestrator turns
-each upstream node's buffered rows into a stream before handing it to the next
-node, and that step used to stamp row 0's tokens on every row, so every tag table
-written through a sync ``PipelineJob`` attributed all inputs to the first one.
+carrying that input's source-info tokens. A source-info token is the provenance
+value a row holds for one data column: the value of its ``_source_<column>``
+column, as ``Data.source_info()`` returns it (for example ``S::row_0::x``).
+"Token" below always means a source-info token.
+
+The sync orchestrator turns each upstream node's buffered rows into a stream before
+handing it to the next node, and that step used to stamp row 0's source-info tokens
+on every row, so every tag table written through a sync ``PipelineJob`` attributed
+all inputs to the first one.
 
 The later tests pin what happens to a store written before the fix: nothing is
-rewritten or recomputed (the tag rows are cache hits and keep their old tokens),
-and dropping only the tag tables while keeping the result tables refills them with
-correct tokens without running any function again. Correcting stored values is
-tracked in ITL-853.
+rewritten or recomputed (the tag rows are cache hits and keep their old source-info
+tokens), and dropping only the tag tables while keeping the result tables refills
+them with correct source-info tokens without running any function again. Correcting
+stored values is tracked in ITL-853.
 """
 
 from __future__ import annotations
@@ -71,7 +76,7 @@ def _reset_calls() -> Iterator[None]:
 
 
 def _source() -> ArrowTableSource:
-    """Build the three-row source with tokens ``S::row_0`` to ``S::row_2``."""
+    """Build the three-row source (source-info tokens ``S::row_<i>::<column>``)."""
     table = pa.table(
         {
             "id": pa.array(["a", "b", "c"], pa.large_string()),
@@ -137,15 +142,15 @@ def _column(rows: Sequence[dict[str, Any]], column: str) -> list[Any]:
     return [row[column] for row in rows]
 
 
-def _input_tokens(column: str) -> list[str | None]:
-    """Return the source's own token for ``column`` on each row."""
+def _input_source_info_tokens(column: str) -> list[str | None]:
+    """Return the source's own source-info token for ``column`` on each row."""
     tokens = [data.source_info()[column] for _, data in _source().iter_data()]
     assert all(isinstance(t, str) for t in tokens)
     return [t if isinstance(t, str) else None for t in tokens]
 
 
-def _output_tokens(job: PipelineJob, label: str, column: str) -> list[Any]:
-    """Return the node's output token for ``column`` on each row, sorted by tag."""
+def _output_source_info_tokens(job: PipelineJob, label: str, column: str) -> list[Any]:
+    """Return the node's output source-info token for ``column`` per row, by tag."""
     rows = sorted(
         _function_node(job, label).iter_data(),
         key=lambda row: str(row[0].as_dict()["id"]),
@@ -174,25 +179,27 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 class TestFreshRunStoresPerRowSourceInfo:
     def test_source_into_function(self, orchestrator: str):
-        """A function fed by a source stores each input row's own tokens."""
+        """A function fed by a source stores each input row's own source-info tokens."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         rows = _tag_rows(job, "direct")
-        assert _column(rows, "_source_x") == _input_tokens("x")
-        assert _column(rows, "_source_y") == _input_tokens("y")
+        assert _column(rows, "_source_x") == _input_source_info_tokens("x")
+        assert _column(rows, "_source_y") == _input_source_info_tokens("y")
 
     def test_operator_into_function(self, orchestrator: str):
-        """A function fed through an operator stores each row's own tokens."""
+        """A function fed through an operator stores each row's source-info tokens."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
-        assert _column(_tag_rows(job, "via_op"), "_source_x") == _input_tokens("x")
+        assert _column(
+            _tag_rows(job, "via_op"), "_source_x"
+        ) == _input_source_info_tokens("x")
 
     def test_function_into_function(self, orchestrator: str):
-        """A function fed by a function stores each upstream output's token."""
+        """A function fed by a function stores each upstream source-info token."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         stored = _column(_tag_rows(job, "second"), "_source_z")
-        expected = _output_tokens(job, "direct", "z")
+        expected = _output_source_info_tokens(job, "direct", "z")
         assert len(set(expected)) == 3
         assert stored == expected
 
@@ -210,7 +217,7 @@ class TestStoreWrittenBeforeFix:
             old_job = _job(store)
             _run(old_job)
         before = {label: _tag_rows(old_job, label) for label in _FUNCTION_NODES}
-        row_zero = _input_tokens("x")[0]
+        row_zero = _input_source_info_tokens("x")[0]
         assert _column(before["direct"], "_source_x") == [row_zero] * 3
         assert sorted(CALLS) == sorted(["add_xy", "times_two", "add_one"] * 3)
 
@@ -221,8 +228,8 @@ class TestStoreWrittenBeforeFix:
         assert CALLS == []  # every input is a cache hit
         for label in _FUNCTION_NODES:
             assert _tag_rows(new_job, label) == before[label]  # not rewritten
-        # The run's own output carries correct tokens downstream regardless.
-        assert len(set(_output_tokens(new_job, "direct", "z"))) == 3
+        # The run's own output carries correct source-info tokens downstream regardless.
+        assert len(set(_output_source_info_tokens(new_job, "direct", "z"))) == 3
 
 
 class TestDropOnlyTagTables:
@@ -273,8 +280,8 @@ class TestDropOnlyTagTables:
 
         assert CALLS == []
         after = {label: _tag_rows(job, label) for label in _FUNCTION_NODES}
-        assert _column(after["direct"], "_source_x") == _input_tokens("x")
-        assert _column(after["via_op"], "_source_x") == _input_tokens("x")
+        assert _column(after["direct"], "_source_x") == _input_source_info_tokens("x")
+        assert _column(after["via_op"], "_source_x") == _input_source_info_tokens("x")
         assert len(set(_column(after["second"], "_source_z"))) == 3
         for label in _FUNCTION_NODES:
             for old, new in zip(before[label], after[label], strict=True):
@@ -294,6 +301,8 @@ class TestDropOnlyTagTables:
         job = _job(DeltaTableDatabase(tmp_path))
 
         assert CALLS == []
-        assert _column(_tag_rows(job, "direct"), "_source_x") == _input_tokens("x")
+        assert _column(
+            _tag_rows(job, "direct"), "_source_x"
+        ) == _input_source_info_tokens("x")
         assert _tag_rows(job, "second") == before["second"]
         assert _tag_rows(job, "via_op") == before["via_op"]

@@ -4,12 +4,17 @@
 ``SyncPipelineOrchestrator._materialize_as_stream`` turn collected (Tag, Data)
 pairs back into a stream. They used to read row 0's source info and stamp it on
 every row, so rows from index 1 onward were attributed to row 0. These tests
-send rows with distinct provenance tokens through every path that materializes
-rows and check that each output row keeps its own tokens.
+send rows with distinct source-info tokens through every path that materializes
+rows and check that each output row keeps its own source-info tokens.
 
-Expected tokens always come from the input stream itself or from the sync
-operator path (which never materializes rows), so no hash is hard-coded except
-in the pinned-identity tests at the bottom.
+A source-info token is the provenance value a row holds for one data column: the
+value of its ``_source_<column>`` column, as ``Data.source_info()`` returns it
+(for example ``<source>::row_0::x``, or a list of such tokens after ``Batch``,
+``GroupBy`` or ``MergeJoin``). "Token" below always means a source-info token.
+
+Expected source-info tokens always come from the input stream itself or from the
+sync operator path (which never materializes rows), so no hash is hard-coded
+except in the pinned-identity tests at the bottom.
 """
 
 from __future__ import annotations
@@ -79,7 +84,7 @@ def _list_source(n: int = 3) -> ArrowTableSource:
     return ArrowTableSource(_non_null(table), tag_columns=["id"])
 
 
-def _tokens(rows: Sequence[Row], column: str = "x") -> list[Any]:
+def _source_info_tokens(rows: Sequence[Row], column: str = "x") -> list[Any]:
     """Return each row's source-info token for ``column``, in row order."""
     return [data.source_info()[column] for _, data in rows]
 
@@ -173,34 +178,38 @@ def _source_fields(table: pa.Table) -> dict[str, pa.Field[pa.DataType]]:
 
 
 class TestMaterializeToStream:
-    def test_scalar_tokens_kept_per_row(self):
-        """Scalar tokens of every data column stay with their own row."""
+    def test_scalar_source_info_tokens_kept_per_row(self):
+        """Scalar source-info tokens of every data column stay with their own row."""
         rows = list(_source().iter_data())
-        expected = _tokens(rows)
+        expected = _source_info_tokens(rows)
         assert len(set(expected)) == len(
             expected
         )  # distinct, so the test is not vacuous
 
         stream = _materialize(rows)
 
-        assert _tokens(list(stream.iter_data())) == expected
-        assert _tokens(list(stream.iter_data()), "y") == _tokens(rows, "y")
+        assert _source_info_tokens(list(stream.iter_data())) == expected
+        assert _source_info_tokens(
+            list(stream.iter_data()), "y"
+        ) == _source_info_tokens(rows, "y")
 
-    def test_list_tokens_kept_per_row(self):
-        """List-valued tokens (after ``Batch``) stay with their own row."""
+    def test_list_source_info_tokens_kept_per_row(self):
+        """List-valued source-info tokens (after ``Batch``) stay with their own row."""
         rows = list(Batch(2)(_source(5)).iter_data())  # batches of 2, 2, 1
-        expected = _tokens(rows)
+        expected = _source_info_tokens(rows)
         assert [len(t) for t in expected] == [2, 2, 1]
 
         stream = _materialize(rows)
 
-        assert _tokens(list(stream.iter_data())) == expected
+        assert _source_info_tokens(list(stream.iter_data())) == expected
 
     def test_single_row(self):
-        """A single row materializes with its own tokens."""
+        """A single row materializes with its own source-info tokens."""
         rows = list(_source(1).iter_data())
         stream = _materialize(rows)
-        assert _tokens(list(stream.iter_data())) == _tokens(rows)
+        assert _source_info_tokens(list(stream.iter_data())) == _source_info_tokens(
+            rows
+        )
 
     def test_zero_rows_raises(self):
         """Materializing zero rows still raises ``ValueError``."""
@@ -208,29 +217,31 @@ class TestMaterializeToStream:
             _ = _materialize([])
 
     def test_none_source_info_rows(self):
-        """A ``None`` token on row 0 does not spread to the other rows."""
+        """A ``None`` source-info token on row 0 does not spread to the other rows."""
         rows = list(_source(3).iter_data())
-        # Row 0 has no token, the others keep theirs.
+        # Row 0 has no source-info token, the others keep theirs.
         rows[0] = (rows[0][0], rows[0][1].with_source_info(x=None))
-        expected = _tokens(rows)
+        expected = _source_info_tokens(rows)
         assert expected[0] is None and None not in expected[1:]
 
         stream = _materialize(rows)
 
-        assert _tokens(list(stream.iter_data())) == expected
+        assert _source_info_tokens(list(stream.iter_data())) == expected
 
     def test_none_source_info_after_row_zero(self):
-        """A ``None`` token after row 0 is kept rather than overwritten."""
+        """A ``None`` source-info token after row 0 is kept rather than overwritten."""
         rows = list(_source(3).iter_data())
         rows[2] = (rows[2][0], rows[2][1].with_source_info(x=None))
         stream = _materialize(rows)
-        assert _tokens(list(stream.iter_data())) == _tokens(rows)
+        assert _source_info_tokens(list(stream.iter_data())) == _source_info_tokens(
+            rows
+        )
 
     def test_all_none_source_info(self):
-        """Rows with no tokens at all materialize with ``None`` tokens."""
+        """Rows with no source-info tokens materialize with ``None`` for each one."""
         rows = [(t, d.with_source_info(x=None)) for t, d in _source(3).iter_data()]
         stream = _materialize(rows)
-        assert _tokens(list(stream.iter_data())) == [None, None, None]
+        assert _source_info_tokens(list(stream.iter_data())) == [None, None, None]
 
     def test_data_columns_and_types_unchanged(self):
         """Data values and the output schema are those of the input."""
@@ -244,15 +255,15 @@ class TestMaterializeToStream:
 class TestSourceInfoArrowFields:
     """The ``_source_*`` fields keep the Arrow type and nullability they had before.
 
-    Before ITL-845 a concrete (broadcast) token made the field non-nullable, and a
-    row-0 ``None`` passed the column through as nullable. The fix declares a field
-    nullable exactly when some row's token is ``None``, which matches the old flag
-    whenever the old values were right; the stored schema, and so the operator
-    node's per-row record hash, depend on it.
+    Before ITL-845 a concrete (broadcast) source-info token made the field
+    non-nullable, and a row-0 ``None`` passed the column through as nullable. The
+    fix declares a field nullable exactly when some row's source-info token is
+    ``None``, which matches the old flag whenever the old values were right; the
+    stored schema, and so the operator node's per-row record hash, depend on it.
     """
 
-    def test_scalar_tokens_non_nullable_large_string(self):
-        """Scalar token fields stay non-nullable ``large_string``."""
+    def test_scalar_source_info_tokens_non_nullable_large_string(self):
+        """Scalar source-info token fields stay non-nullable ``large_string``."""
         stream = _materialize(list(_source().iter_data()))
         fields = _source_fields(stream.as_table(columns={"source": True}))
         assert fields == {
@@ -260,8 +271,8 @@ class TestSourceInfoArrowFields:
             "_source_y": pa.field("_source_y", pa.large_string(), nullable=False),
         }
 
-    def test_list_tokens_non_nullable_large_list(self):
-        """List token fields stay non-nullable ``large_list<large_string>``."""
+    def test_list_source_info_tokens_non_nullable_large_list(self):
+        """List source-info fields stay non-nullable ``large_list<large_string>``."""
         rows = list(Batch(2)(_source(4)).iter_data())
         stream = _materialize(rows)
         field = _source_fields(stream.as_table(columns={"source": True}))["_source_x"]
@@ -273,8 +284,8 @@ class TestSourceInfoArrowFields:
         assert list_type.value_field.nullable is True
 
     @pytest.mark.parametrize("none_row", [0, 2])
-    def test_field_nullable_when_a_token_is_none(self, none_row: int):
-        """A token field is nullable exactly when some row's token is ``None``."""
+    def test_field_nullable_when_a_source_info_token_is_none(self, none_row: int):
+        """A ``_source_*`` field is nullable iff a row's source-info token is None."""
         rows = list(_source(3).iter_data())
         rows[none_row] = (rows[none_row][0], rows[none_row][1].with_source_info(x=None))
         stream = _materialize(rows)
@@ -306,55 +317,57 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
     def test_unary_async_matches_sync(
         self, make_op: Callable[[], StaticOutputOperatorPod]
     ):
-        """The async path emits the same rows and tokens as the sync path."""
+        """The async path emits the same rows and source-info tokens as sync."""
         src = _source(5)
         sync_rows = list(make_op()(src).iter_data())
         async_rows = _run_async(make_op(), src)
         assert _keyed(async_rows) == _keyed(sync_rows)
 
-    def test_polars_filter_tokens_follow_rows(self):
-        """Async ``PolarsFilter`` keeps each row's own token."""
+    def test_polars_filter_source_info_tokens_follow_rows(self):
+        """Async ``PolarsFilter`` keeps each row's own source-info token."""
         src = _source(4)
         out = _run_async(PolarsFilter(), src)
-        assert _tokens(out) == _tokens(list(src.iter_data()))
+        assert _source_info_tokens(out) == _source_info_tokens(list(src.iter_data()))
 
-    def test_batch_lists_hold_member_tokens(self):
-        """Each async ``Batch(2)`` list holds its members' tokens in order."""
+    def test_batch_lists_hold_member_source_info_tokens(self):
+        """An async ``Batch(2)`` list holds its members' source-info tokens in order."""
         src = _source(5)
-        inputs = _tokens(list(src.iter_data()))
+        inputs = _source_info_tokens(list(src.iter_data()))
         out = _run_async(Batch(2), src)
-        assert _tokens(out) == [inputs[0:2], inputs[2:4], inputs[4:5]]
+        assert _source_info_tokens(out) == [inputs[0:2], inputs[2:4], inputs[4:5]]
 
-    def test_batch_all_holds_member_tokens(self):
-        """Async ``Batch(0)`` holds every input token in order."""
+    def test_batch_all_holds_member_source_info_tokens(self):
+        """Async ``Batch(0)`` holds every input source-info token in order."""
         src = _source(4)
         out = _run_async(Batch(0), src)
-        assert _tokens(out) == [_tokens(list(src.iter_data()))]
+        assert _source_info_tokens(out) == [_source_info_tokens(list(src.iter_data()))]
 
-    def test_group_by_lists_hold_member_tokens(self):
-        """Each async ``GroupBy`` list holds its members' tokens."""
+    def test_group_by_lists_hold_member_source_info_tokens(self):
+        """Each async ``GroupBy`` list holds its members' source-info tokens."""
         src = _source(4)
-        inputs = _tokens(list(src.iter_data()))
+        inputs = _source_info_tokens(list(src.iter_data()))
         out = _run_async(GroupBy(by=["g"]), src)
         by_group = {tag.as_dict()["g"]: data.source_info()["x"] for tag, data in out}
         assert by_group == {0: [inputs[0], inputs[2]], 1: [inputs[1], inputs[3]]}
 
     def test_merge_join_async_matches_sync(self):
-        """Async ``MergeJoin`` matches sync and pairs each row's own tokens."""
+        """Async ``MergeJoin`` matches sync; rows pair their own source-info tokens."""
         left, right = _source(3), _source(3, offset=1)
         sync_rows = list(MergeJoin()(left, right).iter_data())
         async_rows = _run_async(MergeJoin(), left, right)
         assert _keyed(async_rows) == _keyed(sync_rows)
-        # Each output row holds its own row's token from each side.
-        left_tokens = _tokens(list(left.iter_data()))
-        right_tokens = _tokens(list(right.iter_data()))
+        # Each output row holds its own row's source-info token from each side.
+        left_tokens = _source_info_tokens(list(left.iter_data()))
+        right_tokens = _source_info_tokens(list(right.iter_data()))
         for i, token_list in enumerate(
-            _tokens(sorted(async_rows, key=lambda r: str(r[0].as_dict()["id"])))
+            _source_info_tokens(
+                sorted(async_rows, key=lambda r: str(r[0].as_dict()["id"]))
+            )
         ):
             assert sorted(token_list) == sorted([left_tokens[i], right_tokens[i]])
 
     def test_list_source_info_through_async_batch_of_batch(self):
-        """A list-valued token column (after Batch) materializes per row too."""
+        """A list-valued ``_source_*`` column (after Batch) materializes per row too."""
         batched = Batch(2)(_source(4))
         sync_rows = list(PolarsFilter()(batched).iter_data())
         async_rows = _run_async(PolarsFilter(), batched)
@@ -392,14 +405,14 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
 
 class TestIndexPickKeepPerRowSourceInfo:
     def test_index(self):
-        """``Index`` derives each row's token from that row's own token."""
+        """``Index`` derives each row's source-info token from that row's own."""
         src = _list_source(3)
-        inputs = _tokens(list(src.iter_data()))
+        inputs = _source_info_tokens(list(src.iter_data()))
         out = list(Index(column="x", i=0)(src).iter_data())
-        assert _tokens(out) == [f"{t}[0]" for t in inputs]
+        assert _source_info_tokens(out) == [f"{t}[0]" for t in inputs]
 
     def test_pick(self):
-        """``Pick`` derives each row's token from that row's own token."""
+        """``Pick`` derives each row's source-info token from that row's own."""
         src = DictSource(
             [
                 {"animal": "cat", "scores": {"speed": 8}},
@@ -418,10 +431,12 @@ class TestIndexPickKeepPerRowSourceInfo:
         }
 
     def test_index_single_row(self):
-        """``Index`` on a single row keeps that row's token."""
+        """``Index`` on a single row keeps that row's source-info token."""
         src = _list_source(1)
         out = list(Index(column="x", i=1)(src).iter_data())
-        assert _tokens(out) == [f"{_tokens(list(src.iter_data()))[0]}[1]"]
+        assert _source_info_tokens(out) == [
+            f"{_source_info_tokens(list(src.iter_data()))[0]}[1]"
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +462,7 @@ def _run_node(node: OperatorJobNode, src: StreamProtocol, mode: str) -> None:
 @pytest.mark.parametrize("mode", ["execute", "async_execute"])
 class TestOperatorNodeStoresPerRowSourceInfo:
     def test_select(self, mode: str):
-        """An operator node stores each row's own token."""
+        """An operator node stores each row's own source-info token."""
         src = _source(3)
         node = OperatorJobNode(
             SelectDataColumns(["x"]),
@@ -456,10 +471,10 @@ class TestOperatorNodeStoresPerRowSourceInfo:
             cache_mode=CacheMode.LOG,
         )
         _run_node(node, src, mode)
-        assert _stored_source(node) == _tokens(list(src.iter_data()))
+        assert _stored_source(node) == _source_info_tokens(list(src.iter_data()))
 
     def test_batch(self, mode: str):
-        """An operator node stores one token per batch member."""
+        """An operator node stores one source-info token per batch member."""
         src = _source(3)
         node = OperatorJobNode(
             Batch(2),
@@ -468,8 +483,8 @@ class TestOperatorNodeStoresPerRowSourceInfo:
             cache_mode=CacheMode.LOG,
         )
         _run_node(node, src, mode)
-        inputs = _tokens(list(src.iter_data()))
-        # One token per batch member: the one-member batch holds one token.
+        inputs = _source_info_tokens(list(src.iter_data()))
+        # One source-info token per batch member: the one-member batch holds one.
         assert _stored_source(node) == [inputs[0:2], inputs[2:3]]
 
 
@@ -484,22 +499,22 @@ class TestSyncOrchestratorMaterialization:
             bound_source=src,
         )
 
-    def test_buffer_keeps_per_row_tokens(self):
-        """A source node's buffer keeps per-row tokens and its pipeline hash."""
+    def test_buffer_keeps_per_row_source_info_tokens(self):
+        """A source node's buffer keeps per-row source-info tokens and pipeline hash."""
         node = self._source_node(_source(3))
         buf = list(node.iter_data())
         stream = _materialize_buffer(buf, node)
-        assert _tokens(list(stream.iter_data())) == _tokens(buf)
+        assert _source_info_tokens(list(stream.iter_data())) == _source_info_tokens(buf)
         assert stream.pipeline_hash() == node.pipeline_hash()
 
-    def test_buffer_keeps_list_tokens(self):
-        """An operator node's buffer keeps list tokens and the node's hashes."""
+    def test_buffer_keeps_list_source_info_tokens(self):
+        """An operator node's buffer keeps list-valued source-info tokens and hashes."""
         src = _source(4)
         node = OperatorJobNode(Batch(2), [src])
         node.run()
         buf = list(node.iter_data())
         stream = _materialize_buffer(buf, node)
-        assert _tokens(list(stream.iter_data())) == _tokens(buf)
+        assert _source_info_tokens(list(stream.iter_data())) == _source_info_tokens(buf)
         assert stream.pipeline_hash() == node.pipeline_hash()
         assert stream.content_hash() == node.content_hash()
         fields = _source_fields(stream.as_table(columns={"source": True}))
@@ -549,9 +564,9 @@ def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
 class TestIdentityPinned:
     """Values recorded on ``main`` at ab544982, before the fix.
 
-    The node's identity, the output data and the row-0 record hash (whose token
-    was already right) are unchanged; only rows whose stored token was wrong get
-    a new record hash.
+    The node's identity, the output data and the row-0 record hash (whose
+    source-info token was already right) are unchanged; only rows whose stored
+    source-info token was wrong get a new record hash.
     """
 
     def test_operator_node_identity_and_row_zero_record_hash(self):
@@ -575,7 +590,7 @@ class TestIdentityPinned:
         assert ids["a"] == ROW_ZERO_RECORD_ID
         assert (
             ids["b"] not in PRE_FIX_RECORD_IDS
-        )  # pre-fix rows b, c held row a's token
+        )  # pre-fix rows b, c held row a's source-info token
         assert ids["c"] not in PRE_FIX_RECORD_IDS
 
         records = node.get_all_records(columns={"source": True})
@@ -591,7 +606,7 @@ class TestIdentityPinned:
 
 
 # ``_record_hash`` of rows a, b, c stored by the pinned node on ab544982 (pre-fix).
-# Row a's token was already right, so its record hash is unchanged by the fix.
+# Row a's source-info token was already right, so the fix leaves its record hash.
 ROW_ZERO_RECORD_ID = (
     b"000001688856047a9f37112172e612834209fb07f2cf4be5db30f0fa3b7059db85905e"
 )
@@ -608,10 +623,10 @@ class TestStoreWrittenBeforeFix:
     """What a user sees when a store written by pre-fix ``main`` is re-run.
 
     Operator-node tables written by ``main`` from c398e7d4 (ITL-539) up to the fix
-    hold row 0's tokens on every row. The fixed code gives the corrected rows new
-    record hashes, so a LOG re-run adds them next to the old ones, and a REPLAY
-    node then emits both. Pinned as it behaves today; the cleanup guidance lives
-    in the CHANGELOG.
+    hold row 0's source-info tokens on every row. The fixed code gives the corrected
+    rows new record hashes, so a LOG re-run adds them next to the old ones, and a
+    REPLAY node then emits both. Pinned as it behaves today; the cleanup guidance
+    lives in the CHANGELOG.
     """
 
     def _node(
@@ -632,14 +647,14 @@ class TestStoreWrittenBeforeFix:
         with monkeypatch.context() as patch:
             _broadcast_row_zero(patch)
             _ = old.execute(_pin_source())
-        tokens = _tokens(list(_pin_source().iter_data()))
+        tokens = _source_info_tokens(list(_pin_source().iter_data()))
         assert _stored_source(old) == [tokens[0]] * 3
 
         new = self._node(db)
         out = new.execute(_pin_source())
 
         # The run itself emits the corrected rows.
-        assert _tokens(out) == tokens
+        assert _source_info_tokens(out) == tokens
         # The table keeps the old rows: row a deduplicates (its ID did not change),
         # rows b and c are now stored twice.
         stored = sorted(zip(*[_stored_rows(new, c) for c in ("id", "_source_x")]))
@@ -667,7 +682,7 @@ class TestStoreWrittenBeforeFix:
         table = SelectDataColumns(["x"])(_pin_source()).as_table(
             columns={"source": True, "system_tags": True}
         )
-        # Old rows as v0.1.x stored them: row 0's token on every row.
+        # Old rows as v0.1.x stored them: row 0's source-info token on every row.
         position = table.schema.get_field_index("_source_x")
         row_zero = table.column("_source_x")[0]
         table = table.set_column(
@@ -696,10 +711,10 @@ class TestStoreWrittenBeforeFix:
         new = self._node(db)
         _ = new.execute(_pin_source())
         db.flush()
-        tokens = _tokens(list(_pin_source().iter_data()))
+        tokens = _source_info_tokens(list(_pin_source().iter_data()))
         assert _stored_source(new) == tokens
         replay = self._node(db, CacheMode.REPLAY)
-        assert _tokens(list(replay.iter_data())) == tokens
+        assert _source_info_tokens(list(replay.iter_data())) == tokens
 
 
 def _stored_rows(node: OperatorJobNode, column: str) -> list[Any]:
