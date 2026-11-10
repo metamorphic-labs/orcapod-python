@@ -146,6 +146,23 @@ class TestAggregatedColumnTypes:
             ), config
 
 
+@pytest.mark.parametrize("name", sorted(OPERATORS))
+def test_null_column_aggregates_to_large_list_of_null(name: str) -> None:
+    """A ``null``-typed column aggregates to ``large_list<null>``, not ``large_string``."""
+    factory, _ = OPERATORS[name]
+    table = pa.table(
+        {
+            "g": pa.array([0, 0], pa.int64()),
+            "i": pa.array([0, 1], pa.int8()),
+            "z": pa.array([None, None], pa.null()),
+        }
+    )
+    result = factory().unary_static_process(
+        ArrowTableStream(table, tag_columns=["g", "i"])
+    )
+    assert result.as_table().schema.field("z").type == pa.large_list(pa.null())
+
+
 def _row_hashes(stream: StreamProtocol) -> list[tuple[str, str]]:
     """Return each row's (tag content hash, data content hash)."""
     return [

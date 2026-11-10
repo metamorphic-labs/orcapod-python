@@ -152,3 +152,23 @@ class TestStructHashesUnchanged:
         assert [
             data.content_hash().to_hex() for _, data in stream.iter_data()
         ] == expected["data_rows"]
+
+
+class TestNullFields:
+    """Only layouts are normalized: a ``null`` field stays ``null``."""
+
+    def test_null_field_round_trips(self) -> None:
+        """``struct<a: null, b: string>`` maps back to ``struct<a: null, b: large_string>``.
+
+        ``normalize_to_large_types`` turns ``null`` into ``large_string`` by
+        default, which is a type change, not a layout change; the converter
+        must not apply it.
+        """
+        converter = get_default_type_converter()
+        struct_type = pa.struct([("a", pa.null()), ("b", pa.string())])
+        python_type = converter.arrow_type_to_python_type(struct_type)
+        assert python_type.__annotations__["b"] is str
+        assert python_type.__annotations__["a"] is not str
+        assert converter.python_type_to_arrow_type(python_type) == pa.struct(
+            [("a", pa.null()), ("b", pa.large_string())]
+        )

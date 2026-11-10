@@ -88,7 +88,9 @@ def schema_drop(
     return pa.schema(remaining_fields)
 
 
-def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
+def normalize_to_large_types(
+    arrow_type: "pa.DataType", *, keep_null: bool = False
+) -> "pa.DataType":
     """
     Recursively convert Arrow types to their large variants where available.
 
@@ -100,6 +102,10 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
 
     Args:
         arrow_type: Arrow data type to normalize
+        keep_null: Keep ``null`` types (at any depth) as ``null``. By default
+            ``null`` becomes ``large_string``, which ``Data`` relies on; that is
+            a type change, not a layout change, so code that must change
+            layouts only (operators, the type converter) passes ``True``.
 
     Returns:
         Arrow data type with large variants substituted
@@ -116,8 +122,7 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
     """
     # Handle primitive types that have large variants
     if pa.types.is_null(arrow_type):
-        # TODO: make this configurable
-        return pa.large_string()
+        return arrow_type if keep_null else pa.large_string()
     if pa.types.is_string(arrow_type) or pa.types.is_string_view(arrow_type):
         # string_view has no comparison/sort kernels in PyArrow (>=23, <=24), so
         # normalizing it to large_string is required for filtering, not just for
@@ -131,25 +136,29 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
     # its name, nullability and metadata are kept. Dropping a non-null flag
     # would change the type's Arrow schema hash.
     elif pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
-        return pa.large_list(_normalize_field_to_large_types(arrow_type.value_field))
+        return pa.large_list(
+            _normalize_field_to_large_types(arrow_type.value_field, keep_null)
+        )
     elif pa.types.is_fixed_size_list(arrow_type):
         # Fixed-size lists have no large variant; normalize the element only.
         return pa.list_(
-            _normalize_field_to_large_types(arrow_type.value_field),
+            _normalize_field_to_large_types(arrow_type.value_field, keep_null),
             arrow_type.list_size,
         )
     elif pa.types.is_struct(arrow_type):
-        return pa.struct([_normalize_field_to_large_types(f) for f in arrow_type])
+        return pa.struct(
+            [_normalize_field_to_large_types(f, keep_null) for f in arrow_type]
+        )
     elif pa.types.is_map(arrow_type):
         # pyarrow accepts key and item Fields here; its stubs only list types.
         return pa.map_(  # pyright: ignore[reportCallIssue]
-            _normalize_field_to_large_types(arrow_type.key_field),
-            _normalize_field_to_large_types(arrow_type.item_field),
+            _normalize_field_to_large_types(arrow_type.key_field, keep_null),
+            _normalize_field_to_large_types(arrow_type.item_field, keep_null),
             keys_sorted=arrow_type.keys_sorted,
         )
     elif pa.types.is_union(arrow_type):
         children = [
-            _normalize_field_to_large_types(arrow_type.field(i))
+            _normalize_field_to_large_types(arrow_type.field(i), keep_null)
             for i in range(arrow_type.num_fields)
         ]
         if isinstance(arrow_type, pa.SparseUnionType):
@@ -160,7 +169,7 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
         return pa.dictionary(
             arrow_type.index_type,
             # The stubs restrict value_type to a few basic types; any type works.
-            normalize_to_large_types(arrow_type.value_type),  # pyright: ignore[reportArgumentType]
+            normalize_to_large_types(arrow_type.value_type, keep_null=keep_null),  # pyright: ignore[reportArgumentType]
             ordered=arrow_type.ordered,
         )
 
@@ -169,16 +178,19 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
         return arrow_type
 
 
-def _normalize_field_to_large_types(field: "pa.Field[Any]") -> "pa.Field[Any]":
+def _normalize_field_to_large_types(
+    field: "pa.Field[Any]", keep_null: bool
+) -> "pa.Field[Any]":
     """Return ``field`` with its type normalized, keeping name, nullability and metadata.
 
     Args:
         field: A nested field (list value, struct child, map key or item, ...).
+        keep_null: Passed through to ``normalize_to_large_types``.
 
     Returns:
         The same field with ``normalize_to_large_types`` applied to its type.
     """
-    return field.with_type(normalize_to_large_types(field.type))
+    return field.with_type(normalize_to_large_types(field.type, keep_null=keep_null))
 
 
 def normalize_schema_to_large_types(schema: "pa.Schema") -> "pa.Schema":
@@ -1308,7 +1320,7 @@ def aggregated_list_type(
                 f"logical type with the data context's type converter."
             )
         return list_type
-    return pa.large_list(normalize_to_large_types(element_type))
+    return pa.large_list(normalize_to_large_types(element_type, keep_null=True))
 
 
 def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:

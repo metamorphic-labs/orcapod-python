@@ -431,7 +431,9 @@ data. The rules:
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
   to `large_list`, recursively). Width, nullability and logical (extension) types are never
-  changed; `int8` stays `int8`. An operator that round-trips through Polars casts its columns back
+  changed; `int8` stays `int8`, and `null` stays `null` (operators and the type converter pass
+  `keep_null=True`; only `Data` maps `null` to `large_string`, the function's default). An
+  operator that round-trips through Polars casts its columns back
   to the normalized input types (`arrow_utils.restore_column_types`, or
   `restore_schema_nullability` when nullability is restored too).
 - List columns built by `Batch`, `GroupBy` and `MergeJoin` are typed by

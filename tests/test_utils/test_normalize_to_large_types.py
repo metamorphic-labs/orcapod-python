@@ -181,3 +181,17 @@ def test_width_is_not_a_layout() -> None:
     assert hasher.hash_table(pa.table({"x": pa.array([1], pa.int8())})) != (
         hasher.hash_table(pa.table({"x": pa.array([1], pa.int64())}))
     )
+
+
+def test_keep_null_leaves_null_fields_alone() -> None:
+    """With ``keep_null=True`` only layouts change; ``null`` stays ``null``.
+
+    The default (``null`` to ``large_string``) is what ``Data`` relies on and
+    is unchanged.
+    """
+    nested = pa.struct([("a", pa.null()), ("b", pa.list_(pa.null()))])
+    assert normalize_to_large_types(nested, keep_null=True) == pa.struct(
+        [("a", pa.null()), ("b", pa.large_list(pa.null()))]
+    )
+    assert normalize_to_large_types(pa.null(), keep_null=True) == pa.null()
+    assert normalize_to_large_types(pa.null()) == pa.large_string()

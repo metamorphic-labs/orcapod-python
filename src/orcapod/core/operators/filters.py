@@ -64,7 +64,9 @@ class PolarsFilter(UnaryOperator):
         filtered_table = arrow_utils.restore_column_types(
             filtered_table,
             {
-                field.name: arrow_utils.normalize_to_large_types(field.type)
+                field.name: arrow_utils.normalize_to_large_types(
+                    field.type, keep_null=True
+                )
                 for field in table.schema
             },
         )

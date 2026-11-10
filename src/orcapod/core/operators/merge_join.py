@@ -50,8 +50,8 @@ def _resolve_disagreeing_types(
     Raises:
         InputValidationError: If the types still differ after normalization.
     """
-    normalized_left = arrow_utils.normalize_to_large_types(left_type)
-    normalized_right = arrow_utils.normalize_to_large_types(right_type)
+    normalized_left = arrow_utils.normalize_to_large_types(left_type, keep_null=True)
+    normalized_right = arrow_utils.normalize_to_large_types(right_type, keep_null=True)
     if normalized_left == normalized_right:
         return normalized_left
     raise InputValidationError(
@@ -88,7 +88,7 @@ def _output_types(
         else:
             known = left_type if left_type is not None else right_type
             assert known is not None
-            resolved[name] = arrow_utils.normalize_to_large_types(known)
+            resolved[name] = arrow_utils.normalize_to_large_types(known, keep_null=True)
     return resolved
 
 

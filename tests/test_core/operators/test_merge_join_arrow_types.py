@@ -610,6 +610,39 @@ class TestPassThroughColumns:
         assert table.column("s").to_pylist() == ["a", None]
         assert table.column("q").to_pylist() == [5, 6]
 
+    @pytest.mark.parametrize("rows", [0, 1])
+    def test_null_typed_columns_stay_null(self, rows: int) -> None:
+        """``null`` is a type, not a layout: pass-through and merged columns keep it.
+
+        With rows only the pass-through column is checked: merging non-empty
+        null values hits the unorderable-values bug (ITL-839).
+        """
+        keys = pa.array(list(range(rows)), pa.int64())
+        nulls = pa.array([None] * rows, pa.null())
+        left_columns: dict[str, pa.Array[Any]] = {"k": keys, "z": nulls}
+        right_columns: dict[str, pa.Array[Any]] = {
+            "k": keys,
+            "y": pa.array([1] * rows, pa.int8()),
+        }
+        if not rows:
+            left_columns["x"] = nulls
+            right_columns["x"] = nulls
+        left, right = (
+            ArrowTableStream(
+                pa.Table.from_arrays(list(columns.values()), names=list(columns)),
+                tag_columns=["k"],
+            )
+            for columns in (left_columns, right_columns)
+        )
+        op = MergeJoin()
+        result = op.static_process(left, right)
+        table = result.as_table()
+        assert table.schema.field("z").type == pa.null()
+        if not rows:
+            assert table.schema.field("x").type == pa.large_list(pa.null())
+        assert len(table) == rows
+        _assert_matches_prediction(op, result, left, right)
+
     def test_merge_join_merged_values_and_sources_stay_sorted(self) -> None:
         """Merged values are sorted per row and their source tokens follow them."""
         left, right = _sources(2)
