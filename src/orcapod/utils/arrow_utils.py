@@ -1264,33 +1264,55 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
 
 
 def aggregated_list_type(
-    element_type: pa.DataType, type_converter: TypeConverterProtocol
+    element_type: pa.DataType,
+    type_converter: TypeConverterProtocol,
+    *,
+    column: str,
 ) -> pa.DataType:
     """Return the list type for a column that aggregates ``element_type`` values.
 
     This is the one construction every aggregating operator (``Batch``,
-    ``GroupBy``, ``MergeJoin``) uses for its ``list[T]`` columns, so that the
-    element keeps the Arrow type the input column already has (``int8`` stays
-    ``int8``, ``large_string`` stays ``large_string``) instead of whatever
-    Arrow would infer from the Python values.
+    ``GroupBy``, ``MergeJoin``) uses for its ``list[T]`` columns. The element
+    keeps the Arrow type the input column already has (``int8`` stays
+    ``int8``, ``string`` stays ``string``, struct fields are unchanged); nothing
+    is inferred from Python values. The outer list is ``large_list``, the
+    variant orcapod's type converter gives ``list[T]``.
 
-    Arrow cannot embed an extension type inside a list value field, so for an
-    extension element the outer ``list[<element>]`` extension type supplied by
-    ``ListLogicalType`` (through the type converter) is returned instead.
+    Arrow cannot embed an extension type inside a list value field, so for a
+    logical (extension) element the result is the logical list type of that
+    element: the ``list[<element>]`` extension type supplied by
+    ``ListLogicalType`` through the type converter, which keeps the inner
+    logical type. The element is never stripped to its storage type.
 
     Args:
         element_type: Arrow type of the input column being aggregated.
-        type_converter: The stream's type converter, used to resolve an
-            extension element's Python type and its list extension type.
+        type_converter: The stream's type converter, used to resolve a logical
+            element's Python type and its logical list type.
+        column: Name of the column being aggregated, for the error message.
 
     Returns:
-        ``pa.list_(element_type)``, or the ``list[...]`` extension type for an
-        extension element.
+        ``pa.large_list(element_type)``, or the ``list[...]`` extension type for
+        a logical element.
+
+    Raises:
+        ValueError: If ``element_type`` is an extension type for which the type
+            converter supplies no logical list type.
     """
-    if isinstance(element_type, pa.ExtensionType):
+    # BaseExtensionType also covers PyArrow's canonical extensions (arrow.uuid,
+    # arrow.json, ...), which are not ``pa.ExtensionType`` subclasses.
+    if isinstance(element_type, pa.BaseExtensionType):
         element_python_type = type_converter.arrow_type_to_python_type(element_type)
-        return type_converter.python_type_to_arrow_type(list[element_python_type])
-    return pa.list_(element_type)
+        list_type = type_converter.python_type_to_arrow_type(list[element_python_type])
+        if not isinstance(list_type, pa.BaseExtensionType):
+            raise ValueError(
+                f"Column {column!r} has logical Arrow type {element_type} "
+                f"(extension {element_type.extension_name!r}), and the type "
+                f"converter supplies no logical list type for it (it returned "
+                f"{list_type} for list[{element_python_type}]). Register the "
+                f"logical type with the data context's type converter."
+            )
+        return list_type
+    return pa.large_list(element_type)
 
 
 def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:
@@ -1308,7 +1330,7 @@ def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:
     Returns:
         The list array.
     """
-    if isinstance(list_type, pa.ExtensionType):
+    if isinstance(list_type, pa.BaseExtensionType):
         storage = pa.array(values, type=list_type.storage_type)
         return pa.ExtensionArray.from_storage(list_type, storage)
     return pa.array(values, type=list_type)
@@ -1385,8 +1407,8 @@ def build_aggregated_table(
         if field.name not in member_columns:
             fields.append(field)
             continue
-        list_type = aggregated_list_type(field.type, type_converter)
-        if isinstance(list_type, pa.ExtensionType):
+        list_type = aggregated_list_type(field.type, type_converter, column=field.name)
+        if isinstance(list_type, pa.BaseExtensionType):
             extension_overrides[field.name] = list_type
             fields.append(pa.field(field.name, list_type.storage_type, nullable=False))
         else:

@@ -28,29 +28,63 @@ PRIMITIVE_ELEMENTS: list[tuple[pa.DataType, list[object]]] = [
 
 
 class TestAggregatedListType:
-    """``aggregated_list_type`` wraps the element type it is given."""
+    """``aggregated_list_type`` wraps the element type it is given in a ``large_list``."""
 
     @pytest.mark.parametrize(
-        "element_type", [t for t, _ in PRIMITIVE_ELEMENTS], ids=str
+        "element_type",
+        [
+            *(t for t, _ in PRIMITIVE_ELEMENTS),
+            pa.string(),
+            pa.struct([("a", pa.int8()), ("b", pa.string())]),
+        ],
+        ids=str,
     )
-    def test_primitive_element_is_wrapped_unchanged(
-        self, element_type: pa.DataType
-    ) -> None:
-        """A plain Arrow element type becomes ``list<element>``, keeping its width."""
+    def test_plain_element_is_wrapped_unchanged(self, element_type: pa.DataType) -> None:
+        """A plain Arrow element becomes ``large_list<element>``, keeping its type.
+
+        ``large_list`` is the outer variant orcapod's type converter uses for
+        ``list[T]``; the element keeps its width and layout (``int8`` stays
+        ``int8``, ``string`` stays ``string``).
+        """
         converter = get_default_type_converter()
-        assert aggregated_list_type(element_type, converter) == pa.list_(element_type)
+        list_type = aggregated_list_type(element_type, converter, column="c")
+        assert list_type == pa.large_list(element_type)
+        assert pa.types.is_large_list(list_type)
+        assert list_type.value_type == element_type
+
+    def test_outer_variant_matches_the_type_converter(self) -> None:
+        """The outer list variant is the one the converter gives ``list[T]``."""
+        converter = get_default_type_converter()
+        assert aggregated_list_type(
+            pa.int64(), converter, column="c"
+        ) == converter.python_type_to_arrow_type(list[int])
 
     def test_extension_element_uses_list_logical_type(self) -> None:
         """An extension element gets the converter's ``list[...]`` extension type.
 
         Arrow cannot embed an extension type in a list value field, so the outer
-        list must itself be the ``ListLogicalType`` extension.
+        list must itself be the ``ListLogicalType`` extension, which keeps the
+        inner logical type in its name and metadata.
         """
         converter = get_default_type_converter()
         element_type = converter.python_type_to_arrow_type(Path)
-        list_type = aggregated_list_type(element_type, converter)
+        list_type = aggregated_list_type(element_type, converter, column="c")
         assert list_type == converter.python_type_to_arrow_type(list[Path])
         assert isinstance(list_type, pa.ExtensionType)
+        assert list_type.extension_name == "list[orcapod.path]"
+        assert list_type.storage_type == pa.large_list(element_type.storage_type)
+
+    def test_extension_element_without_logical_list_raises(self) -> None:
+        """An extension the converter cannot list is rejected, never stripped.
+
+        ``arrow.uuid`` is a PyArrow canonical extension orcapod does not
+        register: the converter maps it to ``Any`` and returns a plain list for
+        ``list[Any]``. Building a list of its storage type would silently drop
+        the logical type, so this must raise, naming the column and the type.
+        """
+        converter = get_default_type_converter()
+        with pytest.raises(ValueError, match=r"'ids'.*arrow\.uuid"):
+            aggregated_list_type(pa.uuid(), converter, column="ids")
 
 
 class TestListArray:
@@ -66,7 +100,7 @@ class TestListArray:
         self, element_type: pa.DataType, values: list[object], rows: int
     ) -> None:
         """Empty and non-empty arrays carry the same, non-inferred type."""
-        list_type = pa.list_(element_type)
+        list_type = pa.large_list(element_type)
         array = list_array([values] * rows, list_type)
         assert array.type == list_type
         assert len(array) == rows
