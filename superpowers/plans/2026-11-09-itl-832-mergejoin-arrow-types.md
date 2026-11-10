@@ -34,6 +34,19 @@ new type-only `arrow_utils.restore_column_types` (nullability is ITL-820's and s
 - **Q4 report only:** `Datagram.with_columns` (Index/Pick), barrier materializer, SemiJoin on list
   columns.
 
+### Revision (developer, 2026-11-09, supersedes Q1 above)
+
+- **Q1 revised:** no promotion. Colliding data columns whose Arrow types differ (width,
+  `string`/`large_string`, timestamp unit, decimal precision) raise `InputValidationError` naming
+  the column and both types and telling the user to cast one side. Streams expose only Python
+  schemas, so the check runs in `binary_static_process` (execution), not in validation; build-time
+  validation still passes for such a pair.
+- **Shared tag keys** whose Arrow types differ keep the joined type, as before (no promotion, no
+  rejection); tracked under ITL-835 / ITL-829.
+- **Q3 condition:** content hashes must not change; proved by
+  `TestPassThroughContentHashes` and by the before/after snapshot against the base commit.
+- **Q4:** Index/Pick/`Datagram.with_columns` is ITL-834 (another worker); findings handed over.
+
 ## Verified facts
 
 - Arrow hasher is layout-insensitive (`string`==`large_string`, `list`==`large_list`) but
