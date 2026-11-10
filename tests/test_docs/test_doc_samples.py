@@ -277,6 +277,7 @@ def test_doc_page_samples_run(page: str, tmp_path: Path):
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
     assert proc.returncode == 0, (
         f"sample runner crashed on {page}:\n{proc.stdout}\n{proc.stderr}"

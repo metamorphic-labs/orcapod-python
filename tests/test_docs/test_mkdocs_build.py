@@ -37,6 +37,7 @@ def test_mkdocs_build_strict(tmp_path: Path):
         capture_output=True,
         text=True,
         timeout=600,
+        check=False,
     )
     output = proc.stdout + proc.stderr
     problems = [
