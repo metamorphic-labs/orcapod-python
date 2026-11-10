@@ -102,6 +102,23 @@ line-length = 88
 # the ones under old_tutorials/ target a package that no longer exists.
 extend-exclude = ["notebooks"]
 
+[tool.basedpyright]
+# Strictness stays at the basedpyright default. Existing errors are recorded in
+# .basedpyright/baseline.json; new errors fail the check.
+# Analyse as the oldest supported Python (the version CI type-checks on), so a
+# local run under another interpreter reports the same errors as CI.
+pythonVersion = "3.11"
+# Setting `exclude` replaces the built-in defaults, so they are repeated here.
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "build",
+    "dist",
+    "site",
+    "notebooks",
+]
+
 [tool.coverage.run]
 omit = [
     "src/orcapod/extension_types/protocols.py",  # Protocol stubs — bodies are all `...`, not executable
