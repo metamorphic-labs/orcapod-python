@@ -61,7 +61,7 @@ Bind one coordinator-owned Run, then start the whole independent wave before wai
 ```
 orca status --json
 orca orchestration run-create --objective "<objective>" --json
-orca orchestration worker-start --spec "<task spec>" --worktree new-top-level --name <short-name> --agent <agent> --setup run --json
+orca orchestration worker-start --spec "<task spec>" --worktree new-top-level --base-branch origin/main --name <short-name> --agent <agent> --setup run --json
 orca orchestration check --wait --types "worker_done,escalation,question" --timeout-ms 900000 --json
 ```
 
@@ -170,6 +170,10 @@ The coordinator stays in the `check --wait` loop until every expected Dispatch h
   that a worker exited. Never start a second editor in a worktree, and never stop, abandon,
   or retry a worker, without positive proof of exit. Report the state as unverifiable
   instead.
+- **Stopping a hung worker.** A worker that is alive but makes no progress and never sends
+  `worker_done` is stopped only with the developer's approval. Stop it as the
+  orchestration guide describes, confirm that it exited, and record the Dispatch as
+  failed before reusing the terminal or retrying the issue.
 - **A successful launch is not a successful task.** Neither is a heartbeat.
 
 ## Watching PRs and reporting
