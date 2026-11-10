@@ -173,7 +173,8 @@ misses its cache once and recomputes. Tag hashes, stream `content_hash` and `pip
 are unchanged.
 
 **Stored schemas:** an existing table written with `list<...>` aggregates (from `Batch`,
-`GroupBy` or `MergeJoin`) will receive `large_list<...>` batches.
+`GroupBy` or `MergeJoin`) will receive `large_list<...>` batches. Appending them is not yet
+tested for every database backend; see *Known limitations* (ITL-851).
 
 **Nested nullability:** `normalize_to_large_types` now keeps every nested field's
 nullability and metadata. A column such as `list<item: int64 not null>` keeps its non-null
@@ -406,6 +407,22 @@ not on PyPI at the time of writing; install it from its repository.
   has (`string` stays `string`). This is layout only and changes no hash. (ITL-841)
 - **`MergeJoin` cannot merge non-empty struct columns**: a colliding data column holding
   struct values raises `TypeError`. Zero-row inputs work. (ITL-839)
+- **`SemiJoin` fails when an input has a list or struct data column**, even one it only
+  passes through: the join raises `ArrowInvalid: Data type list<...> is not supported in
+  join non-key field`. (ITL-847)
+- **Appending v0.2-layout rows to a table written before v0.2 is untested.** `list<...>`
+  aggregates that are now `large_list<...>`, nested non-null flags that are now kept, and
+  narrow columns that no longer widen have not been tested against each database backend
+  when appended to an existing table. (ITL-851)
+- **The Arrow hasher cannot hash some types**: `null`-typed columns, canonical PyArrow
+  extension types such as `arrow.uuid`, and map and fixed-size-list columns raise
+  `NotImplementedError`. (ITL-848)
+- **The `SchemaVersionError` hint suggests `node.node_config = NodeConfig(ignore_schema=("v0",))`**,
+  which resets the node's other settings. Use the `merge` form shown under *Breaking
+  changes and migration*. (ITL-852)
+- **`Index` and `Pick` validation carries masked type errors**, and `Pick`'s branch for
+  logical-type columns cannot run, because no logical type implements `pick_field` yet.
+  (ITL-850)
 - **`Data.select` and `Data.drop` leave the removed column's source-info column**
   (`_source_<column>`) behind, visible with `all_info=True`. (ITL-838)
 - **Arrow schema and data preservation is not yet audited across every operation**, sync and
