@@ -314,6 +314,50 @@ print(filt(source).as_table().to_pylist())
 `Index(column, i)` extracts one element from a list-typed data column (for example, a column
 produced by `Batch` or `GroupBy`). See the [API reference](../api/operators.md).
 
+## Arrow types of operator outputs
+
+`output_schema()` reports Python types, but every column also has an Arrow type, and
+orcapod keeps it predictable:
+
+- **Nothing is inferred from Python values.** An operator types each output column from its
+  inputs' Arrow types, never from what PyArrow would guess for the values, so a result's
+  types do not depend on the data, on whether it has rows, or on argument order.
+- **Types are normalized to their large variants.** `string` becomes `large_string`,
+  `binary` becomes `large_binary` and `list` becomes `large_list`, recursively (also inside
+  structs). The Arrow hasher treats each pair as identical, so this never changes a hash.
+- **Width, nullability and logical types are kept.** An `int8` column stays `int8`, a
+  `float32` column stays `float32`, and a logical type such as `Path` keeps its logical type.
+- **List columns built by `MergeJoin`, `Batch` and `GroupBy`** are `large_list<T>`, where `T`
+  is the normalized input type, whether or not the result has rows. A list of a logical type
+  is that type's logical list (`list[orcapod.path]` for `Path`). Their source-info columns
+  are `large_list<large_string>`.
+- **Inputs that disagree.** If the two inputs of `MergeJoin` give a colliding data column or
+  a shared tag column different Arrow types, both are normalized first. If they are then the
+  same (for example `string` and `large_string`), the join proceeds. Otherwise (for example
+  `int8` and `int64`, or two timestamp units) it raises `InputValidationError` naming the
+  column and both types; cast one input explicitly. Because `output_schema()` reports Python
+  types, this is detected when the join runs, not when the pipeline is built.
+
+```python
+import pyarrow as pa
+from orcapod.sources import ArrowTableSource
+
+def counts(values):
+    table = pa.table(
+        {
+            "subject_id": pa.array(["mouse_01", "mouse_02"], type=pa.string()),
+            "count": pa.array(values, type=pa.int8()),
+        }
+    )
+    return ArrowTableSource(table, tag_columns=["subject_id"])
+
+merged = MergeJoin()(counts([1, 2]), counts([3, 4]))
+print(merged.as_table().schema.field("count").type)
+# large_list<item: int8>
+print(merged.as_table().schema.field("subject_id").type)
+# large_string
+```
+
 ## Using operators
 
 All operators follow the same interface. Call `.process()` with one or more input streams:

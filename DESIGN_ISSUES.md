@@ -1728,11 +1728,13 @@ type. `pa.array([])` is `null`-typed, so with a zero-row input:
 `Join` had the same helper-key bug in 0.1.4; it was fixed on `main` as a side effect of
 ITL-563 but without tests.
 
-**Fix:** The helper key is typed `pa.int8()` (as in `Join`), and merged columns go through
-`_list_array`, which takes the list type from the input element type when there are no rows
-to infer it from. Output for non-empty inputs is unchanged. `tests/test_core/operators/test_empty_inputs.py`
+**Fix:** The helper key is typed `pa.int8()` (as in `Join`). Merged columns and their
+source-info columns are built with an explicit type taken from the inputs (see MJ2), never
+inferred from the values, so a zero-row result has exactly the types of a non-empty one and
+the predicted schema; the two concatenate. `tests/test_core/operators/test_empty_inputs.py`
 covers zero-row inputs for every operator, comparing the materialized schema with the
-predicted `output_schema()`.
+predicted `output_schema()`; `test_merge_join_arrow_types.py` covers zero-row left, right
+and both inputs for every element type.
 
 ---
 
@@ -1815,31 +1817,38 @@ CI job failed.
 ## `src/orcapod/core/operators/merge_join.py` — Arrow types
 
 ### MJ2 — `MergeJoin` discards its inputs' Arrow types
-**Status:** in progress
+**Status:** resolved
 **Severity:** high
-**Issue:** ITL-832
+**Issue:** ITL-832 (with ITL-813; related: ITL-835, ITL-839)
 
 `MergeJoin` built a merged (colliding) column with `pa.array(<python lists>)`, so Arrow inferred
 the element type from the values instead of keeping the input's: `int8`/`int16`/`int32`/`uint8`
-became `int64`, `float32` became `double`, `large_string` became `string`, `large_binary`
-became `binary`, nested lists widened their elements, and decimal precision came from the data
-(`decimal128(5, 2)` became `decimal128(3, 2)`). PR #268 (ITL-813) made the empty path mimic that
-inference. Separately, the Polars join turned every pass-through column into its large layout
-(`string` to `large_string`, `binary` to `large_binary`, `list` to `large_list`, struct children)
-and system-tag record ids from `fixed_size_binary[16]` to `large_binary`; `PolarsFilter` did the
-same.
+became `int64`, `float32` became `double`, nested lists widened their elements, and decimal
+precision came from the data (`decimal128(5, 2)` became `decimal128(3, 2)`). PR #268 (ITL-813)
+made the empty path mimic that inference with a hand-written table. When the two inputs gave a
+column different Arrow types, the result depended on the values and on argument order, or the
+Polars join raised.
 
-**Fix:** Merged columns are `list<input type>` via `arrow_utils.aggregated_list_type` /
-`list_array` (shared with `build_aggregated_table`), empty or not; extension elements keep the
-`ListLogicalType` path. `MergeJoin` and `PolarsFilter`
-restore pass-through columns' input types after the Polars round-trip
-(`arrow_utils.restore_column_types`); this changes layouts only, not content hashes. The rule is
-recorded under "Arrow types" in `CLAUDE.md`.
+**Fix:** No Arrow type is inferred from Python values. Every output column of `MergeJoin` and
+`PolarsFilter` takes the large-normalized form of its input type
+(`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `list` to `large_list`,
+recursively; hash-identical), keeping width, nullability and logical types. Merged columns,
+and the list columns of `Batch` and `GroupBy`, are built by `arrow_utils.aggregated_list_type`:
+`large_list<normalized input element>`, or for a logical element its logical list type from the
+type converter (an error naming the column if the converter has none; the element is never
+stripped to its storage type). Merged source-info columns are `large_list<large_string>`. A
+column whose two inputs' types differ goes through `MergeJoin._resolve_disagreeing_types`:
+equal after normalization proceeds, anything else raises `InputValidationError` naming the
+column and both types, in `binary_static_process` before the join (`output_schema()` reports
+Python types and cannot see it). Hashes: `list`/`large_list` and the other layout pairs hash
+identically, so only a merged column narrower than `int64`/`double` changes its row hash (it no
+longer widens). Rules recorded under "Arrow types" in `CLAUDE.md`.
 
-**Still open:** when the two inputs disagree on a column's Arrow type (colliding data column or
-shared tag key), the behaviour is unchanged from before and the rule is pending a developer
-decision: `MergeJoin._resolve_disagreeing_types` (TODO ITL-835) is the single decision point, and
-`TestDisagreeingArrowTypes` pins today's behaviour. Follow-ups: ITL-835, ITL-829.
+**Still open:** `normalize_to_large_types` drops a list item's non-null flag, which changes the
+Arrow schema hash of such a column (pinned in
+`TestContentHashes.test_non_nullable_list_items_lose_nullability_under_normalization`; decision
+pending). Non-empty struct columns cannot be merged because values are sorted as Python objects
+(ITL-839; pinned by a strict xfail).
 
 ---
 
@@ -1960,3 +1969,24 @@ rely on. Paths are under `src/orcapod/`:
   (`pipeline/logging_observer.py:278`, `pipeline/status_observer.py:231`).
 - `DataFunctionProtocol` lacks `data_context`:
   `core/cached_function_pod.py:145,150,196,201`.
+
+---
+
+## `src/orcapod/semantic_types/universal_converter.py` — struct Python types
+
+### TC1 — A struct's Python type depended on its children's string/list layouts
+**Status:** resolved
+**Severity:** medium
+**Issue:** ITL-832
+
+The type converter synthesized one `TypedDict` class per exact Arrow struct type, so
+`struct<b: string>` and `struct<b: large_string>` (hash-identical) became two different Python
+classes with the same name. A stream with a `struct<b: string>` column therefore reported one
+class in `output_schema()` and another in its own `Data` rows (which normalize to large types),
+and an operator that normalizes its output (ITL-832) could not match its predicted schema.
+
+**Fix:** The converter keys the class by `normalize_to_large_types(struct)` and maps it back to
+the large-normalized struct, so both layouts share one class; width, nullability and logical
+types still distinguish structs. Content and pipeline hashes of struct columns are pinned to
+their values on `main` in `tests/test_semantic_types/test_struct_layout_identity.py`. Maps and
+unions do not have this problem: their Python types do not depend on child layouts.
