@@ -30,7 +30,7 @@ def _resolve_disagreeing_types(
     returns Python types, under which ``int8`` and ``int64``, or ``string``
     and ``large_string``, are the same.
 
-    TODO(ITL-832): the developer has not yet decided what MergeJoin should do
+    TODO(ITL-835): the developer has not yet decided what MergeJoin should do
     here (reject with ``InputValidationError`` naming the column and both
     types, promote, or something else). Until then this returns ``None``,
     which keeps the behaviour MergeJoin had before ITL-832: a merged data
@@ -175,7 +175,7 @@ class MergeJoin(BinaryOperator):
     When the two inputs' Arrow types for the same column disagree (``int8``
     and ``int64``, ``string`` and ``large_string``, ``timestamp[ms]`` and
     ``timestamp[us]``, two decimal precisions), the behaviour is pending a
-    decision (ITL-832, ``_resolve_disagreeing_types``) and stays as before:
+    decision (ITL-835, ``_resolve_disagreeing_types``) and stays as before:
     a merged column's type is inferred from the values, and a shared tag key
     keeps the type the join produces or the join raises. Validation cannot
     detect such a disagreement, because streams expose only Python schemas.

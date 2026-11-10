@@ -1755,7 +1755,7 @@ recorded under "Arrow types" in `CLAUDE.md`.
 
 **Still open:** when the two inputs disagree on a column's Arrow type (colliding data column or
 shared tag key), the behaviour is unchanged from before and the rule is pending a developer
-decision: `MergeJoin._resolve_disagreeing_types` (TODO ITL-832) is the single decision point, and
+decision: `MergeJoin._resolve_disagreeing_types` (TODO ITL-835) is the single decision point, and
 `TestDisagreeingArrowTypes` pins today's behaviour. Follow-ups: ITL-835, ITL-829.
 
 ---

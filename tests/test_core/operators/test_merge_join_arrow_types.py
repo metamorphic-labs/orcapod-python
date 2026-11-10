@@ -59,7 +59,7 @@ ELEMENT_CASES: list[tuple[pa.DataType, list[Any]]] = [
 ]
 
 # Pairs whose Arrow types disagree while their Python types agree. What
-# MergeJoin should do with them is pending (ITL-832, _resolve_disagreeing_types);
+# MergeJoin should do with them is pending (ITL-835, _resolve_disagreeing_types);
 # until then the tests below pin the pre-ITL-832 behaviour, so the decision
 # shows up as a deliberate test change. Each entry: left type, right type,
 # values, and the expected outcome keyed by (rows, argument order) for a
@@ -299,7 +299,7 @@ def _ordered(
 class TestDisagreeingArrowTypes:
     """Pin MergeJoin's behaviour when the inputs' Arrow types disagree.
 
-    The decision is pending (ITL-832): these pin what MergeJoin did before
+    The decision is pending (ITL-835): these pin what MergeJoin did before
     ITL-832, so changing ``_resolve_disagreeing_types`` must change them too.
     Validation passes for every pair, because the Python types agree.
     """
