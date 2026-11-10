@@ -579,6 +579,37 @@ class TestPassThroughColumns:
             # flags, so their prediction differs in nullability only (ITL-820).
             _assert_matches_prediction(op, result, left, right)
 
+    def test_nullable_pass_through_keeps_nulls_and_nullability(self) -> None:
+        """The final cast keeps a nullable column's nulls and each field's nullability.
+
+        The tag is non-nullable and the pass-through data column is nullable
+        and holds a null; after the join both flags and the values survive.
+        """
+        left = ArrowTableStream(
+            pa.Table.from_arrays(
+                [
+                    pa.array([0, 1], pa.int64()),
+                    pa.array(["a", None], pa.string()),
+                ],
+                schema=pa.schema(
+                    [
+                        pa.field("k", pa.int64(), nullable=False),
+                        pa.field("s", pa.string(), nullable=True),
+                    ]
+                ),
+            ),
+            tag_columns=["k"],
+        )
+        right = _stream({"k": (pa.int64(), [0, 1]), "q": (pa.int8(), [5, 6])}, ["k"])
+        table = MergeJoin().static_process(left, right).as_table().sort_by("k")
+
+        assert table.schema.field("k").type == pa.int64()
+        assert not table.schema.field("k").nullable
+        assert table.schema.field("s").type == pa.large_string()
+        assert table.schema.field("s").nullable
+        assert table.column("s").to_pylist() == ["a", None]
+        assert table.column("q").to_pylist() == [5, 6]
+
     def test_merge_join_merged_values_and_sources_stay_sorted(self) -> None:
         """Merged values are sorted per row and their source tokens follow them."""
         left, right = _sources(2)
