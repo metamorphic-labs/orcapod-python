@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import shutil
 import subprocess
@@ -142,6 +143,40 @@ def test_license_is_shipped_in_sdist_and_wheel(built_dists: tuple[Path, Path]) -
         licenses = [n for n in zf.namelist() if n.endswith(suffix)]
         assert len(licenses) == 1
         assert zf.read(licenses[0]) == expected
+
+
+def _declared_version(version_module: str) -> str:
+    """Return the string assigned to ``__version__`` in a generated ``_version.py``."""
+    for node in ast.parse(version_module).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+        if "__version__" in targets and isinstance(node.value, ast.Constant):
+            assert isinstance(node.value.value, str)
+            return node.value.value
+    raise AssertionError("no __version__ assignment in _version.py")
+
+
+def test_wheel_version_file_matches_its_metadata(
+    built_dists: tuple[Path, Path],
+) -> None:
+    """The wheel's ``_version.py`` declares the wheel's own metadata version.
+
+    Together with ``test_version_comes_from_generated_version_file`` this shows that
+    ``orcapod.__version__`` in an installed wheel equals
+    ``importlib.metadata.version("orcapod")``, without installing the wheel and its
+    dependencies into a fresh environment.
+    """
+    wheel = built_dists[1]
+    with zipfile.ZipFile(wheel) as zf:
+        version_file = zf.read("orcapod/_version.py").decode()
+        (metadata_name,) = [
+            n for n in zf.namelist() if n.endswith(".dist-info/METADATA")
+        ]
+        metadata = zf.read(metadata_name).decode()
+    match = re.search(r"^Version: (\S+)$", metadata, re.MULTILINE)
+    assert match is not None
+    assert _declared_version(version_file) == match.group(1)
 
 
 _BLOCK_GENERATED_VERSION = """
