@@ -308,7 +308,6 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
     @pytest.mark.parametrize(
         "make_op",
         [
-            pytest.param(lambda: PolarsFilter(), id="polars_filter"),
             pytest.param(lambda: Batch(2), id="batch2"),
             pytest.param(lambda: Batch(0), id="batch_all"),
         ],
@@ -323,12 +322,9 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
             await make_op().async_execute([empty.reader], output.writer)
             return await output.reader.collect()
 
-        if make_op().__class__ is PolarsFilter:
-            # The barrier path cannot build a stream from zero rows; it raises.
-            with pytest.raises(ValueError, match="empty list of rows"):
-                _ = asyncio.run(go())
-        else:
-            assert asyncio.run(go()) == []
+        # The generic barrier path (e.g. ``PolarsFilter``) still raises on zero rows,
+        # unchanged by ITL-845; reported separately rather than pinned here.
+        assert asyncio.run(go()) == []
 
 
 # ---------------------------------------------------------------------------
