@@ -17,68 +17,45 @@ else:
     pl = LazyModule("polars")
 
 
-def _inferred_type(arrow_type: "pa.DataType") -> "pa.DataType":
-    """Return the type Arrow infers for Python values read from ``arrow_type``.
+def _common_type(
+    name: str, left_type: "pa.DataType", right_type: "pa.DataType"
+) -> "pa.DataType":
+    """Return the Arrow type a column present in both inputs gets in the output.
 
-    ``pa.array`` over Python values ignores the width of the column they came
-    from: any integer becomes ``int64``, any float ``double``, any string
-    ``string`` and any binary ``binary``, and nested lists become ``list``.
-    Types whose inference depends on the values themselves (temporal,
-    decimal, map, ...) are returned unchanged.
+    Identical types are kept as they are. Types that differ only in width or
+    layout (``int8`` and ``int64``, ``string`` and ``large_string``,
+    ``timestamp[ms]`` and ``timestamp[us]``) are promoted to their common type
+    with Arrow's permissive promotion, which does not depend on the input
+    order and so keeps ``MergeJoin`` commutative.
 
     Args:
-        arrow_type: The Arrow type the values were read from.
+        name: Column name, for the error message.
+        left_type: The column's Arrow type in the left input.
+        right_type: The column's Arrow type in the right input.
 
     Returns:
-        The Arrow type ``pa.array`` infers for those values.
+        The common Arrow type.
+
+    Raises:
+        InputValidationError: If Arrow has no common type for the two (for
+            example a timezone-aware and a naive timestamp).
     """
-    if pa.types.is_integer(arrow_type):
-        return pa.int64()
-    if pa.types.is_floating(arrow_type):
-        return pa.float64()
-    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
-        return pa.string()
-    if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
-        return pa.binary()
-    if (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    ):
-        return pa.list_(_inferred_type(arrow_type.value_type))
-    if pa.types.is_struct(arrow_type):
-        return pa.struct(
-            [field.with_type(_inferred_type(field.type)) for field in arrow_type]
+    if left_type == right_type:
+        return left_type
+    try:
+        unified = pa.unify_schemas(
+            [
+                pa.schema([pa.field(name, left_type)]),
+                pa.schema([pa.field(name, right_type)]),
+            ],
+            promote_options="permissive",
         )
-    return arrow_type
-
-
-def _list_array(
-    values: list[Any], element_type: "pa.DataType | None"
-) -> "pa.Array[Any]":
-    """Build the Arrow array for a merged (list-valued) column.
-
-    With rows present the type is inferred from the values. With zero rows
-    inference yields a ``null``-typed array, which cannot be a non-nullable
-    field and does not match the predicted ``list[T]`` schema. The list type
-    is then built from ``element_type``, mapped to what inference would give
-    for its values, so an empty result has the same Arrow type as a non-empty
-    one and the two can be concatenated.
-
-    Args:
-        values: One list per output row.
-        element_type: Arrow type of the column's elements before merging, or
-            ``None`` if unknown.
-
-    Returns:
-        The list array for the merged column.
-    """
-    if values or element_type is None:
-        return pa.array(values)
-    if isinstance(element_type, pa.ExtensionType):
-        # Arrow cannot embed an extension type in a list value field.
-        element_type = element_type.storage_type
-    return pa.array(values, type=pa.list_(_inferred_type(element_type)))
+    except (pa.ArrowInvalid, pa.ArrowTypeError) as e:
+        raise InputValidationError(
+            f"Column '{name}' has Arrow types {left_type} and {right_type}, "
+            f"which have no common type: {e}"
+        ) from e
+    return unified.field(name).type
 
 
 class MergeJoin(BinaryOperator):
@@ -94,6 +71,20 @@ class MergeJoin(BinaryOperator):
     For non-colliding columns, values are kept as scalars (same as regular Join).
 
     Tag columns use inner join on shared tags, with union of tag schemas.
+
+    Arrow types: every output column takes its Arrow type from the inputs,
+    never from what Arrow infers for the Python values. A merged column is
+    ``list<T>`` (built by ``arrow_utils.aggregated_list_type``, the same
+    construction ``Batch`` and ``GroupBy`` use) where ``T`` is the input
+    column's Arrow type, with or without rows; a logical (extension) ``T``
+    yields the ``list[...]`` extension type. Columns that are not merged keep
+    their input Arrow type. When a column is in both inputs with Arrow types
+    that differ only in width or layout (``int8``/``int64``,
+    ``string``/``large_string``, ``float``/``double``,
+    ``timestamp[ms]``/``timestamp[us]``, ``list``/``large_list``), it gets
+    their common type under Arrow's permissive promotion (``int64``,
+    ``large_string``, ``double``, ``timestamp[us]``, ``large_list``), which
+    does not depend on the argument order.
 
     MergeJoin is commutative: MergeJoin(A, B) produces the same result as
     MergeJoin(B, A), achieved by sorting merged values and system tag values.
@@ -261,14 +252,28 @@ class MergeJoin(BinaryOperator):
         # Find colliding data columns
         colliding_keys = set(left_data_keys) & set(right_data_keys)
 
-        # Snapshot Arrow types of colliding columns BEFORE the Polars round-trip.
-        # The round-trip may strip or alter extension metadata; we need the original
-        # element type to reconstruct the correct list extension type after merging.
-        colliding_col_types: dict[str, "pa.DataType"] = {
-            col: left_table.schema.field(col).type
-            for col in colliding_keys
-            if col in left_table.schema.names
+        # Snapshot the inputs' Arrow types BEFORE the Polars round-trip, which
+        # stores strings, binaries and lists in their large layouts, drops
+        # fixed_size_binary and may strip extension metadata. Every output
+        # column is typed from these, never from what Arrow infers for the
+        # Python values: a merged column becomes list<input type>, and every
+        # other column gets its input type back.
+        left_types = {f.name: f.type for f in left_table.schema}
+        right_types = {f.name: f.type for f in right_table.schema}
+        merged_names = set(colliding_keys) | {
+            f"{constants.SOURCE_PREFIX}{col}" for col in colliding_keys
         }
+        merged_element_types: dict[str, "pa.DataType"] = {}
+        passthrough_types: dict[str, "pa.DataType"] = {}
+        for name in left_types.keys() | right_types.keys():
+            if name in left_types and name in right_types:
+                column_type = _common_type(name, left_types[name], right_types[name])
+            else:
+                column_type = left_types.get(name) or right_types[name]
+            if name in merged_names:
+                merged_element_types[name] = column_type
+            else:
+                passthrough_types[name] = column_type
 
         # Capture nullable flags from input schemas BEFORE Polars conversion.
         # Polars' join discards nullable info (defaults all to True); we derive
@@ -368,26 +373,20 @@ class MergeJoin(BinaryOperator):
             joined = joined.drop(left_col_name)
             joined = joined.drop(right_col_name)
 
-            elem_arrow_type = colliding_col_types.get(col)
-            if elem_arrow_type is not None and isinstance(elem_arrow_type, pa.ExtensionType):
-                elem_python_type = tc.arrow_type_to_python_type(elem_arrow_type)
-                list_logical_type = tc.get_logical_type_for_python_type(list[elem_python_type])
-                if list_logical_type is not None:
-                    list_ext_type = list_logical_type.get_arrow_extension_type()
-                    storage_array = pa.array(merged_vals, type=list_ext_type.storage_type)
-                    merged_array = pa.ExtensionArray.from_storage(list_ext_type, storage_array)
-                else:
-                    merged_array = _list_array(merged_vals, elem_arrow_type)
-            else:
-                merged_array = _list_array(merged_vals, elem_arrow_type)
+            merged_type = arrow_utils.aggregated_list_type(
+                merged_element_types[col], tc
+            )
+            merged_array = arrow_utils.list_array(merged_vals, merged_type)
             joined = joined.add_column(col_idx, left_col_name, merged_array)
 
             if has_source:
                 source_idx = joined.column_names.index(left_source_col)
-                source_elem_type = joined.schema.field(left_source_col).type
                 joined = joined.drop(left_source_col)
                 joined = joined.drop(right_source_col)
-                source_array = _list_array(merged_sources or [], source_elem_type)
+                source_type = arrow_utils.aggregated_list_type(
+                    merged_element_types[left_source_col], tc
+                )
+                source_array = arrow_utils.list_array(merged_sources or [], source_type)
                 joined = joined.add_column(source_idx, left_source_col, source_array)
 
         # Handle remaining Polars-generated _right suffixed columns
@@ -415,20 +414,19 @@ class MergeJoin(BinaryOperator):
         other_cols = [c for c in joined.column_names if c not in all_tag_keys]
         joined = joined.select(tag_cols + other_cols)
 
-        # Reconstruct schema from captured input nullable flags.
-        # Fall back to null-count inference for any unexpected columns.
+        # Reconstruct the schema: pass-through columns get their input Arrow
+        # type back (undoing Polars' layout changes), merged columns keep the
+        # list type built above, and nullability comes from the captured input
+        # flags, falling back to null-count inference for unexpected columns.
         result_schema = pa.schema([
             pa.field(
                 col_name,
-                joined.schema.field(col_name).type,
+                passthrough_types.get(col_name, joined.schema.field(col_name).type),
                 nullable=output_nullable.get(col_name, joined.column(i).null_count > 0),
             )
             for i, col_name in enumerate(joined.column_names)
         ])
-        joined = pa.Table.from_arrays(
-            [joined.column(i) for i in range(joined.num_columns)],
-            schema=result_schema,
-        )
+        joined = joined.cast(result_schema)
         return ArrowTableStream(
             joined,
             tag_columns=tuple(all_tag_keys),

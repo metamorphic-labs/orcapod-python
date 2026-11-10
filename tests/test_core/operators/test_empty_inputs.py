@@ -325,10 +325,11 @@ class TestMergeJoinEmptyInput:
         ids=lambda v: str(v) if isinstance(v, pa.DataType) else "",
     )
     def test_colliding_column_type_matches_non_empty_result(self, arrow_type, values):
-        """An empty result types a merged column exactly as a non-empty one does.
+        """An empty and a non-empty result both type a merged column ``list<input>``.
 
-        Otherwise empty and non-empty results of the same join could not be
-        concatenated.
+        The element keeps the input's Arrow type rather than what Arrow infers
+        from Python values (ITL-832), so empty and non-empty results of the
+        same join can be concatenated.
         """
 
         def merged_type(rows: int) -> pa.DataType:
@@ -347,7 +348,7 @@ class TestMergeJoinEmptyInput:
             table = MergeJoin().static_process(*streams).as_table()
             return table.schema.field("x").type
 
-        assert merged_type(0) == merged_type(2)
+        assert merged_type(0) == merged_type(2) == pa.list_(arrow_type)
 
     def test_no_shared_tags(self):
         """With no shared tag the helper key is the only join key."""

@@ -1,0 +1,346 @@
+"""MergeJoin keeps the Arrow types its inputs already have (ITL-832).
+
+The rule: whatever Arrow types the inputs have are respected; an Arrow type is
+inferred from Python values only when none is known. For ``MergeJoin`` this
+means a merged column is ``list<T>`` where ``T`` is the input column's Arrow
+type (not what ``pa.array`` infers from the Python values), for empty and
+non-empty results alike, and every column that passes through the Polars join
+unchanged keeps its input type.
+
+Predictions are compared against ``static_process(...)``, never against
+``process(...)``, whose ``output_schema`` delegates back to the operator.
+"""
+
+from __future__ import annotations
+
+import datetime
+import decimal
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+import pyarrow as pa
+import pytest
+
+from orcapod.contexts import get_default_type_converter
+from orcapod.core.operators import MergeJoin, PolarsFilter
+from orcapod.core.sources.arrow_table_source import ArrowTableSource
+from orcapod.core.streams import ArrowTableStream
+from orcapod.protocols.core_protocols import StreamProtocol
+
+SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
+
+# (Arrow type, two distinct values in ascending order)
+ELEMENT_CASES: list[tuple[pa.DataType, list[Any]]] = [
+    (pa.int8(), [1, 2]),
+    (pa.int16(), [1, 2]),
+    (pa.int32(), [1, 2]),
+    (pa.int64(), [1, 2]),
+    (pa.uint8(), [1, 2]),
+    (pa.float32(), [1.5, 2.5]),
+    (pa.float64(), [1.5, 2.5]),
+    (pa.string(), ["a", "b"]),
+    (pa.large_string(), ["a", "b"]),
+    (pa.binary(), [b"a", b"b"]),
+    (pa.large_binary(), [b"a", b"b"]),
+    (pa.bool_(), [False, True]),
+    (
+        pa.timestamp("ms"),
+        [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)],
+    ),
+    (pa.date32(), [datetime.date(2020, 1, 1), datetime.date(2021, 1, 1)]),
+    (pa.list_(pa.int8()), [[1], [2]]),
+    (pa.large_list(pa.int32()), [[1], [2]]),
+    (
+        pa.decimal128(5, 2),
+        [decimal.Decimal("1.00"), decimal.Decimal("2.50")],
+    ),
+]
+
+# Pairs that collide (same Python type) but differ in Arrow type, and the
+# permissive promotion the merged element gets.
+PROMOTED_PAIRS: list[tuple[pa.DataType, pa.DataType, pa.DataType, list[Any]]] = [
+    (pa.int8(), pa.int64(), pa.int64(), [1, 2]),
+    (pa.string(), pa.large_string(), pa.large_string(), ["a", "b"]),
+    (pa.float32(), pa.float64(), pa.float64(), [1.5, 2.5]),
+    (pa.binary(), pa.large_binary(), pa.large_binary(), [b"a", b"b"]),
+    (
+        pa.timestamp("ms"),
+        pa.timestamp("us"),
+        pa.timestamp("us"),
+        [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)],
+    ),
+    (
+        pa.list_(pa.int8()),
+        pa.large_list(pa.int32()),
+        pa.large_list(pa.int32()),
+        [[1], [2]],
+    ),
+]
+
+
+def _table(columns: dict[str, tuple[pa.DataType, list[Any]]]) -> pa.Table:
+    """Build a table of non-nullable fields from ``{name: (type, values)}``."""
+    return pa.Table.from_arrays(
+        [pa.array(values, type=arrow_type) for arrow_type, values in columns.values()],
+        schema=pa.schema(
+            [
+                pa.field(name, arrow_type, nullable=False)
+                for name, (arrow_type, _) in columns.items()
+            ]
+        ),
+    )
+
+
+def _stream(
+    columns: dict[str, tuple[pa.DataType, list[Any]]], tags: list[str]
+) -> ArrowTableStream:
+    """Build a stream (no source info, no system tags) from ``{name: (type, values)}``."""
+    return ArrowTableStream(_table(columns), tag_columns=tags)
+
+
+def _pair(
+    left_type: pa.DataType,
+    right_type: pa.DataType,
+    values: list[Any],
+    rows: int,
+) -> tuple[ArrowTableStream, ArrowTableStream]:
+    """Build two streams sharing tag ``probe`` and colliding data column ``x``.
+
+    Each row of the left stream holds ``values[0]`` and each row of the right
+    stream ``values[1]``, so every merged row is ``values`` in sorted order.
+    """
+    left = _stream(
+        {
+            "probe": (pa.int64(), list(range(rows))),
+            "x": (left_type, [values[0]] * rows),
+        },
+        ["probe"],
+    )
+    right = _stream(
+        {
+            "probe": (pa.int64(), list(range(rows))),
+            "x": (right_type, [values[1]] * rows),
+        },
+        ["probe"],
+    )
+    return left, right
+
+
+def _assert_matches_prediction(
+    op: MergeJoin | PolarsFilter,
+    result: StreamProtocol,
+    *inputs: StreamProtocol,
+) -> None:
+    """Assert the materialized schema equals the operator's prediction."""
+    for config in SCHEMA_CONFIGS:
+        assert result.output_schema(columns=config) == op.output_schema(
+            *inputs, columns=config
+        ), config
+
+
+def _ids(value: object) -> str:
+    """Name a parametrized case by its Arrow types, leaving values out."""
+    return str(value) if isinstance(value, pa.DataType) else ""
+
+
+class TestMergedColumnElementType:
+    """A merged column is ``list<input type>`` with or without rows."""
+
+    @pytest.mark.parametrize(("arrow_type", "values"), ELEMENT_CASES, ids=_ids)
+    @pytest.mark.parametrize("rows", [0, 2])
+    def test_element_type_is_the_input_type(
+        self, arrow_type: pa.DataType, values: list[Any], rows: int
+    ) -> None:
+        """The merged list keeps the input's width and layout, and the prediction."""
+        left, right = _pair(arrow_type, arrow_type, values, rows)
+        op = MergeJoin()
+        result = op.static_process(left, right)
+        table = result.as_table()
+
+        assert table.schema.field("x").type == pa.list_(arrow_type)
+        assert table.column("x").to_pylist() == [values] * rows
+        _assert_matches_prediction(op, result, left, right)
+
+    @pytest.mark.parametrize("rows", [0, 2])
+    def test_logical_element_type_uses_list_logical_type(self, rows: int) -> None:
+        """A logical (extension) element yields the converter's ``list[...]`` type."""
+        converter = get_default_type_converter()
+        path_type = converter.python_type_to_arrow_type(Path)
+        assert isinstance(path_type, pa.ExtensionType)
+
+        def make(value: str) -> ArrowTableStream:
+            """Build a stream with a ``Path``-typed column ``x`` holding ``value``."""
+            storage = pa.array([value] * rows, type=path_type.storage_type)
+            table = pa.Table.from_arrays(
+                [
+                    pa.array(list(range(rows)), type=pa.int64()),
+                    pa.ExtensionArray.from_storage(path_type, storage),
+                ],
+                schema=pa.schema(
+                    [
+                        pa.field("probe", pa.int64(), nullable=False),
+                        pa.field("x", path_type, nullable=False),
+                    ]
+                ),
+            )
+            return ArrowTableStream(table, tag_columns=["probe"])
+
+        left, right = make("/b"), make("/a")
+        op = MergeJoin()
+        result = op.static_process(left, right)
+        table = result.as_table()
+
+        assert table.schema.field("x").type == converter.python_type_to_arrow_type(
+            list[Path]
+        )
+        assert len(table) == rows
+        _assert_matches_prediction(op, result, left, right)
+
+    @pytest.mark.parametrize("rows", [0, 2])
+    def test_empty_and_non_empty_results_concatenate(self, rows: int) -> None:
+        """Empty and non-empty results share one schema, so they concatenate."""
+        tables = [
+            MergeJoin()
+            .static_process(*_pair(pa.int8(), pa.int8(), [1, 2], n))
+            .as_table()
+            for n in (0, rows)
+        ]
+        assert len(pa.concat_tables(tables)) == rows
+
+
+class TestPromotedElementType:
+    """Colliding columns whose Arrow types differ merge into the common type."""
+
+    @pytest.mark.parametrize(
+        ("left_type", "right_type", "promoted", "values"), PROMOTED_PAIRS, ids=_ids
+    )
+    @pytest.mark.parametrize("rows", [0, 2])
+    def test_promoted_and_commutative(
+        self,
+        left_type: pa.DataType,
+        right_type: pa.DataType,
+        promoted: pa.DataType,
+        values: list[Any],
+        rows: int,
+    ) -> None:
+        """Both argument orders give ``list<promoted>`` and the same values."""
+        left, right = _pair(left_type, right_type, values, rows)
+        op = MergeJoin()
+        forward = op.static_process(left, right)
+        backward = op.static_process(right, left)
+
+        for result in (forward, backward):
+            assert result.as_table().schema.field("x").type == pa.list_(promoted)
+            _assert_matches_prediction(op, result, left, right)
+        assert forward.as_table().equals(backward.as_table())
+
+
+def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
+    """Build two sources with source info and system tags; ``rows=0`` filters all.
+
+    The left source has a ``string`` tag ``probe``, a colliding ``int8``
+    column ``x`` and pass-through columns of several layouts; the right
+    source has the same tag as ``large_string``.
+    """
+    struct_type = pa.struct([("a", pa.int8()), ("b", pa.string())])
+    left = ArrowTableSource(
+        _table(
+            {
+                "probe": (pa.string(), ["p0", "p1"]),
+                "x": (pa.int8(), [1, 2]),
+                "s": (pa.string(), ["a", "b"]),
+                "b": (pa.binary(), [b"a", b"b"]),
+                "l": (pa.list_(pa.int8()), [[1], [2]]),
+                "st": (struct_type, [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]),
+            }
+        ),
+        tag_columns=["probe"],
+    )
+    right = ArrowTableSource(
+        _table(
+            {
+                "probe": (pa.large_string(), ["p0", "p1"]),
+                "x": (pa.int8(), [3, 0]),
+                "f": (pa.float32(), [1.0, 2.0]),
+            }
+        ),
+        tag_columns=["probe"],
+    )
+    if rows:
+        return left, right
+    drop_all = PolarsFilter(predicates=[pl.lit(False)])
+    return drop_all.static_process(left), drop_all.static_process(right)
+
+
+class TestPassThroughColumns:
+    """Columns the join does not merge keep their input Arrow types."""
+
+    @pytest.mark.parametrize("rows", [0, 2])
+    def test_merge_join_keeps_pass_through_types(self, rows: int) -> None:
+        """Data, source-info and system-tag columns keep their types; tags promote."""
+        left, right = _sources(rows)
+        op = MergeJoin()
+        result = op.static_process(left, right)
+        table = result.as_table(all_info=True)
+        left_schema = left.as_table(all_info=True).schema
+        right_schema = right.as_table(all_info=True).schema
+
+        for name in ("s", "b", "l", "st", "_source_s", "_source_b"):
+            assert table.schema.field(name).type == left_schema.field(name).type, name
+        assert table.schema.field("f").type == pa.float32()
+        assert (
+            table.schema.field("_source_f").type == right_schema.field("_source_f").type
+        )
+        assert table.schema.field("probe").type == pa.large_string()
+        assert table.schema.field("x").type == pa.list_(pa.int8())
+
+        input_system_tag_types = {
+            f.type for f in (*left_schema, *right_schema) if f.name.startswith("_tag")
+        }
+        output_system_tag_types = {
+            f.type for f in table.schema if f.name.startswith("_tag")
+        }
+        assert output_system_tag_types == input_system_tag_types
+        assert len(table) == rows
+        if rows:
+            # The empty inputs come from PolarsFilter, which drops non-null
+            # flags, so their prediction differs in nullability only (ITL-820).
+            _assert_matches_prediction(op, result, left, right)
+
+    def test_merge_join_merged_values_and_sources_stay_sorted(self) -> None:
+        """Merged values are sorted per row and their source tokens follow them."""
+        left, right = _sources(2)
+        table = MergeJoin().static_process(left, right).as_table(all_info=True)
+        rows = table.sort_by("probe").to_pylist()
+        assert [row["x"] for row in rows] == [[1, 3], [0, 2]]
+        left_tokens = left.as_table(all_info=True).column("_source_x").to_pylist()
+        right_tokens = right.as_table(all_info=True).column("_source_x").to_pylist()
+        assert [row["_source_x"] for row in rows] == [
+            [left_tokens[0], right_tokens[0]],
+            [right_tokens[1], left_tokens[1]],
+        ]
+
+    def test_shared_tag_type_is_commutative(self) -> None:
+        """A shared tag stored as ``string`` and ``large_string`` promotes either way."""
+        left, right = _sources(2)
+        op = MergeJoin()
+        forward = op.static_process(left, right).as_table(all_info=True)
+        backward = op.static_process(right, left).as_table(all_info=True)
+        assert forward.schema.field("probe").type == pa.large_string()
+        # Column order depends on the argument order; types must not.
+        assert {f.name: f.type for f in forward.schema} == {
+            f.name: f.type for f in backward.schema
+        }
+
+    def test_polars_filter_keeps_input_types(self) -> None:
+        """Filtering keeps every column's Arrow type, system tags included."""
+        source, _ = _sources(2)
+        op = PolarsFilter(predicates=[pl.col("x") > 1])
+        result = op.static_process(source)
+        input_schema = source.as_table(all_info=True).schema
+        output_schema = result.as_table(all_info=True).schema
+
+        assert len(result.as_table()) == 1
+        for field in output_schema:
+            assert field.type == input_schema.field(field.name).type, field.name

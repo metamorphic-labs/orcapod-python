@@ -1254,7 +1254,7 @@ def aggregated_list_type(
     return pa.list_(element_type)
 
 
-def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array:
+def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:
     """Build a list array of exactly ``list_type`` from Python values.
 
     The type never depends on ``values``, so an empty array has the same type
@@ -1300,7 +1300,8 @@ def restore_column_types(
         else field
         for field in table.schema
     ]
-    return table.cast(pa.schema(fields, metadata=table.schema.metadata))
+    restored = table.cast(pa.schema(fields))
+    return restored.replace_schema_metadata(table.schema.metadata)
 
 
 def build_aggregated_table(
@@ -1348,9 +1349,7 @@ def build_aggregated_table(
         list_type = aggregated_list_type(field.type, type_converter)
         if isinstance(list_type, pa.ExtensionType):
             extension_overrides[field.name] = list_type
-            fields.append(
-                pa.field(field.name, list_type.storage_type, nullable=False)
-            )
+            fields.append(pa.field(field.name, list_type.storage_type, nullable=False))
         else:
             fields.append(pa.field(field.name, list_type, nullable=False))
 
