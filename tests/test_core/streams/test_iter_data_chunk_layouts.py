@@ -174,6 +174,8 @@ def test_stream_without_tag_columns_yields_every_row(data_sizes):
     assert len(pairs) == stream.as_table().num_rows == n
     assert [(d["x"], d["y"]) for _, d in pairs] == [(i * 10, f"v{i}") for i in range(n)]
     assert all(t.as_dict() == {} for t, _ in pairs)
+    # Each row gets its own empty tag rather than one shared instance.
+    assert len({id(t) for t, _ in pairs}) == n
 
 
 def test_empty_stream_yields_nothing():

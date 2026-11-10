@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Iterator
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
@@ -272,7 +272,6 @@ class ArrowTableStream(StreamBase):
             cached_elements = []
             tag_columns = list(self._all_tag_columns)
             data_columns = list(self._data_columns)
-            empty_tag = Tag({}) if not tag_columns else None
 
             # Indexed by absolute row position: the source-info table has its
             # own chunk layout, so it must never be indexed batch-locally.
@@ -285,16 +284,17 @@ class ArrowTableStream(StreamBase):
             # mis-pairs rows whenever the two are chunked differently.
             row_offset = 0
             for batch in self._table.to_batches():
-                tag_batch = batch.select(tag_columns) if tag_columns else None
+                tag_batch = batch.select(tag_columns)
                 data_batch = batch.select(data_columns)
                 for i in range(batch.num_rows):
-                    if tag_batch is not None:
+                    if tag_columns:
                         tag = Tag(
                             tag_batch.slice(i, 1),  # type: ignore
                             data_context=self.data_context,
                         )
                     else:
-                        tag = cast(Tag, empty_tag)
+                        # A fresh empty tag per row, so rows never share one object.
+                        tag = Tag({})
 
                     data = Data(
                         data_batch.slice(i, 1),
