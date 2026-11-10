@@ -157,16 +157,19 @@ uv run pytest tests/
 ```
 
 - New and changed code must be ruff-clean and ruff-formatted, and must add no
-  basedpyright errors. Run `uv run ruff format .` and `uv run ruff check .` before
-  committing; `uv run pre-commit install` once per clone runs both on every commit.
+  basedpyright errors **or warnings**: basedpyright's default mode fails on warnings too.
+  Run `uv run ruff format .` and `uv run ruff check .` before committing;
+  `uv run pre-commit install` once per clone runs both on every commit.
+- Check types with `uv run --with basedpyright basedpyright` and read its **exit code**,
+  not the summary line: `0 errors, 73 warnings` still exits 1 and fails CI.
 - The tool versions are the ones in `uv.lock`: `--with ruff` and `--with basedpyright` are
   satisfied by the locked dev dependencies, so a version bump in `uv.lock` can change what
   CI reports.
-- Existing type errors are recorded in `.basedpyright/baseline.json`, a debt list to pay
-  down. Never regenerate the baseline (`basedpyright --writebaseline`) to hide a new
-  error; regenerate it only to **remove** entries for errors you fixed. Fix the new error,
-  or, when it is a genuine false positive, suppress that one line with a targeted
-  `# pyright: ignore[<rule>]` and a reason.
+- Existing type errors and warnings are recorded in `.basedpyright/baseline.json`, a debt
+  list to pay down. Never regenerate the baseline (`basedpyright --writebaseline`) to
+  hide a new error or warning; regenerate it only to **remove** entries you fixed. Fix the
+  new diagnostic, or, when it is a genuine false positive, suppress that one line with a
+  targeted `# pyright: ignore[<rule>]` and a reason.
 - Do not lower the basedpyright strictness mode, and do not add repo-wide or per-directory
   ruff ignores or excludes to make a check pass. A targeted `# noqa: <rule>` on one line
   needs a reason.
