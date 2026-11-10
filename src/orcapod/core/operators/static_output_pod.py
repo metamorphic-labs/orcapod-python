@@ -228,15 +228,13 @@ class StaticOutputOperatorPod(TraceableBase):
         combined_tags = arrow_utils.concat_tables_by_name(tag_tables)
         combined_data = arrow_utils.concat_tables_by_name(data_tables)
 
-        fields = [
-            field.with_nullable(combined_data.column(i).null_count > 0)
-            if field.name.startswith(constants.SOURCE_PREFIX)
-            else field
-            for i, field in enumerate(combined_data.schema)
-        ]
-        combined_data = combined_data.cast(
-            pa.schema(fields, metadata=combined_data.schema.metadata)
-        )
+        data_schema = combined_data.schema
+        for i, field in enumerate(data_schema):
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                nullable = combined_data.column(i).null_count > 0
+                data_schema = data_schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+        # Same arrays, new field flags: no cast, so no value or type can change.
+        combined_data = pa.Table.from_arrays(combined_data.columns, schema=data_schema)
 
         full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
         return full_table, tuple(rows[0][0].keys())

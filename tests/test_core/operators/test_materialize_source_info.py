@@ -15,7 +15,8 @@ in the pinned-identity tests at the bottom.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -37,6 +38,7 @@ from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
@@ -119,7 +121,7 @@ def _stored_source(node: OperatorJobNode, column: str = "x") -> list[Any]:
     return [r[f"{constants.SOURCE_PREFIX}{column}"] for r in rows]
 
 
-def _source_fields(table: pa.Table) -> dict[str, pa.Field]:
+def _source_fields(table: pa.Table) -> dict[str, pa.Field[pa.DataType]]:
     return {
         f.name: f for f in table.schema if f.name.startswith(constants.SOURCE_PREFIX)
     }
@@ -159,7 +161,7 @@ class TestMaterializeToStream:
 
     def test_zero_rows_raises(self):
         with pytest.raises(ValueError, match="empty list of rows"):
-            StaticOutputOperatorPod._materialize_to_stream([])
+            _ = StaticOutputOperatorPod._materialize_to_stream([])
 
     def test_none_source_info_rows(self):
         rows = list(_source(3).iter_data())
@@ -218,7 +220,9 @@ class TestSourceInfoArrowFields:
         assert field == pa.field(
             "_source_x", pa.large_list(pa.large_string()), nullable=False
         )
-        assert field.type.value_field.nullable is True
+        list_type = field.type
+        assert isinstance(list_type, pa.LargeListType)
+        assert list_type.value_field.nullable is True
 
     @pytest.mark.parametrize("none_row", [0, 2])
     def test_field_nullable_when_a_token_is_none(self, none_row: int):
@@ -250,7 +254,9 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
             pytest.param(lambda: GroupBy(by=["g"]), id="group_by"),
         ],
     )
-    def test_unary_async_matches_sync(self, make_op):
+    def test_unary_async_matches_sync(
+        self, make_op: Callable[[], StaticOutputOperatorPod]
+    ):
         src = _source(5)
         sync_rows = list(make_op()(src).iter_data())
         async_rows = _run_async(make_op(), src)
@@ -288,7 +294,7 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
         left_tokens = _tokens(list(left.iter_data()))
         right_tokens = _tokens(list(right.iter_data()))
         for i, token_list in enumerate(
-            _tokens(sorted(async_rows, key=lambda r: r[0].as_dict()["id"]))
+            _tokens(sorted(async_rows, key=lambda r: str(r[0].as_dict()["id"])))
         ):
             assert sorted(token_list) == sorted([left_tokens[i], right_tokens[i]])
 
@@ -307,7 +313,9 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
             pytest.param(lambda: Batch(0), id="batch_all"),
         ],
     )
-    def test_zero_rows_emit_nothing(self, make_op):
+    def test_zero_rows_emit_nothing(
+        self, make_op: Callable[[], StaticOutputOperatorPod]
+    ):
         async def go() -> list[Row]:
             empty: Channel[Row] = Channel(buffer_size=4)
             await empty.writer.close()
@@ -318,7 +326,7 @@ class TestAsyncOperatorsKeepPerRowSourceInfo:
         if make_op().__class__ is PolarsFilter:
             # The barrier path cannot build a stream from zero rows; it raises.
             with pytest.raises(ValueError, match="empty list of rows"):
-                asyncio.run(go())
+                _ = asyncio.run(go())
         else:
             assert asyncio.run(go()) == []
 
@@ -366,13 +374,13 @@ class TestIndexPickKeepPerRowSourceInfo:
 
 def _run_node(node: OperatorJobNode, src: StreamProtocol, mode: str) -> None:
     if mode == "execute":
-        node.execute(src)
+        _ = node.execute(src)
         return
 
     async def go() -> None:
         output: Channel[Row] = Channel(buffer_size=64)
         await node.async_execute([(await _feed(src)).reader], output.writer)
-        await output.reader.collect()
+        _ = await output.reader.collect()
 
     asyncio.run(go())
 
@@ -485,7 +493,7 @@ class TestIdentityPinned:
             pipeline_database=InMemoryArrowDatabase(),
             cache_mode=CacheMode.LOG,
         )
-        node.execute(src)
+        _ = node.execute(src)
 
         assert node.pipeline_hash().to_string() == (
             "semantic_v0.1:1f533cfa7293bad96debd5cda622e04bc39d72970ce6827dcd6e890a7428823c"
@@ -544,7 +552,9 @@ class TestStoreWrittenBeforeFix:
     in the CHANGELOG.
     """
 
-    def _node(self, db: Any, mode: CacheMode = CacheMode.LOG) -> OperatorJobNode:
+    def _node(
+        self, db: ArrowDatabaseProtocol, mode: CacheMode = CacheMode.LOG
+    ) -> OperatorJobNode:
         return OperatorJobNode(
             SelectDataColumns(["x"]),
             [_pin_source()],
@@ -580,7 +590,7 @@ class TestStoreWrittenBeforeFix:
         replay = self._node(db, CacheMode.REPLAY)
         assert len(list(replay.iter_data())) == 5
 
-    def test_v014_store_is_not_read(self, tmp_path):
+    def test_v014_store_is_not_read(self, tmp_path: Path):
         """A table written by v0.1.x is invisible to the run filter, so no duplicates.
 
         v0.1.x stored the run column as ``_node_content_hash`` (``large_string``);
@@ -612,7 +622,7 @@ class TestStoreWrittenBeforeFix:
         db.flush()
 
         new = self._node(db)
-        new.execute(_pin_source())
+        _ = new.execute(_pin_source())
         db.flush()
         tokens = _tokens(list(_pin_source().iter_data()))
         assert _stored_source(new) == tokens
