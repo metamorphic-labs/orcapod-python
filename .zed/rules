@@ -205,6 +205,15 @@ commands (pytest on Python 3.11, 3.12 and 3.13; the others on 3.11):
 - The Graphviz `dot` binary is optional. The tests that render a graph to an image skip
   when `dot` is not on `PATH` and run when it is.
 
+## Testing conventions
+
+Tests use the **public interface** wherever possible (developer, November 10, 2026): drive an
+operator by calling it, `op(stream)`, and read the result through the stream's public methods.
+Use a non-public entry point (`unary_static_process`, `static_process`,
+`binary_static_process`, `_private` helpers) only when the test is specifically about that
+entry point. The standing exception is verifying a schema prediction, which must compare
+against `static_process(...).output_schema(...)`; see "Important implementation details".
+
 ---
 
 ## Project layout

@@ -185,7 +185,7 @@ CHAINS: dict[str, dict[str, Any]] = {
 
 
 class Chain:
-    """One chained aggregation: upstream stream, operator, and its sync output."""
+    """One chained aggregation: upstream stream, operator, and its output stream."""
 
     def __init__(self, name: str) -> None:
         spec = CHAINS[name]
@@ -194,7 +194,7 @@ class Chain:
         self.op = spec["op"]()
         self.types: dict[str, pa.DataType] = spec["types"]
         self.members: Callable[[Rows, int, TagProtocol], list[int]] = spec["members"]
-        self.result = self.op.unary_static_process(self.upstream)
+        self.result = self.op(self.upstream)
 
 
 @pytest.fixture(params=sorted(CHAINS))
@@ -256,9 +256,15 @@ class TestSyncChains:
         self, chain: Chain, columns: dict[str, bool]
     ) -> None:
         """``output_schema()`` predicts exactly what ``static_process`` produces."""
+        # Not ``chain.result``: ``op(stream)`` returns a stream whose
+        # ``output_schema()`` delegates back to this prediction, so comparing
+        # against it would be circular (CLAUDE.md, "Important implementation
+        # details"), and ``as_table()`` legitimately carries columns the schema
+        # omits.
+        static: StreamProtocol = chain.op.unary_static_process(chain.upstream)
         assert chain.op.output_schema(
             chain.upstream, columns=columns
-        ) == chain.result.output_schema(columns=columns)
+        ) == static.output_schema(columns=columns)
 
     def test_values_are_the_members_values(self, chain: Chain) -> None:
         """Each output value lists its members' upstream values, in member order."""
@@ -307,7 +313,7 @@ class TestSyncChains:
             assert hasher.hash_table(_build_record_id_preimage(tag, data)) is not None
         assert chain.result.content_hash() is not None
         assert chain.result.pipeline_hash() is not None
-        assert chain.op(chain.upstream).as_table(all_info=True).num_rows > 0
+        assert chain.result.as_table(all_info=True).num_rows > 0
 
 
 class TestAsyncChains:
@@ -346,7 +352,7 @@ class TestAsyncChains:
         """A third aggregation hands nested Python source info to the barrier path."""
         upstream = Batch(batch_size=2)(GroupBy(["g"])(source_a()))
         op = Batch(batch_size=1)
-        sync_rows = list(op.unary_static_process(upstream).iter_data())
+        sync_rows = list(op(upstream).iter_data())
         async_rows = _run_async(op, upstream)
         assert len(async_rows) == len(sync_rows) == 1
         (a_tag, a_data), (s_tag, s_data) = async_rows[0], sync_rows[0]
@@ -360,11 +366,9 @@ class TestAsyncChains:
 
 
 ZERO_ROW_CHAINS: dict[str, Callable[[StreamProtocol], StreamProtocol]] = {
-    "group_by": lambda s: GroupBy(["g"]).unary_static_process(s),
-    "batch": lambda s: Batch(batch_size=2).unary_static_process(s),
-    "batch_batch": lambda s: Batch(batch_size=2).unary_static_process(
-        Batch(batch_size=2).unary_static_process(s)
-    ),
+    "group_by": lambda s: GroupBy(["g"])(s),
+    "batch": lambda s: Batch(batch_size=2)(s),
+    "batch_batch": lambda s: Batch(batch_size=2)(Batch(batch_size=2)(s)),
 }
 
 
