@@ -607,6 +607,7 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_python_schema = Schema(
                 {k: v for k, v in schema.items() if k in column_names}
             )
+            new_d._data_arrow_schema = None
             return new_d
 
     def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
@@ -642,6 +643,7 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_python_schema = Schema(
                 {k: v for k, v in schema.items() if k in new_data}
             )
+            new_d._data_arrow_schema = None
             return new_d
 
     def rename(self, column_mapping: Mapping[str, str]) -> Self:
@@ -667,6 +669,7 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_python_schema = Schema(
                 {column_mapping.get(k, k): v for k, v in schema.items()}
             )
+            new_d._data_arrow_schema = None
             return new_d
 
     def update(self, **updates: DataValue) -> Self:
@@ -754,6 +757,7 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_dict = new_data
             new_d._data_python_schema = new_schema
             new_d._data_table = None
+            new_d._data_arrow_schema = None
             return new_d
 
     # ------------------------------------------------------------------
