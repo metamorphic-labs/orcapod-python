@@ -4,12 +4,12 @@ Orcapod's Python library for developing reproducible scientific pipelines.
 ## Installation
 
 Orcapod requires Python 3.11 or newer and is tested on Python 3.11 and 3.12.
+<!-- PLACEHOLDER (ITL-825 #275): once #275 merges, say "tested on Python 3.11, 3.12 and 3.13". -->
 
-```bash
-pip install orcapod
-# or, in a uv-managed project
-uv add orcapod
-```
+Orcapod is published to the organization's internal Python package registry.
+
+> **Open item:** the registry URL, authentication and install command are to be supplied
+> by the developer.
 
 Optional features are installed as extras:
 
@@ -27,14 +27,16 @@ SpikeInterface support lives in a separate package,
 Rendering a pipeline graph needs the [Graphviz](https://graphviz.org/download/) `dot`
 executable on your `PATH`.
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes, including the migration steps for
+See [CHANGELOG.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md)
+for release notes, including the migration steps for
 databases written by an earlier release.
 
 ## Releasing
 
-Releases are cut from the GitHub Actions **Release** workflow, which runs the tests,
-tags the commit, and publishes to PyPI. The version comes from the tag via `hatch-vcs`,
-so there is no version number to bump in the source tree. See
+Releases are cut from the GitHub Actions **Release** workflow, which runs the tests and
+tags the commit. The version comes from the tag via `hatch-vcs`, so there is no version
+number to bump in the source tree. The workflow's PyPI publishing steps are superseded by
+the internal registry and have not been replaced yet. See
 [RELEASING.md](RELEASING.md) for the full workflow.
 
 ## Continuous Integration
@@ -42,6 +44,7 @@ so there is no version number to bump in the source tree. See
 This project uses GitHub Actions for continuous integration:
 
 - **Run Tests**: Runs the full unit test suite on Ubuntu with Python 3.11 and 3.12. PostgreSQL integration tests are excluded.
+  <!-- PLACEHOLDER (ITL-825 #275, ITL-826 #276): update the Python versions and job list once #276 merges. -->
 - **Run PostgreSQL Tests**: Runs only the `@pytest.mark.postgres` integration tests against a PostgreSQL 16 service container.
 
 ### Running Tests Locally

@@ -5,6 +5,12 @@
 <!-- RELEASE-DAY: replace "unreleased" with the publish date (YYYY-MM-DD) and resolve every
      line marked PLACEHOLDER below. See superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
 
+> **OPEN ITEM — Publish target: internal registry (URL, auth and install instructions to be
+> supplied by the developer).** `0.2.0` is published to the organization's internal Python
+> package registry, not to public PyPI, until public development resumes in January 2027.
+> Publishing to PyPI / TestPyPI is superseded; the Release workflow still targets them and
+> is changed once the registry details are known.
+
 Everything merged to `main` since `v0.1.2` (30 pull requests). `0.1.3` and `0.1.4` were
 patch releases cut from a separate branch; their one fix is also in this release (see
 *Fixed*), so upgrading from `0.1.4` loses nothing.
@@ -57,8 +63,11 @@ it raises `orcapod.errors.SchemaVersionError`. Nothing is read or overwritten.
 
    ```python
    from orcapod.types import NodeConfig
-   node.node_config = NodeConfig(ignore_schema=("v0",))
+   node.node_config = node.node_config.merge(NodeConfig(ignore_schema=("v0",)))
    ```
+
+   `merge` keeps the node's other settings; assigning a bare `NodeConfig(...)` would reset
+   `is_result_ephemeral` to its default.
 
 **Not covered by the migration tool:** tables written by an *operator* node
 (`OperatorJobNode`). Those have no version check and no migration; an existing table
@@ -135,7 +144,8 @@ listed for anyone upgrading from `0.1.1` or earlier.
 | `NodeConfig.is_result_ephemeral: bool` | `NodeConfig.is_result_ephemeral: bool \| None` |
 
 `is_result_ephemeral` can no longer be set when constructing a `FunctionPod`. Set it on
-the node (`node.node_config = NodeConfig(is_result_ephemeral=True)`) or for a whole job
+the node (`node.node_config = node.node_config.merge(NodeConfig(is_result_ephemeral=True))`)
+or for a whole job
 (`job.apply_node_config(NodeConfig(is_result_ephemeral=True))`).
 
 **SpikeInterface support moved to a separate package (ITL-473 #220).** Core `orcapod` no
@@ -181,9 +191,6 @@ not on PyPI at the time of writing; install it from its repository.
   size only, for filesystems with unreliable mtimes. (ITL-522 #225)
 - Hash computation site reference in the documentation (ITL-529 #238) and the
   side-effect pods design spec (ITL-524 #227).
-- PLACEHOLDER (pending merge): `NodeConfig.missing_cache_policy`
-  (`"recompute"` / `"as_empty"` / `"strict"`) and `CacheMissError`. (ITL-604 #248) —
-  keep this line if #248 merges before the cut, otherwise delete it.
 
 ### Changed
 
@@ -203,6 +210,12 @@ not on PyPI at the time of writing; install it from its repository.
   `pygraphviz` supports). Installing `orcapod` no longer needs a C toolchain or Graphviz
   headers. Rendering pipeline graphs still uses the pure-Python `graphviz` package and
   therefore the optional Graphviz `dot` binary at render time. (ITL-134 #267)
+- PLACEHOLDER (pending merge): CI runs the organization's required checks — `ruff`,
+  `ruff format`, `basedpyright` and `pytest` on Python 3.11, 3.12 and 3.13. (ITL-826 #276)
+- PLACEHOLDER (pending merge): Python 3.13 is supported; canonical type names and hashes
+  are identical on 3.11–3.13. (ITL-825 #275, carried by #276)
+- PLACEHOLDER (pending merge): the license changes from MIT to proprietary. Final wording
+  comes from the ITL-827 PR; this PR does not change the license text. (ITL-827)
 
 ### Fixed
 
@@ -265,6 +278,8 @@ not on PyPI at the time of writing; install it from its repository.
   a code change — so the `spiraldb` extra ships untested against a live service.
 - **Tested on Python 3.11 and 3.12 only.** `requires-python` is `>=3.11` with no upper
   bound; newer interpreters are not exercised in CI.
+  PLACEHOLDER (ITL-825 #275): once #275 merges, change this item to "Tested on Python
+  3.11, 3.12 and 3.13".
 - **`ray` is pinned to `2.48.0`** in the `ray` extra.
 - **There is no `orcapod.__version__`.** Read the installed version with
   `importlib.metadata.version("orcapod")`.

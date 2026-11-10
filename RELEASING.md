@@ -1,6 +1,18 @@
 # Releasing Orcapod
 
-This document describes how to cut a release of `orcapod` to PyPI.
+This document describes how to cut a release of `orcapod`.
+
+## Publish target — PyPI is superseded
+
+> **OPEN ITEM — Publish target: internal registry (URL, auth and install instructions to be
+> supplied by the developer).**
+
+As of 2026-11-09, Orcapod is published to the organization's internal Python package
+registry, not to public PyPI, until public development resumes in January 2027. The
+Release workflow (`.github/workflows/release.yml`) still publishes to TestPyPI and PyPI and
+has not been changed yet. Every step below that publishes to, checks or installs from
+PyPI or TestPyPI is marked **(superseded)**; do not rely on it. These steps are rewritten
+in one pass once the registry details are known.
 
 ## Branching Model
 
@@ -17,9 +29,12 @@ Do these on `main` before triggering the workflow:
    body is generated from PR titles; `CHANGELOG.md` is the curated record.
 2. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
    releasing. The Release workflow re-runs the unit tests on Python 3.11 and 3.12
+   <!-- PLACEHOLDER (ITL-825 #275): add 3.13 once #275/#276 merge and the Release workflow tests it. -->
    and the license check, but not the PostgreSQL or SpiralDB integration jobs.
-3. **Check the version is free** — the tag must not exist on origin, and the version must
-   not exist on PyPI or TestPyPI. Neither index allows a version to be uploaded twice.
+3. **Check the version is free** — the tag must not exist on origin. **(superseded)** The
+   version must not exist on PyPI or TestPyPI; neither index allows a version to be
+   uploaded twice. The equivalent check against the internal registry is part of the open
+   item above.
 
 Per-release checklists live in `superpowers/plans/` (for example
 `2026-11-09-v0.2-release-checklist.md`).
@@ -47,14 +62,15 @@ Releases are triggered from the GitHub Actions UI — no manual `git tag` step r
 
    - Pre-flight: branch validation, then tests on Python 3.11 and 3.12 and license check (parallel after validation)
    - Build: normalises version, creates local tag, builds wheel + sdist, pushes tag to origin
-   - TestPyPI: publishes to test.pypi.org first as a staging step
-   - PyPI: publishes to pypi.org and creates a GitHub Release with generated release notes
+   - TestPyPI **(superseded)**: publishes to test.pypi.org first as a staging step
+   - PyPI **(superseded)**: publishes to pypi.org and creates a GitHub Release with generated release notes
    - Linear: `linear-sync` starts immediately after build (parallel to publish); `linear-complete` runs after both PyPI publish and linear-sync succeed
 
 ## Pre-releases
 
 Release candidates (e.g. `0.1.0rc1`) follow exactly the same path — enter the version in the
-workflow input. PyPI handles the stable vs pre-release distinction natively:
+workflow input. **(superseded)** PyPI handles the stable vs pre-release distinction
+natively:
 
 - `pip install orcapod` — installs the latest **stable** release only
 - `pip install --pre orcapod` — installs the latest release including pre-releases
@@ -76,7 +92,7 @@ workflow.
 5. Click **Run workflow**
 
 The workflow will confirm the branch exists, run tests against it, create the `v0.1.1`
-tag at its tip, and publish to PyPI — identical to a normal release.
+tag at its tip, and publish **(superseded: PyPI)** — identical to a normal release.
 
 ## If a Run Fails Part-Way
 
@@ -88,11 +104,12 @@ failure in a later job leaves the tag behind.
 | `test` or `license-check` | Nothing | Fix on `main`, trigger a new run |
 | `build`, before "Push release tag" | Nothing | Fix, trigger a new run |
 | `build`, after "Push release tag" | Tag on origin, no artifact | Delete the tag (`git push origin :refs/tags/vX.Y.Z`), then trigger a new run |
-| `publish-testpypi` | Tag on origin | Use **Re-run failed jobs** on the same run — do not start a new run, which would fail creating a tag that already exists |
-| `publish-pypi` | Tag on origin, version on TestPyPI | Use **Re-run failed jobs**. If the upload to PyPI itself partly succeeded, the version is burned: release the next patch version instead |
-| `linear-sync` / `linear-complete` | Release is published | Re-run the failed job; these do not affect PyPI |
+| `publish-testpypi` **(superseded)** | Tag on origin | Use **Re-run failed jobs** on the same run — do not start a new run, which would fail creating a tag that already exists |
+| `publish-pypi` **(superseded)** | Tag on origin, version on TestPyPI | Use **Re-run failed jobs**. If the upload to PyPI itself partly succeeded, the version is burned: release the next patch version instead |
+| `linear-sync` | Unknown: it needs only `build` and runs in parallel with publishing, so it can fail before anything is published | Check `publish-testpypi` and `publish-pypi` first and recover them by their rows above. Then re-run `linear-sync`; it does not affect publishing |
+| `linear-complete` | Release is published (it runs only after `publish-pypi` and `linear-sync` succeed) | Re-run the failed job; it does not affect publishing |
 
-Never delete a tag whose version has reached PyPI.
+Never delete a tag whose version has been published to any package index.
 
 ## Release Lineage
 
@@ -142,13 +159,13 @@ Before cutting the first release with this system active, a workspace admin must
    set the release name, which statuses count as "included" (at minimum: Merged), and
    the target state for the transition (Done).
 
-3. **Update PyPI/TestPyPI Trusted Publisher configs** — if the Trusted Publisher on
+3. **(superseded)** **Update PyPI/TestPyPI Trusted Publisher configs** — if the Trusted Publisher on
    pypi.org or test.pypi.org still references `publish.yml` as the workflow file, update
    it to `release.yml` before triggering the first release.
 
 If `LINEAR_ACCESS_KEY` is not set: the `release-sync` workflow runs but the Linear action
 may fail; the `linear-sync` and `linear-complete` jobs in `release.yml` fail but do not
-block the PyPI publish (they have no dependents in the publish chain).
+block publishing (they have no dependents in the publish chain).
 
 ### Replicating for other orcapod repos
 
