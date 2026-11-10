@@ -28,3 +28,12 @@ def test_license_is_metamorphic_proprietary() -> None:
     assert not [c for c in project.get("classifiers", []) if c.startswith("License ::")]
     license_text = (REPO_ROOT / "LICENSE").read_text()
     assert license_text.startswith("Copyright (c) Metamorphic Labs, Inc.")
+
+
+def test_basedpyright_is_a_dev_dependency_only() -> None:
+    """A type checker is a development tool, not something users install (ITL-827)."""
+    data = tomllib.loads(PYPROJECT.read_text())
+    runtime = [d.lower() for d in data["project"]["dependencies"]]
+    dev = [d.lower() for d in data["dependency-groups"]["dev"]]
+    assert not [d for d in runtime if d.startswith("basedpyright")]
+    assert [d for d in dev if d.startswith("basedpyright")]
