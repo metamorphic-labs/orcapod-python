@@ -147,6 +147,9 @@ follow `AGENT_COORDINATION.md` at the project root. In short:
 - Every wave opens with a discussion of its key decision points, and the developer selects
   what is dispatched. Issues the developer did not file are suggestions to triage, not
   decisions.
+- A PR reaches the developer only after its CodeRabbit rounds are addressed and CI is green
+  (the runbook's PR readiness pipeline). Every GitHub post an agent makes ends with the
+  agent signature the runbook gives.
 
 Load the version-matched guides (`orca skills get orca-cli`, `orca skills get orchestration`)
 before running Orca commands.
