@@ -12,11 +12,16 @@ import pytest
 
 from orcapod.core.streams import ArrowTableStream
 from orcapod.system_constants import constants
+from orcapod.types import ColumnConfig
 
 SOURCE_X = f"{constants.SOURCE_PREFIX}x"
+SYSTEM_TAG = f"{constants.SYSTEM_TAG_PREFIX}source:abc123"
+WITH_SYSTEM_TAGS = ColumnConfig(system_tags=True)
 
 
-def _chunked(values: list, sizes: list[int], arrow_type: pa.DataType) -> pa.ChunkedArray:
+def _chunked(
+    values: list, sizes: list[int], arrow_type: pa.DataType
+) -> pa.ChunkedArray:
     """Cut ``values`` into a ``ChunkedArray`` with chunks of the given sizes."""
     assert sum(sizes) == len(values)
     chunks = []
@@ -43,7 +48,9 @@ def _chunked_stream(
     columns: dict[str, pa.ChunkedArray] = {}
     if with_tags:
         columns["id"] = _chunked(list(range(n)), tag_sizes, pa.int64())
-        columns["grp"] = _chunked([f"g{i}" for i in range(n)], tag_sizes, pa.large_string())
+        columns["grp"] = _chunked(
+            [f"g{i}" for i in range(n)], tag_sizes, pa.large_string()
+        )
     columns["x"] = _chunked([i * 10 for i in range(n)], data_sizes, pa.int64())
     columns["y"] = _chunked([f"v{i}" for i in range(n)], data_sizes, pa.large_string())
     if source_sizes is not None:
@@ -64,15 +71,23 @@ LAYOUTS = [
     pytest.param([0, 6], [3, 0, 3], id="empty-chunks"),
     # Result-cache hits return data whose columns carry zero-length chunks
     # (layouts like [1, 0, 0, ...]) while the tag side has one chunk per row.
-    pytest.param([1] * 6, [1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1], id="zero-length-data-chunks"),
-    pytest.param([1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1], [1] * 6, id="zero-length-tag-chunks"),
-    pytest.param([0, 1, 0, 2, 0, 3], [3, 0, 0, 2, 1, 0], id="zero-length-chunks-both-sides"),
+    pytest.param(
+        [1] * 6, [1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1], id="zero-length-data-chunks"
+    ),
+    pytest.param(
+        [1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1], [1] * 6, id="zero-length-tag-chunks"
+    ),
+    pytest.param(
+        [0, 1, 0, 2, 0, 3], [3, 0, 0, 2, 1, 0], id="zero-length-chunks-both-sides"
+    ),
     pytest.param([2, 4], [2, 4], id="same-layout-control"),
 ]
 
 
 @pytest.mark.parametrize("tag_sizes,data_sizes", LAYOUTS)
 class TestIterDataChunkLayouts:
+    """``iter_data`` over tag and data columns that are chunked differently."""
+
     def test_layout_is_actually_as_described(self, tag_sizes, data_sizes):
         """Guard the fixture: the stream's backing table really is chunked unevenly."""
         stream = _chunked_stream(tag_sizes, data_sizes)
@@ -80,12 +95,14 @@ class TestIterDataChunkLayouts:
         assert [len(c) for c in stream._table.column("x").chunks] == data_sizes
 
     def test_yields_every_row(self, tag_sizes, data_sizes):
+        """``iter_data`` yields as many pairs as the table has rows."""
         stream = _chunked_stream(tag_sizes, data_sizes)
         n = sum(data_sizes)
         assert stream.as_table().num_rows == n
         assert len(list(stream.iter_data())) == stream.as_table().num_rows
 
     def test_tag_pairs_with_its_own_data(self, tag_sizes, data_sizes):
+        """Rows come out in table order, each tag next to its own data."""
         stream = _chunked_stream(tag_sizes, data_sizes)
         pairs = list(stream.iter_data())
         assert [tag["id"] for tag, _ in pairs] == list(range(sum(data_sizes)))
@@ -96,12 +113,16 @@ class TestIterDataChunkLayouts:
             assert data["y"] == f"v{row}"
 
     def test_iteration_matches_as_table(self, tag_sizes, data_sizes):
+        """The iterated pairs, flattened, equal the rows of ``as_table()``."""
         stream = _chunked_stream(tag_sizes, data_sizes)
         expected = stream.as_table().to_pylist()
-        actual = [{**tag.as_dict(), **data.as_dict()} for tag, data in stream.iter_data()]
+        actual = [
+            {**tag.as_dict(), **data.as_dict()} for tag, data in stream.iter_data()
+        ]
         assert actual == expected
 
     def test_cached_second_iteration_is_identical(self, tag_sizes, data_sizes):
+        """A second pass, served from the element cache, repeats the first."""
         stream = _chunked_stream(tag_sizes, data_sizes)
         first = [(t.as_dict(), d.as_dict()) for t, d in stream.iter_data()]
         second = [(t.as_dict(), d.as_dict()) for t, d in stream.iter_data()]
@@ -137,11 +158,14 @@ def test_source_info_pairs_with_its_own_row(tag_sizes, data_sizes, source_sizes)
 
 @pytest.mark.parametrize("data_sizes", [[6], [1, 5], [2, 2, 2]])
 def test_stream_without_tag_columns_yields_every_row(data_sizes):
+    """With no tag column of any kind, every row pairs with an empty tag."""
     n = sum(data_sizes)
     table = pa.table(
         {
             "x": _chunked([i * 10 for i in range(n)], data_sizes, pa.int64()),
-            "y": _chunked([f"v{i}" for i in range(n)], data_sizes[::-1], pa.large_string()),
+            "y": _chunked(
+                [f"v{i}" for i in range(n)], data_sizes[::-1], pa.large_string()
+            ),
         }
     )
     stream = ArrowTableStream(table)
@@ -152,6 +176,7 @@ def test_stream_without_tag_columns_yields_every_row(data_sizes):
 
 
 def test_empty_stream_yields_nothing():
+    """A zero-row stream iterates to nothing rather than raising."""
     table = pa.table(
         {
             "id": pa.array([], type=pa.int64()),
@@ -161,3 +186,103 @@ def test_empty_stream_yields_nothing():
     stream = ArrowTableStream(table, tag_columns=["id"])
     assert list(stream.iter_data()) == []
     assert stream.as_table().num_rows == 0
+
+
+def _system_tag_stream(
+    system_tag_sizes: list[int],
+    data_sizes: list[int],
+    tag_sizes: list[int] | None = None,
+) -> ArrowTableStream:
+    """Build a stream with a system tag column chunked independently of the rest.
+
+    Row ``i`` holds the system tag ``"rec::{i}"``, ``x=i*10``, ``y="v{i}"`` and,
+    when ``tag_sizes`` is given, the ordinary tag ``id=i``. Without
+    ``tag_sizes`` the stream has no ordinary tag column at all.
+    """
+    n = sum(data_sizes)
+    columns: dict[str, pa.ChunkedArray] = {}
+    if tag_sizes is not None:
+        columns["id"] = _chunked(list(range(n)), tag_sizes, pa.int64())
+    columns[SYSTEM_TAG] = _chunked(
+        [f"rec::{i}" for i in range(n)], system_tag_sizes, pa.large_string()
+    )
+    columns["x"] = _chunked([i * 10 for i in range(n)], data_sizes, pa.int64())
+    columns["y"] = _chunked([f"v{i}" for i in range(n)], data_sizes, pa.large_string())
+    return ArrowTableStream(
+        pa.table(columns), tag_columns=["id"] if tag_sizes is not None else []
+    )
+
+
+@pytest.mark.parametrize("system_tag_sizes,data_sizes", LAYOUTS)
+def test_system_tags_survive_without_ordinary_tag_columns(system_tag_sizes, data_sizes):
+    """A stream with system tags but no ordinary tags keeps each row's system tag.
+
+    The tag of every pair is empty by default, yet still carries the system tag
+    of its own row, whatever the chunk layout of the system tag column.
+    """
+    stream = _system_tag_stream(system_tag_sizes, data_sizes)
+    n = sum(data_sizes)
+    assert [len(c) for c in stream._table.column(SYSTEM_TAG).chunks] == system_tag_sizes
+    assert stream.keys() == ((), ("x", "y"))
+
+    pairs = list(stream.iter_data())
+    assert len(pairs) == n
+    for row, (tag, data) in enumerate(pairs):
+        assert tag.as_dict() == {}
+        assert tag.as_dict(columns=WITH_SYSTEM_TAGS) == {SYSTEM_TAG: f"rec::{row}"}
+        assert tag.system_tags() == {SYSTEM_TAG: f"rec::{row}"}
+        assert data["x"] == row * 10
+        assert data["y"] == f"v{row}"
+
+    table = stream.as_table(columns=WITH_SYSTEM_TAGS)
+    assert table.column(SYSTEM_TAG).to_pylist() == [f"rec::{i}" for i in range(n)]
+
+
+SYSTEM_TAG_LAYOUTS = [
+    pytest.param([6], [2, 2, 2], [1, 5], id="tag-single-rest-differ"),
+    pytest.param([4, 2], [6], [1, 1, 1, 1, 1, 1], id="system-tag-single"),
+    pytest.param([2, 2, 2], [3, 3], [6], id="data-single"),
+    pytest.param([4, 2], [1, 5], [3, 3], id="all-three-differ"),
+    pytest.param([0, 6], [3, 0, 3], [1, 0, 0, 2, 0, 3], id="zero-length-chunks"),
+    pytest.param(
+        [1] * 6,
+        [0, 1, 0, 2, 0, 3],
+        [1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1],
+        id="zero-length-system-tag-and-data-chunks",
+    ),
+    pytest.param([2, 4], [2, 4], [2, 4], id="same-layout-control"),
+]
+
+
+@pytest.mark.parametrize("tag_sizes,system_tag_sizes,data_sizes", SYSTEM_TAG_LAYOUTS)
+def test_system_tags_pair_with_ordinary_tags_and_data(
+    tag_sizes, system_tag_sizes, data_sizes
+):
+    """Ordinary tag, system tag and data of one row stay together.
+
+    The three column groups are chunked independently, so a system tag taken
+    from the wrong row shows up as a mismatch against the ordinary tag ``id``.
+    """
+    stream = _system_tag_stream(system_tag_sizes, data_sizes, tag_sizes)
+    n = sum(data_sizes)
+    assert [len(c) for c in stream._table.column("id").chunks] == tag_sizes
+    assert [len(c) for c in stream._table.column(SYSTEM_TAG).chunks] == system_tag_sizes
+
+    pairs = list(stream.iter_data())
+    assert [tag["id"] for tag, _ in pairs] == list(range(n))
+    for tag, data in pairs:
+        row = tag["id"]
+        assert tag.as_dict() == {"id": row}
+        assert tag.as_dict(columns=WITH_SYSTEM_TAGS) == {
+            "id": row,
+            SYSTEM_TAG: f"rec::{row}",
+        }
+        assert data["x"] == row * 10
+        assert data["y"] == f"v{row}"
+
+    expected = stream.as_table(columns=WITH_SYSTEM_TAGS).to_pylist()
+    actual = [
+        {**tag.as_dict(columns=WITH_SYSTEM_TAGS), **data.as_dict()}
+        for tag, data in pairs
+    ]
+    assert actual == expected
