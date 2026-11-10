@@ -170,10 +170,12 @@ The coordinator stays in the `check --wait` loop until every expected Dispatch h
   that a worker exited. Never start a second editor in a worktree, and never stop, abandon,
   or retry a worker, without positive proof of exit. Report the state as unverifiable
   instead.
-- **Stopping a hung worker.** A worker that is alive but makes no progress and never sends
-  `worker_done` is stopped only with the developer's approval. Stop it as the
-  orchestration guide describes, confirm that it exited, and record the Dispatch as
-  failed before reusing the terminal or retrying the issue.
+- **A hung worker.** Orca stops or abandons a Dispatch only after positive proof that the
+  agent has stopped, so the coordinator cannot cancel a live worker that makes no
+  progress. It reports that worker to the developer, who can interrupt the agent in the
+  worker's terminal. Once the agent has stopped, follow the guide's recovery reference to
+  stop or abandon the Dispatch, and settle it as a failure (see "Accept and settle")
+  before reusing the terminal or retrying the issue.
 - **A successful launch is not a successful task.** Neither is a heartbeat.
 
 ## Watching PRs and reporting
