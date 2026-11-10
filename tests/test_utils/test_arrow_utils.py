@@ -903,6 +903,7 @@ class TestConcatTablesByName:
     """``concat_tables_by_name`` reconciles column order only."""
 
     def test_aligns_reordered_columns_to_first_table(self) -> None:
+        """A table listing the same columns in another order takes the first table's order."""
         first = pa.table({"a": [1], "b": [2]})
         second = pa.table({"b": [4], "a": [3]})
         result = concat_tables_by_name([first, second])
@@ -910,5 +911,6 @@ class TestConcatTablesByName:
         assert result.to_pylist() == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
 
     def test_empty_input_raises_value_error(self) -> None:
+        """An empty sequence raises ``ValueError`` instead of reaching ``pa.concat_tables``."""
         with pytest.raises(ValueError, match="empty sequence of tables"):
             concat_tables_by_name([])

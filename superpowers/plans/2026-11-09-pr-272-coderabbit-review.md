@@ -19,4 +19,4 @@ Coordinator findings fixed in the same commit:
 | Finding | Location | Action | Commit |
 |---------|----------|--------|--------|
 | New `DESIGN_ISSUES.md` entries reused IDs `ST1`/`ST2`, which already exist on main | `DESIGN_ISSUES.md` | Renumbered to `RS1`/`RS2`. No other file referenced them. | `fb4328d9` |
-| New basedpyright error on `sink_pod(deliver).process(...)` | `tests/test_pipeline/test_system_tag_run_stability.py` | Narrowed the `SideEffectPod | Callable` return with `isinstance`; file is at 0 errors. The two new test files are also `ruff format` clean now. | `fb4328d9` |
+| New basedpyright error on `sink_pod(deliver).process(...)` | `tests/test_pipeline/test_system_tag_run_stability.py` | Narrowed the `SideEffectPod` or `Callable` return with `isinstance`; file is at 0 errors. The two new test files are also `ruff format` clean now. | `fb4328d9` |

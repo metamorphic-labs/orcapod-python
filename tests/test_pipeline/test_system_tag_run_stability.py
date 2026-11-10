@@ -122,6 +122,7 @@ def _run_once(
 
 
 def _rows_with_swapped_tag_order() -> list[tuple[Tag, Data]]:
+    """Return two rows whose tags list the same columns in opposite order."""
     return [
         (Tag({"a": 1, "b": 2}), Data({"v": 10})),
         (Tag({"b": 4, "a": 3}), Data({"v": 20})),
@@ -136,6 +137,7 @@ class TestMaterializationAlignsColumnsByName:
     """
 
     def test_operator_materialize_to_stream(self) -> None:
+        """The operator materializer emits rows in the first row's column order."""
         stream = StaticOutputOperatorPod._materialize_to_stream(
             _rows_with_swapped_tag_order()
         )
@@ -143,6 +145,7 @@ class TestMaterializationAlignsColumnsByName:
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 
     def test_orchestrator_materialize_as_stream(self) -> None:
+        """The orchestrator materializer emits rows in the first row's column order."""
         upstream = SimpleNamespace(producer=None, upstreams=())
         stream = SyncPipelineOrchestrator._materialize_as_stream(
             _rows_with_swapped_tag_order(), upstream
@@ -151,6 +154,7 @@ class TestMaterializationAlignsColumnsByName:
         assert rows == [{"a": 1, "b": 2, "v": 10}, {"a": 3, "b": 4, "v": 20}]
 
     def test_different_column_sets_still_raise(self) -> None:
+        """Rows whose column names differ still raise ``ArrowInvalid``."""
         rows = [
             (Tag({"a": 1}), Data({"v": 10})),
             (Tag({"b": 2}), Data({"v": 20})),
@@ -168,9 +172,12 @@ class TestMaterializationAlignsColumnsByName:
     "shared_key", [False, True], ids=["cross_product", "shared_key"]
 )
 class TestSinkCompletionIsRunStable:
+    """A ``sink_pod`` fed by a two-source join skips rows it already delivered."""
+
     def test_second_run_delivers_nothing(
         self, tmp_path: Any, sink_rows: dict[Key, dict[str, Any]], shared_key: bool
     ) -> None:
+        """Repeating the run with identical inputs delivers nothing and keeps system tags."""
         probes, methods = _inputs(3, 3, shared_key)
 
         assert len(_run_once(str(tmp_path), probes, methods, shared_key)) == 9
