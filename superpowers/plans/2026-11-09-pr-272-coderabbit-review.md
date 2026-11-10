@@ -20,3 +20,13 @@ Coordinator findings fixed in the same commit:
 |---------|----------|--------|--------|
 | New `DESIGN_ISSUES.md` entries reused IDs `ST1`/`ST2`, which already exist on main | `DESIGN_ISSUES.md` | Renumbered to `RS1`/`RS2`. No other file referenced them. | `fb4328d9` |
 | New basedpyright error on `sink_pod(deliver).process(...)` | `tests/test_pipeline/test_system_tag_run_stability.py` | Narrowed the `SideEffectPod` or `Callable` return with `isinstance`; file is at 0 errors. The two new test files are also `ruff format` clean now. | `fb4328d9` |
+
+## Round 2 — review of `1bdbc425`
+
+| # | Finding | Location | Verdict | Reason | Commit |
+|---|---------|----------|---------|--------|--------|
+| 6 | Minor: the pipe inside a code span splits a row of this log's table into five cells | `superpowers/plans/2026-11-09-pr-272-coderabbit-review.md:22` (inline) | FIX | Confirmed: GitHub table syntax splits on `\|` even inside a code span. Reworded to "`SideEffectPod` or `Callable`". | `8edca428` |
+| 7 | Trivial: the two new `TestConcatTablesByName` methods lack docstrings | `tests/test_utils/test_arrow_utils.py:905,912` (review body) | FIX | CLAUDE.md asks for Google-style docstrings everywhere. Added them, and to the other new undocumented tests and helpers in `test_system_tag_run_stability.py` so the same finding does not recur there. | `8edca428` |
+| 8 | Pre-merge "Linked Issues" warning (repeat of #5) | summary comment | DISMISS (2nd) | Same reason as #5: a content-derived default record ID changes stored identities and awaits the developer's decision; it is proposed in the spec and tracked as RS2. This check will keep failing until that change is made in its own PR. | — |
+
+CI on `1bdbc425`: `pytest` fails only the three pre-existing `test_graph_rendering.py` tests (no Graphviz `dot` binary on the runner); `ruff` (270 errors) and `typecheck` fail on files this PR does not touch, and this PR's files show warnings only. These are the repo-wide failures being fixed separately (ITL-826).
