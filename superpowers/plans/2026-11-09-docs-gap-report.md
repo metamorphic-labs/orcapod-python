@@ -94,8 +94,10 @@ than it looks — see "Things a newcomer will trip on".
 ### Function pods — was wrong, now fixed
 
 - **Extra columns (ITL-807).** The page said a pod extracts the columns it needs from a wider
-  stream. It does not: any extra, missing or differently typed data column raises
-  `ValueError`. The page now states the strict rule and shows the `SelectDataColumns` step.
+  stream. It does not: an extra data column, a missing column for a parameter without a
+  default, or a column of a different type raises `ValueError` (a parameter with a default may
+  be left out; the default is used). The page now states the strict rule and shows the
+  `SelectDataColumns` step.
   Whether to relax the behaviour is the open v0.3 decision.
 - **Multiple input streams.** The sample used undefined names; it is now runnable.
 - Type annotations are required on every parameter (`ValueError` at decoration time
