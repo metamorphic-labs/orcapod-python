@@ -853,10 +853,13 @@ class Datagram(ContentIdentifiableBase):
         """
         arrow_fields: dict[str, pa.Field[pa.DataType]] = {}
         python_schema: dict[str, DataType] = {}
-        for name in updates:
-            if name not in column_types:
+        # Iterate the declarations, not ``updates``: binding an ``updates`` value
+        # to a loop variable makes it partially unknown (``DataValue`` contains
+        # the unparametrized ``os.PathLike``). Output order is restored by the
+        # final ``select``.
+        for name, declared in column_types.items():
+            if name not in updates:
                 continue
-            declared = column_types[name]
             if isinstance(declared, pa.Field):
                 if updates[name] is None and not declared.nullable:
                     raise ValueError(

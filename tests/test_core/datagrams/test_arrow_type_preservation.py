@@ -204,6 +204,19 @@ class TestNewColumnTypes:
                 column_types={"a": declared}, a=None
             )
 
+    def test_new_column_order_follows_updates_not_declarations(
+        self, cls: type[Datagram], load_dict: bool
+    ) -> None:
+        """Columns follow ``updates`` order, however ``column_types`` is ordered."""
+        out = _build(cls, load_dict).with_columns(
+            column_types={"b": pa.int8(), "a": float}, a=1, b=2, c="x"
+        )
+        assert list(out.keys()) == [*DATA_COLUMNS, "a", "b", "c"]
+        types = _all_types(out)
+        assert types["a"] == pa.float64()
+        assert types["b"] == pa.int8()
+        assert types["c"] == pa.large_string()
+
     def test_python_typed_new_column_unchanged(
         self, cls: type[Datagram], load_dict: bool
     ) -> None:
