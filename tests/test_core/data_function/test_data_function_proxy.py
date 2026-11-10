@@ -1,5 +1,7 @@
 """Tests for DataFunctionProxy invocation, bind, and unbind behavior."""
 
+from typing import cast
+
 import pytest
 
 from orcapod.core.datagrams.tag_data import Data, Tag
@@ -37,8 +39,11 @@ def _make_sample_function() -> PythonDataFunction:
     return PythonDataFunction(double_age, output_keys="doubled_age", version="v1.0")
 
 
-def _make_proxy_from_function(pf: PythonDataFunction) -> DataFunctionProxy:
-    config = pf.to_config()
+def _make_proxy_from_function(
+    pf: PythonDataFunction, config: dict[str, object] | None = None
+) -> DataFunctionProxy:
+    if config is None:
+        config = pf.to_config()
     return DataFunctionProxy(
         config=config,
         content_hash_str=pf.content_hash().to_string(),
@@ -243,13 +248,16 @@ class TestConfigPythonVersionIndependence:
     def _make_path_function() -> PythonDataFunction:
         from pathlib import Path
 
-        def stem(p: Path, alt: Path | None, many: list[Path]) -> Path:
+        # The parameters exist only for the schema derived from them.
+        def stem(p: Path, alt: Path | None, many: list[Path]) -> Path:  # pyright: ignore[reportUnusedParameter]
             return p
 
         return PythonDataFunction(stem, output_keys="out", version="v1.0")
 
     def test_to_config_schema_strings(self):
-        config = self._make_path_function().to_config()["config"]
+        config = cast(
+            "dict[str, object]", self._make_path_function().to_config()["config"]
+        )
         assert config["input_data_schema"] == {
             "p": "<class 'pathlib.Path'>",
             "alt": "pathlib.Path | None",
@@ -266,10 +274,6 @@ class TestConfigPythonVersionIndependence:
             "many": "list[pathlib.Path]",
         }
         config["config"]["output_data_schema"] = {"out": "<class 'pathlib.Path'>"}
-        proxy = DataFunctionProxy(
-            config=config,
-            content_hash_str=pf.content_hash().to_string(),
-            pipeline_hash_str=pf.pipeline_hash().to_string(),
-        )
+        proxy = _make_proxy_from_function(pf, config)
         proxy.bind(pf)  # pyright: ignore[reportArgumentType]
         assert proxy.is_bound

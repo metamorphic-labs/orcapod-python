@@ -69,7 +69,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from orcapod.protocols import hashing_protocols as hp
 from orcapod.types import ContentHash
@@ -386,7 +386,7 @@ class SemanticAwarePythonHasher:
         type.  Raises TypeError in strict mode.
         """
         class_name = type(obj).__name__
-        module_name = canonical_module_name(type(obj)) or "<unknown>"
+        module_name = canonical_module_name(type(cast(object, obj))) or "<unknown>"
         qualified = f"{module_name}.{class_name}"
 
         if self._strict:
