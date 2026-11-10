@@ -56,11 +56,17 @@ class PolarsFilter(UnaryOperator):
         )
         df = pl.DataFrame(table)
         filtered_table = df.filter(*self.predicates, **self.constraints).to_arrow()
-        # Polars changes layouts (string -> large_string, fixed_size_binary ->
-        # large_binary, ...); a filter passes every column through, so give
-        # each one its input Arrow type back.
+        # A filter passes every column through, so each one takes the
+        # large-normalized form of its input Arrow type (string ->
+        # large_string, list -> large_list, recursively; hash-identical).
+        # This also undoes Polars' other changes, such as fixed_size_binary ->
+        # large_binary for system-tag record ids.
         filtered_table = arrow_utils.restore_column_types(
-            filtered_table, {field.name: field.type for field in table.schema}
+            filtered_table,
+            {
+                field.name: arrow_utils.normalize_to_large_types(field.type)
+                for field in table.schema
+            },
         )
 
         return ArrowTableStream(

@@ -41,6 +41,7 @@ from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import SourceInfoValue
+from orcapod.utils.arrow_utils import normalize_to_large_types
 
 INT = pa.int64()
 STR = pa.large_string()
@@ -330,12 +331,13 @@ class TestMergeJoinEmptyInput:
         ids=lambda v: str(v) if isinstance(v, pa.DataType) else "",
     )
     def test_colliding_column_type_matches_non_empty_result(self, arrow_type, values):
-        """An empty and a non-empty result both type a merged column ``list<input>``.
+        """Empty and non-empty results type a merged column ``large_list<input>``.
 
-        The element keeps the input's Arrow type rather than what Arrow infers
-        from Python values (ITL-832), so empty and non-empty results of the
-        same join can be concatenated. This holds for the merged data column and
-        for its source-info column.
+        The element is the input's Arrow type in its large variants (width
+        kept), never what Arrow infers from Python values (ITL-832), so empty
+        and non-empty results of the same join can be concatenated. This holds
+        for the merged data column and for its source-info column, which is
+        ``large_list<large_string>``.
         """
 
         def merged_type(rows: int) -> tuple[pa.DataType, pa.DataType]:
@@ -361,7 +363,10 @@ class TestMergeJoinEmptyInput:
             )
 
         assert merged_type(0) == merged_type(2)
-        assert merged_type(0)[0] == pa.list_(arrow_type)
+        assert merged_type(0) == (
+            pa.large_list(normalize_to_large_types(arrow_type)),
+            pa.large_list(pa.large_string()),
+        )
 
     def test_no_shared_tags(self):
         """With no shared tag the helper key is the only join key."""

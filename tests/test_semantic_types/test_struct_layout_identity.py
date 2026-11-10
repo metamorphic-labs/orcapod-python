@@ -116,7 +116,9 @@ class TestStructPythonType:
         ) is not converter.arrow_type_to_python_type(SMALL)
 
     @pytest.mark.parametrize("struct_type", [SMALL, LARGE], ids=str)
-    def test_class_maps_back_to_the_large_struct(self, struct_type: pa.DataType) -> None:
+    def test_class_maps_back_to_the_large_struct(
+        self, struct_type: pa.DataType
+    ) -> None:
         """The class converts back to the large-normalized struct, whichever came first."""
         converter = get_default_type_converter()
         python_type = converter.arrow_type_to_python_type(struct_type)

@@ -1,11 +1,19 @@
-"""MergeJoin keeps the Arrow types its inputs already have (ITL-832).
+"""MergeJoin types its output from its inputs' Arrow types (ITL-813, ITL-832).
 
-The rule: whatever Arrow types the inputs have are respected; an Arrow type is
-inferred from Python values only when none is known. For ``MergeJoin`` this
-means a merged column is ``list<T>`` where ``T`` is the input column's Arrow
-type (not what ``pa.array`` infers from the Python values), for empty and
-non-empty results alike, and every column that passes through the Polars join
-unchanged keeps its input type.
+The rules:
+
+* Nothing is inferred from Python values. Every output column takes the
+  large-normalized form of its input Arrow type (``string`` to
+  ``large_string``, ``list`` to ``large_list``, recursively; the Arrow hasher
+  treats the variants as identical). Integer and float width, nullability and
+  logical (extension) types are never changed.
+* A merged (colliding) column is ``large_list<normalized input element>``, or
+  the logical list type of a logical element; its source-info column is
+  ``large_list<large_string>``. Zero-row and non-empty results have the same
+  types, equal to the predicted schema.
+* When the two inputs' Arrow types for a column differ, both are normalized;
+  if they are then equal the join proceeds, otherwise it raises
+  ``InputValidationError`` naming the column and both types.
 
 Predictions are compared against ``static_process(...)``, never against
 ``process(...)``, whose ``output_schema`` delegates back to the operator.
@@ -22,140 +30,76 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
-from orcapod.contexts import get_default_type_converter
+from orcapod.contexts import get_default_context, get_default_type_converter
 from orcapod.core.operators import MergeJoin, PolarsFilter
+from orcapod.core.operators.merge_join import _resolve_disagreeing_types
 from orcapod.core.sources import CSVSource, DictSource
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
+from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import constants
+from orcapod.utils.arrow_utils import normalize_to_large_types
 
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
-
-# (Arrow type, two distinct values in ascending order)
-ELEMENT_CASES: list[tuple[pa.DataType, list[Any]]] = [
-    (pa.int8(), [1, 2]),
-    (pa.int16(), [1, 2]),
-    (pa.int32(), [1, 2]),
-    (pa.int64(), [1, 2]),
-    (pa.uint8(), [1, 2]),
-    (pa.float32(), [1.5, 2.5]),
-    (pa.float64(), [1.5, 2.5]),
-    (pa.string(), ["a", "b"]),
-    (pa.large_string(), ["a", "b"]),
-    (pa.binary(), [b"a", b"b"]),
-    (pa.large_binary(), [b"a", b"b"]),
-    (pa.bool_(), [False, True]),
-    (
-        pa.timestamp("ms"),
-        [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)],
-    ),
-    (pa.date32(), [datetime.date(2020, 1, 1), datetime.date(2021, 1, 1)]),
-    (pa.list_(pa.int8()), [[1], [2]]),
-    (pa.large_list(pa.int32()), [[1], [2]]),
-    (
-        pa.decimal128(5, 2),
-        [decimal.Decimal("1.00"), decimal.Decimal("2.50")],
-    ),
-]
-
-# Pairs whose Arrow types disagree while their Python types agree. What
-# MergeJoin should do with them is pending (ITL-835, _resolve_disagreeing_types);
-# until then the tests below pin the pre-ITL-832 behaviour, so the decision
-# shows up as a deliberate test change. Each entry: left type, right type,
-# values, and the expected outcome keyed by (rows, argument order) for a
-# colliding data column ("x" type) and for a shared tag key ("k" type, or the
-# name of the exception the join raises).
+STRUCT = pa.struct([("a", pa.int8()), ("b", pa.string())])
+LARGE_STRUCT = pa.struct([("a", pa.int8()), ("b", pa.large_string())])
+SOURCE_LIST = pa.large_list(pa.large_string())
 _TS = [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)]
 _DEC = [decimal.Decimal("1.00"), decimal.Decimal("2.50")]
-DISAGREEING_PAIRS: list[
-    tuple[
-        pa.DataType, pa.DataType, list[Any], dict[tuple[int, str], str], dict[str, str]
-    ]
-] = [
+
+# (input Arrow type, two distinct values in ascending order, expected element)
+ELEMENT_CASES: list[tuple[pa.DataType, list[Any], pa.DataType]] = [
+    (pa.int8(), [1, 2], pa.int8()),
+    (pa.int16(), [1, 2], pa.int16()),
+    (pa.int32(), [1, 2], pa.int32()),
+    (pa.int64(), [1, 2], pa.int64()),
+    (pa.uint8(), [1, 2], pa.uint8()),
+    (pa.float32(), [1.5, 2.5], pa.float32()),
+    (pa.float64(), [1.5, 2.5], pa.float64()),
+    (pa.string(), ["a", "b"], pa.large_string()),
+    (pa.large_string(), ["a", "b"], pa.large_string()),
+    (pa.binary(), [b"a", b"b"], pa.large_binary()),
+    (pa.large_binary(), [b"a", b"b"], pa.large_binary()),
+    (pa.bool_(), [False, True], pa.bool_()),
+    (pa.timestamp("ms"), _TS, pa.timestamp("ms")),
     (
-        pa.int8(),
-        pa.int64(),
-        [1, 2],
-        {
-            (2, "LR"): "list<item: int64>",
-            (2, "RL"): "list<item: int64>",
-            (0, "LR"): "list<item: int64>",
-            (0, "RL"): "list<item: int64>",
-        },
-        {"LR": "int8", "RL": "int64"},
+        pa.date32(),
+        [datetime.date(2020, 1, 1), datetime.date(2021, 1, 1)],
+        pa.date32(),
     ),
-    (
-        pa.float32(),
-        pa.float64(),
-        [1.5, 2.5],
-        {
-            (2, "LR"): "list<item: double>",
-            (2, "RL"): "list<item: double>",
-            (0, "LR"): "list<item: double>",
-            (0, "RL"): "list<item: double>",
-        },
-        {"LR": "float", "RL": "double"},
-    ),
-    (
-        pa.string(),
-        pa.large_string(),
-        ["a", "b"],
-        {
-            (2, "LR"): "list<item: string>",
-            (2, "RL"): "list<item: string>",
-            (0, "LR"): "list<item: string>",
-            (0, "RL"): "list<item: string>",
-        },
-        {"LR": "large_string", "RL": "large_string"},
-    ),
-    (
-        pa.binary(),
-        pa.large_binary(),
-        [b"a", b"b"],
-        {
-            (2, "LR"): "list<item: binary>",
-            (2, "RL"): "list<item: binary>",
-            (0, "LR"): "list<item: binary>",
-            (0, "RL"): "list<item: binary>",
-        },
-        {"LR": "large_binary", "RL": "large_binary"},
-    ),
+    (pa.list_(pa.int8()), [[1], [2]], pa.large_list(pa.int8())),
+    (pa.large_list(pa.int32()), [[1], [2]], pa.large_list(pa.int32())),
+    (pa.decimal128(5, 2), _DEC, pa.decimal128(5, 2)),
+]
+STRUCT_VALUES = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+
+# Pairs that differ only in layout: both normalize to the same large type.
+LAYOUT_PAIRS: list[tuple[pa.DataType, pa.DataType, list[Any], pa.DataType]] = [
+    (pa.string(), pa.large_string(), ["a", "b"], pa.large_string()),
+    (pa.binary(), pa.large_binary(), [b"a", b"b"], pa.large_binary()),
     (
         pa.list_(pa.int64()),
         pa.large_list(pa.int64()),
         [[1], [2]],
-        {
-            (2, "LR"): "list<item: list<item: int64>>",
-            (2, "RL"): "list<item: list<item: int64>>",
-            (0, "LR"): "list<item: list<item: int64>>",
-            (0, "RL"): "list<item: list<item: int64>>",
-        },
-        {"LR": "large_list<item: int64>", "RL": "large_list<item: int64>"},
+        pa.large_list(pa.int64()),
     ),
     (
-        pa.timestamp("ms"),
-        pa.timestamp("us"),
-        _TS,
-        {
-            (2, "LR"): "list<item: timestamp[us]>",
-            (2, "RL"): "list<item: timestamp[us]>",
-            (0, "LR"): "list<item: timestamp[ms]>",
-            (0, "RL"): "list<item: timestamp[us]>",
-        },
-        {"LR": "SchemaError", "RL": "SchemaError"},
+        pa.list_(pa.string()),
+        pa.large_list(pa.large_string()),
+        [["a"], ["b"]],
+        pa.large_list(pa.large_string()),
     ),
-    (
-        pa.decimal128(5, 2),
-        pa.decimal128(7, 2),
-        _DEC,
-        {
-            (2, "LR"): "list<item: decimal128(3, 2)>",
-            (2, "RL"): "list<item: decimal128(3, 2)>",
-            (0, "LR"): "list<item: decimal128(5, 2)>",
-            (0, "RL"): "list<item: decimal128(7, 2)>",
-        },
-        {"LR": "SchemaError", "RL": "SchemaError"},
-    ),
+]
+STRUCT_LAYOUT_PAIR = (STRUCT, LARGE_STRUCT, STRUCT_VALUES, LARGE_STRUCT)
+
+# Pairs that differ in more than layout: rejected.
+MISMATCHED_PAIRS: list[tuple[pa.DataType, pa.DataType, list[Any]]] = [
+    (pa.int8(), pa.int64(), [1, 2]),
+    (pa.float32(), pa.float64(), [1.5, 2.5]),
+    (pa.timestamp("ms"), pa.timestamp("us"), _TS),
+    (pa.decimal128(5, 2), pa.decimal128(7, 2), _DEC),
+    (pa.list_(pa.int8()), pa.large_list(pa.int64()), [[1], [2]]),
 ]
 
 
@@ -175,36 +119,44 @@ def _table(columns: dict[str, tuple[pa.DataType, list[Any]]]) -> pa.Table:
 def _stream(
     columns: dict[str, tuple[pa.DataType, list[Any]]], tags: list[str]
 ) -> ArrowTableStream:
-    """Build a stream (no source info, no system tags) from ``{name: (type, values)}``."""
-    return ArrowTableStream(_table(columns), tag_columns=tags)
+    """Build a stream with source info for every data column."""
+    data_columns = [name for name in columns if name not in tags]
+    return ArrowTableStream(
+        _table(columns),
+        tag_columns=tags,
+        source_info={name: "origin" for name in data_columns},
+    )
+
+
+def _side(arrow_type: pa.DataType, value: Any, rows: int) -> ArrowTableStream:
+    """Build one input: tag ``probe`` and data column ``x`` holding ``value``."""
+    return _stream(
+        {
+            "probe": (pa.int64(), list(range(rows))),
+            "x": (arrow_type, [value] * rows),
+        },
+        ["probe"],
+    )
 
 
 def _pair(
     left_type: pa.DataType,
     right_type: pa.DataType,
     values: list[Any],
-    rows: int,
+    left_rows: int,
+    right_rows: int | None = None,
 ) -> tuple[ArrowTableStream, ArrowTableStream]:
     """Build two streams sharing tag ``probe`` and colliding data column ``x``.
 
     Each row of the left stream holds ``values[0]`` and each row of the right
     stream ``values[1]``, so every merged row is ``values`` in sorted order.
     """
-    left = _stream(
-        {
-            "probe": (pa.int64(), list(range(rows))),
-            "x": (left_type, [values[0]] * rows),
-        },
-        ["probe"],
+    if right_rows is None:
+        right_rows = left_rows
+    return (
+        _side(left_type, values[0], left_rows),
+        _side(right_type, values[1], right_rows),
     )
-    right = _stream(
-        {
-            "probe": (pa.int64(), list(range(rows))),
-            "x": (right_type, [values[1]] * rows),
-        },
-        ["probe"],
-    )
-    return left, right
 
 
 def _assert_matches_prediction(
@@ -219,37 +171,85 @@ def _assert_matches_prediction(
         ), config
 
 
+def _merged_types(table: pa.Table) -> tuple[pa.DataType, pa.DataType]:
+    """Return the Arrow types of merged column ``x`` and its source-info column."""
+    return (
+        table.schema.field("x").type,
+        table.schema.field(f"{constants.SOURCE_PREFIX}x").type,
+    )
+
+
 def _ids(value: object) -> str:
     """Name a parametrized case by its Arrow types, leaving values out."""
     return str(value) if isinstance(value, pa.DataType) else ""
 
 
-class TestMergedColumnElementType:
-    """A merged column is ``list<input type>`` with or without rows."""
+ROW_SHAPES = [(2, 2), (0, 2), (2, 0), (0, 0)]
 
-    @pytest.mark.parametrize(("arrow_type", "values"), ELEMENT_CASES, ids=_ids)
-    @pytest.mark.parametrize("rows", [0, 2])
-    def test_element_type_is_the_input_type(
-        self, arrow_type: pa.DataType, values: list[Any], rows: int
+
+class TestMergedColumnType:
+    """A merged column is ``large_list<normalized input type>`` with or without rows."""
+
+    @pytest.mark.parametrize(
+        ("arrow_type", "values", "element"), ELEMENT_CASES, ids=_ids
+    )
+    @pytest.mark.parametrize(("left_rows", "right_rows"), ROW_SHAPES)
+    def test_type_is_from_the_input(
+        self,
+        arrow_type: pa.DataType,
+        values: list[Any],
+        element: pa.DataType,
+        left_rows: int,
+        right_rows: int,
     ) -> None:
-        """The merged list keeps the input's width and layout, and the prediction."""
-        left, right = _pair(arrow_type, arrow_type, values, rows)
+        """Zero-row left, right or both type ``x`` exactly as a non-empty join does.
+
+        The element is the input type in its large variants: a narrow input
+        never widens (``int8`` stays ``int8``), and the source-info column is
+        ``large_list<large_string>``. The schema matches the prediction.
+        """
+        left, right = _pair(arrow_type, arrow_type, values, left_rows, right_rows)
         op = MergeJoin()
         result = op.static_process(left, right)
-        table = result.as_table()
+        table = result.as_table(columns={"source": True})
 
-        assert table.schema.field("x").type == pa.list_(arrow_type)
-        assert table.column("x").to_pylist() == [values] * rows
+        assert _merged_types(table) == (pa.large_list(element), SOURCE_LIST)
+        rows = min(left_rows, right_rows) * (1 if left_rows == right_rows else 0)
+        assert len(table) == rows
+        if rows:
+            assert table.column("x").to_pylist() == [values] * rows
         _assert_matches_prediction(op, result, left, right)
 
-    @pytest.mark.parametrize("rows", [0, 2])
-    def test_logical_element_type_uses_list_logical_type(self, rows: int) -> None:
-        """A logical (extension) element yields the converter's ``list[...]`` type."""
+    @pytest.mark.parametrize(
+        ("arrow_type", "values", "element"), ELEMENT_CASES, ids=_ids
+    )
+    def test_empty_and_non_empty_results_concatenate(
+        self, arrow_type: pa.DataType, values: list[Any], element: pa.DataType
+    ) -> None:
+        """Empty and non-empty results share one schema, so they concatenate."""
+        del element
+        tables = [
+            MergeJoin()
+            .static_process(*_pair(arrow_type, arrow_type, values, left, right))
+            .as_table(columns={"source": True})
+            for left, right in ROW_SHAPES
+        ]
+        assert len(pa.concat_tables(tables)) == 2
+
+    @pytest.mark.parametrize(("left_rows", "right_rows"), ROW_SHAPES)
+    def test_logical_element_keeps_its_logical_list_type(
+        self, left_rows: int, right_rows: int
+    ) -> None:
+        """A ``Path`` column merges into the ``list[orcapod.path]`` logical list.
+
+        The inner logical type is kept in the extension name; the element is
+        never stripped to a plain list of strings.
+        """
         converter = get_default_type_converter()
         path_type = converter.python_type_to_arrow_type(Path)
         assert isinstance(path_type, pa.ExtensionType)
 
-        def make(value: str) -> ArrowTableStream:
+        def make(value: str, rows: int) -> ArrowTableStream:
             """Build a stream with a ``Path``-typed column ``x`` holding ``value``."""
             storage = pa.array([value] * rows, type=path_type.storage_type)
             table = pa.Table.from_arrays(
@@ -264,29 +264,59 @@ class TestMergedColumnElementType:
                     ]
                 ),
             )
-            return ArrowTableStream(table, tag_columns=["probe"])
+            return ArrowTableStream(
+                table, tag_columns=["probe"], source_info={"x": "origin"}
+            )
 
-        left, right = make("/b"), make("/a")
+        left, right = make("/b", left_rows), make("/a", right_rows)
         op = MergeJoin()
         result = op.static_process(left, right)
-        table = result.as_table()
+        table = result.as_table(columns={"source": True})
+        list_type = table.schema.field("x").type
 
-        assert table.schema.field("x").type == converter.python_type_to_arrow_type(
-            list[Path]
-        )
-        assert len(table) == rows
+        assert list_type == converter.python_type_to_arrow_type(list[Path])
+        assert isinstance(list_type, pa.ExtensionType)
+        assert list_type.extension_name == "list[orcapod.path]"
+        assert list_type.storage_type == pa.large_list(pa.large_string())
+        assert _merged_types(table)[1] == SOURCE_LIST
+        if left_rows and right_rows:
+            assert (
+                table.column("x").combine_chunks().storage.to_pylist()
+                == [["/a", "/b"]] * 2
+            )
         _assert_matches_prediction(op, result, left, right)
 
-    @pytest.mark.parametrize("rows", [0, 2])
-    def test_empty_and_non_empty_results_concatenate(self, rows: int) -> None:
-        """Empty and non-empty results share one schema, so they concatenate."""
-        tables = [
-            MergeJoin()
-            .static_process(*_pair(pa.int8(), pa.int8(), [1, 2], n))
-            .as_table()
-            for n in (0, rows)
-        ]
-        assert len(pa.concat_tables(tables)) == rows
+    @pytest.mark.parametrize(("left_rows", "right_rows"), ROW_SHAPES[1:])
+    @pytest.mark.parametrize("right_type", [STRUCT, LARGE_STRUCT], ids=str)
+    def test_struct_element_with_zero_rows(
+        self, left_rows: int, right_rows: int, right_type: pa.DataType
+    ) -> None:
+        """A struct column merges into ``large_list<struct<..., large_string>>``.
+
+        Struct fields keep their width and nullability; their string children
+        take the large variant, also when the other input already has it.
+        """
+        left, right = (
+            _side(STRUCT, STRUCT_VALUES[0], left_rows),
+            _side(right_type, STRUCT_VALUES[1], right_rows),
+        )
+        op = MergeJoin()
+        op.validate_inputs(left, right)
+        result = op.static_process(left, right)
+        table = result.as_table(columns={"source": True})
+        assert _merged_types(table) == (pa.large_list(LARGE_STRUCT), SOURCE_LIST)
+        assert len(table) == 0
+        _assert_matches_prediction(op, result, left, right)
+
+    @pytest.mark.xfail(
+        raises=TypeError,
+        strict=True,
+        reason="ITL-839: MergeJoin sorts merged values as Python objects, and "
+        "dicts do not order; pre-existing on main.",
+    )
+    def test_struct_element_with_rows(self) -> None:
+        """Non-empty struct columns cannot be merged yet (ITL-839)."""
+        MergeJoin().static_process(*_pair(STRUCT, STRUCT, STRUCT_VALUES, 2))
 
 
 def _ordered(
@@ -296,58 +326,113 @@ def _ordered(
     return (left, right) if order == "LR" else (right, left)
 
 
-class TestDisagreeingArrowTypes:
-    """Pin MergeJoin's behaviour when the inputs' Arrow types disagree.
-
-    The decision is pending (ITL-835): these pin what MergeJoin did before
-    ITL-832, so changing ``_resolve_disagreeing_types`` must change them too.
-    Validation passes for every pair, because the Python types agree.
-    """
+class TestResolveDisagreeingTypes:
+    """The single decision point for inputs whose Arrow types differ."""
 
     @pytest.mark.parametrize(
-        ("left_type", "right_type", "values", "data_expected", "tag_expected"),
-        DISAGREEING_PAIRS,
+        ("left", "right", "values", "expected"),
+        [*LAYOUT_PAIRS, STRUCT_LAYOUT_PAIR],
         ids=_ids,
+    )
+    def test_layout_only_difference_resolves_to_large(
+        self,
+        left: pa.DataType,
+        right: pa.DataType,
+        values: list[Any],
+        expected: pa.DataType,
+    ) -> None:
+        """Layout-only differences resolve to the large variant, in either order."""
+        del values
+        assert _resolve_disagreeing_types("c", left, right) == expected
+        assert _resolve_disagreeing_types("c", right, left) == expected
+
+    @pytest.mark.parametrize(("left", "right", "values"), MISMATCHED_PAIRS, ids=_ids)
+    def test_other_difference_raises(
+        self, left: pa.DataType, right: pa.DataType, values: list[Any]
+    ) -> None:
+        """Any other difference raises, naming the column and both types."""
+        del values
+        for first, second in ((left, right), (right, left)):
+            with pytest.raises(InputValidationError) as excinfo:
+                _resolve_disagreeing_types("col", first, second)
+            message = str(excinfo.value)
+            assert "'col'" in message
+            assert str(first) in message
+            assert str(second) in message
+
+    def test_struct_with_different_fields_raises(self) -> None:
+        """Structs whose fields differ are not layout variants of each other."""
+        other = pa.struct([("a", pa.int8()), ("c", pa.string())])
+        with pytest.raises(InputValidationError):
+            _resolve_disagreeing_types("s", STRUCT, other)
+
+
+class TestDisagreeingInputs:
+    """MergeJoin over inputs whose Arrow types differ for a shared column."""
+
+    @pytest.mark.parametrize(
+        ("left_type", "right_type", "values", "expected"), LAYOUT_PAIRS, ids=_ids
     )
     @pytest.mark.parametrize("rows", [0, 2])
     @pytest.mark.parametrize("order", ["LR", "RL"])
-    def test_colliding_data_column(
+    def test_colliding_column_with_layout_difference_merges(
         self,
         left_type: pa.DataType,
         right_type: pa.DataType,
         values: list[Any],
-        data_expected: dict[tuple[int, str], str],
-        tag_expected: dict[str, str],
+        expected: pa.DataType,
         rows: int,
         order: str,
     ) -> None:
-        """A colliding column's merged type is inferred, as before ITL-832."""
-        del tag_expected
+        """The merged column is ``large_list`` of the large variant, in both orders."""
         first, second = _ordered(*_pair(left_type, right_type, values, rows), order)
         op = MergeJoin()
         op.validate_inputs(first, second)
-        table = op.static_process(first, second).as_table()
-        assert str(table.schema.field("x").type) == data_expected[(rows, order)]
+        result = op.static_process(first, second)
+        table = result.as_table(columns={"source": True})
+        assert _merged_types(table) == (pa.large_list(expected), SOURCE_LIST)
+        assert table.column("x").to_pylist() == [values] * rows
+        _assert_matches_prediction(op, result, first, second)
 
     @pytest.mark.parametrize(
-        ("left_type", "right_type", "values", "data_expected", "tag_expected"),
-        DISAGREEING_PAIRS,
-        ids=_ids,
+        ("left_type", "right_type", "values"), MISMATCHED_PAIRS, ids=_ids
     )
     @pytest.mark.parametrize("rows", [0, 2])
     @pytest.mark.parametrize("order", ["LR", "RL"])
-    def test_shared_tag_key(
+    def test_colliding_column_with_other_difference_raises(
         self,
         left_type: pa.DataType,
         right_type: pa.DataType,
         values: list[Any],
-        data_expected: dict[tuple[int, str], str],
-        tag_expected: dict[str, str],
         rows: int,
         order: str,
     ) -> None:
-        """A shared tag key keeps the joined type, or the Polars join raises."""
-        del data_expected
+        """Width, unit or precision differences raise before the join.
+
+        Validation cannot see them (the Python types agree), so
+        ``static_process`` raises as soon as it has the input tables.
+        """
+        first, second = _ordered(*_pair(left_type, right_type, values, rows), order)
+        op = MergeJoin()
+        op.validate_inputs(first, second)
+        with pytest.raises(InputValidationError, match=r"'x'"):
+            op.static_process(first, second)
+
+    @pytest.mark.parametrize(
+        ("left_type", "right_type", "values", "expected"), LAYOUT_PAIRS[:2], ids=_ids
+    )
+    @pytest.mark.parametrize("rows", [0, 2])
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_shared_tag_with_layout_difference_joins(
+        self,
+        left_type: pa.DataType,
+        right_type: pa.DataType,
+        values: list[Any],
+        expected: pa.DataType,
+        rows: int,
+        order: str,
+    ) -> None:
+        """A shared tag key that differs only in layout takes the large variant."""
         left = _stream(
             {"k": (left_type, [values[0]] * rows), "p": (pa.int64(), [0] * rows)},
             ["k"],
@@ -358,22 +443,40 @@ class TestDisagreeingArrowTypes:
         )
         first, second = _ordered(left, right, order)
         op = MergeJoin()
-        op.validate_inputs(first, second)
-        expected = tag_expected[order]
-        if expected == "SchemaError":
-            with pytest.raises(pl.exceptions.SchemaError):
-                op.static_process(first, second).as_table()
-        else:
-            table = op.static_process(first, second).as_table()
-            assert str(table.schema.field("k").type) == expected
-            assert len(table) == rows * rows
+        result = op.static_process(first, second)
+        table = result.as_table()
+        assert table.schema.field("k").type == expected
+        assert len(table) == rows * rows
+        _assert_matches_prediction(op, result, first, second)
+
+    @pytest.mark.parametrize(
+        ("left_type", "right_type", "values"), MISMATCHED_PAIRS[:4], ids=_ids
+    )
+    @pytest.mark.parametrize("rows", [0, 2])
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_shared_tag_with_other_difference_raises(
+        self,
+        left_type: pa.DataType,
+        right_type: pa.DataType,
+        values: list[Any],
+        rows: int,
+        order: str,
+    ) -> None:
+        """A shared tag key that differs in width, unit or precision raises."""
+        left = _stream(
+            {"k": (left_type, [values[0]] * rows), "p": (pa.int64(), [0] * rows)},
+            ["k"],
+        )
+        right = _stream(
+            {"k": (right_type, [values[0]] * rows), "q": (pa.int64(), [0] * rows)},
+            ["k"],
+        )
+        first, second = _ordered(left, right, order)
+        with pytest.raises(InputValidationError, match=r"'k'"):
+            MergeJoin().static_process(first, second)
 
     def test_csv_and_dict_sources_on_a_string_column(self, tmp_path: Path) -> None:
-        """A CSV ``string`` column colliding with a dict ``large_string`` one merges.
-
-        This is the common real-world disagreement: today the merged column is
-        inferred as ``list<string>`` and the join succeeds.
-        """
+        """A CSV ``string`` column colliding with a dict ``large_string`` one merges."""
         csv_path = tmp_path / "labels.csv"
         csv_path.write_text("id,label\n1,a\n2,b\n")
         csv_source = CSVSource(str(csv_path), tag_columns=["id"])
@@ -384,7 +487,7 @@ class TestDisagreeingArrowTypes:
         assert dict_source.as_table().schema.field("label").type == pa.large_string()
 
         table = MergeJoin()(csv_source, dict_source).as_table()
-        assert table.schema.field("label").type == pa.list_(pa.string())
+        assert table.schema.field("label").type == pa.large_list(pa.large_string())
         labels = table.sort_by("id").column("label").to_pylist()
         assert labels == [["a", "x"], ["b", "y"]]
 
@@ -396,7 +499,6 @@ def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
     column ``x`` and pass-through columns of several layouts; the right
     source has the same tag as ``large_string``.
     """
-    struct_type = pa.struct([("a", pa.int8()), ("b", pa.string())])
     left = ArrowTableSource(
         _table(
             {
@@ -405,7 +507,7 @@ def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
                 "s": (pa.string(), ["a", "b"]),
                 "b": (pa.binary(), [b"a", b"b"]),
                 "l": (pa.list_(pa.int8()), [[1], [2]]),
-                "st": (struct_type, [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]),
+                "st": (STRUCT, [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]),
             }
         ),
         tag_columns=["probe"],
@@ -427,34 +529,43 @@ def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
 
 
 class TestPassThroughColumns:
-    """Columns the join does not merge keep their input Arrow types."""
+    """Columns the join does not merge take their large-normalized input type."""
 
     @pytest.mark.parametrize("rows", [0, 2])
-    def test_merge_join_keeps_pass_through_types(self, rows: int) -> None:
-        """Data, source-info and system-tag columns keep their types; tags promote."""
+    def test_merge_join_pass_through_types(self, rows: int) -> None:
+        """Data, source-info, tag and system-tag columns: normalized input type.
+
+        ``fixed_size_binary`` system-tag record ids have no large variant and
+        keep their type (the Polars join alone would turn them into
+        ``large_binary``); ``float32`` keeps its width.
+        """
         left, right = _sources(rows)
         op = MergeJoin()
         result = op.static_process(left, right)
         table = result.as_table(all_info=True)
-        left_schema = left.as_table(all_info=True).schema
-        right_schema = right.as_table(all_info=True).schema
 
-        for name in ("s", "b", "l", "st", "_source_s", "_source_b"):
-            assert table.schema.field(name).type == left_schema.field(name).type, name
+        assert table.schema.field("s").type == pa.large_string()
+        assert table.schema.field("b").type == pa.large_binary()
+        assert table.schema.field("l").type == pa.large_list(pa.int8())
+        assert table.schema.field("st").type == LARGE_STRUCT
         assert table.schema.field("f").type == pa.float32()
-        assert (
-            table.schema.field("_source_f").type == right_schema.field("_source_f").type
-        )
         assert table.schema.field("probe").type == pa.large_string()
-        assert table.schema.field("x").type == pa.list_(pa.int8())
+        assert table.schema.field("x").type == pa.large_list(pa.int8())
+        for name in ("_source_s", "_source_b", "_source_f"):
+            assert table.schema.field(name).type == pa.large_string(), name
+        assert table.schema.field("_source_x").type == SOURCE_LIST
 
         input_system_tag_types = {
-            f.type for f in (*left_schema, *right_schema) if f.name.startswith("_tag")
+            normalize_to_large_types(f.type)
+            for stream in (left, right)
+            for f in stream.as_table(all_info=True).schema
+            if f.name.startswith("_tag")
         }
         output_system_tag_types = {
             f.type for f in table.schema if f.name.startswith("_tag")
         }
         assert output_system_tag_types == input_system_tag_types
+        assert pa.binary(16) in output_system_tag_types
         assert len(table) == rows
         if rows:
             # The empty inputs come from PolarsFilter, which drops non-null
@@ -474,24 +585,18 @@ class TestPassThroughColumns:
             [right_tokens[1], left_tokens[1]],
         ]
 
-    def test_shared_tag_type_is_commutative(self) -> None:
-        """A shared tag the inputs disagree on keeps the joined type in both orders.
-
-        No promotion and no rejection for tag keys: the type is what the join
-        produced before ITL-832 (``large_string``), whichever input comes first.
-        """
+    def test_types_are_commutative(self) -> None:
+        """Every column has the same type whichever input comes first."""
         left, right = _sources(2)
         op = MergeJoin()
         forward = op.static_process(left, right).as_table(all_info=True)
         backward = op.static_process(right, left).as_table(all_info=True)
-        assert forward.schema.field("probe").type == pa.large_string()
-        # Column order depends on the argument order; types must not.
         assert {f.name: f.type for f in forward.schema} == {
             f.name: f.type for f in backward.schema
         }
 
-    def test_polars_filter_keeps_input_types(self) -> None:
-        """Filtering keeps every column's Arrow type, system tags included."""
+    def test_polars_filter_emits_normalized_input_types(self) -> None:
+        """Filtering gives every column its large-normalized input type."""
         source, _ = _sources(2)
         op = PolarsFilter(predicates=[pl.col("x") > 1])
         result = op.static_process(source)
@@ -500,7 +605,10 @@ class TestPassThroughColumns:
 
         assert len(result.as_table()) == 1
         for field in output_schema:
-            assert field.type == input_schema.field(field.name).type, field.name
+            expected = normalize_to_large_types(input_schema.field(field.name).type)
+            assert field.type == expected, field.name
+        assert output_schema.field("s").type == pa.large_string()
+        assert output_schema.field("st").type == LARGE_STRUCT
 
 
 def _row_hashes(stream: StreamProtocol) -> list[tuple[str, str]]:
@@ -511,55 +619,155 @@ def _row_hashes(stream: StreamProtocol) -> list[tuple[str, str]]:
     ]
 
 
-def _in_pre_fix_layout(stream: StreamProtocol) -> ArrowTableStream:
-    """Rebuild ``stream`` with the column types the code before ITL-832 emitted.
+def _small_layout(arrow_type: pa.DataType) -> pa.DataType:
+    """Return ``arrow_type`` with every large variant replaced by its small one."""
+    if pa.types.is_large_string(arrow_type):
+        return pa.string()
+    if pa.types.is_large_binary(arrow_type):
+        return pa.binary()
+    if pa.types.is_large_list(arrow_type) or pa.types.is_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.list_(field.with_type(_small_layout(field.type)))
+    if pa.types.is_struct(arrow_type):
+        return pa.struct([f.with_type(_small_layout(f.type)) for f in arrow_type])
+    return arrow_type
 
-    Before the fix, ``MergeJoin`` and ``PolarsFilter`` kept the Arrow types
-    Polars produced (large layouts) while setting nullability exactly as they
-    still do. So this swaps in the types of a Polars round-trip and keeps every
-    field's nullability, isolating the type change the fix makes.
+
+def _relayout(
+    stream: StreamProtocol, overrides: dict[str, pa.DataType] | None = None
+) -> ArrowTableStream:
+    """Rebuild ``stream`` in the small layouts, with optional per-column types.
+
+    The small layouts are what MergeJoin emitted for a merged column of
+    ``int64`` or ``string`` values before this change (``list<...>``).
     """
+    overrides = overrides or {}
     table = stream.as_table(columns={"source": True, "system_tags": True})
-    polars_schema = pl.DataFrame(table).to_arrow().schema
-    pre_fix_schema = pa.schema(
+    schema = pa.schema(
         [
-            field.with_type(polars_schema.field(field.name).type)
+            field.with_type(overrides.get(field.name, _small_layout(field.type)))
             for field in table.schema
         ]
     )
     tag_columns, _ = stream.keys()
-    return ArrowTableStream(table.cast(pre_fix_schema), tag_columns=tag_columns)
+    return ArrowTableStream(table.cast(schema), tag_columns=tag_columns)
 
 
-def _string_like_types(stream: StreamProtocol) -> dict[str, pa.DataType]:
-    """Return the Arrow types of the pass-through columns ``s``, ``b``, ``l``, ``st``."""
-    schema = stream.as_table().schema
-    return {name: schema.field(name).type for name in ("s", "b", "l", "st")}
+def _stream_hash(stream: StreamProtocol) -> str:
+    """Return the content hash of ``stream``'s full table."""
+    table = stream.as_table(columns={"source": True, "system_tags": True})
+    return ArrowTableStream(table, tag_columns=stream.keys()[0]).content_hash().to_hex()
 
 
-class TestPassThroughContentHashes:
-    """Restoring pass-through layouts leaves every row's content hash unchanged.
+class TestContentHashes:
+    """Large normalization changes no hash; keeping a narrow width does."""
 
-    The developer approved the pass-through fix on the condition that content
-    hashes do not change. The Arrow hasher ignores layout (``string`` versus
-    ``large_string``, ``list`` versus ``large_list``), so the rows must hash the
-    same in the restored layout and in the pre-fix (Polars) layout.
-    """
+    def test_normalization_never_changes_a_hash(self) -> None:
+        """Ask the hasher: each type and its large variant hash the same.
 
-    def test_polars_filter_row_hashes_unchanged(self) -> None:
-        """Filter output rows hash exactly as they did before the fix."""
-        source, _ = _sources(2)
-        fixed = PolarsFilter(predicates=[pl.lit(True)]).static_process(source)
-        pre_fix = _in_pre_fix_layout(fixed)
+        Both the schema hash and the hash of the same values agree, while
+        ``int8`` and ``int64`` differ in both.
+        """
+        hasher = get_default_context().arrow_hasher
+        cases: list[tuple[pa.DataType, list[Any]]] = [
+            (pa.string(), ["a"]),
+            (pa.binary(), [b"a"]),
+            (pa.list_(pa.int64()), [[1]]),
+            (pa.list_(pa.string()), [["a"]]),
+            (STRUCT, [{"a": 1, "b": "x"}]),
+            (pa.struct([pa.field("b", pa.string(), nullable=False)]), [{"b": "q"}]),
+            (pa.list_(pa.field("element", pa.int64())), [[1]]),
+        ]
+        for arrow_type, values in cases:
+            large = normalize_to_large_types(arrow_type)
+            assert large != arrow_type
+            assert hasher.hash_schema(
+                pa.schema([pa.field("x", arrow_type)])
+            ) == hasher.hash_schema(pa.schema([pa.field("x", large)])), arrow_type
+            assert hasher.hash_table(
+                pa.table({"x": pa.array(values, type=arrow_type)})
+            ) == hasher.hash_table(pa.table({"x": pa.array(values, type=large)})), (
+                arrow_type
+            )
 
-        assert _string_like_types(fixed) != _string_like_types(pre_fix)
-        assert _row_hashes(fixed) == _row_hashes(pre_fix)
+        # The hasher has no value hashing for maps; their schema hash agrees.
+        map_type = pa.map_(pa.string(), pa.int64())
+        assert hasher.hash_schema(
+            pa.schema([pa.field("x", map_type)])
+        ) == hasher.hash_schema(
+            pa.schema([pa.field("x", normalize_to_large_types(map_type))])
+        )
 
-    def test_merge_join_row_hashes_unchanged(self) -> None:
-        """MergeJoin output with pass-through columns hashes as before the fix."""
+        narrow = pa.schema([pa.field("x", pa.int8())])
+        wide = pa.schema([pa.field("x", pa.int64())])
+        assert hasher.hash_schema(narrow) != hasher.hash_schema(wide)
+        assert hasher.hash_table(
+            pa.table({"x": pa.array([1], pa.int8())})
+        ) != hasher.hash_table(pa.table({"x": pa.array([1], pa.int64())}))
+
+    def test_non_nullable_list_items_lose_nullability_under_normalization(
+        self,
+    ) -> None:
+        """Known exception: normalizing ``list<item not null>`` changes its schema hash.
+
+        ``normalize_to_large_types`` rebuilds a list's value field as
+        ``large_list(element_type)``, dropping the item's non-null flag, and
+        the Arrow hasher includes that flag in the schema hash (value hashes
+        agree). Every other normalization is hash-identical. Whether to make
+        ``normalize_to_large_types`` keep the item field is pending a developer
+        decision; this test pins today's behaviour so that decision shows up
+        as a deliberate change here.
+        """
+        hasher = get_default_context().arrow_hasher
+        strict_items = pa.list_(pa.field("item", pa.int64(), nullable=False))
+        large = normalize_to_large_types(strict_items)
+        assert large == pa.large_list(pa.int64())
+        assert large.value_field.nullable
+        assert hasher.hash_schema(
+            pa.schema([pa.field("x", strict_items)])
+        ) != hasher.hash_schema(pa.schema([pa.field("x", large)]))
+        assert hasher.hash_table(
+            pa.table({"x": pa.array([[1]], type=strict_items)})
+        ) == hasher.hash_table(pa.table({"x": pa.array([[1]], type=large)}))
+
+    @pytest.mark.parametrize("arrow_type", [pa.int64(), pa.string()], ids=str)
+    def test_layout_change_keeps_merge_join_hashes(
+        self, arrow_type: pa.DataType
+    ) -> None:
+        """An ``int64`` or ``string`` merge hashes as in the old ``list`` layout.
+
+        Before this change the merged column was ``list<int64>`` or
+        ``list<string>`` and pass-through columns kept their input layout;
+        rows and the whole stream hash the same either way.
+        """
+        values = [1, 2] if arrow_type == pa.int64() else ["a", "b"]
+        result = MergeJoin().static_process(*_pair(arrow_type, arrow_type, values, 2))
+        old_layout = _relayout(result)
+        assert pa.types.is_list(old_layout.as_table().schema.field("x").type)
+        assert _row_hashes(result) == _row_hashes(old_layout)
+        assert _stream_hash(result) == _stream_hash(old_layout)
+
+    def test_layout_change_keeps_pass_through_hashes(self) -> None:
+        """Pass-through columns of several layouts hash as in their input layout."""
         left, right = _sources(2)
-        fixed = MergeJoin().static_process(left, right)
-        pre_fix = _in_pre_fix_layout(fixed)
+        result = MergeJoin().static_process(left, right)
+        assert _row_hashes(result) == _row_hashes(_relayout(result))
+        filtered = PolarsFilter(predicates=[pl.lit(True)]).static_process(left)
+        assert _row_hashes(filtered) == _row_hashes(_relayout(filtered))
 
-        assert _string_like_types(fixed) != _string_like_types(pre_fix)
-        assert _row_hashes(fixed) == _row_hashes(pre_fix)
+    def test_narrow_width_changes_the_hash(self) -> None:
+        """An ``int8`` merge no longer widens to ``int64``, so its hash changes.
+
+        Before this change Arrow inferred ``list<int64>`` from the Python
+        values; the merged column is now ``large_list<int8>``. This is the one
+        intended hash change of ITL-832.
+        """
+        result = MergeJoin().static_process(*_pair(pa.int8(), pa.int8(), [1, 2], 2))
+        assert result.as_table().schema.field("x").type == pa.large_list(pa.int8())
+        widened = _relayout(result, {"x": pa.list_(pa.int64())})
+        assert [data for _, data in _row_hashes(result)] != [
+            data for _, data in _row_hashes(widened)
+        ]
+        assert [tag for tag, _ in _row_hashes(result)] == [
+            tag for tag, _ in _row_hashes(widened)
+        ]

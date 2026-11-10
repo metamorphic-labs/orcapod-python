@@ -12,8 +12,6 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
-
-    from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 else:
     pa = LazyModule("pyarrow")
     pl = LazyModule("polars")
@@ -21,133 +19,77 @@ else:
 
 def _resolve_disagreeing_types(
     name: str, left_type: "pa.DataType", right_type: "pa.DataType"
-) -> "pa.DataType | None":
-    """Decide the output type of a column whose two inputs' Arrow types disagree.
+) -> "pa.DataType":
+    """Decide the output type of a column whose two inputs' Arrow types differ.
 
-    Applies to a colliding data column (the element type of the merged list)
-    and to any other column present in both inputs, such as a shared tag key.
-    The disagreement cannot be seen at graph-build time: ``output_schema()``
-    returns Python types, under which ``int8`` and ``int64``, or ``string``
-    and ``large_string``, are the same.
+    This is the single place that rule lives. It applies to a colliding data
+    column (the element type of the merged list), to the source-info column
+    that goes with it, and to a shared tag key. The disagreement cannot be
+    seen at graph-build time: ``output_schema()`` returns Python types, under
+    which ``int8`` and ``int64``, or ``string`` and ``large_string``, are the
+    same, so ``binary_static_process`` calls this as soon as it has the input
+    tables, before the join.
 
-    TODO(ITL-835): the developer has not yet decided what MergeJoin should do
-    here (reject with ``InputValidationError`` naming the column and both
-    types, promote, or something else). Until then this returns ``None``,
-    which keeps the behaviour MergeJoin had before ITL-832: a merged data
-    column's type is inferred from the Python values (for an empty result,
-    from what inference gives for the left input's type), and any other
-    column keeps the type the Polars join produced, or the join raises.
-    ``TestDisagreeingArrowTypes`` pins that behaviour, so the eventual
-    decision shows up as a deliberate test change.
+    Both types are normalized to their large variants
+    (``arrow_utils.normalize_to_large_types``: ``string`` to ``large_string``,
+    ``binary`` to ``large_binary``, ``list`` to ``large_list``, recursively),
+    which the Arrow hasher treats as identical. If the normalized types are
+    equal, that is the output type. Anything else (integer or float width,
+    timestamp unit, decimal precision, struct fields, nullability of a nested
+    field, logical type) is an error: MergeJoin never widens, promotes or picks
+    a side. The result does not depend on argument order.
 
     Args:
-        name: Column name, for an eventual error message.
-        left_type: The column's Arrow type in the left input.
-        right_type: The column's Arrow type in the right input.
+        name: Column name, for the error message.
+        left_type: The column's Arrow type in one input.
+        right_type: The column's Arrow type in the other input.
 
     Returns:
-        The output type, or ``None`` for the pre-ITL-832 behaviour.
+        The large-normalized type both inputs share.
+
+    Raises:
+        InputValidationError: If the types still differ after normalization.
     """
-    del name, left_type, right_type
-    return None
+    normalized_left = arrow_utils.normalize_to_large_types(left_type)
+    normalized_right = arrow_utils.normalize_to_large_types(right_type)
+    if normalized_left == normalized_right:
+        return normalized_left
+    raise InputValidationError(
+        f"MergeJoin inputs disagree on the Arrow type of column {name!r}: "
+        f"{left_type} in one input and {right_type} in the other. MergeJoin "
+        f"never widens or promotes a type; cast one input explicitly so both "
+        f"have the same Arrow type."
+    )
 
 
-def _input_types(
+def _output_types(
     left_types: "dict[str, pa.DataType]", right_types: "dict[str, pa.DataType]"
 ) -> "dict[str, pa.DataType]":
-    """Return the Arrow type each column takes from the inputs, where one is known.
+    """Return the Arrow type each input column takes in the output.
 
-    A column in one input gets that input's type. A column in both gets the
-    shared type when the two agree, and otherwise whatever
-    ``_resolve_disagreeing_types`` decides; columns it leaves undecided are
-    left out.
+    Every type is the large-normalized form of the input type
+    (``arrow_utils.normalize_to_large_types``); width, nullability and logical
+    types are never changed. A column in both inputs whose types differ goes
+    through ``_resolve_disagreeing_types``, which either finds the shared
+    normalized type or raises.
 
     Args:
-        left_types: Column name to Arrow type for the left input table.
-        right_types: Column name to Arrow type for the right input table.
+        left_types: Column name to Arrow type for one input table.
+        right_types: Column name to Arrow type for the other input table.
 
     Returns:
-        Column name to its output Arrow type.
+        Column name to its output Arrow type, for every column of either input.
     """
     resolved: dict[str, pa.DataType] = {}
     for name in left_types.keys() | right_types.keys():
         left_type, right_type = left_types.get(name), right_types.get(name)
-        if left_type is None or right_type is None or left_type == right_type:
-            known = left_type if left_type is not None else right_type
+        if left_type is not None and right_type is not None:
+            resolved[name] = _resolve_disagreeing_types(name, left_type, right_type)
         else:
-            known = _resolve_disagreeing_types(name, left_type, right_type)
-        if known is not None:
-            resolved[name] = known
+            known = left_type if left_type is not None else right_type
+            assert known is not None
+            resolved[name] = arrow_utils.normalize_to_large_types(known)
     return resolved
-
-
-def _inferred_type(arrow_type: "pa.DataType") -> "pa.DataType":
-    """Return the type Arrow infers for Python values read from ``arrow_type``.
-
-    Only used for the pre-ITL-832 behaviour that ``_resolve_disagreeing_types``
-    keeps for disagreeing inputs. ``pa.array`` over Python values ignores the
-    width of the column they came from: any integer becomes ``int64``, any
-    float ``double``, any string ``string`` and any binary ``binary``, and
-    nested lists become ``list``. Types whose inference depends on the values
-    themselves (temporal, decimal, map, ...) are returned unchanged.
-
-    Args:
-        arrow_type: The Arrow type the values were read from.
-
-    Returns:
-        The Arrow type ``pa.array`` infers for those values.
-    """
-    if pa.types.is_integer(arrow_type):
-        return pa.int64()
-    if pa.types.is_floating(arrow_type):
-        return pa.float64()
-    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
-        return pa.string()
-    if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
-        return pa.binary()
-    if (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    ):
-        return pa.list_(_inferred_type(arrow_type.value_type))
-    if pa.types.is_struct(arrow_type):
-        return pa.struct(
-            [field.with_type(_inferred_type(field.type)) for field in arrow_type]
-        )
-    return arrow_type
-
-
-def _merged_list_array(
-    values: "list[Any]",
-    element_type: "pa.DataType | None",
-    left_type: "pa.DataType | None",
-    type_converter: "TypeConverterProtocol",
-) -> "pa.Array[Any]":
-    """Build a merged column as ``list<element_type>``.
-
-    Args:
-        values: One list per output row.
-        element_type: The column's Arrow type from the inputs, or ``None``
-            when the inputs disagree and ``_resolve_disagreeing_types`` left it
-            undecided.
-        left_type: The column's Arrow type in the left input; used only for
-            the pre-ITL-832 behaviour when ``element_type`` is ``None``.
-        type_converter: The stream's type converter, for extension elements.
-
-    Returns:
-        The merged list array.
-    """
-    if element_type is not None:
-        list_type = arrow_utils.aggregated_list_type(element_type, type_converter)
-        return arrow_utils.list_array(values, list_type)
-    # Pre-ITL-832 behaviour for disagreeing inputs (see _resolve_disagreeing_types).
-    if left_type is not None and isinstance(left_type, pa.ExtensionType):
-        list_type = arrow_utils.aggregated_list_type(left_type, type_converter)
-        return arrow_utils.list_array(values, list_type)
-    if values or left_type is None:
-        return pa.array(values)
-    return pa.array(values, type=pa.list_(_inferred_type(left_type)))
 
 
 class MergeJoin(BinaryOperator):
@@ -164,21 +106,23 @@ class MergeJoin(BinaryOperator):
 
     Tag columns use inner join on shared tags, with union of tag schemas.
 
-    Arrow types: where the inputs agree on a column's Arrow type, the output
-    takes that type, never what Arrow infers for the Python values. A merged
-    column is ``list<T>`` (built by ``arrow_utils.aggregated_list_type``, the
-    same construction ``Batch`` and ``GroupBy`` use) where ``T`` is the input
-    column's Arrow type, with or without rows; a logical (extension) ``T``
-    yields the ``list[...]`` extension type. Columns that are not merged keep
-    their input Arrow type.
+    Arrow types: every output column takes the large-normalized form of its
+    input Arrow type (``string`` becomes ``large_string``, ``list`` becomes
+    ``large_list``, recursively; the Arrow hasher treats the two variants as
+    identical), and nothing is inferred from Python values. Integer and float
+    width, nullability and logical (extension) types are kept. A merged column
+    is ``large_list<T>`` where ``T`` is the normalized input element type,
+    built by ``arrow_utils.aggregated_list_type`` (the construction ``Batch``
+    and ``GroupBy`` use), with or without rows; a logical ``T`` yields the
+    logical list type of ``T``. Its source-info column is
+    ``large_list<large_string>``.
 
-    When the two inputs' Arrow types for the same column disagree (``int8``
-    and ``int64``, ``string`` and ``large_string``, ``timestamp[ms]`` and
-    ``timestamp[us]``, two decimal precisions), the behaviour is pending a
-    decision (ITL-835, ``_resolve_disagreeing_types``) and stays as before:
-    a merged column's type is inferred from the values, and a shared tag key
-    keeps the type the join produces or the join raises. Validation cannot
-    detect such a disagreement, because streams expose only Python schemas.
+    When the two inputs' Arrow types for the same column differ, both are
+    normalized to their large variants; if they are then equal the join
+    proceeds, otherwise it raises ``InputValidationError`` naming the column
+    and both types (``_resolve_disagreeing_types``). Validation cannot detect
+    such a disagreement, because streams expose only Python schemas; it is
+    detected in ``binary_static_process`` before the join.
 
     MergeJoin is commutative: MergeJoin(A, B) produces the same result as
     MergeJoin(B, A), achieved by sorting merged values and system tag values.
@@ -361,19 +305,11 @@ class MergeJoin(BinaryOperator):
         # stores strings, binaries and lists in their large layouts, drops
         # fixed_size_binary and may strip extension metadata. Every output
         # column is typed from these, never from what Arrow infers for the
-        # Python values: a merged column becomes list<input type>, and every
-        # other column gets its input type back where the inputs agree on it.
+        # Python values. Inputs whose types differ beyond layout are rejected
+        # here, before the join (_resolve_disagreeing_types).
         left_types = {f.name: f.type for f in left_table.schema}
         right_types = {f.name: f.type for f in right_table.schema}
-        input_types = _input_types(left_types, right_types)
-        merged_names = set(colliding_keys) | {
-            f"{constants.SOURCE_PREFIX}{col}" for col in colliding_keys
-        }
-        passthrough_types = {
-            name: column_type
-            for name, column_type in input_types.items()
-            if name not in merged_names
-        }
+        output_types = _output_types(left_types, right_types)
 
         # Capture nullable flags from input schemas BEFORE Polars conversion.
         # Polars' join discards nullable info (defaults all to True); we derive
@@ -482,22 +418,27 @@ class MergeJoin(BinaryOperator):
             joined = joined.drop(left_col_name)
             joined = joined.drop(right_col_name)
 
-            merged_array = _merged_list_array(
-                merged_vals, input_types.get(col), left_types.get(col), tc
+            list_type = arrow_utils.aggregated_list_type(
+                output_types[col], tc, column=col
             )
-            joined = joined.add_column(col_idx, left_col_name, merged_array)
+            joined = joined.add_column(
+                col_idx, left_col_name, arrow_utils.list_array(merged_vals, list_type)
+            )
+            output_types[col] = list_type
 
             if has_source:
                 source_idx = joined.column_names.index(left_source_col)
                 joined = joined.drop(left_source_col)
                 joined = joined.drop(right_source_col)
-                source_array = _merged_list_array(
-                    merged_sources or [],
-                    input_types.get(left_source_col),
-                    left_types.get(left_source_col),
-                    tc,
+                source_list_type = arrow_utils.aggregated_list_type(
+                    output_types[left_source_col], tc, column=left_source_col
                 )
-                joined = joined.add_column(source_idx, left_source_col, source_array)
+                joined = joined.add_column(
+                    source_idx,
+                    left_source_col,
+                    arrow_utils.list_array(merged_sources or [], source_list_type),
+                )
+                output_types[left_source_col] = source_list_type
 
         # Handle remaining Polars-generated _right suffixed columns
         # (only from columns we know Polars auto-suffixed, not original names)
@@ -529,15 +470,17 @@ class MergeJoin(BinaryOperator):
         other_cols = [c for c in joined.column_names if c not in listed]
         joined = joined.select(tag_cols + data_cols + other_cols)
 
-        # Reconstruct the schema: pass-through columns get their input Arrow
-        # type back (undoing Polars' layout changes), merged columns keep the
-        # list type built above, and nullability comes from the captured input
-        # flags, falling back to null-count inference for unexpected columns.
+        # Reconstruct the schema: every column takes the type decided above
+        # from the inputs (the large-normalized input type for pass-through
+        # columns, undoing Polars' other changes such as fixed_size_binary to
+        # large_binary; the list type built above for merged columns), and
+        # nullability comes from the captured input flags, falling back to
+        # null-count inference for system tag and source-info columns.
         result_schema = pa.schema(
             [
                 pa.field(
                     col_name,
-                    passthrough_types.get(col_name, joined.schema.field(col_name).type),
+                    output_types[col_name],
                     nullable=output_nullable.get(
                         col_name, joined.column(i).null_count > 0
                     ),

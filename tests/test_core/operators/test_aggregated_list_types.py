@@ -3,7 +3,8 @@
 ``arrow_utils.aggregated_list_type`` is the one construction for the
 ``list[T]`` columns of every aggregating operator: the outer list is
 ``large_list`` (the variant orcapod's type converter uses for ``list[T]``),
-the element keeps the input column's Arrow type, and a logical element yields
+the element is the input column's Arrow type normalized to its large variants
+(width, nullability and logical types unchanged), and a logical element yields
 the logical list type of that element. ``MergeJoin`` is covered in
 ``test_merge_join_arrow_types.py``.
 
@@ -84,16 +85,20 @@ class TestAggregatedColumnTypes:
         [
             ("n", pa.int8()),
             ("f", pa.float32()),
-            ("s", pa.string()),
+            ("s", pa.large_string()),
             ("ls", pa.large_string()),
-            ("st", STRUCT),
+            ("st", pa.struct([("a", pa.int8()), ("b", pa.large_string())])),
         ],
         ids=str,
     )
-    def test_plain_column_is_large_list_of_input_type(
+    def test_plain_column_is_large_list_of_normalized_input_type(
         self, aggregated: tuple[Any, StreamProtocol, Any], name: str, element_type: Any
     ) -> None:
-        """The element keeps its width and layout; the outer list is large."""
+        """The element is the input type in its large variants; width never changes.
+
+        ``string`` becomes ``large_string`` (also inside a struct), while
+        ``int8`` and ``float32`` keep their width.
+        """
         _, _, result = aggregated
         assert result.as_table().schema.field(name).type == pa.large_list(element_type)
 

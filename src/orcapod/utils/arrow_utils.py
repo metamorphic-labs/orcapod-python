@@ -1272,11 +1272,14 @@ def aggregated_list_type(
     """Return the list type for a column that aggregates ``element_type`` values.
 
     This is the one construction every aggregating operator (``Batch``,
-    ``GroupBy``, ``MergeJoin``) uses for its ``list[T]`` columns. The element
-    keeps the Arrow type the input column already has (``int8`` stays
-    ``int8``, ``string`` stays ``string``, struct fields are unchanged); nothing
-    is inferred from Python values. The outer list is ``large_list``, the
-    variant orcapod's type converter gives ``list[T]``.
+    ``GroupBy``, ``MergeJoin``) uses for its ``list[T]`` columns. Nothing is
+    inferred from Python values: the element is the input column's Arrow type
+    normalized to its large variants (``normalize_to_large_types``: ``string``
+    becomes ``large_string``, ``list`` becomes ``large_list``, recursively,
+    which the Arrow hasher treats as identical), keeping integer and float
+    width, struct fields and nullability (``int8`` stays ``int8``). The outer
+    list is ``large_list``, the variant orcapod's type converter gives
+    ``list[T]``.
 
     Arrow cannot embed an extension type inside a list value field, so for a
     logical (extension) element the result is the logical list type of that
@@ -1291,8 +1294,8 @@ def aggregated_list_type(
         column: Name of the column being aggregated, for the error message.
 
     Returns:
-        ``pa.large_list(element_type)``, or the ``list[...]`` extension type for
-        a logical element.
+        ``pa.large_list(normalize_to_large_types(element_type))``, or the
+        ``list[...]`` extension type for a logical element.
 
     Raises:
         ValueError: If ``element_type`` is an extension type for which the type
@@ -1312,7 +1315,7 @@ def aggregated_list_type(
                 f"logical type with the data context's type converter."
             )
         return list_type
-    return pa.large_list(element_type)
+    return pa.large_list(normalize_to_large_types(element_type))
 
 
 def list_array(values: Sequence[Any], list_type: pa.DataType) -> pa.Array[Any]:

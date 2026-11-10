@@ -31,26 +31,33 @@ class TestAggregatedListType:
     """``aggregated_list_type`` wraps the element type it is given in a ``large_list``."""
 
     @pytest.mark.parametrize(
-        "element_type",
+        ("element_type", "expected_element"),
         [
-            *(t for t, _ in PRIMITIVE_ELEMENTS),
-            pa.string(),
-            pa.struct([("a", pa.int8()), ("b", pa.string())]),
+            (pa.int8(), pa.int8()),
+            (pa.float32(), pa.float32()),
+            (pa.large_string(), pa.large_string()),
+            (pa.string(), pa.large_string()),
+            (pa.large_binary(), pa.large_binary()),
+            (pa.list_(pa.int16()), pa.large_list(pa.int16())),
+            (
+                pa.struct([("a", pa.int8()), ("b", pa.string())]),
+                pa.struct([("a", pa.int8()), ("b", pa.large_string())]),
+            ),
         ],
         ids=str,
     )
-    def test_plain_element_is_wrapped_unchanged(self, element_type: pa.DataType) -> None:
-        """A plain Arrow element becomes ``large_list<element>``, keeping its type.
+    def test_plain_element_is_normalized_to_large(
+        self, element_type: pa.DataType, expected_element: pa.DataType
+    ) -> None:
+        """A plain element becomes ``large_list<element in its large variants>``.
 
         ``large_list`` is the outer variant orcapod's type converter uses for
-        ``list[T]``; the element keeps its width and layout (``int8`` stays
-        ``int8``, ``string`` stays ``string``).
+        ``list[T]``. The element is normalized to its large variants (which
+        hash identically) but keeps its width: ``int8`` stays ``int8``.
         """
         converter = get_default_type_converter()
         list_type = aggregated_list_type(element_type, converter, column="c")
-        assert list_type == pa.large_list(element_type)
-        assert pa.types.is_large_list(list_type)
-        assert list_type.value_type == element_type
+        assert list_type == pa.large_list(expected_element)
 
     def test_outer_variant_matches_the_type_converter(self) -> None:
         """The outer list variant is the one the converter gives ``list[T]``."""
