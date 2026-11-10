@@ -49,7 +49,7 @@ def _tables() -> dict[str, pa.Table]:
     }
 
 
-_FLAT_HASHES = {
+_FLAT_HASHES: dict[str, object] = {
     "stream_content": "90dab8a6e5b7b03c83ef20fbfdd4040410f05f9e20d8ca2f64d6f2ef374b8e99",
     "stream_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
     "source_content": "7263fb2ff4346ac025631fd34c7204971478d83165084f9a748e61acc5e9f919",

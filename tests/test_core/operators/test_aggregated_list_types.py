@@ -36,6 +36,7 @@ def _source() -> ArrowTableSource:
     Tag ``g`` groups rows 0-1 and 2-3; tag ``i`` is a per-row tag.
     """
     path_type = get_default_type_converter().python_type_to_arrow_type(Path)
+    assert isinstance(path_type, pa.ExtensionType)
     paths = pa.array(["/a", "/b", "/c", "/d"], type=path_type.storage_type)
     columns: dict[str, tuple[pa.DataType, Any]] = {
         "g": (pa.int64(), pa.array([0, 0, 1, 1], type=pa.int64())),

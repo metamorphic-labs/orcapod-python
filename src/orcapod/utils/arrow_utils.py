@@ -141,7 +141,8 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
     elif pa.types.is_struct(arrow_type):
         return pa.struct([_normalize_field_to_large_types(f) for f in arrow_type])
     elif pa.types.is_map(arrow_type):
-        return pa.map_(
+        # pyarrow accepts key and item Fields here; its stubs only list types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
             _normalize_field_to_large_types(arrow_type.key_field),
             _normalize_field_to_large_types(arrow_type.item_field),
             keys_sorted=arrow_type.keys_sorted,
@@ -158,7 +159,8 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
         # Normalize the value type (dictionary values), keep index type as-is
         return pa.dictionary(
             arrow_type.index_type,
-            normalize_to_large_types(arrow_type.value_type),
+            # The stubs restrict value_type to a few basic types; any type works.
+            normalize_to_large_types(arrow_type.value_type),  # pyright: ignore[reportArgumentType]
             ordered=arrow_type.ordered,
         )
 
@@ -167,7 +169,7 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
         return arrow_type
 
 
-def _normalize_field_to_large_types(field: "pa.Field") -> "pa.Field":
+def _normalize_field_to_large_types(field: "pa.Field[Any]") -> "pa.Field[Any]":
     """Return ``field`` with its type normalized, keeping name, nullability and metadata.
 
     Args:

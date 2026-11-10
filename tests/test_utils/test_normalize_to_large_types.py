@@ -15,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.contexts import get_default_context
+from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.utils.arrow_utils import (
     normalize_schema_to_large_types,
     normalize_to_large_types,
@@ -23,9 +24,22 @@ from orcapod.utils.arrow_utils import (
 META = {b"note": b"kept"}
 
 
-def _strict(name: str, arrow_type: pa.DataType) -> pa.Field:
+def _starfix_hasher() -> StarfixArrowHasher:
+    """Return the default context's Arrow hasher, which hashes schemas too."""
+    hasher = get_default_context().arrow_hasher
+    assert isinstance(hasher, StarfixArrowHasher)
+    return hasher
+
+
+def _strict(name: str, arrow_type: pa.DataType) -> pa.Field[Any]:
     """Return a non-nullable field carrying ``META``."""
     return pa.field(name, arrow_type, nullable=False, metadata=META)
+
+
+def _map(key: pa.Field[Any], item: pa.Field[Any]) -> pa.DataType:
+    """Build a map type from key and item fields, keeping their flags."""
+    # pyarrow accepts Fields here; its stubs only list DataTypes.
+    return pa.map_(key, item)  # pyright: ignore[reportArgumentType]
 
 
 # (input type, values, expected normalized type)
@@ -71,12 +85,12 @@ CASES: list[tuple[pa.DataType, list[Any], pa.DataType]] = [
         ),
     ),
     (
-        pa.map_(
+        _map(
             _strict("key", pa.string()),
             _strict("value", pa.list_(_strict("item", pa.int64()))),
         ),
         [[("a", [1])]],
-        pa.map_(
+        _map(
             _strict("key", pa.large_string()),
             _strict("value", pa.large_list(_strict("item", pa.int64()))),
         ),
@@ -84,7 +98,7 @@ CASES: list[tuple[pa.DataType, list[Any], pa.DataType]] = [
 ]
 
 
-def _nested_fields(arrow_type: pa.DataType) -> list[pa.Field]:
+def _nested_fields(arrow_type: pa.DataType) -> list[pa.Field[Any]]:
     """Return every nested field of ``arrow_type``, depth first."""
     if isinstance(arrow_type, pa.MapType):
         children = [arrow_type.key_field, arrow_type.item_field]
@@ -134,7 +148,7 @@ class TestNormalizeKeepsFields:
         their schema hash is compared.
         """
         del expected
-        hasher = get_default_context().arrow_hasher
+        hasher = _starfix_hasher()
         large = normalize_to_large_types(arrow_type)
         assert hasher.hash_schema(
             pa.schema([pa.field("x", arrow_type)])
@@ -159,7 +173,7 @@ def test_schema_normalization_keeps_top_level_fields() -> None:
 
 def test_width_is_not_a_layout() -> None:
     """``int8`` and ``int64`` differ in both hashes; normalization keeps ``int8``."""
-    hasher = get_default_context().arrow_hasher
+    hasher = _starfix_hasher()
     assert normalize_to_large_types(pa.int8()) == pa.int8()
     assert hasher.hash_schema(pa.schema([pa.field("x", pa.int8())])) != (
         hasher.hash_schema(pa.schema([pa.field("x", pa.int64())]))

@@ -1467,7 +1467,9 @@ class UniversalTypeConverter:
         """
         # TODO(ITL-841): workaround so both layouts of a struct share one
         # Python class; revisit with the treatment of large variants everywhere.
-        struct_type = arrow_utils.normalize_to_large_types(struct_type)
+        normalized = arrow_utils.normalize_to_large_types(struct_type)
+        assert isinstance(normalized, pa.StructType)
+        struct_type = normalized
 
         # Check cache first
         if struct_type in self._struct_signature_to_typeddict:

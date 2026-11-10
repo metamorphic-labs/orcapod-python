@@ -31,6 +31,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.contexts import get_default_context, get_default_type_converter
+from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.core.operators import MergeJoin, PolarsFilter
 from orcapod.core.operators.merge_join import _resolve_disagreeing_types
 from orcapod.core.sources import CSVSource, DictSource
@@ -101,6 +102,13 @@ MISMATCHED_PAIRS: list[tuple[pa.DataType, pa.DataType, list[Any]]] = [
     (pa.decimal128(5, 2), pa.decimal128(7, 2), _DEC),
     (pa.list_(pa.int8()), pa.large_list(pa.int64()), [[1], [2]]),
 ]
+
+
+def _starfix_hasher() -> StarfixArrowHasher:
+    """Return the default context's Arrow hasher, which hashes schemas too."""
+    hasher = get_default_context().arrow_hasher
+    assert isinstance(hasher, StarfixArrowHasher)
+    return hasher
 
 
 def _table(columns: dict[str, tuple[pa.DataType, list[Any]]]) -> pa.Table:
@@ -280,10 +288,9 @@ class TestMergedColumnType:
         assert list_type.storage_type == pa.large_list(pa.large_string())
         assert _merged_types(table)[1] == SOURCE_LIST
         if left_rows and right_rows:
-            assert (
-                table.column("x").combine_chunks().storage.to_pylist()
-                == [["/a", "/b"]] * 2
-            )
+            merged = table.column("x").combine_chunks()
+            assert isinstance(merged, pa.ExtensionArray)
+            assert merged.storage.to_pylist() == [["/a", "/b"]] * 2
         _assert_matches_prediction(op, result, left, right)
 
     @pytest.mark.parametrize(("left_rows", "right_rows"), ROW_SHAPES[1:])
@@ -668,7 +675,7 @@ class TestContentHashes:
         Both the schema hash and the hash of the same values agree, while
         ``int8`` and ``int64`` differ in both.
         """
-        hasher = get_default_context().arrow_hasher
+        hasher = _starfix_hasher()
         cases: list[tuple[pa.DataType, list[Any]]] = [
             (pa.string(), ["a"]),
             (pa.binary(), [b"a"]),
@@ -713,10 +720,11 @@ class TestContentHashes:
         the Arrow hasher includes in the schema hash (ITL-842 audits the wider
         question). A merged column of such lists keeps the flag too.
         """
-        hasher = get_default_context().arrow_hasher
+        hasher = _starfix_hasher()
         strict_items = pa.list_(pa.field("item", pa.int64(), nullable=False))
         large = normalize_to_large_types(strict_items)
         assert large == pa.large_list(pa.field("item", pa.int64(), nullable=False))
+        assert isinstance(large, pa.LargeListType)
         assert not large.value_field.nullable
         assert hasher.hash_schema(
             pa.schema([pa.field("x", strict_items)])

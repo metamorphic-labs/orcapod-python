@@ -75,6 +75,7 @@ class TestAggregatedListType:
         """
         converter = get_default_type_converter()
         element_type = converter.python_type_to_arrow_type(Path)
+        assert isinstance(element_type, pa.ExtensionType)
         list_type = aggregated_list_type(element_type, converter, column="c")
         assert list_type == converter.python_type_to_arrow_type(list[Path])
         assert isinstance(list_type, pa.ExtensionType)
