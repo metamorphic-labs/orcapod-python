@@ -60,8 +60,12 @@ class TestCanonicalAnnotationStr:
 
     def test_non_union_matches_formatannotation(self):
         """Non-union types fall through to inspect.formatannotation."""
-        for t in (int, str, bytes, Path):
+        for t in (int, str, bytes, UUID):
             assert canonical_annotation_str(t) == inspect.formatannotation(t)
+
+    def test_relocated_stdlib_type_uses_public_module(self):
+        """Path is 'pathlib.Path' even where it is defined in pathlib._local (3.13)."""
+        assert canonical_annotation_str(Path) == "pathlib.Path"
 
     def test_typing_union_order_independent(self):
         import typing
