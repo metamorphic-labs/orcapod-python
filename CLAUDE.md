@@ -341,6 +341,13 @@ and `as_table()` methods. `all_info=True` sets everything to True.
 
 ### Arrow types
 
+Governing principle (developer, November 9, 2026): minimize convenient inference and hold to
+complete predictability, even when that is more tedious for the user; explicit type conversion
+is always preferred over implicit coercion. So an operator never widens, promotes or picks a
+side when its inputs' types disagree; a result's type never depends on data values, argument
+order or the path the data took; and inferring a type from Python values is a last resort for
+when no type is known.
+
 Respect the Arrow types the inputs already have. Infer an Arrow type from Python values only
 when no Arrow type is known — never call `pa.array(values)` / `pa.Table.from_pylist(rows)`
 without a type for a column whose input type is known, because inference widens `int8` to
@@ -349,11 +356,12 @@ from the data. Aggregating operators (`Batch`, `GroupBy`, `MergeJoin`) build a `
 from the input field's type via `arrow_utils.aggregated_list_type` (directly or through
 `build_aggregated_table`). An operator that round-trips through Polars restores pass-through
 columns' input types afterwards (`arrow_utils.restore_column_types`, or
-`restore_schema_nullability` when nullability is restored too). What an operator does when two
-inputs disagree on a column's Arrow type (width, `string`/`large_string`, timestamp unit,
-decimal precision) is pending (ITL-832; `MergeJoin._resolve_disagreeing_types` keeps the old
-behaviour). `output_schema()` exposes only Python types, so such disagreements are invisible at
-graph-build time.
+`restore_schema_nullability` when nullability is restored too). The rule for multi-input operators
+whose inputs disagree on a column's Arrow type (width, `string`/`large_string`, timestamp
+unit, decimal precision) is being designed under ITL-835. Today's `MergeJoin` behaviour for
+those cases (`MergeJoin._resolve_disagreeing_types`) is pinned by `TestDisagreeingArrowTypes`,
+not endorsed. `output_schema()` exposes only Python types, so such disagreements are
+invisible at graph-build time.
 
 ### Important implementation details
 
@@ -367,7 +375,7 @@ graph-build time.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted
   `list[T]` with source columns reordered to match. `T` is the inputs' Arrow type when both
-  sides agree on it; the rule for disagreeing Arrow types is pending (ITL-832).
+  sides agree on it; the rule for disagreeing Arrow types is pending (ITL-835).
 - Operators predict their output schema (including system tag column names) without
   performing the actual computation. Verify a prediction against
   `unary_static_process(stream).output_schema(...)`, **not** against `process(...)` (which

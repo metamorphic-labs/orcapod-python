@@ -88,29 +88,40 @@ class TestRestoreColumnTypes:
     """``restore_column_types`` undoes a layout change without touching nullability."""
 
     def test_restores_types_and_keeps_nullability(self) -> None:
-        """Listed columns get their reference type back; flags and others stay."""
+        """Listed columns get their reference type back; flags, nulls and others stay."""
         table = pa.Table.from_arrays(
             [
-                pa.array(["a"], pa.large_string()),
-                pa.array([[1]], pa.large_list(pa.int8())),
-                pa.array([1], pa.int64()),
+                pa.array(["a", "b"], pa.large_string()),
+                pa.array(["a", None], pa.large_string()),
+                pa.array([[1], None], pa.large_list(pa.int8())),
+                pa.array([1, 2], pa.int64()),
             ],
             schema=pa.schema(
                 [
                     pa.field("s", pa.large_string(), nullable=False),
+                    pa.field("n", pa.large_string(), nullable=True),
                     pa.field("l", pa.large_list(pa.int8()), nullable=True),
                     pa.field("other", pa.int64(), nullable=True),
                 ]
             ),
         )
         restored = restore_column_types(
-            table, {"s": pa.string(), "l": pa.list_(pa.int8()), "absent": pa.int8()}
+            table,
+            {
+                "s": pa.string(),
+                "n": pa.string(),
+                "l": pa.list_(pa.int8()),
+                "absent": pa.int8(),
+            },
         )
         assert restored.schema == pa.schema(
             [
                 pa.field("s", pa.string(), nullable=False),
+                pa.field("n", pa.string(), nullable=True),
                 pa.field("l", pa.list_(pa.int8()), nullable=True),
                 pa.field("other", pa.int64(), nullable=True),
             ]
         )
+        assert restored.column("n").null_count == 1
+        assert restored.column("l").null_count == 1
         assert restored.to_pylist() == table.to_pylist()
