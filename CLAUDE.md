@@ -339,6 +339,20 @@ and `as_table()` methods. `all_info=True` sets everything to True.
 - **Source delegation** — CSVSource, DictSource, etc. all create an internal
   `ArrowTableSource` and delegate every method to it.
 
+### Arrow types
+
+Respect the Arrow types the inputs already have. Infer an Arrow type from Python values only
+when no Arrow type is known — never call `pa.array(values)` / `pa.Table.from_pylist(rows)`
+without a type for a column whose input type is known, because inference widens `int8` to
+`int64`, `float32` to `double`, picks `string` over `large_string`, and takes decimal precision
+from the data. Aggregating operators (`Batch`, `GroupBy`, `MergeJoin`) build a `list[T]` column
+from the input field's type via `arrow_utils.aggregated_list_type` (directly or through
+`build_aggregated_table`). An operator that round-trips through Polars restores pass-through
+columns' input types afterwards (`arrow_utils.restore_column_types`, or
+`restore_schema_nullability` when nullability is restored too). Inputs that collide with
+different widths or layouts promote to their common type (`pa.unify_schemas(...,
+promote_options="permissive")`), which keeps commutative operators commutative.
+
 ### Important implementation details
 
 - `ArrowTableSource.__init__` raises `ValueError` if any `tag_columns` are not in the table.
@@ -349,8 +363,9 @@ and `as_table()` methods. `all_info=True` sets everything to True.
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - `DerivedSource` before `run()` → raises `ValueError` (no computed records).
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
-- MergeJoin requires colliding data columns to have identical types; merges into sorted
-  `list[T]` with source columns reordered to match.
+- MergeJoin requires colliding data columns to have identical Python types; merges into sorted
+  `list[T]` with source columns reordered to match. `T` is the inputs' Arrow type (promoted to
+  the common type when the two differ only in width or layout).
 - Operators predict their output schema (including system tag column names) without
   performing the actual computation. Verify a prediction against
   `unary_static_process(stream).output_schema(...)`, **not** against `process(...)` (which

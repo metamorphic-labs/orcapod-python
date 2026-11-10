@@ -1726,3 +1726,29 @@ CI job failed.
 **Fix:** Removed `pygraphviz` from `pyproject.toml` and `uv.lock`, and dropped
 `libgraphviz-dev` from all workflows (the `graphviz` apt package stays for `dot`).
 `tests/test_packaging.py` guards against re-adding it.
+
+---
+
+## `src/orcapod/core/operators/merge_join.py` — Arrow types
+
+### MJ2 — `MergeJoin` discards its inputs' Arrow types
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-832
+
+`MergeJoin` built a merged (colliding) column with `pa.array(<python lists>)`, so Arrow inferred
+the element type from the values instead of keeping the input's: `int8`/`int16`/`int32`/`uint8`
+became `int64`, `float32` became `double`, `large_string` became `string`, `large_binary`
+became `binary`, nested lists widened their elements, and decimal precision came from the data
+(`decimal128(5, 2)` became `decimal128(3, 2)`). PR #268 (ITL-813) made the empty path mimic that
+inference. Separately, the Polars join turned every pass-through column into its large layout
+(`string` to `large_string`, `binary` to `large_binary`, `list` to `large_list`, struct children)
+and system-tag record ids from `fixed_size_binary[16]` to `large_binary`; `PolarsFilter` did the
+same.
+
+**Fix:** Merged columns are `list<input type>` via `arrow_utils.aggregated_list_type` /
+`list_array` (shared with `build_aggregated_table`), empty or not; extension elements keep the
+`ListLogicalType` path. Colliding inputs whose Arrow types differ only in width or layout promote
+to the permissive common type, so the result stays commutative. `MergeJoin` and `PolarsFilter`
+restore pass-through columns' input types after the Polars round-trip
+(`arrow_utils.restore_column_types`). The rule is recorded under "Arrow types" in `CLAUDE.md`.
