@@ -7,6 +7,7 @@ StyleRuleSets, and Pipeline.show_graph.
 from __future__ import annotations
 
 import os
+import shutil
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -25,6 +26,16 @@ from orcapod.pipeline.graph import (
     StyleRuleSets,
     render_graph,
     render_graph_dark_theme,
+)
+
+# The tests that render a graph to an image shell out to the Graphviz ``dot``
+# executable. It is an optional system package, so those tests skip without it.
+requires_dot = pytest.mark.skipif(
+    shutil.which("dot") is None,
+    reason=(
+        "Graphviz `dot` executable not found on PATH; install Graphviz to run "
+        "the tests that render a graph to an image"
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -346,6 +357,7 @@ class TestRenderGraphFullPath:
         assert isinstance(result, str)
         assert "digraph" in result
 
+    @requires_dot
     def test_render_with_output_path(
         self, node_graph: OrcaDAG, tmp_path
     ) -> None:
@@ -358,6 +370,7 @@ class TestRenderGraphFullPath:
         assert isinstance(result, str)
         assert os.path.exists(output_file)
 
+    @requires_dot
     def test_render_with_show_mocked(self, node_graph: OrcaDAG) -> None:
         """Exercise the show=True path with matplotlib mocked."""
         renderer = GraphRenderer()
@@ -428,6 +441,7 @@ class TestPipelineShowGraphFullPath:
         assert isinstance(result, str)
         assert "digraph" in result
 
+    @requires_dot
     def test_show_graph_with_show_mocked(
         self, compiled_job: PipelineJob
     ) -> None:
