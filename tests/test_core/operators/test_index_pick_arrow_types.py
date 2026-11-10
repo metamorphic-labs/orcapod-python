@@ -24,6 +24,7 @@ from typing import Any, TypeAlias
 import pyarrow as pa
 import pytest
 
+from orcapod import contexts
 from orcapod.channels import Channel
 from orcapod.contexts import DataContext, get_default_type_converter
 from orcapod.core.operators import (
@@ -639,32 +640,72 @@ def test_no_converter_or_context_held_after_validation(
     assert held == ["_data_context"]
 
 
-@pytest.mark.parametrize(
-    "method",
-    [
-        Index._process_one,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
-        Index._element_arrow_type,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
-        Index.async_execute,
-        Pick._process_one,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
-        Pick._value_arrow_type,  # pyright: ignore[reportPrivateUsage]  # row-time path under test
-        Pick.async_execute,
-    ],
-    ids=[
-        "Index._process_one",
-        "Index._element_arrow_type",
-        "Index.async_execute",
-        "Pick._process_one",
-        "Pick._value_arrow_type",
-        "Pick.async_execute",
-    ],
-)
-def test_row_time_code_never_reads_a_converter_or_context(
-    method: Callable[..., object],
+_OPERATOR_MODULES = frozenset({Index.__module__, Pick.__module__})
+
+
+def _forbid_row_time_context(
+    op: UnaryOperator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Per-row code uses only types resolved at validation from the stream's context."""
-    source = inspect.getsource(method)
-    assert "converter" not in source
-    assert "data_context" not in source
+    """Make any context read by ``op``'s own code fail from now on.
+
+    Reading the operator's own context, or resolving one from the Index or
+    Pick modules, raises ``AssertionError``. Datagrams and streams may still
+    use their own contexts.
+    """
+
+    def forbidden(_self: object) -> object:
+        raise AssertionError(f"{type(op).__name__} read its own context at row time")
+
+    monkeypatch.setattr(type(op), "data_context", property(forbidden))
+    monkeypatch.setattr(type(op), "data_context_key", property(forbidden))
+    original = contexts.resolve_context
+
+    def guarded(
+        context_info: str | DataContext | None = None,
+    ) -> DataContext:
+        caller = inspect.currentframe()
+        module = (
+            caller.f_back.f_globals.get("__name__")
+            if caller and caller.f_back
+            else None
+        )
+        if module in _OPERATOR_MODULES:
+            raise AssertionError(f"{module} resolved a context at row time")
+        return original(context_info)
+
+    monkeypatch.setattr(contexts, "resolve_context", guarded)
+
+
+@CONTEXT_CASES
+@pytest.mark.asyncio
+async def test_row_time_code_never_reads_a_context(
+    make_op: Callable[[], UnaryOperator],
+    make_source: Callable[[], ArrowTableSource],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After validation, sync and streaming rows use only the types resolved there."""
+    source = make_source()
+    op = make_op()
+    op.validate_inputs(source)
+    _forbid_row_time_context(op, monkeypatch)
+    sync_rows = list(op.unary_static_process(source).iter_data())
+    input_ch: Channel[Row] = Channel(buffer_size=16)
+    output_ch: Channel[Row] = Channel(buffer_size=16)
+    for row in source.iter_data():
+        await input_ch.writer.send(row)
+    await input_ch.writer.close()
+    await op.async_execute([input_ch.reader], output_ch.writer)
+    async_rows = await output_ch.reader.collect()
+    assert len(sync_rows) == len(async_rows) == 2
+
+
+def test_pick_fallback_never_reads_a_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pick's fallback value type, unreachable through sources, reads no context."""
+    op = Pick("d", "k")
+    op.validate_inputs(_pick_source())
+    _forbid_row_time_context(op, monkeypatch)
+    struct_type = pa.struct([("k", pa.int16())])
+    assert op._value_arrow_type(struct_type) == pa.int64()  # pyright: ignore[reportPrivateUsage]  # fallback is unreachable publicly
 
 
 def _validate_with_unmappable(
