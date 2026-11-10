@@ -705,30 +705,30 @@ class TestContentHashes:
             pa.table({"x": pa.array([1], pa.int8())})
         ) != hasher.hash_table(pa.table({"x": pa.array([1], pa.int64())}))
 
-    def test_non_nullable_list_items_lose_nullability_under_normalization(
-        self,
-    ) -> None:
-        """Known exception: normalizing ``list<item not null>`` changes its schema hash.
+    def test_non_nullable_list_items_keep_their_hash(self) -> None:
+        """Normalizing ``list<item not null>`` keeps the flag, and so its hashes.
 
-        ``normalize_to_large_types`` rebuilds a list's value field as
-        ``large_list(element_type)``, dropping the item's non-null flag, and
-        the Arrow hasher includes that flag in the schema hash (value hashes
-        agree). Every other normalization is hash-identical. Whether to make
-        ``normalize_to_large_types`` keep the item field is pending a developer
-        decision; this test pins today's behaviour so that decision shows up
-        as a deliberate change here.
+        ``normalize_to_large_types`` used to rebuild a list's value field as
+        ``large_list(element_type)``, dropping the item's non-null flag, which
+        the Arrow hasher includes in the schema hash (ITL-842 audits the wider
+        question). A merged column of such lists keeps the flag too.
         """
         hasher = get_default_context().arrow_hasher
         strict_items = pa.list_(pa.field("item", pa.int64(), nullable=False))
         large = normalize_to_large_types(strict_items)
-        assert large == pa.large_list(pa.int64())
-        assert large.value_field.nullable
+        assert large == pa.large_list(pa.field("item", pa.int64(), nullable=False))
+        assert not large.value_field.nullable
         assert hasher.hash_schema(
             pa.schema([pa.field("x", strict_items)])
-        ) != hasher.hash_schema(pa.schema([pa.field("x", large)]))
+        ) == hasher.hash_schema(pa.schema([pa.field("x", large)]))
         assert hasher.hash_table(
             pa.table({"x": pa.array([[1]], type=strict_items)})
         ) == hasher.hash_table(pa.table({"x": pa.array([[1]], type=large)}))
+
+        result = MergeJoin().static_process(
+            *_pair(strict_items, strict_items, [[1], [2]], 2)
+        )
+        assert result.as_table().schema.field("x").type == pa.large_list(large)
 
     @pytest.mark.parametrize("arrow_type", [pa.int64(), pa.string()], ids=str)
     def test_layout_change_keeps_merge_join_hashes(

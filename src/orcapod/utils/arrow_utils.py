@@ -93,7 +93,10 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
     Recursively convert Arrow types to their large variants where available.
 
     This ensures consistent schema representation regardless of the original
-    type choices (e.g., string vs large_string, binary vs large_binary).
+    type choices (e.g., string vs large_string, binary vs large_binary). Only
+    layouts change: every nested field keeps its name, nullability and
+    metadata, and widths are untouched, so the Arrow hasher gives the
+    normalized type the same schema and value hashes.
 
     Args:
         arrow_type: Arrow data type to normalize
@@ -122,70 +125,58 @@ def normalize_to_large_types(arrow_type: "pa.DataType") -> "pa.DataType":
         return pa.large_string()
     elif pa.types.is_binary(arrow_type) or pa.types.is_binary_view(arrow_type):
         return pa.large_binary()
-    elif pa.types.is_list(arrow_type):
-        # Regular list -> large_list with normalized element type
-        element_type = normalize_to_large_types(arrow_type.value_type)
-        return pa.large_list(element_type)
-
-    # Large variants and fixed-size lists stay as-is (already normalized or no large variant)
     elif pa.types.is_large_string(arrow_type) or pa.types.is_large_binary(arrow_type):
         return arrow_type
-    elif pa.types.is_large_list(arrow_type):
-        # Still need to normalize the element type
-        element_type = normalize_to_large_types(arrow_type.value_type)
-        return pa.large_list(element_type)
+    # Nested types: every nested field is rebuilt with ``Field.with_type`` so
+    # its name, nullability and metadata are kept. Dropping a non-null flag
+    # would change the type's Arrow schema hash.
+    elif pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        return pa.large_list(_normalize_field_to_large_types(arrow_type.value_field))
     elif pa.types.is_fixed_size_list(arrow_type):
-        # Fixed-size lists don't have large variants, but normalize element type
-        element_type = normalize_to_large_types(arrow_type.value_type)
-        return pa.list_(element_type, arrow_type.list_size)
-
-    # Handle struct types recursively
+        # Fixed-size lists have no large variant; normalize the element only.
+        return pa.list_(
+            _normalize_field_to_large_types(arrow_type.value_field),
+            arrow_type.list_size,
+        )
     elif pa.types.is_struct(arrow_type):
-        normalized_fields = []
-        for field in arrow_type:
-            normalized_field_type = normalize_to_large_types(field.type)
-            normalized_fields.append(
-                pa.field(
-                    field.name,
-                    normalized_field_type,
-                    nullable=field.nullable,
-                    metadata=field.metadata,
-                )
-            )
-        return pa.struct(normalized_fields)
-
-    # Handle map types (key and value types)
+        return pa.struct([_normalize_field_to_large_types(f) for f in arrow_type])
     elif pa.types.is_map(arrow_type):
-        normalized_key_type = normalize_to_large_types(arrow_type.key_type)
-        normalized_value_type = normalize_to_large_types(arrow_type.item_type)
-        return pa.map_(normalized_key_type, normalized_value_type)
-
-    # Handle union types
+        return pa.map_(
+            _normalize_field_to_large_types(arrow_type.key_field),
+            _normalize_field_to_large_types(arrow_type.item_field),
+            keys_sorted=arrow_type.keys_sorted,
+        )
     elif pa.types.is_union(arrow_type):
-        # Union types contain multiple child types
-        normalized_child_types = []
-        for i in range(arrow_type.num_fields):
-            child_field = arrow_type[i]
-            normalized_child_type = normalize_to_large_types(child_field.type)
-            normalized_child_types.append(
-                pa.field(child_field.name, normalized_child_type)
-            )
-
-        # Reconstruct union with normalized child types
+        children = [
+            _normalize_field_to_large_types(arrow_type.field(i))
+            for i in range(arrow_type.num_fields)
+        ]
         if isinstance(arrow_type, pa.SparseUnionType):
-            return pa.sparse_union(normalized_child_types)
-        else:  # dense union
-            return pa.dense_union(normalized_child_types)
-
-    # Handle dictionary types
+            return pa.sparse_union(children, arrow_type.type_codes)
+        return pa.dense_union(children, arrow_type.type_codes)
     elif pa.types.is_dictionary(arrow_type):
         # Normalize the value type (dictionary values), keep index type as-is
-        normalized_value_type = normalize_to_large_types(arrow_type.value_type)
-        return pa.dictionary(arrow_type.index_type, normalized_value_type)  # type: ignore
+        return pa.dictionary(
+            arrow_type.index_type,
+            normalize_to_large_types(arrow_type.value_type),
+            ordered=arrow_type.ordered,
+        )
 
     # All other types (int, float, bool, date, timestamp, etc.) don't have large variants
     else:
         return arrow_type
+
+
+def _normalize_field_to_large_types(field: "pa.Field") -> "pa.Field":
+    """Return ``field`` with its type normalized, keeping name, nullability and metadata.
+
+    Args:
+        field: A nested field (list value, struct child, map key or item, ...).
+
+    Returns:
+        The same field with ``normalize_to_large_types`` applied to its type.
+    """
+    return field.with_type(normalize_to_large_types(field.type))
 
 
 def normalize_schema_to_large_types(schema: "pa.Schema") -> "pa.Schema":
