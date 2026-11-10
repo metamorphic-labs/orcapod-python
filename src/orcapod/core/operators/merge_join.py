@@ -17,13 +17,53 @@ else:
     pl = LazyModule("polars")
 
 
-def _list_array(values: list[Any], element_type: "pa.DataType | None") -> "pa.Array[Any]":
+def _inferred_type(arrow_type: "pa.DataType") -> "pa.DataType":
+    """Return the type Arrow infers for Python values read from ``arrow_type``.
+
+    ``pa.array`` over Python values ignores the width of the column they came
+    from: any integer becomes ``int64``, any float ``double``, any string
+    ``string`` and any binary ``binary``, and nested lists become ``list``.
+    Types whose inference depends on the values themselves (temporal,
+    decimal, map, ...) are returned unchanged.
+
+    Args:
+        arrow_type: The Arrow type the values were read from.
+
+    Returns:
+        The Arrow type ``pa.array`` infers for those values.
+    """
+    if pa.types.is_integer(arrow_type):
+        return pa.int64()
+    if pa.types.is_floating(arrow_type):
+        return pa.float64()
+    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return pa.string()
+    if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
+        return pa.binary()
+    if (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        return pa.list_(_inferred_type(arrow_type.value_type))
+    if pa.types.is_struct(arrow_type):
+        return pa.struct(
+            [field.with_type(_inferred_type(field.type)) for field in arrow_type]
+        )
+    return arrow_type
+
+
+def _list_array(
+    values: list[Any], element_type: "pa.DataType | None"
+) -> "pa.Array[Any]":
     """Build the Arrow array for a merged (list-valued) column.
 
     With rows present the type is inferred from the values. With zero rows
     inference yields a ``null``-typed array, which cannot be a non-nullable
-    field and does not match the predicted ``list[T]`` schema, so the list
-    type is built from ``element_type`` instead.
+    field and does not match the predicted ``list[T]`` schema. The list type
+    is then built from ``element_type``, mapped to what inference would give
+    for its values, so an empty result has the same Arrow type as a non-empty
+    one and the two can be concatenated.
 
     Args:
         values: One list per output row.
@@ -38,7 +78,7 @@ def _list_array(values: list[Any], element_type: "pa.DataType | None") -> "pa.Ar
     if isinstance(element_type, pa.ExtensionType):
         # Arrow cannot embed an extension type in a list value field.
         element_type = element_type.storage_type
-    return pa.array(values, type=pa.list_(element_type))
+    return pa.array(values, type=pa.list_(_inferred_type(element_type)))
 
 
 class MergeJoin(BinaryOperator):

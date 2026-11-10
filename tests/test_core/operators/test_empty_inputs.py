@@ -310,6 +310,45 @@ class TestMergeJoinEmptyInput:
         _, data_schema = result.output_schema()
         assert data_schema["label"] == list[str]
 
+    @pytest.mark.parametrize(
+        ("arrow_type", "values"),
+        [
+            (pa.int8(), [1, 2]),
+            (INT, [1, 2]),
+            (pa.float32(), [1.5, 2.5]),
+            (pa.string(), ["a", "b"]),
+            (STR, ["a", "b"]),
+            (pa.large_binary(), [b"a", b"b"]),
+            (pa.bool_(), [False, True]),
+            (pa.large_list(pa.int8()), [[1], [2]]),
+        ],
+        ids=lambda v: str(v) if isinstance(v, pa.DataType) else "",
+    )
+    def test_colliding_column_type_matches_non_empty_result(self, arrow_type, values):
+        """An empty result types a merged column exactly as a non-empty one does.
+
+        Otherwise empty and non-empty results of the same join could not be
+        concatenated.
+        """
+
+        def merged_type(rows: int) -> pa.DataType:
+            """Return the merged column's Arrow type for ``rows`` input rows."""
+            streams = [
+                _stream(
+                    {
+                        "probe": (INT, list(range(rows))),
+                        "x": (arrow_type, values[:rows]),
+                    },
+                    ["probe"],
+                    nullable=False,
+                )
+                for _ in range(2)
+            ]
+            table = MergeJoin().static_process(*streams).as_table()
+            return table.schema.field("x").type
+
+        assert merged_type(0) == merged_type(2)
+
     def test_no_shared_tags(self):
         """With no shared tag the helper key is the only join key."""
         streams = [
