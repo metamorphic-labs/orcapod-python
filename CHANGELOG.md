@@ -297,8 +297,10 @@ not on PyPI at the time of writing; install it from its repository.
     is running (ITL-617 #260);
   - no longer crashes on a zero-row batch; the Arrow schema is established once, from the
     declared schema or the first non-empty batch (ENG-952 #261).
-- PLACEHOLDER (pending merge): `iter_data` dropped rows when columns had mismatched chunk
-  layouts. (ITL-816)
+- `ArrowTableStream.iter_data()` no longer drops rows or pairs a tag with another row's
+  data when the tag and data columns have different chunk layouts (which result-cache
+  hits could produce), and rows after the first record batch get their own source info.
+  Public API, schemas, hashes and record ids are unchanged. (ITL-816 #270)
 - PLACEHOLDER (pending merge): `MergeJoin` on an empty input. (ITL-813)
 - PLACEHOLDER (pending merge): system tags misaligned across runs after a join. (ITL-817)
 
