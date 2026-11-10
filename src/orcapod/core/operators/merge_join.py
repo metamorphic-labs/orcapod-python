@@ -199,9 +199,7 @@ class MergeJoin(BinaryOperator):
 
         # Colliding data columns must have identical types since they are
         # merged into list[T] — both sides must contribute the same T.
-        colliding_keys = set(left_data_schema.keys()) & set(
-            right_data_schema.keys()
-        )
+        colliding_keys = set(left_data_schema.keys()) & set(right_data_schema.keys())
         for key in colliding_keys:
             left_type = left_data_schema[key]
             right_type = right_data_schema[key]
@@ -245,9 +243,7 @@ class MergeJoin(BinaryOperator):
         )
 
         merged_data_schema = {}
-        all_data_keys = set(left_data_schema.keys()) | set(
-            right_data_schema.keys()
-        )
+        all_data_keys = set(left_data_schema.keys()) | set(right_data_schema.keys())
         for key in all_data_keys:
             if key in colliding_schema:
                 merged_data_schema[key] = list[colliding_schema[key]]
@@ -370,9 +366,18 @@ class MergeJoin(BinaryOperator):
         # Only capture tag and data columns — system tag and source columns
         # are internally created with Arrow's all-nullable default; those fall
         # through to null-count inference below.
-        captured_cols = set(left_tag_keys) | set(left_data_keys) | set(right_tag_keys) | set(right_data_keys)
-        left_nullable = {f.name: f.nullable for f in left_table.schema if f.name in captured_cols}
-        right_nullable = {f.name: f.nullable for f in right_table.schema if f.name in captured_cols}
+        captured_cols = (
+            set(left_tag_keys)
+            | set(left_data_keys)
+            | set(right_tag_keys)
+            | set(right_data_keys)
+        )
+        left_nullable = {
+            f.name: f.nullable for f in left_table.schema if f.name in captured_cols
+        }
+        right_nullable = {
+            f.name: f.nullable for f in right_table.schema if f.name in captured_cols
+        }
         # Build expected output nullable map
         output_nullable: dict[str, bool] = {}
         output_nullable.update(left_nullable)
@@ -508,14 +513,18 @@ class MergeJoin(BinaryOperator):
         # type back (undoing Polars' layout changes), merged columns keep the
         # list type built above, and nullability comes from the captured input
         # flags, falling back to null-count inference for unexpected columns.
-        result_schema = pa.schema([
-            pa.field(
-                col_name,
-                passthrough_types.get(col_name, joined.schema.field(col_name).type),
-                nullable=output_nullable.get(col_name, joined.column(i).null_count > 0),
-            )
-            for i, col_name in enumerate(joined.column_names)
-        ])
+        result_schema = pa.schema(
+            [
+                pa.field(
+                    col_name,
+                    passthrough_types.get(col_name, joined.schema.field(col_name).type),
+                    nullable=output_nullable.get(
+                        col_name, joined.column(i).null_count > 0
+                    ),
+                )
+                for i, col_name in enumerate(joined.column_names)
+            ]
+        )
         joined = joined.cast(result_schema)
         return ArrowTableStream(
             joined,
