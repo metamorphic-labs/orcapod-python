@@ -88,7 +88,9 @@ def canonical_annotation_str(
         args = getattr(annotation, "__args__", None) or ()
         origin_str = canonical_annotation_str(origin, type_converter)
         if args:
-            args_str = ", ".join(canonical_annotation_str(a, type_converter) for a in args)
+            args_str = ", ".join(
+                canonical_annotation_str(a, type_converter) for a in args
+            )
             return f"{origin_str}[{args_str}]"
         return origin_str
 
@@ -142,7 +144,9 @@ def _to_path(file_path: PathLike) -> Path | UPath:
     return Path(file_path)
 
 
-def hash_file(file_path: PathLike, algorithm="sha256", buffer_size=65536) -> ContentHash:
+def hash_file(
+    file_path: PathLike, algorithm="sha256", buffer_size=65536
+) -> ContentHash:
     """Calculate the hash of a file using the specified algorithm.
 
     Supports both local ``pathlib.Path`` and remote ``UPath`` objects.
@@ -262,8 +266,12 @@ def get_function_signature(
     for name, param in sig.parameters.items():
         annotation = param.annotation
         param_str = stabilize_type_names(str(param), annotation)
-        if annotation is not inspect.Parameter.empty and is_union_annotation(annotation):
-            old_ann = stabilize_type_names(inspect.formatannotation(annotation), annotation)
+        if annotation is not inspect.Parameter.empty and is_union_annotation(
+            annotation
+        ):
+            old_ann = stabilize_type_names(
+                inspect.formatannotation(annotation), annotation
+            )
             new_ann = canonical_annotation_str(annotation)
             # Replace ": <old_ann>" with ": <new_ann>" (first occurrence only).
             # The ": " prefix distinguishes the annotation from the default value.

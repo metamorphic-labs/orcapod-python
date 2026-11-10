@@ -280,7 +280,7 @@ class DataFunctionProxy(DataFunctionBase):
             # Also compare via serialized form in case type repr differs
             bound_input = {
                 k: stabilize_type_names(str(v), v)
-                    for k, v in data_function.input_data_schema.items()
+                for k, v in data_function.input_data_schema.items()
             }
             if bound_input != self._raw_input_schema_dict:
                 mismatches.append(
@@ -291,7 +291,7 @@ class DataFunctionProxy(DataFunctionBase):
         if data_function.output_data_schema != self._output_data_schema:
             bound_output = {
                 k: stabilize_type_names(str(v), v)
-                    for k, v in data_function.output_data_schema.items()
+                for k, v in data_function.output_data_schema.items()
             }
             if bound_output != self._raw_output_schema_dict:
                 mismatches.append(
