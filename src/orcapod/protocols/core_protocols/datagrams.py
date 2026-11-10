@@ -499,7 +499,8 @@ class DatagramProtocol(ContentIdentifiableProtocol, DataContextAwareProtocol, Pr
 
     def with_columns(
         self,
-        column_types: Mapping[str, DataType | pa.DataType] | None = None,
+        column_types: Mapping[str, DataType | pa.DataType | pa.Field[Any]]  # pyright: ignore[reportExplicitAny]  # Field is invariant; Any admits every Arrow type
+        | None = None,
         **updates: DataValue,
     ) -> Self:
         """
@@ -511,17 +512,19 @@ class DatagramProtocol(ContentIdentifiableProtocol, DataContextAwareProtocol, Pr
 
         Args:
             column_types: Optional type specifications for new columns. Each entry is
-                either a Python type (converted to Arrow as usual) or a ``pa.DataType``
-                (used verbatim, nullable only when the value is ``None``). Columns
-                without an entry have their type inferred from the provided value; a
-                ``None`` value is inferred as ``str | None``.
+                a Python type (converted to Arrow as usual), a ``pa.DataType`` (used
+                verbatim, nullable only when the value is ``None``), or a ``pa.Field``
+                (used verbatim, nullability included; its name is replaced by the
+                column's). Columns without an entry have their type inferred from the
+                provided value; a ``None`` value is inferred as ``str | None``.
             **kwargs: New columns as keyword arguments.
 
         Returns:
             New datagram instance with additional data columns.
 
         Raises:
-            ValueError: If any specified column already exists.
+            ValueError: If any specified column already exists, or a column declared
+                by a non-nullable ``pa.Field`` has the value ``None``.
 
         Example:
             >>> expanded = datagram.with_columns(

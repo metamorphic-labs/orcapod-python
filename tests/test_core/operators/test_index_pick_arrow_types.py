@@ -14,6 +14,7 @@ for ITL-834, so expected types are the large-normalized input types.
 
 from __future__ import annotations
 
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -347,6 +348,113 @@ def test_fail_on_miss_raises(case: OpCase, out: str | None) -> None:
     """``fail_on_miss=True`` raises instead of producing an empty result."""
     with pytest.raises(RuntimeError, match="fail_on_miss=True"):
         _ = case.make_op(out=out, fail_on_miss=True)(case.make_source(False)).as_table()
+
+
+# ── extracted nullability: stable per column, equal to the prediction ──────
+
+
+def _index_null_source(null_first: bool) -> ArrowTableSource:
+    """Build an ``Index`` source whose element 0 is ``None`` in one row only."""
+    values = [[None, 1], [5]] if null_first else [[5], [None]]
+    return _source(lst=pa.array(values, pa.list_(pa.int8())))
+
+
+def _pick_null_source(null_first: bool) -> ArrowTableSource:
+    """Build a ``Pick`` source whose value at key ``k`` is ``None`` in one row only."""
+    rows: list[list[dict[str, Any]]] = [
+        [{"key": "k", "value": None}],
+        [{"key": "k", "value": 2}],
+    ]
+    if not null_first:
+        rows.reverse()
+    return _source(d=pa.array(rows, _dict_type(pa.int16())))
+
+
+@dataclass(frozen=True)
+class NullCase:
+    """An operator, a source with one ``None`` extraction, and the expected error."""
+
+    label: str
+    make_op: Callable[..., UnaryOperator]
+    make_source: Callable[[bool], ArrowTableSource]
+    message: str
+
+
+NULL_CASES = [
+    NullCase(
+        "index",
+        lambda **kw: Index("lst", 0, **kw),
+        _index_null_source,
+        "Index: element 0 of column 'lst' is None",
+    ),
+    NullCase(
+        "pick",
+        lambda **kw: Pick("d", "k", **kw),
+        _pick_null_source,
+        "Pick: value of key 'k' in column 'd' is None",
+    ),
+]
+NULL_OP = pytest.mark.parametrize("case", NULL_CASES, ids=[c.label for c in NULL_CASES])
+NULL_FIRST = pytest.mark.parametrize(
+    "null_first", [True, False], ids=["null_first", "null_last"]
+)
+
+
+def _null_row_pattern(case: NullCase, null_first: bool) -> str:
+    """Regex for the error: operator, column, and the tag of the ``None`` row."""
+    tag_value = 1 if null_first else 2
+    return rf"{case.message} in the row with tag \{{.*'{TAG}': {tag_value}"
+
+
+@NULL_OP
+@OUT
+@MISS
+@NULL_FIRST
+def test_none_extraction_raises_value_error(
+    case: NullCase, out: str | None, fail_on_miss: bool, null_first: bool
+) -> None:
+    """A ``None`` element / value raises a clear ``ValueError``, not ``ArrowInvalid``.
+
+    Mixing a ``None`` row with a non-null row used to give the rows different
+    nullability, so materializing failed in ``pa.concat_tables``.
+    """
+    op = case.make_op(out=out, fail_on_miss=fail_on_miss)
+    with pytest.raises(ValueError, match=_null_row_pattern(case, null_first)):
+        _ = op(case.make_source(null_first)).as_table()
+
+
+@NULL_OP
+@OUT
+@pytest.mark.asyncio
+async def test_none_extraction_raises_value_error_streaming(
+    case: NullCase, out: str | None
+) -> None:
+    """The streaming path raises the same ``ValueError``."""
+    with pytest.raises(ValueError, match=_null_row_pattern(case, True)):
+        _ = await _run_async(case.make_op(out=out), case.make_source(True))
+
+
+@OP
+@OUT
+def test_extracted_column_nullability_matches_prediction(
+    case: OpCase, out: str | None
+) -> None:
+    """Every result marks the extracted column ``NOT NULL``, as ``int`` predicts.
+
+    The predicted type of an element / value is never Optional, so the column
+    is non-nullable in the non-empty result, in each row, and in the
+    all-skipped result alike.
+    """
+    target = out or case.target
+    op = case.make_op(out=out)
+    source = case.make_source(True)
+    assert type(None) not in typing.get_args(op.output_schema(source)[1][target])
+    hit = op(source).as_table()
+    miss = case.make_op(out=out)(case.make_source(False)).as_table()
+    assert not hit.schema.field(target).nullable
+    assert not miss.schema.field(target).nullable
+    for _, data in op(source).iter_data():
+        assert not data.arrow_schema().field(target).nullable
 
 
 # ── streaming path and a generic guard for row-wise operators ──────────────

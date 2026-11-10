@@ -830,14 +830,15 @@ class Datagram(ContentIdentifiableBase):
     def _new_columns_table(
         self,
         updates: dict[str, DataValue],
-        column_types: Mapping[str, DataType | pa.DataType],
+        column_types: Mapping[str, DataType | pa.DataType | pa.Field[Any]],  # pyright: ignore[reportExplicitAny]  # Field is invariant
     ) -> pa.Table:
         """Build a one-row Arrow table holding only the genuinely new columns.
 
         Each column's Arrow type comes from ``column_types`` when given there:
-        a ``pa.DataType`` is used verbatim (nullable only when the value is
-        ``None``), a Python type is converted. Columns absent from
-        ``column_types`` are inferred from their value.
+        a ``pa.Field`` is used verbatim, nullability included (only its name is
+        replaced by the column's); a ``pa.DataType`` is used verbatim (nullable
+        only when the value is ``None``); a Python type is converted. Columns
+        absent from ``column_types`` are inferred from their value.
 
         Args:
             updates: New column names mapped to their values.
@@ -845,6 +846,10 @@ class Datagram(ContentIdentifiableBase):
 
         Returns:
             A one-row table whose columns follow the order of ``updates``.
+
+        Raises:
+            ValueError: If a column declared by a non-nullable ``pa.Field`` has
+                the value ``None``.
         """
         arrow_fields: dict[str, pa.Field[pa.DataType]] = {}
         python_schema: dict[str, DataType] = {}
@@ -852,7 +857,14 @@ class Datagram(ContentIdentifiableBase):
             if name not in column_types:
                 continue
             declared = column_types[name]
-            if isinstance(declared, pa.DataType):
+            if isinstance(declared, pa.Field):
+                if updates[name] is None and not declared.nullable:
+                    raise ValueError(
+                        f"Column {name!r} is declared non-nullable"
+                        + f" ({declared}) but its value is None"
+                    )
+                arrow_fields[name] = declared.with_name(name)
+            elif isinstance(declared, pa.DataType):
                 arrow_fields[name] = pa.field(
                     name, declared, nullable=updates[name] is None
                 )
@@ -885,7 +897,8 @@ class Datagram(ContentIdentifiableBase):
 
     def with_columns(
         self,
-        column_types: Mapping[str, DataType | pa.DataType] | None = None,
+        column_types: Mapping[str, DataType | pa.DataType | pa.Field[Any]]  # pyright: ignore[reportExplicitAny]  # Field is invariant; Any admits every Arrow type
+        | None = None,
         **updates: DataValue,
     ) -> Self:
         """Return a copy with new data columns added.
@@ -898,8 +911,10 @@ class Datagram(ContentIdentifiableBase):
 
         Args:
             column_types: Optional types for some or all new columns. A
-                ``pa.DataType`` is used verbatim (nullable only when the value
-                is ``None``); a Python type is converted.
+                ``pa.Field`` is used verbatim, nullability included (its name
+                is replaced by the column's); a ``pa.DataType`` is used
+                verbatim (nullable only when the value is ``None``); a Python
+                type is converted.
             **updates: New column names mapped to their values.
 
         Returns:
@@ -907,7 +922,8 @@ class Datagram(ContentIdentifiableBase):
             are given.
 
         Raises:
-            ValueError: If any named column already exists.
+            ValueError: If any named column already exists, or a column
+                declared by a non-nullable ``pa.Field`` has the value ``None``.
         """
         if not updates:
             return self
@@ -925,7 +941,7 @@ class Datagram(ContentIdentifiableBase):
             )
 
         has_arrow_types = column_types is not None and any(
-            isinstance(t, pa.DataType) for t in column_types.values()
+            isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()
         )
         if self._data_table is not None or has_arrow_types:
             # Arrow-native path whenever an Arrow type is known — the table is
@@ -951,7 +967,7 @@ class Datagram(ContentIdentifiableBase):
                     {
                         k: t
                         for k, t in column_types.items()
-                        if not isinstance(t, pa.DataType)
+                        if not isinstance(t, (pa.DataType, pa.Field))
                     }
                 )
             inferred = infer_python_schema_from_pylist_data([new_data])

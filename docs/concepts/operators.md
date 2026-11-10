@@ -218,6 +218,24 @@ You can also filter by exact values using `constraints`:
 filt = PolarsFilter(constraints={"subject_id": "mouse_01"})
 ```
 
+### Index and Pick
+
+Project one element out of a container-valued data column:
+
+- **`Index(column, i, out=None, fail_on_miss=False)`** -- the element at position `i` of a
+  list column
+- **`Pick(column, key, out=None, fail_on_miss=False)`** -- the value at `key` of a dict column
+
+With `out=None` the extracted value replaces the column in place; with `out="name"` it is added
+as a new column and the original is kept. A row whose list is too short, or whose dict lacks the
+key, is skipped (or raises `RuntimeError` with `fail_on_miss=True`).
+
+Every other column keeps its exact input Arrow type, and the extracted column takes the input's
+element or value Arrow type (a `list<int8>` column yields `int8`). The extracted column is
+`NOT NULL`: its predicted type (`int`, not `int | None`) is not Optional, so an element or value
+that is `None` raises `ValueError` naming the operator, the column and the row's tag, whatever
+`fail_on_miss` is.
+
 ## Using operators
 
 All operators follow the same interface. Call `.process()` with one or more input streams:

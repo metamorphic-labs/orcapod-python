@@ -507,7 +507,8 @@ class Data(Datagram):
 
     def with_columns(
         self,
-        column_types: Mapping[str, DataType | pa.DataType] | None = None,
+        column_types: Mapping[str, DataType | pa.DataType | pa.Field[Any]]  # pyright: ignore[reportExplicitAny]  # Field is invariant; Any admits every Arrow type
+        | None = None,
         **updates: DataValue,
     ) -> Self:
         """Return a copy with new data columns, each with empty source info.

@@ -35,6 +35,12 @@ class Pick(UnaryOperator):
     For extension-type struct columns (Pydantic, dataclass) the field
     existence is validated at build time and guaranteed at runtime.
 
+    The extracted column keeps the value's Arrow type (``dict[str, int16]``
+    yields ``int16``). Its nullability follows the predicted output type, which
+    is not Optional for dict values, so the column is ``NOT NULL``. A value that
+    is ``None`` therefore raises ``ValueError`` (whatever ``fail_on_miss`` is),
+    naming the operator, the column and the row's tag.
+
     Args:
         column: Name of the data column to project into.
         key: Dict key or struct field name to extract.
@@ -67,6 +73,19 @@ class Pick(UnaryOperator):
         # fail_on_miss intentionally excluded — it controls error behaviour,
         # not the functional transformation.
         return (self.__class__.__name__, self.column, self.key, self.out)
+
+    def _output_nullable(self) -> bool:
+        """Return whether the projected column is nullable.
+
+        Nullability follows the predicted output type: the column is nullable
+        only when that type is Optional. The rule is the same for every row and
+        for the all-skipped result, so the materialized schema always equals
+        the predicted ``output_schema``.
+
+        Returns:
+            True when the predicted output type admits ``None``.
+        """
+        return type(None) in typing.get_args(self._output_type)
 
     def _value_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
         """Return the Arrow type of the value picked from a ``column_type`` column.
@@ -214,6 +233,8 @@ class Pick(UnaryOperator):
 
         Raises:
             RuntimeError: If the key is absent and ``fail_on_miss=True``.
+            ValueError: If the extracted value is ``None`` but the predicted
+                output type is not Optional.
         """
         col_val = data[self.column]
 
@@ -235,11 +256,23 @@ class Pick(UnaryOperator):
                 return None
             extracted = col_val[self.key]
 
+        nullable = self._output_nullable()
+        if extracted is None and not nullable:
+            raise ValueError(
+                f"Pick: value of key {self.key!r} in column {self.column!r} is"
+                + f" None in the row with tag {tag}, but the output type"
+                + f" {self._output_type} is not Optional."
+            )
+
         old_src = data.source_info().get(self.column)
         new_src = f"{old_src}[{self.key!r}]" if old_src else None
 
-        value_type = self._value_arrow_type(
-            arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+        value_field = pa.field(
+            self.out or self.column,
+            self._value_arrow_type(
+                arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+            ),
+            nullable=nullable,
         )
         if self.out is None:
             # Replace column in place: drop the old (with its stale type), re-add
@@ -249,7 +282,7 @@ class Pick(UnaryOperator):
             new_data = (
                 data.drop(self.column)
                 .with_columns(
-                    column_types={self.column: value_type},
+                    column_types={self.column: value_field},
                     **{self.column: extracted},
                 )
                 .select(*column_order)
@@ -258,7 +291,7 @@ class Pick(UnaryOperator):
         else:
             # Add new column; original stays unchanged.
             new_data = data.with_columns(
-                column_types={self.out: value_type},
+                column_types={self.out: value_field},
                 **{self.out: extracted},
             ).with_source_info(**{self.out: new_src})
 
@@ -306,7 +339,7 @@ class Pick(UnaryOperator):
                 self._value_arrow_type(
                     arrow_utils.column_arrow_type(input_schema, self.column)
                 ),
-                nullable=type(None) in typing.get_args(self._output_type),
+                nullable=self._output_nullable(),
             )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)

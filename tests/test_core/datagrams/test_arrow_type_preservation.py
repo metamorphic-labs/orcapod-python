@@ -169,6 +169,41 @@ class TestNewColumnTypes:
         assert out["a"] == 5
         assert out.schema()["a"] is int
 
+    def test_arrow_field_used_verbatim_with_nullability(
+        self, cls: type[Datagram], load_dict: bool
+    ) -> None:
+        """A declared ``pa.Field`` keeps its type and nullability; the key names it."""
+        declared = pa.field("ignored", pa.int8(), nullable=True)
+        out = _build(cls, load_dict).with_columns(column_types={"a": declared}, a=5)
+        field = out.as_table().schema.field("a")
+        assert field.type == pa.int8()
+        assert field.nullable
+        assert out["a"] == 5
+
+    def test_nullable_field_schema_stable_across_values(
+        self, cls: type[Datagram], load_dict: bool
+    ) -> None:
+        """A nullable ``pa.Field`` gives ``None`` and non-null rows one schema."""
+        declared = pa.field("a", pa.int8(), nullable=True)
+        tables = [
+            _build(cls, load_dict)
+            .with_columns(column_types={"a": declared}, a=value)
+            .as_table()
+            for value in (None, 5)
+        ]
+        assert tables[0].schema == tables[1].schema
+        assert pa.concat_tables(tables).column("a").to_pylist() == [None, 5]
+
+    def test_non_nullable_field_rejects_none(
+        self, cls: type[Datagram], load_dict: bool
+    ) -> None:
+        """A ``None`` value for a non-nullable ``pa.Field`` raises ``ValueError``."""
+        declared = pa.field("a", pa.int8(), nullable=False)
+        with pytest.raises(ValueError, match="declared non-nullable"):
+            _ = _build(cls, load_dict).with_columns(
+                column_types={"a": declared}, a=None
+            )
+
     def test_python_typed_new_column_unchanged(
         self, cls: type[Datagram], load_dict: bool
     ) -> None:

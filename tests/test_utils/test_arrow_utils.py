@@ -939,10 +939,10 @@ class TestColumnArrowType:
     def test_missing_column_raises_key_error(self) -> None:
         """An absent column raises ``KeyError``, as ``Schema.field`` does."""
         with pytest.raises(KeyError):
-            column_arrow_type(pa.schema([pa.field("a", pa.int8())]), "b")
+            _ = column_arrow_type(pa.schema([pa.field("a", pa.int8())]), "b")
 
     def test_duplicate_column_raises_key_error(self) -> None:
         """An ambiguous (duplicated) column name raises ``KeyError``."""
         schema = pa.schema([pa.field("a", pa.int8()), pa.field("a", pa.int16())])
         with pytest.raises(KeyError):
-            column_arrow_type(schema, "a")
+            _ = column_arrow_type(schema, "a")

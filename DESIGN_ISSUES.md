@@ -1800,3 +1800,12 @@ Arrow schema. `Index`/`Pick` derive the extracted type from the input column's A
 keep the in-place column's position, and build the empty result from the input's Arrow
 schema. Rule: whatever Arrow types the inputs have are respected; inferring from Python
 values is reserved for when no Arrow type is known.
+
+The extracted column's nullability is the same for every row and equals the predicted output
+type's: `column_types` also accepts a `pa.Field` (used verbatim, nullability included), and
+`Index`/`Pick` declare `NOT NULL` because an element's predicted type is never Optional. An
+extracted `None` raises `ValueError` naming the operator, column and row (before, a `None` in
+one row and a value in another gave the rows different nullability, so materializing failed in
+`pa.concat_tables`). Known limit: the type converter maps `list[int | None]` and
+`list[int]` to the same Arrow type and back to `list[int]`, so nullable elements cannot be
+declared today (ITL-835 territory).

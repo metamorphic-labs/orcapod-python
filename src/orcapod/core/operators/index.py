@@ -34,6 +34,12 @@ class Index(UnaryOperator):
     when ``fail_on_miss=True``).  Negative indices follow Python semantics
     (``-1`` is the last element).
 
+    The extracted column keeps the list's element Arrow type (``list<int8>``
+    yields ``int8``). Its nullability follows the predicted output type, which
+    is not Optional for list elements, so the column is ``NOT NULL``. An
+    element that is ``None`` therefore raises ``ValueError`` (whatever
+    ``fail_on_miss`` is), naming the operator, the column and the row's tag.
+
     Args:
         column: Name of the data column to project into.
         i: Position to extract.  Negative indices follow Python semantics.
@@ -63,6 +69,19 @@ class Index(UnaryOperator):
 
     def identity_structure(self) -> Any:
         return (self.__class__.__name__, self.column, self.i, self.out)
+
+    def _output_nullable(self) -> bool:
+        """Return whether the projected column is nullable.
+
+        Nullability follows the predicted output type: the column is nullable
+        only when that type is Optional. The rule is the same for every row and
+        for the all-skipped result, so the materialized schema always equals
+        the predicted ``output_schema``.
+
+        Returns:
+            True when the predicted output type admits ``None``.
+        """
+        return type(None) in typing.get_args(self._output_type)
 
     def _element_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
         """Return the Arrow type of one element of a column of ``column_type``.
@@ -204,6 +223,8 @@ class Index(UnaryOperator):
 
         Raises:
             RuntimeError: If the index is out of bounds and ``fail_on_miss=True``.
+            ValueError: If the extracted element is ``None`` but the predicted
+                output type is not Optional.
         """
         col_val = data[self.column]
         length = len(col_val)
@@ -226,12 +247,23 @@ class Index(UnaryOperator):
             return None
 
         extracted = col_val[self.i]
+        nullable = self._output_nullable()
+        if extracted is None and not nullable:
+            raise ValueError(
+                f"Index: element {self.i} of column {self.column!r} is None in"
+                + f" the row with tag {tag}, but the output type"
+                + f" {self._output_type} is not Optional."
+            )
 
         old_src = data.source_info().get(self.column)
         new_src = f"{old_src}[{self.i}]" if old_src else None
 
-        element_type = self._element_arrow_type(
-            arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+        element_field = pa.field(
+            self.out or self.column,
+            self._element_arrow_type(
+                arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+            ),
+            nullable=nullable,
         )
         if self.out is None:
             # Replace column in place: drop the old (with its stale type), re-add
@@ -241,7 +273,7 @@ class Index(UnaryOperator):
             new_data = (
                 data.drop(self.column)
                 .with_columns(
-                    column_types={self.column: element_type},
+                    column_types={self.column: element_field},
                     **{self.column: extracted},
                 )
                 .select(*column_order)
@@ -250,7 +282,7 @@ class Index(UnaryOperator):
         else:
             # Add new column; original stays unchanged.
             new_data = data.with_columns(
-                column_types={self.out: element_type},
+                column_types={self.out: element_field},
                 **{self.out: extracted},
             ).with_source_info(**{self.out: new_src})
 
@@ -277,6 +309,8 @@ class Index(UnaryOperator):
         Raises:
             RuntimeError: If ``fail_on_miss=True`` and any packet is
                 out-of-bounds.
+            ValueError: If an extracted element is ``None`` but the predicted
+                output type is not Optional.
         """
         out_rows = []
         for tag, data in stream.iter_data():
@@ -298,7 +332,7 @@ class Index(UnaryOperator):
                 self._element_arrow_type(
                     arrow_utils.column_arrow_type(input_schema, self.column)
                 ),
-                nullable=type(None) in typing.get_args(self._output_type),
+                nullable=self._output_nullable(),
             )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)
