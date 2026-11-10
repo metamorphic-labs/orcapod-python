@@ -12,7 +12,7 @@
 
 ---
 
-### Task 1: Failing tests (meta-column equivalence)
+## Task 1: Failing tests (meta-column equivalence)
 
 **Files:** Modify `tests/test_core/operators/test_async_sync_equivalence.py`
 
@@ -24,7 +24,7 @@
 - [ ] Add a strict xfail `test_join_meta_rename_collides_with_own_column` (ITL-857): inputs whose canonical order makes `__x` rename to `__x_1` while that input already has `__x_1`. Sync raises Polars `DuplicateError`. The test asserts that both paths succeed and are equal.
 - [ ] Run `uv run pytest tests/test_core/operators/test_async_sync_equivalence.py -q`. Expected: the Join meta cases FAIL (async meta `[]`). Record the results for the other operators.
 
-### Task 2: Shared helper and async fix
+## Task 2: Shared helper and async fix
 
 **Files:** Modify `src/orcapod/core/operators/join.py`
 
@@ -42,16 +42,16 @@
 - [ ] `_merge_pair_rename` passes `right_index=1`. `_merge_pair_passthrough` gains `right_index`, and `_staggered_join` binds `i` per binary join with `functools.partial`.
 - [ ] Run the equivalence file: the Join meta cases PASS, and the xfails stay xfailed.
 
-### Task 3: Other operators
+## Task 3: Other operators
 
 - [ ] For each other operator with its own async path whose meta case fails: if the fix is the same small local change, make it. Otherwise pin it with a strict xfail naming ITL-846 and report it.
 
-### Task 4: Hash invariance and full verification
+## Task 4: Hash invariance and full verification
 
 - [ ] `uv run pytest tests/` on 3.11, 3.12 and 3.13 (`uv run --python 3.1x`). The pinned sync hashes in `test_issue_example_types_and_pinned_hashes` and every existing hash test must stay unchanged.
 - [ ] `uv run --with ruff ruff check .`, `uv run --with ruff ruff format --check .`, `uv run --with basedpyright basedpyright` (exit codes).
 
-### Task 5: Docs and PR
+## Task 5: Docs and PR
 
 - [ ] CHANGELOG ITL-837 entry: add one sentence on meta columns (ITL-854). DESIGN_ISSUES ITL-837 entry: add one sentence.
 - [ ] Commit (Conventional Commits, Co-Authored-By trailer), make one push, and update the PR #280 body: add `Fixes ITL-854` next to `Fixes ITL-837`, and one plain sentence on the remaining order difference.

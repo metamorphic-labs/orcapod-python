@@ -805,8 +805,9 @@ class Join(NonZeroInputOperator):
         """
         from orcapod.core.datagrams import Data
 
-        left_table, right_table = left.as_table(), right.as_table()
-        if overlap := set(left_table.column_names) & set(right_table.column_names):
+        left_data_columns = set(left.as_table().column_names)
+        right_data_columns = set(right.as_table().column_names)
+        if overlap := left_data_columns & right_data_columns:
             raise InputValidationError(
                 f"Join: inputs share data columns {sorted(overlap)}."
             )

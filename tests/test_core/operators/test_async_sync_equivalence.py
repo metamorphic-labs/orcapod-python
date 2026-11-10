@@ -2,7 +2,7 @@
 
 For the same inputs, ``async_execute`` must produce rows whose Arrow types,
 nullability, column order, system tags, source info and Tag/Data content hashes
-equal those of ``process(...).iter_data()``. A result must not depend on the path
+equal those of ``op(...).iter_data()``. A result must not depend on the path
 the data took: ``Data.content_hash()`` is the input hash a downstream function
 node stores, so any difference breaks cache hits between sync and async runs.
 
@@ -25,6 +25,9 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.contexts import get_default_context, get_default_type_converter
+from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
@@ -44,6 +47,7 @@ from orcapod.core.operators import (
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
+from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
     DataProtocol,
@@ -173,8 +177,8 @@ def merge_source(source_id: str, offset: int) -> ArrowTableSource:
 
 
 def sync_rows(op: StaticOutputOperatorPod, *sources: StreamProtocol) -> list[Row]:
-    """The rows of the sync path, ``op.process(...)``."""
-    return list(op.process(*sources).iter_data())
+    """The rows of the sync path, ``op(...)``."""
+    return list(op(*sources).iter_data())
 
 
 async def _run_async(
@@ -528,29 +532,53 @@ def _meta_stream(
     )
 
 
-def static_rows(*sources: StreamProtocol) -> list[Row]:
-    """The rows of sync ``Join.static_process``, which skips input validation.
+def _double_a(a: int) -> int:
+    return a * 2
 
-    ``process`` rejects inputs whose schemas share a column. A raw
-    ``ArrowTableStream`` lists its ``__`` columns in its schema, so colliding
-    meta columns reach the join only this way.
+
+def _double_b(b: int) -> int:
+    return b * 2
+
+
+def _double_c(c: int) -> int:
+    return c * 2
+
+
+def _cached_pod_stream(column: str, function: Callable[[int], int]) -> StreamProtocol:
+    """A cached function pod's output on tag ``k: int16``.
+
+    Every row's ``Data`` carries the pod's ``__computed`` meta column, which the
+    stream's ``output_schema()`` does not list, so two such streams collide on it
+    and still pass ``Join``'s input validation.
     """
-    return list(Join().static_process(*sources).iter_data())
+    source = _source(
+        {
+            "k": pa.array([1, 2], pa.int16()),
+            column: pa.array([3, 4], pa.int8()),
+        },
+        tags=("k",),
+        source_id=column,
+    )
+    function_pod = FunctionPod(
+        PythonDataFunction(function, output_keys=f"out_{column}")  # pyright: ignore[reportArgumentType]  # PythonDataFunction is not yet typed as matching DataFunctionProtocol (baselined in other tests); it works at runtime
+    )
+    pod = CachedFunctionPod(function_pod, result_database=InMemoryArrowDatabase())
+    return pod(source)
 
 
 COLLIDING_META = [
     pytest.param(
         lambda: (
-            _meta_stream("a", "va", ["__u_a", "__m"]),
-            _meta_stream("b", "vb", ["__u_b", "__m"]),
+            _cached_pod_stream("a", _double_a),
+            _cached_pod_stream("b", _double_b),
         ),
         id="two",
     ),
     pytest.param(
         lambda: (
-            _meta_stream("a", "va", ["__m"]),
-            _meta_stream("b", "vb", ["__m"]),
-            _meta_stream("c", "vc", ["__m"]),
+            _cached_pod_stream("a", _double_a),
+            _cached_pod_stream("b", _double_b),
+            _cached_pod_stream("c", _double_c),
         ),
         id="three",
     ),
@@ -563,56 +591,50 @@ def test_join_colliding_meta_async_equals_sync(
 ) -> None:
     """Colliding meta columns get the sync path's ``_<index>`` renames on both paths."""
     sources = make_sources()
-    expected = static_rows(*sources)
+    expected = sync_rows(Join(), *sources)
     actual = async_rows(Join(), *sources)
     assert_equivalent(expected, actual)
     assert_same_meta(expected, actual)
-    assert any(name.startswith("__m_") for name in expected[0][1].meta_columns)
+    assert list(expected[0][1].meta_columns) == [
+        "__computed",
+        *(f"__computed_{i}" for i in range(1, len(sources))),
+    ]
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
         "ITL-858: sync Join puts the columns an input's output_schema lists first; a "
-        "raw ArrowTableStream lists its __ columns, so with colliding meta the sync "
-        "meta order is not the canonical concatenation the async path emits "
-        "(async_execute never sees input schemas)."
+        "raw ArrowTableStream lists its __ columns, so next to another stream's meta "
+        "columns (a cached pod's __computed) sync gives [__m, __computed] while async "
+        "keeps canonical concatenation, [__computed, __m] (async_execute never sees "
+        "input schemas)."
     ),
 )
 def test_join_meta_order_schema_dependent() -> None:
-    """Three inputs ``[__u_i, __m]``: sync moves the unique names forward."""
-    sources = (
-        _meta_stream("a", "va", ["__u_a", "__m"]),
-        _meta_stream("b", "vb", ["__u_b", "__m"]),
-        _meta_stream("c", "vc", ["__u_c", "__m"]),
-    )
-    assert_same_meta(static_rows(*sources), async_rows(Join(), *sources))
+    """A raw stream with ``__m`` joined with a cached pod's output, both orders."""
+    raw = _meta_stream("r", "vr", ["__m"])
+    pod = _cached_pod_stream("a", _double_a)
+    for sources in ((raw, pod), (pod, raw)):
+        assert_same_meta(sync_rows(Join(), *sources), async_rows(Join(), *sources))
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
         "ITL-857: Join's collision rename checks only the accumulated columns, not the "
-        "next input's own names: __x renamed to __x_1 duplicates that input's own __x_1 "
-        "(Polars DuplicateError on the sync path; the shared rename fails async too)."
+        "next input's own names. Join()(cached pod output with __computed, raw "
+        "ArrowTableStream with __computed and __computed_1 that sorts after it) renames "
+        "the raw __computed to __computed_1, duplicating the raw __computed_1: Polars "
+        "DuplicateError on the sync path, and the shared rename fails async too."
     ),
 )
-@pytest.mark.parametrize(
-    "metas",
-    [
-        pytest.param((["__x"], ["__x", "__x_1"]), id="two"),
-        pytest.param((["__x"], ["__x"], ["__x", "__x_1"]), id="three"),
-    ],
-)
-def test_join_meta_rename_collides_with_own_column(
-    metas: tuple[list[str], ...],
-) -> None:
-    """An input already holding ``__x_1`` must not get a second ``__x_1``."""
-    sources = [
-        _meta_stream(source_id, f"v{source_id}", meta)
-        for source_id, meta in zip("abc", metas)
-    ]
-    assert_same_meta(static_rows(*sources), async_rows(Join(), *sources))
+def test_join_meta_rename_collides_with_own_column() -> None:
+    """An input already holding ``__computed_1`` must not get a second one."""
+    pod = _cached_pod_stream("a", _double_a)
+    # Canonically after ``pod`` (pipeline hashes are schema-derived and stable).
+    raw = _meta_stream("r", "v0", ["__computed", "__computed_1"])
+    assert_same_meta(sync_rows(Join(), pod, raw), async_rows(Join(), pod, raw))
 
 
 # ── the issue's own example, pinned ────────────────────────────────────────
@@ -648,7 +670,7 @@ PINNED_STREAM_PIPELINE_HASH = (
 def test_issue_example_types_and_pinned_hashes() -> None:
     """ITL-837's example: ``k: int16``, ``a``/``b: int8`` keep their types on both paths."""
     left, right = _narrow_source("a", "l"), _narrow_source("b", "r")
-    stream = Join().process(left, right)
+    stream = Join()(left, right)
     assert stream.content_hash().to_string() == PINNED_STREAM_CONTENT_HASH
     assert stream.pipeline_hash().to_string() == PINNED_STREAM_PIPELINE_HASH
     for rows in (sync_rows(Join(), left, right), async_rows(Join(), left, right)):
@@ -706,7 +728,7 @@ def test_sync_join_rejects_disagreeing_key_types(
     left, right = _disagreeing_sources(left_type, right_type, matching)
     for operands in ((left, right), (right, left)):
         with pytest.raises(InputValidationError, match=_KEY_MESSAGE) as excinfo:
-            _ = Join().process(*operands).as_table()
+            _ = Join()(*operands).as_table()
         found = re.search(_KEY_MESSAGE, str(excinfo.value))
         assert found is not None
         assert set(found.groups()) == {str(left_type), str(right_type)}
@@ -732,7 +754,7 @@ def test_join_rejects_disagreeing_key_types_three_inputs(matching: bool) -> None
     left, right = _disagreeing_sources(pa.int16(), pa.int32(), matching)
     third = _key_source(pa.array([1, 2], pa.int16()), "c", "t")
     with pytest.raises(InputValidationError, match=_KEY_MESSAGE):
-        _ = Join().process(left, right, third).as_table()
+        _ = Join()(left, right, third).as_table()
     with pytest.raises(ExceptionGroup) as excinfo:
         _ = async_rows(Join(), left, right, third)
     assert excinfo.group_contains(InputValidationError, match=_KEY_MESSAGE, depth=None)
