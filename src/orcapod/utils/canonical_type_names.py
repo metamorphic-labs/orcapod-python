@@ -15,6 +15,7 @@ types are never touched.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Iterator
 from typing import cast
@@ -130,6 +131,12 @@ def stabilize_type_names(text: str, *annotations: object) -> str:
     is present ``text`` is returned unchanged, so output on Python versions
     where nothing has moved is byte-identical to what it always was.
 
+    A spelling is replaced only where it stands as a whole dotted name, in a
+    single pass with longer spellings tried first. A shorter spelling therefore
+    never rewrites the start of a longer name (``json._impl.Foo`` inside
+    ``json._impl.FooBar`` or ``x.json._impl.Foo``), and a nested class
+    (``Outer.Inner``) is rewritten as one name.
+
     Args:
         text: A rendered annotation, parameter or signature string.
         *annotations: The annotation objects that ``text`` was rendered from.
@@ -137,11 +144,18 @@ def stabilize_type_names(text: str, *annotations: object) -> str:
     Returns:
         ``text`` with relocated standard-library type names made canonical.
     """
+    replacements: dict[str, str] = {}
     for tp in _iter_types(annotations):
         module = tp.__module__
         canonical = canonical_module_name(tp)
         if canonical is not None and canonical != module:
-            text = text.replace(
-                f"{module}.{tp.__qualname__}", f"{canonical}.{tp.__qualname__}"
+            replacements[f"{module}.{tp.__qualname__}"] = (
+                f"{canonical}.{tp.__qualname__}"
             )
-    return text
+    if not replacements:
+        return text
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(replacements, key=len, reverse=True)
+    )
+    pattern = re.compile(rf"(?<![\w.])(?:{alternatives})(?!\w)")
+    return pattern.sub(lambda match: replacements[match.group(0)], text)
