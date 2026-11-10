@@ -59,3 +59,15 @@ No inline comments; two review-body items and the repeated pre-merge check.
 | 3.3 | Pre-merge check "Linked Issues": no tutorial (third time) | PR | DISMISS (3rd time) | As 1.8 and 2.6. This is the stop condition in the brief (a finding dismissed twice is repeated); it is reported to the coordinator instead of being argued again. | round comment |
 
 Local suite after the round: same command as round 1 — 4827 passed, 93 skipped, 2 xfailed.
+
+## Round 4 — review of `0cf3d296`
+
+Review: https://github.com/metamorphic-labs/orcapod-python/pull/271#pullrequestreview-5835217633.
+Both pre-merge checks now pass (Linked Issues; Docstring Coverage 90.91 %).
+
+| # | Finding | Location | Verdict | Reason | Commit / reply |
+|---|---------|----------|---------|--------|----------------|
+| 4.1 | Document that `MapTags(..., drop_unmapped=True)` keeps all tags when no `name_map` key matches | `docs/concepts/operators.md:272` | DISMISS (coordinator decision) | Verified, and worse than stated: for both `MapTags` and `MapData` the rows are returned unchanged (`mappers.py:51-53`, `196-198`) while the predicted `output_schema()` / `keys()` drops every tag or data column. A library defect, not a docs gap; documenting it would make the bug look intended. Tracked in ITL-820 (repro added by the coordinator) and logged as DESIGN_ISSUES O6 in `ebb95d52`. The page will describe the case once the intended behaviour is decided. | `ebb95d52` (O6), [thread](https://github.com/metamorphic-labs/orcapod-python/pull/271#discussion_r4519956487) |
+| 4.2 | Gap report says any missing column raises; parameters with defaults may be omitted | `superpowers/plans/2026-11-09-docs-gap-report.md:96-98` | FIX | True, same correction as 2.2 applied to the report. | `ebb95d52`, [thread](https://github.com/metamorphic-labs/orcapod-python/pull/271#discussion_r4519956499) |
+
+Local suite after the round: same command as round 1 — 4827 passed, 93 skipped, 2 xfailed.
