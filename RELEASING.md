@@ -6,7 +6,9 @@ This document describes how to cut a release of `orcapod`.
 
 Orcapod is published on public PyPI as [`orcapod`](https://pypi.org/project/orcapod/), under
 the MIT License (developer decision, 2026-11-10; the license is applied from `0.2.0`). Users
-install it with `pip install orcapod` or `uv add orcapod`.
+install it with `pip install orcapod` or `uv add orcapod`. `0.2.0` was cut as a tag only
+(developer decision, 2026-11-10); `0.3.0` is the first release published to PyPI from this
+repository.
 
 The Release workflow (`.github/workflows/release.yml`) is the only publishing route. It runs
 only when dispatched by hand, uploads to TestPyPI first and then to PyPI, and authenticates

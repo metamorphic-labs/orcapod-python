@@ -1,16 +1,12 @@
 # Changelog
 
-## [0.2.0] — unreleased
-
-<!-- RELEASE-DAY: replace "unreleased" with the release date (YYYY-MM-DD). If 0.2.0 is
-     not published to PyPI, replace the second sentence of the Distribution paragraph with
-     "0.2.0 is a tag only; 0.3.0 is the first release published to PyPI from this
-     repository." Then delete this comment. See
-     superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
+## [0.2.0] — 2026-11-10
 
 **Distribution:** Orcapod is MIT licensed starting with `0.2.0` (it was proprietary on
-`main` between #277 and #283; no release carried that license). `0.2.0` is published on
-PyPI as `orcapod`: install it with `pip install orcapod` or `uv add orcapod`.
+`main` between #277 and #283; no release carried that license). `0.2.0` is a tag only;
+`0.3.0` is the first release published to PyPI from this repository. Until then,
+`pip install orcapod` and `uv add orcapod` install `0.1.4`, the latest release on PyPI;
+`0.2.0` is the tag `v0.2.0` of the repository.
 
 Everything merged to `main` since `v0.1.2`. `0.1.3` and `0.1.4` were patch releases cut
 from a separate branch; their one fix is also in this release (see

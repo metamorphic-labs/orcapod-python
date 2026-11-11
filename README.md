@@ -18,6 +18,9 @@ pip install orcapod
 uv add orcapod
 ```
 
+`0.2.0` is not on PyPI, where the latest release is `0.1.4`; `0.2.0` is the tag `v0.2.0` of
+the repository.
+
 Optional features are installed as extras:
 
 | Extra | Adds |
