@@ -2,7 +2,7 @@
 
 Calls only read methods (``list_tables``, ``Table.schema``, ``Table.key_schema``,
 ``Table.get_metadata`` and a ``limit``-ed scan), so it is safe on the workshop's EDI sample
-projects. Run after ``spiral login``, from the repository root::
+projects. Run after ``spiral login``, from the repository root:
 
     uv run python superpowers/specs/itl-926-live/inspect_tables.py edi-sample-v1-855632 \
         [--tables session,experiment] [--limit 3] > inspect.txt
@@ -22,10 +22,12 @@ from typing import Any
 
 
 def _desc(f: Any) -> str:
+    """Describe a field as its type, marking a non-null one with ``!``."""
     return f"{f.type}{'' if f.nullable else '!'}"
 
 
 def main() -> None:
+    """Print the key schema, Arrow schema and a sample of each table, reading only."""
     parser = argparse.ArgumentParser(description="Read-only SpiralDB table inspection")
     parser.add_argument("project")
     parser.add_argument("--dataset", default="default")

@@ -1,6 +1,6 @@
 """C2 repro: a ``fixed_size_list`` column cannot be hashed, so no source can be built on it.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/c2_fixed_size_list_cannot_hash.py
 

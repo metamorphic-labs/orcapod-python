@@ -1,6 +1,6 @@
 """H2 repro: record identity of a Spiral source is positional, and a composite key can't be used.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/h2_positional_record_ids.py
 
@@ -23,6 +23,7 @@ from orcapod.sources import SpiralDBTableSource  # noqa: E402
 
 
 def tokens(source: SpiralDBTableSource) -> list[Any]:
+    """Return the source-info tokens of column ``v``."""
     return source.as_table(columns={"source": True}).column("_source_v").to_pylist()
 
 

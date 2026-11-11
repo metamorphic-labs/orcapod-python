@@ -1,6 +1,6 @@
 """READ-ONLY: table sizes, and the cost of building ``SpiralDBTableSource`` on small ones.
 
-Run after ``spiral login``, from the repository root::
+Run after ``spiral login``, from the repository root:
 
     uv run python superpowers/specs/itl-926-live/size_probe.py edi-sample-v1-855632 \
         [--max-rows 200000] > sizes.txt
@@ -25,16 +25,18 @@ from typing import Any
 
 
 def _peak_rss_mb() -> float:
+    """Return this process's peak resident memory in MB."""
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak / 1e6 if sys.platform == "darwin" else peak / 1e3
 
 
-def _child(project: str, table: str) -> None:
+def _child(project: str, dataset: str, table: str) -> None:
+    """Child phase: build one table's source and print its row count, time and memory."""
     from orcapod.sources import SpiralDBTableSource
 
     before = _peak_rss_mb()
     start = time.time()
-    source = SpiralDBTableSource(project, table)
+    source = SpiralDBTableSource(project, table, dataset=dataset)
     built = time.time() - start
     rows = source.as_table().num_rows
     print(
@@ -50,6 +52,7 @@ def _child(project: str, table: str) -> None:
 
 
 def _sizes(project_id: str, dataset: str) -> dict[str, dict[str, Any]]:
+    """Return each table's manifest row count and sizes, without scanning data."""
     import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     sp = spiral.Spiral()
@@ -73,6 +76,7 @@ def _sizes(project_id: str, dataset: str) -> dict[str, dict[str, Any]]:
 
 
 def main() -> None:
+    """Print table sizes, then build and measure the sources under the row cap."""
     parser = argparse.ArgumentParser(description="Read-only Spiral table size probe")
     parser.add_argument("project")
     parser.add_argument("--dataset", default="default")
@@ -80,7 +84,7 @@ def main() -> None:
     parser.add_argument("--child", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.child:
-        _child(args.project, args.child)
+        _child(args.project, args.dataset, args.child)
         return
 
     signal.alarm(1800)
@@ -93,7 +97,15 @@ def main() -> None:
             print(f"{name:40} skipped ({info['manifest_rows']} rows > --max-rows)")
             continue
         proc = subprocess.run(
-            [sys.executable, __file__, args.project, "--child", name],
+            [
+                sys.executable,
+                __file__,
+                args.project,
+                "--dataset",
+                args.dataset,
+                "--child",
+                name,
+            ],
             capture_output=True,
             text=True,
             check=False,

@@ -1,6 +1,6 @@
 """H4 repro: with ``DeltaTableDatabase``, ``get_all_records()`` misses rows right after ``run()``.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/h4_get_all_records_delta_after_run.py
 
@@ -22,6 +22,7 @@ from orcapod.sources import ArrowTableSource
 
 @function_pod(output_keys="y")
 def double(x: int) -> int:
+    """Double the value."""
     return 2 * x
 
 

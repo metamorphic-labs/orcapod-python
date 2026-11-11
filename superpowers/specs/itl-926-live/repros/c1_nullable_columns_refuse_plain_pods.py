@@ -1,6 +1,6 @@
 """C1 repro: an all-nullable Spiral table makes a plain-typed function pod refuse the stream.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/c1_nullable_columns_refuse_plain_pods.py
 
@@ -35,11 +35,13 @@ print("source schema:", source.output_schema())
 
 @function_pod(output_keys="m")
 def plain(n: int) -> int:
+    """A pod whose parameter does not accept ``None``."""
     return n
 
 
 @function_pod(output_keys="m")
 def optional(n: int | None) -> int | None:
+    """A pod whose parameter accepts ``None``."""
     return n
 
 

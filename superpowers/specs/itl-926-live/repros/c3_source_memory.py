@@ -1,6 +1,6 @@
 """C3 repro: memory used to build a source over a spike_event-shaped table.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/c3_source_memory.py [rows]
 

@@ -1,6 +1,6 @@
 """READ-ONLY: where the time goes when a small Spiral table is slow to scan.
 
-Run after ``spiral login``, from the repository root::
+Run after ``spiral login``, from the repository root:
 
     uv run python superpowers/specs/itl-926-live/scan_cost_probe.py edi-sample-v1-855632 \
         unit unit_location > scan_cost.txt
@@ -18,6 +18,7 @@ import time
 
 
 def main() -> None:
+    """Print manifest counts and scan times for each table named on the command line."""
     signal.alarm(900)
     import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 

@@ -74,7 +74,15 @@ class StorageBehaviour:
 
 
 def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
-    """Return the Arrow type SpiralDB hands back for a column written as ``t``."""
+    """Return the Arrow type SpiralDB hands back for a column written as ``t``.
+
+    Args:
+        t: The type that was written.
+        b: The storage behaviour to apply.
+
+    Returns:
+        The stored type, with the same nesting, field names and nullability.
+    """
     if isinstance(t, pa.ExtensionType):
         # Vortex stores the storage type; the extension name lives in field metadata,
         # which is dropped.
@@ -89,6 +97,13 @@ def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
         return pa.timestamp(t.unit)
     if pa.types.is_struct(t):
         return pa.struct([_stored_field(t.field(i), b) for i in range(t.num_fields)])
+    if pa.types.is_map(t):
+        # pyarrow accepts key/item fields here; its stubs list only types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
+            _stored_field(t.key_field, b),
+            _stored_field(t.item_field, b),
+            keys_sorted=t.keys_sorted,
+        )
     if pa.types.is_large_list(t):
         return pa.large_list(_stored_field(t.value_field, b))
     if pa.types.is_list(t):
@@ -99,11 +114,13 @@ def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
 
 
 def _stored_field(f: pa.Field[Any], b: StorageBehaviour) -> pa.Field[Any]:
+    """Return the field SpiralDB hands back for a field written as ``f``."""
     metadata = None if b.drop_arrow_metadata else f.metadata
     return pa.field(f.name, _stored_type(f.type, b), f.nullable, metadata)
 
 
 def _has_struct_nulls(arr: pa.ChunkedArray[Any]) -> bool:
+    """Return whether ``arr`` is a struct column with a null struct value."""
     return pa.types.is_struct(arr.type) and arr.null_count > 0
 
 
@@ -190,10 +207,13 @@ class TableResource:
 
 
 class FakeSchema:
+    """What ``Table.schema()`` returns: a wrapper whose ``to_arrow()`` gives the schema."""
+
     def __init__(self, schema: pa.Schema) -> None:
         self._schema = schema
 
     def to_arrow(self) -> pa.Schema:
+        """Return the stored Arrow schema."""
         return self._schema
 
 
@@ -205,13 +225,17 @@ class FakeExpr:
 
 
 class FakeScan:
+    """What ``Spiral.scan(table.select())`` returns: reads the whole stored table."""
+
     def __init__(self, table: FakeTable) -> None:
         self._table = table
 
     def to_table(self) -> pa.Table:
+        """Return every stored row, in key order."""
         return self._table._read_all()
 
     def to_record_batches(self) -> pa.RecordBatchReader:
+        """Return the stored rows in key order, as batches of at most two rows."""
         t = self._table._read_all()
         # SpiralDB yields more than one batch for larger tables; split to exercise that.
         batches = t.to_batches(max_chunksize=2) if t.num_rows else []
@@ -219,6 +243,17 @@ class FakeScan:
 
 
 class FakeTable:
+    """A stored table: key schema, Arrow schema, key-value metadata and upserting writes.
+
+    Args:
+        store: The directory-backed store.
+        project_id: The project the table belongs to.
+        identifier: ``"<dataset>.<table>"``.
+
+    Raises:
+        ValueError: If the table does not exist.
+    """
+
     def __init__(self, store: _Store, project_id: str, identifier: str) -> None:
         if not store.exists(project_id, identifier):
             raise ValueError(f"Table not found: {project_id}/{identifier}")
@@ -228,9 +263,11 @@ class FakeTable:
 
     @property
     def key_schema(self) -> pa.Schema:
+        """The key columns, in key order."""
         return self._store.key_schema(self._project_id, self._identifier)
 
     def schema(self) -> FakeSchema:
+        """Return the stored schema (only the key columns before the first write)."""
         stored = self._store.read(self._project_id, self._identifier)
         keys = self.key_schema
         if stored is None:
@@ -238,19 +275,33 @@ class FakeTable:
         return FakeSchema(stored.schema)
 
     def select(self, *paths: str, exclude: list[str] | None = None) -> FakeExpr:
+        """Return an expression selecting the whole table (projections are not modelled)."""
         if paths or exclude:
             raise NotImplementedError("fake Table.select supports only select()")
         return FakeExpr(self)
 
     def get_metadata(self) -> dict[str, bytes]:
+        """Return the table's key-value metadata."""
         return self._store.kv(self._project_id, self._identifier)
 
     def set_metadata(self, metadata: dict[str, bytes]) -> None:
+        """Merge ``metadata`` into the table's key-value metadata."""
         self._store.set_kv(self._project_id, self._identifier, metadata)
 
     def write(
         self, table: pa.Table, push_down_nulls: bool = False, **kwargs: Any
     ) -> None:
+        """Store ``table`` the way SpiralDB does: transform types, then upsert by key.
+
+        Args:
+            table: The rows to write; every key column must be present.
+            push_down_nulls: Accept null struct values (SpiralDB's own flag).
+            **kwargs: Accepted for signature compatibility; unused.
+
+        Raises:
+            ValueError: If a key column is missing, a struct value is null without
+                ``push_down_nulls``, or the column set differs from the stored table.
+        """
         b = self._store.behaviour
         keys = self.key_schema
         missing = [k for k in keys.names if k not in table.column_names]
@@ -298,6 +349,7 @@ class FakeTable:
         self._store.write(self._project_id, self._identifier, incoming.combine_chunks())
 
     def _read_all(self) -> pa.Table:
+        """Return every stored row (an empty key-only table before the first write)."""
         stored = self._store.read(self._project_id, self._identifier)
         if stored is None:
             keys = self.key_schema
@@ -330,11 +382,14 @@ def _cast_storage(
 
 
 class FakeProject:
+    """What ``Spiral.project(id)`` returns: list, open, create and drop tables."""
+
     def __init__(self, store: _Store, project_id: str) -> None:
         self._store = store
         self._project_id = project_id
 
     def list_tables(self) -> list[TableResource]:
+        """Return every table of the project, in every dataset."""
         out = []
         for ident in self._store.identifiers(self._project_id):
             dataset, _, table = ident.partition(".")
@@ -342,6 +397,7 @@ class FakeProject:
         return out
 
     def table(self, identifier: str) -> FakeTable:
+        """Open the table ``"<dataset>.<table>"``."""
         return FakeTable(self._store, self._project_id, identifier)
 
     def create_table(
@@ -373,10 +429,21 @@ class FakeProject:
         return self.table(identifier)
 
     def drop_table(self, identifier: str) -> None:
+        """Drop the table ``"<dataset>.<table>"`` if it exists."""
         self._store.drop(self._project_id, identifier)
 
 
 class FakeSpiral:
+    """Stands in for ``spiral.Spiral``; tables live under ``FAKE_SPIRAL_ROOT``.
+
+    Args:
+        config: Accepted for signature compatibility; unused.
+        overrides: Recorded; unused.
+
+    Raises:
+        RuntimeError: If ``FAKE_SPIRAL_ROOT`` is not set (use ``install``).
+    """
+
     def __init__(
         self, *, config: Any = None, overrides: dict[str, str] | None = None
     ) -> None:
@@ -387,9 +454,11 @@ class FakeSpiral:
         self.overrides = overrides
 
     def project(self, project_id: str) -> FakeProject:
+        """Return project ``project_id`` (created on first use)."""
         return FakeProject(self._store, project_id)
 
     def scan(self, *projections: Any, **kwargs: Any) -> FakeScan:
+        """Return a scan of one ``table.select()``; other projections are not modelled."""
         if len(projections) != 1 or not isinstance(projections[0], FakeExpr):
             raise NotImplementedError(
                 "fake Spiral.scan supports only scan(table.select())"

@@ -1,6 +1,6 @@
 """READ-ONLY: what an attendee sees for common mistakes with ``SpiralDBTableSource``.
 
-Run after ``spiral login``, from the repository root::
+Run after ``spiral login``, from the repository root:
 
     uv run python superpowers/specs/itl-926-live/error_messages.py edi-sample-v1-855632
 
@@ -20,6 +20,7 @@ from orcapod.sources import SpiralDBTableSource
 
 
 def attempt(label: str, **kwargs: str) -> None:
+    """Build a source with ``kwargs`` and print the error it raises, if any."""
     start = time.time()
     try:
         SpiralDBTableSource(**kwargs)  # pyright: ignore[reportArgumentType]
@@ -30,6 +31,7 @@ def attempt(label: str, **kwargs: str) -> None:
 
 
 def main() -> None:
+    """Try each common mistake against the project named on the command line."""
     signal.alarm(300)
     project = sys.argv[1]
     attempt("wrong table name", project_id=project, table_name="no_such_table")

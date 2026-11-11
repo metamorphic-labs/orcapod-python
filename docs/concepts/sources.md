@@ -100,14 +100,16 @@ Things to know about Spiral tables:
 - **The whole table is read when the source is built.** Use tables of up to a few hundred
   thousand rows. Very large tables (for example `spike_event`) need the streaming source that
   is still being designed.
-- **Not yet supported:** columns of type `fixed_size_list` (the source cannot be built), time
-  zones (SpiralDB stores timestamps without one), and Orcapod logical types such as `Path`
-  (they come back as their storage type).
+- **Not supported:** columns of type `fixed_size_list`, until Orcapod adopts starfix 0.5.0
+  (the source cannot be built); time zones (SpiralDB stores timestamps without one); and
+  Orcapod logical types such as `Path` (they come back as their storage type).
 - **Source identity.** The default `source_id` is `<project id>/<dataset>/<table>`, for
   example `edi-sample-v1-855632/default/session`, so tables with the same name in different
   projects stay apart.
-- **Record identity.** A row's record ID comes from its position in the table, which SpiralDB
-  orders by key. A row inserted before existing rows changes the IDs of the rows after it.
+- **Record identity.** Without `record_id_column`, a row's record ID comes from its position
+  in the table, which SpiralDB orders by key, so a row inserted before existing rows changes
+  the IDs of the rows after it. Pass `record_id_column=` (a column whose value is unique per
+  row) to derive the IDs from that column's values instead, so they stay with their rows.
 
 ### `DerivedSource`
 

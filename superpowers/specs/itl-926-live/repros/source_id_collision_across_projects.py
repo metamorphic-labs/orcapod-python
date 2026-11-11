@@ -1,6 +1,6 @@
 """Repro: two Spiral projects with the same table name feed the same pipeline.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/source_id_collision_across_projects.py
 
@@ -29,6 +29,7 @@ calls: list[str] = []
 
 @function_pod(output_keys="weight_kg")
 def to_kg(weight_g: float) -> float:
+    """Convert grams to kilograms, counting the call."""
     calls.append("call")
     return weight_g / 1000
 

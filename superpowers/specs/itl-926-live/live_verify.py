@@ -7,7 +7,7 @@ Two modes.
 
 **Read-only (default)** -- for an existing project such as the workshop's EDI sample
 (``edi-sample-v1-855632``). Nothing is written to the project: no table creation, no writes,
-no maintenance. Results go to a local Delta store in a temporary directory::
+no maintenance. Results go to a local Delta store in a temporary directory:
 
     uv run python superpowers/specs/itl-926-live/live_verify.py \
         --project edi-sample-v1-855632 --tables session,experiment \
@@ -21,7 +21,7 @@ sources' ``content_hash`` / ``pipeline_hash`` are unchanged and that the loaded 
 ``get_all_records()`` returns every row.
 
 **Write mode** -- only for a dedicated test project, never an ``edi-*`` project. It must be
-asked for by repeating the project id::
+asked for by repeating the project id:
 
     uv run python superpowers/specs/itl-926-live/live_verify.py \
         --project <test-project> --allow-writes <test-project> [--keep]
@@ -56,6 +56,7 @@ import datetime as dt
 import decimal
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -121,11 +122,45 @@ def _type_cases() -> dict[str, tuple[pa.Array[Any], bool]]:
 
 
 def _field_desc(f: pa.Field[Any]) -> str:
+    """Describe a field as its type, marking a non-null one ``not null``."""
     return f"{f.type}{'' if f.nullable else ' not null'}"
 
 
+_CHILD_TIMEOUT_S = 600
+
+
+def _run_child(cmd: list[str]) -> dict[str, Any]:
+    """Run a fresh-process phase of this script and return the JSON it prints last.
+
+    Args:
+        cmd: The argument list (no shell), built from this script's own arguments.
+
+    Returns:
+        The decoded JSON object, or ``{"error": ...}`` when the child times out after
+        ``_CHILD_TIMEOUT_S`` seconds (for example waiting at a login prompt) or prints no
+        JSON.
+    """
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=_CHILD_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"fresh-process phase timed out after {_CHILD_TIMEOUT_S}s"}
+    try:
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001 - the child's output is reported as is
+        return {"error": proc.stdout[-2000:] + proc.stderr[-4000:]}
+
+
 class Run:
+    """Write mode: scratch tables in a dedicated test project, dropped by ``cleanup``.
+
+    Args:
+        args: The parsed command line; ``args.project`` is the test project.
+    """
+
     def __init__(self, args: argparse.Namespace) -> None:
+        """Connect to the test project; no table is touched yet."""
         import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
         self.args = args
@@ -137,19 +172,28 @@ class Run:
         self.report: dict[str, Any] = {"run_id": args.run_id, "checks": {}, "types": {}}
 
     def ident(self, name: str) -> str:
+        """Return the dataset-qualified identifier of scratch table ``name``."""
         return f"{self.args.dataset}.{self.prefix}_{name}"
 
     def create(self, name: str, key_schema: Any) -> Any:
+        """Create scratch table ``name`` and remember it for ``cleanup``."""
         t = self.project.create_table(self.ident(name), key_schema=key_schema)
         self.created.append(self.ident(name))
         return t
 
     def check(self, name: str, ok: bool, detail: Any) -> None:
+        """Record and print one pass/fail check."""
         self.report["checks"][name] = {"ok": bool(ok), "detail": detail}
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
     # 1. storage behaviour ------------------------------------------------------------
     def storage_matrix(self) -> None:
+        """Write each awkward column type through pyspiral and record how it reads back.
+
+        A case that raises, or whose values come back different while the stored type
+        equals the written one, is a failed check. A changed type (for example a dropped
+        time zone) is recorded as an observation.
+        """
         from orcapod.sources import SpiralDBTableSource
 
         for name, (values, nonnull) in _type_cases().items():
@@ -185,6 +229,16 @@ class Run:
             except Exception as exc:  # noqa: BLE001 - every outcome is recorded
                 entry["error"] = f"{type(exc).__name__}: {exc}"
             print(f"  {name:22} {entry}")
+            same_type = (
+                entry.get("scan", "").split(" not null")[0]
+                == entry.get("written", "").split(" not null")[0]
+            )
+            self.check(
+                f"type {name}: written and read back",
+                "error" not in entry
+                and (bool(entry.get("values_equal")) or not same_type),
+                entry,
+            )
 
         # struct-level null: SpiralDB documents that it refuses these without push_down_nulls
         try:
@@ -229,6 +283,7 @@ class Run:
 
     # 2. workshop path ----------------------------------------------------------------
     def workshop_table(self) -> str:
+        """Create the composite-key workshop table and return its plain name."""
         t = self.create(
             "recordings", [("subject_id", pa.string()), ("session", pa.int32())]
         )
@@ -253,6 +308,7 @@ class Run:
         return f"{self.prefix}_recordings"
 
     def workshop_path(self, workdir: Path) -> None:
+        """Run the workshop path, the fresh-process load, and the row-insert check."""
         table_name = self.workshop_table()
         first = _workshop_job(self.args, table_name, workdir, save=True)
         self.report["workshop_first"] = first
@@ -290,11 +346,7 @@ class Run:
         ]
         if self.args.server_url:
             cmd += ["--server-url", self.args.server_url]
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        try:
-            second = json.loads(proc.stdout.strip().splitlines()[-1])
-        except Exception:  # noqa: BLE001
-            second = {"error": proc.stdout[-2000:] + proc.stderr[-4000:]}
+        second = _run_child(cmd)
         self.report["workshop_load"] = second
         self.check(
             "fresh process: same content_hash",
@@ -341,6 +393,7 @@ class Run:
         print("insert: get_all_records rows =", third["pipeline_records"])
 
     def cleanup(self) -> None:
+        """Drop every scratch table this run created, unless ``--keep``."""
         if self.args.keep:
             print("kept tables:", self.created)
             return
@@ -359,6 +412,7 @@ def _workshop_job(
     save: bool,
     runs: int = 2,
 ) -> dict[str, Any]:
+    """Build and run the write-mode workshop job; return its counts, schemas and hashes."""
     from orcapod import PipelineJob, function_pod
     from orcapod.databases import DeltaTableDatabase
     from orcapod.operators import Join
@@ -369,10 +423,12 @@ def _workshop_job(
 
     @function_pod(output_keys="score")
     def score(firing_rate: float, age: int, notes: str | None) -> float:
+        """Workshop function pod: a firing rate scaled by age."""
         calls.append(1)
         return firing_rate * age
 
     def build() -> tuple[Any, Any]:
+        """Build the source and the job over the shared Delta store."""
         src = SpiralDBTableSource(
             args.project, table_name, dataset=args.dataset, overrides=overrides
         )
@@ -411,6 +467,7 @@ def _workshop_job(
 
 
 def _load_phase(args: argparse.Namespace) -> None:
+    """Fresh-process phase of write mode: rebuild the source, load the job, print JSON."""
     from orcapod import PipelineJob
     from orcapod.databases import DeltaTableDatabase
     from orcapod.sources import SpiralDBTableSource
@@ -456,6 +513,7 @@ def _ro_job(args: argparse.Namespace, workdir: Path) -> tuple[Any, Any, Any, lis
     calls: list[int] = []
 
     def touch(value: Any) -> Any:
+        """Return the value unchanged, counting the call."""
         calls.append(1)
         return value
 
@@ -484,6 +542,7 @@ def read_only(args: argparse.Namespace) -> dict[str, Any]:
     report: dict[str, Any] = {"tables": {}, "checks": {}}
 
     def check(name: str, ok: bool, detail: Any) -> None:
+        """Record and print one pass/fail check."""
         report["checks"][name] = {"ok": bool(ok), "detail": detail}
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
@@ -508,14 +567,21 @@ def read_only(args: argparse.Namespace) -> dict[str, Any]:
             entry["error"] = f"{type(exc).__name__}: {exc}"
         print(f"  {name}: {entry}")
 
-    workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp())
+    owned_workdir = args.workdir is None
+    workdir = Path(tempfile.mkdtemp()) if owned_workdir else Path(args.workdir)
     left, right, job, calls = _ro_job(args, workdir)
     job.run()
     first_calls = len(calls)
     echoed = job.nodes["echo"].as_table()
     rows = echoed.num_rows
     # The function cache is keyed on the input value, so equal values compute once.
-    distinct = len(set(echoed.column("echoed").to_pylist()))
+    # json text is hashable for list and struct values too.
+    distinct = len(
+        {
+            json.dumps(v, sort_keys=True, default=str)
+            for v in echoed.column("echoed").to_pylist()
+        }
+    )
     check(
         "run 1 computes each distinct value once",
         first_calls == distinct and rows > 0,
@@ -543,11 +609,7 @@ def read_only(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if args.server_url:
         cmd += ["--server-url", args.server_url]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    try:
-        second = json.loads(proc.stdout.strip().splitlines()[-1])
-    except Exception:  # noqa: BLE001
-        second = {"error": proc.stdout[-2000:] + proc.stderr[-4000:]}
+    second = _run_child(cmd)
     report["fresh_process"] = second
     for label, src in (("left", left), ("right", right)):
         check(
@@ -565,11 +627,15 @@ def read_only(args: argparse.Namespace) -> dict[str, Any]:
         second.get("echo_rows") == rows,
         [rows, second.get("echo_rows")],
     )
-    report["workdir"] = str(workdir)
+    if owned_workdir:
+        shutil.rmtree(workdir, ignore_errors=True)
+    else:
+        report["workdir"] = str(workdir)
     return report
 
 
 def _ro_load_phase(args: argparse.Namespace) -> None:
+    """Fresh-process phase of read-only mode: rebuild both sources, load the job, print JSON."""
     from orcapod import PipelineJob
     from orcapod.databases import DeltaTableDatabase
     from orcapod.sources import SpiralDBTableSource
@@ -590,6 +656,7 @@ def _ro_load_phase(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    """Parse the command line, run the chosen mode, write the report, return the exit code."""
     parser = argparse.ArgumentParser(description="ITL-926 live SpiralDB source check")
     parser.add_argument("--project", required=True)
     parser.add_argument("--dataset", default="default")

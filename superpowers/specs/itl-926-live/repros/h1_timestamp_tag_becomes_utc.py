@@ -1,6 +1,6 @@
 """H1 repro: ``FunctionJobNode.as_table()`` turns a naive ``timestamp[us]`` tag into UTC.
 
-Run from the repository root::
+Run from the repository root:
 
     uv run python superpowers/specs/itl-926-live/repros/h1_timestamp_tag_becomes_utc.py
 
@@ -26,6 +26,7 @@ data = pa.table({"start": [dt.datetime(2026, 1, 1, 9)], "x": [1]}, schema=schema
 
 @function_pod(output_keys="y")
 def inc(x: int) -> int:
+    """Add one."""
     return x + 1
 
 

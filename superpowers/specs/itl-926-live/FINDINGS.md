@@ -34,14 +34,18 @@ scratchpad (listed in the plan).
    `arrow_hasher.hash_table`. General: `ArrowTableSource` fails the same way. EDI tables hit:
    `experiment_display_params`, `experiment_freeviewing_params`,
    `experiment_screen_capture_event`, `lfp_timeseries`. Repro:
-   `repros/c2_fixed_size_list_cannot_hash.py`. (starfix 0.5.0, about to be released, also
-   rejects FixedSizeList, so this is a starfix decision.)
+   `repros/c2_fixed_size_list_cannot_hash.py`. **Status:** starfix support is implemented
+   (nauticalab/starfix#22, ITL-927) and ships in starfix 0.5.0; Orcapod gets it when it
+   adopts 0.5.0 (ITL-910).
 3. **Large tables cannot be used.** The source reads the whole table eagerly and
    `SourceStreamBuilder` calls `table.to_pylist()` for provenance tokens. Measured: 200k
    spike_event-shaped rows take 0.9 s and add about 210 MB of peak RSS for 8.6 MB of Arrow
    data (about 25×). There is no column projection, row filter or limit on the source.
    `spike_event`, `lfp_timeseries`, `experiment_gaze_online_timeseries` and
    `experiment_screen_capture_frame_270p` are at risk. Repro: `repros/c3_source_memory.py`.
+   **Status:** this PR removes the whole-table `to_pylist()` (C3b, byte-identical), so the
+   same 200k rows now add about 115 MB; reading large tables at all is the streaming source
+   (ITL-186).
 4. **pyspiral pin vs. login.** See "pyspiral" below.
 
 ### High
@@ -75,8 +79,8 @@ scratchpad (listed in the plan).
 11. **ITL-40:** the asymmetry is fixed at top level (`get_column_info` and `iter_batches`
     both map `string`/`binary` to the large variants). Nested types (`list<string>`,
     struct children) are normalized by neither, which breaks the "normalize recursively"
-    rule; hashes are unaffected. Mechanical fix: `arrow_utils.normalize_to_large_types`
-    in both.
+    rule; hashes are unaffected. **Status:** fixed in this PR: both paths use
+    `arrow_utils.normalize_to_large_types`.
 12. **Saved source config narrows integer widths:** `tag_schema` / `data_schema` in
     `to_config()` go through Python types, so an `int32`/`uint32` key is saved as `int64`,
     and a `SourceProxy` fallback gets the wrong width. General.
@@ -202,3 +206,13 @@ of `unit` alone took 14.5 s, against about 1 s for other tables, so the time is 
 scan: likely one column group or fragment fetched after another. `scan_cost_probe.py unit
 unit_location` reports column groups, fragments, and scan times for keys only, full, and
 full again. Compacting the table may help; that is for the developer or Spiral to judge.
+
+## Found during the CodeRabbit round (November 11, 2026)
+
+* **`map` columns cannot be hashed either.** starfix 0.4.0 raises `NotImplementedError:
+  Unsupported leaf type: map<...>` from `arrow_hasher.hash_table`, the same failure as
+  `fixed_size_list` (C2), so no source can be built on a table with a map column. The
+  connector itself reads maps correctly (large-normalized, key/item names and nullability
+  kept; tested). The EDI sample tables have no map columns. Whether starfix 0.5.0 covers maps
+  is to check (ITL-927/ITL-910).
+

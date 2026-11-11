@@ -126,7 +126,8 @@ Memory is bounded by about `batch_readahead + 1` batches, plus whatever downstre
 * Positional tokens use a **global row offset** carried across batches (`row_{offset+i}`), so
   they equal the eager source's tokens for the same pinned version.
 * The table hash, which is only used to default `source_id`, is not computed;
-  `source_id` defaults to the table name as today.
+  `source_id` defaults to `<project id>/<dataset>/<table>` in both modes, as in the eager
+  source since ITL-926, so same-named tables in different projects never collide.
 
 ### Record identity (decision D2, ties to H2)
 
@@ -153,7 +154,8 @@ Memory is bounded by about `batch_readahead + 1` batches, plus whatever downstre
   `as_lazy_frame` raise `ValueError`. The message names the estimated row count and the
   options: `source.head(n)`, filtering first, running the table in a `PipelineJob` with the
   async orchestrator, or `streaming=False` to load it anyway.
-* New `head(n=1000)` returns an eager stream of the first `n` rows by key (`scan(limit=n)`),
+* New `head(n=1000)` returns an eager stream of the first `n` rows by key
+  (`scan(limit=n, asof=<pinned>)`: the same version as the full source),
   with the same tags, types and record IDs as the full source.
 * Small tables behave as today.
 * Later: `as_lazy_frame` as a Polars IO-plugin source that pushes projection and predicates
@@ -168,6 +170,15 @@ Memory is bounded by about `batch_readahead + 1` batches, plus whatever downstre
   With the small table closing first, the big side streams through using memory proportional
   to the small side. Output rows are unchanged (verify with
   `test_async_sync_equivalence.py`).
+  * **Assumption: the small side closes first.** A small Spiral table, or one that is read
+    eagerly, finishes long before a large stream, so this holds in the workshop path.
+    Nothing enforces it, though. If the large side's rows arrive before the small side
+    closes, they are buffered until it does, so memory grows with the rows that arrived
+    first. That is never worse than today's Join, which keeps both sides to the end.
+  * **Later work (not part of the approved D6):** buffer only the side the manifest row
+    estimate marks as smaller and use the other side only as the probe, or do a lookup join
+    against a side within `max_eager_rows`. Either bounds memory whatever the closing
+    order.
 * **Sync** over a streaming source would materialize it (`list(iter_data())`). The sync
   orchestrator raises a clear error naming the async orchestrator instead (decision D5;
   alternative: allow it and warn).
@@ -205,7 +216,8 @@ the Polars lazy plugin, and the generic streaming `DBTableSource`.
 
 If D2 is approved, key-based record IDs replace step 1's tokens.
 
-`lfp_timeseries` stays blocked by C2 (`fixed_size_list` hashing, a starfix decision)
+`lfp_timeseries` stays blocked by C2 (`fixed_size_list` hashing) until Orcapod adopts
+starfix 0.5.0 (ITL-910)
 whatever this design does.
 
 Fallback if P0 slips: the workshop uses only small tables with the eager source, and the

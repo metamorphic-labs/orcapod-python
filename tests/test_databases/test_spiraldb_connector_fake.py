@@ -26,6 +26,11 @@ _NESTED = pa.schema(
             pa.struct([pa.field("a", pa.string(), False), pa.field("b", pa.binary())]),
         ),
         pa.field("large_list_bin", pa.large_list(pa.binary())),
+        pa.field(
+            "tags",
+            # key field "key" (non-null) and item field "value" (nullable)
+            pa.map_(pa.string(), pa.list_(pa.string())),
+        ),
     ]
 )
 
@@ -40,10 +45,12 @@ _EXPECTED = {
         [pa.field("a", pa.large_string(), False), pa.field("b", pa.large_binary())]
     ),
     "large_list_bin": pa.large_list(pa.large_binary()),
+    "tags": pa.map_(pa.large_string(), pa.large_list(pa.large_string())),
 }
 
 
 def _nested_table() -> pa.Table:
+    """Return two rows covering every nested type in ``_NESTED``."""
     return pa.table(
         {
             "id": [1, 2],
@@ -52,6 +59,7 @@ def _nested_table() -> pa.Table:
             "list_nonnull_item": [["p", "q"], ["r"]],
             "st": [{"a": "u", "b": b"1"}, {"a": "v", "b": None}],
             "large_list_bin": [[b"z"], []],
+            "tags": [[("k", ["a", "b"])], []],
         },
         schema=_NESTED,
     )
@@ -59,6 +67,7 @@ def _nested_table() -> pa.Table:
 
 @pytest.fixture()
 def spiral_root(tmp_path: Path):
+    """Provide a fake SpiralDB root holding table ``default.nested`` in project ``p``."""
     with fake_pyspiral.install(tmp_path / "spiral"):
         table = (
             fake_pyspiral.FakeSpiral()
@@ -66,6 +75,14 @@ def spiral_root(tmp_path: Path):
             .create_table("default.nested", key_schema=[("id", pa.int64())])
         )
         table.write(_nested_table())
+        # Sources hash their rows, and starfix 0.4.0 cannot hash map columns yet, so the
+        # source-level tests read a copy without the map column.
+        hashable = (
+            fake_pyspiral.FakeSpiral()
+            .project("p")
+            .create_table("default.hashable", key_schema=[("id", pa.int64())])
+        )
+        hashable.write(_nested_table().drop_columns(["tags"]))
         yield tmp_path
 
 
@@ -85,23 +102,26 @@ class TestLargeTypeNormalization:
         assert info == _EXPECTED
 
     def test_source_exposes_normalized_types(self, spiral_root):
-        source = SpiralDBTableSource("p", "nested")
+        source = SpiralDBTableSource("p", "hashable")
         schema = source.as_table().schema
-        assert {name: schema.field(name).type for name in _EXPECTED} == _EXPECTED
+        expected = {k: v for k, v in _EXPECTED.items() if k != "tags"}
+        assert {name: schema.field(name).type for name in expected} == expected
 
     def test_normalization_leaves_hashes_unchanged(self, spiral_root):
         # Large and non-large layouts hash identically, so the Spiral source's per-row
         # content hashes equal those of the same rows given in their original layout.
-        spiral = SpiralDBTableSource("p", "nested", source_id="nested")
+        spiral = SpiralDBTableSource("p", "hashable", source_id="nested")
         stored = (
             fake_pyspiral.FakeSpiral()
             .project("p")
-            .table("default.nested")
+            .table("default.hashable")
             .schema()
             .to_arrow()
         )
         direct = ArrowTableSource(
-            _nested_table().cast(stored), tag_columns=["id"], source_id="nested"
+            _nested_table().drop_columns(["tags"]).cast(stored),
+            tag_columns=["id"],
+            source_id="nested",
         )
 
         def hashes(source) -> list[str]:

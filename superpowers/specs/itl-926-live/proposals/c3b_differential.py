@@ -1,11 +1,15 @@
 """C3b differential: hash every source output byte for byte, before and after the change.
 
-Run from the repository root, once on the current code and once with
-``c3b-stream-builder-no-to_pylist.patch`` applied, then compare the two files::
+The change is in this branch, so compare the revision before it (``ebf2511b``, main when
+ITL-926 started) with this branch. Copy the script out of the tree first, because the
+older revision does not have it, then run it from the repository root on each revision
+with the same environment and compare the two files:
 
-    uv run python superpowers/specs/itl-926-live/proposals/c3b_differential.py before.json
-    git apply superpowers/specs/itl-926-live/proposals/c3b-stream-builder-no-to_pylist.patch
-    uv run python superpowers/specs/itl-926-live/proposals/c3b_differential.py after.json
+    cp superpowers/specs/itl-926-live/proposals/c3b_differential.py /tmp/c3b_diff.py
+    git switch --detach ebf2511b
+    uv run python /tmp/c3b_diff.py before.json
+    git switch -
+    uv run python /tmp/c3b_diff.py after.json
     cmp before.json after.json
 
 Each case records the SHA-256 of the IPC bytes of ``as_table(all_info=True)``,

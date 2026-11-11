@@ -41,6 +41,7 @@ def _all_nullable(table: pa.Table) -> pa.Table:
 
 @pytest.fixture()
 def spiral_root(tmp_path: Path):
+    """Provide a fake root with EDI-shaped, all-nullable ``session`` and ``experiment``."""
     root = tmp_path / "spiral"
     with fake_pyspiral.install(root):
         project = fake_pyspiral.FakeSpiral().project(_PROJECT)
@@ -135,6 +136,8 @@ class TestErrors:
 
 class TestWorkshopPath:
     def _job(self, store: Path, calls: list[int]) -> PipelineJob:
+        """Build the workshop job (Join, select, counting pod) over the Delta ``store``."""
+
         @function_pod(output_keys="accuracy")
         def counted(
             correct_trials: int | None, total_trials: int | None
@@ -183,6 +186,8 @@ class TestWorkshopPath:
         path = tmp_path / "job.json"
         rerun.save(path)
         loaded = PipelineJob.load(path, store=DeltaTableDatabase(store))
+        # Both Spiral sources were rebuilt from the saved config, not left unbound.
+        assert loaded.unbound_sources == []
         records = loaded.nodes["accuracy"].get_all_records()
         assert records is not None
         assert records.num_rows == 3
@@ -224,6 +229,7 @@ class TestSourceId:
 
     @pytest.fixture()
     def two_projects(self, tmp_path: Path):
+        """Provide two fake projects holding the same one-row ``subject`` table."""
         with fake_pyspiral.install(tmp_path / "spiral"):
             for project in ("edi-sample-a", "edi-sample-b"):
                 table = (
@@ -297,6 +303,7 @@ class TestNonNullableColumns:
 
     @pytest.fixture()
     def strict_root(self, tmp_path: Path):
+        """Provide ``session`` and ``unit`` tables whose columns are written non-null."""
         root = tmp_path / "spiral"
         with fake_pyspiral.install(root):
             project = fake_pyspiral.FakeSpiral().project(_PROJECT)
@@ -383,6 +390,7 @@ class TestNonNullableColumns:
         path = tmp_path / "job.json"
         job.save(path)
         loaded = PipelineJob.load(path, store=DeltaTableDatabase(store))
+        assert loaded.unbound_sources == []
         records = loaded.nodes["double"].get_all_records()
         assert records is not None
         assert sorted(records.column("trials_x2").to_pylist()) == [20, 40]
