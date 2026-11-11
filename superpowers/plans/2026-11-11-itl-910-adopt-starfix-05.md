@@ -74,7 +74,8 @@ on both.
 - `src/orcapod/contexts/data/schemas/context_schema.json:178` (example value)
 - tests: `tests/test_hashing/test_starfix_arrow_hasher.py` (label + three pinned format-1 digests),
   `tests/test_hashing/test_pandas_handlers.py` (label), `tests/test_core/operators/test_materialize_source_info.py`
-  (three pinned format-1 digests), `tests/test_core/operators/test_async_sync_equivalence.py`,
+  (three pinned format-1 digests), `tests/test_core/operators/test_async_sync_equivalence.py`
+  (`PINNED_ROW_HASHES`, `PINNED_STREAM_CONTENT_HASH`),
   `tests/test_hashing/golden/cases.py` (docstring), golden data files.
 - docs: `docs/reference/hashing.md` §3/§4 worked-example tables (regenerate with
   `superpowers/scripts/hash_audit_example.py`); `notebooks/tutorials/01_introduction_to_orcapod.ipynb`
@@ -106,6 +107,24 @@ before the first v0.3 run, a read returns the v0.2 rows. Stored rows carry the l
 (`__input_data_hash`, `__pipeline_base_entry_id` start `b"arrow_v0.1:"` vs `b"arrow_v0.2:"`). OperatorNode
 REPLAY reads all rows matching the node content hash, so a v0.3 LOG-mode write next to v0.2 rows can
 duplicate too.
+
+### Full suite under starfix 0.5 overlay (label unchanged): 201 failed / 7400 passed / 96 skipped
+
+- 186 golden entries (all Arrow-derived, see above).
+- Pinned format-1 digests: `test_starfix_arrow_hasher.py` (5 tests), `test_materialize_source_info.py` (1),
+  `test_async_sync_equivalence.py::test_issue_example_types_and_pinned_hashes`,
+  `test_struct_layout_identity.py::TestStructHashesUnchanged` (4 params).
+- `test_group_by.py::test_falls_back_to_record_id_when_key_covers_all_tags`: member order comes from
+  record ids (uuid5 of the Arrow-hashed default `source_id`), so `["a","b"]` becomes `["b","a"]`. Arrow-derived.
+- `test_array_v02_store.py` (2): the ITL-888 claim "an array-free pod reuses its v0.2 results" stops being
+  true: every function node recomputes (input data hashes move) into the same tables (mixing finding).
+- `test_async_sync_equivalence.py::test_arrow_hasher_hash_schema_with_extension_type` (strict xfail, ITL-846)
+  now XPASSes: starfix 0.5 accepts a live extension type in `hash_schema`, but hashes it as its storage
+  type, so `hash_schema(Path column) == hash_schema(large_string column)`.
+- Same identity loss in `hash_table` for pyarrow's canonical extension types (`arrow.uuid`,
+  `arrow.fixed_shape_tensor`): they are `pa.BaseExtensionType`, not `pa.ExtensionType`, so
+  `normalize_extension_columns` skips them, `include_metadata` stays off, and an `arrow.uuid` table hashes
+  equal to a `fixed_size_binary(16)` table. (On 0.4 they raised.)
 
 ## Tasks (after approval)
 
