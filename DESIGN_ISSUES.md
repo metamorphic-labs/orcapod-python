@@ -2251,7 +2251,7 @@ yields an empty result on the async path instead of an error. `Join`'s async key
 ## `src/orcapod/core/operators/filters.py` — `PolarsFilter` identity and nullability (ITL-828)
 
 ### PF1 — An expression predicate could not be hashed, and a filter broke a join inside a job
-**Status:** in progress (PF1a resolved; PF1b open)
+**Status:** resolved
 
 **PF1a.** `stream.polars_filter(pl.col("x") > 0).pipeline_hash()` raised `TypeError` (no
 semantic handler for `pl.Expr`), so an expression filter failed upstream of a join and anywhere
@@ -2264,16 +2264,17 @@ serialization is not hashed directly: it changed layout between 1.20, 1.30 and 1
 nodes and unsupported expressions (Python functions, multi-column selectors, aggregations,
 `alias`, `when/then`, non-finite literals, `pl.Series` literals) raise `ValueError` naming the
 expression, so a Polars layout change fails loudly instead of moving a hash. `predicates` is
-normalized to a tuple. The identity design awaits the developer's confirmation.
+normalized to a tuple. The developer confirmed the identity design (November 11, 2026).
 
 Also fixed: inside a `PipelineJob` any `PolarsFilter` (keyword constraints too) upstream of a
 `Join` raised `InputValidationError` (`str` vs `str | None`), because Polars returns every field
-nullable and the filter restored types but not nullability. Tag, system-tag, source-info and
-meta columns now get their input nullability back. No golden value moved.
+nullable and the filter restored types but not nullability.
 
-**PF1b (open).** Data columns of a filtered stream still come back nullable, which breaks the
-rule that operators never change nullability. Restoring them too (drop the exclusion in
-`PolarsFilter.unary_static_process`) makes a filtered row's data hash equal to its source row's,
-but moves the pinned `pipeline:polars_filter` row data hashes, which are the cache keys of any
-function pod downstream of a filter, so a 0.2 store would recompute those results once. Awaiting
-the developer's decision.
+**PF1b.** Data columns of a filtered stream also came back nullable, which broke the rule that
+operators never change nullability, and gave a filtered row a different data hash from its
+source row.
+
+**Fix (PF1b):** the filter restores every column's input nullability (developer, November 11,
+2026). A filtered row's data hash now equals its source row's. The pinned
+`pipeline:polars_filter` row data hashes moved (approved); they are the cache keys of any
+function pod downstream of a filter, so a 0.2 store recomputes those results once.

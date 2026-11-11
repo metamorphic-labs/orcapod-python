@@ -15,8 +15,11 @@
   `map_batches`) and selectors over several columns, raises `ValueError` naming the
   expression when the filter's identity is needed. Keyword-constraint filters hash as before.
 - Inside a `PipelineJob`, a `PolarsFilter` (keyword constraints too) upstream of a `Join` no
-  longer raises `InputValidationError` (`str` vs `str | None`): the filter keeps the
-  nullability of tag, system-tag and source-info columns (ITL-828).
+  longer raises `InputValidationError` (`str` vs `str | None`): the filter now keeps every
+  column's input nullability, instead of returning every column nullable (ITL-828). A filtered
+  row's data hash now equals its source row's, so the data hashes of filtered rows change from
+  `0.2.0`, and a function pod downstream of a `polars_filter` recomputes its results once
+  against a `0.2.0` store.
 - `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
   have the same hashes (`predicates` is stored as a tuple).
 

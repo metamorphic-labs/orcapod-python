@@ -72,22 +72,11 @@ class PolarsFilter(UnaryOperator):
         filtered_table = arrow_utils.restore_column_types(
             filtered_table, {field.name: field.type for field in input_fields}
         )
-        # Polars returns every field nullable. Tag, system-tag, source-info and
-        # meta columns get their input nullability back, so a filtered stream
-        # still joins with streams whose tags are non-nullable. Data columns
-        # keep the nullable flag Polars gives them: restoring it too is correct
-        # but changes their data hashes, the function-pod cache keys, and awaits
-        # a decision (DESIGN_ISSUES.md, ITL-828 entry). Restoring every column
-        # means dropping this exclusion.
-        _, data_columns = stream.keys()
-        keeps_polars_nullability = set(data_columns)
+        # Polars returns every field nullable; every column gets its input
+        # nullability back, so a filtered stream keeps its input schema and
+        # still joins with streams whose tags are non-nullable.
         filtered_table = arrow_utils.restore_schema_nullability(
-            filtered_table,
-            pa.schema(
-                field
-                for field in input_fields
-                if field.name not in keeps_polars_nullability
-            ),
+            filtered_table, pa.schema(input_fields)
         )
 
         return ArrowTableStream(

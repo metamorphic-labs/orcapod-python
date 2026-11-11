@@ -81,3 +81,7 @@ expression filter that is never hashed keeps working exactly as today.
   a "1c" section there, so on merging #286 renumber ours to 1d and fix the anchor in
   docs/concepts/operators.md.
 - PR must be a DRAFT: identity design awaits the developer's confirmation.
+- 2026-11-11 (later): developer approved polars_expr_v1 as final and the FULL nullability fix
+  (option A). PolarsFilter restores every column's nullability; versus main the golden diff
+  changes exactly the two pipeline:polars_filter row data_hash lines (new value = source row
+  hash) and otherwise adds lines. PR to be marked ready.

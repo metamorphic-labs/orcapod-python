@@ -141,12 +141,22 @@ def test_filter_upstream_of_join_inside_pipeline_job(kind, orchestrator):
     assert sorted(table.column("score").to_pylist()) == scores
 
 
-def test_filter_keeps_tag_nullability():
+def test_filter_keeps_every_column_nullability():
     source = _readings()
     filtered = source.polars_filter(pl.col("x") > 0)
-    source_field = source.as_table().schema.field("id")
-    filtered_field = filtered.as_table().schema.field("id")
-    assert filtered_field.nullable == source_field.nullable
+    columns = {"source": True, "system_tags": True}
+    assert (
+        filtered.as_table(columns=columns).schema
+        == source.as_table(columns=columns).schema
+    )
+
+
+def test_filtered_row_keeps_its_source_data_hash():
+    source = _readings()
+    filtered = source.polars_filter(pl.col("x") > 0)
+    source_hashes = {tag["id"]: data.content_hash() for tag, data in source.iter_data()}
+    for tag, data in filtered.iter_data():
+        assert data.content_hash() == source_hashes[tag["id"]]
 
 
 _JOB_SCRIPT = textwrap.dedent("""\
