@@ -30,6 +30,7 @@ Optional features are installed as extras:
 
 SpikeInterface support lives in a separate package,
 [`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
+It is not published on PyPI; install it from its repository.
 
 See [CHANGELOG.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md)
 for release notes, including the migration steps for databases written by an earlier
