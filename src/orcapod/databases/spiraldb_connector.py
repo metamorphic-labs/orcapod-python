@@ -23,8 +23,23 @@ import json
 import logging
 import re
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from orcapod.databases.spiraldb_nullability import (
+    apply_nullability_record,
+    check_no_nulls,
+    enforce_nullability_record,
+    read_nullability_record,
+    render_path,
+    schema_paths,
+    write_nullability_record,
+)
+from orcapod.errors import (
+    NullabilityRecordError,
+    NullInNonNullableColumnError,
+    NullabilityRecordMismatchError,
+)
 from orcapod.types import ColumnInfo
 from orcapod.utils import arrow_utils
 
@@ -292,6 +307,25 @@ def _parse_table_name(query: str) -> str:
     return m.group(1)
 
 
+@contextmanager
+def _about_table(table: str) -> Iterator[None]:
+    """Re-raise a nullability error that does not name its table with ``table`` added.
+
+    Args:
+        table: The table, as ``"<project>/<dataset>/<table>"``.
+    """
+    try:
+        yield
+    except NullabilityRecordError as exc:
+        if exc.table is not None:
+            raise
+        raise NullabilityRecordError(exc.reason, table=table) from exc
+    except NullInNonNullableColumnError as exc:
+        if exc.table is not None:
+            raise
+        raise NullInNonNullableColumnError(exc.column, table=table) from exc
+
+
 # ---------------------------------------------------------------------------
 # SpiralDBConnector
 # ---------------------------------------------------------------------------
@@ -335,6 +369,10 @@ class SpiralDBConnector:
         """Return the dataset-qualified table identifier for a plain table name."""
         return f"{self._dataset}.{table_name}"
 
+    def _qualified(self, table_name: str) -> str:
+        """Return ``"<project>/<dataset>/<table>"``, the table as errors name it."""
+        return f"{self._project_id}/{self._dataset}/{table_name}"
+
     def get_table_names(self) -> list[str]:
         """Return all table names in this connector's dataset, sorted alphabetically.
 
@@ -377,17 +415,29 @@ class SpiralDBConnector:
         columns at storage time — ``timestamp[us, tz=UTC]`` is returned as
         ``timestamp[us]``.
 
+        SpiralDB reports every top-level column and every struct field nullable. When
+        the table carries a nullability record (``write_nullability_record``, written by
+        ``upsert_records`` on a table's first write), the recorded columns and nested
+        fields are reported non-nullable; without one, nullability is SpiralDB's.
+
         Args:
             table_name: Plain table name (no dataset prefix).
 
         Returns:
             List of ColumnInfo objects. Propagates pyspiral exception if the
             table does not exist (no empty-list fallback).
+
+        Raises:
+            NullabilityRecordError: If the table's nullability record cannot be read or
+                names a column the table does not have.
         """
         self._require_open()
-        arrow_schema = (
-            self._project.table(self._table_id(table_name)).schema().to_arrow()
-        )
+        tbl = self._project.table(self._table_id(table_name))
+        arrow_schema = tbl.schema().to_arrow()
+        with _about_table(self._qualified(table_name)):
+            paths = read_nullability_record(tbl.get_metadata())
+            if paths is not None:
+                arrow_schema = apply_nullability_record(arrow_schema, paths)
         return [
             ColumnInfo(
                 name=field.name,
@@ -434,7 +484,16 @@ class SpiralDBConnector:
               restored from the SpiralDB native KV store, if any was written
               by ``upsert_records``.
             - Schema-level metadata restored from the KV store.
+            - The nullability ``get_column_info`` reports: when the table carries a
+              nullability record, every batch is checked and its recorded columns are
+              non-nullable. Tables without a record pay no per-batch check.
             Yields nothing for an empty table.
+
+        Raises:
+            NullabilityRecordError: If the table's nullability record cannot be read or
+                names a column the table does not have.
+            NullInNonNullableColumnError: If a batch holds a null in a recorded
+                non-nullable column (naming the table and the column).
         """
         import pyarrow as _pa  # noqa: PLC0415
 
@@ -454,7 +513,11 @@ class SpiralDBConnector:
             )
         table_name = _parse_table_name(query)
         tbl = self._project.table(self._table_id(table_name))
-        schema_meta, field_trees = _load_arrow_metadata(tbl.get_metadata())
+        kv = tbl.get_metadata()
+        schema_meta, field_trees = _load_arrow_metadata(kv)
+        qualified = self._qualified(table_name)
+        with _about_table(qualified):
+            paths = read_nullability_record(kv)
         reader = self._spiral.scan(tbl.select()).to_record_batches()
         for batch in reader:
             schema = batch.schema
@@ -484,6 +547,9 @@ class SpiralDBConnector:
             if needs_rebuild:
                 target_schema = _pa.schema(new_fields, metadata=restored_schema_meta)
                 batch = batch.cast(target_schema)
+            if paths is not None:
+                with _about_table(qualified):
+                    batch = enforce_nullability_record(batch, paths)
             yield batch
 
     def delete_table(self, table_name: str) -> None:
@@ -571,10 +637,23 @@ class SpiralDBConnector:
                 the timezone-naive values returned by the existing-row scan,
                 causing all rows to appear novel and be re-written.
 
+        Nullability: SpiralDB reports every top-level column and struct field
+        nullable, so the connector keeps the non-nullable paths of ``records.schema`` in
+        the table's nullability record (``write_nullability_record``). It writes the
+        record, before the rows, on the first write to a table that has no value columns
+        yet. A table that already holds rows without a record gets none: recording it is a
+        deliberate act. A later write must declare exactly the recorded paths.
+
         Raises:
             ValueError: If ``id_column`` is not in the table key schema (including
                 empty key schema), or if any key-schema column is absent from
                 ``records``.
+            NullInNonNullableColumnError: If ``records`` holds a null in a column (or
+                nested field) its schema declares non-nullable. Nothing is written.
+            NullabilityRecordMismatchError: If the table's record lists different
+                non-nullable paths than ``records.schema``. Nothing is written.
+            NullabilityRecordError: If the table's record cannot be read, or
+                ``records`` has a non-nullable field inside a map.
         """
         self._require_open()
         tbl = self._project.table(self._table_id(table_name))
@@ -595,6 +674,26 @@ class SpiralDBConnector:
                 f"records is missing key column(s) {missing} required by the "
                 f"table key schema {pk_cols}."
             )
+
+        # Nullability (ITL-936). SpiralDB keeps no non-null flag except on list items, and
+        # stores a null written to a non-null struct field as the type's zero, so every
+        # non-nullable path is checked here before anything is written.
+        qualified = self._qualified(table_name)
+        with _about_table(qualified):
+            paths = schema_paths(records.schema)
+            check_no_nulls(records, paths)
+            recorded = read_nullability_record(tbl.get_metadata())
+        if recorded is not None:
+            if recorded != paths:
+                raise NullabilityRecordMismatchError(
+                    [render_path(p) for p in sorted(recorded - paths)],
+                    [render_path(p) for p in sorted(paths - recorded)],
+                    table=qualified,
+                )
+        elif set(tbl.schema().to_arrow().names) <= set(pk_cols):
+            # A table with no value columns yet holds no rows Orcapod did not record:
+            # record first, so a failed row write never leaves unrecorded rows.
+            write_nullability_record(tbl, records.schema)
 
         meta_kv = _serialize_arrow_metadata(records)
 

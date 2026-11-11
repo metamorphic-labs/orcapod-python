@@ -319,6 +319,7 @@ def apply_nullability_record(
 
 
 def _descend(arrays: list[Any], segment: str) -> list[Any]:
+    arrays = [a.storage if isinstance(a, pa.ExtensionArray) else a for a in arrays]
     if segment == ITEM:
         return [a.flatten() for a in arrays]
     return [a.field(segment) for a in arrays]
