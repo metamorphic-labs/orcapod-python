@@ -39,7 +39,18 @@ def _node_of(table: str) -> str:
 def store(tmp_path: Path) -> Path:
     target = tmp_path / "store"
     with tarfile.open(FIXTURE) as tar:
-        tar.extractall(target, filter="data")
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(target, filter="data")
+        else:  # Python 3.11.0-3.11.3 have no extraction filters
+            for member in tar.getmembers():
+                path = Path(member.name)
+                if (
+                    path.is_absolute()
+                    or ".." in path.parts
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise ValueError(f"unsafe member in {FIXTURE}: {member.name!r}")
+            tar.extractall(target)  # every member was checked above
     return target
 
 

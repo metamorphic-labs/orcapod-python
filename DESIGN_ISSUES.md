@@ -2306,14 +2306,16 @@ yields an empty result on the async path instead of an error. `Join`'s async key
 Arrays were stored as the exact `np.save` file in a `large_binary` column under extension name
 `numpy.ndarray`, and hashed as SHA-256 of that file under the bare label `sha256`. The hash
 followed the file, not the value: equal arrays in C and Fortran order, in little- and big-endian
-byte order, or with structured fields in another order hashed differently. Masked arrays lost
+byte order, or with structured fields at other offsets hashed differently. Masked arrays lost
 their mask silently. `StringDType` failed with a misleading pickle error. A pod declared
 `-> np.ndarray` could return a NumPy scalar unchecked.
 
 v0.3 moves to the value-based format of `superpowers/specs/2026-11-10-array-format-v0.3.md`:
 extension `orcapod.ndarray` over `struct<dtype, shape, data>` (little-endian, C order), hashed
-by value under a versioned label, with old data neither detected nor migrated (deferred by the
-developer).
+by value under the label `ndarray_v1` (developer's decisions, November 10 and 11, 2026). Old
+data is neither detected nor migrated in v0.3; migration is deferred to ITL-889. Accepting
+`longdouble`/`clongdouble`, unit-less datetimes and titled structured dtypes, refused in v0.3,
+is reconsidered in ITL-911.
 
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null

@@ -1,9 +1,8 @@
 """Shared arrays and assertions for the ``numpy.ndarray`` value tests (ITL-888).
 
 Every array here is little-endian, C-ordered, a plain ``np.ndarray`` and, when
-structured, has its fields sorted by name and packed. Such arrays read back
-unchanged under every identity option considered for the v0.3 array format,
-so the tests built on them hold before and after the format change.
+structured, packed with its fields in declared order (field order is part of an
+array's identity). Such arrays read back unchanged.
 """
 
 from __future__ import annotations
@@ -31,6 +30,12 @@ ARRAYS: dict[str, npt.NDArray[Any]] = {
     "bytes": np.array([b"abc", b"", b"z"], dtype="S3"),
     "void": np.array([b"\x00\x01\x02\x03", b"\xff\xfe\xfd\xfc"], dtype="V4"),
     "structured": np.array([(1, 0.5), (-2, 1.5)], dtype=[("a", "<i4"), ("b", "<f8")]),
+    "structured_unsorted": np.array(
+        [(0.5, 1), (1.5, -2)], dtype=[("b", "<f8"), ("a", "<i4")]
+    ),
+    "structured_nested": np.array(
+        [((1, 2), 3.5)], dtype=[("s", [("y", "<i2"), ("x", "<i2")]), ("a", "<f8")]
+    ),
     "zero_d": np.array(2.5),
     "empty_0x3": np.zeros((0, 3), dtype=np.float32),
     "empty_3x0": np.zeros((3, 0), dtype=np.float32),

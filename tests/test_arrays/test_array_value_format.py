@@ -126,7 +126,7 @@ TAG_CASES: list[tuple[str, npt.NDArray[Any], str]] = [
     (
         "nested",
         np.zeros(1, dtype=[("p", [("y", "<f4"), ("x", "<f4")]), ("n", "<i8")]),
-        '[["n","int64"],["p",[["x","float32"],["y","float32"]]]]',
+        '[["p",[["y","float32"],["x","float32"]]],["n","int64"]]',
     ),
     (
         "non_ascii_name",
@@ -167,9 +167,11 @@ def test_zero_d_and_empty_shapes() -> None:
     assert stored(np.zeros((3, 0), np.float32))["shape"] == [3, 0]
 
 
-def test_structured_data_is_packed_in_field_name_order() -> None:
+def test_structured_data_is_packed_in_declared_field_order() -> None:
     array = np.array([(1.5, 7)], dtype=[("b", ">f8"), ("a", "<i4")])
-    assert stored(array)["data"] == struct.pack("<i", 7) + struct.pack("<d", 1.5)
+    row = stored(array)
+    assert row["dtype"] == '[["b","float64"],["a","int32"]]'
+    assert row["data"] == struct.pack("<d", 1.5) + struct.pack("<i", 7)
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +201,32 @@ def test_big_endian_reads_back_little_endian_with_equal_values(dtype: str) -> No
     assert (got == big).all()
 
 
-def test_structured_reads_back_with_fields_sorted_and_packed() -> None:
+def test_structured_reads_back_in_stored_field_order_and_packed() -> None:
     aligned = np.dtype([("b", ">f8"), ("a", "<i2")], align=True)
     array = np.array([(1.5, 7), (-2.0, 9)], dtype=aligned)
     got = read_back(array)
-    assert got.dtype == np.dtype([("a", "<i2"), ("b", "<f8")])
+    assert got.dtype == np.dtype([("b", "<f8"), ("a", "<i2")])
+    assert got.dtype.names == ("b", "a")
     assert got.dtype.itemsize == 10
     assert got["a"].tolist() == [7, 9]
     assert got["b"].tolist() == [1.5, -2.0]
+
+
+def test_nested_structured_reads_back_in_stored_field_order() -> None:
+    inner = np.dtype([("y", ">i2"), ("x", "<i2")])
+    array = np.array([((1, 2), 3.5)], dtype=[("s", inner), ("a", "<f8")])
+    got = read_back(array)
+    assert got.dtype == np.dtype([("s", [("y", "<i2"), ("x", "<i2")]), ("a", "<f8")])
+    assert got["s"]["y"].tolist() == [1] and got["s"]["x"].tolist() == [2]
+
+
+def test_reordered_fields_are_a_different_stored_value() -> None:
+    ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
+    ba = np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")])
+    assert stored(ab)["dtype"] != stored(ba)["dtype"]
+    assert stored(ab) != stored(ba)
+    assert read_back(ab).dtype.names == ("a", "b")
+    assert read_back(ba).dtype.names == ("b", "a")
 
 
 def test_zero_d_structured_round_trip() -> None:
@@ -273,17 +293,42 @@ def _equal_value_variants() -> list[tuple[str, npt.NDArray[Any], npt.NDArray[Any
     base = np.zeros((4, 12), dtype=np.float32)
     base[:, ::2] = a
     rec_ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
-    rec_ba = np.array([(2.0, 1)], dtype=[("b", ">f8"), ("a", ">i4")])
+    rec_ab_big = np.array([(1, 2.0)], dtype=[("a", ">i4"), ("b", ">f8")])
     aligned = np.array(
         [(1, 2.0)], dtype=np.dtype([("a", "<i4"), ("b", "<f8")], align=True)
+    )
+    padded = np.array(
+        [(1, 2.0)],
+        dtype=np.dtype(
+            {
+                "names": ["a", "b"],
+                "formats": ["<i4", "<f8"],
+                "offsets": [0, 8],
+                "itemsize": 24,
+            }
+        ),
+    )
+    # Declared order a, b; in memory b comes first.
+    offsets_swapped = np.array(
+        [(1, 2.0)],
+        dtype=np.dtype(
+            {
+                "names": ["a", "b"],
+                "formats": ["<i4", "<f8"],
+                "offsets": [8, 0],
+                "itemsize": 12,
+            }
+        ),
     )
     return [
         ("fortran", a, np.asfortranarray(a)),
         ("strided", a, base[:, ::2]),
         ("transposed_twice", a, a.T.T),
         ("big_endian", a, a.astype(">f4")),
-        ("field_order", rec_ab, rec_ba),
+        ("structured_byte_order", rec_ab, rec_ab_big),
         ("aligned", rec_ab, aligned),
+        ("padded", rec_ab, padded),
+        ("offsets_swapped", rec_ab, offsets_swapped),
         (
             "matrix",
             np.arange(4.0).reshape(2, 2),
@@ -297,7 +342,7 @@ def _equal_value_variants() -> list[tuple[str, npt.NDArray[Any], npt.NDArray[Any
     [v[1:] for v in _equal_value_variants()],
     ids=[v[0] for v in _equal_value_variants()],
 )
-def test_layout_byte_order_field_order_and_subclass_do_not_change_the_hash(
+def test_layout_byte_order_padding_and_subclass_do_not_change_the_hash(
     left: npt.NDArray[Any], right: npt.NDArray[Any]
 ) -> None:
     assert semantic_hash(left) == semantic_hash(right)
@@ -320,6 +365,16 @@ def _different_value_pairs() -> list[tuple[str, npt.NDArray[Any], npt.NDArray[An
             "field_name",
             np.zeros(1, dtype=[("a", "<i4")]),
             np.zeros(1, dtype=[("b", "<i4")]),
+        ),
+        (
+            "field_order",
+            np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")]),
+            np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")]),
+        ),
+        (
+            "nested_field_order",
+            np.zeros(1, dtype=[("s", [("x", "<i4"), ("y", "<i4")])]),
+            np.zeros(1, dtype=[("s", [("y", "<i4"), ("x", "<i4")])]),
         ),
         ("unit", np.array([1], "M8[s]"), np.array([1], "M8[ms]")),
     ]
@@ -402,6 +457,33 @@ def test_null_child_on_read_raises_naming_the_column() -> None:
             data.as_dict()
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [["a"], ["a", "int32", [2], "extra"]],
+    ids=["one_part", "four_parts"],
+)
+def test_structured_tag_entry_with_wrong_part_count_raises_on_read(
+    entry: list[Any],
+) -> None:
+    converter = get_default_context().type_converter
+    ext = converter.python_type_to_arrow_type(np.ndarray)
+    assert isinstance(ext, pa.ExtensionType)
+    tag = json.dumps([entry])
+    storage = pa.array(
+        [{"dtype": tag, "shape": [], "data": b"\x00" * 8}], type=ext.storage_type
+    )
+    table = pa.table(
+        {
+            "k": pa.array(["r"], pa.large_string()),
+            "x": pa.ExtensionArray.from_storage(ext, storage),
+        }
+    )
+    with pytest.raises((ValueError, RuntimeError), match="malformed array dtype tag"):
+        source = ArrowTableSource(table, tag_columns=["k"])
+        for _, data in source.iter_data():
+            data.as_dict()
+
+
 # ---------------------------------------------------------------------------
 # Function pods: a declared np.ndarray return must be an ndarray
 # ---------------------------------------------------------------------------
@@ -462,9 +544,25 @@ def test_merge_join_orders_arrays_by_stored_tag_shape_and_data() -> None:
         assert [x.dtype for x in got[k]] == [x.dtype for x in expected]
 
 
+def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
+    ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
+    ba = np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")])
+    left = DictSource(data=[{"k": "a", "x": ba}], tag_columns=["k"], source_id="l")
+    right = DictSource(data=[{"k": "a", "x": ab}], tag_columns=["k"], source_id="r")
+    outs: list[Any] = [
+        next(d.as_dict()["x"] for _, d in MergeJoin()(*pair).iter_data())
+        for pair in ((left, right), (right, left))
+    ]
+    expected = sorted([ab, ba], key=lambda a: stored(a)["dtype"])
+    for got in outs:
+        assert [x.dtype.names for x in got] == [x.dtype.names for x in expected]
+        for x, e in zip(got, expected, strict=True):
+            assert_arrays_identical(x, e)
+
+
 def test_stored_tag_is_valid_json_for_structured() -> None:
     tag = stored(np.zeros(1, dtype=[("b", "<f4"), ("a", "<i2", (2,))]))["dtype"]
-    assert json.loads(tag) == [["a", "int16", [2]], ["b", "float32"]]
+    assert json.loads(tag) == [["b", "float32"], ["a", "int16", [2]]]
 
 
 # ---------------------------------------------------------------------------

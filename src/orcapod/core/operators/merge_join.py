@@ -61,17 +61,46 @@ def _storage_sort_key(
     """Return the ordering key MergeJoin uses for a column's stored values.
 
     The array logical type defines ``storage_sort_key`` (its stored ``(dtype tag,
-    shape, data)``); every other type is ordered by its stored value as before.
+    shape, data)``). A list of such values, at any depth (an array column after
+    ``GroupBy`` or ``Batch``), is ordered by the tuple of its elements' keys, with
+    ``None`` first. Every other type is ordered by its stored value as before.
     General struct ordering is ITL-839.
     """
     if isinstance(arrow_type, pa.ExtensionType):
         lt = type_converter.get_logical_type_by_arrow_extension_name(
             arrow_type.extension_name
         )
-        key = getattr(lt, "storage_sort_key", None)
-        if callable(key):
+        key = _logical_sort_key(lt)
+        if key is not None:
             return key
     return _identity_key
+
+
+def _logical_sort_key(logical_type: Any) -> Callable[[Any], Any] | None:
+    """Return a logical type's own ordering key for stored values, if it has one.
+
+    Args:
+        logical_type: A logical type, or ``None``.
+
+    Returns:
+        The type's ``storage_sort_key``; for a list logical type whose elements
+        have a key, a key ordering lists by their elements' keys; otherwise
+        ``None``.
+    """
+    key = getattr(logical_type, "storage_sort_key", None)
+    if callable(key):
+        return key
+    element = getattr(logical_type, "element_logical_type", None)
+    element_key = _logical_sort_key(element) if element is not None else None
+    if element_key is None:
+        return None
+
+    def list_key(storage_value: Any) -> tuple[Any, ...]:
+        if storage_value is None:
+            return (0,)
+        return (1, tuple(element_key(v) for v in storage_value))
+
+    return list_key
 
 
 class MergeJoin(BinaryOperator):

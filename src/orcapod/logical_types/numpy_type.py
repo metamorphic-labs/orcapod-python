@@ -9,9 +9,11 @@ element bytes in C order, little-endian and packed. The extension name is
 
 Writing canonicalises what is not part of an array's identity: memory order
 and strides (stored C order), byte order (stored little-endian) and structured
-field order and padding (fields sorted by name, packed). So a stored row is the
-array's canonical value, and its hash (``NumpyArrayHandler``) is a function of
-the stored row alone.
+offsets, padding and alignment (fields packed). Structured field order is part
+of the identity, as NumPy's own dtype equality has it: fields are stored in
+declared order, at every nesting depth. So a stored row is the array's
+canonical value, and its hash (``NumpyArrayHandler``) is a function of the
+stored row alone.
 
 Refused at write time, with a ``ValueError`` naming the dtype (the type
 converter adds the column): masked arrays, object dtypes, NumPy 2
@@ -85,8 +87,9 @@ def _tag_value(dtype: np.dtype[Any]) -> str | list[Any]:
     """Return the tag of ``dtype`` as a string or, for structured dtypes, a JSON list."""
     if dtype.fields is not None:
         entries: list[Any] = []
-        for name in sorted(dtype.fields):
-            field = dtype.fields[name]
+        fields = {str(key): value for key, value in dtype.fields.items()}
+        for name in dtype.names or ():
+            field = fields[name]
             if len(field) > 2:
                 raise _refuse(dtype, "structured fields with titles are not supported")
             sub = field[0]
@@ -153,7 +156,8 @@ def dtype_to_tag(dtype: np.dtype[Any]) -> str:
     Returns:
         A scalar tag such as ``"float32"`` or ``"datetime64[ns]"``, or for a
         structured dtype a JSON list of ``[name, tag]`` / ``[name, tag, shape]``
-        entries sorted by name (``separators=(",", ":")``, ``ensure_ascii=True``).
+        entries in declared field order (``separators=(",", ":")``,
+        ``ensure_ascii=True``).
 
     Raises:
         UnsupportedValueError: If the dtype cannot be stored.
@@ -179,6 +183,11 @@ def _dtype_from_value(value: Any) -> np.dtype[Any]:
     if isinstance(value, list):
         fields: list[Any] = []
         for entry in value:
+            if not isinstance(entry, list) or len(entry) not in (2, 3):
+                expected = "[name, tag] or [name, tag, shape]"
+                raise ValueError(
+                    f"malformed array dtype tag entry {entry!r}: expected {expected}"
+                )
             if len(entry) == 3:
                 fields.append((entry[0], _dtype_from_value(entry[1]), tuple(entry[2])))
             else:
@@ -200,7 +209,7 @@ def tag_to_dtype(tag: str) -> np.dtype[Any]:
     """Return the canonical NumPy dtype of an Orcapod dtype tag.
 
     The canonical dtype is little-endian and, for structured tags, packed with
-    fields in tag order (sorted by name).
+    fields in tag order (the declared order of the written array).
 
     Args:
         tag: A tag produced by ``dtype_to_tag``.
@@ -219,8 +228,9 @@ def tag_to_dtype(tag: str) -> np.dtype[Any]:
 def _copy_by_field_name(dst: npt.NDArray[Any], src: npt.NDArray[Any]) -> None:
     """Copy ``src`` into ``dst`` field by field, by name, recursively.
 
-    NumPy assigns between structured dtypes by position, so a plain assignment
-    would pair fields wrongly once ``dst`` has its fields sorted by name.
+    ``dst`` has the same fields in the same declared order as ``src`` but a
+    packed, little-endian layout; copying by name keeps the pairing explicit
+    whatever the source offsets are.
     """
     names = dst.dtype.names
     if names is None:

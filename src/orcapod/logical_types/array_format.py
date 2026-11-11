@@ -6,7 +6,7 @@ version-1 value digest computed from a stored row. ``numpy.ndarray`` uses them
 today (``numpy_type.LogicalNumpyArray``); other array types (such as
 ``torch.Tensor``) reuse them under their own extension name and hash label.
 
-Storage struct (one value per row)::
+Storage struct (one value per row):
 
     struct<
       dtype: large_string,              # Orcapod dtype tag
@@ -20,7 +20,7 @@ would then no longer match. A stored array value never has a null child: the
 logical type refuses one on write and on read. A null array is a null struct.
 
 Value digest, version 1. For a row with dtype tag ``T``, shape
-``(d0, ..., d{n-1})`` and data bytes ``D``::
+``(d0, ..., d{n-1})`` and data bytes ``D``:
 
     P = u64le(len(utf8(T))) || utf8(T)
         || u64le(n) || i64le(d0) || ... || i64le(d{n-1})

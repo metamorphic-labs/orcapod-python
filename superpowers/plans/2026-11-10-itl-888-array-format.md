@@ -12,9 +12,9 @@ behaviour across operators, orchestrators, databases and processes.
 
 **Tech Stack:** numpy 2.2.6, pyarrow 23.0.1, polars 1.41.2, deltalake 1.0.2, starfix, pytest.
 
-**Gating:** Phase 1 is approved by the coordinator now (November 10). Phase 2 depends on PENDING
-decisions (identity rules, names, label, D-PATH) and starts only when the coordinator relays
-them. This plan is updated with the decided values before Phase 2 starts.
+**Gating:** Phase 1 was approved by the coordinator on November 10. Phase 2 implements the
+developer's decisions on the identity rules, the name `orcapod.ndarray`, the label `ndarray_v1`,
+D-PATH and the refused dtypes (November 10 and 11, 2026; listed in the spec's Decisions).
 
 ---
 
@@ -126,7 +126,7 @@ def test_storage_type():
 `test_array_pipeline_stores.py`, `test_array_cached_rerun.py`, `test_array_hash_stability.py`.
 
 Every test uses only arrays that are little-endian, C-ordered, plain `np.ndarray` and not
-structured with unsorted fields, so it holds under every pending identity option. They pass on
+structured with unsorted fields, so it holds whatever the identity rules are. They pass on
 today's code and must keep passing after Phase 2 (a regression harness, not TDD red tests).
 
 - `conftest.py`: `ARRAYS` dict, one per dtype class: bool, int8, uint64, float16, float32,
@@ -154,7 +154,7 @@ finding. Commit `test(arrays): public-interface array scaffolding (ITL-888)`.
 ### Task 3: draft PR
 
 Push the branch, open a draft PR against `main` (body: `Fixes ITL-888`, `Fixes ITL-883`,
-`Refs ITL-874`, the spec link, the "draft: decisions pending" note, the trailer line), then
+`Refs ITL-874`, the spec link, the trailer line), then
 `orca linear attach` and `orca worktree set --worktree current --pr <n>`.
 
 ---
@@ -209,3 +209,37 @@ main is b197544e (v0.2.0 tagged at 70f53f64; #291 SemiJoin via Polars, ITL-847, 
    layout/digest/names/identity/behaviour → ask coordinator).
 4. If #286 merges meanwhile: merge main again (golden: keep both sets; docs/reference/hashing.md:
    the hash label convention paragraph appears once).
+
+### CodeRabbit round 4 (on 25b240ad), coordinator decisions
+
+- Fixed (ad7a3ded): ReST `::` markers; fixture mkdir; tar extraction fallback for 3.11.0-3.11.3.
+- Declined: test docstrings (as in rounds 1-3).
+- A (None from a non-optional output): not array-specific; deferred to ITL-895; reply on thread.
+- B: MergeJoin with colliding grouped array columns (`list[ndarray]`) raises TypeError. Extend
+  the array ordering key recursively to lists of arrays; test merging two grouped array
+  columns, sync and async; confirm no golden or existing hash moves.
+- C: structured dtype tag entry with other than 2 or 3 parts raises ValueError naming the tag;
+  test.
+
+### Field order is identity (developer, November 11, 2026; relayed by the coordinator)
+
+Reverses identity rule D3: a structured dtype's field order is identity at every depth, as
+NumPy's dtype equality has it. Offsets, padding, alignment, itemsize and byte order stay layout.
+Change: `_tag_value` walks `dtype.names` (declared order) instead of `sorted(dtype.fields)`;
+read-back follows the tag. Tests: declared-order storage and read-back (nested too), field
+order and nested field order change the hash and the stored value, padded and offset-swapped
+layouts keep it, MergeJoin over arrays differing only in field order (both argument orders),
+unsorted and nested structured arrays added to `ARRAYS` (round trip on in-memory and Delta,
+sync and async, every operator). Golden: no structured entries, nothing moves. Docs, spec D3,
+CHANGELOG, DESIGN_ISSUES, PR body and ITL-888 wording updated.
+
+## Merge of origin/main after PR #287 (2026-11-11, task_0d716f1fc6fc)
+
+Plan (mechanical, coordinator-scoped; no behaviour change beyond keeping both sides):
+1. `git merge origin/main` (cf4f67c7) — merge commit, no rebase/force-push.
+2. Resolve conflicts additively: CHANGELOG one `[0.3.0] — unreleased` section with both
+   sides' entries; DESIGN_ISSUES both entries; code keeps both behaviours (ITL-878 store-write
+   failure handling + ITL-888 ndarray output check / UnsupportedValueError); re-read merged code.
+3. Golden: `git diff origin/main -- tests/test_hashing/golden/` must equal this PR's approved diff.
+4. Verify: pytest on 3.11/3.12/3.13, ruff check, ruff format --check, basedpyright exit code.
+5. Push; wait for CI + CodeRabbit on new head; read review bodies + inline threads.
