@@ -6,7 +6,7 @@ some file systems refuse.
 Run from the repository root with a v0.2 source tree first on the path:
 
     rm -rf /tmp/orcapod_v02 && mkdir -p /tmp/orcapod_v02
-    git archive c438d4d1 src/orcapod | tar -x -C /tmp/orcapod_v02
+    git archive v0.2.0 src/orcapod | tar -x -C /tmp/orcapod_v02
     PYTHONPATH=/tmp/orcapod_v02/src:. uv run python tests/test_arrays/data/make_v02_array_store.py
 
 It refuses to run with an Orcapod that already has the v0.3 array format.

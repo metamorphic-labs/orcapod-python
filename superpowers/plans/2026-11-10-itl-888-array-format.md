@@ -257,3 +257,19 @@ developer confirmation November 11; ITL-889, ITL-911 deferred).
    a subclass whose `view` returns other values stores and hashes like its base array.
 3. Body pre-merge checks: ITL-889 is deferred (referenced, not targeted); changelog entries
    from #287/#296 come from merging main; docstring coverage declined as in earlier rounds.
+
+### CodeRabbit round on 1cf5eed4 (coordinator decisions, 2026-11-11)
+
+- Plan's storage-type test: nullable children (done, 6ce706cf).
+- (A) Path-move scope: pipeline hashes are Merkle-chained, so the pipeline/operator tables of
+  every node downstream of an array column move too; result tables of array-free pods keep
+  their path (no recompute). Verified v0.2.0 vs branch: source(x, n) -> DropDataColumns(['x'])
+  -> plus_one(n) pipeline hash 7c13dce1 -> 9f5326e3; array-free lineage b2d5c5d7 unchanged.
+  Fix wording in spec, CHANGELOG, docs/concepts/arrays.md, DESIGN_ISSUES, PR description.
+  New fixture test: add `mixed` source -> DropDataColumns(['x']) -> `plus_two(n)` (label
+  `after_drop`) to `v02_store_pods.build_job`, regenerate the archive with v0.2.0
+  (`git archive v0.2.0`), then assert under v0.3: after_drop calls its function 0 times, its
+  pipeline table is new, its result table is the v0.2 one; `total`'s shared result table holds
+  the v0.2 rows unchanged plus new rows under new record ids, and reads back correctly.
+- (B) Polars ext metadata: declined, follow-up ITL-917.
+- (C) Windows: map ':' to '!' in archive member names on win32 (unverified on Windows).

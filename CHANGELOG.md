@@ -26,7 +26,11 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   SHA-256 over a length-prefixed encoding of the stored row (`docs/reference/hashing.md`,
   section 8), and the label replaces the bare `sha256`. Because the logical type name is now
   `orcapod.ndarray`, the type, schema and pipeline hashes of anything with an array column
-  change too, and so do the table paths of those nodes, and of nothing else.
+  change too, and so do the table paths of those nodes. Pipeline hashes are chained, so the
+  pipeline and operator tables of every node downstream of an array column move as well,
+  even when it has no array column itself. A pod whose inputs and outputs hold no array
+  keeps its function result table, so it reuses its v0.2 results without computing again.
+  Nodes with no array column upstream do not move.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and

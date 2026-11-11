@@ -2350,7 +2350,10 @@ extension `orcapod.ndarray` over `struct<dtype, shape, data>` (little-endian, C 
 by value under the label `ndarray_v1` (developer's decisions, November 10 and 11, 2026). Old
 data is neither detected nor migrated in v0.3; migration is deferred to ITL-889. Accepting
 `longdouble`/`clongdouble`, unit-less datetimes and titled structured dtypes, refused in v0.3,
-is reconsidered in ITL-911.
+is reconsidered in ITL-911. The new logical type name moves the table paths of nodes with an
+array column and the pipeline and operator tables of every node downstream of one (pipeline
+hashes are Merkle-chained); an array-free pod downstream keeps its result table and reuses its
+results.
 
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
