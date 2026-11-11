@@ -8,11 +8,15 @@ rejects.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
 from orcapod.contexts import get_default_context
 from orcapod.core.operators import Join
+
+# Non-public on purpose: the label constant itself is under test.
 from orcapod.hashing.versioned_hashers import _CURRENT_ARROW_HASHER_ID
 from orcapod.sources import ArrowTableSource
 from orcapod.types import ContentHash
@@ -25,16 +29,19 @@ def _hash_table(table: pa.Table) -> ContentHash:
     return get_default_context().arrow_hasher.hash_table(table)
 
 
-def _row_hashes(column: pa.Array) -> list[str]:
+def _row_hashes(column: pa.Array[Any]) -> list[str]:
     """Content hashes of the data of a one-column source keyed by a row tag."""
     table = pa.table(
-        {"k": pa.array([f"r{i}" for i in range(len(column))], pa.large_string()), "x": column}
+        {
+            "k": pa.array([f"r{i}" for i in range(len(column))], pa.large_string()),
+            "x": column,
+        }
     )
     source = ArrowTableSource(table, tag_columns=["k"])
     return [data.content_hash().to_string() for _, data in source.iter_data()]
 
 
-def _non_nullable(name: str, column: pa.Array) -> pa.Table:
+def _non_nullable(name: str, column: pa.Array[Any]) -> pa.Table:
     """A one-column table whose field is declared non-nullable."""
     return pa.Table.from_arrays(
         [column], schema=pa.schema([pa.field(name, column.type, nullable=False)])
@@ -198,9 +205,7 @@ class TestCanonicalExtensionTypes:
 
 class TestRejections:
     def test_zero_row_map_column_is_rejected(self):
-        table = pa.table(
-            {"m": pa.array([], pa.map_(pa.large_string(), pa.int64()))}
-        )
+        table = pa.table({"m": pa.array([], pa.map_(pa.large_string(), pa.int64()))})
         with pytest.raises(ValueError, match="map"):
             _hash_table(table)
 
@@ -218,9 +223,7 @@ class TestRejections:
             ArrowTableSource(table, tag_columns=["k"])
 
     def test_duplicate_column_names_are_rejected(self):
-        table = pa.Table.from_arrays(
-            [pa.array([1]), pa.array([2])], names=["x", "x"]
-        )
+        table = pa.Table.from_arrays([pa.array([1]), pa.array([2])], names=["x", "x"])
         with pytest.raises(ValueError, match="Ambiguous node path 'x'"):
             get_default_context().semantic_hasher.hash_object(table)
 

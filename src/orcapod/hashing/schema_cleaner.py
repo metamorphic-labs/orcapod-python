@@ -178,9 +178,9 @@ def _contains_extension_type(arrow_type: pa.DataType) -> bool:
     ):
         return _contains_extension_type(arrow_type.value_type)
     if pa.types.is_map(arrow_type):
-        return _contains_extension_type(arrow_type.key_type) or _contains_extension_type(
-            arrow_type.item_type
-        )
+        return _contains_extension_type(
+            arrow_type.key_type
+        ) or _contains_extension_type(arrow_type.item_type)
     if pa.types.is_dictionary(arrow_type):
         return _contains_extension_type(arrow_type.value_type)
     return False
