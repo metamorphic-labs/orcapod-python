@@ -1154,49 +1154,49 @@
       "columns": {
         "experiment_preprocessing_hash": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "subject_id": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "session_start_datetime": {
           "arrow_type": "timestamp[us]",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "experiment_index": {
           "arrow_type": "uint32",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "screen_capture_import_version_id": {
           "arrow_type": "int64",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "timestamp": {
           "arrow_type": "int64",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "frame_index": {
           "arrow_type": "uint32",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "frame_jpeg": {
           "arrow_type": "large_binary",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         }
@@ -1433,7 +1433,13 @@
             "atlas_id",
             "atlas_label_region_short"
           ],
-          "note": ""
+          "note": "",
+          "accepted_unresolved": [
+            [
+              "AFNI_D99v2",
+              "White Matter"
+            ]
+          ]
         },
         {
           "parent": "chamber",
@@ -1974,85 +1980,85 @@
       "columns": {
         "region": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "built_at_utc": {
           "arrow_type": "timestamp[us]",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "dataset": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "experiment_index": {
           "arrow_type": "int64",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "experiment_preprocessing_hash": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "git_sha": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "n_units": {
           "arrow_type": "int64",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "probe_index": {
           "arrow_type": "int64",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "recording_index": {
           "arrow_type": "int64",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "session_start_datetime": {
           "arrow_type": "timestamp[us]",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "sources_json": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "spike_extraction_hash": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "subject_id": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "unit_filter": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         }
@@ -2074,61 +2080,61 @@
       "columns": {
         "spike_extraction_hash": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "subject_id": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "session_start_datetime": {
           "arrow_type": "timestamp[us]",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "recording_index": {
           "arrow_type": "uint32",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "probe_index": {
           "arrow_type": "uint32",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "unit_id": {
           "arrow_type": "uint32",
-          "nullable": null,
+          "nullable": false,
           "spec_type": null,
           "key": true
         },
         "atlas_label_region_short": {
           "arrow_type": "string",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "fano_factor_detrended": {
           "arrow_type": "double",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "firing_rate_hz": {
           "arrow_type": "double",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         },
         "presence_ratio": {
           "arrow_type": "double",
-          "nullable": null,
+          "nullable": true,
           "spec_type": null,
           "key": false
         }
@@ -2418,7 +2424,7 @@
       "groups": {
         "labels": {
           "arrow_type": "struct<aind_label: bool, bombcell_label: string, brian_label: bool, kilosort_label: bool, rigor_label: bool, tian_label: bool, unitrefine_label: string, unitrefine_monkey_label: bool>",
-          "nullable": null,
+          "nullable": false,
           "fields": {
             "aind_label": {
               "arrow_type": "bool",
@@ -2472,7 +2478,7 @@
         },
         "quality_metrics": {
           "arrow_type": "struct<amplitude_cutoff: float, amplitude_cv_median: float, amplitude_cv_range: float, amplitude_median_uv: float, d_prime: float, drift_mad_um: float, drift_ptp_um: float, drift_std_um: float, firing_range_hz: float, firing_rate_hz: float, isi_violations_count: uint32, isi_violations_ratio: float, isolation_distance: float, l_ratio: float, max_waveform_channel_id: string, nn_hit_rate: float, nn_miss_rate: float, noise_cutoff: float, noise_ratio: float, num_spikes: uint32, presence_ratio: float, rp_contamination: float, rp_violations: uint32, sd_ratio: float, silhouette: float, sliding_rp_violation: float, snr: float, sync_spike_2: float, sync_spike_4: float, sync_spike_8: float, unit_depth_um: float>",
-          "nullable": null,
+          "nullable": false,
           "fields": {
             "amplitude_cutoff": {
               "arrow_type": "float",
@@ -2664,7 +2670,7 @@
         },
         "rolling_quality_metrics": {
           "arrow_type": "struct<rolling_amplitude_median_uv: list<item: float>, rolling_firing_rate_hz: list<item: float>, rolling_isi_violations_ratio: list<item: float>, rolling_nn_hit_rate: list<item: float>, rolling_nn_miss_rate: list<item: float>, rolling_quality_metrics_timestamps: list<item: uint64>, rolling_snr: list<item: float>>",
-          "nullable": null,
+          "nullable": false,
           "fields": {
             "rolling_amplitude_median_uv": {
               "arrow_type": "list<item: float>",
@@ -2712,7 +2718,7 @@
         },
         "waveform_metrics": {
           "arrow_type": "struct<exp_decay_per_um: float, main_peak_to_trough_ratio: float, main_to_next_extremum_duration_s: float, num_negative_peaks: uint8, num_positive_peaks: uint8, peak_half_width_s: float, spread_um: float, template_waveform_uv: list<item: float>, trough_half_width_s: float, waveform_baseline_flatness: float>",
-          "nullable": null,
+          "nullable": false,
           "fields": {
             "exp_decay_per_um": {
               "arrow_type": "float",
@@ -2942,5 +2948,26 @@
         }
       ]
     }
+  },
+  "decisions": {
+    "decided_by": "developer, November 11, 2026 (ITL-933)",
+    "tables_not_in_spec": {
+      "keys": "required",
+      "values": "nullable"
+    },
+    "column_group_structs": "required",
+    "accepted_unresolved": [
+      {
+        "child": "lfp_location",
+        "parent": "atlas_label",
+        "keys": [
+          [
+            "AFNI_D99v2",
+            "White Matter"
+          ]
+        ],
+        "evidence": "In edi-sample-v1-855632, 58 of the 383 lfp_location rows (localization_hash semantic_v0.1:2026f1fac0e37436064a5161c6..., channels spread over 0-383, chamber_z_um 90-3840) have atlas_label_region_short = atlas_label_region_full = 'White Matter'. atlas_label holds 198 regions for AFNI_D99v2 (atlas_label_region_index -1 'Skull', then 2-224) and none for white matter. Copied unchanged; reported to the EDI owners by the developer."
+      }
+    ]
   }
 }

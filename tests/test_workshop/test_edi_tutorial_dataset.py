@@ -461,6 +461,37 @@ class TestDeriveMap:
         }
         assert event_fks == {"experiment", "experiment_freeviewing_trial"}
 
+    def test_decisions_resolve_every_pending_entry(self, client):
+        decisions = {
+            "decided_by": "test",
+            "tables_not_in_spec": {"keys": "required", "values": "nullable"},
+            "column_group_structs": "required",
+            "accepted_unresolved": [
+                {"child": "spike_event", "parent": "unit", "keys": [["x", "y", 1]]}
+            ],
+        }
+        raw = tool.derive_map(
+            MINI_SPEC, "0.3.0", SOURCE, _source_schemas(client), decisions
+        )
+        nm = tool.parse_map(raw)
+        assert nm.pending() == {}
+        frames = nm.tables["experiment_screen_capture_frame_270p"].columns
+        assert frames["timestamp"].nullable is False
+        assert frames["frame_jpeg"].nullable is True
+        assert nm.tables["unit"].groups["labels"].nullable is False
+        assert nm.tables["spike_event"].foreign_keys[0].accepted_unresolved == {
+            ("x", "y", 1)
+        }
+
+    def test_a_decision_for_a_missing_foreign_key_is_refused(self, client):
+        decisions = {
+            "accepted_unresolved": [{"child": "session", "parent": "unit", "keys": []}]
+        }
+        with pytest.raises(tool.ToolError, match="no foreign key"):
+            tool.derive_map(
+                MINI_SPEC, "0.3.0", SOURCE, _source_schemas(client), decisions
+            )
+
     def test_render_map_lists_every_column(self, client):
         text = tool.render_map(tool.parse_map(derived_map(client)))
         assert "| `spike_amplitude_uv` | `float` | `f32` |  | **required** |" in text
@@ -663,6 +694,32 @@ class TestCopy:
         with pytest.raises(tool.SchemaMismatchError, match="booth"):
             run_copy(client, target, nmap, subset)
 
+    def test_records_provenance_on_the_marker_table(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        meta = client.project(target).table(tool.MARKER_TABLE).get_metadata()
+        record = json.loads(meta[tool.PROVENANCE_KEY])
+        assert record["source_project"] == SOURCE
+        assert record["window_us"] == list(WINDOW)
+        assert record["unit_ids"] == KEPT_UNITS
+        assert record["kept_trials"] == [1, 2, 3]
+        assert record["source_sample_info"] == [{"region": "V1", "n_units": 3}]
+        assert record["rows"]["spike_event"] == 20
+
+    def test_verify_requires_the_provenance(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target][tool.MARKER_TABLE]
+        del stored.metadata[tool.PROVENANCE_KEY]
+        with pytest.raises(tool.VerificationError, match="provenance"):
+            tool.verify(
+                client,
+                source_project=SOURCE,
+                target_project=target,
+                nmap=nmap,
+                subset=subset,
+            )
+
     def test_dry_run_writes_nothing(self, client, nmap, subset):
         target = make_target(client)
         before = list(client.log)
@@ -793,6 +850,29 @@ class TestVerify:
         text = "\n".join(info.value.problems)
         assert "row count" in text
         assert "experiment_freeviewing_event -> experiment_freeviewing_trial" in text
+
+    def test_an_accepted_unresolved_reference_is_reported_not_failed(
+        self, client, subset
+    ):
+        # the source's unit table loses unit 3, whose spikes are kept: a broken
+        # reference in the source itself, like lfp_location -> atlas_label live
+        units = client.rows(SOURCE, "default.unit")
+        client.add_table(
+            SOURCE,
+            "default.unit",
+            units.filter(
+                pc.not_equal(units.column("unit_id"), pa.scalar(3, pa.uint32()))
+            ),
+            ["subject_id", "session_start_datetime", "unit_id"],
+        )
+        raw = decide(derived_map(client))
+        report = tool.plan(client, SOURCE, tool.parse_map(raw), subset)
+        assert any(p.startswith("spike_event -> unit") for p in report.problems)
+        fk = raw["tables"]["spike_event"]["foreign_keys"][0]
+        fk["accepted_unresolved"] = [["Goliath", SST.isoformat(), 3]]
+        report = tool.plan(client, SOURCE, tool.parse_map(raw), subset)
+        assert report.problems == []
+        assert len(report.accepted) == 1 and "spike_event -> unit" in report.accepted[0]
 
     def test_detects_nullability_that_differs_from_the_map(self, client, nmap, subset):
         target = make_target(client)

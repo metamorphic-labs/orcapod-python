@@ -57,6 +57,7 @@ import pyarrow.compute as pc
 HERE = Path(__file__).resolve().parent
 MAP_PATH = HERE / "nullability_map.json"
 SUBSET_PATH = HERE / "subset.json"
+DECISIONS_PATH = HERE / "decisions.json"
 
 MIN_PYSPIRAL = (0, 16, 33)
 DEFAULT_SOURCE = "edi-sample-v1-855632"
@@ -64,6 +65,9 @@ MARKER_TABLE = "meta.edi_tutorial_build"
 PROBE_TABLE = "meta.nullability_probe"
 MARKER_KEY = "edi_tutorial_dataset.marker"
 STATUS_KEY = "edi_tutorial_dataset.status"
+PROVENANCE_KEY = "edi_tutorial_dataset.provenance"
+# SpiralDB limits each table-metadata key and value pair to 8 KiB.
+METADATA_LIMIT = 8 * 1024
 FORBIDDEN_TARGET_PREFIXES = ("edi-sample-v",)
 TOOL_NAME = "orcapod-python workshop/edi_tutorial_dataset"
 
@@ -157,11 +161,20 @@ class ForeignKey:
     """Child columns that must resolve to the key of rows in ``parent``.
 
     The child columns carry the same names as the parent's key columns.
+
+    Attributes:
+        parent: The referenced table.
+        columns: The parent's key columns, present under the same names in the child.
+        note: Why the reference is checked, when the specification does not say.
+        accepted_unresolved: Key tuples known not to resolve in the source, accepted
+            by the developer; they are reported, not counted as problems. Values are
+            JSON scalars; a timestamp or date is written in ISO format.
     """
 
     parent: str
     columns: tuple[str, ...]
     note: str = ""
+    accepted_unresolved: frozenset[tuple[Any, ...]] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -229,7 +242,12 @@ def parse_map(raw: Mapping[str, Any]) -> NullabilityMap:
             columns={c: _column_from_json(cd) for c, cd in t["columns"].items()},
             groups=groups,
             foreign_keys=tuple(
-                ForeignKey(fk["parent"], tuple(fk["columns"]), fk.get("note", ""))
+                ForeignKey(
+                    fk["parent"],
+                    tuple(fk["columns"]),
+                    fk.get("note", ""),
+                    frozenset(tuple(k) for k in fk.get("accepted_unresolved", [])),
+                )
                 for fk in t.get("foreign_keys", [])
             ),
         )
@@ -646,8 +664,18 @@ class Integrity:
                 )
 
     def problems(self, present: Iterable[str]) -> list[str]:
-        """Return every unresolved reference among the tables in ``present``."""
-        present = set(present)
+        """Return every unresolved reference among the tables in ``present``.
+
+        References a foreign key lists as accepted are left out; ``accepted`` reports
+        them.
+        """
+        return self._unresolved(set(present), accepted=False)
+
+    def accepted(self, present: Iterable[str]) -> list[str]:
+        """Return the unresolved references the map accepts, among ``present``."""
+        return self._unresolved(set(present), accepted=True)
+
+    def _unresolved(self, present: set[str], *, accepted: bool) -> list[str]:
         out = []
         for (child, fk), refs in sorted(
             self.child_refs.items(), key=lambda kv: (kv[0][0], kv[0][1].parent)
@@ -655,18 +683,28 @@ class Integrity:
             if child not in present:
                 continue
             if fk.parent not in present:
-                out.append(
-                    f"{child} -> {fk.parent}: parent table is not in the project"
-                )
+                if not accepted:
+                    out.append(
+                        f"{child} -> {fk.parent}: parent table is not in the project"
+                    )
                 continue
-            missing = refs - self.parent_keys.get(fk.parent, set())
+            missing = {
+                k
+                for k in refs - self.parent_keys.get(fk.parent, set())
+                if (_json_key(k) in fk.accepted_unresolved) == accepted
+            }
             if missing:
                 sample = sorted(missing, key=repr)[:3]
                 out.append(
                     f"{child} -> {fk.parent} {list(fk.columns)}: {len(missing)} "
-                    f"unresolved key(s), e.g. {sample}"
+                    f"{'accepted ' if accepted else ''}unresolved key(s), e.g. {sample}"
                 )
         return out
+
+
+def _json_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Return ``key`` as the map writes it: timestamps and dates in ISO format."""
+    return tuple(v.isoformat() if hasattr(v, "isoformat") else v for v in key)
 
 
 def _tuples(batch: pa.RecordBatch, columns: Sequence[str]) -> set[tuple[Any, ...]]:
@@ -681,6 +719,8 @@ def _tuples(batch: pa.RecordBatch, columns: Sequence[str]) -> set[tuple[Any, ...
 
 class DryRunSink:
     """Accepts every batch and writes nothing."""
+
+    skipped_rows = 0
 
     def open_table(
         self, table: str, schema: pa.Schema, keys: pa.Schema, digest: str
@@ -713,6 +753,7 @@ class SpiralSink:
         self._table: Any = None
         self._txn: Any = None
         self._digest = ""
+        self.skipped_rows = 0
 
     def open_table(
         self, table: str, schema: pa.Schema, keys: pa.Schema, digest: str
@@ -738,6 +779,7 @@ class SpiralSink:
                         f"{ident} is complete for a different subset or map; "
                         "drop it and copy again"
                     )
+                self.skipped_rows = int(status.get("rows", 0))
                 return "skip"
             current = t.schema().to_arrow()
             if current.names != keys.names and current != schema:
@@ -783,6 +825,7 @@ class Report:
     kept_trials: list[int]
     pending: dict[str, list[str]]
     problems: list[str]
+    accepted: list[str] = dataclasses.field(default_factory=list)
 
     def render(self) -> str:
         """Return a human-readable summary."""
@@ -799,6 +842,9 @@ class Report:
         if self.pending:
             lines.append("pending decisions (source nullability kept in this dry run):")
             lines.extend(f"  {t}: {cols}" for t, cols in self.pending.items())
+        if self.accepted:
+            lines.append("accepted exceptions (recorded in the map):")
+            lines.extend(f"  {a}" for a in self.accepted)
         if self.problems:
             lines.append("problems:")
             lines.extend(f"  {p}" for p in self.problems)
@@ -838,6 +884,7 @@ def _run(
                 name, schema, keys, table_digest(nmap, subset, name)
             )
             if result.action == "skip":
+                result.rows = sink.skipped_rows
                 results.append(result)
                 continue
             try:
@@ -859,7 +906,8 @@ def _run(
             on_table(result)
     skipped = [r.name for r in results if r.action == "skip"]
     problems = integrity.problems(subset.tables) if not skipped else []
-    return Report(results, trials, nmap.pending(), problems)
+    accepted = integrity.accepted(subset.tables) if not skipped else []
+    return Report(results, trials, nmap.pending(), problems, accepted)
 
 
 def plan(
@@ -1015,9 +1063,60 @@ def copy(
     sink: DryRunSink | SpiralSink = (
         DryRunSink() if dry_run else SpiralSink(project, subset, marker)
     )
-    return _run(
+    report = _run(
         client, source, nmap, subset, sink, allow_pending=False, on_table=on_table
     )
+    record = provenance(client, source_project, nmap, subset, report)
+    encoded = json.dumps(record, sort_keys=True, default=str).encode()
+    if len(PROVENANCE_KEY) + len(encoded) > METADATA_LIMIT:
+        raise ToolError(f"provenance is {len(encoded)} bytes, over SpiralDB's 8 KiB")
+    marker_table = project.table(MARKER_TABLE)
+    if (
+        not dry_run
+        and not report.problems
+        and marker_table.get_metadata().get(PROVENANCE_KEY) != encoded
+    ):
+        marker_table.set_metadata({PROVENANCE_KEY: encoded})
+    return report
+
+
+def provenance(
+    client: Any,
+    source_project: str,
+    nmap: NullabilityMap,
+    subset: Subset,
+    report: Report,
+) -> dict[str, Any]:
+    """Return the provenance record ``copy`` stores on the marker table.
+
+    It names the source project (with its description), the specification version,
+    the window, units and trials, the row count of every table, and the source's
+    ``sample_info`` row, which is not copied because it describes the whole sample
+    (its ``sources_json`` is replaced by a SHA-256 digest to stay under 8 KiB).
+    """
+    descriptions = {p.id: p.description for p in client.list_projects()}
+    record: dict[str, Any] = {
+        "source_project": source_project,
+        "source_description": descriptions.get(source_project),
+        "spec_version": nmap.spec_version,
+        "window_us": list(subset.window),
+        "unit_ids": list(subset.unit_ids),
+        "kept_trials": report.kept_trials,
+        "rows": {t.name: t.rows for t in report.tables},
+        "decisions": nmap.raw.get("decisions", {}).get("decided_by"),
+    }
+    source = client.project(source_project)
+    names = {r.table for r in source.list_tables() if r.dataset == subset.dataset}
+    if "sample_info" in names:
+        rows = client.scan(source.table(_qualified(subset, "sample_info"))).to_table()
+        info = []
+        for row in rows.to_pylist():
+            blob = row.pop("sources_json", None)
+            if blob is not None:
+                row["sources_json_sha256"] = hashlib.sha256(blob.encode()).hexdigest()
+            info.append(row)
+        record["source_sample_info"] = info
+    return record
 
 
 # --------------------------------------------------------------------------- verify
@@ -1060,8 +1159,19 @@ def verify(
     """
     target = client.project(target_project)
     read_marker(target)
+    stored = target.table(MARKER_TABLE).get_metadata().get(PROVENANCE_KEY)
     source = client.project(source_project)
     problems: list[str] = []
+    if stored is None:
+        problems.append(f"{MARKER_TABLE} carries no {PROVENANCE_KEY} metadata")
+    else:
+        record = json.loads(stored)
+        if (
+            record.get("source_project") != source_project
+            or record.get("window_us") != list(subset.window)
+            or record.get("unit_ids") != list(subset.unit_ids)
+        ):
+            problems.append("the provenance record does not match the subset")
     present = {r.table for r in target.list_tables() if r.dataset == subset.dataset}
     if present != set(subset.tables):
         problems.append(
@@ -1115,7 +1225,9 @@ def verify(
             problems.append(f"{name}: {mismatch}")
         results.append(result)
     problems.extend(integrity.problems(present))
-    report = Report(results, trials, nmap.pending(), problems)
+    report = Report(
+        results, trials, nmap.pending(), problems, integrity.accepted(present)
+    )
     if problems:
         raise VerificationError(problems)
     return report
@@ -1334,11 +1446,58 @@ EXTRA_REFERENCES: dict[str, list[tuple[str, str]]] = {
 }
 
 
+def apply_decisions(
+    raw: Mapping[str, Any], decisions: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return a copy of the map's JSON form with the developer's decisions applied.
+
+    ``decisions`` holds:
+
+    * ``tables_not_in_spec``: ``{"keys": "required" | "nullable", "values": ...}``,
+      applied to every pending column of a table the specification does not define;
+    * ``column_group_structs``: ``"required"`` or ``"nullable"``, for every pending
+      column group struct;
+    * ``accepted_unresolved``: ``[{"child", "parent", "keys", "evidence"}]``, key
+      tuples known not to resolve in the source.
+
+    Raises:
+        ToolError: if an accepted reference names a foreign key the map lacks, or a
+            value is neither ``"required"`` nor ``"nullable"``.
+    """
+    out = json.loads(json.dumps(raw))
+
+    def nullable(choice: str) -> bool:
+        if choice not in ("required", "nullable"):
+            raise ToolError(f"expected 'required' or 'nullable', got {choice!r}")
+        return choice == "nullable"
+
+    outside = decisions.get("tables_not_in_spec")
+    groups = decisions.get("column_group_structs")
+    for table in out["tables"].values():
+        if outside is not None and not table["in_spec"]:
+            for c in table["columns"].values():
+                if c["nullable"] is None:
+                    c["nullable"] = nullable(outside["keys" if c["key"] else "values"])
+        if groups is not None:
+            for g in table["groups"].values():
+                if g["nullable"] is None:
+                    g["nullable"] = nullable(groups)
+    for item in decisions.get("accepted_unresolved", []):
+        fks = out["tables"][item["child"]]["foreign_keys"]
+        match = [fk for fk in fks if fk["parent"] == item["parent"]]
+        if not match:
+            raise ToolError(f"{item['child']} has no foreign key to {item['parent']}")
+        match[0]["accepted_unresolved"] = item["keys"]
+    out["decisions"] = dict(decisions)
+    return out
+
+
 def derive_map(
     spec_text: str,
     spec_version: str,
     source_project: str,
     source_schemas: Mapping[str, tuple[pa.Schema, Sequence[str]]],
+    decisions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON form of the nullability map.
 
@@ -1354,7 +1513,8 @@ def derive_map(
         nullability; a column or table it does not define gets ``nullable: null``
         (pending), as does each column group struct (the specification types only
         the group's fields). Specification types that disagree with the source's
-        are listed under ``mismatches``.
+        are listed under ``mismatches``. ``decisions``, if given, resolves pending
+        entries (see ``apply_decisions``).
     """
     spec = parse_spec_tables(spec_text)
     out: dict[str, Any] = {
@@ -1459,7 +1619,7 @@ def derive_map(
         entry["foreign_keys"] = [fk for fk in fks if fk["columns"]]
         entry["unchecked_references"] = [fk for fk in fks if not fk["columns"]]
         out["tables"][table] = entry
-    return out
+    return apply_decisions(out, decisions) if decisions is not None else out
 
 
 def render_map(nmap: NullabilityMap) -> str:
@@ -1577,6 +1737,12 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--spec", type=Path, required=True, help="edi_schema_spec.md")
     d.add_argument("--spec-version", required=True)
     d.add_argument("--output", type=Path, required=True)
+    d.add_argument(
+        "--decisions",
+        type=Path,
+        default=DECISIONS_PATH,
+        help="the developer's decisions (default: decisions.json)",
+    )
 
     sub.add_parser("render-map", help="print the map as Markdown")
     return p
@@ -1599,6 +1765,7 @@ def main(
                 args.spec_version,
                 args.source_project,
                 _source_schemas(client, args.source_project, subset.dataset),
+                json.loads(args.decisions.read_text(encoding="utf-8")),
             )
             args.output.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
             print(f"wrote {args.output}; {len(raw['mismatches'])} mismatch(es)")
