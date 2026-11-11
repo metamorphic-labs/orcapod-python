@@ -252,6 +252,16 @@ After the failure, rows stored before it are kept: `job.run()` commits the write
 succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
 fixed, run the job again; only the rows that are missing are computed.
 
+A value your function returned for one row that cannot be turned into a record at all is a
+different case: a naive `datetime`, a `str` from a function declared to return `int`, or an
+`int` where a dataclass is declared. Such a value is rejected while the row's record is being
+prepared, before anything is written, and it is a *row failure*: it is handled exactly like a
+function that raised on that row. The observer gets `on_data_crash`, the failure is logged,
+and `error_policy` decides -- `"continue"` skips the row, `"fail_fast"` raises the error
+the conversion raised. It is not a `StoreWriteError`, because the store is healthy and every
+re-run would fail at the same row. The asynchronous orchestrator currently logs row failures
+at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these rows too.
+
 This is the contract for now. An opt-in mode that tolerates store failures may be added
 later.
 
