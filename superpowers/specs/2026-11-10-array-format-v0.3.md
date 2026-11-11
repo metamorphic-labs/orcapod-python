@@ -4,10 +4,17 @@
 **Issue:** ITL-888 (fixes ITL-883; refs ITL-874, ITL-871, ITL-465, ITL-882, ITL-884)
 **Design basis:** ITL-874 review, PR #285 (`superpowers/specs/2026-11-10-array-tensor-storage.md`,
 candidate 4c, sections C4 and C5; experiments `b0`, `c1`, `c2`, `c3`, `b7`).
-**Status:** Plan for coordinator and developer review. Nothing implemented yet.
+**Status:** Implemented in PR #289.
 
-Each decision is marked **CONFIRMED** (fixed by the developer's decision of November 10, the
-coordinator brief, or the ITL-874 evidence) or **PENDING** (needs the developer's yes).
+**Decisions (developer, November 10, 2026).** The identity rules D1 to D8 are confirmed as
+written here: identity is dtype, shape and element bits; memory layout, byte order and
+structured field order are not identity; little-endian storage; hashing by bits; extended data
+(masked, object, `StringDType`) refused, and if supported later stored as multi-part data, not
+as one array; subclasses treated as arrays unless a more specific registered type exists; array
+and tensor distinct. Proceeding provisionally, each a one-line change: the names
+`orcapod.ndarray` and `ndarray_v1`, D-PATH, and the three extra refusals (`longdouble`,
+unit-less datetimes, titled structured dtypes). Old-store detection and migration are
+deferred. The PENDING marks below are kept as written for the record.
 
 v0.3 is a public release. The extension name, the storage struct, the dtype tags, the digest
 definition and the hash label below are public commitments once v0.3 is tagged.
