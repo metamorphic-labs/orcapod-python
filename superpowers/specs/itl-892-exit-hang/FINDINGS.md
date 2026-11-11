@@ -13,7 +13,7 @@ and native stacks are in this directory; the tables are produced by `summarize.p
 - **Rate**: one write plus one scan, then exit: about 57% of runs on macOS arm64, 5–38% on
   Linux x86_64 (GitHub runners), depending on the Python version and the read call. The ITL-864 script (scan,
   four merges with a scan after each) fails 12% on macOS. Through Orcapod, a fresh
-  `DeltaTableDatabase.get_all_records` fails 53% on macOS and 8–23% on Linux, and
+  `DeltaTableDatabase.get_all_records` fails 53–77% on macOS and 8–23% on Linux, and
   `DeltaTableSource` 4–10%. A `PipelineJob` run fails 0–4%.
 - **Cause (upstream, not Orcapod)**: `DeltaTable.to_pyarrow_dataset()` (and `to_pyarrow_table()`,
   which calls it) reads through `pyarrow.fs.PyFileSystem(DeltaStorageHandler)`, a filesystem
@@ -31,8 +31,8 @@ and native stacks are in this directory; the tables are produced by `summarize.p
   combination fails, at 36–68% on macOS.
 - **Recommended mitigation, option (c)**: Orcapod scans local Delta tables through a native
   pyarrow filesystem (`to_pyarrow_dataset(filesystem=SubTreeFileSystem(table_path,
-  LocalFileSystem()))`). This takes the failure rate from 53% to 0/100 in every Orcapod mode on
-  macOS and on Linux 3.11/3.12/3.13. The result is schema- and value-identical, including on partitioned
+  LocalFileSystem()))`). This takes the failure rate from up to 77% to 0/100 in every Orcapod mode
+  tested, on macOS and on Linux 3.11/3.12/3.13. The result is schema- and value-identical, including on partitioned
   tables with escaped partition values. The full suite passes with it (6834 passed, 96 skipped,
   16 xfailed). No API, hash, stored-schema or dependency change. Cloud stores (`s3://` etc.)
   keep deltalake's default reader and stay exposed until Arrow ships a fix. Document that case
@@ -76,7 +76,7 @@ Consistent with this:
 
 ## 3. Characterisation
 
-Full tables: §7. Headline cells, 100 runs each.
+Full tables: §10. Headline cells, 100 runs each.
 
 **Operation.** Only scanning (`to_table`, `to_pyarrow_table`) triggers it. Writing and merging
 do not. More scans earlier in the process do not raise the rate (ITL-864 script with 4, 12 or
@@ -98,7 +98,7 @@ with the Python-implemented filesystem does.
 **Polars as a third runtime.** Importing polars after pyarrow gives 48%, importing it first 27%.
 Polars changes timing, not the outcome.
 
-**Python version** (macOS): 3.11 57%, 3.12 58%, 3.13 65%. Linux: see §7. On 3.13 failures are
+**Python version** (macOS): one-scan cell 3.11 57%, 3.12 58%, 3.13 65%; Orcapod plain-read 3.11 77%, 3.12 53%, 3.13 76%. The 3.11/3.13 Orcapod cells ran in an isolated environment with a 30 s deadline and 4 parallel runs; the 3.12 cell ran in the project environment with 6 s and 10. Orcapod `PipelineJob` sync and async: 0% on all three. Linux: see §10. On 3.13 failures are
 always hangs. On 3.11/3.12 Linux they are hangs or SIGABRT.
 
 **Load.** Running 1, 4 or 10 children in parallel gives 3%, 5%, 10% on the ITL-864 script. Load
@@ -209,9 +209,21 @@ validate a prototype.
 | unpatched (today's `main`) | fails both cases (wall time 497 s, bounded by the 60 s deadlines) | fails both cases on each version (162 / 198 / 511 s) |
 | native-fs patch | passes, 10 s | passes on each version, 39 / 50 / 50 s |
 
-Detection: at the measured per-run rates (macOS 8–53%, Linux 4–15%), 80 runs miss a regression
-with probability below 1e-3 on macOS and about under 1% per Python version (both cases must miss), so about 1e-6 across CI's three Python jobs on Linux. False failures: a clean run
-takes about 1–2 s, so a 60 s deadline leaves a wide margin. Recommendation: add it to `tests/` (for example `tests/test_databases/test_delta_exit.py`, with the child script inline and the public API only) as an ordinary test that runs in CI. It costs about 40–50 s per Python job on GitHub runners when passing and needs no infrastructure. If that time is unwelcome, halve `RUNS` to 20: the miss probability is then about 8% per job and 0.05% across the three jobs. An opt-in marker is not needed for reliability, only for time..
+Detection. Measured per-run failure rates without a fix: macOS 53–77% (plain-read) and 8%
+(source-read); Linux 8–23% and 4–10%. With 40 runs per case, both cases miss a regression with
+probability below 1e-12 on macOS and below 1% per Linux Python job, which is about 1e-6 across
+CI's three Python jobs.
+
+False failures. A clean run takes 1–2 s, so the 60 s deadline leaves a wide margin. Every
+patched run passed (one macOS and three Linux runs of the check, plus thousands of patched
+harness runs).
+
+Recommendation: add it to `tests/` as an ordinary test that runs in CI, for example
+`tests/test_databases/test_delta_exit.py`, with the child script inline and only the public API.
+When it passes it costs about 40–50 s per Python job on GitHub runners (10 s on this Mac) and
+needs no infrastructure. If that time is unwelcome, halve `RUNS` to 20: a miss is then about 8%
+likely per job and 0.05% across the three jobs. It is reliable enough for CI. An opt-in marker
+would be justified only by its run time, not by flakiness.
 
 ## 8. Not verified
 
@@ -240,9 +252,208 @@ takes about 1–2 s, so a 60 s deadline leaves a wide margin. Recommendation: ad
 | `native_fs_pytest_plugin.py` | runs the suite with option (c) applied |
 | `regression_check_proto.py` | proposed regression check |
 | `summarize.py` | renders the tables below |
-| `results.jsonl`, `samples/` | macOS raw results and stacks |
-| `linux/round*/` | Linux raw results and stacks from the temporary CI probe |
+| `results.jsonl` | macOS raw results (one line per cell) |
+| `samples/` | representative macOS stacks: py3.12 (`op=dataset_scan_py3.12_locked.txt`), py3.13 with the worker in `PyGILState_Ensure` (`dataset_scan_py3.13_pa23.0.1_dl1.0.2.txt`), Orcapod with no worker left (`orcapod_plain_read_hang_manual.txt`). The other stacks named in `results.jsonl` are not committed (`*.txt` is gitignored; about 4 MB) |
+| `linux/round*/` | Linux raw results from the temporary CI probe, with two py3.13 `gdb` stacks. On 3.11/3.12, `gdb` could not attach because the child aborted first |
 
 ## 10. All results
 
-RESULTS_TABLES
+Each cell is one `harness.py` run (`results.jsonl`, `linux/*/results.jsonl`). "hung" means the run missed its deadline. In almost every cell it had already printed `done`; the exception is the `spawn` cell, where the parent waits on a hung child. Early exploratory cells (`baseline`, `load`, `amplify`, `itl864 ...`) used the ITL-864 script, which fails less often than the one-scan cell (`dataset_scan`) used afterwards.
+
+#### macOS arm64 (this machine)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| baseline itl864 py3.12 locked | 40 | 2 | 0 | 0 | **5%** |
+| load j=1 itl864 py3.12 locked | 60 | 2 | 0 | 0 | **3%** |
+| load j=4 itl864 py3.12 locked | 60 | 3 | 0 | 0 | **5%** |
+| amplify rounds=12 itl864 py3.12 locked | 40 | 0 | 0 | 0 | **0%** |
+| amplify rounds=24 itl864 py3.12 locked | 40 | 0 | 0 | 0 | **0%** |
+| load j=10 itl864 py3.12 locked | 60 | 6 | 0 | 0 | **10%** |
+| op=pyarrow_only py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| op=write py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| op=merge py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| op=to_dataset py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| op=to_table py3.12 locked | 100 | 57 | 0 | 0 | **57%** |
+| op=dataset_scan py3.12 locked | 100 | 57 | 0 | 0 | **57%** |
+| op=itl864 py3.12 locked | 100 | 12 | 0 | 0 | **12%** |
+| itl864 read-via=native_fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| itl864 read-via=no_threads py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| itl864 read-via=querybuilder py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| itl864 read-via=files py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| itl864 read-via=polars py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| itl864 cpu_threads=1 | 100 | 6 | 0 | 0 | **6%** |
+| dataset_scan read-via=native_fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan read-via=no_threads py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan read-via=querybuilder py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan read-via=files py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan read-via=polars py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan cpu_threads=1 | 100 | 33 | 0 | 0 | **33%** |
+| dataset_scan io_threads=1 | 100 | 53 | 0 | 0 | **53%** |
+| dataset_scan OMP_NUM_THREADS=1 | 100 | 45 | 0 | 0 | **45%** |
+| dataset_scan RAYON/TOKIO threads=1 | 100 | 49 | 0 | 0 | **49%** |
+| dataset_scan import polars after pyarrow | 100 | 48 | 0 | 0 | **48%** |
+| dataset_scan import polars first | 100 | 27 | 0 | 0 | **27%** |
+| dataset_scan in fork child | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan in spawn child | 100 | 90 | 0 | 0 | **90%** |
+| dataset_scan mitigation=del | 100 | 2 | 0 | 0 | **2%** |
+| dataset_scan mitigation=atexit_del | 100 | 1 | 0 | 0 | **1%** |
+| dataset_scan mitigation=os_exit | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan mitigation=atexit_sleep | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan mitigation=atexit_sleep_long | 100 | 0 | 0 | 0 | **0%** |
+| orcapod plain-read py3.12 locked | 100 | 53 | 0 | 0 | **53%** |
+| orcapod source-read py3.12 locked | 100 | 8 | 0 | 0 | **8%** |
+| orcapod pipeline-sync py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod rerun py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan py3.11 pa23.0.1 dl1.0.2 | 100 | 57 | 0 | 0 | **57%** |
+| dataset_scan native_fs py3.11 pa23.0.1 dl1.0.2 | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan py3.12 pa23.0.1 dl1.0.2 | 100 | 50 | 0 | 0 | **50%** |
+| dataset_scan native_fs py3.12 pa23.0.1 dl1.0.2 | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan py3.13 pa23.0.1 dl1.0.2 | 100 | 65 | 0 | 0 | **65%** |
+| dataset_scan native_fs py3.13 pa23.0.1 dl1.0.2 | 100 | 0 | 0 | 0 | **0%** |
+| dataset_scan py3.12 pa20.0.0 dl1.6.6 | 100 | 59 | 0 | 0 | **59%** |
+| dataset_scan py3.12 pa22.0.0 dl1.0.2 | 100 | 55 | 0 | 0 | **55%** |
+| dataset_scan py3.12 pa22.0.0 dl1.6.6 | 100 | 55 | 0 | 0 | **55%** |
+| dataset_scan py3.12 pa23.0.1 dl1.6.6 | 100 | 61 | 0 | 0 | **61%** |
+| dataset_scan py3.12 pa24.0.0 dl1.0.2 | 100 | 53 | 0 | 0 | **53%** |
+| dataset_scan py3.12 pa24.0.0 dl1.6.6 | 100 | 58 | 0 | 0 | **58%** |
+| dataset_scan py3.12 pa25.0.1 dl1.0.2 | 100 | 36 | 0 | 0 | **36%** |
+| dataset_scan py3.12 pa25.0.1 dl1.6.6 | 100 | 39 | 0 | 0 | **39%** |
+| dataset_scan py3.12 pa26.0.1 dl1.0.2 | 100 | 56 | 0 | 0 | **56%** |
+| dataset_scan py3.12 pa26.0.1 dl1.6.6 | 100 | 68 | 0 | 0 | **68%** |
+| dataset_scan py3.12 pa20.0.0 dl1.0.2 | 100 | 67 | 0 | 0 | **67%** |
+| orcapod plain-read patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod source-read patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-sync patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod plain-read patch=no-threads py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod source-read patch=no-threads py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-sync patch=no-threads py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async patch=no-threads py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod plain-read patch=atexit-gc py3.12 locked | 100 | 27 | 0 | 0 | **27%** |
+| orcapod source-read patch=atexit-gc py3.12 locked | 100 | 5 | 0 | 0 | **5%** |
+| orcapod pipeline-sync patch=atexit-gc py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async patch=atexit-gc py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod plain-read patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod source-read patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-sync patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod plain-read py3.11 locked | 100 | 77 | 0 | 0 | **77%** |
+| orcapod pipeline-sync py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod plain-read py3.13 locked | 100 | 76 | 0 | 0 | **76%** |
+| orcapod pipeline-sync py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| orcapod pipeline-async py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+
+#### Linux x86_64, GitHub ubuntu-latest (round1-py3.11)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| linux op=dataset_scan py3.11 locked | 100 | 8 | 13 | 0 | **21%** |
+| linux op=to_table py3.11 locked | 100 | 4 | 19 | 0 | **23%** |
+| linux op=itl864 py3.11 locked | 100 | 8 | 0 | 0 | **8%** |
+| linux dataset_scan native_fs py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux dataset_scan no_threads py3.11 locked | 100 | 11 | 0 | 0 | **11%** |
+| linux dataset_scan io_threads=1 py3.11 locked | 100 | 18 | 0 | 0 | **18%** |
+| linux dataset_scan mitigation=del py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read py3.11 locked | 100 | 12 | 0 | 0 | **12%** |
+| linux orcapod source-read py3.11 locked | 100 | 4 | 0 | 0 | **4%** |
+| linux orcapod pipeline-sync py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-async py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux op=dataset_scan py3.11 pa22.0.0 dl1.0.2 | 100 | 6 | 0 | 0 | **6%** |
+| linux op=dataset_scan py3.11 pa26.0.1 dl1.6.6 | 100 | 2 | 2 | 0 | **4%** |
+
+#### Linux x86_64, GitHub ubuntu-latest (round1-py3.12)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| linux op=dataset_scan py3.12 locked | 100 | 10 | 8 | 0 | **18%** |
+| linux op=to_table py3.12 locked | 100 | 3 | 17 | 0 | **20%** |
+| linux op=itl864 py3.12 locked | 100 | 8 | 0 | 0 | **8%** |
+| linux dataset_scan native_fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux dataset_scan no_threads py3.12 locked | 100 | 20 | 1 | 0 | **21%** |
+| linux dataset_scan io_threads=1 py3.12 locked | 100 | 18 | 0 | 0 | **18%** |
+| linux dataset_scan mitigation=del py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read py3.12 locked | 100 | 8 | 0 | 0 | **8%** |
+| linux orcapod source-read py3.12 locked | 100 | 5 | 0 | 0 | **5%** |
+| linux orcapod pipeline-sync py3.12 locked | 100 | 4 | 0 | 0 | **4%** |
+| linux orcapod pipeline-async py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux op=dataset_scan py3.12 pa22.0.0 dl1.0.2 | 100 | 13 | 0 | 0 | **13%** |
+| linux op=dataset_scan py3.12 pa26.0.1 dl1.6.6 | 100 | 2 | 1 | 0 | **3%** |
+
+#### Linux x86_64, GitHub ubuntu-latest (round1-py3.13)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| linux op=dataset_scan py3.13 locked | 100 | 5 | 0 | 0 | **5%** |
+| linux op=to_table py3.13 locked | 100 | 38 | 0 | 0 | **38%** |
+| linux op=itl864 py3.13 locked | 100 | 10 | 0 | 0 | **10%** |
+| linux dataset_scan native_fs py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux dataset_scan no_threads py3.13 locked | 100 | 8 | 0 | 0 | **8%** |
+| linux dataset_scan io_threads=1 py3.13 locked | 100 | 32 | 0 | 0 | **32%** |
+| linux dataset_scan mitigation=del py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read py3.13 locked | 100 | 15 | 0 | 0 | **15%** |
+| linux orcapod source-read py3.13 locked | 100 | 10 | 0 | 0 | **10%** |
+| linux orcapod pipeline-sync py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-async py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux op=dataset_scan py3.13 pa22.0.0 dl1.0.2 | 100 | 14 | 0 | 0 | **14%** |
+| linux op=dataset_scan py3.13 pa26.0.1 dl1.6.6 | 100 | 5 | 0 | 0 | **5%** |
+
+#### Linux x86_64, GitHub ubuntu-latest (round2-py3.11)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| linux dataset_scan mitigation=atexit_sleep py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux dataset_scan mitigation=atexit_sleep_long py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=none py3.11 locked | 100 | 9 | 0 | 0 | **9%** |
+| linux orcapod source-read patch=none py3.11 locked | 100 | 8 | 0 | 0 | **8%** |
+| linux orcapod pipeline-sync patch=none py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=native-fs py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod source-read patch=native-fs py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-sync patch=native-fs py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=atexit-sleep py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod source-read patch=atexit-sleep py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-sync patch=atexit-sleep py3.11 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=atexit-gc py3.11 locked | 100 | 8 | 13 | 0 | **21%** |
+| linux orcapod source-read patch=atexit-gc py3.11 locked | 100 | 4 | 1 | 0 | **5%** |
+| linux orcapod pipeline-sync patch=atexit-gc py3.11 locked | 100 | 1 | 0 | 0 | **1%** |
+
+#### Linux x86_64, GitHub ubuntu-latest (round2-py3.12)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| linux dataset_scan mitigation=atexit_sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux dataset_scan mitigation=atexit_sleep_long py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=none py3.12 locked | 100 | 8 | 11 | 0 | **19%** |
+| linux orcapod source-read patch=none py3.12 locked | 100 | 8 | 2 | 0 | **10%** |
+| linux orcapod pipeline-sync patch=none py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod source-read patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-sync patch=native-fs py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod source-read patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-sync patch=atexit-sleep py3.12 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=atexit-gc py3.12 locked | 100 | 11 | 1 | 0 | **12%** |
+| linux orcapod source-read patch=atexit-gc py3.12 locked | 100 | 6 | 0 | 0 | **6%** |
+| linux orcapod pipeline-sync patch=atexit-gc py3.12 locked | 100 | 1 | 0 | 0 | **1%** |
+
+#### Linux x86_64, GitHub ubuntu-latest (round2-py3.13)
+
+| cell | runs | hung | aborted (rc<0) | other rc!=0 | failed |
+|---|---:|---:|---:|---:|---:|
+| linux dataset_scan mitigation=atexit_sleep py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux dataset_scan mitigation=atexit_sleep_long py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=none py3.13 locked | 100 | 23 | 0 | 0 | **23%** |
+| linux orcapod source-read patch=none py3.13 locked | 100 | 8 | 0 | 0 | **8%** |
+| linux orcapod pipeline-sync patch=none py3.13 locked | 100 | 1 | 0 | 0 | **1%** |
+| linux orcapod plain-read patch=native-fs py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod source-read patch=native-fs py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-sync patch=native-fs py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=atexit-sleep py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod source-read patch=atexit-sleep py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod pipeline-sync patch=atexit-sleep py3.13 locked | 100 | 0 | 0 | 0 | **0%** |
+| linux orcapod plain-read patch=atexit-gc py3.13 locked | 100 | 17 | 0 | 0 | **17%** |
+| linux orcapod source-read patch=atexit-gc py3.13 locked | 100 | 6 | 0 | 0 | **6%** |
+| linux orcapod pipeline-sync patch=atexit-gc py3.13 locked | 100 | 1 | 0 | 0 | **1%** |
+
