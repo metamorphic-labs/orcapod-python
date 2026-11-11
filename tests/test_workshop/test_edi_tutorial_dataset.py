@@ -793,6 +793,28 @@ class TestCopy:
         with pytest.raises(tool.StaleTableError):
             run_copy(client, target, nmap, changed)
 
+    def test_a_foreign_key_annotation_does_not_make_tables_stale(
+        self, client, nmap, subset
+    ):
+        # removing an accepted exception changes no copied value, so a re-run skips
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        raw = copy_module.deepcopy(dict(nmap.raw))
+        raw["tables"]["spike_event"]["foreign_keys"][0]["accepted_unresolved"] = [
+            ["Goliath", SST.isoformat(), 9]
+        ]
+        report = run_copy(client, target, tool.parse_map(raw), subset)
+        assert {t.action for t in report.tables} == {"skip"}
+
+    def test_a_nullability_change_makes_the_table_stale(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        raw = copy_module.deepcopy(dict(nmap.raw))
+        raw["tables"]["session"]["columns"]["session_notes"]["nullable"] = False
+        raw["tables"]["session"]["columns"]["session_notes"]["key"] = False
+        with pytest.raises(tool.StaleTableError):
+            run_copy(client, target, tool.parse_map(raw), subset)
+
     def test_window_literals_carry_the_column_type(self, client, nmap, subset):
         # the fake, like SpiralDB, refuses a u64 column compared with an i64 literal;
         # the frames table keys time as int64 and the others as uint64

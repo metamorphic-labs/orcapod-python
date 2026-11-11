@@ -316,11 +316,17 @@ def load_subset(path: Path = SUBSET_PATH) -> Subset:
     return parse_subset(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+# The parts of a table's map entry that decide what is written. Foreign keys and
+# their accepted exceptions only decide what plan and verify report.
+_CONTENT_KEYS = ("in_spec", "keys", "columns", "groups")
+
+
 def table_digest(nmap: NullabilityMap, subset: Subset, table: str) -> str:
     """Return a digest of everything that decides a table's copied content."""
+    entry = nmap.raw["tables"][table]
     payload = {
         "source_project": nmap.source_project,
-        "map": nmap.raw["tables"][table],
+        "map": {k: entry[k] for k in _CONTENT_KEYS if k in entry},
         "subset": {k: v for k, v in subset.raw.items() if k != "notes"},
     }
     return hashlib.sha256(

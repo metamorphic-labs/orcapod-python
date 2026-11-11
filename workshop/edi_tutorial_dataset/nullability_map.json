@@ -1433,13 +1433,7 @@
             "atlas_id",
             "atlas_label_region_short"
           ],
-          "note": "",
-          "accepted_unresolved": [
-            [
-              "AFNI_D99v2",
-              "White Matter"
-            ]
-          ]
+          "note": ""
         },
         {
           "parent": "chamber",
@@ -2956,18 +2950,6 @@
       "values": "nullable"
     },
     "column_group_structs": "required",
-    "accepted_unresolved": [
-      {
-        "child": "lfp_location",
-        "parent": "atlas_label",
-        "keys": [
-          [
-            "AFNI_D99v2",
-            "White Matter"
-          ]
-        ],
-        "evidence": "In edi-sample-v1-855632, 58 of the 383 lfp_location rows (localization_hash semantic_v0.1:2026f1fac0e37436064a5161c6..., channels spread over 0-383, chamber_z_um 90-3840) have atlas_label_region_short = atlas_label_region_full = 'White Matter'. atlas_label holds 198 regions for AFNI_D99v2 (atlas_label_region_index -1 'Skull', then 2-224) and none for white matter. Copied unchanged; reported to the EDI owners by the developer."
-      }
-    ]
+    "accepted_unresolved": []
   }
 }
