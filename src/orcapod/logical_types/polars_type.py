@@ -203,14 +203,13 @@ def _ordered_pairs(pairs: Iterable[tuple[str, Any]]) -> list[list[Any]]:
     return [[name, descriptor] for name, descriptor in pairs]
 
 
-def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
+def polars_dtype_descriptor(dtype: PolarsDataType) -> Any:
     """Encode a Polars dtype in Orcapod's hash descriptor grammar.
 
     See the module docstring for the grammar.
 
     Args:
         dtype: The dtype to encode, possibly nested.
-        column: The top-level column the dtype belongs to, for the error message.
 
     Returns:
         A JSON-serialisable value: a ``str`` for a plain dtype, a one-key ``dict`` for a
@@ -218,7 +217,8 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
         their order is part of the descriptor.
 
     Raises:
-        ValueError: If ``dtype`` (or a dtype nested in it) is outside the grammar.
+        ValueError: If ``dtype`` (or a dtype nested in it) is outside the grammar. The
+            message names the offending dtype; callers add the column.
     """
     if isinstance(dtype, pl.Enum):
         return {"enum": dtype.categories.to_list()}
@@ -240,13 +240,13 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
     if isinstance(dtype, pl.Duration):
         return {"duration": dtype.time_unit}
     if isinstance(dtype, pl.List):
-        return {"list": polars_dtype_descriptor(dtype.inner, column)}
+        return {"list": polars_dtype_descriptor(dtype.inner)}
     if isinstance(dtype, pl.Array):
-        return {"array": [polars_dtype_descriptor(dtype.inner, column), dtype.size]}
+        return {"array": [polars_dtype_descriptor(dtype.inner), dtype.size]}
     if isinstance(dtype, pl.Struct):
         return {
             "struct": _ordered_pairs(
-                (field.name, polars_dtype_descriptor(field.dtype, column))
+                (field.name, polars_dtype_descriptor(field.dtype))
                 for field in dtype.fields
             )
         }
@@ -256,8 +256,7 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
         if name is not None:
             return name
     raise ValueError(
-        f"Polars value: column {column!r} has dtype {dtype}, which Orcapod cannot hash. "
-        f"{_SUPPORTED_DTYPES_TEXT}"
+        f"dtype {dtype} is outside Orcapod's hash grammar. {_SUPPORTED_DTYPES_TEXT}"
     )
 
 
@@ -462,13 +461,18 @@ def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
     Raises:
         ValueError: If a column's dtype is outside the descriptor grammar.
     """
+    columns: list[tuple[str, Any]] = []
+    for name, dtype in df.schema.items():
+        try:
+            columns.append((name, polars_dtype_descriptor(dtype)))
+        except ValueError as error:
+            raise ValueError(
+                f"Polars value: column {name!r} cannot be hashed: {error}"
+            ) from error
     descriptor = {
         "kind": "polars.dataframe",
         "height": df.height,
-        "columns": _ordered_pairs(
-            (name, polars_dtype_descriptor(dtype, name))
-            for name, dtype in df.schema.items()
-        ),
+        "columns": _ordered_pairs(columns),
     }
     return _content_hash(descriptor, df, POLARS_DATAFRAME_HASH_METHOD)
 
@@ -487,11 +491,17 @@ def polars_series_content_hash(series: pl.Series) -> ContentHash:
     Raises:
         ValueError: If the dtype is outside the descriptor grammar.
     """
+    try:
+        dtype_descriptor = polars_dtype_descriptor(series.dtype)
+    except ValueError as error:
+        raise ValueError(
+            f"Polars value: Series {series.name!r} cannot be hashed: {error}"
+        ) from error
     descriptor = {
         "kind": "polars.series",
         "name": series.name,
         "height": series.len(),
-        "dtype": polars_dtype_descriptor(series.dtype, series.name),
+        "dtype": dtype_descriptor,
     }
     return _content_hash(descriptor, series.to_frame(), POLARS_SERIES_HASH_METHOD)
 

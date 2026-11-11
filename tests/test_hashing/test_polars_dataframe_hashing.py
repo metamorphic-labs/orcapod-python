@@ -364,6 +364,12 @@ class TestHashTimeRejection:
         with pytest.raises(ValueError, match=r"'obj'.*Object"):
             hasher.hash_object(df)
 
+    def test_series_outside_the_grammar_is_rejected_naming_it(self) -> None:
+        series = pl.Series("big", [[1]], dtype=pl.List(pl.Int128))
+        hasher = get_default_context().semantic_hasher
+        with pytest.raises(ValueError, match=r"'big'.*Int128"):
+            hasher.hash_object(series)
+
 
 _CROSS_PROCESS_SCRIPT = textwrap.dedent(
     """
@@ -433,7 +439,7 @@ class TestDescriptorGrammar:
                 "n": pl.Null,
             }
         )
-        assert polars_dtype_descriptor(dtype, "col") == {
+        assert polars_dtype_descriptor(dtype) == {
             "struct": [
                 ["e", {"enum": ["y", "x"]}],
                 ["a", {"array": [{"array": ["int16", 3]}, 2]}],
@@ -447,10 +453,10 @@ class TestDescriptorGrammar:
 
     def test_categorical_categories_encoding(self) -> None:
         dtype = pl.Categorical(pl.Categories("units", "lab", pl.UInt8))
-        assert polars_dtype_descriptor(dtype, "col") == {
+        assert polars_dtype_descriptor(dtype) == {
             "categorical": ["units", "lab", "uint8"]
         }
 
-    def test_dtype_outside_the_grammar_names_the_column(self) -> None:
-        with pytest.raises(ValueError, match=r"'col'.*Int128"):
-            polars_dtype_descriptor(pl.List(pl.Int128), "col")
+    def test_dtype_outside_the_grammar_names_the_dtype(self) -> None:
+        with pytest.raises(ValueError, match=r"Int128"):
+            polars_dtype_descriptor(pl.List(pl.Int128))
