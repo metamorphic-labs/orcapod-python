@@ -50,3 +50,6 @@ the property table). Labels stay `polars_dataframe_v1` / `polars_series_v1` (unr
 7. Docs: remove the column-order caveat (9ed28caa), state the new rule + OUT list. CHANGELOG:
    add `[0.3.0] — unreleased` above `[0.2.0]` with the ITL-578 entry. PR description.
 8. Reply on CodeRabbit thread 4536018197: accepted.
+- Order-identity change done (4bb08754, 06f1682f); suite green 3.11/3.12/3.13; CI green on
+  06f1682f. Threads 4536018197 and 4536193979 answered. CodeRabbit rate-limited on
+  06f1682f at 09:43Z; retry 1 at ~10:05Z, retry 2 at ~10:25Z if needed.
