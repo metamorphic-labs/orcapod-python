@@ -22,6 +22,20 @@ until it is migrated or explicitly ignored.
 
 ### Breaking changes and migration
 
+#### Upgrading a store written by `0.1.4`: what is still found
+
+Checked on 2026-11-10 by writing a Delta Lake store with the released `orcapod==0.1.4` and
+opening it with `0.2.0`. Sources whose columns are plain types (`int`, `str`, …) keep the
+same schema, content and pipeline hashes and system-tag column names as on `0.1.4`.
+
+| Change | What a `0.1.4` user sees | Are stored results still found? |
+|---|---|---|
+| Table paths gain `pdb_v1` / `rdb_v1` (ITL-535 #232) | `SchemaVersionError` the first time a node touches a `0.1.x` table | Result tables: yes, after `orcapod migrate result-db` or `migrate_result_v0_to_v1`. In the check, the migrated result tables served every row and no function ran again. |
+| Pipeline-DB record IDs (ITL-533 #236) | Every `record_id` differs | Pipeline tables: no. Their migration fails on a `0.1.4` store (ITL-863), so set `ignore_schema=("v0",)` and let the node refill its pipeline table. With migrated result tables this re-runs no function, although the warning says all results will be recomputed. |
+| Type-object hashes of `Path`, `UUID`, `DataFrame`, `list[Path]` and `set[UUID]` (ITL-638 #262) | A source with a column of such a type has a new schema hash, `pipeline_hash` and `content_hash`, and new system-tag column names (`_tag_record_id::<pipeline hash>`). Record-ID values and row data hashes are unchanged | Pipeline tables of function nodes downstream of such a source: no. The node's table path changes, so its `0.1.4` table is not seen at all: no `SchemaVersionError`, and `migrate_node` finds 0 rows. Result tables: yes, after migration, unless the function itself is annotated with one of these types (its signature hash changes; see below) |
+| Stored Arrow type of `list[Path]` / `set[UUID]` (ITL-173 #251) | These columns are logical list types (`extension<list[orcapod.path]>`) | Nothing to find: `0.1.4` rejected such columns as not yet supported |
+| `Batch` system tags folded to scalars (NPIPE-204 #250) | `Batch` output system-tag columns are scalars instead of lists, and their names gain a further `::<pipeline hash>` | Nothing to find for a function downstream of `Batch`: in `0.1.4` such a node failed inside a `PipelineJob` with `ArrowTypeError`. An operator-node table has no migration (see *Known limitations*) |
+
 #### Stored hash columns are now `large_binary`; pipeline and result databases are versioned (ITL-535 #232, ITL-539 #241)
 
 Every orcapod-produced hash column in the pipeline database (pdb) and result database
@@ -102,6 +116,12 @@ A function pod's signature hash used to embed the full import path of an annotat
 orcapod type (`orcapod.logical_types.file_type.File`). It now uses the type's stable
 registered name (`orcapod.file`), so moving a module inside orcapod can no longer
 invalidate caches.
+
+The same change moved the semantic hash of the type objects `Path`, `UUID`, `DataFrame`,
+`list[Path]` and `set[UUID]` (commit `7dbd0b66`). A `Schema` that contains one of them
+hashes differently, so a source with such a column has a new `pipeline_hash`,
+`content_hash` and system-tag column names; see the table above for what that does to
+stored tables.
 
 **Effect — one-time cache invalidation:** any function pod whose parameters or return
 annotation mention `op.File`, `op.Directory`, `op.Path` or `op.UUID` (directly or inside
