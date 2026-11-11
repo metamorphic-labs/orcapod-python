@@ -2,43 +2,100 @@
 
 ## [0.3.0] — unreleased
 
+### Breaking changes and migration
+
+#### A changed column type is refused when appending to a Delta table (ITL-884)
+
+Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'
+column types with the stored ones. If a column's type differs, the flush raises
+`InputValidationError` naming the table, the column and both types, and writes nothing to that
+table (other tables' pending rows in the same flush may still be committed). Before,
+Delta's merge silently cast the new rows to the stored type (`int32` or `float64` rows written
+into an `int64` column, `large_binary` into `large_string`), or, when an extension (logical) type
+was involved, accepted rows the table could then no longer read. The comparison treats types the
+way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
+are the same type, types the Delta writer converts on the way in are compared as converted
+(unsigned integers as signed, every timestamp in microseconds), an extension type is compared by
+its storage type, and nullability is not compared. Struct fields are compared by name at any depth, including inside lists and maps.
+New and missing columns, and new and missing struct fields, pass the check; whether Delta's
+merge adds a new one follows the database's `allow_schema_evolution` setting, as before.
+
+`DeltaTableDatabase.flush()` (and `add_records(..., flush=True)`) now raises a
+`StoreReadError` or this `InputValidationError` as itself. Before, it wrapped every failure in a
+`RuntimeError`. When several tables fail in one flush, the `StoreReadError` is raised, or else the
+first `InputValidationError`, with each other failure attached as a note and logged. Failed rows
+stay queued for the next flush. A flush that fails only for other reasons still raises
+`RuntimeError`, with the first failure as its cause.
+
 ### Added
 
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
   written to the store. It names the node, the row's tag and the table, and chains the
   database's own exception as its cause. (ITL-878 #287)
+- **`orcapod.errors.StoreReadError`** — raised when a stored table exists but cannot be read.
+  It names the table, and the node and row being processed when they are known, and chains
+  the backend's exception as its cause. (ITL-884 #290)
+- **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
+  `except StoreError` handles both. (ITL-884 #290)
 
 ### Fixed
 
-- A job loaded with `PipelineJob.load` can read its results. A function node's `as_table()`
-  and `iter_data()` return the rows the saved run stored, with their stored types (they used
-  to raise "no function pod and no database attached" while `get_all_records()` worked).
-  Without a store, reading says to pass `PipelineJob.load(path, store=...)` or call
-  `job.bind(store=...)`. `save()` now records whether the store held records of each
-  function node (`run.node_has_stored_records`, an optional field; the format version is
-  unchanged). A node saved with records raises, naming the store, when the attached store
-  holds none of them, instead of returning no rows. When an entry has several records (it
-  was recomputed), a function node now reads the one with the greatest recomputation index,
-  on a live node too; it used to keep whichever record the store returned last. Loading a job in which an operator consumes a function
-  node no longer crashes with `InputValidationError`, and a loaded node's
-  `output_schema()` reports Python types; a saved type it cannot restore (a logical type such
-  as `Path`) raises an error naming the column. Saved `timestamp`, `duration`, `time` and
-  `decimal` types are now read back. A `PipelineJob` does not store operator outputs, so
-  reading a loaded operator node raises instead of returning an empty table. In-memory
-  sources (`DictSource`, `ListSource`, `ArrowTableSource`, `DataFrameSource`) are logged at
-  INFO with the remedy instead of a "skipping" warning. A loaded job stays read-only and
-  cannot be run again. See *Saving and loading a job* in the function-pods guide. (ITL-904)
-- A failed store write fails the run. `PipelineJob.run()` used to return normally when a
-  node's result or record could not be written (the row was skipped like a crashed function
-  under the default `error_policy="continue"`), so the node read back fewer rows than it
-  computed. It now raises `StoreWriteError` at the first failed write, whatever
-  `error_policy` is, on both orchestrators (the async one no longer raises an exception
-  group). Rows stored before the failure are committed and kept; re-running does not
-  recompute stored function results. A failed flush of pending writes raises
-  `StoreWriteError` with `flush=True` and names the store, not a row. A function output that
-  cannot be turned into a record (a naive `datetime`, a value not matching the declared
-  type) is still a row failure governed by `error_policy`, like a function that raised. See
-  *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
+#### A loaded job can read its results (ITL-904)
+
+A job loaded with `PipelineJob.load` can read its results. A function node's `as_table()` and
+`iter_data()` return the rows the saved run stored, with their stored types (they used to raise
+"no function pod and no database attached" while `get_all_records()` worked). Without a store,
+reading says to pass `PipelineJob.load(path, store=...)` or call `job.bind(store=...)`. `save()`
+now records whether the store held records of each function node (`run.node_has_stored_records`,
+an optional field; the format version is unchanged). A node saved with records raises, naming
+the store, when the attached store holds none of them, instead of returning no rows. When an
+entry has several records (it was recomputed), a function node now reads the one with the
+greatest recomputation index, on a live node too; it used to keep whichever record the store
+returned last. Loading a job in which an operator consumes a function node no longer crashes
+with `InputValidationError`, and a loaded node's `output_schema()` reports Python types; a saved
+type it cannot restore (a logical type such as `Path`) raises an error naming the column. Saved
+`timestamp`, `duration`, `time` and `decimal` types are now read back. A `PipelineJob` does not
+store operator outputs, so reading a loaded operator node raises instead of returning an empty
+table. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`, `DataFrameSource`) are
+logged at INFO with the remedy instead of a "skipping" warning. A loaded job stays read-only and
+cannot be run again. See *Saving and loading a job* in the function-pods guide. (ITL-904)
+
+#### A Delta table that cannot be read is no longer reported as having no rows (ITL-884)
+
+When a `DeltaTableDatabase` table existed but could not be read (a missing or damaged data
+file, a log the backend cannot load, data files whose column type no longer matches the
+table), `get_all_records` and `get_records_by_ids` returned `None`, the same answer as for a
+table that does not exist. A `PipelineJob` then warned that the stored results "may have been
+deleted externally", swallowed the per-row read errors under `error_policy="continue"`, finished
+without raising, and its nodes showed no records. Every read now raises
+`orcapod.errors.StoreReadError`, which names the table and chains the backend's error, and a
+store read failure fails the run under both orchestrators whatever the `error_policy`, also
+when it happens while a row's result is being stored. A table that does not exist still reads as
+empty.
+
+A flush that could not load an existing table no longer treats it as absent. Before this fix a
+`DeltaProtocolError` while loading the table made the flush write the batch with
+`mode="overwrite"`, replacing the stored rows. The flush now raises and writes nothing.
+
+A write that fails because the stored table cannot be read raises `StoreReadError`, not
+`StoreWriteError`. When read and write failures happen in the same run, both orchestrators
+raise the error of the node that comes first in the pipeline (ITL-884 #290).
+
+#### A failed store write fails the run (ITL-878)
+
+A failed store write fails the run. `PipelineJob.run()` used to return normally when a node's
+result or record could not be written (the row was skipped like a crashed function under the
+default `error_policy="continue"`), so the node read back fewer rows than it computed. It now
+raises `StoreWriteError` at the first failed write, whatever `error_policy` is, on both
+orchestrators (the async one no longer raises an exception group). Rows stored before the
+failure are committed and kept; re-running does not recompute stored function results. A failed
+flush of pending writes raises `StoreWriteError` with `flush=True` and names the store, not a
+row. A function output that cannot be turned into a record (a naive `datetime`, a value not
+matching the declared type) is still a row failure governed by `error_policy`, like a function
+that raised. See *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
+
+#### Newcomer papercuts (ITL-821)
+
 - `orcapod.enable_file_hash_caching` is exported at the top level (ITL-821).
 - A source built from data with no rows and no schema (e.g. `DictSource(data=[])`) raises
   `ValueError: Table is empty` instead of `tag_columns not found in table` (ITL-821).
