@@ -210,3 +210,69 @@ def test_hashes_are_stable_across_processes(spiral_root):
         source.content_hash().to_string(),
         source.pipeline_hash().to_string(),
     ]
+
+
+class TestSourceId:
+    """The default source_id is the fully qualified table (ITL-926, developer decision)."""
+
+    _SUBJECT = pa.schema(
+        [
+            pa.field("subject_id", pa.string(), False),
+            pa.field("sex", pa.string(), False),
+        ]
+    )
+
+    @pytest.fixture()
+    def two_projects(self, tmp_path: Path):
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            for project in ("edi-sample-a", "edi-sample-b"):
+                table = (
+                    fake_pyspiral.FakeSpiral()
+                    .project(project)
+                    .create_table(
+                        "default.subject",
+                        key_schema=pa.schema(
+                            [pa.field("subject_id", pa.string(), False)]
+                        ),
+                    )
+                )
+                table.write(
+                    pa.table({"subject_id": ["m1"], "sex": ["F"]}, schema=self._SUBJECT)
+                )
+            yield
+
+    @staticmethod
+    def _identity(source: SpiralDBTableSource) -> tuple[str, str, str]:
+        table = source.as_table(all_info=True)
+        record_id = next(
+            c for c in table.column_names if c.startswith("_tag_record_id")
+        )
+        return (
+            source.content_hash().to_string(),
+            table.column(record_id)[0].as_py().hex(),
+            table.column("_source_sex")[0].as_py(),
+        )
+
+    def test_default_source_id_is_project_dataset_table(self, two_projects):
+        source = SpiralDBTableSource("edi-sample-a", "subject")
+        assert source.source_id == "edi-sample-a/default/subject"
+        assert self._identity(source)[2] == "edi-sample-a/default/subject::row_0::sex"
+
+    def test_same_table_in_two_projects_does_not_collide(self, two_projects):
+        a = SpiralDBTableSource("edi-sample-a", "subject")
+        b = SpiralDBTableSource("edi-sample-b", "subject")
+        assert a.pipeline_hash() == b.pipeline_hash()  # schema only
+        identity_a, identity_b = self._identity(a), self._identity(b)
+        assert all(x != y for x, y in zip(identity_a, identity_b, strict=True))
+
+    def test_explicit_source_id_keeps_its_hashes(self, two_projects):
+        # Values pinned on main (ebf2511b) before the default changed.
+        source = SpiralDBTableSource("edi-sample-a", "subject", source_id="subject")
+        assert self._identity(source) == (
+            "semantic_v0.1:1f4ecfe64566d1684d7cdf1319f0274a7048e0124f8026c815814de7d0e365d3",
+            "18d1efa53fbc52b6a40f406eca35ca81",
+            "subject::row_0::sex",
+        )
+        assert source.pipeline_hash().to_string() == (
+            "semantic_v0.1:a771eabb35eac3fbd266b5751c75c6664556a2fab5d0d31977cefedc4b870a3d"
+        )

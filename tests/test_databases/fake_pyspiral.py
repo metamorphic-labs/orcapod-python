@@ -31,10 +31,12 @@ connector's docstrings, pyspiral's own documentation) or is an assumption to con
 * ``drop_arrow_metadata`` (observed, ITL-471): schema and field metadata are dropped; the
   table's key-value store (``set_metadata``) round-trips.
 * ``decode_dictionaries`` (assumed): dictionary columns come back as their value type.
-* ``value_columns_nullable``: every non-key column is reported nullable. Every column,
-  key columns included, is nullable in the EDI sample tables (live schema dump, November 11,
-  2026); whether SpiralDB keeps a non-null flag that was written is still to confirm. Key
-  columns keep the nullability given at ``create_table`` (nullable for the tuple form).
+* ``value_columns_nullable`` (off by default): report every non-key column nullable whatever
+  was written. Every column, keys included, is nullable in the EDI sample tables (live
+  schema dump, November 11, 2026), but those columns were written nullable; whether SpiralDB
+  keeps a non-null flag that was written is to confirm in write mode. By default the fake
+  keeps the nullability each column was written with, keys included (the tuple form of
+  ``create_table`` makes key columns nullable).
 * ``reject_struct_nulls`` (documented by pyspiral ``Table.write``): a null struct value is
   refused unless written with ``push_down_nulls=True``.
 * Rows come back sorted by key and writes upsert by key (SpiralDB is a key-sorted store).
@@ -67,7 +69,7 @@ class StorageBehaviour:
     drop_timezone: bool = True
     drop_arrow_metadata: bool = True
     decode_dictionaries: bool = True
-    value_columns_nullable: bool = True
+    value_columns_nullable: bool = False
     reject_struct_nulls: bool = True
 
 

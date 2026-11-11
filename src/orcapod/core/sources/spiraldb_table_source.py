@@ -78,7 +78,11 @@ class SpiralDBTableSource(DBTableSource):
         system_tag_columns: Additional system-level tag columns.
         record_id_column: Column for stable per-row record IDs in provenance.
         source_id: Canonical source name for the registry and provenance
-            tokens. Defaults to *table_name*.
+            tokens. Defaults to ``"<project_id>/<dataset>/<table_name>"``.
+            The project id is Spiral's project identifier (for example
+            ``"edi-sample-v1-855632"``: the API's resource id, unique across
+            Spiral, not a display name), so tables with the same name in
+            different projects or datasets never share record ids.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
@@ -108,6 +112,8 @@ class SpiralDBTableSource(DBTableSource):
         self._project_id = project_id
         self._dataset = dataset
         self._overrides = overrides
+        if source_id is None:
+            source_id = f"{project_id}/{dataset}/{table_name}"
 
         connector = SpiralDBConnector(
             project_id=project_id,
