@@ -33,7 +33,9 @@ def _store_bytes_per_row(n_rows: int, orchestrator: str) -> float:
             source_id="src",
         )
         double.pod(src, label="dbl")
-    job.run(orchestrator=AsyncPipelineOrchestrator() if orchestrator == "async" else None)
+    job.run(
+        orchestrator=AsyncPipelineOrchestrator() if orchestrator == "async" else None
+    )
     assert job.nodes["dbl"].as_table().num_rows == n_rows
     return store.counter.bytes_allocated / n_rows
 
