@@ -8,6 +8,7 @@ from starfix import ArrowDigester
 from orcapod.hashing.schema_cleaner import (
     clean_schema_for_hashing,
     has_extension_metadata,
+    has_extension_type,
 )
 from orcapod.hashing.visitors import SemanticHashingVisitor
 from orcapod.utils.arrow_utils import normalize_extension_columns
@@ -30,8 +31,22 @@ class StarfixArrowHasher:
        Extension-typed columns without a registered hasher pass through with
        their full extension metadata intact.
     2. **Starfix hashing** — ``ArrowDigester.hash_table`` produces a 35-byte
-       versioned SHA-256 digest that is byte-for-byte identical to the Rust
-       ``starfix`` crate output.
+       digest: the starfix hash format number ``00 00 02`` (hash format 2,
+       starfix 0.5) followed by a SHA-256 digest, byte-for-byte identical to
+       the Rust ``starfix`` crate output. The order of columns and of struct
+       fields is not part of the hash (starfix's order options stay off); row
+       order and list element order are. Extension identity
+       (``ARROW:extension:name`` and ``ARROW:extension:metadata``) is hashed
+       through starfix's ``include_metadata`` whenever the table has an
+       extension column, including pyarrow's built-in canonical extension types
+       such as ``arrow.uuid``.
+
+    starfix raises ``ValueError`` for inputs it cannot hash: data of ``null``,
+    ``map``, interval and view types (whatever the row count); union and
+    run-end-encoded types; two schema nodes sharing a path (duplicate column
+    names, or a ``/`` in a name aliasing a struct child); and a non-nullable
+    field holding a null. Those errors propagate unchanged; they name the
+    column path and type.
 
     Parameters
     ----------
@@ -127,8 +142,14 @@ class StarfixArrowHasher:
         return normalize_extension_columns(intermediate)
 
     def hash_schema(self, schema: "pa.Schema") -> ContentHash:
-        """Hash an Arrow schema using the starfix canonical algorithm."""
-        include_meta = has_extension_metadata(schema)
+        """Hash an Arrow schema using the starfix canonical algorithm.
+
+        Extension-typed columns are normalized to their storage type with the
+        extension identity in field metadata, as ``hash_table`` does, so the
+        extension name and metadata are part of the hash.
+        """
+        schema = normalize_extension_columns(schema.empty_table()).schema
+        include_meta = has_extension_metadata(schema) or has_extension_type(schema)
         if include_meta:
             schema = clean_schema_for_hashing(schema)
         digest = ArrowDigester.hash_schema(schema, include_metadata=include_meta)
@@ -140,7 +161,9 @@ class StarfixArrowHasher:
             table = pa.Table.from_batches([table])
 
         processed_table = self._process_table_columns(table)
-        include_meta = has_extension_metadata(processed_table.schema)
+        include_meta = has_extension_metadata(
+            processed_table.schema
+        ) or has_extension_type(processed_table.schema)
         if include_meta:
             clean_schema = clean_schema_for_hashing(processed_table.schema)
             clean_table = pa.Table.from_arrays(

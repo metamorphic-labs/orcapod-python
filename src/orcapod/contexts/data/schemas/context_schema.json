@@ -175,7 +175,7 @@
             "arrow_hasher": {
                 "_class": "orcapod.hashing.arrow_hashers.StarfixArrowHasher",
                 "_config": {
-                    "hasher_id": "arrow_v0.1",
+                    "hasher_id": "arrow_v0.2",
                     "type_converter": {"_ref": "type_converter"},
                     "semantic_hasher": {"_ref": "semantic_hasher"}
                 }

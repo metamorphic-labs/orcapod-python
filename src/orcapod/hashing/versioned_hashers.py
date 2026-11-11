@@ -36,8 +36,10 @@ logger = logging.getLogger(__name__)
 # hashes can be distinguished from newly-computed ones.
 _CURRENT_SEMANTIC_HASHER_ID = "semantic_v0.1"
 
-# The hasher_id for the Arrow hasher.
-_CURRENT_ARROW_HASHER_ID = "arrow_v0.1"
+# The hasher_id for the Arrow hasher.  Bumped whenever the hash of any table can change,
+# whatever the cause; its number is not kept equal to the starfix hash format number.
+# arrow_v0.1: starfix 0.4 (hash format 1).  arrow_v0.2: starfix 0.5 (hash format 2, ITL-910).
+_CURRENT_ARROW_HASHER_ID = "arrow_v0.2"
 
 
 # ---------------------------------------------------------------------------
