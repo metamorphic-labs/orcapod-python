@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from orcapod.types import ColumnInfo
+from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -362,14 +363,13 @@ class SpiralDBConnector:
         """Return column metadata with Arrow types.
 
         SpiralDB is Arrow-native; types are taken directly from the table's
-        Arrow schema with two normalizations applied for consistency with
-        other connectors (SQLite, PostgreSQL):
-
-        - ``pa.string()`` → ``pa.large_string()``: SpiralDB stores all string
-          columns as ``string`` regardless of whether they were written as
-          ``large_string``. Normalizing to ``large_string`` matches the
-          convention used by the other connectors and by ``ConnectorArrowDatabase``.
-        - ``pa.binary()`` → ``pa.large_binary()``: same reasoning.
+        Arrow schema and normalized to their large variants at every nesting
+        level (``arrow_utils.normalize_to_large_types``: ``string`` to
+        ``large_string``, ``binary`` to ``large_binary``, ``list`` to
+        ``large_list``). SpiralDB hands back ``string`` / ``binary`` whatever
+        layout was written, so this gives the same types as ``iter_batches``
+        and as the other connectors. Only layouts change: widths, nullability
+        and nested field names are kept, and hashes are unaffected.
 
         Note: SpiralDB also silently drops timezone information from timestamp
         columns at storage time — ``timestamp[us, tz=UTC]`` is returned as
@@ -382,24 +382,16 @@ class SpiralDBConnector:
             List of ColumnInfo objects. Propagates pyspiral exception if the
             table does not exist (no empty-list fallback).
         """
-        import pyarrow as _pa  # noqa: PLC0415
-
         self._require_open()
         arrow_schema = (
             self._project.table(self._table_id(table_name)).schema().to_arrow()
         )
-
-        def _normalize(arrow_type: _pa.DataType) -> _pa.DataType:
-            if arrow_type == _pa.string():
-                return _pa.large_string()
-            if arrow_type == _pa.binary():
-                return _pa.large_binary()
-            return arrow_type
-
         return [
             ColumnInfo(
                 name=field.name,
-                arrow_type=_normalize(field.type),
+                arrow_type=arrow_utils.normalize_to_large_types(
+                    field.type, keep_null=True
+                ),
                 nullable=field.nullable,
             )
             for field in arrow_schema
@@ -433,8 +425,9 @@ class SpiralDBConnector:
 
         Yields:
             Arrow RecordBatch objects. Each batch has:
-            - ``pa.string()`` normalized to ``pa.large_string()`` and
-              ``pa.binary()`` to ``pa.large_binary()``.
+            - Every column's type normalized to its large variants at every
+              nesting level (``arrow_utils.normalize_to_large_types``), the same
+              types ``get_column_info`` reports.
             - Field metadata (including nested struct/list field metadata)
               restored from the SpiralDB native KV store, if any was written
               by ``upsert_records``.
@@ -470,22 +463,12 @@ class SpiralDBConnector:
                 restored_field, field_changed = _restore_field(
                     field, field_trees.get(field.name)
                 )
-                # Apply large_string / large_binary normalization on the top-level type.
-                if restored_field.type == _pa.string():
-                    restored_field = _pa.field(
-                        restored_field.name,
-                        _pa.large_string(),
-                        restored_field.nullable,
-                        restored_field.metadata,
-                    )
-                    field_changed = True
-                elif restored_field.type == _pa.binary():
-                    restored_field = _pa.field(
-                        restored_field.name,
-                        _pa.large_binary(),
-                        restored_field.nullable,
-                        restored_field.metadata,
-                    )
+                # Normalize to the large variants at every depth (layout only).
+                normalized_type = arrow_utils.normalize_to_large_types(
+                    restored_field.type, keep_null=True
+                )
+                if normalized_type != restored_field.type:
+                    restored_field = restored_field.with_type(normalized_type)
                     field_changed = True
                 new_fields.append(restored_field)
                 needs_rebuild = needs_rebuild or field_changed
