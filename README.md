@@ -41,7 +41,8 @@ Releases are cut by running the GitHub Actions **Release** workflow by hand. It 
 tests and the license check, creates and pushes the version tag, builds the wheel and
 sdist, and publishes them to TestPyPI and then PyPI through trusted publishing. The version
 comes from the tag via `hatch-vcs`, so there is no version number to bump in the source
-tree. See [RELEASING.md](RELEASING.md) for the full workflow.
+tree. See [RELEASING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md)
+for the full workflow.
 
 ## Continuous Integration
 
