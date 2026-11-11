@@ -489,7 +489,7 @@ in any data-level preimage; they serve logging, observability, and result inspec
 ## 8. Array Value Digest
 
 **Value hash labels.** A type whose values are hashed by a dedicated handler labels its hash
-`<type>_v<N>`, for example `ndarray_v1` (and later `tensor_v1`). The label is the
+`<type>_v<N>`, for example `ndarray_v1` or `torch_tensor_v1`. The label is the
 `ContentHash.method` and appears in every token built from the hash. The bytes produced under
 an existing label never change. A new definition gets a new label, so a hash always says
 which definition produced it.
@@ -499,7 +499,7 @@ A `numpy.ndarray` value is hashed by value (since v0.3, ITL-888). The semantic h
 version-1 array digest of the array's stored row. Inside a table hash, an array cell becomes
 the token `b"orcapod:ndarray::ndarray_v1:" + D`: the extension name, then the label and the
 digest. The stored row, the dtype tags and the canonical form are described in
-[NumPy Arrays](../concepts/arrays.md).
+[Arrays and Tensors](../concepts/arrays.md).
 
 For a stored row with dtype tag `T`, shape `(d0, ..., dn-1)` and data bytes `B`:
 
@@ -513,8 +513,15 @@ D = SHA-256(P)
 `u64le` and `i64le` are 8-byte little-endian unsigned and signed integers. Every field is
 length-prefixed, so two different rows never share a preimage. `D` depends only on the stored
 row, so it can be recomputed from a stored table by any SHA-256 implementation. The label
-`ndarray_v1` names this definition; a different definition gets a different label. A
-`torch.Tensor` type is to share the digest under its own label.
+`ndarray_v1` names this definition; a different definition gets a different label.
+
+A `torch.Tensor` value (since v0.3, ITL-871) is hashed with the same digest of its stored row,
+under its own label: `TorchTensorHandler` returns `ContentHash(method="torch_tensor_v1",
+digest=D)`, and a stored tensor cell becomes the token
+`b"orcapod:torch_tensor::torch_tensor_v1:" + D`. A tensor and an ndarray with equal dtype,
+shape and values therefore share `D` but not their hashes. Device, gradient state, memory
+layout, lazy conjugate and negative views, and subclass do not change a tensor's `D`. The
+`bfloat16` tag stores the 16-bit patterns of the values.
 
 | Variation | Same `D`? |
 |---|---|

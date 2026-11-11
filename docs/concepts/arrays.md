@@ -1,4 +1,4 @@
-# NumPy Arrays
+# Arrays and Tensors
 
 A `numpy.ndarray` can be a data value like any other: a source column, a function pod
 parameter or a return value. Orcapod stores each array by its **value**, its dtype, its shape
@@ -146,6 +146,98 @@ sorted by name. It is written with no whitespace and with non-ASCII characters e
 
 The hash of an array is the version-1 array digest of its stored row, labelled `ndarray_v1`.
 The byte-level definition, and a reference implementation that does not use Orcapod, are in
-the [Hashing Reference](../reference/hashing.md#8-array-value-digest). A future PyTorch tensor
-type will share the digest under its own label, so an array and a tensor with equal values
-have different hashes.
+the [Hashing Reference](../reference/hashing.md#8-array-value-digest). PyTorch tensors share
+the digest under their own label (below), so an array and a tensor with equal values have
+different hashes.
+
+## PyTorch tensors
+
+A `torch.Tensor` can be a data value too. PyTorch is an optional dependency: install it
+yourself, with the build that suits your hardware (see pytorch.org), next to Orcapod. Orcapod
+is tested with PyTorch 2.3 and later. Importing Orcapod never imports PyTorch. The tensor type
+is set up the first time Orcapod meets a tensor or a `torch.Tensor` annotation, or reads a
+stored tensor column. Reading a stored tensor column without PyTorch installed raises
+`orcapod.errors.MissingOptionalDependencyError`, which names the missing package.
+
+<!-- docs-test: skip -->
+```python
+import torch
+
+from orcapod import function_pod
+from orcapod.sources import DictSource
+
+@function_pod(output_keys="scaled")
+def scale_tensor(signal: torch.Tensor) -> torch.Tensor:
+    return signal * 2
+
+tensors = DictSource(
+    data=[{"trial": "t1", "signal": torch.arange(6, dtype=torch.float32).reshape(2, 3)}],
+    tag_columns=["trial"],
+    source_id="tensor_trials",
+)
+for tag, data in scale_tensor.pod(tensors).iter_data():
+    print(tag["trial"], data["scaled"].dtype, tuple(data["scaled"].shape))
+# t1 torch.float32 (2, 3)
+```
+
+**A tensor is a different type from an array.** A tensor and an ndarray with equal dtype,
+shape and values are stored in the same struct, with the same bytes, but under the extension
+name `orcapod.torch_tensor` and the hash label `torch_tensor_v1`. So their hashes differ, and
+a pod that declares `x: torch.Tensor` cannot take an `np.ndarray` column (or the reverse).
+Convert at the pod boundary when you need to: `torch.from_numpy(a)` or `t.numpy()`.
+
+**What counts as the same tensor.** Dtype, shape and element bits, exactly as for arrays. These
+do not count, and are not stored:
+
+| Property | On write |
+|---|---|
+| Device (CPU, CUDA, MPS) | the values are copied to the CPU |
+| `requires_grad`, `grad`, `grad_fn` | the tensor is detached; the autograd graph is not stored |
+| Memory layout: strides, views, `channels_last` | stored in C order |
+| Lazy conjugate and negative views (`t.conj()`) | the conjugated values are stored |
+| Subclass, such as `torch.nn.Parameter` | stored as a plain tensor |
+
+Orcapod never modifies your tensor: it reads it through a detached copy or view. A pod may
+return a GPU tensor or one that still tracks gradients; its value is stored on the CPU, with
+no warning.
+
+**What comes back.** A tensor read from a store or a source is a CPU, contiguous, writeable,
+plain `torch.Tensor` without gradients, with exactly the stored dtype and shape (a `bfloat16`
+tensor reads back as `bfloat16`). Within a single in-memory run, though, the next pod receives
+the very object the previous pod returned, on its device and with its gradient state. The same
+holds for NumPy arrays (a Fortran-ordered array passes through in Fortran order). Write pods
+that do not depend on device, gradient state or layout of their inputs.
+
+**Dtypes.** `bool`, `int8` to `int64`, `uint8` to `uint64`, `float16`, `float32`, `float64`,
+`complex64` and `complex128` use the NumPy tags and bytes from the table above. `bfloat16` is
+stored as its 16-bit pattern under the tag `bfloat16`. Everything else is refused when it is
+written, with an `UnsupportedValueError` that names the column and the reason:
+
+| Tensor | What to do |
+|---|---|
+| sparse or `mkldnn` layout | `.to_dense()` |
+| quantized | `.dequantize()` |
+| nested (jagged) | store the parts as separate tensors |
+| on the `meta` device | it holds no data |
+| named dimensions (PyTorch before 2.15) | `.rename(None)` |
+| `complex32`, the `float8` types, sub-byte types | convert to a supported dtype |
+
+A function pod that declares `-> torch.Tensor` must return a tensor. An `np.ndarray` or a
+Python number raises `TypeError` that names the output. Return `torch.as_tensor(...)`
+instead.
+
+<!-- docs-test: skip -->
+```python
+from orcapod.contexts import get_default_context
+
+hasher = get_default_context().semantic_hasher
+t = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+print(hasher.hash_object(t) == hasher.hash_object(t.T.contiguous().T))
+# True
+print(hasher.hash_object(t).digest == hasher.hash_object(t.numpy()).digest)
+# True
+print(hasher.hash_object(t) == hasher.hash_object(t.numpy()))
+# False
+print(hasher.hash_object(t).to_string())
+# torch_tensor_v1:318f6e503e8064e89ce6039453fce709f8e01f60c501af2b63bbbe9cf8fbf90e
+```

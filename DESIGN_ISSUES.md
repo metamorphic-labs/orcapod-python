@@ -2270,3 +2270,27 @@ developer).
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
 instead. Tighten under a new storage version once nested nullability survives Polars.
+
+---
+
+## `src/orcapod/logical_types/torch_type.py` — PyTorch tensors
+
+### TT1 — `torch.Tensor` could not be a data value
+**Status:** resolved
+**Severity:** medium
+**Issue:** ITL-871 (design: `superpowers/specs/2026-11-11-torch-tensor-v0.3.md`)
+
+A pod annotated with `torch.Tensor` could not be defined, and the semantic hasher refused
+tensors. Users converted at every pod boundary by hand.
+
+**Fix:** `LogicalTorchTensor` (`orcapod.torch_tensor`) stores a tensor in the shared array
+struct and `TorchTensorHandler` hashes it under `torch_tensor_v1` (the array digest body). Both
+register on first use through new deferred entries in the data context, so PyTorch stays an
+optional peer dependency that `import orcapod` never imports. The name, the label, the dtype
+set (NumPy-shared plus `bfloat16`), accepting GPU and grad tensors, and the peer-dependency
+packaging are provisional picks awaiting the developer's confirmation.
+
+Known limits: within one in-memory run a downstream pod receives the very tensor the upstream
+pod returned (device, gradients and layout included); only stored or read-back values are
+canonical. NumPy arrays behave the same.
+

@@ -18,6 +18,12 @@
 - 2026-11-11: spec approved provisionally by the coordinator (name `orcapod.torch_tensor`, label
   `torch_tensor_v1`, NumPy-shared dtypes + bfloat16, GPU/grad accepted, P1 peer dependency,
   no new CI workflow, draft PR). Plan written. Next: Task 1.
+- Tasks 1-7 done (deferred registration, sort key, tests, torch_type + handler, declared-output
+  check, golden `torch` group, docs/CHANGELOG/DESIGN_ISSUES). The delta-async store test is
+  xfail(strict=False) for ITL-864 / PR #293 (verified it passes with #293 merged locally); remove
+  the xfail once #293 is on main. Findings reported: ITL-896 (terminal operator node empty after
+  async run), in-memory pass-through of the returned object (raised with the developer).
+  Next: Task 8 (full suite, ruff, basedpyright, torch on 3.11-3.13, merge main, draft PR).
 
 ## Commands
 

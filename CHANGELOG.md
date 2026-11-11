@@ -40,6 +40,33 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
   subclasses, whatever the registration order.
 
+### Added
+
+#### PyTorch tensors as data values (ITL-871)
+
+- **`torch.Tensor` is a value type**: a source column, a function pod parameter or return value,
+  stored, cached and re-run like an ndarray, sync and async, in memory and in Delta stores.
+  PyTorch is an optional peer dependency (install it yourself; tested with 2.3 and later).
+  `import orcapod` never imports PyTorch: the type is set up on first use, and reading a
+  stored tensor column without PyTorch raises `orcapod.errors.MissingOptionalDependencyError`.
+- **Storage.** Extension type `orcapod.torch_tensor` (metadata `{"version":1}`) over the same
+  struct as `orcapod.ndarray`, with the same dtype tags and bytes for shared dtypes, plus
+  `bfloat16` (its 16-bit patterns, tag `bfloat16`).
+- **Identity and hash.** A tensor is its dtype, shape and element bits; device, gradient state,
+  memory layout, lazy conjugate/negative views and subclass are not stored. `TorchTensorHandler`
+  returns `ContentHash("torch_tensor_v1", digest)` with the array digest of the stored row, so
+  a tensor and an equal ndarray share the digest but not the hash. GPU tensors and tensors that
+  require gradients are accepted and stored from a detached CPU copy; the caller's tensor is
+  never modified. Tensors read back on the CPU, contiguous, without gradients, with the exact
+  stored dtype and shape.
+- **Refused at write time**, naming the column and reason: sparse, mkldnn, quantized, nested
+  and meta tensors, named tensors, and other dtypes (`complex32`, the `float8` types,
+  sub-byte types). A pod declared `-> torch.Tensor` that returns an ndarray or a number raises
+  `TypeError` naming the output.
+- **Registries** accept `deferred_logical_types` (`LogicalTypeRegistry`) and `deferred_handlers`
+  (`PythonTypeHandlerRegistry`): a value type named by its qualified class name and extension
+  name, loaded on first use. No existing hash, schema or table path changes.
+
 ## [0.2.0] — 2026-11-10
 
 **Distribution:** Orcapod is MIT licensed starting with `0.2.0` (it was proprietary on
