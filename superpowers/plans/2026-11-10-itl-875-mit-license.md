@@ -16,7 +16,7 @@ are listed in the worker report, not edited.
   license classifier. ITL-827 avoided a classifier because `pip-licenses --from=mixed` prefers
   trove classifiers over the `License` field, and `License :: Other/Proprietary License` fails
   the allow list.
-- The build backend is `hatchling` (`hatchling>=1.21.0`, not locked by `uv.lock`; `uv build`
+- The build backend is `hatchling` (originally `hatchling>=1.21.0`, now `>=1.27.0`; not locked by `uv.lock`; `uv build`
   resolves the latest, which emits Metadata-Version 2.5). `pip-licenses` is locked at 5.5.5.
 - `_license-check.yml` runs `uv run pip-licenses --allow-only="MIT;...;LicenseRef-Metamorphic-Proprietary" --partial-match`
   over the synced dev environment, which includes `orcapod` itself.
@@ -26,8 +26,9 @@ are listed in the worker report, not edited.
 Preferred: PEP 639, `license = "MIT"` (SPDX expression), no license classifier (PEP 639
 forbids combining an expression with license classifiers), `LICENSE` picked up by hatchling's
 default `license-files`. Metadata then carries `License-Expression: MIT` and
-`License-File: LICENSE`. The build requirement is not changed (no dependency change): Task 2
-also builds with the floor, `hatchling==1.21.0`, to confirm it accepts the declaration.
+`License-File: LICENSE`. The build floor is `hatchling>=1.27.0` (see the revision note
+below); Task 2 also builds with that floor, `hatchling==1.27.0`, to confirm it emits
+Metadata-Version 2.4 with the declaration.
 
 **Revised after review (CodeRabbit on #283, approved by the coordinator):** hatchling 1.21.0
 writes `License-Expression` under `Metadata-Version: 2.1`, which does not define the field.
@@ -52,8 +53,8 @@ Verified empirically in Task 2 before committing.
 
 ### Task 2: apply the license
 - `LICENSE`: standard MIT text (SPDX `MIT` template), copyright line exactly once.
-- `pyproject.toml`: `license = "MIT"`.
-- Verify: `uv build` (latest hatchling and `--build-constraint hatchling==1.21.0`), inspect wheel METADATA and sdist PKG-INFO, confirm LICENSE in both;
+- `pyproject.toml`: `license = "MIT"`; build floor `hatchling>=1.27.0`.
+- Verify: `uv build` (latest hatchling and `--build-constraint hatchling==1.27.0`), inspect wheel METADATA and sdist PKG-INFO, confirm LICENSE in both;
   `uv sync --locked --dev` then the `_license-check.yml` command verbatim, plus
   `pip-licenses --packages orcapod` showing `MIT`.
 - Run the packaging tests; green.
