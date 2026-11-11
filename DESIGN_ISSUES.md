@@ -2109,3 +2109,23 @@ equals the materialized one. Hashes of pipelines that already worked are unchang
 Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
 barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
 xfail.
+
+---
+
+## `src/orcapod/logical_types/numpy_type.py` — array and tensor storage
+
+### AT1 — NumPy array hash commits to the `.npy` file, not the array value; no tensor format yet
+**Status:** open
+**Severity:** high
+**Issue:** ITL-874
+
+`LogicalNumpyArray` stores each array as its `np.save` bytes, and `NumpyArrayHandler` hashes
+SHA-256 of those bytes. Storage is lossless and stable across processes and NumPy 1.26/2.x.
+The hash, however, changes with memory layout (C vs Fortran), byte order and structured
+field order, contrary to ITL-465. The column type carries no dtype or shape, so
+`NDArray[np.float32]` is rejected and MergeJoin merges float32 with float64 arrays. Masked
+arrays silently lose their mask. A pod declared `-> np.ndarray` may return an unchecked NumPy
+scalar. Any change of format or hash must ship as an explicit migration to new tables: in
+Delta, new-format rows under an unchanged pipeline path hide the old rows. Review,
+experiments and options for v0.3 and PyTorch (ITL-871):
+`superpowers/specs/2026-11-10-array-tensor-storage.md`. Awaiting the developer's decision.
