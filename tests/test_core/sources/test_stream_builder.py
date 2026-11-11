@@ -164,3 +164,79 @@ class TestArrowTableSourceUsesBuilder:
         src = ArrowTableSource(table=table, tag_columns=["id"])
         with pytest.raises(NotImplementedError):
             src.resolve_field("row_0", "x")
+
+
+class TestProvenanceTokensMatchRowValues:
+    """Provenance tokens are built from one column, never the whole table (ITL-926 C3b).
+
+    The expected tokens are computed the way the builder used to build them, from
+    ``table.to_pylist()`` rows, so the test fails if the per-column path changes any token
+    (and therefore any record id, which is derived from the token).
+    """
+
+    @staticmethod
+    def _table():
+        import datetime as dt
+        import decimal
+
+        import pyarrow as pa
+
+        utc = dt.timezone.utc
+        return pa.table(
+            {
+                "k_str": pa.array(["b", "a", None, "c"], pa.string()),
+                "k_int": pa.array([3, 1, 2, None], pa.int64()),
+                "k_u64": pa.array([2**63 + 5, 1, 2, 3], pa.uint64()),
+                "k_ts": pa.array(
+                    [dt.datetime(2026, 1, 1, 9, 0, 0, 123456)] * 3 + [None],
+                    pa.timestamp("us"),
+                ),
+                "k_tstz": pa.array(
+                    [dt.datetime(2026, 1, 1, 9, tzinfo=utc)] * 4,
+                    pa.timestamp("us", "UTC"),
+                ),
+                "k_date": pa.array([dt.date(2026, 1, 1)] * 4, pa.date32()),
+                "k_float": pa.array([1.5, float("nan"), -0.0, 1e300], pa.float64()),
+                "k_bool": pa.array([True, False, None, True]),
+                "k_bin": pa.array([b"\x00\xff", b"a", None, b""], pa.binary()),
+                "k_dec": pa.array(
+                    [decimal.Decimal("1.10"), None, decimal.Decimal("0"), None],
+                    pa.decimal128(5, 2),
+                ),
+                "v": pa.array([1.0, 2.0, 3.0, 4.0]),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "k_str",
+            "k_int",
+            "k_u64",
+            "k_ts",
+            "k_tstz",
+            "k_date",
+            "k_float",
+            "k_bool",
+            "k_bin",
+            "k_dec",
+            None,
+        ],
+    )
+    def test_tokens_equal_row_based_tokens(self, column):
+        from orcapod.sources import ArrowTableSource
+
+        table = self._table()
+        tag = column or "k_str"
+        source = ArrowTableSource(
+            table, tag_columns=[tag], record_id_column=column, source_id="s"
+        )
+        tokens = (
+            source.as_table(columns={"source": True}).column("_source_v").to_pylist()
+        )
+        rows = table.to_pylist()
+        expected = [
+            f"s::{column}={row[column]}::v" if column else f"s::row_{i}::v"
+            for i, row in enumerate(rows)
+        ]
+        assert tokens == expected
