@@ -38,8 +38,9 @@ definition and the hash label below are public commitments once v0.3 is tagged.
   write time with a `ValueError` naming the column and the dtype. A NumPy scalar returned where
   `np.ndarray` is declared is refused at the pod (ITL-883).
 - The new logical type name moves the **pipeline hash of every node that has an array column, and
-  only those**. A v0.2 store is therefore never written into: v0.3 builds new tables for the
-  array nodes and leaves the v0.2 tables untouched (verified, see E). This is a deliberate table
+  only those**. v0.3 therefore builds new tables for the array nodes and leaves every v0.2
+  table that holds array values untouched (verified, see E). It may append rows to an existing
+  result table of a pod that takes arrays but outputs none; that table holds no array column. This is a deliberate table
   path change for array nodes. It needs the developer's yes (D-PATH).
 - Old-data detection and migration are deferred (developer, November 10). Section E states the
   known consequence for the CHANGELOG.

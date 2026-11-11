@@ -465,3 +465,46 @@ def test_merge_join_orders_arrays_by_stored_tag_shape_and_data() -> None:
 def test_stored_tag_is_valid_json_for_structured() -> None:
     tag = stored(np.zeros(1, dtype=[("b", "<f4"), ("a", "<i2", (2,))]))["dtype"]
     assert json.loads(tag) == [["a", "int16", [2]], ["b", "float32"]]
+
+
+# ---------------------------------------------------------------------------
+# Pick on an array column (ITL-883)
+# ---------------------------------------------------------------------------
+
+
+def test_pick_on_an_array_column_raises_input_validation_error() -> None:
+    from orcapod.errors import InputValidationError
+    from orcapod.operators import Pick
+
+    source = DictSource(data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"])
+    with pytest.raises(InputValidationError, match="'x'.*does not support pick"):
+        Pick("x", "dtype")(source)
+
+
+def test_pick_on_an_array_column_raises_while_building_a_pipeline(
+    tmp_path: Path,
+) -> None:
+    # Operators validate their inputs when the graph is built, before either
+    # orchestrator (sync or async) runs, so both paths stop here.
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.errors import InputValidationError
+    from orcapod.operators import Pick
+
+    source = DictSource(data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"])
+    job = PipelineJob(name="pick", store=InMemoryArrowDatabase())
+    with pytest.raises(InputValidationError, match="'x'"), job:
+        Pick("x", "dtype")(source)
+
+
+def test_declared_ndarray_check_recognizes_parameterized_aliases() -> None:
+    # Non-public helper: NDArray[...] annotations are rejected when a pod is built
+    # today (ITL-869), so the check is exercised directly for when they are allowed.
+    import numpy.typing as npt_
+
+    from orcapod.core.data_function import _declared_ndarray_type  # pyright: ignore[reportPrivateUsage]
+
+    assert _declared_ndarray_type(np.ndarray) is np.ndarray
+    assert _declared_ndarray_type(npt_.NDArray[np.float32]) is np.ndarray
+    assert _declared_ndarray_type(npt_.NDArray[np.float32] | None) is np.ndarray
+    assert _declared_ndarray_type(float) is None

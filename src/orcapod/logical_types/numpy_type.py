@@ -66,6 +66,15 @@ _SIZED_CODES = {"ucs4": "<U", "bytes": "|S", "void": "|V"}
 
 
 def _refuse(dtype: object, reason: str) -> UnsupportedValueError:
+    """Build the refusal for an array that cannot be stored.
+
+    Args:
+        dtype: The offending dtype, shown with ``repr``.
+        reason: Why it cannot be stored and, where possible, what to do.
+
+    Returns:
+        The error to raise; the type converter prefixes the column name.
+    """
     return UnsupportedValueError(
         f"numpy arrays with dtype {dtype!r} cannot be stored: {reason}"
     )
@@ -155,6 +164,17 @@ def dtype_to_tag(dtype: np.dtype[Any]) -> str:
 
 
 def _dtype_from_value(value: Any) -> np.dtype[Any]:
+    """Return the canonical NumPy dtype of a parsed tag value.
+
+    Args:
+        value: A scalar tag string, or the parsed JSON list of a structured tag.
+
+    Returns:
+        The little-endian, packed NumPy dtype.
+
+    Raises:
+        ValueError: If the value is not a known tag.
+    """
     if isinstance(value, list):
         fields: list[Any] = []
         for entry in value:

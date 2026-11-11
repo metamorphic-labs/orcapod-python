@@ -115,7 +115,8 @@ E = TypeVar("E", bound=DataFunctionExecutorProtocol)
 def _declared_ndarray_type(declared: Any) -> type | None:
     """Return the ndarray class a declared output type requires, if any.
 
-    Handles ``np.ndarray`` (or a subclass) and ``Optional``/``| None`` of one.
+    Handles ``np.ndarray`` (or a subclass), parameterized aliases such as
+    ``npt.NDArray[np.float32]``, and ``Optional``/``| None`` of either.
     NumPy is never imported here: a class counts as an ndarray when its MRO
     contains ``numpy.ndarray``.
     """
@@ -123,6 +124,8 @@ def _declared_ndarray_type(declared: Any) -> type | None:
     if typing.get_origin(declared) in (typing.Union, types.UnionType):
         candidates = [a for a in typing.get_args(declared) if a is not type(None)]
     for candidate in candidates:
+        # A parameterized alias such as npt.NDArray[np.float32] has origin np.ndarray.
+        candidate = typing.get_origin(candidate) or candidate
         if isinstance(candidate, type) and any(
             base.__module__ == "numpy" and base.__qualname__ == "ndarray"
             for base in candidate.__mro__

@@ -51,6 +51,7 @@ def _output_types(
 
 
 def _identity_key(value: Any) -> Any:
+    """Order stored values as themselves (the default MergeJoin ordering)."""
     return value
 
 

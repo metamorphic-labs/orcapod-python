@@ -49,8 +49,10 @@ element bits.
 - **Shape counts**, including empty shapes: `(0, 3)` and `(3, 0)` differ, and so do a 0-d
   array and a one-element 1-d array.
 - **Every bit counts**: `0.0` and `-0.0` differ, and so do NaNs with different payloads.
-- **Subclasses are plain arrays.** `np.matrix`, `np.recarray` and `np.memmap` values are
-  stored as their values and read back as plain `np.ndarray`.
+- **Subclasses are plain arrays by default.** `np.matrix`, `np.recarray`, `np.memmap` and
+  other subclasses use the array format: they are stored as their values and read back as
+  plain `np.ndarray`. The exception is a subclass with its own registered logical type, which
+  is used for that subclass and its own subclasses instead.
 
 ```python
 from orcapod.contexts import get_default_context
