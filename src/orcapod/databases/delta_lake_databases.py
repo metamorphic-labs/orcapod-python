@@ -340,6 +340,7 @@ class DeltaTableDatabase:
         _shared_pending_record_ids: "defaultdict[str, set[bytes]] | None" = None,
         _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
         _shared_snapshots: "dict[str, _CommittedSnapshot] | None" = None,
+        _shared_pending_indexes: "dict[str, KeyIndex] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -386,6 +387,10 @@ class DeltaTableDatabase:
         # loaded tables: a snapshot describes the cached table's version only.
         self._snapshots: dict[str, _CommittedSnapshot] = (
             _shared_snapshots if _shared_snapshots is not None else {}
+        )
+        # Indexes over each pending batch, valid while it is the key's batch.
+        self._pending_indexes: dict[str, KeyIndex] = (
+            _shared_pending_indexes if _shared_pending_indexes is not None else {}
         )
 
     def _clear_pending(self):
@@ -940,7 +945,13 @@ class DeltaTableDatabase:
         if pending_batch is None:
             self._pending_batches[record_key] = table
         else:
-            self._pending_batches[record_key] = pa.concat_tables([pending_batch, table])
+            # Kept at O(log n) record batches, and its indexes extended in place, so a
+            # lookup's cost does not grow with the rows pending (ITL-919).
+            grown = compact_tail(pa.concat_tables([pending_batch, table]))
+            self._pending_batches[record_key] = grown
+            index = self._pending_indexes.get(record_key)
+            if index is not None and index.table is pending_batch:
+                index.append(table, grown)
 
         pending_ids = cast(list[bytes], table[self.RECORD_ID_COLUMN].to_pylist())
         self._pending_record_ids[record_key].update(pending_ids)
@@ -953,35 +964,68 @@ class DeltaTableDatabase:
             and self._pending_batches[record_key].num_rows >= self.batch_size
         )
 
-    def _pending_not_stored(self, record_path: tuple[str, ...]) -> pa.Table | None:
-        """Return the pending rows a flush would insert at ``record_path``.
+    def _pending_rows(self, record_path: tuple[str, ...]) -> KeyIndex | None:
+        """Return the indexed pending rows at ``record_path``, or ``None`` if none.
+
+        The indexes are built on first use and describe the current pending batch
+        only (``_add_to_pending_batch`` extends them; a flush or schema change
+        replaces the batch, and with it the indexes).
+        """
+        record_key = self._get_record_key(record_path)
+        pending = self._pending_batches.get(record_key)
+        if pending is None or pending.num_rows == 0:
+            return None
+        index = self._pending_indexes.get(record_key)
+        if index is None or index.table is not pending:
+            index = KeyIndex(pending)
+            self._pending_indexes[record_key] = index
+        return index
+
+    def _without_stored_ids(
+        self, record_path: tuple[str, ...], pending: pa.Table
+    ) -> pa.Table | None:
+        """Return the pending rows a flush would insert: those whose id is not stored.
 
         A flush inserts only rows whose record id is not stored yet (the merge is
         ``when_not_matched_insert_all``), so a pending row with a stored id is
-        never returned by a read: the stored row is.
+        never returned by a read: the stored row is. The stored ids are read even
+        when ``pending`` is empty, so a read with rows pending raises
+        ``StoreReadError`` whenever the stored ids cannot be read.
 
         Args:
             record_path: Path components relative to this database view.
+            pending: Pending rows of the table at ``record_path``.
 
         Returns:
-            The pending rows whose record id is not stored, or ``None`` if there
-            are none.
+            The rows whose record id is not stored, or ``None`` if there are none.
         """
-        pending = self._pending_batches.get(self._get_record_key(record_path))
-        if pending is None or pending.num_rows == 0:
-            return None
         stored_ids = self._stored_ids(record_path)
-        if stored_ids:
+        if stored_ids and pending.num_rows > 0:
             # The mask is built from the pending ids against the cached set, so its
-            # cost follows the pending batch, not the stored table. A null id is
+            # cost follows the pending rows, not the stored table. A null id is
             # never matched by the merge (``null = null`` is not true), so its row
             # is kept.
             keep = [
                 record_id is None or record_id not in stored_ids
                 for record_id in pending[self.RECORD_ID_COLUMN].to_pylist()
             ]
-            pending = pending.filter(pa.array(keep, type=pa.bool_()))
+            if not all(keep):
+                pending = pending.filter(pa.array(keep, type=pa.bool_()))
         return pending if pending.num_rows > 0 else None
+
+    def _pending_not_stored(self, record_path: tuple[str, ...]) -> pa.Table | None:
+        """Return every pending row a flush would insert at ``record_path``, or ``None``.
+
+        Args:
+            record_path: Path components relative to this database view.
+
+        Returns:
+            The pending rows whose record id is not stored, or ``None``.
+        """
+        pending = self._pending_rows(record_path)
+        if pending is None:
+            return None
+        return self._without_stored_ids(record_path, pending.table)
 
     def _combine_stored_and_pending(
         self,
@@ -1103,7 +1147,10 @@ class DeltaTableDatabase:
         for next_expression in expressions[1:]:
             combined_expression = combined_expression & next_expression
 
-        pending = self._pending_not_stored(record_path)
+        pending = self._pending_rows(record_path)
+        if pending is not None:
+            # Rows are pending: the stored ids decide which of them a read returns.
+            self._stored_ids(record_path)
         stored = self._stored_rows(record_path)
 
         # A side without a queried column holds null there once flushed, and
@@ -1111,23 +1158,29 @@ class DeltaTableDatabase:
         # column neither side has is unknown: the filter raises as before.
         queried = {c for c, _ in pair_list}
         stored_columns = set() if stored is None else set(stored.table.column_names)
-        pending_columns = set() if pending is None else set(pending.column_names)
+        pending_columns = set() if pending is None else set(pending.table.column_names)
         if queried <= stored_columns | pending_columns:
             if not queried <= pending_columns:
                 pending = None
             if not queried <= stored_columns:
                 stored = None
 
-        if pending is not None:
-            pending = pending.filter(combined_expression)
-
-        # The committed matches come from the indexed snapshot (ITL-919): no re-read.
+        # Both sides are answered from indexes (ITL-919): no re-read, no scan.
+        pending_matches = (
+            None
+            if pending is None
+            else self._without_stored_ids(
+                record_path, matching_rows(pending, pair_list, combined_expression)
+            )
+        )
         result = (
             None
             if stored is None
             else matching_rows(stored, pair_list, combined_expression)
         )
-        return self._combine_stored_and_pending(result, pending, record_id_column)
+        return self._combine_stored_and_pending(
+            result, pending_matches, record_id_column
+        )
 
     def get_record_by_id(
         self,
@@ -1158,10 +1211,12 @@ class DeltaTableDatabase:
             record_key
         ] and record_id not in self._stored_ids(record_path):
             # Return the pending record after removing the entry id column
-            pending_batch = self._pending_batches[record_key]
-            assert pending_batch is not None, "Pending batch should not be None"
-            filtered_table = pending_batch.filter(
-                pc.field(self.RECORD_ID_COLUMN) == record_id
+            pending = self._pending_rows(record_path)
+            assert pending is not None, "Pending batch should not be None"
+            filtered_table = self._rows_with_ids(
+                pending,
+                [record_id],
+                pending.table.schema.field(self.RECORD_ID_COLUMN).type,
             )
             if filtered_table.num_rows != 1:
                 raise ValueError(
@@ -1173,7 +1228,7 @@ class DeltaTableDatabase:
         stored = self._stored_rows(record_path)
         if stored is None:
             return None
-        result = self._stored_rows_with_ids(stored, [record_id])
+        result = self._rows_with_ids(stored, [record_id])
         if result.num_rows == 0:
             return None
 
@@ -1217,22 +1272,22 @@ class DeltaTableDatabase:
             return None
 
         stored = self._stored_rows(record_path)
-        # Reading the stored ids drops the pending rows a flush would not insert;
-        # it raises StoreReadError when the stored table cannot be read.
-        pending = self._pending_not_stored(record_path)
+        pending = self._pending_rows(record_path)
         result = None
         if stored is not None:
-            result = self._stored_rows_with_ids(stored, record_ids_list)
+            result = self._rows_with_ids(stored, record_ids_list)
 
+        pending_matches = None
         if pending is not None:
-            id_type = pending.schema.field(self.RECORD_ID_COLUMN).type
-            pending = pending.filter(
-                pc.is_in(
-                    pending[self.RECORD_ID_COLUMN],
-                    value_set=pa.array(record_ids_list, type=id_type),
-                )
+            id_type = pending.table.schema.field(self.RECORD_ID_COLUMN).type
+            # Reading the stored ids drops the pending rows a flush would not
+            # insert; it raises StoreReadError when the stored table cannot be read.
+            pending_matches = self._without_stored_ids(
+                record_path, self._rows_with_ids(pending, record_ids_list, id_type)
             )
-        return self._combine_stored_and_pending(result, pending, record_id_column)
+        return self._combine_stored_and_pending(
+            result, pending_matches, record_id_column
+        )
 
     def to_config(self, db_registry: Any = None) -> dict[str, Any]:
         """Serialize database configuration to a JSON-compatible dict."""
@@ -1461,29 +1516,37 @@ class DeltaTableDatabase:
             self._delta_table_cache.pop(record_key, None)
             self._snapshots.pop(record_key, None)
 
-    def _stored_rows_with_ids(
-        self, stored: KeyIndex, record_ids: list[bytes]
+    def _rows_with_ids(
+        self,
+        rows: KeyIndex,
+        record_ids: list[bytes],
+        value_type: pa.DataType | None = None,
     ) -> pa.Table:
-        """Return the stored rows whose record id is one of ``record_ids``, in table order.
+        """Return the rows whose record id is one of ``record_ids``, in table order.
 
-        Served from the snapshot's record-id index (ITL-919); a table whose id
-        column is not binary is filtered instead, with Arrow's comparison.
+        Served from the record-id index (ITL-919); a table whose id column is not
+        binary is filtered instead, with Arrow's comparison.
 
         Args:
-            stored: The indexed stored rows.
+            rows: The indexed rows (stored or pending).
             record_ids: The ids looked up.
+            value_type: The Arrow type to build the looked-up ids with for the
+                filter, or ``None`` to infer it from the ids.
 
         Returns:
             The matching rows (possibly none).
         """
-        id_type = stored.table.schema.field(self.RECORD_ID_COLUMN).type
+        id_type = rows.table.schema.field(self.RECORD_ID_COLUMN).type
         if not all(is_indexed_lookup(id_type, r) for r in record_ids):
-            return stored.table.filter(
-                pc.is_in(pc.field(self.RECORD_ID_COLUMN), pa.array(record_ids))
+            return rows.table.filter(
+                pc.is_in(
+                    pc.field(self.RECORD_ID_COLUMN),
+                    pa.array(record_ids, type=value_type),
+                )
             )
-        id_index = stored.column(self.RECORD_ID_COLUMN)
+        id_index = rows.column(self.RECORD_ID_COLUMN)
         positions = {p for r in set(record_ids) for p in id_index.get(r, ())}
-        return rows_at(stored.table, sorted(positions))
+        return rows_at(rows.table, sorted(positions))
 
     @staticmethod
     def _stores_as_is(delta_table: deltalake.DeltaTable, batch: pa.Table) -> bool:
@@ -1716,6 +1779,7 @@ class DeltaTableDatabase:
             _shared_pending_record_ids=root_instance._pending_record_ids,
             _shared_delta_table_cache=root_instance._delta_table_cache,
             _shared_snapshots=root_instance._snapshots,
+            _shared_pending_indexes=root_instance._pending_indexes,
         )
 
     def list_sources(self) -> list[tuple[str, ...]]:

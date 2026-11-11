@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,7 @@ from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
 from orcapod.types import CacheMode, NodeConfig
+from orcapod.utils.store_errors import flush_best_effort
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,35 +31,6 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
-
-
-def _flush_best_effort(
-    run_error: BaseException, *databases: ArrowDatabaseProtocol
-) -> None:
-    """Flush each database, noting instead of raising if a flush fails.
-
-    Used when a run has already failed: the run's own error is the one to report,
-    and a second failure while committing the writes that did succeed must not
-    replace it. A flush failure is logged and added as a note to ``run_error``,
-    so the caller learns that pending results may not have been stored.
-
-    Args:
-        run_error: The error the run failed with, which the caller re-raises.
-        *databases: The databases to flush.
-    """
-    for database in databases:
-        try:
-            database.flush()
-        except Exception as flush_error:
-            logger.exception(
-                "Could not flush pending writes after the run failed; "
-                "the rows they hold were not stored"
-            )
-            run_error.add_note(
-                "Flushing pending writes after this failure also failed "
-                + f"({type(flush_error).__name__}: {flush_error}); results that were "
-                + "still pending may not have been stored."
-            )
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -734,6 +707,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         orchestrator: "SyncPipelineOrchestrator | AsyncPipelineOrchestrator | None" = None,
         observer: "ExecutionObserverProtocol | None" = None,
         materialize_results: bool = True,
+        commit_every_rows: int = 100,
     ) -> "PipelineJob":
         """Execute the resolvable subgraph of this job in place.
 
@@ -758,19 +732,33 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 result access — DB records are written regardless, and
                 ``job.nodes["label"].get_all_records()`` works the same in
                 either case.
+            commit_every_rows: How many rows a function node processes between
+                commits of its results and pipeline records to the store
+                (default 100). Each node also commits when it finishes, before a
+                failed run raises, and the job commits at its end. On a durable
+                store (``DeltaTableDatabase``) a hard crash (power loss, killed
+                process) loses at most the rows of the running node since its
+                last commit; re-running the job recomputes only those. A larger
+                value commits less often (faster, fewer files); ``1`` commits
+                after every row. A node run on its own, outside ``run()``,
+                commits after every row.
 
         Returns:
             ``self`` — the same ``PipelineJob`` instance, with
             ``_has_run`` and ``_run_id`` set.
 
         Raises:
-            ValueError: If no store is set.
+            ValueError: If no store is set, or ``commit_every_rows`` is not a
+                positive integer.
             RuntimeError: If no pipeline has been compiled.
             StoreWriteError: If a node's results or records could not be written
                 to the store, whatever the orchestrator's ``error_policy``. The run
                 stops at the first failed write. Writes that succeeded before it
                 are flushed first, so rows stored before the failure are kept, and
                 re-running the job does not recompute stored function results.
+                A failed commit of a node's batch names the node but no row
+                (``flush=True``): the batch's writes stay pending and are retried
+                once by the flush that follows the failure.
             StoreReadError: If a stored table exists but could not be read,
                 whatever the orchestrator's ``error_policy``, also when the read
                 was needed to write a node's results. Its rows are not recomputed
@@ -782,6 +770,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.observer import NoOpObserver
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
+        if (
+            isinstance(commit_every_rows, bool)
+            or not isinstance(commit_every_rows, int)
+            or commit_every_rows < 1
+        ):
+            raise ValueError(
+                "commit_every_rows must be a positive integer (rows per commit), "
+                f"got {commit_every_rows!r}"
+            )
         if not self._compiled:
             raise RuntimeError(
                 "PipelineJob has no compiled pipeline. "
@@ -871,17 +868,24 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         try:
-            effective_orchestrator.run(
-                exec_dag,
-                observer=effective_observer,
-                run_id=run_id,
-                pipeline_uri=pipeline_uri,
-                materialize_results=materialize_results,
-            )
+            with contextlib.ExitStack() as batched:
+                # Function nodes commit every commit_every_rows rows (ITL-919).
+                for node in exec_dag.nodes():
+                    if isinstance(node, FunctionJobNode):
+                        batched.enter_context(
+                            node._batched_commits(commit_every_rows)  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' commit cadence
+                        )
+                effective_orchestrator.run(
+                    exec_dag,
+                    observer=effective_observer,
+                    run_id=run_id,
+                    pipeline_uri=pipeline_uri,
+                    materialize_results=materialize_results,
+                )
         except Exception as run_error:
             # Commit the writes that did succeed before the failure, so their rows
             # do not look dropped, then report the failure itself.
-            _flush_best_effort(run_error, pipeline_db, result_db)
+            flush_best_effort(run_error, pipeline_db, result_db)
             raise
 
         # Flush databases. Every view of the store shares one set of pending
