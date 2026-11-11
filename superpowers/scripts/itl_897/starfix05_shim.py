@@ -10,6 +10,12 @@ digest, on the flags, and on the top-level column order and the struct field ord
 depth, which is the behaviour the 0.5 options promise. It is NOT the format-2 byte layout, so
 digests and golden values under it are meaningless; only equalities and inequalities are.
 
+Lifetime: delete this script once starfix 0.5.0 is installable (before the ITL-897 PRs open);
+it refuses to run when the installed starfix already has the order options. Nothing of it runs
+outside an explicit ``python starfix05_shim.py``: the ``.pth`` hook lives only in this worktree's
+git-ignored venv for the duration of the run, is removed at the end and at the next start, and is
+inert unless ``ITL897_STARFIX05_STANDIN`` is set.
+
 Run: ``uv run python superpowers/scripts/itl_897/starfix05_shim.py [pytest args]``
 """
 
@@ -103,7 +109,19 @@ def _cover_child_processes() -> Path:
     return hook
 
 
+def _released_supports_order_options() -> bool:
+    import inspect
+
+    return "ordered_columns" in inspect.signature(_released).parameters
+
+
 if __name__ == "__main__":
+    _pth_path().unlink(missing_ok=True)  # a hook left by an interrupted run
+    if _released_supports_order_options():
+        sys.exit(
+            "starfix with ordered_columns is installed (0.5+): the stand-in is obsolete. "
+            "Delete superpowers/scripts/itl_897/starfix05_shim.py and run pytest directly."
+        )
     install()
     hook = _cover_child_processes()
     try:

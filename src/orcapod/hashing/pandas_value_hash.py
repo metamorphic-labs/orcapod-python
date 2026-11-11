@@ -6,8 +6,11 @@ A pandas value hashes as::
 
 under the ``ContentHash`` method label ``"pandas_dataframe_v1"`` (a frame) or
 ``"pandas_series_v1"`` (a Series); see ``orcapod.hashing.labelled_hash``. The label names this
-whole definition: any change to the grammar or the values table is a new definition under new
-labels (``pandas_dataframe_v2``, ``pandas_series_v2``).
+whole definition, including the Arrow hasher whose digest it embeds (``arrow_v0.1``). A label is
+bumped whenever the hash of any value can change (developer's rule, November 11, 2026): a change
+to the grammar, to the values table, or of the Arrow hasher (a new ``hasher_id``) is a new
+definition under new labels (``pandas_dataframe_v2``, ``pandas_series_v2``). A test pins the
+labels to the Arrow hasher id.
 
 The identity is what pandas' own ``assert_frame_equal`` / ``assert_series_equal`` compare with
 their default arguments (developer's decision, November 11, 2026), with two exceptions:
