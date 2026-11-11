@@ -2211,6 +2211,54 @@ value needs a migration assessment and the developer's approval. Not pinned yet:
 
 ---
 
+## `src/orcapod/pipeline/job.py`, orchestrators, node write paths — store write failures
+
+### SW1 — A failed store write did not fail `PipelineJob.run()`
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-878
+
+A node's write to the store ran inside the per-row handler meant for function failures:
+`FunctionNode.execute` (sync) and `_FunctionPodBase.async_execute.process_one` (async) wrap
+compute *and* the result-table and pipeline-table writes in one `except Exception`. With the
+default `error_policy="continue"` a failed write was skipped like a crashed function: the sync
+path logged a WARNING, the async path logged only at DEBUG, `job.run()` returned normally and
+the node read back fewer rows (none when every write failed, e.g. a logical-type output on
+`SQLiteConnector`, ITL-877). An operator LOG write failure did raise, but before `job.run()`'s
+final flush, so the upstream function node's pending pipeline rows were never committed while
+its result rows were; async callers got an `ExceptionGroup`.
+
+**Fix:** Contract, for now (developer, November 10, 2026): a failed store write always fails
+the run, whatever `error_policy` is. Every node write site (`ResultCache.store`,
+`FunctionNode.add_pipeline_record`, `OperatorNode._store_output_stream`, the side-effect
+invocation log) raises `orcapod.errors.StoreWriteError`, chained from the backend error and
+naming the node, the row's tag and the table. The per-row handlers re-raise it, so the run
+stops at the first failed write; `error_policy` still decides only about rows whose function
+raised. `AsyncPipelineOrchestrator` unwraps it from the `TaskGroup` exception group, so both
+orchestrators raise the same error. `PipelineJob.run()` flushes the writes that succeeded
+before re-raising (a flush failure there is logged, not raised over the original), and wraps a
+failure of its final flush. Nothing stored is rewritten; no hash, path or schema change. An
+opt-in mode that tolerates store failures is a possible later option. A fail-loud post-run
+hook or an observer callback that raises while the store error propagates is logged and noted
+on it (`orcapod.utils.store_errors`), not raised in its place, so a node function that runs
+another cached pod cannot turn that pod's store failure into a skipped row. When concurrent
+node tasks fail together, the async orchestrator raises the store error of the node first in
+topological order, notes the other failures on it and logs other store errors at WARNING.
+A failed flush (the result cache's per-row auto-flush or the job's final flush) raises
+`StoreWriteError(flush=True)` naming the store and no row: views of one store share their
+pending writes, so the failing batch may be an earlier row's or another table's.
+The rule (developer, November 11, 2026): store failures fail the run; a function output that
+cannot be stored (a naive `datetime`, a value not matching the declared type, rejected while
+`ResultCache.store` prepares the record, before any write) is a row failure governed by
+`error_policy` exactly like a function that raised, not a `StoreWriteError`: the value is
+specific to that row, the store is healthy, and every re-run would fail at the same row. The
+async orchestrator logs row failures at DEBUG and ignores `fail_fast` (ITL-879), unchanged here.
+Regressions: `tests/test_pipeline/test_store_write_failure.py`. Related, not fixed here: the async
+orchestrator ignores `error_policy` (ITL-879); connector and Delta `flush` drop a batch whose
+write fails (ITL-880).
+
+---
+
 ## `src/orcapod/core/operators/semijoin.py` — nested columns and string/large_string keys
 
 ### SJ1 — `SemiJoin` failed on nested columns and on `string` vs `large_string` keys
@@ -2248,10 +2296,45 @@ yields an empty result on the async path instead of an error. `Join`'s async key
 
 ---
 
+## Newcomer papercuts found by the docs audit
+
+### NP1 — Missing export, misleading errors, inconsistent defaults, broken example, write noise
+**Status:** in progress
+**Severity:** medium
+**Issue:** ITL-821
+
+The docs audit (PR #271) ran every sample against `main` and found behavior that trips a
+newcomer. Re-checked on `b197544e` (v0.2.0 + #291):
+
+1. `orcapod.enable_file_hash_caching` was not exported. **Fix:** re-exported from `orcapod`.
+2. `DictSource(data=[], tag_columns=[...])` raised `tag_columns not found in table: {...}.
+   Available columns: []`. **Fix:** `SourceStreamBuilder.build` raises `Table is empty` for
+   a table with no columns; a zero-row source with `data_schema=` still builds.
+3. A pod applied to a stream with an extra column printed `Key 'age' not found in parameter
+   types.` (a `logger.warning` reaching logging's last-resort stderr handler) before raising
+   `Incoming data data type ...`. **Fix:** `schema_utils.schema_incompatibility` returns the
+   reason instead of logging; `FunctionPod` and `FunctionNode` raise `Incoming data schema
+   ... : column 'age' is not a parameter of the function`.
+4. Defaults that disagree: `@function_pod` `version="v0.0"` vs `FunctionPod.from_fn` /
+   `side_effect_function_pod` `"v1.0"` (the major version is in the data function's `uri`, so
+   it moves identity hashes and the result-store path); `MapData`/`MapTags`
+   `drop_unmapped=False` vs `stream.map_data`/`map_tags` `True` (in the operator identity).
+   **Open:** awaiting the developer's choice of default.
+5. `examples/save_and_load_pipelines.py` passed a database to `Pipeline()` and failed.
+   **Fix:** rewritten around `PipelineJob`; `tests/test_examples/test_examples.py` runs every
+   example in a subprocess so an example cannot break silently again.
+6. Noise: the protobuf gencode `UserWarning`s on import no longer reproduce (every
+   `orcapod` module imported with and without all extras, `-W always`; protobuf is never
+   loaded), so that half is closed. deltalake's `WARN deltalake_core::writer::stats Skipping
+   column ... because it's a binary field` lines on every Delta write still appear.
+   **Open:** awaiting the developer's choice of how to silence them.
+
+---
+
 ## `src/orcapod/core/data_function.py` — returned values not checked against the declared type
 
 ### FO1 — A pod declared `-> int` stored `1.5` as `1`
-**Status:** in progress
+**Status:** resolved
 **Severity:** high
 **Issue:** ITL-895
 
@@ -2268,19 +2351,28 @@ orchestrator. Present in every release up to v0.2.0. Root-cause evidence:
 `superpowers/specs/itl-895-float-to-int/FINDINGS.md`.
 
 **Fix (function outputs):** `semantic_types/output_conformance.py` checks each returned value
-against its declared type, including inside lists, dicts and dataclass fields, under one rule
-table (`OUTPUT_CONFORMANCE`). `_build_output_data` raises `OutputTypeError` for a mismatch, and
-otherwise converts the outputs to Arrow eagerly, so the `Data` holds exactly what is stored and
-hashed. The error is raised inside the function call, so it is a row failure under
-`error_policy`. Regressions: `tests/test_core/function_pod/test_output_conformance.py`.
+against its declared type, including inside lists, dicts and dataclass fields. One table,
+`OUTPUT_CONFORMANCE`, says how each near miss is treated, following the developer's decisions
+of 2026-11-11: an `int` or `bool` for `float`, a `set` for `list` (ITL-901) and one-shot
+iterators are rejected; a `tuple` or other ordered container for `list`, a `datetime` for
+`date` and a `float` for `numpy.float32` are converted with a `ValueConversionWarning` (once
+per function instance, output and conversion; explicit, not through the warning registry);
+same-kind NumPy scalars are accepted. `_build_output_data` raises `OutputTypeError` (which says
+what to return instead) for a mismatch, and otherwise converts the outputs to Arrow eagerly,
+so the `Data` holds exactly what is stored, hashed and handed to downstream pods. The error is
+raised inside the function call, so it is a row failure under `error_policy`. Regressions:
+`tests/test_core/function_pod/test_output_conformance.py`.
 
-**Open:**
-- The developer still has to decide the near-miss conversions D1-D7 (FINDINGS section 11).
-  Undecided entries keep today's behaviour: an `int` or `bool` for `float`, NumPy scalars of
-  the same kind, a `tuple` for `list`, and a `float` for `numpy.float32`.
-- Inputs built from Python values (`DictSource` and `ListSource` with a declared schema,
-  `Datagram`, `Data` and `Tag` from dicts, `Datagram.update` / `with_columns`) still go through
-  the unchecked conversion and truncate the same way.
-- Rows stored wrongly before the fix are served unchanged. They are not repaired
-  automatically.
+Rows stored wrongly before the fix are served unchanged. They are not repaired automatically.
 
+### FO2 — Inputs built from Python values are not checked against their declared types
+**Status:** open (deferred)
+**Severity:** medium
+**Issue:** ITL-895
+
+Inputs built from Python values (`DictSource` and `ListSource` with a declared schema,
+`Datagram`, `Data` and `Tag` from dicts, `Datagram.update` / `with_columns`) still go through
+the unchecked pyarrow conversion and truncate the same way (`1.5` for an `int` column is
+stored as `1`). Evidence: `superpowers/specs/itl-895-float-to-int/04_input_sites.py`.
+Deferred by the developer (2026-11-11): "generally a big implementation and given the nature
+of Python, not sure if it's something I'd care to put explicit check".

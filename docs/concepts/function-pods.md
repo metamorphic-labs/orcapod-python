@@ -113,9 +113,10 @@ except ValueError as err:
 # ValueError
 ```
 
-The error message names both schemas, for example `... Schema({'weight': float, 'height':
-float, 'age': int}) is not compatible with expected input schema Schema({'weight': float,
-'height': float})`.
+The error message names both schemas and the first column that does not fit, for example
+`Incoming data schema Schema({'weight': float, 'height': float, 'age': int}) is not
+compatible with expected input schema Schema({'weight': float, 'height': float}): column
+'age' is not a parameter of the function`.
 
 Narrow the stream first with the `SelectDataColumns` [operator](operators.md) (or drop the
 extras with `DropDataColumns`):
@@ -138,9 +139,9 @@ untouched.
 ## Return values must match the declared type
 
 Each value the function returns is checked against its declared output type before it is
-stored or hashed. Orcapod never converts a returned value implicitly. A `float` returned
-for an output declared `int` is rejected; it is not truncated. The `OutputTypeError` names the
-function, the output, the declared type and the type of the value:
+stored or hashed. A `float` returned for an output declared `int` is rejected; it is not
+truncated. The `OutputTypeError` names the function, the output, the declared type and the
+type of the value, and says what to return instead:
 
 ```python
 from orcapod.errors import OutputTypeError
@@ -155,25 +156,66 @@ try:
     list(halve.pod(weights).iter_data())
 except OutputTypeError as err:
     print(err)
-# Function 'halve' returned float (12.65) for output 'half_weight', which is declared int. Orcapod does not convert types implicitly; convert the value in the function.
+# Function 'halve' returned float (12.65) for output 'half_weight', which is declared int. Orcapod does not convert types implicitly. Return an int instead: round(value), or int(value) to truncate.
 ```
 
 Fix the function (`return round(weight / 2)`), or declare the type it really returns
-(`-> float`). Values inside containers are checked too: a `1.5` in a `list[int]`, a
-`dict[str, int]` or an `int` field of a dataclass is rejected the same way. So are `None`
-for an output not declared `T | None`, a number for a `date` or `datetime`, a `datetime` for
-a `date`, and `bytes` for `str` (or the reverse).
+(`-> float`).
 
 `OutputTypeError` is a `TypeError` (and a `ValueError`). Inside a `PipelineJob` it counts as
 a failure of the function for that row, like an exception the function raises itself. With
 the default `error_policy="continue"` the row is skipped and reported to the observer, and
 the other rows are computed and stored. With `error_policy="fail_fast"` the run stops.
 
-A few conversions that keep the value are still accepted while their rules are being
-decided: an `int` or `bool` for a `float` output, a NumPy scalar of the same kind (such as
-`numpy.int64` for `int`), a `tuple` for a `list`, and a Python `float` for a
-`numpy.float32` output. The stored value always has the declared type, and so does the
-value a downstream pod receives.
+A few near misses are accepted. Some keep the value exactly and are accepted silently; others
+change it, and are converted with a `ValueConversionWarning`:
+
+| Declared | Returned | Result |
+|---|---|---|
+| any type | a value of that type, or of a subclass (an `IntEnum` for `int`) | accepted |
+| `int`, `float`, `bool` or a NumPy scalar type | a NumPy scalar of the same kind (`numpy.int64` for `int`, `numpy.float32` for `float`, `numpy.bool_` for `bool`) | accepted |
+| a NumPy integer type (`numpy.int8`) | a Python `int` | accepted; out of range is an error |
+| `list[T]` | a `tuple`, or another ordered container (NumPy array, `deque`, `range`, dict view) | converted to a list, with a warning |
+| `date` | a `datetime` | the time of day is dropped, with a warning |
+| `numpy.float32` | a Python `float` or a `numpy.float64` | rounded to 32 bits, with a warning |
+| `float` or `numpy.float32` | an `int` or a NumPy integer | rejected: return `0.0` or `float(value)` |
+| `float` or `numpy.float32` | a `bool` | rejected: return `1.0` or `float(value)` |
+| `int` | a `float`, `Decimal`, `Fraction` or NumPy float | rejected: return `round(value)` |
+| `list[T]` | a `set` or `frozenset` | rejected: its order differs between processes; return `sorted(value)` |
+| `list[T]` | a generator or another one-shot iterator | rejected: return `list(value)` |
+| `date` or `datetime` | a number | rejected |
+| `str` or `bytes` | `bytes` or `str` | rejected |
+| not `T \| None` | `None` | rejected: return a value, or declare `T \| None` |
+
+Values inside containers follow the same rules: the elements of a `list`, the keys and values
+of a `dict` and the fields of a dataclass. Anything else must be exactly the declared type.
+
+A converted value is stored in its converted form, and a downstream pod receives that same
+form: the list, not the tuple. The warning names the types, never the value:
+
+```python
+import warnings
+
+from orcapod.errors import ValueConversionWarning
+
+@function_pod(output_keys="weights")
+def twice(weight: float) -> list[float]:
+    return (weight, weight * 2)  # a tuple, although the function says it returns a list
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    for tag, data in twice.pod(weights).iter_data():
+        print(data.as_dict())
+for warning in caught:
+    print(warning.category is ValueConversionWarning, warning.message)
+# {'weights': [25.3, 50.6]}
+# True Function 'twice' returned tuple for output 'weights', which is declared list[float]; Orcapod converted it to a list. Return a list (list(value)) to avoid this warning.
+```
+
+Each function pod issues the warning once per output and conversion, however many rows it
+processes. To treat every conversion as an error instead, run Python with
+`-W error::orcapod.errors.ValueConversionWarning`: each converted row then raises, and in a
+`PipelineJob` that row fails like a rejected one.
 
 ## `PipelineJob` -- database-backed, cached execution
 
@@ -267,6 +309,52 @@ A node from a job that has run also provides:
   `source_id`, are not included
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
   of another pipeline
+
+### When the store cannot be written
+
+A failed write to the store always fails the run. If a node's results or records cannot be
+stored -- the disk is full, the connection drops, or the database cannot hold one of the
+output types -- `job.run()` raises `StoreWriteError` (from `orcapod.errors`) at the first
+failed write, on both the synchronous and the asynchronous orchestrator. The error names the
+node, the row being stored and the table, and the database's own exception is chained as its
+cause. When committing pending writes fails, the error has `flush=True` and names the store
+instead of a row and table: every view of a store shares its pending writes, so the write
+that failed may belong to an earlier row or another table. A run that returns normally has
+stored every result that could be turned into a record; a result rejected before that is a
+row failure (see below).
+
+This holds whatever `error_policy` the orchestrator was given. `error_policy="continue"` (the
+default) skips rows whose *function* raised and keeps going; it never skips a row because it
+could not be stored.
+
+The error you get is always one plain `StoreWriteError`, never an exception group and never
+another exception raised in its place. A post-run hook or observer callback that fails while
+the store error is on its way out is logged and recorded as a note on the error
+(`err.__notes__`). When several nodes fail at once on the asynchronous orchestrator, you get
+the store error of the node that comes first in the pipeline, the one the synchronous
+orchestrator would have stopped at; the other failures are logged and noted on it.
+
+After the failure, rows stored before it are kept: `job.run()` commits the writes that
+succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
+fixed, run the job again: stored function results are not recomputed, only the missing ones
+are. An operator with `cache_mode=LOG` recomputes its output on every run, as it always does.
+A side effect is different: if its delivery completed but the write to its invocation log
+failed, there is no record that it completed, and `track_completion` delivers it again on the
+re-run. Before re-running, check which side effects already completed, or make the side
+effect safe to repeat.
+
+A value your function returned for one row that cannot be turned into a record at all is a
+different case: a naive `datetime`, a `str` from a function declared to return `int`, or an
+`int` where a dataclass is declared. Such a value is rejected while the row's record is being
+prepared, before anything is written, and it is a *row failure*: it is handled exactly like a
+function that raised on that row. The observer gets `on_data_crash`, the failure is logged,
+and `error_policy` decides -- `"continue"` skips the row, `"fail_fast"` raises the error
+the conversion raised. It is not a `StoreWriteError`, because the store is healthy and every
+re-run would fail at the same row. The asynchronous orchestrator currently logs row failures
+at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these rows too.
+
+This is the contract for now. An opt-in mode that tolerates store failures may be added
+later.
 
 ## Multiple input streams
 
