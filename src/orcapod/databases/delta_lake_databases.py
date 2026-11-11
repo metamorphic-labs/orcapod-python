@@ -71,6 +71,92 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
+def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
+    """Return ``schema`` with the types the Delta writer would store it as.
+
+    Applies the conversion ``deltalake.write_deltalake`` and ``DeltaTable.merge``
+    apply to incoming data (unsigned to signed integers, every timestamp to
+    microseconds, fixed-size binary to binary), then Delta's own type mapping.
+    Calling the writer's conversion instead of copying it keeps the append check
+    in step with what the writer accepts; ``test_identical_schema_appends``
+    guards it across ``deltalake`` versions.
+
+    Args:
+        schema: The schema of the rows about to be written.
+
+    Returns:
+        The schema as the Delta table would store it.
+    """
+    from arro3.core import Schema as Arro3Schema
+    from deltalake.writer._conversion import (  # pyright: ignore[reportPrivateUsage]  # the writer's own conversion, see the docstring
+        _convert_arro3_schema_to_delta,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    converted = _convert_arro3_schema_to_delta(Arro3Schema.from_arrow(schema))
+    return pa.schema(
+        deltalake.Schema.from_arrow(converted).to_arrow()  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
+    )
+
+
+def _without_field_metadata(delta_type: Any) -> Any:
+    """Return a Delta type with the metadata of every nested field dropped.
+
+    Args:
+        delta_type: A ``deltalake.schema`` type.
+
+    Returns:
+        The same type with no field metadata at any depth.
+    """
+    from deltalake.schema import ArrayType, Field, MapType, StructType
+
+    if isinstance(delta_type, StructType):
+        return StructType(
+            [
+                Field(f.name, _without_field_metadata(f.type), nullable=f.nullable)
+                for f in delta_type.fields
+            ]
+        )
+    if isinstance(delta_type, ArrayType):
+        return ArrayType(
+            _without_field_metadata(delta_type.element_type),
+            contains_null=delta_type.contains_null,
+        )
+    if isinstance(delta_type, MapType):
+        return MapType(
+            _without_field_metadata(delta_type.key_type),
+            _without_field_metadata(delta_type.value_type),
+            value_contains_null=delta_type.value_contains_null,
+        )
+    return delta_type
+
+
+def _stored_arrow_schema(delta_table: deltalake.DeltaTable) -> pa.Schema:
+    """Return the Arrow schema of the table's stored Delta schema, without metadata.
+
+    Delta keeps the Arrow field metadata it was written with, including the
+    extension type name of a logical type. Reading that back into pyarrow would
+    rebuild the registered extension type over Delta's own storage type (``list``
+    where Orcapod wrote ``large_list``), which the extension type rejects. The
+    append check compares storage types only, so the metadata is dropped first.
+
+    Args:
+        delta_table: The loaded stored table.
+
+    Returns:
+        The stored schema as plain Arrow types.
+    """
+    from deltalake.schema import Field, Schema
+
+    stored = delta_table.schema()
+    plain = Schema(
+        [
+            Field(f.name, _without_field_metadata(f.type), nullable=f.nullable)
+            for f in stored.fields
+        ]
+    )
+    return pa.schema(plain.to_arrow())  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
+
+
 def _types_conflict(stored: pa.DataType, incoming: pa.DataType) -> bool:
     """Return ``True`` if ``incoming`` changes a type that ``stored`` already has.
 
@@ -1216,10 +1302,12 @@ class DeltaTableDatabase:
 
         Delta's merge either casts such a batch to the stored type (``int32`` or
         ``float64`` rows into an ``int64`` column) or, when an extension type is
-        involved, writes data files the table can no longer read. Both sides are
-        compared through Delta's own type mapping, with extension types reduced to
-        storage, large-normalized and nullability ignored, so a type Delta stores
-        differently (``uint64`` as ``int64``) is not reported. Columns and nested
+        involved, writes data files the table can no longer read. The batch's types
+        are first converted exactly as the Delta writer converts them (see
+        ``_as_delta_writer_stores``), then both sides are compared with extension
+        types reduced to storage, large-normalized and nullability ignored, so a
+        type Delta stores differently (``uint64`` as ``int64``, ``timestamp[ns]``
+        as ``timestamp[us]``) is not reported. Columns and nested
         struct fields present on only one side are allowed (schema evolution);
         see ``_types_conflict``. The stored schema comes from the loaded log; no
         data is read.
@@ -1232,16 +1320,14 @@ class DeltaTableDatabase:
             ``(column, stored_type, incoming_type)`` for the first column whose
             compared types differ, or ``None`` when the batch can be appended.
         """
-        stored = pa.schema(delta_table.schema().to_arrow())  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
-        incoming = pa.schema(
-            deltalake.Schema.from_arrow(
-                pa.schema(
-                    [
-                        pa.field(f.name, _comparable_storage_type(f.type))
-                        for f in batch.schema
-                    ]
-                )
-            ).to_arrow()  # pyright: ignore[reportArgumentType]  # arro3 schema, as above
+        stored = _stored_arrow_schema(delta_table)
+        incoming = _as_delta_writer_stores(
+            pa.schema(
+                [
+                    pa.field(f.name, _comparable_storage_type(f.type))
+                    for f in batch.schema
+                ]
+            )
         )
         for field in incoming:
             index = stored.get_field_index(field.name)

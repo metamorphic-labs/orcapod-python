@@ -79,3 +79,12 @@ and says a refused append in a run is a `StoreWriteError`; async `record_and_for
 and row on a `StoreError`; `_start_node` labels store errors inside a node's exception group.
 Declined: pending-rows read skip (fixed by #293). Deferred: table data without a `_delta_log`
 and connector-DB read errors -> ITL-916.
+
+## CodeRabbit round on cf029bbf (coordinator approved)
+
+Regression: non-microsecond timestamps (and `list[Path]`, found by the new differential guard)
+could not be appended to an existing Delta table. Fix: `_as_delta_writer_stores` applies the
+writer's own conversion, `_stored_arrow_schema` reads the stored schema without field metadata.
+Guard: `tests/test_databases/test_delta_append_types.py` (every Arrow/logical type, identical
+schema, same view and reopened; 40 cases failed before the fix). Deferred: ExceptionGroup-wrapped
+store errors -> ITL-918; fixed_size_list merge failure (also on main) -> ITL-916 (strict xfail).

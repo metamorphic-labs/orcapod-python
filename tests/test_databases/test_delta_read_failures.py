@@ -15,6 +15,7 @@ Covers:
 
 from __future__ import annotations
 
+import datetime
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -320,8 +321,14 @@ class TestChangedColumnTypeIsRefused:
             (pa.float64(), 2.0, "double"),
             (pa.int32(), 2, "int32"),
             (pa.large_string(), "2", "string"),
+            (pa.timestamp("ns"), datetime.datetime(2020, 1, 2), "timestamp"),
         ],
-        ids=["int64->float64", "int64->int32", "int64->large_string"],
+        ids=[
+            "int64->float64",
+            "int64->int32",
+            "int64->large_string",
+            "int64->timestamp[ns]",
+        ],
     )
     def test_plain_type_change(self, base, stored, new_type, value, named):
         """A changed column type is refused, naming the column and both types."""

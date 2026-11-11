@@ -230,12 +230,14 @@ print("function calls:", len(calls))
     A write that fails because the stored table cannot be read raises `StoreReadError` too,
     not `StoreWriteError` (see *When the store cannot be written* below).
 
-    In a `DeltaTableDatabase`, rows whose column types differ from the stored table's
-    (`float64` values for a column stored as `int64`, say) are refused with
+    In a `DeltaTableDatabase`, rows whose column types differ from the stored table's, as
+    Delta stores them (`float64` values for a column stored as `int64`, say), are refused with
     `InputValidationError`, which names the table, the column and both types, and nothing is
     written to that table. They are not converted to the stored type. `string` and
     `large_string`, and the other large and non-large layouts of one type, count as the same
-    type. New columns and new struct fields pass this check; whether they are added follows
+    type, and so do types the Delta writer converts on the way in (`uint64` is stored as
+    `int64`, every timestamp in microseconds). New columns and new struct fields pass this
+    check; whether they are added follows
     the database's `allow_schema_evolution` setting. In a job run, a refused append fails the
     run as a `StoreWriteError` whose cause is the `InputValidationError`.
 

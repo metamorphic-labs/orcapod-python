@@ -14,8 +14,9 @@ Delta's merge silently cast the new rows to the stored type (`int32` or `float64
 into an `int64` column, `large_binary` into `large_string`), or, when an extension (logical) type
 was involved, accepted rows the table could then no longer read. The comparison treats types the
 way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
-are the same type, an extension type is compared by its storage type, and nullability is not
-compared. Struct fields are compared by name at any depth, including inside lists and maps.
+are the same type, types the Delta writer converts on the way in are compared as converted
+(unsigned integers as signed, every timestamp in microseconds), an extension type is compared by
+its storage type, and nullability is not compared. Struct fields are compared by name at any depth, including inside lists and maps.
 New and missing columns, and new and missing struct fields, pass the check; whether Delta's
 merge adds a new one follows the database's `allow_schema_evolution` setting, as before.
 

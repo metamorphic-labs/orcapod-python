@@ -2322,7 +2322,13 @@ async `FunctionPod` row handler and the async orchestrator let it fail the run w
 the stored Delta schema through Delta's own type mapping (extension types by storage,
 large-normalized, nullability ignored). On a difference it raises `InputValidationError` naming the
 table, column and both types, and nothing is written; struct fields are compared by name at
-every depth, so a new nested field is schema evolution, not a difference. `flush()` raises a `StoreReadError` or
+every depth, so a new nested field is schema evolution, not a difference. The batch's types
+are converted with the Delta writer's own conversion (`deltalake.writer._conversion`, the one
+`write_deltalake` and `merge` use) before the comparison, and the stored schema is read without
+field metadata, so a type the writer stores differently (timestamps in microseconds, unsigned as
+signed) or a logical type whose Delta storage differs is never refused; the differential guard
+`tests/test_databases/test_delta_append_types.py` appends an identical schema for every Arrow and
+logical type Delta can store. `flush()` raises a `StoreReadError` or
 that `InputValidationError` as itself, not wrapped in `RuntimeError`, with every other failed
 batch noted on it, so a read failure in a per-row result-cache flush still fails the run. The
 async orchestrator selects the `StoreReadError` from the `TaskGroup`'s exception group with a
