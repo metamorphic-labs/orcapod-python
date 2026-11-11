@@ -91,6 +91,14 @@ GENERATOR_TIMEOUT_S = 600
 
 
 def _run_generator(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the golden generator in a fresh process and capture its JSON output.
+
+    Args:
+        env: Environment for the child process, e.g. with ``PYTHONHASHSEED`` set.
+
+    Returns:
+        The completed process, with ``stdout`` and ``stderr`` captured as text.
+    """
     try:
         return subprocess.run(
             [sys.executable, str(GENERATOR), "--stdout"],
@@ -124,10 +132,13 @@ def test_values_independent_of_process_and_hash_seed(seed: str) -> None:
 
 
 def test_generator_timeout_fails_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A generator that exceeds the timeout fails the test with a clear message."""
+
     # Exercises the private helper because the test is about its timeout handling.
     def hang(
         cmd: list[str], *, timeout: float, **_: object
     ) -> subprocess.CompletedProcess[str]:
+        """Stand in for ``subprocess.run`` and time out immediately."""
         raise subprocess.TimeoutExpired(cmd, timeout)
 
     monkeypatch.setattr(subprocess, "run", hang)
