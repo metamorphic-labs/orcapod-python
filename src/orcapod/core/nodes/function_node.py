@@ -1219,6 +1219,18 @@ class FunctionJobNode(FunctionNodeBase):
             "store=...) or call job.bind(store=...)."
         )
 
+    def _cannot_compute_error(self) -> RuntimeError:
+        """Return the error for asking a loaded node to compute.
+
+        A node loaded by ``PipelineJob.load`` has no function pod: it can serve
+        the results its saved run stored, never compute new ones.
+        """
+        return RuntimeError(
+            f"FunctionJobNode {self.label!r} was loaded by PipelineJob.load and has no "
+            "function pod, so it cannot compute; read its stored results with "
+            "as_table() or iter_data()."
+        )
+
     def _has_stored_records(self) -> bool:
         """Return whether the attached store holds a pipeline record of this node.
 
@@ -1373,8 +1385,15 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             Materialized list of (tag, output_data) pairs, excluding
             ``None`` outputs and failed data.
+
+        Raises:
+            RuntimeError: If the node was loaded by ``PipelineJob.load`` and so
+                has no function pod to compute with.
         """
         from orcapod.pipeline.observer import NoOpObserver
+
+        if self._function_pod is None:
+            raise self._cannot_compute_error()
 
         node_label = self.label
         node_hash = self.content_hash().to_string()
@@ -2544,6 +2563,11 @@ class FunctionJobNode(FunctionNodeBase):
             observer: Optional execution observer for hooks.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
+
+        Raises:
+            RuntimeError: If the node was loaded by ``PipelineJob.load``: without a
+                store it has nothing to serve, and it has no function pod to
+                compute with. *output* is closed first.
         """
         from orcapod.pipeline.serialization import LoadStatus
 
@@ -2555,6 +2579,10 @@ class FunctionJobNode(FunctionNodeBase):
         if status == LoadStatus.UNAVAILABLE:
             await output.close()
             raise self._no_store_error()
+
+        if self._function_pod is None:
+            await output.close()
+            raise self._cannot_compute_error()
 
         from orcapod.pipeline.observer import NoOpObserver
 

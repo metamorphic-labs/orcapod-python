@@ -258,9 +258,9 @@ def test_loaded_function_node_with_store_is_read_only(saved: pathlib.Path) -> No
 
 
 def _append_recomputed_record(
-    node: Any, entry_row: int, recomputation_index: int, value: int
+    node: Any, entry_id: int, recomputation_index: int, value: int
 ) -> None:
-    """Store a recomputed result for one entry of *node*: a new result and its record.
+    """Store a recomputed result for the entry tagged ``id == entry_id``.
 
     Non-public on purpose: no public call recomputes a stored entry in a test, so
     this writes what a recomputation writes -- a result record with *value* and a
@@ -280,7 +280,17 @@ def _append_recomputed_record(
     table_path = node._versioned_pipeline_path
     entry_id_col = "__pipeline_entry_id"
     records = pipeline_db.get_all_records(table_path, record_id_column=entry_id_col)
-    record = records.slice(entry_row, 1)
+    # The entry's original record: selected by its tag value, never by row order.
+    index_col = "__pipeline_recomputation_index"
+    id_type = records.schema.field("id").type
+    index_type = records.schema.field(index_col).type
+    record = records.filter(
+        pc.and_(
+            pc.equal(records.column("id"), pa.scalar(entry_id, type=id_type)),
+            pc.equal(records.column(index_col), pa.scalar(0, type=index_type)),
+        )
+    )
+    assert record.num_rows == 1
     old_record_id = record.column(record_id_col)[0]
     result = results.filter(pc.equal(results.column(record_id_col), old_record_id))
 
@@ -325,8 +335,8 @@ def test_recomputed_entry_is_read_once_with_its_latest_result(
     node = PipelineJob.load(path).nodes["dbl"]
     entry_id = next(iter(node.iter_data()))[0].as_dict()["id"]
     # Index 2 is stored before index 1, so "last record wins" would pick 111.
-    _append_recomputed_record(node, 0, recomputation_index=2, value=222)
-    _append_recomputed_record(node, 0, recomputation_index=1, value=111)
+    _append_recomputed_record(node, entry_id, recomputation_index=2, value=222)
+    _append_recomputed_record(node, entry_id, recomputation_index=1, value=111)
 
     reloaded = PipelineJob.load(path).nodes["dbl"]
     table = reloaded.as_table()
@@ -350,8 +360,8 @@ def test_live_node_hot_load_reads_the_latest_recomputed_result(
     _ = job.run()
     node = job.nodes["dbl"]
     entry_id = next(iter(node.iter_data()))[0].as_dict()["id"]
-    _append_recomputed_record(node, 0, recomputation_index=2, value=222)
-    _append_recomputed_record(node, 0, recomputation_index=1, value=111)
+    _append_recomputed_record(node, entry_id, recomputation_index=2, value=222)
+    _append_recomputed_record(node, entry_id, recomputation_index=1, value=111)
 
     fresh = PipelineJob(name="small", store=store)
     with fresh:
@@ -590,6 +600,51 @@ def test_loaded_operator_only_job_cannot_run(tmp_path: pathlib.Path) -> None:
     assert job.unbound_sources == []
     with pytest.raises(RuntimeError, match="cannot execute a loaded job"):
         _ = job.run()
+
+
+def test_loaded_job_without_a_store_cannot_run(
+    saved: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """A loaded job without a store gets the read-only error, not 'requires a store'."""
+
+    def drop_store(data: dict[str, Any]) -> None:
+        """Remove the saved store configuration."""
+        data["bindings"]["store"] = None
+
+    job = PipelineJob.load(_rewrite_job_file(saved, tmp_path, drop_store))
+    with pytest.raises(RuntimeError, match="cannot execute a loaded job"):
+        _ = job.run()
+
+
+def test_loaded_function_node_cannot_execute(saved: pathlib.Path) -> None:
+    """``execute()`` on a loaded node raises: it has no function pod."""
+    job = _load(saved)
+    with pytest.raises(RuntimeError) as excinfo:
+        _ = job.nodes["dbl"].execute(job.nodes["dsrc"])
+    assert str(excinfo.value) == (
+        "FunctionJobNode 'dbl' was loaded by PipelineJob.load and has no function "
+        "pod, so it cannot compute; read its stored results with as_table() or "
+        "iter_data()."
+    )
+
+
+def test_loaded_function_node_cannot_async_execute(saved: pathlib.Path) -> None:
+    """``async_execute()`` on a loaded node raises and closes its output."""
+    import asyncio
+
+    from orcapod.channels import Channel
+
+    node = _load(saved).nodes["dbl"]
+    inputs: Channel[Any] = Channel()
+    output: Channel[Any] = Channel()
+
+    async def run() -> list[Any]:
+        """Run the node, then drain its output (which must be closed)."""
+        with pytest.raises(RuntimeError, match="has no function pod, so it cannot"):
+            await node.async_execute(inputs.reader, output.writer)
+        return [item async for item in output.reader]
+
+    assert asyncio.run(asyncio.wait_for(run(), timeout=10)) == []
 
 
 # ---------------------------------------------------------------------------

@@ -767,7 +767,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         Raises:
             ValueError: If no store is set.
-            RuntimeError: If no pipeline has been compiled.
+            RuntimeError: If no pipeline has been compiled, or the job was built
+                by ``PipelineJob.load`` (a loaded job is read-only).
             StoreWriteError: If a node's results or records could not be written
                 to the store, whatever the orchestrator's ``error_policy``. The run
                 stops at the first failed write. Writes that succeeded before it
@@ -785,14 +786,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "PipelineJob has no compiled pipeline. "
                 "Record invocations inside a 'with job:' block first."
             )
-        if self._store is None:
-            raise ValueError(
-                "PipelineJob.run() requires a store. "
-                "Call job.bind(store=db) before run(). "
-                "For transient (in-memory) storage use "
-                "job.bind(store=InMemoryArrowDatabase())."
-            )
-
         # A loaded job reads the results its saved run stored and never runs:
         # function pods are not saved with it, and even an operator-only loaded
         # job, whose operators are rebuilt, stays read-only.
@@ -801,6 +794,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "PipelineJob.run() cannot execute a loaded job: PipelineJob.load() "
                 "is for reading stored results only. To run a new computation, "
                 "create a fresh PipelineJob from the original pipeline definition."
+            )
+
+        if self._store is None:
+            raise ValueError(
+                "PipelineJob.run() requires a store. "
+                "Call job.bind(store=db) before run(). "
+                "For transient (in-memory) storage use "
+                "job.bind(store=InMemoryArrowDatabase())."
             )
 
         # Reject loaded read-only stubs: nodes created by load() have no live
