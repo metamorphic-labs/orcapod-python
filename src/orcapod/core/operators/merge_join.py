@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
@@ -47,6 +48,29 @@ def _output_types(
             assert known is not None
             resolved[name] = arrow_utils.normalize_to_large_types(known, keep_null=True)
     return resolved
+
+
+def _identity_key(value: Any) -> Any:
+    return value
+
+
+def _storage_sort_key(
+    type_converter: Any, arrow_type: "pa.DataType"
+) -> Callable[[Any], Any]:
+    """Return the ordering key MergeJoin uses for a column's stored values.
+
+    The array logical type defines ``storage_sort_key`` (its stored ``(dtype tag,
+    shape, data)``); every other type is ordered by its stored value as before.
+    General struct ordering is ITL-839.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        lt = type_converter.get_logical_type_by_arrow_extension_name(
+            arrow_type.extension_name
+        )
+        key = getattr(lt, "storage_sort_key", None)
+        if callable(key):
+            return key
+    return _identity_key
 
 
 class MergeJoin(BinaryOperator):
@@ -357,6 +381,10 @@ class MergeJoin(BinaryOperator):
                 left_sources = joined.column(left_source_col).to_pylist()
                 right_sources = joined.column(right_source_col).to_pylist()
 
+            # A logical type whose stored values are not orderable as Python values
+            # (struct storage comes back as dicts) supplies its own ordering key.
+            sort_key = _storage_sort_key(tc, output_types[col])
+
             merged_vals = []
             merged_sources = [] if has_source else None
             for i in range(len(left_vals)):
@@ -364,11 +392,13 @@ class MergeJoin(BinaryOperator):
                 if has_source:
                     ls, rs = left_sources[i], right_sources[i]
                     # Sort by data value, carry source along
-                    pairs = sorted(zip([lv, rv], [ls, rs]), key=lambda p: p[0])
+                    pairs = sorted(
+                        zip([lv, rv], [ls, rs]), key=lambda p: sort_key(p[0])
+                    )
                     merged_vals.append([p[0] for p in pairs])
                     merged_sources.append([p[1] for p in pairs])
                 else:
-                    merged_vals.append(sorted([lv, rv]))
+                    merged_vals.append(sorted([lv, rv], key=sort_key))
 
             # Replace the left column with merged list, drop right column
             col_idx = joined.column_names.index(left_col_name)

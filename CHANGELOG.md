@@ -115,6 +115,41 @@ replaced by `_`. Correcting stored values is tracked in ITL-853.
 
 ### Breaking Changes
 
+#### NumPy arrays: new storage format and new hashes, no automatic migration (ITL-888, ITL-883)
+
+**The array format and every array hash changed in v0.3.** A store written by v0.2 that holds
+`numpy.ndarray` columns is **not migrated**. Under v0.3, every node that handles arrays
+computes again into new tables, and its v0.2 results are no longer returned. Nothing written by
+v0.2 is changed or deleted, and those tables stay readable with v0.2. Use a fresh store for
+v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.3.
+
+- **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
+  `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
+  data: large_binary>`: an Orcapod dtype tag, the shape, and the elements in C order,
+  little-endian, packed. It replaces the `.npy` file under `numpy.ndarray`; that name is no
+  longer registered or written.
+- **Identity.** An array is its dtype, shape and element bits. Memory layout, byte order,
+  structured field order and padding, and subclass are not part of it. Arrays read back
+  canonical: C order, little-endian (`>f4` reads back `<f4`), structured fields sorted by name
+  and packed, as plain `np.ndarray`.
+- **Hash.** `NumpyArrayHandler` returns `ContentHash("ndarray_v1", digest)`. The digest is
+  SHA-256 over a length-prefixed encoding of the stored row (`docs/reference/hashing.md`,
+  section 8), and the label replaces the bare `sha256`. Because the logical type name is now
+  `orcapod.ndarray`, the type, schema and pipeline hashes of anything with an array column
+  change too, and so do the table paths of those nodes, and of nothing else.
+- **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
+  the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
+  NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
+  `clongdouble`, datetimes and timedeltas without a unit, and structured dtypes with titles.
+- **Function pods.** A pod declared `-> np.ndarray` that returns something other than an array,
+  such as a NumPy scalar, now raises `TypeError` naming the output.
+- **MergeJoin** orders merged arrays by their stored `(dtype tag, shape, data)`.
+- `LogicalTypeRegistry.get_by_python_type` now picks the most specific registered class along
+  the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
+  subclasses, whatever the registration order.
+- Known gap: `SemiJoin` with an array column fails until ITL-847 lands (SemiJoin already failed
+  for list and dataclass columns).
+
 #### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-832, ITL-813)
 
 `MergeJoin` no longer infers Arrow types from Python values, and it no longer fails on a

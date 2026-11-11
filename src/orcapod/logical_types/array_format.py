@@ -46,6 +46,13 @@ import pyarrow as pa
 ARRAY_FORMAT_VERSION = 1
 """Version of the array storage struct; recorded in the extension metadata."""
 
+ARRAY_FORMAT_METADATA = b'{"version":1}'
+"""``ARROW:extension:metadata`` of every array-format extension type (canonical JSON).
+
+A reader rejects a stored type whose metadata differs, so a later storage version
+is never decoded as this one.
+"""
+
 
 ARRAY_STORAGE_TYPE: pa.StructType = pa.struct(
     [

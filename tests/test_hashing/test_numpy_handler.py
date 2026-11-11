@@ -15,7 +15,7 @@ class TestNumpyArrayHandler:
         arr = np.array([1.0, 2.0, 3.0])
         result = handler.handle(arr, hasher=None)
         assert isinstance(result, ContentHash)
-        assert result.method == "sha256"
+        assert result.method == "ndarray_v1"
 
     def test_same_content_same_hash(self):
         handler = NumpyArrayHandler()
@@ -51,5 +51,5 @@ class TestNumpyArrayHandler:
     def test_raises_value_error_for_object_dtype(self):
         handler = NumpyArrayHandler()
         arr = np.array([1, "hello", None], dtype=object)
-        with pytest.raises(ValueError, match="object-dtype"):
+        with pytest.raises(ValueError, match="object arrays"):
             handler.handle(arr, hasher=None)

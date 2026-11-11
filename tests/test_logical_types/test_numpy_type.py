@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pyarrow as pa
 import pytest
 
 from orcapod.logical_types.protocols import LogicalTypeProtocol
@@ -18,7 +17,7 @@ class TestLogicalNumpyArrayProtocol:
     def test_logical_type_name(self):
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
-        assert LogicalNumpyArray().logical_type_name == "numpy.ndarray"
+        assert LogicalNumpyArray().logical_type_name == "orcapod.ndarray"
 
     def test_python_type(self):
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
@@ -30,15 +29,17 @@ class TestLogicalNumpyArrayProtocol:
 
         assert (
             LogicalNumpyArray().get_arrow_extension_type().extension_name
-            == "numpy.ndarray"
+            == "orcapod.ndarray"
         )
 
     def test_arrow_ext_storage_type(self):
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
+        from orcapod.logical_types.array_format import ARRAY_STORAGE_TYPE
+
         assert (
             LogicalNumpyArray().get_arrow_extension_type().storage_type
-            == pa.large_binary()
+            == ARRAY_STORAGE_TYPE
         )
 
     def test_arrow_ext_is_cached(self):
@@ -55,18 +56,18 @@ class TestLogicalNumpyArrayProtocol:
 
 
 class TestLogicalNumpyArrayStorage:
-    def test_python_to_storage_returns_bytes(self):
+    def test_python_to_storage_returns_the_array_struct_row(self):
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         arr = np.array([1.0, 2.0, 3.0])
         result = LogicalNumpyArray().python_to_storage(arr)
-        assert isinstance(result, bytes)
+        assert result == {"dtype": "float64", "shape": [3], "data": arr.tobytes()}
 
-    def test_object_dtype_raises_before_save(self):
+    def test_object_dtype_raises(self):
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         arr = np.array([1, "hello", None], dtype=object)
-        with pytest.raises(ValueError, match="object-dtype"):
+        with pytest.raises(ValueError, match="object arrays"):
             LogicalNumpyArray().python_to_storage(arr)
 
     def test_structured_with_object_field_raises(self):
@@ -121,8 +122,9 @@ class TestLogicalNumpyArrayRoundTrip:
         assert np.array_equal(result["x"], arr["x"])
         assert np.array_equal(result["y"], arr["y"])
 
-    def test_fortran_order(self):
+    def test_fortran_order_reads_back_c_order(self):
+        # Memory order is not part of an array's identity: storage is C order.
         arr = np.asfortranarray(np.array([[1, 2], [3, 4]], dtype=np.float64))
         result = self._rt(arr)
         assert np.array_equal(result, arr)
-        assert result.flags["F_CONTIGUOUS"]
+        assert result.flags["C_CONTIGUOUS"]
