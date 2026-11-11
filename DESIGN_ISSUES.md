@@ -2296,6 +2296,57 @@ yields an empty result on the async path instead of an error. `Join`'s async key
 
 ---
 
+## `src/orcapod/databases/delta_lake_databases.py` — read failures
+
+### DR1 — A Delta table that could not be read was reported as having no rows
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-884
+
+`DeltaTableDatabase.get_all_records` logged a read error at WARNING and returned `None`, and
+`get_records_by_ids` returned `None` on any error. Both conflated "the table does not exist"
+with "the table exists but cannot be read". Callers treat `None` as no rows. A function node
+recomputed with a "deleted externally" warning, its per-row lookups failed inside the
+`error_policy="continue"` handler, and the run finished without raising, so stored results
+looked dropped. `_flush_by_key` also treated a `DeltaProtocolError` on load as "no table" and
+wrote the batch with `mode="overwrite"`. The case that exposed it: an append whose column type
+differs from the stored table, which Delta's merge either casts silently to the stored type or,
+with an extension type involved, accepts and then cannot read. Other backends were not
+affected: the in-memory and connector databases (SQLite, PostgreSQL, SpiralDB) return `None`
+only for a table that does not exist and let read errors propagate.
+
+**Fix:** only `TableNotFoundError` means absent. Every other load or read error raises
+`orcapod.errors.StoreReadError`, which names the table and chains the cause. `FunctionNode.execute`, the
+async `FunctionPod` row handler and the async orchestrator let it fail the run whatever the
+`error_policy`. Before merging into an existing table, `_flush_by_key` compares the batch with
+the stored Delta schema through Delta's own type mapping (extension types by storage,
+large-normalized, nullability ignored). On a difference it raises `InputValidationError` naming the
+table, column and both types, and nothing is written; struct fields are compared by name at
+every depth, so a new nested field is schema evolution, not a difference. The batch's types
+are converted with the Delta writer's own conversion (`deltalake.writer._conversion`, the one
+`write_deltalake` and `merge` use) before the comparison, and the stored schema is read without
+field metadata, so a type the writer stores differently (timestamps in microseconds, unsigned as
+signed) or a logical type whose Delta storage differs is never refused; the differential guard
+`tests/test_databases/test_delta_append_types.py` appends an identical schema for every Arrow and
+logical type Delta can store. `flush()` raises a `StoreReadError` or
+that `InputValidationError` as itself, not wrapped in `RuntimeError`, with every other failed
+batch noted on it, so a read failure in a per-row result-cache flush still fails the run. The
+async orchestrator selects the `StoreReadError` from the `TaskGroup`'s exception group with a
+plain `except`, noting the other failures, so a concurrent unrelated failure cannot turn it into
+an `ExceptionGroup`. With ITL-878 (SW1) both errors derive from `orcapod.errors.StoreError`
+and share one path: the per-row handlers, `orcapod.utils.store_errors` and both orchestrators
+handle `StoreError`. A write that fails because the stored table cannot be read raises
+`StoreReadError`, not `StoreWriteError`; a refused append is a `StoreWriteError` caused by the
+`InputValidationError`. The orchestrators label a store error with the node it escaped from,
+and the async orchestrator ranks read and write errors alike by node order. Regressions:
+`tests/test_databases/test_delta_read_failures.py`,
+`tests/test_pipeline/test_store_read_failure.py` and
+`tests/test_pipeline/test_store_errors_together.py`. Open: whether a nullability-only change
+should be refused (Delta's merge relaxes a non-null nested field to nullable) belongs to the
+nullability audit, ITL-842.
+
+---
+
 ## Newcomer papercuts found by the docs audit
 
 ### NP1 — Missing export, misleading errors, inconsistent defaults, broken example, write noise
@@ -2331,6 +2382,39 @@ newcomer. Re-checked on `b197544e` (v0.2.0 + #291):
 
 ---
 
+## `src/orcapod/core/operators/filters.py` — `PolarsFilter` identity and nullability (ITL-828)
+
+### PF1 — An expression predicate could not be hashed, and a filter broke a join inside a job
+**Status:** resolved
+
+**PF1a.** `stream.polars_filter(pl.col("x") > 0).pipeline_hash()` raised `TypeError` (no
+semantic handler for `pl.Expr`), so an expression filter failed upstream of a join and anywhere
+inside a `PipelineJob`.
+
+**Fix (PF1a):** `PolarsExprHandler` hashes a `pl.Expr` as `polars_expr_v1`: a strict parser
+turns `Expr.meta.serialize(format="json")` into a tree in an Orcapod-owned grammar
+(`hashing/semantic_hashing/polars_expr.py`), hashed as sha256 of its canonical JSON. Polars'
+serialization is not hashed directly: it changed layout between 1.20, 1.30 and 1.36. Unknown
+nodes and unsupported expressions (Python functions, multi-column selectors, aggregations,
+`alias`, `when/then`, non-finite literals, `pl.Series` literals) raise `ValueError` naming the
+expression, so a Polars layout change fails loudly instead of moving a hash. `predicates` is
+normalized to a tuple. The developer confirmed the identity design (November 11, 2026).
+
+Also fixed: inside a `PipelineJob` any `PolarsFilter` (keyword constraints too) upstream of a
+`Join` raised `InputValidationError` (`str` vs `str | None`), because Polars returns every field
+nullable and the filter restored types but not nullability.
+
+**PF1b.** Data columns of a filtered stream also came back nullable, which broke the rule that
+operators never change nullability, and gave a filtered row a different data hash from its
+source row.
+
+**Fix (PF1b):** the filter restores every column's input nullability (developer, November 11,
+2026). A filtered row's data hash now equals its source row's. The pinned
+`pipeline:polars_filter` row data hashes moved (approved); they are the cache keys of any
+function pod downstream of a filter, so a 0.2 store recomputes those results once.
+
+---
+
 ## `src/orcapod/databases/` — PipelineJob run time quadratic in rows
 
 ### PQ1 — Every row a function node processes scans the rows already stored
@@ -2362,4 +2446,3 @@ pod: 0.09 ms).
   Related: `get_records_with_column_value` searches only the pending batch when one exists
   (ignores committed rows) and `get_records_by_ids` ignores pending rows; reported to the
   coordinator and filed as ITL-923, not fixed here.
-
