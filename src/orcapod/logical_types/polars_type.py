@@ -203,10 +203,10 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
     """
     if isinstance(dtype, pl.Enum):
         return {"enum": dtype.categories.to_list()}
-    if dtype is pl.Categorical or isinstance(dtype, pl.Categorical):
-        categories = (
-            dtype if isinstance(dtype, pl.Categorical) else pl.Categorical()
-        ).categories
+    if dtype is pl.Categorical:  # the bare class means the default ``Categories``
+        dtype = pl.Categorical()
+    if isinstance(dtype, pl.Categorical):
+        categories = dtype.categories
         return {
             "categorical": [
                 categories.name(),
@@ -284,12 +284,15 @@ def _struct_validity_type(arrow_type: pa.DataType) -> pa.DataType:
         ``arrow_type`` with every struct, at any depth, replaced by
         ``struct<valid: bool not null, fields: struct<...>>``.
     """
-    if pa.types.is_large_list(arrow_type):
+    if isinstance(arrow_type, pa.LargeListType):
         item = arrow_type.value_field
         return pa.large_list(item.with_type(_struct_validity_type(item.type)))
-    if pa.types.is_struct(arrow_type):
+    if isinstance(arrow_type, pa.StructType):
         fields = pa.struct(
-            [field.with_type(_struct_validity_type(field.type)) for field in arrow_type]
+            [
+                field.with_type(_struct_validity_type(field.type))
+                for field in _struct_fields(arrow_type)
+            ]
         )
         return pa.struct(
             [pa.field("valid", pa.bool_(), nullable=False), pa.field("fields", fields)]
@@ -297,7 +300,12 @@ def _struct_validity_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
-def _with_struct_validity(array: pa.Array) -> pa.Array:
+def _struct_fields(arrow_type: pa.StructType) -> list[pa.Field[Any]]:
+    """The fields of ``arrow_type``, in order."""
+    return [arrow_type.field(i) for i in range(arrow_type.num_fields)]
+
+
+def _with_struct_validity(array: pa.Array[Any]) -> pa.Array[Any]:
     """Make every struct's own validity part of its values, at any depth.
 
     starfix hashes a null struct like a struct whose fields are all null, but Polars tells
@@ -312,27 +320,28 @@ def _with_struct_validity(array: pa.Array) -> pa.Array:
     Returns:
         The array with type ``_struct_validity_type(array.type)``.
     """
-    arrow_type = array.type
-    if pa.types.is_large_list(arrow_type):
-        values = _with_struct_validity(array.values)
+    if isinstance(array, pa.LargeListArray):
         return pa.LargeListArray.from_arrays(
             array.offsets,
-            values,
-            type=_struct_validity_type(arrow_type),
+            _with_struct_validity(array.values),
+            type=_struct_validity_type(array.type),
             mask=array.is_null() if array.null_count else None,
         )
-    if pa.types.is_struct(arrow_type):
+    if isinstance(array, pa.StructArray):
         children = [_with_struct_validity(child) for child in array.flatten()]
         fields = pa.StructArray.from_arrays(
             children,
             fields=[
                 field.with_type(child.type)
-                for field, child in zip(arrow_type, children, strict=True)
+                for field, child in zip(
+                    _struct_fields(array.type), children, strict=True
+                )
             ],
         )
+        wrapped_type = _struct_validity_type(array.type)
+        assert isinstance(wrapped_type, pa.StructType)
         return pa.StructArray.from_arrays(
-            [array.is_valid(), fields],
-            fields=list(_struct_validity_type(arrow_type)),
+            [array.is_valid(), fields], fields=_struct_fields(wrapped_type)
         )
     return array
 
@@ -358,11 +367,7 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
     )
     table = table.cast(target)
     columns = [
-        pa.chunked_array(
-            [_with_struct_validity(chunk) for chunk in column.chunks],
-            type=_struct_validity_type(column.type),
-        )
-        for column in table.columns
+        _with_struct_validity(column.combine_chunks()) for column in table.columns
     ]
     schema = pa.schema(
         [field.with_type(_struct_validity_type(field.type)) for field in table.schema]
