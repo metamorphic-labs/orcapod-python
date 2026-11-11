@@ -33,12 +33,39 @@ TENSORS: dict[str, Any] = {
     "complex64": torch.tensor([1 + 2j, -3.5 - 0.5j], dtype=torch.complex64),
     "complex128": torch.tensor([[1 + 2j], [3 - 4j]], dtype=torch.complex128),
     "bfloat16": torch.tensor([1.5, -2.25, 3.0, float("nan")], dtype=torch.bfloat16),
+    "complex32": torch.tensor([1 + 2j, -0.5 + 0.25j], dtype=torch.complex32),
     "zero_d": torch.tensor(2.5),
     "empty_0x3": torch.zeros((0, 3), dtype=torch.float32),
     "empty_3x0": torch.zeros((3, 0), dtype=torch.float32),
     "three_d": torch.arange(24, dtype=torch.int32).reshape(2, 3, 4),
 }
 """One tensor per supported dtype and shape class."""
+
+FLOAT8_DTYPES = (
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+)
+"""The float8 dtypes Orcapod stores as raw bits, where the installed torch has them."""
+
+for _name in FLOAT8_DTYPES:
+    _dtype = getattr(torch, _name, None)
+    if _dtype is not None:
+        # Powers of two are exact in every float8 format, including e8m0 (exponent only).
+        TENSORS[_name] = torch.tensor([0.5, 1.0, 2.0, 4.0]).to(_dtype)
+
+NUMPY_DTYPES = frozenset(
+    {"bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"}
+    | {"float16", "float32", "float64", "complex64", "complex128"}
+)
+"""Tags whose element bytes are NumPy's: such a tensor stores the row of its ndarray."""
+
+
+def shares_numpy_dtype(t: Any) -> bool:
+    """Whether ``t``'s dtype is one NumPy has (so ``t.numpy()`` is the equal ndarray)."""
+    return tag_of(t) in NUMPY_DTYPES
 
 NUMERIC = (
     "int8",
@@ -65,6 +92,11 @@ def value_bytes(t: Any) -> bytes:
     c = t.detach().cpu().resolve_conj().resolve_neg().contiguous()
     if c.dtype == torch.bfloat16:
         c = c.view(torch.int16)
+    elif c.dtype == torch.complex32:
+        # Real then imaginary part of each element, each binary16.
+        c = torch.view_as_real(c).view(torch.int16)
+    elif tag_of(c).startswith("float8_"):
+        c = c.view(torch.uint8)
     arr = c.numpy()
     return arr.astype(arr.dtype.newbyteorder("<"), copy=False).tobytes()
 

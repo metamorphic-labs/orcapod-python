@@ -7,6 +7,11 @@ semantic hasher.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,6 +32,7 @@ from tests.test_torch.tensor_cases import (  # noqa: E402
     TENSORS,
     assert_tensors_identical,
     expected_digest,
+    shares_numpy_dtype,
     tag_of,
     value_bytes,
 )
@@ -100,7 +106,7 @@ def test_round_trip_is_exact(name: str) -> None:
 def test_shared_dtypes_store_the_same_row_as_the_equal_ndarray() -> None:
     """Dtypes shared with NumPy store the same row as the equal ndarray."""
     for name, t in TENSORS.items():
-        if t.dtype == torch.bfloat16:
+        if not shares_numpy_dtype(t):
             continue
         assert stored(t) == stored(t.numpy()), name
 
@@ -121,7 +127,7 @@ def test_semantic_hash_is_the_v1_digest_under_the_tensor_label(name: str) -> Non
 def test_tensor_and_equal_ndarray_differ_in_hash_but_share_the_digest_body() -> None:
     """A tensor and its equal ndarray differ in hash but share the digest body."""
     for name, t in TENSORS.items():
-        if t.dtype == torch.bfloat16:
+        if not shares_numpy_dtype(t):
             continue
         ht, hn = semantic_hash(t), semantic_hash(t.numpy())
         assert ht != hn, name
@@ -198,6 +204,21 @@ DIFFERENT: list[tuple[str, Any, Any]] = [
         torch.ones(2, dtype=torch.float16),
     ),
     ("shape", torch.arange(6.0).reshape(2, 3), torch.arange(6.0).reshape(3, 2)),
+    (
+        "complex32_vs_float32",
+        torch.zeros(2, dtype=torch.complex32),
+        torch.zeros(2, dtype=torch.float32),
+    ),
+    (
+        "float8_e4m3fn_vs_e5m2",
+        torch.zeros(2, dtype=torch.float8_e4m3fn),
+        torch.zeros(2, dtype=torch.float8_e5m2),
+    ),
+    (
+        "float8_vs_uint8",
+        torch.zeros(2, dtype=torch.float8_e4m3fn),
+        torch.zeros(2, dtype=torch.uint8),
+    ),
 ]
 
 
@@ -268,12 +289,12 @@ def _refused() -> list[tuple[str, Any, str]]:
             "nested",
         ),
         ("meta", torch.empty(3, device="meta"), "meta"),
-        ("complex32", torch.zeros(2, dtype=torch.complex32), "complex32"),
     ]
-    for name in ("float8_e4m3fn", "float8_e5m2", "int4", "bits8"):
+    # Sub-byte, packed and not yet defined dtypes (where this torch has them).
+    for name in ("int4", "uint3", "bits8", "float4_e2m1fn_x2", "bcomplex32"):
         dtype = getattr(torch, name, None)
         if dtype is not None:
-            cases.append((name, torch.zeros(2, dtype=dtype), name))
+            cases.append((name, torch.empty(2, dtype=dtype), name))
     return cases
 
 
@@ -352,3 +373,64 @@ def test_declared_tensor_subclass_accepts_a_plain_tensor() -> None:
     source = DictSource(data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"])
     got = [d.as_dict()["y"] for _, d in as_parameter.pod(source).iter_data()]
     assert_tensors_identical(got[0], torch.ones(2) * 2)
+
+
+# ---------------------------------------------------------------------------
+# A stored dtype the installed torch does not have
+# ---------------------------------------------------------------------------
+
+OLDER_TORCH = textwrap.dedent(
+    """
+    import pyarrow as pa
+    import torch
+
+    # Simulate a PyTorch that predates float8_e8m0fnu (added in torch 2.7).
+    del torch.float8_e8m0fnu
+
+    from orcapod.sources import ArrowTableSource, DictSource
+
+    # Orcapod's torch support loads and stores the dtypes this torch has.
+    source = DictSource(data=[{"k": "a", "x": torch.arange(3.0)}], tag_columns=["k"])
+    table = source.as_table()
+    print("stored:", next(iter(source.iter_data()))[1].as_dict()["x"].tolist())
+
+    # A row written by a newer torch.
+    column_type = table.schema.field("x").type
+    storage = pa.array(
+        [{"dtype": "float8_e8m0fnu", "shape": [2], "data": bytes([127, 128])}],
+        type=column_type.storage_type,
+    )
+    newer = pa.table(
+        {
+            "k": table.column("k"),
+            "x": pa.ExtensionArray.from_storage(column_type, storage),
+        }
+    )
+    try:
+        for _, data in ArrowTableSource(newer, tag_columns=["k"]).iter_data():
+            data.as_dict()
+    except ValueError as exc:
+        print("raised:", exc)
+    else:
+        print("no error")
+    """
+)
+
+
+def test_a_dtype_the_installed_torch_lacks_fails_clearly_when_read() -> None:
+    """Reading a dtype this torch lacks raises naming it; importing and other dtypes work."""
+    repo_root = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [sys.executable, "-c", OLDER_TORCH],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        cwd=repo_root,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    lines = proc.stdout.strip().splitlines()
+    assert lines[0] == "stored: [0.0, 1.0, 2.0]"
+    assert lines[-1].startswith("raised:"), proc.stdout
+    assert "'float8_e8m0fnu'" in lines[-1]
+    assert torch.__version__ in lines[-1]
