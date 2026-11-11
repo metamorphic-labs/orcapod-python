@@ -67,6 +67,7 @@ prints one line per check: `[OK]`, `[DEFECT]`, `[FAIL]`, `[INFO]` or `[SKIP]`.
 | `b8_vst_support_and_out_of_table.py` | `variable_shape_tensor` in pyarrow 23.0.1, out-of-table size |
 | `c1_canonical_digest_prototype.py` | a layout-independent array digest, prototype |
 | `c2_hash_labels_and_extension_metadata.py` | the unversioned `sha256` label; extension metadata in table, schema and pipeline hashes |
+| `c3_hash_change_on_existing_store.py` | Option B: a changed array hash on an existing Delta store; re-derivation from stored values |
 
 Environment: macOS arm64, Python 3.12, NumPy 2.2.6, pyarrow 23.0.1, polars 1.41.2,
 starfix 0.4.0, torch 2.15 (experiments only). **Not verified:** Linux, x86-64, Windows,
@@ -240,6 +241,10 @@ Not array-specific, found on the way (out of ITL-874's scope; reported in the ha
 11. `arrow_hasher.hash_schema` raises `TypeError: unhashable type` on every live extension type,
     today's `numpy.ndarray` included (ITL-848, confirmed; b1).
 12. Delta read failures are swallowed and returned as `None`, which looks like "no rows" (b3, b7).
+13. `FunctionNode.get_all_records()` returns 1 row after a 3-row run on a Delta store, plain ints
+    included, while `iter_data` and the raw table have 3 (found while writing c3; not in a script).
+14. Reading a Delta store with `deltalake` (`to_pyarrow_table`) left the Python process hanging
+    at exit here, with or without Orcapod imported; c3 works around it with `os._exit`.
 
 ### A9. Is today's support compatible with future designs?
 
@@ -302,10 +307,10 @@ b6 (torch), b7 (migration), b8 (vst, out of table).
 ¹ In the b0 prototype of 4c the dtype is per row, so neither shape nor dtype enters the schema.
 Putting the dtype in type metadata instead (as in 4b) is possible when the annotation names it.
 ² b7 shows 4c value-exact for every case. Big-endian `.npy` values convert `>f4` to `<f4`,
-equal in value but a different NumPy dtype, and Fortran order becomes C order.
+equal in value but a different NumPy dtype, and Fortran order becomes C order. Whether byte
+order is identity is a developer decision (D4).
 ³ `ConnectorArrowDatabase(SQLiteConnector)` rejects every logical-typed column at write time
-(ITL-877), so this row does not count against any one design. Whether byte order is
-identity is a developer decision (D4).
+(ITL-877), so this row does not count against any one design.
 
 ### B3. Observations that drive the choice
 
@@ -385,7 +390,7 @@ silent version bump.
 | 3 vst | No for complex, structured, strings | By extension name | Not viable; pyarrow has no type |
 | 4a flat | No: needs one dtype and shape per column | By extension name | Only for homogeneous columns |
 | 4b row | No: needs one dtype per column; mixed columns cast silently | By extension name | Only for single-dtype columns |
-| 4c raw | **Yes for values** in every b7 case, structured and complex included. Big-endian values become little-endian, a different NumPy dtype (D4). Memory order becomes C | By extension name, plus `\x93NUMPY` magic on old values | Explicit migration to new tables. Old hashes change, so record ids must be re-derived from stored values, not by re-running functions (feasibility not verified) |
+| 4c raw | **Yes for values** in every b7 case, structured and complex included. Big-endian values become little-endian, a different NumPy dtype (D4). Memory order becomes C | By extension name, plus `\x93NUMPY` magic on old values | Explicit migration to new tables. Old hashes change, so record ids must be re-derived from stored values, not by re-running functions. c3 shows the new input hashes can be derived that way; writing re-keyed rows is not verified |
 | 5 out of table | Yes (write the `.npy` bytes to a file) | Reference column | Same as 4c, and needs ITL-467 first |
 
 For every candidate, writing the new format under the old pipeline path hides old rows in Delta
@@ -414,9 +419,22 @@ Delta table.
   migrations need no rekeying (B3.1).
 - Cost: every hash involving an array moves in v0.3. That is a hash change days before a public
   release, and it needs a v0.2→v0.3 rekeying migration for internal stores, or an explicit
-  decision that v0.2 array caches are abandoned. Pipeline hashes do not move. Record ids do, so
-  new rows land beside the old ones in the same table. Whether Phase 1 then shows duplicates is
-  not verified.
+  decision that v0.2 array caches are abandoned.
+- What happens to an existing store without a migration (c3, Delta, `source -> double ->
+  total`, the hash replaced in a fresh process):
+  - Pipeline hashes, table paths and source system tags do not change.
+  - The first run under the new hash **recomputes every row** (3 + 3 calls) and **appends** new
+    rows beside the old ones (each table goes from 3 to 6 rows).
+  - The node shows 3 rows, not 6: no duplicates are visible, but the old rows are no longer
+    returned. They are still in the table, and they look dropped.
+  - A second run under the new hash calls nothing.
+  - So Option B without a migration breaks the stored-data rule. The results are recomputed,
+    and the old rows look dropped.
+- A migration can avoid recomputation (c3). The new input hash of every row can be derived
+  from stored values alone, without calling a function. For `double` this uses the source
+  values, and for `total` the arrays `double` already stored. Both sets equal what the new run
+  wrote. The record id is a hash of the system tags (unchanged) and the input hash, so it can
+  be derived too. Writing re-keyed rows, including the output-hash column, is not verified.
 
 **Option C: move to candidate 4c in v0.3, for NumPy and PyTorch.**
 - Consequences: the long-term format ships first, so public data needs no later migration.
@@ -428,10 +446,15 @@ reads fail, and it refuses common dtypes and 0-d arrays (B2).
 
 **My pick: Option A for v0.3, with 4c as the v0.4 target.** In v0.4, storage and hash move
 together under one explicit migration. Today's storage is lossless and stable, so v0.3 data is
-safe to carry forward (A3, A4, b7). The only thing that later changes is the hash, which is
-the same cost whether it changes now or in v0.4, but now it lands on a release a week before
-a public workshop. If the developer prefers paying the hash change before there are public
-users, Option B is the alternative. Option C is not realistic in the time.
+safe to carry forward (A3, A4, b7). What later changes is the hash. Either way it needs the
+same rekeying migration. Without one, a changed hash recomputes every row and hides the old
+ones (c3). With one, the new keys can be derived from stored values (c3). Under A that
+migration is written for v0.4 and runs on public users' stores. Under B it must be written
+and run on internal stores within six days, before the workshop release.
+
+If hash stability across public releases outweighs that release risk, Option B is the
+alternative, with a versioned label (D10). It is feasible only if the rekeying migration ships
+with it. Option C is not realistic in the time.
 
 ### C2. PyTorch (ITL-871) in v0.3?
 
@@ -455,6 +478,7 @@ users, Option B is the alternative. Option C is not realistic in the time.
 | D7 | Shape and dtype in the schema | never / later via annotations (ITL-869), as type metadata | later, optional |
 | D8 | Masked arrays | reject / support (mask as a field) | reject now |
 | D9 | v0.2 internal stores holding arrays | migrate / declare abandoned (explicitly) | depends on D1; migrate if hashes move |
+| D10 | Versioned label on the array hash (C5) | add now, with D1 = B / add with the v0.4 change | with whichever change moves the hash first |
 
 ### C4. Shape of the long-term design (4c), for reference
 
@@ -469,3 +493,27 @@ users, Option B is the alternative. Option C is not realistic in the time.
 - Export to `arrow.fixed_shape_tensor` for tools that read it, as a view, not as storage.
 - Large values: the same struct with the data field replaced by a reference, once ITL-467
   exists.
+
+### C5. How a logical type evolves
+
+Storage and hash are versioned separately, and each has its own place for a version.
+
+| What changes | Where its version lives | How a reader tells old from new | Evidence |
+|---|---|---|---|
+| Storage layout | The extension name (`numpy.ndarray` against a new name), or a version key in `ARROW:extension:metadata` | The converter dispatches on the extension name, so old and new columns decode side by side | b7 |
+| Hash definition | The hash label: `ContentHash.method`, which also appears in the token (`numpy:ndarray::<method>:`). Today it is a bare `sha256` | Only by a new label, or by the row's `_context_key`. The digest bytes alone cannot tell | c2 |
+| Both, in one release | A new data context version (`contexts/data/v0.x.json`). The semantic hasher id (`semantic_v0.1`) is part of every node's table path | A new context writes under new paths; old tables stay as they were. Not verified with a real context bump | c3 (paths) |
+
+Rules that follow:
+
+1. Never change the bytes produced under an existing extension name or hash label.
+2. A storage or hash change gets a new name or label. It ships in a minor release with one
+   explicit migration (ITL-535). No silent bump.
+3. Keep the old logical type registered for reading, so stored columns still decode.
+4. Extension name and metadata are part of the Arrow schema hash and, for columns without a
+   semantic handler, of the value hash (c2). They do not reach the pipeline hash, so the table
+   path does not move by itself (c2, c3). A storage change therefore lands in the existing
+   table unless the migration moves it, which in Delta hides the old rows (b7).
+5. Relabelling today's array hash (e.g. `ndarray-v1:sha256` in place of `sha256`) is itself a
+   hash change. It moves every array hash, with the c3 consequences, so it is decision D10.
+   Under Option B it comes free with the new definition.
