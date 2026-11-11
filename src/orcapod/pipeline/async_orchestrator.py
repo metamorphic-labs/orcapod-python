@@ -138,7 +138,6 @@ class AsyncPipelineOrchestrator:
         effective_observer = observer if observer is not None else NoOpObserver()
         effective_observer.on_run_start(run_id, pipeline_uri=pipeline_uri)
 
-        topo_order: list[Any] = []
         store_error: StoreReadError | None = None
         try:
             topo_order = list(graph.topological_sort())
@@ -256,7 +255,7 @@ class AsyncPipelineOrchestrator:
         except ExceptionGroup as group:
             # A failed store read stops the run. Raise it on its own, as the sync
             # orchestrator does, rather than inside the TaskGroup's exception group.
-            store_error = _single_store_error(group, topo_order)
+            store_error = _single_store_error(group)
             if store_error is None:
                 raise
             raise store_error
@@ -264,24 +263,20 @@ class AsyncPipelineOrchestrator:
             effective_observer.on_run_end(run_id)
 
 
-def _single_store_error(
-    group: ExceptionGroup, topo_order: list[Any]
-) -> StoreReadError | None:
+def _single_store_error(group: ExceptionGroup) -> StoreReadError | None:
     """Pick the one ``StoreReadError`` an async run raises from its exception group.
 
     Concurrent node tasks can fail together, so the ``TaskGroup``'s group may hold
     several store errors and other exceptions. The caller gets a single
-    ``StoreReadError``, as from the sync orchestrator: the one whose node comes
-    first in topological order, with ties and node-less errors (a
-    ``StoreReadError`` names a table, not a node) broken by their order in the
-    group. Every other exception stays attached for diagnosis: each is noted on
+    ``StoreReadError``, as from the sync orchestrator: the first one in the group
+    (a ``StoreReadError`` names a table, not a node, so there is no node order to
+    rank by). Every other exception stays attached for diagnosis: each is noted on
     the chosen error, other store errors are also logged at WARNING, and the whole
     group is the chosen error's ``__context__``. Its ``__cause__`` stays the
     backend error.
 
     Args:
         group: The exception group the run's ``TaskGroup`` raised.
-        topo_order: The run's nodes in topological order.
 
     Returns:
         The store error to raise, or ``None`` when the group holds none.
@@ -289,11 +284,7 @@ def _single_store_error(
     store_errors = StoreReadError.in_group(group)
     if not store_errors:
         return None
-    rank = {getattr(node, "label", None): i for i, node in enumerate(topo_order)}
-    chosen = min(
-        store_errors,
-        key=lambda err: rank.get(getattr(err, "node_label", None), len(rank)),
-    )
+    chosen = store_errors[0]
     for other in _leaves(group):
         if other is chosen:
             continue

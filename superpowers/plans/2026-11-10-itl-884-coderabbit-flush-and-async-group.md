@@ -3,6 +3,12 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:executing-plans to implement this plan
 > task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Superseded in part (November 11, 2026):** the developer's review of PR #290 removed every
+> parameter used only for an error message. `_read_delta_table` no longer takes `record_path`,
+> `_require_compatible_append(table_uri, ...)` became `_incompatible_append_column(...)`,
+> `_store_error_to_raise` takes only the errors, and `_single_store_error` no longer takes
+> `topo_order`. See `2026-11-11-itl-884-no-message-only-parameters.md`.
+
 **Goal:** Answer the two open CodeRabbit threads on PR #290 (ids 4534230764 and 4534230775).
 A `StoreReadError` or an append-refusal `InputValidationError` raised while flushing reaches the
 caller as itself, so a store read failure in a per-row result-cache flush fails the run under

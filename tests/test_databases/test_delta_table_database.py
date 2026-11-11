@@ -561,7 +561,7 @@ class TestStringViewColumns:
         tbl = make_string_view_table(__record_id=["p", "q"], category=["A", "B"])
         deltalake.write_deltalake(uri, tbl, mode="overwrite")
 
-        result = db._read_delta_table(db._get_delta_table(self.PATH), self.PATH)
+        result = db._read_delta_table(db._get_delta_table(self.PATH))
         assert result.num_rows == 2
         assert not any(pa.types.is_string_view(f.type) for f in result.schema)
 

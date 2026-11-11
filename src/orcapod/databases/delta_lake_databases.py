@@ -71,36 +71,34 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
-def _store_error_to_raise(errors: list[tuple[str, Exception]]) -> Exception | None:
+def _store_error_to_raise(errors: list[Exception]) -> Exception | None:
     """Pick the store error a failed flush raises as itself.
 
     A ``StoreReadError`` is preferred, because it is the error that fails a run
     whatever the orchestrator's ``error_policy``; failing that, an
-    ``InputValidationError`` from a refused append. Every other failed batch is
-    added to the chosen error as a note, so no failure is hidden.
+    ``InputValidationError`` from a refused append.
 
     Args:
-        errors: The ``(record_key, error)`` pair of every batch that failed, in
-            flush order.
+        errors: The error of every batch that failed, in flush order.
 
     Returns:
-        The chosen error with its notes added, or ``None`` when no batch failed
-        with a store error.
+        The first ``StoreReadError``, else the first ``InputValidationError``, or
+        ``None`` when no batch failed with a store error.
     """
-    chosen: Exception | None = None
     for kind in (StoreReadError, InputValidationError):
-        chosen = next((e for _, e in errors if isinstance(e, kind)), None)
+        chosen = next((e for e in errors if isinstance(e, kind)), None)
         if chosen is not None:
-            break
-    if chosen is None:
-        return None
-    for record_key, other in errors:
-        if other is not chosen:
-            chosen.add_note(
-                f"Another batch also failed to flush ({record_key}): "
-                f"{type(other).__name__}: {other}"
-            )
-    return chosen
+            return chosen
+    return None
+
+
+class _DeltaTableReadError(Exception):
+    """A Delta table's data could not be read; the backend error is the ``__cause__``.
+
+    Raised by ``DeltaTableDatabase._read_delta_table`` so that its callers, which
+    know the table's path, can tell a failed read from a bad filter and raise
+    ``StoreReadError``.
+    """
 
 
 class DeltaTableDatabase:
@@ -790,9 +788,10 @@ class DeltaTableDatabase:
             return None
 
         # Use schema-preserving read
-        result = self._read_delta_table(
-            delta_table, record_path, expression=combined_expression
-        )
+        try:
+            result = self._read_delta_table(delta_table, expression=combined_expression)
+        except _DeltaTableReadError as e:
+            raise self._read_failed(record_path) from e.__cause__
 
         if len(result) == 0:
             return None
@@ -844,7 +843,10 @@ class DeltaTableDatabase:
 
         # Use schema-preserving read
         filter_expr = self._create_record_id_filter(record_id)
-        result = self._read_delta_table(delta_table, record_path, filters=filter_expr)
+        try:
+            result = self._read_delta_table(delta_table, filters=filter_expr)
+        except _DeltaTableReadError as e:
+            raise self._read_failed(record_path) from e.__cause__
 
         if len(result) == 0:
             return None
@@ -894,7 +896,10 @@ class DeltaTableDatabase:
             return None
         # Use schema-preserving read with filters
         filter_expr = self._create_record_ids_filter(record_ids_list)
-        result = self._read_delta_table(delta_table, record_path, filters=filter_expr)
+        try:
+            result = self._read_delta_table(delta_table, filters=filter_expr)
+        except _DeltaTableReadError as e:
+            raise self._read_failed(record_path) from e.__cause__
 
         if len(result) == 0:
             return None
@@ -905,7 +910,6 @@ class DeltaTableDatabase:
     def _read_delta_table(
         self,
         delta_table: deltalake.DeltaTable,
-        record_path: tuple[str, ...],
         filters: list | None = None,
         expression: pc.Expression | None = None,
     ) -> pa.Table:
@@ -914,7 +918,6 @@ class DeltaTableDatabase:
 
         Args:
             delta_table: The Delta table to read from
-            record_path: Path of the table relative to this view, for errors
             filters: Optional filters to apply
             expression: Optional filter expression, used instead of ``filters``
 
@@ -922,15 +925,16 @@ class DeltaTableDatabase:
             Arrow table with preserved schema
 
         Raises:
-            StoreReadError: If the table's data could not be read. An error in
-                the filter itself (an unknown column, say) is raised as is.
+            _DeltaTableReadError: If the table's data could not be read, with the
+                backend's error as its ``__cause__``. An error in the filter itself
+                (an unknown column, say) is raised as is.
         """
         filter_expr = None
         # Use to_pyarrow_dataset with as_large_types for Polars compatible arrow table loading
         try:
             dataset = delta_table.to_pyarrow_dataset(as_large_types=True)
         except Exception as e:
-            raise self._read_failed(record_path) from e
+            raise _DeltaTableReadError from e
         if filters and expression is None:
             for filt in filters:
                 if len(filt) == 3:
@@ -959,7 +963,7 @@ class DeltaTableDatabase:
         try:
             scanned = dataset.to_table()
         except Exception as e:
-            raise self._read_failed(record_path) from e
+            raise _DeltaTableReadError from e
         table = arrow_utils.normalize_table_view_types(scanned)
         if filter_expr is not None:
             return table.filter(filter_expr)
@@ -1032,8 +1036,15 @@ class DeltaTableDatabase:
                 logger.error(f"Error flushing batch for {record_key}: {e}")
                 errors.append((record_key, e))
         if errors:
-            store_error = _store_error_to_raise(errors)
+            store_error = _store_error_to_raise([e for _, e in errors])
             if store_error is not None:
+                # Keep every other failure visible on the error that is raised.
+                for record_key, other in errors:
+                    if other is not store_error:
+                        store_error.add_note(
+                            f"Another batch also failed to flush ({record_key}): "
+                            f"{type(other).__name__}: {other}"
+                        )
                 raise store_error
             failed_keys = [k for k, _ in errors]
             raise RuntimeError(
@@ -1119,7 +1130,16 @@ class DeltaTableDatabase:
                     f"Created new Delta table for {record_key} with {len(combined_table)} records"
                 )
             else:
-                self._require_compatible_append(table_uri, delta_table, combined_table)
+                mismatch = self._incompatible_append_column(delta_table, combined_table)
+                if mismatch is not None:
+                    column, stored_type, incoming_type = mismatch
+                    raise InputValidationError(
+                        f"Cannot append to the stored table {table_uri!r}: column "
+                        f"{column!r} is stored as {stored_type} but the new rows have "
+                        f"{incoming_type} (input type "
+                        f"{combined_table.schema.field(column).type}). "
+                        "The stored rows are unchanged and nothing was written."
+                    )
                 delta_table.merge(
                     source=combined_table,
                     predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
@@ -1150,28 +1170,27 @@ class DeltaTableDatabase:
             raise
 
     @staticmethod
-    def _require_compatible_append(
-        table_uri: str, delta_table: deltalake.DeltaTable, batch: pa.Table
-    ) -> None:
-        """Refuse a batch whose column types differ from the stored table's.
+    def _incompatible_append_column(
+        delta_table: deltalake.DeltaTable, batch: pa.Table
+    ) -> tuple[str, pa.DataType, pa.DataType] | None:
+        """Find a column whose type in ``batch`` differs from the stored table's.
 
         Delta's merge either casts such a batch to the stored type (``int32`` or
         ``float64`` rows into an ``int64`` column) or, when an extension type is
         involved, writes data files the table can no longer read. Both sides are
         compared through Delta's own type mapping, with extension types reduced to
         storage, large-normalized and nullability ignored, so a type Delta stores
-        differently (``uint64`` as ``int64``) is not refused. Columns present on
+        differently (``uint64`` as ``int64``) is not reported. Columns present on
         only one side are allowed (schema evolution). The stored schema comes from
         the loaded log; no data is read.
 
         Args:
-            table_uri: Location of the stored table, for the error message.
             delta_table: The loaded stored table.
             batch: The rows about to be merged into it.
 
-        Raises:
-            InputValidationError: If a column's type in ``batch`` differs from its
-                stored type. Nothing is written.
+        Returns:
+            ``(column, stored_type, incoming_type)`` for the first column whose
+            compared types differ, or ``None`` when the batch can be appended.
         """
         stored = pa.schema(delta_table.schema().to_arrow())  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
         incoming = pa.schema(
@@ -1197,12 +1216,8 @@ class DeltaTableDatabase:
                 arrow_utils.normalize_to_large_types(field.type, keep_null=True)
             )
             if stored_type != incoming_type:
-                raise InputValidationError(
-                    f"Cannot append to the stored table {table_uri!r}: column "
-                    f"{field.name!r} is stored as {stored_type} but the new rows have "
-                    f"{incoming_type} (input type {batch.schema.field(field.name).type}). "
-                    "The stored rows are unchanged and nothing was written."
-                )
+                return field.name, stored_type, incoming_type
+        return None
 
     @property
     def base_path(self) -> tuple[str, ...]:
