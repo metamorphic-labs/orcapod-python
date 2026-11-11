@@ -175,3 +175,30 @@ secret (GitHub OIDC), `vars.SPIRAL_PROJECT_ID` and `vars.SPIRAL_SERVER_URL`
      unverified: run `error_messages.py`.
    * Not logged in: pyspiral starts a device-code login and **blocks** until it completes (seen
      with 0.14.9). In a notebook the cell waits on a URL. The docs must say to log in first.
+
+## Decisions applied in the ITL-926 PR (November 11, 2026)
+
+* **Default `source_id`** is `<project id>/<dataset>/<table>` (developer). The project id is
+  pyspiral's `ProjectId`: the API resource id, created from an `id_prefix` plus a
+  server-generated suffix, and distinct from the display `description`.
+  Repro of the problem it fixes: `repros/source_id_collision_across_projects.py`. Before the
+  fix, with two projects, the same `subject` table and one store, project B's job
+  `get_all_records()` returned 4 rows (A's 2 and B's 2) with nothing to tell them apart.
+  After the fix it returns B's 2. Results were never served across projects (they are keyed
+  on row data). `PostgreSQLTableSource` and `SQLiteTableSource` still default to the bare
+  table name; not changed here.
+* **C3b** applied: the 44-case differential is byte-identical, plus a regression test.
+* **C1**: no `infer_nullable`. Non-nullable Spiral columns arrive as `T` at every depth,
+  through Join, pods and save/load (tests on the fake). `db_table_source.py`'s
+  "infer from data" branch runs only when a connector returns no column info, never for
+  Spiral, so it cannot override declared nullability in either direction.
+* **C2**: starfix will support FixedSizeList (ITL-927); the type is kept intact here.
+
+## Why `unit` (100 rows) takes about 35 s live
+
+Orcapod's share is small: the same 100-row shape (4 structs with 31, 7 list, 10 and 8
+fields) builds in 0.41 s in the fake, mostly struct and list hashing. The live 3-row `scan`
+of `unit` alone took 14.5 s, against about 1 s for other tables, so the time is the Spiral
+scan: likely one column group or fragment fetched after another. `scan_cost_probe.py unit
+unit_location` reports column groups, fragments, and scan times for keys only, full, and
+full again. Compacting the table may help; that is for the developer or Spiral to judge.
