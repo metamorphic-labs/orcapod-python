@@ -5,8 +5,8 @@
 **Basis:** the v0.3 array format (`superpowers/specs/2026-11-10-array-format-v0.3.md`,
 `src/orcapod/logical_types/array_format.py`, `numpy_type.py`) and the ITL-874 storage review
 (`superpowers/specs/2026-11-10-array-tensor-storage.md`, section B4, `b6_torch_mapping.py`).
-**Status:** Decided (developer, November 11, 2026). The decisions below override the
-provisional picks and the body.
+**Status:** Decided (developer, November 11, 2026). The decisions below are final and override
+the proposals in the body, which is kept as the design record.
 
 **Developer decisions (November 11, 2026)**
 
@@ -32,25 +32,6 @@ provisional picks and the body.
   fails when `CI` is set and torch is missing. The no-torch path is tested in subprocesses
   with a `sys.meta_path` import blocker.
 
-**Provisional picks (coordinator, November 11, 2026; superseded by the decisions above)**
-
-- (a) Name **`orcapod.torch_tensor`**, label **`torch_tensor_v1`** (over `orcapod.tensor` /
-  `tensor_v1`: other tensor libraries may come later and each library's array is a distinct
-  type). Every later mention of `orcapod.tensor` and `tensor_v1` reads as these names.
-- (b) The NumPy-shared dtypes **plus `bfloat16` only**. `complex32` and the float8 family are
-  refused, naming column and reason; adding them later is additive.
-- (c) GPU and grad-requiring tensors accepted as described, never mutated, documented.
-- (d) **P1**: torch is a peer dependency. No `pyproject.toml`, `uv.lock` or required-workflow
-  change. **No `run-torch-tests.yml`** until the developer approves it; the torch tests are run
-  locally on Python 3.11 to 3.13 and the results pasted in the PR.
-- (e), (f): approved as written.
-- The PR is a draft against `main`, stacked on #289.
-
-Facts in this document were checked on torch 2.15.0 (CPU and MPS, macOS arm64) with
-`uv run --with torch`; CUDA was not available.
-
----
-
 ## Decided by the developer (CONFIRMED, not re-asked)
 
 - A tensor is stored in the **same struct** as an array: `dtype` tag, `shape`, `data`
@@ -72,7 +53,7 @@ schema or table path**. Every hash below is new.
 
 ---
 
-## (a) Name, storage version, hash label (PENDING: name; label CONFIRMED)
+## (a) Name, storage version, hash label (decided: see the top)
 
 | Item | Value |
 |---|---|
@@ -95,7 +76,7 @@ Consequences, all by construction of the confirmed decisions:
 - A pod declared `x: torch.Tensor` fed from an `np.ndarray` column (or the reverse) is a type
   mismatch at graph build, like any other pair of distinct types. No implicit conversion.
 
-## (b) Dtype mapping (PENDING)
+## (b) Dtype mapping (decided: see the top)
 
 The tag vocabulary is the array format's (A2 of the array spec). Tags are the same strings for
 the same element type, whichever library wrote them.
@@ -140,9 +121,9 @@ refuse the others (see g); adding a tag later is additive and changes no stored 
 | sub-byte and packed dtypes (`int1`..`int7`, `uint1`..`uint7`, `float4_e2m1fn_x2`, `bits*`) | no defined element layout in core torch (their `itemsize` is a placeholder) |
 | `bcomplex32` (new in torch 2.15) | no stable definition yet |
 | `meta` device (and fake tensors without storage) | there is no data |
-| named tensors (torch < 2.15 only; the API is gone in 2.15) | names would be dropped silently (PENDING, see c) |
+| named tensors (torch < 2.15 only; the API is gone in 2.15) | names would be dropped silently (refused) |
 
-## (c) What is not identity and not stored; what reads back (PENDING)
+## (c) What is not identity and not stored; what reads back (decided: see the top)
 
 | Property | Identity? | Stored? | On write |
 |---|---|---|---|
@@ -174,7 +155,7 @@ The **declared-output check** (D8 of the array spec) extends to tensors: a pod d
 pod with a `TypeError` naming the output key, the declared type and the returned type. Never
 wrapped implicitly.
 
-## (d) Packaging and CI (PENDING: needs your choice)
+## (d) Packaging and CI (decided: see the top)
 
 **Optional, in the core package.** New module `orcapod/logical_types/torch_type.py` (imports
 torch) and a `TensorHandler` in the hashing handlers. Not an extension package: the type shares
@@ -227,7 +208,7 @@ Two tests run in the required job without torch: `import orcapod` + a pipeline r
 `orcapod.tensor` column with torch absent raises the install error (skipped when torch is
 present).
 
-## (e) Operators (PENDING: expected to work unchanged; tests will show)
+## (e) Operators (decided: see the top)
 
 Same struct, so the array work applies:
 
@@ -241,7 +222,7 @@ Same struct, so the array work applies:
 
 The test file mirrors `tests/test_arrays` for tensors.
 
-## (f) Golden pins (PENDING)
+## (f) Golden pins (decided: see the top)
 
 Additions only, in a **new file** `tests/test_hashing/golden/data/tensor.json`, with cases in
 `cases.py` that need torch (the same values as the `ndarray.*` cases, plus torch-only ones). Reason: the existing files must not lose or skip entries when the
