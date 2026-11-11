@@ -158,6 +158,15 @@ def test_nullability_changes_schema_hash(live: dict[str, dict[str, Any]]) -> Non
     )
 
 
+def test_column_order_does_not_change_arrow_hashes(
+    live: dict[str, dict[str, Any]],
+) -> None:
+    # StarfixArrowHasher canonicalizes column order (see test_cross_process_stability).
+    arrow = live["arrow"]
+    for kind in ("table", "schema"):
+        assert arrow[f"{kind}.order.ab"] == arrow[f"{kind}.order.ba"]
+
+
 def test_row_order_changes_table_hash(live: dict[str, dict[str, Any]]) -> None:
     arrow = live["arrow"]
     assert arrow["table.order.ab"] != arrow["table.order.rows_reversed"]
