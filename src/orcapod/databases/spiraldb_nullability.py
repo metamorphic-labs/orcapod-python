@@ -315,7 +315,8 @@ def apply_nullability_record(
             "recorded column(s) not in the table: "
             + ", ".join(repr(render_path(p)) for p in missing)
         )
-    return pa.schema(fields, metadata=schema.metadata)
+    restricted = pa.schema(fields)
+    return restricted.with_metadata(schema.metadata) if schema.metadata else restricted
 
 
 def _descend(arrays: list[Any], segment: str) -> list[Any]:

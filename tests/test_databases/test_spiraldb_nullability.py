@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -56,11 +57,11 @@ def table(tmp_path: Path):
         )
 
 
-def _header(table) -> dict:
+def _header(table: fake_pyspiral.FakeTable) -> dict[str, Any]:
     return json.loads(table.get_metadata()[_KEY])
 
 
-def _chunk_keys(table) -> list[str]:
+def _chunk_keys(table: fake_pyspiral.FakeTable) -> list[str]:
     return sorted(k for k in table.get_metadata() if k.startswith(_KEY + "/"))
 
 
@@ -122,9 +123,9 @@ class TestRoundTrip:
                 pa.field(
                     "m",
                     # pyarrow accepts key/item fields here; its stubs list only types.
-                    pa.map_(  # pyright: ignore[reportCallIssue]
-                        pa.field("key", pa.string(), False),
-                        pa.field("value", pa.int64(), False),
+                    pa.map_(
+                        pa.field("key", pa.string(), False),  # pyright: ignore[reportArgumentType]
+                        pa.field("value", pa.int64(), False),  # pyright: ignore[reportArgumentType]
                     ),
                 )
             ]

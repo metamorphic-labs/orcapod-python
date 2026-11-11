@@ -164,7 +164,7 @@ def _rows(schema: pa.Schema = _RECORDED, **override) -> pa.Table:
         "l": [[1.0], [], [2.0, 3.0]],
         **override,
     }
-    return pa.table(columns, schema=schema)
+    return pa.Table.from_pydict(columns, schema=schema)
 
 
 def _with(schema: pa.Schema, name: str, nullable: bool) -> pa.Schema:
