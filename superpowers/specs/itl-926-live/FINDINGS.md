@@ -216,3 +216,17 @@ full again. Compacting the table may help; that is for the developer or Spiral t
   kept; tested). The EDI sample tables have no map columns. Whether starfix 0.5.0 covers maps
   is to check (ITL-927/ITL-910).
 
+
+## Second live read-only run (coordinator, November 11, 2026)
+
+* `live_verify.py --tables unit,sample_unit --value-column firing_rate_hz`: all 7 checks pass
+  (100 calls for 100 distinct values and 100 rows; no calls on run 2; hashes identical in a
+  fresh process; the loaded job reads 100 rows).
+* Every Delta write prints `deltalake_core::writer::stats` WARN lines ("Skipping column
+  __node_content_hash because it's a binary field", ...). Attendees will see them. This is the
+  known `RUST_LOG` item held from ITL-821.
+* `unit` has 5 column groups (the root group, empty, plus one for each struct column:
+  `labels`, `quality_metrics`, `rolling_quality_metrics`, `waveform_metrics`), each 1
+  fragment of 100 rows. SpiralDB cannot scan key columns alone ("Reading key columns without
+  including at least one column from any column group is currently not supported"), so
+  `scan_cost_probe.py` now times one scan per column group instead.
