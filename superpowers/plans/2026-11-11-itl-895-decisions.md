@@ -17,6 +17,18 @@ mechanism; this one applies the developer's decisions of 2026-11-11.
   ("Unsupported annotation"), so the reverse-of-D5 case cannot occur; the checker's
   `tuple[...]` branch is dead code and is removed.
 
+- 2026-11-11: Developer, final: the category is `orcapod.errors.ValueConversionWarning`
+  (plain `UserWarning` subclass, docstring verbatim from the coordinator, shared with PR #300;
+  the caller builds the message), deduplicated explicitly per function instance and (output,
+  location, near miss), marked only after `warnings.warn` returns; Q2 option (a) final.
+  Done: tests (red, then green), rule table, warning, explicit dedup, docs table, CHANGELOG,
+  DESIGN_ISSUES (FO1 resolved, FO2 inputs open/deferred), merge of origin/main (ITL-878,
+  ITL-821), no-debug-only-parameters refactor of the checker (containers annotate results).
+  Dedup evidence: `superpowers/specs/itl-895-float-to-int/09_warning_dedup.py`. Finding:
+  `PipelineJob` runs grow superlinearly with rows on main too (1,000 rows: minutes), so the
+  pipeline dedup scenarios use 1,000 rows. **Next:** full suite on the final head, PR body,
+  mark ready, CI, CodeRabbit (review bodies too), worker_done.
+
 **Goal:** `OUTPUT_CONFORMANCE` applies the developer's decisions: each near-miss value is
 either accepted silently, accepted and converted with an `OutputConversionWarning`, or rejected
 with an `OutputTypeError` that says what to return instead.
