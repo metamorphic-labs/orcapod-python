@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -654,3 +655,99 @@ class TestConcurrentFailures:
                 and "Another store write failed" in record.getMessage()
             ]
             assert any("node 'other'" in r.getMessage() for r in others), others
+
+
+# ---------------------------------------------------------------------------
+# An output that cannot be turned into a record is a row failure, not a store error
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Pair:
+    """A dataclass output type."""
+
+    a: int
+    b: int
+
+
+@function_pod(output_keys="y")
+def raises_for_one(x: int) -> int:
+    """Raise for ``x == 1``: the reference function failure."""
+    if x == 1:
+        raise RuntimeError("function failed for x == 1")
+    return x
+
+
+@function_pod(output_keys="y")
+def naive_datetime_for_one(x: int) -> datetime:
+    """Return a naive ``datetime`` for ``x == 1``, rejected by the strict tz policy."""
+    return datetime(2020, 1, 1 + x, tzinfo=None if x == 1 else timezone.utc)
+
+
+@function_pod(output_keys="y")
+def str_for_int_for_one(x: int) -> int:
+    """Return a ``str`` for ``x == 1`` although ``int`` is declared."""
+    return "abc" if x == 1 else x  # pyright: ignore[reportReturnType]  # the bad output under test
+
+
+@function_pod(output_keys="y")
+def int_for_dataclass_for_one(x: int) -> Pair:
+    """Return an ``int`` for ``x == 1`` although a dataclass is declared."""
+    return 7 if x == 1 else Pair(x, x)  # pyright: ignore[reportReturnType]  # the bad output under test
+
+
+class CrashRecorder(NoOpObserver):
+    """Record the node label and row key of every ``on_data_crash``."""
+
+    def __init__(self) -> None:
+        """Start with no crashes."""
+        self.crashes: list[tuple[str, str]] = []
+
+    def on_data_crash(self, node_label, tag, data, error) -> None:
+        """Record the crash."""
+        self.crashes.append((node_label, str(tag["k"])))
+
+
+def row_failure_outcome(pod: Any, orchestrator: Any) -> dict[str, Any]:
+    """Run ``pod`` as node ``dbl`` and describe what the caller sees."""
+    store = InMemoryArrowDatabase()
+    observer = CrashRecorder()
+    job = build_job(store, ROWS, pod=pod)
+    try:
+        job.run(orchestrator=orchestrator, observer=observer)
+        raised = None
+        rows = sorted(job.nodes["dbl"].as_table()["k"].to_pylist())
+    except Exception as exc:
+        raised = exc
+        rows = None
+    return {
+        "raised": raised,
+        "rows": rows,
+        "crashes": observer.crashes,
+        "stored": stored_rows(store),
+    }
+
+
+class TestUnstorableOutputIsARowFailure:
+    """An output that cannot become a record is reported like a function failure."""
+
+    @pytest.mark.parametrize(
+        "pod",
+        [naive_datetime_for_one, str_for_int_for_one, int_for_dataclass_for_one],
+        ids=["naive_datetime", "str_for_int", "int_for_dataclass"],
+    )
+    @pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+    def test_reported_like_a_function_failure(
+        self, orchestrator_cls, error_policy, pod
+    ):
+        """Same raise-or-return, rows, observer report and stored rows as a raise."""
+        expected = row_failure_outcome(
+            raises_for_one, orchestrator_cls(error_policy=error_policy)
+        )
+        actual = row_failure_outcome(pod, orchestrator_cls(error_policy=error_policy))
+
+        assert not isinstance(actual["raised"], StoreWriteError), actual["raised"]
+        assert (actual["raised"] is None) == (expected["raised"] is None), actual
+        assert actual["rows"] == expected["rows"]
+        assert actual["crashes"] == expected["crashes"] == [("dbl", "r1")]
+        assert actual["stored"] == expected["stored"]
