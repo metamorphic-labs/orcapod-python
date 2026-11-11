@@ -1,4 +1,4 @@
-"""Public API for user class identity: ``op.register_type`` and ``op.set_type_naming`` (ITL-881).
+"""Public API for user class identity: ``op.register_type`` (ITL-881).
 
 Identity is observed through the public interface: the Arrow extension name of a
 ``DictSource`` column (``as_table``), the source's ``pipeline_hash`` and values read back
@@ -9,7 +9,6 @@ because declarations are process-wide.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
 from typing import Any
 
 import pydantic
@@ -17,9 +16,6 @@ import pytest
 
 import orcapod as op
 from orcapod.errors import RecursiveTypeError
-from orcapod.logical_types import (
-    user_class_identity as uci,
-)  # get_naming: restore the policy
 from orcapod.sources import DictSource
 
 
@@ -113,23 +109,45 @@ def test_declaring_after_use_under_another_name_raises() -> None:
         op.register_type(UsedFirst, name="itl881.UsedFirst")
 
 
+@op.register_type(qualified=False)
 @dataclasses.dataclass
-class RenamedByPolicy:
+class ShortNamed:
     x: int
 
 
-def test_set_type_naming_module_name() -> None:
-    before = uci.get_naming()
-    op.set_type_naming(module="name")
-    try:
-        assert _name_part(RenamedByPolicy(1)) == "RenamedByPolicy"
-    finally:
-        op.set_type_naming(**before)
+def test_qualified_false_names_a_module_class_by_its_class_name() -> None:
+    assert _name_part(ShortNamed(1)) == "ShortNamed"
 
 
-def test_set_type_naming_rejects_unknown_style() -> None:
-    with pytest.raises(ValueError, match="'name' or 'qualified'"):
-        op.set_type_naming(main="short")  # pyright: ignore[reportArgumentType]
+def test_name_and_qualified_together_raise() -> None:
+    with pytest.raises(ValueError, match="either name"):
+        op.register_type(Undeclared, name="itl881.X", qualified=False)
+
+
+@dataclasses.dataclass
+class DeclaredTwice:
+    x: int
+
+
+def test_redeclaring_with_the_same_name_is_a_no_op_and_another_name_raises() -> None:
+    op.register_type(DeclaredTwice, name="itl881.Twice")
+    assert op.register_type(DeclaredTwice, name="itl881.Twice") is DeclaredTwice
+    with pytest.raises(ValueError, match="already registered as 'itl881.Twice'"):
+        op.register_type(DeclaredTwice, name="itl881.Other")
+
+
+@dataclasses.dataclass
+class NotMutated:
+    x: int
+
+
+def test_registration_does_not_modify_the_class() -> None:
+    before = dict(vars(NotMutated))
+    params = NotMutated.__dataclass_params__  # pyright: ignore[reportAttributeAccessIssue]
+    op.register_type(NotMutated, name="itl881.NotMutated")
+    _type_name(NotMutated(1))
+    assert dict(vars(NotMutated)) == before
+    assert NotMutated.__dataclass_params__ is params  # pyright: ignore[reportAttributeAccessIssue]
 
 
 # ---------------------------------------------------------------------------
@@ -352,10 +370,3 @@ def test_subclass_has_its_own_identity_and_keeps_its_fields() -> None:
     assert _type_name(Base(1)) != _type_name(Child(1, 2))
     _, data = next(iter(_source(Child(1, 2)).iter_data()))
     assert data.as_dict()["p"] == Child(1, 2)
-
-
-@pytest.fixture(autouse=True)
-def _no_policy_leak() -> Iterator[None]:
-    before = uci.get_naming()
-    yield
-    assert uci.get_naming() == before

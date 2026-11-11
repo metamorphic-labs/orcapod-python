@@ -9,7 +9,6 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import typing
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -24,13 +23,6 @@ def converter():
     return get_default_context().type_converter
 
 
-@pytest.fixture(autouse=True)
-def _restore_naming() -> Iterator[None]:
-    before = uci.get_naming()
-    yield
-    uci.set_naming(**before)
-
-
 def _make_class(module: str, qualname: str = "Point") -> type:
     cls = dataclasses.make_dataclass(qualname, [("x", int)])
     cls.__module__ = module
@@ -41,7 +33,9 @@ def _make_class(module: str, qualname: str = "Point") -> type:
 class TestIdentityString:
     def test_documented_example(self) -> None:
         record = uci.identity_record("dataclass", "Point", {"x": "int", "y": "float"})
-        assert uci.identity_string(record) == "Point@9117beaaf7ebe3ab"
+        assert uci.identity_string(record) == (
+            "Point@9117beaaf7ebe3ab0bd25de9448c92eb64aa070a58611517bd1e470a544584d8"
+        )
 
     def test_canonical_json_is_sorted_and_compact(self) -> None:
         record = uci.identity_record("pydantic", "P", {"b": "int", "a": "str"})
@@ -125,17 +119,12 @@ class TestNames:
     def test_nested_main_class_uses_qualname(self) -> None:
         assert uci.resolve_name(_make_class("__main__", "Outer.Point")) == "Outer.Point"
 
-    def test_main_qualified_setting(self) -> None:
-        uci.set_naming(main="qualified")
-        assert uci.resolve_name(_make_class("__main__")) == "__main__.Point"
+    def test_default_name_qualified_false(self) -> None:
+        assert uci.default_name(_make_class("pkg.models"), qualified=False) == "Point"
 
-    def test_module_name_setting(self) -> None:
-        uci.set_naming(module="name")
-        assert uci.resolve_name(_make_class("pkg.models")) == "Point"
-
-    def test_invalid_setting_rejected(self) -> None:
-        with pytest.raises(ValueError, match="main"):
-            uci.set_naming(main="short")  # pyright: ignore[reportArgumentType]
+    def test_default_name_qualified_true_for_main(self) -> None:
+        cls = _make_class("__main__")
+        assert uci.default_name(cls, qualified=True) == "__main__.Point"
 
     def test_declared_name_wins(self) -> None:
         cls = _make_class("pkg.models")

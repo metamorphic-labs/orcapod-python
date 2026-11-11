@@ -4,9 +4,8 @@ A user class is identified by an *identity record* with three components (ITL-88
 spec ``superpowers/specs/2026-11-10-user-class-identity-v0.3.md``):
 
 - ``kind``: ``"dataclass"`` or ``"pydantic"``.
-- ``name``: a declared name, or a name chosen by the naming policy (the qualified name
-  for ``__main__`` classes is just ``__qualname__`` by default; module classes use
-  ``module.qualname`` by default).
+- ``name``: a declared name; otherwise ``__qualname__`` for a class defined in
+  ``__main__`` (a notebook or script) and ``module.qualname`` for a module class.
 - ``fields``: a mapping from each stored field's name to its *type token*. It is
   serialized with sorted keys, so field order never enters the identity.
 
@@ -14,7 +13,7 @@ The *identity string* ``f"{name}@{fingerprint}"`` is the class's logical type na
 Arrow extension name. ``identity_string`` is the only place that defines its format.
 
 This module also holds the process-wide state that belongs to classes rather than to a
-data context: declared names, the naming policy and the table of classes seen under each
+data context: declared names and the table of classes seen under each
 ``(kind, name)``, which the read path uses to find a class for a stored column.
 """
 
@@ -38,12 +37,6 @@ if TYPE_CHECKING:
 KIND_DATACLASS = "dataclass"
 KIND_PYDANTIC = "pydantic"
 
-NamingStyle = Literal["name", "qualified"]
-
-_NAMING_STYLES: frozenset[str] = frozenset({"name", "qualified"})
-_DEFAULT_NAMING: dict[str, NamingStyle] = {"main": "name", "module": "qualified"}
-_naming: dict[str, NamingStyle] = dict(_DEFAULT_NAMING)
-
 #: Modules whose classes are "defined in a notebook or script". ``__mp_main__`` is the
 #: name a ``multiprocessing`` spawn child gives the main module.
 MAIN_MODULES: frozenset[str] = frozenset({"__main__", "__mp_main__"})
@@ -51,8 +44,8 @@ MAIN_MODULES: frozenset[str] = frozenset({"__main__", "__mp_main__"})
 #: Prefix reserved for Orcapod's own types (``orcapod.path``, ``orcapod.uuid``, ...).
 RESERVED_PREFIX = "orcapod."
 
-#: Number of hex digits of the SHA-256 fingerprint in an identity string.
-FINGERPRINT_HEX_DIGITS = 16
+#: Number of hex digits of the SHA-256 fingerprint in an identity string (the full digest).
+FINGERPRINT_HEX_DIGITS = 64
 
 _NAME_FORBIDDEN = re.compile(r"[@\s]")
 
@@ -120,47 +113,38 @@ def validate_name(name: str) -> None:
         )
 
 
-def get_naming() -> dict[str, NamingStyle]:
-    """Return the current naming policy as ``{"main": ..., "module": ...}``."""
-    return dict(_naming)
-
-
-def set_naming(
-    main: NamingStyle | None = None, module: NamingStyle | None = None
-) -> None:
-    """Set how classes that declare no name are named.
-
-    Applies to classes registered after the call.
-
-    Args:
-        main: ``"name"`` (default) or ``"qualified"`` for classes defined in
-            ``__main__`` (a notebook or a script run directly).
-        module: ``"qualified"`` (default) or ``"name"`` for classes defined in an
-            importable module.
-
-    Raises:
-        ValueError: If a value is not ``"name"`` or ``"qualified"``.
-    """
-    for key, value in (("main", main), ("module", module)):
-        if value is None:
-            continue
-        if value not in _NAMING_STYLES:
-            raise ValueError(
-                f"Invalid naming style for {key}: {value!r}. Use 'name' or 'qualified'."
-            )
-        _naming[key] = typing.cast(NamingStyle, value)
-
-
 def is_main_class(cls: type) -> bool:
     """Return True if ``cls`` was defined in ``__main__`` (or ``__mp_main__``)."""
     return cls.__module__ in MAIN_MODULES
 
 
-def resolve_name(cls: type) -> str:
-    """Return the name component for ``cls``.
+def default_name(cls: type, *, qualified: bool | None = None) -> str:
+    """Return the name a class gets without a declared name.
 
-    The first rule that applies wins: a declared name; the naming policy for
-    ``__main__`` classes; the naming policy for module classes.
+    Args:
+        cls: A dataclass or pydantic model class.
+        qualified: ``None`` applies the location rule: ``__qualname__`` for a class
+            defined in ``__main__`` (or ``__mp_main__``), ``module.qualname`` for a
+            module class. ``False`` always gives ``__qualname__``; ``True`` always gives
+            ``module.qualname``.
+
+    Returns:
+        The name component.
+    """
+    if qualified is None:
+        qualified = not is_main_class(cls)
+    if not qualified:
+        return cls.__qualname__
+    module = cls.__module__
+    if not is_main_class(cls):
+        from orcapod.utils.canonical_type_names import canonical_module_name
+
+        module = canonical_module_name(cls) or module
+    return f"{module}.{cls.__qualname__}"
+
+
+def resolve_name(cls: type) -> str:
+    """Return the name component for ``cls``: its declared name or ``default_name``.
 
     Args:
         cls: A dataclass or pydantic model class.
@@ -171,28 +155,27 @@ def resolve_name(cls: type) -> str:
     declared = _declared.get(cls)
     if declared is not None:
         return declared
-    style = _naming["main" if is_main_class(cls) else "module"]
-    if style == "name":
-        return cls.__qualname__
-    module = cls.__module__
-    if not is_main_class(cls):
-        from orcapod.utils.canonical_type_names import canonical_module_name
-
-        module = canonical_module_name(cls) or module
-    return f"{module}.{cls.__qualname__}"
+    return default_name(cls)
 
 
-def declare(cls: type, name: str | None) -> None:
+def declare(cls: type, name: str | None, *, qualified: bool | None = None) -> None:
     """Record the name a user class is identified by.
+
+    Registration never modifies the class: the name is kept in a process-wide table
+    keyed by the class object. Declaring the same class again with the same name is a
+    no-op; any other name raises.
 
     Args:
         cls: A dataclass or pydantic model class.
-        name: The declared name, or ``None`` to use the naming policy.
+        name: The declared name, or ``None`` for ``default_name(cls, qualified=...)``.
+        qualified: Only without ``name``: ``False`` for the class name alone,
+            ``True`` for ``module.qualname``, ``None`` for the location rule.
 
     Raises:
         TypeError: If ``cls`` is not a dataclass or pydantic model class.
-        ValueError: If the class is local, the name is invalid, or the class was
-            already registered in this process under a different name.
+        ValueError: If both ``name`` and ``qualified`` are given, the class is local,
+            the name is invalid, or the class is already registered (declared or used)
+            under a different name.
     """
     kind = class_kind(cls)
     if kind is None:
@@ -200,20 +183,24 @@ def declare(cls: type, name: str | None) -> None:
             f"Only dataclasses and pydantic models can be registered as types, "
             f"got {cls!r}."
         )
+    if name is not None and qualified is not None:
+        raise ValueError(
+            "Pass either name=... or qualified=..., not both: qualified only chooses "
+            "between the class name and its module path when no name is given."
+        )
     reject_local_class(cls)
     if name is not None:
         validate_name(name)
-    effective = name if name is not None else resolve_name(cls)
-    built_as = _built.get(cls)
-    if built_as is not None and built_as != effective:
+    effective = name if name is not None else default_name(cls, qualified=qualified)
+    previous = _built.get(cls) or _declared.get(cls)
+    if previous is not None and previous != effective:
         raise ValueError(
             f"Cannot register {cls.__module__}.{cls.__qualname__} as {effective!r}: it "
-            f"is already registered as {built_as!r} in this process, because it was "
-            f"used before this declaration. Declare the name before the class is first "
-            f"used (for example with the @op.register_type decorator)."
+            f"is already registered as {previous!r} in this process, and a class has "
+            f"one name. Declare the name once, before the class is first used (for "
+            f"example with the @op.register_type decorator)."
         )
-    if name is not None:
-        _declared[cls] = name
+    _declared[cls] = effective
     remember(kind, effective, cls)
 
 
