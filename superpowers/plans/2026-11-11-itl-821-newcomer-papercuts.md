@@ -163,3 +163,10 @@ runs in ~4.5 s and passes; `save_and_load_pipelines.py` fails.
 
 ## Progress notes
 - 2026-11-11: Step 1 re-check done (table above). Asked coordinator about items 4 and 6.
+- 2026-11-11: Coordinator: 1, 2, 3, 5 + examples test approved; protobuf half of 6 closed with reason;
+  4a, 4b and the deltalake RUST_LOG change HELD for the developer — do not implement until the
+  coordinator replies. Tasks 1–4 and 7 done; PR #296 opened ("Refs ITL-821"). Example note: a loaded
+  `PipelineJob` is read-only; its nodes read stored rows only via `get_all_records()`.
+- Out-of-scope findings (report in worker_done, not filed): `PipelineJob.load` logs
+  "Could not reconstruct source ... skipping" for in-memory sources; a loaded node's `as_table()` raises
+  "no function pod and no database attached" although the store is attached.
