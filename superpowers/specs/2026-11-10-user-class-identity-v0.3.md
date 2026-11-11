@@ -1,6 +1,6 @@
 # Identity of a user class in v0.3 (ITL-881)
 
-**Status:** implementation spec, waiting for approval. No product code changes yet.
+**Status:** implementation spec, approved by the coordinator November 10, 2026 (P1 decided by the developer; P2 names and the identity-string format provisional).
 **Issue:** ITL-881 (v0.3, a public release; tag target November 16, 2026).
 **Builds on:** the findings in PR #288 (`superpowers/specs/2026-11-10-user-class-identity.md`,
 experiments E01–E08). "W1"–"W15" are the workshop scenarios from §3.4 of that document.
@@ -17,11 +17,12 @@ Each decision is marked **CONFIRMED** (the developer decided it, November 10, 20
 | D-rebind | Same identity re-registered: rebind silently | CONFIRMED: developer answer to S1 |
 | D-raise | Stored shape disagreeing with registered shape raises, in v0.3 | CONFIRMED: developer answer to S2 |
 | D-doc | A page documenting identity | CONFIRMED: developer answer to S4 |
-| P1 | A field typed by another user class carries that class's full identity | PENDING: developer asked; default stated by the coordinator |
-| P2 | Public API and setting names | PENDING: developer to settle the names |
-| D-hash | The 25 golden entries in §e move; nothing else | PENDING: needs the developer's approval of the list (golden rule) |
-| D-legacy | Reading a pre-0.3 user-class column directly raises a clear error | PENDING: stored-data behaviour, proposed here |
-| D-notice | One-time notice when a `__main__` class is first registered (S3) | PENDING: developer leaned towards a warning; first scope cut |
+| P1 | A field typed by another user class carries that class's identity as that class was registered | CONFIRMED: developer decision, November 10, 2026 |
+| D-cycle | A self-referential or cyclic class is rejected with a clear `TypeError` | CONFIRMED by the coordinator from this proposal: Arrow cannot store a recursive struct |
+| P2 | Public API names (`register_type`, `set_type_naming`) and the identity-string format | PENDING with the developer; implemented provisionally, each a single-point change |
+| D-hash | The 25 golden entries in §e move; nothing else | CONFIRMED by the coordinator: follows from decision 2; the PR lists every moved entry |
+| D-legacy | Reading a pre-0.3 user-class column directly raises a clear error | CONFIRMED by the coordinator: a consequence of the identity check; nothing extra is built |
+| D-notice | One-time notice when a `__main__` class is first registered (S3) | CONFIRMED in scope by the coordinator; last item before the cuts |
 
 ## a. The identity definition
 
@@ -55,7 +56,7 @@ A name must be non-empty, must not contain `@` or whitespace, and must not start
 or `"pydantic"` (`pydantic.BaseModel` subclass). A dataclass and a pydantic model with the
 same name and fields have different identity records, so they are different types.
 
-### Field component — CONFIRMED (decision 2), nested classes PENDING (P1)
+### Field component — CONFIRMED (decision 2; nested classes: P1)
 
 `fields` maps each **stored field's name** to its **type token**. It is a JSON object
 serialized with sorted keys, so field order never enters. The stored fields are exactly
@@ -71,8 +72,30 @@ extras):
 | type with a built-in logical type | its logical type name | `orcapod.path`, `orcapod.uuid`, `orcapod.file` |
 | generic container | `origin[arg, …]`, origin by its canonical name, args in order | `list[int]`, `dict[str, float]`, `tuple[int, str]` (`typing.List[int]` gives `list[int]`) |
 | `Optional` / union | member tokens sorted, joined by ` \| ` | `int \| None` for `Optional[int]`, `int \| None` and `None \| int` |
-| nested dataclass / pydantic model (**P1 default**) | that class's identity string (below) | `Inner@3c1d…` |
-| nested class (**P1 alternative**) | its fields only: `struct{a: int, b: str}` (sorted, no name, no kind) | — |
+| nested dataclass / pydantic model (P1) | that class's identity string (below), as that class is registered | `Inner@3c1d…`, `geo.Inner@…` |
+
+**Nested classes (P1, CONFIRMED).** The token of a field typed by another user class is
+that class's own registered identity string: its name component however *that* class was
+registered (declared name, name only, or `module.qualname`), its kind, and its field
+component, recursively through the fingerprint. It is never re-derived from
+`module.qualname` and never reduced to the storage struct. So renaming the inner class,
+declaring it under another name, or changing its fields changes the outer identity.
+
+**Registration order does not matter.** `register_type` only records the declared name
+and checks it (§b); the logical type, and so the identity, is built at first use, and the
+outer class's build registers the inner class first (implicitly, by the setting, if it
+was never declared). Declaring every class before first use therefore gives the same
+identities in any order: outer decorated before inner, inner declared later in the same
+cell, inner registered implicitly by the outer's first use. Declaring a class after it
+was used under a different name raises (§c). An identical notebook re-run of the inner
+class rebinds it (§c) and leaves the outer identity unchanged.
+
+**Cycles (D-cycle).** A class that refers to itself, directly (`next: Node | None`) or
+through other classes, is rejected at first use with a `TypeError` naming the cycle
+(`Node.next -> Node`). Today's converter already raises `TypeError: Circular type
+dependency detected…`; v0.3 keeps the rejection and names the path. Encoding the
+back-reference by name would give a well-defined identity, but Arrow cannot store a
+recursive struct, so there is nothing to identify.
 
 Deliberately **not** part of the identity: defaults and default factories, methods and
 validators, properties and pydantic `computed_field`s, `init=False` dataclass fields,
@@ -146,10 +169,13 @@ op.set_type_naming(main="name", module="qualified")   # process-wide defaults (s
 ```
 
 - `register_type` records the name for the class object (a process-wide weak-keyed table,
-  so the class is not modified), validates it, builds its logical type in the default
-  data context (so an unsupported field type fails at the definition, not at first use)
-  and returns the class unchanged. Classes that are never registered are registered on
-  first use, as today, with the name from the setting.
+  so the class is not modified), checks the kind, the name and that the class is not
+  local, and returns the class unchanged. The logical type is built at first use, as
+  today, so declarations may come in any order (§a). Classes that are never declared are
+  registered on first use with the name from the setting.
+- Provisional (P2): the public names live in one place (`orcapod/user_types.py`,
+  re-exported from `orcapod`) and the identity-string format in one function
+  (`identity_string(record)`), so a rename or a format change is a single-point edit.
 - `set_type_naming` changes the default for classes registered after the call. Values:
   `"name"` or `"qualified"`. Defaults: `main="name"`, `module="qualified"`. No TOML key
   in v0.3 (scope, §g).
@@ -176,7 +202,9 @@ op.set_type_naming(main="name", module="qualified")   # process-wide defaults (s
   the new class gets its own logical type and extension name (W2: the next run computes
   into new tables).
 - **Still raises:**
-  1. One class object registered under two names (§b).
+  1. One class object registered under two names (§b), including a declaration after
+     the class was already used under its default name.
+  5. A self-referential or cyclic class (D-cycle).
   2. An invalid declared name (§a).
   3. A local class (`<locals>`), as today.
   4. A shape disagreement on read (§d, S2).
