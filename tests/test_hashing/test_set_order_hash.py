@@ -12,6 +12,9 @@ import subprocess
 import sys
 import textwrap
 
+import numpy as np
+import pytest
+
 from orcapod.sources import DictSource
 
 _ROW_HASH_SCRIPT = textwrap.dedent(
@@ -66,3 +69,12 @@ class TestPlainSetOrder:
             data_schema={"k": str, "s": set[int]},
         )
         assert source.as_table().column("s").to_pylist() == [[-1, 7, 300]]
+
+    def test_numpy_nan_element_is_rejected(self):
+        """A NaN that is not a Python ``float`` (``numpy.float32``) has no order either."""
+        with pytest.raises(ValueError, match="NaN"):
+            DictSource(
+                data=[{"k": "r", "s": {np.float32("nan"), np.float32(1.0)}}],
+                tag_columns=["k"],
+                data_schema={"k": str, "s": set[float]},
+            ).as_table()

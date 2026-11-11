@@ -15,10 +15,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pytest
 
 from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import function_pod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.sources import ArrowTableSource, DictSource
@@ -169,6 +171,11 @@ class TestPythonDictValues:
         with pytest.raises(ValueError, match="'m'.*NaN|NaN.*'m'"):
             _row_hash({float("nan"): 1, 1.0: 2}, dict[float, int])
 
+    def test_numpy_nan_key_is_rejected(self):
+        """A NaN that is not a Python ``float`` (``numpy.float32``) is rejected too."""
+        with pytest.raises(ValueError, match="NaN"):
+            _row_hash({np.float32("nan"): 1, np.float32(1.0): 2}, dict[float, int])
+
 
 class TestNestedDicts:
     def test_dict_of_dicts_inner_and_outer_reordered(self):
@@ -293,6 +300,38 @@ class TestFunctionPodDictOutputs:
         assert sync_out.content_hash() == async_plain.content_hash()
         assert async_plain.content_hash() == async_flipped.content_hash()
         assert _keys(async_flipped.as_dict()["out"]) == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# Datagram column updates
+# ---------------------------------------------------------------------------
+
+
+class TestDatagramColumnUpdates:
+    """``update`` and ``with_columns`` hold dict values in canonical key order."""
+
+    def test_update_holds_dict_in_key_order(self):
+        """A replaced dict value iterates in key order, like a constructed one."""
+        datagram = Datagram({"m": {"a": 1}}, python_schema={"m": dict[str, int]})
+        updated = datagram.update(m={"b": 2, "a": 1})
+        assert _keys(updated.as_dict()["m"]) == ["a", "b"]
+
+    def test_with_columns_holds_dict_in_key_order(self):
+        """A new dict column iterates in key order, like a constructed one."""
+        datagram = Datagram({"x": 1}, python_schema={"x": int})
+        extended = datagram.with_columns(
+            column_types={"m": dict[str, int]}, m={"b": 2, "a": 1}
+        )
+        assert _keys(extended.as_dict()["m"]) == ["a", "b"]
+
+    def test_update_and_with_columns_do_not_mutate_the_given_dict(self):
+        """The caller's dict keeps its own order."""
+        given = {"b": 2, "a": 1}
+        Datagram({"m": {"a": 1}}, python_schema={"m": dict[str, int]}).update(m=given)
+        Datagram({"x": 1}, python_schema={"x": int}).with_columns(
+            column_types={"m": dict[str, int]}, m=given
+        )
+        assert list(given) == ["b", "a"]
 
 
 def _delta_db(tmp_path: Path) -> DeltaTableDatabase:
