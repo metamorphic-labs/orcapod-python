@@ -106,6 +106,24 @@ their `source_id` explicitly and keep it when loaded.
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
+- **SpiralDB nullability record** (ITL-936). SpiralDB reports every top-level column (key
+  columns included) and every struct field as nullable, whatever was written; only list items
+  keep a non-null flag. `SpiralDBConnector` now records a table's non-nullable columns and
+  nested fields in its key-value metadata (key `__orcapod_nullability__`, format
+  `orcapod.nullability` version 1, chunked under SpiralDB's 8 KiB entry limit) on the table's
+  first write, and `get_column_info` and `iter_batches` restore them, so a
+  `SpiralDBTableSource` over a recorded table gives `T`, not `T | None`, and a function pod can
+  take `x: float`. Every batch of a recorded table is checked: a null in a recorded column
+  raises `orcapod.errors.NullInNonNullableColumnError` naming the table and column. A write
+  holding a null in a non-nullable column is refused before anything is written (SpiralDB
+  stores a null written to a non-nullable struct field as `0`), and a write whose non-nullable
+  columns differ from the record raises `NullabilityRecordMismatchError`. An unreadable record
+  raises `NullabilityRecordError`. `orcapod.databases.write_nullability_record` and
+  `read_nullability_record` let other writers record a table. Tables without a record read
+  exactly as before (same schema and hashes); a table that gains a record has a different
+  schema, `pipeline_hash` and `content_hash`. A `ConnectorArrowDatabase` on SpiralDB records
+  new result tables, so results read back with their written nullability; existing result
+  tables are not changed.
 
 ### Fixed
 
@@ -187,8 +205,9 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
 - Building any source converts only its `record_id_column` to Python, not the whole table:
   about half the peak memory (200,000 rows: +210 MB down to +115 MB). Tokens, record IDs and
   hashes are byte-identical.
-- A non-nullable Spiral column arrives as `T`, and a nullable one as `T | None`, at every
-  nesting level, through `Join`, function pods and save/load (tested against a pyspiral fake).
+- SpiralDB keeps no non-null flag except on list items, so a Spiral column arrives as `T`
+  only when the table carries Orcapod's nullability record (ITL-936, under Added); otherwise
+  every column is `T | None`. The pyspiral fake now behaves like the server in this respect.
 - A source whose table has a column the Arrow hasher cannot hash (`fixed_size_list` or `map`
   with starfix 0.4.0) raises `NotImplementedError` naming every such column and its Arrow
   type, chained to the hasher's error. Before, it raised the hasher's bare

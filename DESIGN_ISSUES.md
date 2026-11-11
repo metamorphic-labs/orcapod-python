@@ -2472,12 +2472,14 @@ process. Findings, with repro scripts, are in `superpowers/specs/itl-926-live/FI
 * pyspiral is raised to 0.16.33.
 * The default `source_id` is `<project id>/<dataset>/<table>` (approved hash change).
 * Source building no longer calls `to_pylist()` on the whole table (byte-identical).
-* Non-nullable columns stay non-nullable end to end (tested).
+* Non-nullable columns stay non-nullable end to end: true only on the original pyspiral
+  fake. SpiralDB keeps no non-null flag except on list items; fixed by the nullability record
+  (SP3, ITL-936).
 
 **Open (developer decisions pending):**
 
 * Every column of the EDI sample tables is nullable, so a function pod over them must
-  annotate `T | None`; non-nullable Spiral columns arrive as `T` (tested).
+  annotate `T | None`; recorded columns arrive as `T` (SP3, ITL-936).
 * `fixed_size_list` columns cannot be hashed: not supported until Orcapod adopts starfix
   0.5.0 (ITL-910; starfix support is ITL-927). `map` columns fail the same way in starfix
   0.4.0 (none in the EDI tables).
@@ -2490,3 +2492,30 @@ process. Findings, with repro scripts, are in `superpowers/specs/itl-926-live/FI
   (14.5 s for 3 rows); Orcapod's share is about 0.4 s. `scan_cost_probe.py` measures it.
 * `PostgreSQLTableSource` and `SQLiteTableSource` still default `source_id` to the bare table
   name (to be filed separately).
+
+## `src/orcapod/databases/spiraldb_connector.py` — SpiralDB stores every column nullable (ITL-936)
+
+### SP3 — Non-nullable columns arrive as `T | None` from SpiralDB; a null in a non-null struct field is stored as 0
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-936
+
+Live, pyspiral 0.16.33, scratch table in `edi-tutorial-v1-841226` (November 11, 2026): a
+table written with `k`, `v`, struct `g` and its field `g.x`, and list `l` with its items all
+declared non-null reports `Schema({k=i64?, l=fixed_size_list(f32)[2]?, v=i32?, w=i32?,
+g={x=i32?, y=i32?}?})`: every top-level column and struct field nullable; only list items keep
+`not null`. Writing a null to top-level `v` declared non-null is refused by Arrow on the
+client. Writing `{k: 4, v: 40, g: {x: null, y: null}}` with `g.x` declared non-null is
+**accepted and reads back as `g.x = 0`**: silent data corruption on SpiralDB's side.
+
+**Fix:** Orcapod records each table's non-nullable paths in the table's key-value metadata
+(`__orcapod_nullability__`, format `orcapod.nullability` v1; `orcapod.databases.
+write_nullability_record` / `read_nullability_record`). `SpiralDBConnector` writes the record
+before the first rows of a table, checks every non-nullable path for nulls before any write,
+refuses a write that disagrees with the record, and on read restores the record in
+`get_column_info` and checks and restores every batch in `iter_batches`
+(`NullInNonNullableColumnError` / `NullabilityRecordError`, naming the table). Tables without
+a record are unchanged. The pyspiral fake now reports nullability as the server does. Open:
+the corruption itself is SpiralDB's (to raise with Spiral); live verification of the
+connector on `edi-tutorial-v1-841226` is pending (coordinator-run).
+
