@@ -50,7 +50,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 
@@ -202,7 +202,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
         created.append(names["a"])
         fresh = proj.table(f"{dataset}.{names['a']}").schema().to_arrow().names
         report["fresh"] = {"schema_names_after_create": fresh, "ok": fresh == ["k"]}
-        ok &= report["fresh"]["ok"]
+        ok = ok and bool(report["fresh"]["ok"])
 
         # 2. record
         connector.upsert_records(names["a"], _rows([1, 2, 3]), id_column="k")
@@ -212,20 +212,21 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
         batches = list(connector.iter_batches(f'SELECT * FROM "{names["a"]}"'))
         source = SpiralDBTableSource(project, names["a"], dataset=dataset)
         record = read_nullability_record(tbl.get_metadata())
-        report["record"] = {
+        record_report: dict[str, Any] = {
             "record": sorted(list(p) for p in record or ()),
             "spiral_schema": _schema_text(spiral_schema),
             "column_info": [[c.name, str(c.arrow_type), c.nullable] for c in info],
             "batch_schema": _schema_text(batches[0].schema),
             "output_schema": [str(s) for s in source.output_schema()],
         }
+        report["record"] = record_report
         expected_nonnull = {"k", "x", "g", "l"}
-        report["record"]["ok"] = (
+        record_report["ok"] = (
             {c.name for c in info if not c.nullable} == expected_nonnull
             and not batches[0].schema.field("g").type.field("x").nullable
             and batches[0].schema.field("g").type.field("y").nullable
         )
-        ok &= report["record"]["ok"]
+        ok = ok and bool(report["record"]["ok"])
 
         connector.create_table_if_not_exists(names["b"], key_info, pk_column="k")
         created.append(names["b"])
@@ -244,7 +245,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
             report["workshop_path"] = _workshop_path(
                 project, dataset, names["a"], names["b"], "z", Path(tmp) / "store"
             )
-        ok &= report["workshop_path"]["ok"]
+        ok = ok and bool(report["workshop_path"]["ok"])
 
         # 3. refusals
         refusals: dict[str, Any] = {}
@@ -270,7 +271,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
             and rows_after == 3
         )
         report["refusals"] = refusals
-        ok &= refusals["ok"]
+        ok = ok and bool(refusals["ok"])
 
         # 4. hidden values (straight through pyspiral, like any other writer)
         hidden = proj.create_table(
@@ -294,7 +295,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
         written = pa.table({"k": pa.array([1, 2, 3], pa.int64()), "g": g, "l": lists})
         hidden.write(written, push_down_nulls=True)
         back = client.scan(hidden.select()).to_table()
-        gb = back.column("g").combine_chunks()
+        gb = cast("pa.StructArray", back.column("g").combine_chunks())
         report["hidden_values"] = {
             "written_rows": written.to_pylist(),
             "read_rows": back.to_pylist(),
@@ -337,7 +338,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
             report["metadata"]["two_keys_one_call"]
             and report["metadata"]["wide_record_round_trip"]
         )
-        ok &= report["metadata"]["ok"]
+        ok = ok and bool(report["metadata"]["ok"])
     except Exception:  # noqa: BLE001 - reported, then the scratch tables are dropped
         report["error"] = traceback.format_exc()
         ok = False
@@ -379,18 +380,18 @@ def read_mode(
             "recorded_but_optional": optional,
             "ok": record is not None and not optional,
         }
-        ok &= report[name]["ok"]
+        ok = ok and bool(report[name]["ok"])
     if len(tables) >= 2:
         with tempfile.TemporaryDirectory() as tmp:
             report["workshop_path"] = _workshop_path(
                 project, dataset, tables[0], tables[1], column, Path(tmp) / "store"
             )
-        ok &= report["workshop_path"]["ok"]
+        ok = ok and bool(report["workshop_path"]["ok"])
     return bool(ok)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("mode", choices=["write", "read"])
     parser.add_argument("--project", required=True)
     parser.add_argument("--allow-writes")
