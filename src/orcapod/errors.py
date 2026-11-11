@@ -195,3 +195,55 @@ class EphemeralResultMissingError(Exception):
             f"node={node_identity_path!r} "
             f"cached_content_hash={cached_content_hash!r}"
         )
+
+
+class StoreReadError(RuntimeError):
+    """Raised when a stored table exists but could not be read.
+
+    A table that does not exist reads as empty. A table that exists but cannot be
+    read (a missing or damaged data file, a log the backend cannot load, columns
+    whose stored data no longer matches the table schema) raises this error
+    instead, so stored results never look dropped. Nothing is recomputed or
+    overwritten. A failed store read always fails the run, whatever the
+    orchestrator's ``error_policy``.
+
+    The backend's own exception is chained as ``__cause__``.
+
+    Attributes:
+        table: Location of the table that could not be read (a directory or a
+            cloud URI).
+        record_path: Path of the table, including the database view's prefix.
+    """
+
+    def __init__(self, table: str, record_path: tuple[str, ...]) -> None:
+        self.table = table
+        self.record_path = tuple(record_path)
+        super().__init__(table, self.record_path)
+
+    def __str__(self) -> str:
+        cause = self.__cause__
+        reason = f": {type(cause).__name__}: {cause}" if cause is not None else ""
+        return (
+            f"Could not read the stored table at {self.table!r}{reason}. The table "
+            "exists, so its rows are not treated as missing: nothing was recomputed "
+            "or overwritten."
+        )
+
+    @classmethod
+    def in_group(cls, group: BaseExceptionGroup) -> "list[StoreReadError]":
+        """Return every ``StoreReadError`` in an exception group, nested ones included.
+
+        Args:
+            group: An exception group, such as the one an ``asyncio.TaskGroup``
+                raises.
+
+        Returns:
+            The ``StoreReadError`` leaves in the order the group holds them.
+        """
+        found: "list[StoreReadError]" = []
+        for exc in group.exceptions:
+            if isinstance(exc, BaseExceptionGroup):
+                found.extend(cls.in_group(exc))
+            elif isinstance(exc, cls):
+                found.append(exc)
+        return found
