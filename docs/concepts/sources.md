@@ -88,10 +88,11 @@ sessions.as_df()  # also as_polars_df(), as_pandas_df(), as_lazy_frame(), as_tab
 
 Things to know about Spiral tables:
 
-- **Columns are nullable.** SpiralDB reports every column as nullable, key columns included,
-  so each tag and data column has the type `T | None` (`str | None`,
-  `datetime.datetime | None`, ...). A function pod receiving such a column must accept `None`:
-  annotate the parameter `x: float | None`, not `x: float`, or the pod refuses the stream.
+- **Nullability comes from the table.** A column SpiralDB reports as nullable has the type
+  `T | None` (`str | None`, `datetime.datetime | None`, ...); a non-nullable column keeps `T`.
+  In the current EDI sample tables every column is nullable, key columns included. A function
+  pod receiving a nullable column must accept `None`: annotate the parameter `x: float | None`,
+  not `x: float`, or the pod refuses the stream.
 - **Types are kept.** Arrow types come through unchanged (`uint32` stays `uint32`), except
   that strings, binaries and lists become their large variants. Joining two Spiral tables on
   their shared key columns works; joining with another source requires the same Arrow types on
@@ -102,10 +103,11 @@ Things to know about Spiral tables:
 - **Not yet supported:** columns of type `fixed_size_list` (the source cannot be built), time
   zones (SpiralDB stores timestamps without one), and Orcapod logical types such as `Path`
   (they come back as their storage type).
+- **Source identity.** The default `source_id` is `<project id>/<dataset>/<table>`, for
+  example `edi-sample-v1-855632/default/session`, so tables with the same name in different
+  projects stay apart.
 - **Record identity.** A row's record ID comes from its position in the table, which SpiralDB
   orders by key. A row inserted before existing rows changes the IDs of the rows after it.
-  The default `source_id` is the table name, so pass `source_id=` when you use tables with
-  the same name from two projects.
 
 ### `DerivedSource`
 

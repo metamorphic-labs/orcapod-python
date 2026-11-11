@@ -2438,6 +2438,9 @@ process. Findings, with repro scripts, are in `superpowers/specs/itl-926-live/FI
   (ITL-40).
 * Errors name the project and dataset.
 * pyspiral is raised to 0.16.33.
+* The default `source_id` is `<project id>/<dataset>/<table>` (approved hash change).
+* Source building no longer calls `to_pylist()` on the whole table (byte-identical).
+* Non-nullable columns stay non-nullable end to end (tested).
 
 **Open (developer decisions pending):**
 
@@ -2446,6 +2449,10 @@ process. Findings, with repro scripts, are in `superpowers/specs/itl-926-live/FI
 * The whole table is read at construction, which rules out tables such as `spike_event`
   (8.1M rows); the streaming design is in
   `superpowers/specs/2026-11-11-itl-186-spiral-streaming-source-design.md`.
-* Record IDs are positional (key-based IDs are a hash decision).
-* `source_id` defaults to the bare table name.
+* Record IDs are positional; key-based IDs are approved for the streaming source work
+  (ITL-186).
+* `unit` (100 rows) takes about 35 s to build live, and the Spiral scan itself is slow
+  (14.5 s for 3 rows); Orcapod's share is about 0.4 s. `scan_cost_probe.py` measures it.
+* `PostgreSQLTableSource` and `SQLiteTableSource` still default `source_id` to the bare table
+  name (to be filed separately).
 
