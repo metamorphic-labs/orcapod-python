@@ -296,3 +296,32 @@ def test_cached_rerun_in_new_process_hits_the_cache(tmp_path: Path) -> None:
     assert second["schemas"]["b"] == str(
         pl.Schema({"i": pl.Int8, "e": pl.Enum(["b", "a"])})
     )
+
+
+@function_pod(output_keys="column")
+def first_column(df: pl.DataFrame) -> pl.Series:
+    return df.to_series(0)
+
+
+@function_pod(output_keys="total")
+def series_sum(column: pl.Series) -> int:
+    return int(column.sum())
+
+
+class TestSeriesValues:
+    def test_pod_output_and_input(self, tmp_path: Path) -> None:
+        job = PipelineJob(name="series", store=DeltaTableDatabase(tmp_path / "s"))
+        with job:
+            columns = first_column.pod(make_frame.pod(_int_source()), label="first")
+            series_sum.pod(columns, label="sum")
+        job.run()
+
+        got = {tag["k"]: data["column"] for tag, data in job.nodes["first"].iter_data()}
+        for key, n in (("a", 1), ("b", 3)):
+            series = got[key]
+            assert isinstance(series, pl.Series)
+            assert series.name == "i"
+            assert series.dtype == pl.Int8
+            assert series.to_list() == list(range(n))
+        totals = {tag["k"]: data["total"] for tag, data in job.nodes["sum"].iter_data()}
+        assert totals == {"a": 0, "b": 3}

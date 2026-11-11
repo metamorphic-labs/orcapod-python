@@ -47,7 +47,7 @@ from .file_type import LogicalFile  # ITL-450
 from .directory_type import LogicalDirectory  # ITL-451
 from .numpy_type import LogicalNumpyArray  # ITL-460
 from .pandas_type import LogicalPandasDataFrame, LogicalPandasSeries  # PLT-1869
-from .polars_type import LogicalPolarsDataFrame  # ITL-578
+from .polars_type import LogicalPolarsDataFrame, LogicalPolarsSeries  # ITL-578
 
 __all__ = [
     "LogicalTypeProtocol",
@@ -86,4 +86,5 @@ __all__ = [
     "LogicalPandasSeries",
     # ITL-578
     "LogicalPolarsDataFrame",
+    "LogicalPolarsSeries",
 ]

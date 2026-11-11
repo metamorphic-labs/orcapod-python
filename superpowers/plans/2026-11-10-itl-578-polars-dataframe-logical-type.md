@@ -234,9 +234,37 @@ stream API. Frames are compared with `assert_frame_equal` **and** schema equalit
   This test also needs Task 6 (the cache key is the hash).
 - [ ] Commit `test(function_pod): polars.DataFrame values through pods, operators and databases`.
 
-### Task 6: Hash handler — BLOCKED on the developer's decision
+### Task 6: Hash handler — decided by the developer (November 10, 2026)
 
-Do not implement until the coordinator answers. Tests to write first whatever the option:
+Decision: option A with corrections. Column order and struct field order are **not** part of
+identity (starfix is deliberately order independent and Orcapod relies on it). Enum category
+order **is**. The dtype descriptor is Orcapod's own versioned grammar, never Polars' repr or
+`_PL_*` metadata. Values are hashed with starfix `hash_table` over a hash-only projection
+(Array cast to `large_list`, top-level Null columns left out, row count in the descriptor).
+`pl.Series` is approved as `polars.series` with the same scheme (name + dtype + values). The
+pandas handler and every existing hash stay unchanged.
+
+Mechanism: a semantic handler per Python type (`PolarsDataFrameHandler`,
+`PolarsSeriesHandler`) registered in `v0.1.json`. The column-level `ARROW:extension:*`
+metadata route cannot carry a per-value dtype, so the handler route is the only one that
+applies to every `polars.dataframe` value wherever it is hashed. The descriptor and hash
+functions live in `polars_type.py`, next to the storage format they describe; the handlers
+delegate to them.
+
+Grammar (canonical JSON, `sort_keys`, compact separators, UTF-8):
+`{"v": 1, "kind": "polars.dataframe", "height": n, "columns": {name: dtype}}`, and for a
+Series `{"v": 1, "kind": "polars.series", "name": s, "height": n, "dtype": dtype}`, where
+`dtype` is one of `"int8"`…`"uint64"`, `"float16"`, `"float32"`, `"float64"`, `"boolean"`,
+`"string"`, `"binary"`, `"date"`, `"time"`, `"null"`, `"categorical"`,
+`{"enum": [categories in order]}`, `{"decimal": [precision, scale]}`,
+`{"datetime": [unit, time_zone or null]}`, `{"duration": unit}`, `{"list": dtype}`,
+`{"array": [dtype, size]}` (multi-dimensional arrays nest), `{"struct": {field: dtype}}`.
+Anything else raises `ValueError` naming the column and dtype. Nested Null (inside List,
+Array or Struct) cannot be left out without changing list offsets, so the projection casts it
+to an all-null `bool` for hashing only; the descriptor still records `"null"`.
+Digest: `sha256(descriptor_bytes + b"\x00" + starfix_digest)`, method `"sha256"`.
+
+Tests to write first:
 `tests/test_hashing/test_polars_handlers.py`
 
 - equal frames hash identically regardless of chunk layout and of null-slot payload

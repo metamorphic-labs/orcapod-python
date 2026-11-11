@@ -14,9 +14,13 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pytest
-from polars.testing import assert_frame_equal
+from polars.testing import assert_frame_equal, assert_series_equal
 
-from orcapod.logical_types import LogicalNumpyArray, LogicalPolarsDataFrame
+from orcapod.logical_types import (
+    LogicalNumpyArray,
+    LogicalPolarsDataFrame,
+    LogicalPolarsSeries,
+)
 from orcapod.logical_types.protocols import LogicalTypeProtocol
 
 
@@ -212,6 +216,15 @@ class TestLogicalPolarsDataFrameRoundTrip:
         back = _round_trip(df)
         assert back.shape == (0, 0)
 
+    def test_empty_column_name_is_kept(self) -> None:
+        """``pl.from_arrow`` alone renames a ``""`` column to ``column_0``."""
+        df = pl.DataFrame({"": [1, 2], "x": ["a", "b"]})
+        _assert_exact(_round_trip(df), df)
+
+    def test_empty_name_next_to_column_0(self) -> None:
+        df = pl.DataFrame({"": [1], "column_0": [2]})
+        _assert_exact(_round_trip(df), df)
+
     def test_chunked_frame_round_trips(self) -> None:
         df = pl.concat(
             [pl.DataFrame({"x": [1, None]}), pl.DataFrame({"x": [3]})], rechunk=False
@@ -263,3 +276,47 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
         df = pl.DataFrame([pl.Series("arr", [b"x"], dtype=pl.Binary).ext.to(ext)])
         with pytest.raises(ValueError, match=r"'arr'.*numpy\.ndarray"):
             LogicalPolarsDataFrame().python_to_storage(df)
+
+
+class TestLogicalPolarsSeries:
+    def test_protocol_and_names(self) -> None:
+        lt = LogicalPolarsSeries()
+        assert isinstance(lt, LogicalTypeProtocol)
+        assert lt.logical_type_name == "polars.series"
+        assert lt.python_type is pl.Series
+        ext = lt.get_arrow_extension_type()
+        assert ext.extension_name == "polars.series"
+        assert ext.storage_type == pa.large_binary()
+        assert lt.get_polars_extension_type().ext_name() == "polars.series"
+
+    @pytest.mark.parametrize("name", list(_COLUMN_CASES))
+    def test_round_trip_is_exact(self, name: str) -> None:
+        lt = LogicalPolarsSeries()
+        series = _COLUMN_CASES[name]().alias(name)
+        back = lt.storage_to_python(lt.python_to_storage(series))
+        assert back.name == name
+        assert back.dtype == series.dtype
+        assert_series_equal(back, series)
+
+    @pytest.mark.parametrize("name", ["", "metric", "with space"])
+    def test_name_is_kept(self, name: str) -> None:
+        lt = LogicalPolarsSeries()
+        series = pl.Series(name, [1, 2], dtype=pl.UInt8)
+        assert lt.storage_to_python(lt.python_to_storage(series)).name == name
+
+    def test_empty_series(self) -> None:
+        lt = LogicalPolarsSeries()
+        series = pl.Series("e", [], dtype=pl.Enum(["a", "b"]))
+        back = lt.storage_to_python(lt.python_to_storage(series))
+        assert_series_equal(back, series)
+        assert back.dtype == pl.Enum(["a", "b"])
+
+    def test_unsupported_dtype_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"'big'.*Int128"):
+            LogicalPolarsSeries().python_to_storage(
+                pl.Series("big", [1], dtype=pl.Int128)
+            )
+
+    def test_non_series_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="pl.Series"):
+            LogicalPolarsSeries().python_to_storage(pl.DataFrame({"x": [1]}))

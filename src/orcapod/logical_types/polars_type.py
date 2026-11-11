@@ -1,7 +1,11 @@
-"""``polars.DataFrame`` logical type for orcapod.
+"""``polars.DataFrame`` and ``polars.Series`` logical types for orcapod.
 
+Storage
+-------
 ``LogicalPolarsDataFrame`` maps ``pl.DataFrame`` <-> Arrow ``large_binary`` using an Arrow
 IPC stream as the storage envelope, the same envelope ``LogicalPandasDataFrame`` uses.
+``LogicalPolarsSeries`` stores a ``pl.Series`` the same way, as a one-column frame named
+after the Series (a Polars Series name is always a ``str``, so no sentinel is needed).
 
 The frame is exported with ``compat_level=pl.CompatLevel.oldest()``, so strings and binaries
 are written as ``large_string`` / ``large_binary`` (never the view types) whatever the
@@ -15,14 +19,57 @@ Dtypes that cannot round-trip exactly are rejected when the value is written, na
 column and dtype: ``Object`` (Arrow export would silently store raw pointer bytes),
 ``Int128`` / ``UInt128`` (pyarrow cannot import them), and Polars extension dtypes (a logical
 value nested inside a frame value is not supported).
+
+Content hash
+------------
+The stored IPC bytes are not canonical (the bytes under null slots, and Polars' own field
+metadata, vary for equal frames), so the content hash is computed from the frame itself by
+``polars_frame_content_hash`` / ``polars_series_content_hash``, which the semantic hashers
+``PolarsDataFrameHandler`` / ``PolarsSeriesHandler`` call. The hash is::
+
+    sha256(descriptor + b"\\x00" + starfix_digest)
+
+``starfix_digest`` is ``starfix.ArrowDigester.hash_table`` of a hash-only Arrow projection of
+the values (see ``_hash_projection``). Like every Orcapod table hash it ignores column order
+and struct field order, and hashes a dictionary-encoded column by its values.
+
+``descriptor`` is canonical JSON (keys sorted, separators ``","`` and ``":"``, UTF-8) that
+carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``repr`` or its
+``_PL_*`` metadata)::
+
+    frame:  {"v": 1, "kind": "polars.dataframe", "height": <rows>,
+             "columns": {<name>: <dtype>, ...}}
+    series: {"v": 1, "kind": "polars.series", "name": <name>, "height": <rows>,
+             "dtype": <dtype>}
+
+    <dtype> := "int8" | "int16" | "int32" | "int64"
+             | "uint8" | "uint16" | "uint32" | "uint64"
+             | "float16" | "float32" | "float64"
+             | "boolean" | "string" | "binary" | "date" | "time" | "null"
+             | "categorical"
+             | {"enum": [<category>, ...]}          categories in their order
+             | {"decimal": [<precision>, <scale>]}
+             | {"datetime": [<unit>, <time zone or null>]}
+             | {"duration": <unit>}
+             | {"list": <dtype>}
+             | {"array": [<dtype>, <size>]}         a multi-dimensional array nests
+             | {"struct": {<field>: <dtype>, ...}}
+
+Keys are sorted, so column order and struct field order are not part of the identity; Enum
+category order is. ``"v"`` versions the grammar: any change to it must bump ``"v"``, which
+changes every frame hash on purpose. A dtype outside the grammar raises ``ValueError`` naming
+the column.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pyarrow as pa
+from starfix import ArrowDigester
 
 from orcapod.logical_types.arrow_ipc import ipc_bytes_to_table, table_to_ipc_bytes
 from orcapod.logical_types.base_logical_type import BaseLogicalType
@@ -30,6 +77,7 @@ from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
 )
+from orcapod.types import ContentHash
 
 if TYPE_CHECKING:
     from polars._typing import PolarsDataType
@@ -37,7 +85,38 @@ if TYPE_CHECKING:
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
+POLARS_HASH_GRAMMAR_VERSION = 1
+"""Version of the hash descriptor grammar (the ``"v"`` key). Bump on any grammar change."""
+
 _UNSTORABLE_DTYPES: tuple[type[pl.DataType], ...] = (pl.Object, pl.Int128, pl.UInt128)
+
+_SUPPORTED_DTYPES_TEXT = (
+    "Supported dtypes are integers up to 64 bits, floats, String, Binary, Boolean, "
+    "Categorical, Enum, Decimal, Date, Time, Datetime, Duration, Null, and List, Array or "
+    "Struct of those."
+)
+
+# Grammar names of the dtypes that carry no parameters.
+_PLAIN_DTYPE_NAMES: dict[object, str] = {
+    pl.Int8: "int8",
+    pl.Int16: "int16",
+    pl.Int32: "int32",
+    pl.Int64: "int64",
+    pl.UInt8: "uint8",
+    pl.UInt16: "uint16",
+    pl.UInt32: "uint32",
+    pl.UInt64: "uint64",
+    pl.Float16: "float16",
+    pl.Float32: "float32",
+    pl.Float64: "float64",
+    pl.Boolean: "boolean",
+    pl.String: "string",
+    pl.Binary: "binary",
+    pl.Date: "date",
+    pl.Time: "time",
+    pl.Null: "null",
+    pl.Categorical: "categorical",
+}
 
 
 def _find_unstorable_dtype(dtype: PolarsDataType) -> PolarsDataType | None:
@@ -54,14 +133,9 @@ def _find_unstorable_dtype(dtype: PolarsDataType) -> PolarsDataType | None:
     """
     if isinstance(dtype, type):
         # A bare dtype class has no children to walk.
-        return (
-            dtype
-            if issubclass(dtype, (pl.BaseExtension, *_UNSTORABLE_DTYPES))
-            else None
-        )
-    if isinstance(dtype, pl.BaseExtension):
-        return dtype
-    if isinstance(dtype, _UNSTORABLE_DTYPES):
+        unstorable = issubclass(dtype, (pl.BaseExtension, *_UNSTORABLE_DTYPES))
+        return dtype if unstorable else None
+    if isinstance(dtype, (pl.BaseExtension, *_UNSTORABLE_DTYPES)):
         return dtype
     if isinstance(dtype, (pl.List, pl.Array)):
         return _find_unstorable_dtype(dtype.inner)
@@ -89,12 +163,185 @@ def check_polars_schema_storable(schema: pl.Schema) -> None:
             continue
         nested = "" if bad is dtype else f" (contains {bad})"
         raise ValueError(
-            f"LogicalPolarsDataFrame: column {name!r} has dtype {dtype}{nested}, which "
-            "cannot be stored and read back exactly. Supported dtypes are integers up to "
-            "64 bits, floats, String, Binary, Boolean, Categorical, Enum, Decimal, Date, "
-            "Time, Datetime, Duration, Null, and List, Array or Struct of those. Convert "
-            "the column explicitly before returning the frame."
+            f"Polars value: column {name!r} has dtype {dtype}{nested}, which cannot be "
+            f"stored and read back exactly. {_SUPPORTED_DTYPES_TEXT} Convert the column "
+            "explicitly before returning the value."
         )
+
+
+def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
+    """Encode a Polars dtype in Orcapod's hash descriptor grammar.
+
+    See the module docstring for the grammar.
+
+    Args:
+        dtype: The dtype to encode, possibly nested.
+        column: The top-level column the dtype belongs to, for the error message.
+
+    Returns:
+        A JSON-serialisable value: a ``str`` for a plain dtype, a one-key ``dict`` for a
+        parameterised one.
+
+    Raises:
+        ValueError: If ``dtype`` (or a dtype nested in it) is outside the grammar.
+    """
+    if isinstance(dtype, pl.Enum):
+        return {"enum": dtype.categories.to_list()}
+    if isinstance(dtype, pl.Decimal):
+        return {"decimal": [dtype.precision, dtype.scale]}
+    if isinstance(dtype, pl.Datetime):
+        return {"datetime": [dtype.time_unit, dtype.time_zone]}
+    if isinstance(dtype, pl.Duration):
+        return {"duration": dtype.time_unit}
+    if isinstance(dtype, pl.List):
+        return {"list": polars_dtype_descriptor(dtype.inner, column)}
+    if isinstance(dtype, pl.Array):
+        return {"array": [polars_dtype_descriptor(dtype.inner, column), dtype.size]}
+    if isinstance(dtype, pl.Struct):
+        return {
+            "struct": {
+                field.name: polars_dtype_descriptor(field.dtype, column)
+                for field in dtype.fields
+            }
+        }
+    if not isinstance(dtype, pl.BaseExtension):
+        dtype_class = dtype if isinstance(dtype, type) else type(dtype)
+        name = _PLAIN_DTYPE_NAMES.get(dtype_class)
+        if name is not None:
+            return name
+    raise ValueError(
+        f"Polars value: column {column!r} has dtype {dtype}, which Orcapod cannot hash. "
+        f"{_SUPPORTED_DTYPES_TEXT}"
+    )
+
+
+def _hash_projection_type(arrow_type: pa.DataType) -> pa.DataType:
+    """Map a nested Arrow type to the type starfix hashes it as.
+
+    ``fixed_size_list`` (Polars ``Array``) becomes ``large_list`` and a nested ``null``
+    becomes an all-null ``bool``, because starfix supports neither; a dictionary becomes its
+    value type. The descriptor records the real dtypes, so nothing is lost. Field names and
+    nullability are kept.
+
+    Args:
+        arrow_type: The Arrow type of a column, as exported by Polars.
+
+    Returns:
+        The type to cast the column to before hashing.
+    """
+    if pa.types.is_null(arrow_type):
+        return pa.bool_()
+    if pa.types.is_dictionary(arrow_type):
+        return _hash_projection_type(arrow_type.value_type)
+    if (
+        pa.types.is_fixed_size_list(arrow_type)
+        or pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+    ):
+        item = arrow_type.value_field
+        return pa.large_list(item.with_type(_hash_projection_type(item.type)))
+    if pa.types.is_struct(arrow_type):
+        return pa.struct(
+            [field.with_type(_hash_projection_type(field.type)) for field in arrow_type]
+        )
+    return arrow_type
+
+
+def _hash_projection(df: pl.DataFrame) -> pa.Table:
+    """Build the Arrow table whose starfix digest stands for the frame's values.
+
+    Top-level ``Null`` columns are left out: their content is fully determined by their
+    dtype and the row count, both in the descriptor.
+
+    Args:
+        df: The frame to hash. Its dtypes must already be inside the grammar.
+
+    Returns:
+        A table of the frame's non-``Null`` columns, cast with ``_hash_projection_type``.
+    """
+    table = df.to_arrow(compat_level=pl.CompatLevel.oldest())
+    kept = [field for field in table.schema if not pa.types.is_null(field.type)]
+    table = table.select([field.name for field in kept])
+    target = pa.schema(
+        [field.with_type(_hash_projection_type(field.type)) for field in kept]
+    )
+    return table.cast(target)
+
+
+def _content_hash(descriptor: dict[str, Any], df: pl.DataFrame) -> ContentHash:
+    descriptor_bytes = json.dumps(
+        descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    values_digest = ArrowDigester.hash_table(_hash_projection(df))
+    digest = hashlib.sha256(descriptor_bytes + b"\x00" + values_digest).digest()
+    return ContentHash(method="sha256", digest=digest)
+
+
+def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
+    """Content hash of a ``pl.DataFrame`` (see the module docstring for the scheme).
+
+    Args:
+        df: The frame to hash.
+
+    Returns:
+        A ``ContentHash`` with method ``"sha256"``.
+
+    Raises:
+        ValueError: If a column's dtype is outside the descriptor grammar.
+    """
+    descriptor = {
+        "v": POLARS_HASH_GRAMMAR_VERSION,
+        "kind": "polars.dataframe",
+        "height": df.height,
+        "columns": {
+            name: polars_dtype_descriptor(dtype, name)
+            for name, dtype in df.schema.items()
+        },
+    }
+    return _content_hash(descriptor, df)
+
+
+def polars_series_content_hash(series: pl.Series) -> ContentHash:
+    """Content hash of a ``pl.Series``: its name, dtype and values.
+
+    Args:
+        series: The Series to hash.
+
+    Returns:
+        A ``ContentHash`` with method ``"sha256"``; never equal to the hash of the one-column
+        frame holding the same Series (the descriptors differ in ``"kind"``).
+
+    Raises:
+        ValueError: If the dtype is outside the descriptor grammar.
+    """
+    descriptor = {
+        "v": POLARS_HASH_GRAMMAR_VERSION,
+        "kind": "polars.series",
+        "name": series.name,
+        "height": series.len(),
+        "dtype": polars_dtype_descriptor(series.dtype, series.name),
+    }
+    return _content_hash(descriptor, series.to_frame())
+
+
+def _frame_to_ipc_bytes(df: pl.DataFrame) -> bytes:
+    check_polars_schema_storable(df.schema)
+    table = df.to_arrow(compat_level=pl.CompatLevel.oldest()).combine_chunks()
+    return table_to_ipc_bytes(table)
+
+
+def _ipc_bytes_to_frame(storage_value: Any) -> pl.DataFrame:
+    table = ipc_bytes_to_table(storage_value)
+    names = table.column_names
+    # ``pl.from_arrow`` renames a column called "" to "column_0" (and then fails if a
+    # "column_0" exists too), so read under positional names and restore the stored ones.
+    frame = pl.from_arrow(table.rename_columns([str(i) for i in range(len(names))]))
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError(
+            f"stored Polars value did not decode to a pl.DataFrame (got {type(frame)!r})"
+        )
+    frame.columns = names
+    return frame
 
 
 class LogicalPolarsDataFrame(BaseLogicalType):
@@ -132,9 +379,8 @@ class LogicalPolarsDataFrame(BaseLogicalType):
             storage type ``pa.large_binary()``.
         """
         if LogicalPolarsDataFrame._arrow_ext is None:
-            LogicalPolarsDataFrame._arrow_ext = (
-                LogicalPolarsDataFrame._arrow_ext_class()
-            )  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no constructor arguments
+            ext_class = LogicalPolarsDataFrame._arrow_ext_class
+            LogicalPolarsDataFrame._arrow_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
         return LogicalPolarsDataFrame._arrow_ext
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
@@ -144,9 +390,8 @@ class LogicalPolarsDataFrame(BaseLogicalType):
             A ``pl.BaseExtension`` instance registered under ``"polars.dataframe"``.
         """
         if LogicalPolarsDataFrame._polars_ext is None:
-            LogicalPolarsDataFrame._polars_ext = (
-                LogicalPolarsDataFrame._polars_ext_class()
-            )  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no constructor arguments
+            ext_class = LogicalPolarsDataFrame._polars_ext_class
+            LogicalPolarsDataFrame._polars_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
         return LogicalPolarsDataFrame._polars_ext
 
     def python_to_storage(
@@ -170,9 +415,7 @@ class LogicalPolarsDataFrame(BaseLogicalType):
             raise TypeError(
                 f"LogicalPolarsDataFrame: expected a pl.DataFrame, got {type(value)!r}"
             )
-        check_polars_schema_storable(value.schema)
-        table = value.to_arrow(compat_level=pl.CompatLevel.oldest()).combine_chunks()
-        return table_to_ipc_bytes(table)
+        return _frame_to_ipc_bytes(value)
 
     def storage_to_python(
         self, storage_value: Any, converter: TypeConverterProtocol | None = None
@@ -189,10 +432,99 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         Raises:
             TypeError: If the stored stream does not decode to a ``pl.DataFrame``.
         """
-        frame = pl.from_arrow(ipc_bytes_to_table(storage_value))
-        if not isinstance(frame, pl.DataFrame):
+        return _ipc_bytes_to_frame(storage_value)
+
+
+class LogicalPolarsSeries(BaseLogicalType):
+    """Logical type for ``pl.Series``.
+
+    Stores the Series as a one-column frame named after the Series, in the same Arrow IPC
+    envelope as ``LogicalPolarsDataFrame``, so its name, dtype and values round-trip exactly
+    under the same rules.
+
+    The extension name ``"polars.series"`` is library-qualified, like ``"pandas.series"``.
+
+    Example:
+        >>> lt = LogicalPolarsSeries()
+        >>> s = pl.Series("m", [1, 2], dtype=pl.UInt8)
+        >>> back = lt.storage_to_python(lt.python_to_storage(s))
+        >>> back.name, back.dtype
+        ('m', UInt8)
+    """
+
+    _arrow_ext_class = make_arrow_extension_type("polars.series", pa.large_binary())
+    _arrow_ext: pa.ExtensionType | None = None
+    _polars_ext_class = make_polars_extension_type("polars.series", pa.large_binary())
+    _polars_ext: pl.BaseExtension | None = None
+
+    logical_type_name: str = "polars.series"
+    python_type: type = pl.Series
+
+    def get_arrow_extension_type(self) -> pa.ExtensionType:
+        """Return the cached Arrow extension type for ``pl.Series``.
+
+        Returns:
+            A ``pa.ExtensionType`` instance with extension name ``"polars.series"`` and
+            storage type ``pa.large_binary()``.
+        """
+        if LogicalPolarsSeries._arrow_ext is None:
+            ext_class = LogicalPolarsSeries._arrow_ext_class
+            LogicalPolarsSeries._arrow_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
+        return LogicalPolarsSeries._arrow_ext
+
+    def get_polars_extension_type(self) -> pl.BaseExtension:
+        """Return the cached Polars extension type for ``pl.Series``.
+
+        Returns:
+            A ``pl.BaseExtension`` instance registered under ``"polars.series"``.
+        """
+        if LogicalPolarsSeries._polars_ext is None:
+            ext_class = LogicalPolarsSeries._polars_ext_class
+            LogicalPolarsSeries._polars_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
+        return LogicalPolarsSeries._polars_ext
+
+    def python_to_storage(
+        self, value: Any, converter: TypeConverterProtocol | None = None
+    ) -> bytes:
+        """Serialise a ``pl.Series`` to Arrow IPC stream bytes.
+
+        Args:
+            value: A ``pl.Series`` whose dtype can round-trip exactly.
+            converter: Ignored. Present for protocol conformance.
+
+        Returns:
+            Raw bytes of an Arrow IPC stream holding the Series as a one-column frame.
+
+        Raises:
+            TypeError: If ``value`` is not a ``pl.Series``.
+            ValueError: If the dtype cannot round-trip exactly (see
+                ``check_polars_schema_storable``).
+        """
+        if not isinstance(value, pl.Series):
             raise TypeError(
-                "LogicalPolarsDataFrame: stored value did not decode to a pl.DataFrame "
-                f"(got {type(frame)!r})"
+                f"LogicalPolarsSeries: expected a pl.Series, got {type(value)!r}"
             )
-        return frame
+        return _frame_to_ipc_bytes(value.to_frame())
+
+    def storage_to_python(
+        self, storage_value: Any, converter: TypeConverterProtocol | None = None
+    ) -> pl.Series:
+        """Reconstruct a ``pl.Series`` from Arrow IPC stream bytes.
+
+        Args:
+            storage_value: Raw bytes as stored in Arrow ``large_binary``.
+            converter: Ignored. Present for protocol conformance.
+
+        Returns:
+            The ``pl.Series`` with the name, dtype and values it was stored with.
+
+        Raises:
+            TypeError: If the stored stream does not decode to a one-column frame.
+        """
+        frame = _ipc_bytes_to_frame(storage_value)
+        if frame.width != 1:
+            raise TypeError(
+                "LogicalPolarsSeries: stored value has "
+                f"{frame.width} columns, expected exactly 1"
+            )
+        return frame.to_series(0)

@@ -494,6 +494,72 @@ class PandasSeriesHandler:
         return self._get_arrow_hasher().hash_table(table)
 
 
+class PolarsDataFrameHandler:
+    """Hasher for ``pl.DataFrame``: Orcapod's dtype descriptor plus a starfix value digest.
+
+    Delegates to ``polars_frame_content_hash`` in ``orcapod.logical_types.polars_type``,
+    whose module docstring defines the scheme. The hash ignores chunking, slice offsets, the
+    bytes under null slots, column order and struct field order, and distinguishes every
+    dtype parameter (Enum categories and their order, Decimal precision and scale, Datetime
+    unit and time zone, Duration unit, Array shape).
+    """
+
+    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+        """Return the content hash of ``obj``.
+
+        Args:
+            obj: A ``pl.DataFrame`` instance.
+            hasher: Ignored. Present for protocol conformance.
+
+        Returns:
+            A ``ContentHash`` with method ``"sha256"``.
+
+        Raises:
+            TypeError: If ``obj`` is not a ``pl.DataFrame``.
+            ValueError: If a column's dtype is outside the descriptor grammar.
+        """
+        import polars as _pl
+
+        from orcapod.logical_types.polars_type import polars_frame_content_hash
+
+        if not isinstance(obj, _pl.DataFrame):
+            raise TypeError(
+                f"PolarsDataFrameHandler: expected pl.DataFrame, got {type(obj)!r}"
+            )
+        return polars_frame_content_hash(obj)
+
+
+class PolarsSeriesHandler:
+    """Hasher for ``pl.Series``: its name, Orcapod dtype descriptor and starfix value digest.
+
+    Delegates to ``polars_series_content_hash`` in ``orcapod.logical_types.polars_type``.
+    """
+
+    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+        """Return the content hash of ``obj``.
+
+        Args:
+            obj: A ``pl.Series`` instance.
+            hasher: Ignored. Present for protocol conformance.
+
+        Returns:
+            A ``ContentHash`` with method ``"sha256"``.
+
+        Raises:
+            TypeError: If ``obj`` is not a ``pl.Series``.
+            ValueError: If the dtype is outside the descriptor grammar.
+        """
+        import polars as _pl
+
+        from orcapod.logical_types.polars_type import polars_series_content_hash
+
+        if not isinstance(obj, _pl.Series):
+            raise TypeError(
+                f"PolarsSeriesHandler: expected pl.Series, got {type(obj)!r}"
+            )
+        return polars_series_content_hash(obj)
+
+
 def register_builtin_python_type_handlers(
     registry: "HandlerRegistryProtocol",
     file_hasher: Any = None,
@@ -612,6 +678,11 @@ def register_builtin_python_type_handlers(
 
     registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher))
     registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher))
+
+    import polars as _pl
+
+    registry.register(_pl.DataFrame, PolarsDataFrameHandler())
+    registry.register(_pl.Series, PolarsSeriesHandler())
 
     logger.debug(
         "register_builtin_python_type_handlers: registered %d hashers",
