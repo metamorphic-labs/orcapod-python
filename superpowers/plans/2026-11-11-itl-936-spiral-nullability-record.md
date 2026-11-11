@@ -22,8 +22,18 @@ batch), wrapping errors with project/dataset/table. Tables without a record are 
   (`eywalker/itl-926-re-verify-spiraldb-table-as-a-source-for`, 49956a6a).
 - [x] Investigation (probe output, ITL-933 tool, connector, fake, tests).
 - [x] Fake corrected to server behaviour; list of #305 tests only true on the fake (Notes).
-- [ ] Design sent to coordinator via `orca orchestration ask`; approval recorded here.
-- [ ] Tasks 1-7 below.
+- [x] Design sent to coordinator; provisionally approved November 11, 2026 (names, key and
+  encoding pending developer confirmation: keep them easy to change). Additions requested and
+  done: header written last with digest-named chunk keys; record never rewritten by the
+  connector; per-batch check counted for unrecorded tables; result-store round trip.
+- [x] Tasks 0-6 done; full suite green on 3.12 (7669 passed, 96 skipped, 19 xfailed).
+- [ ] Live check (coordinator runs `superpowers/specs/itl-936-live/live_nullability.py`).
+- [ ] PR, CodeRabbit rounds, CI.
+
+pyspiral 0.16.33 `Table.set_metadata`: one upsert PUT of all entries; "not versioned, parallel
+calls race"; limits: key + value <= 8 KiB, key <= 255 characters, <= 1024 entries per table;
+`drop_metadata(keys)` exists. `Transaction.write(push_down_nulls=True)` turns a null struct
+into a struct of null fields ("SpiralDB doesn't allow struct-level nullability").
 
 ---
 
