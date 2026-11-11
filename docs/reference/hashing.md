@@ -242,6 +242,67 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 ---
 
+### 1c. `dict` and `set` values: canonical order
+
+A `dict` and a `set` have no order, so equal values must hash equally whatever order they
+were built in. Arrow stores both as lists: `dict[K, V]` as `large_list<struct<key, value>>`
+and a plain `set[T]` as `large_list<T>`. Orcapod puts them in canonical order at the point
+where a Python value becomes Arrow, so the stored list, and therefore the row hash, does not
+depend on insertion order (dicts) or on `PYTHONHASHSEED` (sets of `str` or `bytes`).
+
+```python
+from orcapod.sources import DictSource
+
+
+def dict_row_hash(value):
+    source = DictSource(
+        data=[{"k": "r", "m": value}],
+        tag_columns=["k"],
+        data_schema={"k": str, "m": dict[str, int]},
+    )
+    _, data = next(iter(source.iter_data()))
+    return data.content_hash()
+
+
+print(dict_row_hash({"a": 1, "b": 2}) == dict_row_hash({"b": 2, "a": 1}))
+# True
+```
+
+**Where the order is applied.** In the type converter (`get_python_to_arrow_converter`),
+which every Python-to-Arrow path uses: sources built from Python values, datagrams, function
+pod outputs (sync and async), and dicts nested in lists, dicts or dataclass and pydantic
+fields. A datagram built from Python values also holds its dict values (including dicts
+inside lists, dicts and `Optional`) as key-ordered copies, so a fresh pod output and the
+same output read back from a cache iterate in the same order. The caller's dict is never
+modified; dicts inside dataclass or pydantic objects keep their own order in memory.
+
+**The order** is defined on the converted (storage) key or element, in
+`semantic_types/canonical_order.py`:
+
+| Key or element type | Order |
+|---|---|
+| `None` (for `K \| None`) | first |
+| `bool` | `False` before `True` |
+| `int`, `float`, `Decimal` | numeric |
+| `str` | Unicode code point, never locale |
+| `bytes` | unsigned bytewise |
+| `date`, `datetime`, `time`, `timedelta` | natural order; datetimes by instant (they are timezone aware after conversion) |
+
+A NaN key or element has no order and raises `CanonicalOrderError` (a `ValueError`) naming
+the column, as do keys or elements that cannot be compared and two keys or elements that
+convert to the same stored value. A dict or set already built in this order is stored
+byte-for-byte as before this rule existed, so its hash did not change.
+
+**Arrow tables are hashed exactly as stored.** `StarfixArrowHasher` never sorts list
+contents. A `list<struct<key, value>>` column that arrives already in Arrow form (an
+`ArrowTableSource`, a Delta table, rows read back from a store) is read by Python as a
+`dict`, but at the Arrow level it is an ordered list and its stored order is part of its
+hash. Rows written by `0.2.0` from dicts that were not built in key order therefore keep
+their old hash when read back; see the `0.3.0` changelog for what that means for an
+existing store. A `list[T]` value is never sorted: its order is part of its identity.
+
+---
+
 ## 2. Source Provenance & System Tags
 
 When a source is built by `SourceStreamBuilder`, four hash-related operations happen in
