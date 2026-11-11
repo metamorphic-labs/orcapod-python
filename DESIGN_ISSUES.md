@@ -2401,17 +2401,21 @@ ignored stored rows whenever a pending batch existed (and returned an empty tabl
 `None`), and a pending row whose record id was already stored was returned as well, although a
 flush keeps the stored row and drops the pending one.
 
-**Fix:** the loaded-table, existing-ids and cache-dirty dicts are shared across the `at()`
-family exactly as pending state is. Every read method returns what a flush would leave: the
+**Fix:** the loaded-table cache and the committed snapshots (`_CommittedSnapshot`, which
+replaced the existing-ids and cache-dirty dicts in ITL-919) are shared across the `at()`
+family exactly as pending state (pending batches and their indexes) is. Every read method returns what a flush would leave: the
 stored rows plus the pending rows whose record id is not stored (`_pending_not_stored`), and
 `None` when there are none. These dicts are touched only from the thread that drives the
 pipeline; the async orchestrator runs only user functions in worker threads. Regression tests:
 `tests/test_databases/test_delta_read_your_writes.py` and
-`tests/test_pipeline/test_delta_node_records_after_run.py`. A failed stored-id refresh leaves
-the cache dirty, so the next read retries it instead of treating every stored id as unstored
-and returning duplicates; in `get_records_by_ids` the refresh shares the stored read's error
-handling. A handle that loaded the table before it had any stored ids (a fresh root over an
-existing table) refreshes them on its first read with pending rows.
+`tests/test_pipeline/test_delta_node_records_after_run.py`. Stored ids come from
+`_stored_ids`: the snapshot of the loaded table version reads them on first use, through an
+id-only scan (a one-column schema); a failed scan raises `StoreReadError` and leaves the
+snapshot's ids unset (`None`), so the next read scans again instead of treating every stored
+id as unstored and returning duplicates. A handle that loaded the table before it had any
+stored ids (a fresh root over an existing table) reads them on its first read with pending
+rows (`_pending_not_stored`). After the family's own commit the ids are extended from the
+commit itself, with no re-read (ITL-919).
 
 When stored and pending rows are read together, the result has the schema a flush would give:
 both parts are large-normalized (`null` kept), then combined with
@@ -2435,9 +2439,10 @@ fails and the batch stays pending (unchanged, pinned by
 `test_pending_null_typed_column_reads_back_but_does_not_flush`).
 
 Still open: a handle does not see writes made by another process, or by a separate
-`DeltaTableDatabase` root on the same path, until it reloads the table; this is unchanged.
-Reading with a pending batch also refreshes the stored-id set when it is stale, which loads the
-whole table (D3).
+`DeltaTableDatabase` root on the same path, until its own next commit to that table reloads it;
+this is unchanged. When it does reload (another writer committed in between), the stored ids
+are read again with the id-only scan, and the stored rows on the next lookup, each once per
+version (D3, now bounded by ITL-919's snapshot).
 
 ---
 
@@ -2562,4 +2567,9 @@ pod: 0.09 ms).
   async rerun of an ephemeral-result node skipped its rows (ITL-923, fixed). Remaining
   (ITL-923 item 3): a pending row written with `skip_duplicates=False` whose id is already
   stored is still dropped by the commit (Delta keeps the stored row; the in-memory store
-  overwrites it).
+  overwrites it). Memory: a store object keeps the committed rows of each table it looks rows
+  up in for as long as it lives (main read the whole table per lookup and released it; the
+  peak is the same, the lifetime is new); keeping only the lookup columns would need a read
+  per matched row. A follow-up to bound it is for the coordinator to file. The store's own
+  size-triggered flush (`batch_size`) now commits only the full table, and `PipelineJob.run`
+  refuses `commit_every_rows >= batch_size`, so the results-first order holds.

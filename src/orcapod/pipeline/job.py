@@ -741,7 +741,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 last commit; re-running the job recomputes only those. A larger
                 value commits less often (faster, fewer files); ``1`` commits
                 after every row. A node run on its own, outside ``run()``,
-                commits after every row.
+                commits after every row. It must be smaller than the store's
+                ``batch_size`` when the store has one (``DeltaTableDatabase``,
+                default 1000): the store commits every pending table by itself
+                once one table's pending rows reach that size, which would
+                break the node's results-before-records commit order.
 
         Returns:
             ``self`` — the same ``PipelineJob`` instance, with
@@ -749,7 +753,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         Raises:
             ValueError: If no store is set, or ``commit_every_rows`` is not a
-                positive integer.
+                positive integer smaller than the store's ``batch_size``.
             RuntimeError: If no pipeline has been compiled.
             StoreWriteError: If a node's results or records could not be written
                 to the store, whatever the orchestrator's ``error_policy``. The run
@@ -783,6 +787,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             raise RuntimeError(
                 "PipelineJob has no compiled pipeline. "
                 "Record invocations inside a 'with job:' block first."
+            )
+        store_batch_size = getattr(self._store, "batch_size", None)
+        if isinstance(store_batch_size, int) and commit_every_rows >= store_batch_size:
+            raise ValueError(
+                f"commit_every_rows={commit_every_rows} must be smaller than the "
+                f"store's batch_size={store_batch_size}: the store commits every "
+                "pending table by itself once one table holds batch_size pending "
+                "rows, which would commit pipeline records before their results. "
+                "Use a smaller commit_every_rows, or create the store with a larger "
+                "batch_size."
             )
         if self._store is None:
             raise ValueError(

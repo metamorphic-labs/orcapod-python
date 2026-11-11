@@ -106,7 +106,7 @@ def stored_rows(table: Path) -> int:
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 @pytest.mark.parametrize(
-    ("n_rows", "every", "commits"), [(250, 100, 3), (250, None, 3), (40, 1000, 1)]
+    ("n_rows", "every", "commits"), [(250, 100, 3), (250, None, 3), (40, 999, 1)]
 )
 def test_each_table_is_committed_once_per_batch(
     tmp_path: Path, orchestrator: str, n_rows: int, every: int | None, commits: int
@@ -380,3 +380,79 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
         (table,) = {log.parent for log in (tmp_path / "store").rglob("_delta_log")}
         index = read_column(table, "__pipeline_recomputation_index")
         assert sorted(index) == [0] * 5 + [1] * 5
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "every", "refused"),
+    [(None, 1000, True), (None, 999, False), (50, 50, True), (50, 49, False)],
+)
+def test_commit_every_rows_must_be_below_the_delta_batch_size(
+    tmp_path: Path, batch_size: int | None, every: int, refused: bool
+) -> None:
+    """At or above the store's ``batch_size`` the store would commit on its own."""
+    store = (
+        DeltaTableDatabase(tmp_path)
+        if batch_size is None
+        else DeltaTableDatabase(tmp_path, batch_size=batch_size)
+    )
+    job = build_job(store, 3)
+    if refused:
+        expected = rf"commit_every_rows={every} must be smaller than the store's batch_size={store.batch_size}"
+        with pytest.raises(ValueError, match=expected):
+            job.run(commit_every_rows=every)
+        assert not list(tmp_path.rglob("_delta_log"))
+    else:
+        job.run(commit_every_rows=every)
+        assert job.nodes["dbl"].as_table().num_rows == 3
+
+
+def test_a_store_without_batch_size_takes_any_commit_size() -> None:
+    """The in-memory store commits only when asked: any positive size works."""
+    job = build_job(InMemoryArrowDatabase(), 3)
+    job.run(commit_every_rows=5000)
+    assert job.nodes["dbl"].as_table().num_rows == 3
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_results_are_committed_before_their_records_just_below_batch_size(
+    tmp_path: Path, orchestrator: str
+) -> None:
+    """Every committed pipeline record points at a result committed no later.
+
+    ``commit_every_rows`` is one below the store's ``batch_size``. On the async
+    orchestrator results run ahead of their records, so the result table can reach
+    ``batch_size`` between the node's commits; the store then commits that table
+    alone, never the pipeline records with it.
+    """
+    store = DeltaTableDatabase(tmp_path, batch_size=50)
+    build_job(store, 120).run(
+        orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=49
+    )
+    tables = table_dirs(tmp_path)
+    pipeline_history = deltalake.DeltaTable(str(tables["pipeline"])).history()
+    result_history = deltalake.DeltaTable(str(tables["result"])).history()
+    # 120 rows at 49 per commit: 3 pipeline-record commits, none by the store alone.
+    assert len(pipeline_history) == 3
+    for entry in pipeline_history:
+        records = deltalake.DeltaTable(
+            str(tables["pipeline"]), version=entry["version"]
+        )
+        stored_at = entry["timestamp"]
+        result_versions = [
+            r["version"] for r in result_history if r["timestamp"] <= stored_at
+        ]
+        assert result_versions, entry
+        results = deltalake.DeltaTable(
+            str(tables["result"]), version=max(result_versions)
+        )
+        referenced = set(
+            delta_to_pyarrow_dataset(records)
+            .to_table(columns=["__data_id"])["__data_id"]
+            .to_pylist()
+        )
+        committed = set(
+            delta_to_pyarrow_dataset(results)
+            .to_table(columns=["__record_id"])["__record_id"]
+            .to_pylist()
+        )
+        assert referenced <= committed, entry["version"]

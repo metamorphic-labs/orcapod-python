@@ -785,9 +785,15 @@ class DeltaTableDatabase:
         # Step 5: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
 
-        # Step 6: Auto-flush if needed
-        if flush or self._should_auto_flush(record_path):
+        # Step 6: Flush if asked to; otherwise commit this table alone once its
+        # pending batch reaches batch_size. Only the full table: committing every
+        # pending table here would commit another table's rows, such as pipeline
+        # records whose results are still pending, out of their writer's order
+        # (ITL-919).
+        if flush:
             self.flush()
+        elif self._should_auto_flush(record_path):
+            self.flush_batch(record_path)
 
     def _deduplicate_within_table(self, table: pa.Table) -> pa.Table:
         # TODO: consider erroring out if duplicates are found

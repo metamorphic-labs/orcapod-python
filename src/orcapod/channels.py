@@ -210,7 +210,7 @@ class _BroadcastReader(Generic[T]):
     multiple downstream consumers can read at their own pace.
     """
 
-    __slots__ = ("_queue", "_closed")
+    __slots__ = ("_closed", "_queue")
 
     def __init__(self, buffer_size: int) -> None:
         self._queue: asyncio.Queue[T | _Sentinel] = asyncio.Queue(maxsize=buffer_size)

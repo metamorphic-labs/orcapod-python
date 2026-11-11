@@ -261,7 +261,17 @@ job.run(commit_every_rows=500)  # fewer, larger commits
 ```
 
 `commit_every_rows=1` commits after every row. A node or a cached pod used on its own,
-outside `job.run()`, also commits after every row.
+outside `job.run()`, also commits after every row. On a `DeltaTableDatabase`,
+`commit_every_rows` must be smaller than the store's `batch_size` (default 1000):
+the store commits every pending table by itself once one table holds that many pending
+rows, which would not keep the order described below, so `job.run()` refuses a larger value
+with `ValueError`. Create the store with a larger `batch_size` to commit less often.
+
+**Memory.** A `DeltaTableDatabase` keeps the committed rows of every table it looks rows up
+in (each function node's result and pipeline-record tables) in memory for as long as the
+store object lives, so that a lookup never re-reads the table. Before, every lookup read the
+whole table and released it; the peak is the same, but it now lasts. For very large tables,
+use a new store object per job.
 
 **What a hard crash loses.** If the process dies without raising (power loss, `kill -9`,
 the machine restarts), a durable store such as `DeltaTableDatabase` keeps every batch
