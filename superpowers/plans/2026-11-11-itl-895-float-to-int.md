@@ -16,6 +16,15 @@
   - Do not change `DictSource` / `ListSource` / `Datagram` input behaviour.
   - Keep the PR a draft.
   - Report the out-of-scope items in worker_done.
+- 2026-11-11: Tasks 1-6 done. Draft PR #299 is open, and CI is green (`run-tests`, objective
+  tests, ruff, typecheck). `test-objective/unit/test_data_function.py::test_call_returns_none_propagates`
+  encoded the old `None` behaviour; its function now declares `-> int | None`, and a sibling
+  test checks the rejection. CodeRabbit skipped the draft.
+  **Next:** when the developer decides D1-D7, flip the entries in `OUTPUT_CONFORMANCE`
+  (`semantic_types/output_conformance.py`) and the matching tests in
+  `TestUndecidedCasesKeepTodaysBehaviour`. Extend the check to inputs if they are in scope.
+  Merge main after PR #287 / PR #289 land; PR #289's ndarray check in `_build_output_data` can
+  then raise `OutputTypeError`. Mark the PR ready, then run the CodeRabbit rounds.
 
 **Goal:** A function pod rejects a returned value that does not conform to its declared output
 type, before anything is stored. The rejection names the pod, the output, the declared type
