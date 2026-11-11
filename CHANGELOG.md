@@ -10,7 +10,7 @@
 `numpy.ndarray` columns is **not migrated**. Under v0.3, every node that handles arrays
 computes again into new tables, and its v0.2 results are no longer returned. Nothing written by
 v0.2 is changed or deleted, and those tables stay readable with v0.2. Use a fresh store for
-v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.3.
+v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.3 (ITL-889).
 
 - **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
   `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
@@ -30,7 +30,8 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
-  `clongdouble`, datetimes and timedeltas without a unit, and structured dtypes with titles.
+  `clongdouble`, datetimes and timedeltas without a unit, and structured dtypes with titles
+  (whether to accept these last three kinds later is tracked in ITL-911).
 - **Function pods.** A pod declared `-> np.ndarray` that returns something other than an array,
   such as a NumPy scalar, now raises `TypeError` naming the output.
 - **MergeJoin** orders merged arrays by their stored `(dtype tag, shape, data)`, and lists of

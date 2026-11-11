@@ -12,9 +12,9 @@ behaviour across operators, orchestrators, databases and processes.
 
 **Tech Stack:** numpy 2.2.6, pyarrow 23.0.1, polars 1.41.2, deltalake 1.0.2, starfix, pytest.
 
-**Gating:** Phase 1 is approved by the coordinator now (November 10). Phase 2 depends on PENDING
-decisions (identity rules, names, label, D-PATH) and starts only when the coordinator relays
-them. This plan is updated with the decided values before Phase 2 starts.
+**Gating:** Phase 1 was approved by the coordinator on November 10. Phase 2 implements the
+developer's decisions on the identity rules, the name `orcapod.ndarray`, the label `ndarray_v1`,
+D-PATH and the refused dtypes (November 10 and 11, 2026; listed in the spec's Decisions).
 
 ---
 
@@ -126,7 +126,7 @@ def test_storage_type():
 `test_array_pipeline_stores.py`, `test_array_cached_rerun.py`, `test_array_hash_stability.py`.
 
 Every test uses only arrays that are little-endian, C-ordered, plain `np.ndarray` and not
-structured with unsorted fields, so it holds under every pending identity option. They pass on
+structured with unsorted fields, so it holds whatever the identity rules are. They pass on
 today's code and must keep passing after Phase 2 (a regression harness, not TDD red tests).
 
 - `conftest.py`: `ARRAYS` dict, one per dtype class: bool, int8, uint64, float16, float32,
@@ -154,7 +154,7 @@ finding. Commit `test(arrays): public-interface array scaffolding (ITL-888)`.
 ### Task 3: draft PR
 
 Push the branch, open a draft PR against `main` (body: `Fixes ITL-888`, `Fixes ITL-883`,
-`Refs ITL-874`, the spec link, the "draft: decisions pending" note, the trailer line), then
+`Refs ITL-874`, the spec link, the trailer line), then
 `orca linear attach` and `orca worktree set --worktree current --pr <n>`.
 
 ---

@@ -6,15 +6,30 @@
 candidate 4c, sections C4 and C5; experiments `b0`, `c1`, `c2`, `c3`, `b7`).
 **Status:** Implemented in PR #289.
 
-**Decisions (developer, November 10, 2026).** The identity rules D1 to D8 are confirmed as
-written here: identity is dtype, shape and element bits; memory layout, byte order and
-structured field order are not identity (field order revised November 11, below); little-endian storage; hashing by bits; extended data
-(masked, object, `StringDType`) refused, and if supported later stored as multi-part data, not
-as one array; subclasses treated as arrays unless a more specific registered type exists; array
-and tensor distinct. Proceeding provisionally, each a one-line change: the names
-`orcapod.ndarray` and `ndarray_v1`, D-PATH, and the three extra refusals (`longdouble`,
-unit-less datetimes, titled structured dtypes). Old-store detection and migration are
-deferred. The PENDING marks below are kept as written for the record.
+**Decisions (developer, November 10 and 11, 2026).** Every design choice in this spec is
+decided:
+
+- Identity is the dtype, the shape and the element bits (November 10). Memory layout and byte
+  order are not identity; storage is little-endian. Structured field order **is** identity,
+  together with field names and types, at every nesting depth (November 11; it was "not
+  identity" on November 10).
+- Hashing is by bits, so `0.0` and `-0.0` differ (November 10).
+- Extended data (masked, object, `StringDType`) is refused; if supported later it will be
+  stored as multi-part data, not as one array (November 10).
+- Subclasses are treated as plain arrays unless a more specific registered type exists
+  (November 10).
+- A NumPy array and a PyTorch tensor are distinct types (November 10).
+- The extension and logical type name `orcapod.ndarray` and the hash label `ndarray_v1`
+  (name confirmed November 11).
+- D-PATH: the new logical type name moves the table paths of nodes with array columns, and of
+  nothing else (agreed November 11).
+- `longdouble`/`clongdouble`, unit-less datetimes and timedeltas, and titled structured dtypes
+  are refused in v0.3 (November 11).
+
+**Deferred.**
+
+- Old-store detection and migration from the v0.2 format: ITL-889 (developer, November 10).
+- Whether to accept the three refused dtype kinds above in a later release: ITL-911.
 
 v0.3 is a public release. The extension name, the storage struct, the dtype tags, the digest
 definition and the hash label below are public commitments once v0.3 is tagged.
@@ -41,9 +56,9 @@ definition and the hash label below are public commitments once v0.3 is tagged.
   only those**. v0.3 therefore builds new tables for the array nodes and leaves every v0.2
   table that holds array values untouched (verified, see E). It may append rows to an existing
   result table of a pod that takes arrays but outputs none; that table holds no array column. This is a deliberate table
-  path change for array nodes. It needs the developer's yes (D-PATH).
-- Old-data detection and migration are deferred (developer, November 10). Section E states the
-  known consequence for the CHANGELOG.
+  path change for array nodes (D-PATH, agreed by the developer, November 11).
+- Old-data detection and migration are deferred to ITL-889 (developer, November 10). Section E
+  states the known consequence for the CHANGELOG.
 - The NumPy-neutral pieces (storage struct, digest) live in one module that `torch.Tensor`
   (ITL-871) will reuse under its own name.
 
@@ -81,7 +96,7 @@ struct<
   exactly `itemsize(dtype) * prod(shape)` bytes.
 - The Polars extension type carries the same `ARROW:extension:metadata` as the Arrow one.
 
-### A2. The dtype tag (PENDING: names below)
+### A2. The dtype tag
 
 The tag is an Orcapod string, not NumPy's `descr`. It names the element type without byte order
 (storage is always little-endian), so it can be produced by any implementation, including torch
@@ -126,11 +141,11 @@ width spelled out, fields in declared order and offsets/padding dropped (fields 
 |---|---|
 | `object` (`O`), or a structured dtype with an object field | needs pickling |
 | NumPy 2 `StringDType` (`T`) | variable width, object-like storage (ITL-883 defect 3) |
-| `longdouble`, `clongdouble` (`g`, `G`) | width and format differ by platform (float64 on arm64 macOS, 80-bit on x86-64 Linux), so neither bytes nor hash would be portable. **PENDING** (alternative: accept and tag `longdouble` with platform-dependent hashes) |
-| `datetime64`/`timedelta64` without a unit (`M8`, `m8`) | no defined meaning for the int64 value. **PENDING** (rare; alternative: tag `datetime64[generic]`) |
-| structured dtype with field titles | titles are aliases the tag does not represent. **PENDING** (rare) |
+| `longdouble`, `clongdouble` (`g`, `G`) | width and format differ by platform (float64 on arm64 macOS, 80-bit on x86-64 Linux), so neither bytes nor hash would be portable. Refused in v0.3 (developer, November 11); accepting them later is ITL-911. |
+| `datetime64`/`timedelta64` without a unit (`M8`, `m8`) | no defined meaning for the int64 value. Refused in v0.3 (developer, November 11); accepting them later (for example as `datetime64[generic]`) is ITL-911. |
+| structured dtype with field titles | titles are aliases the tag does not represent. Refused in v0.3 (developer, November 11); accepting them later is ITL-911. |
 
-### A3. Canonicalisation on write (PENDING with D below)
+### A3. Canonicalisation on write
 
 `python_to_storage(arr)`:
 
@@ -158,7 +173,7 @@ dtype, C order, and the base class `np.ndarray`.
 
 ---
 
-## B. Extension name and storage version (PENDING: names)
+## B. Extension name and storage version (name confirmed by the developer, November 11)
 
 - **Extension name `orcapod.ndarray`**, and the logical type name (`logical_type_name`, which the
   type and pipeline hashes use) is the same string, as for every built-in type
@@ -178,7 +193,7 @@ dtype, C order, and the base class `np.ndarray`.
 
 ## C. Hash
 
-### C1. Value digest, byte level (PENDING: exact framing)
+### C1. Value digest, byte level
 
 For a stored row with tag `T` (string), shape `(d0, ..., d{n-1})` and data `D` (bytes):
 
@@ -191,13 +206,14 @@ digest = SHA-256(P)            (32 bytes)
 
 `u64le`/`i64le` are 8-byte little-endian unsigned/signed integers. Because every field is
 length-prefixed, no two distinct `(T, shape, D)` give the same `P`. The digest depends only on the
-stored row, so it can be recomputed from a Parquet or Delta file with any SHA-256 library; the
-docs will carry a short reference implementation and test vectors (the golden values in G).
+stored row, so it can be recomputed from a Parquet or Delta file with any SHA-256 library;
+`docs/reference/hashing.md` (section 8) carries a short reference implementation and test
+vectors (the golden values in G).
 
 It is computed from the canonical buffer without the hasher copying it again: `hashlib` reads the
 C-contiguous canonical array's buffer directly (c1: about 0.1 s for 128 MiB).
 
-### C2. Label and binding to the logical type (PENDING: label spelling)
+### C2. Label and binding to the logical type
 
 - The semantic handler (`NumpyArrayHandler`, kept registered for `numpy.ndarray`) returns
   `ContentHash(method="ndarray_v1", digest=<32 bytes>)`. `ndarray_v1` replaces the bare
@@ -211,7 +227,7 @@ C-contiguous canonical array's buffer directly (c1: about 0.1 s for 128 MiB).
   and a tensor with equal values therefore have different hashes but the same digest body
   (ITL-874 D6 pick).
 
-### C3. Invariances (CONFIRMED for layout by c1; PENDING for byte and field order, see D)
+### C3. Invariances (layout confirmed by experiment c1; byte and field order decided in D)
 
 Same hash: C vs Fortran order, any strides or views, a transposed-twice view, big- vs
 little-endian copies, aligned, padded or offset-reordered structured dtypes with the same
@@ -222,9 +238,9 @@ structured field names, structured field order (at every nesting depth).
 
 ---
 
-## D. Identity decisions (all PENDING the developer's confirmation, relayed by the coordinator)
+## D. Identity decisions (developer, November 10 and 11, 2026)
 
-| # | Decision | Plan | Consequence |
+| # | Question | Decision | Consequence |
 |---|---|---|---|
 | D1 | What identity is | The value: dtype tag, shape, C-order little-endian packed buffer. Not the `.npy` file. | Layout-free hash; the digest is reproducible outside NumPy. |
 | D2 | Byte order | Not identity. Canonicalised to little-endian on write; `>f4` reads back as `<f4`. | Round trip exact in value, not in `dtype.byteorder`. |
@@ -234,16 +250,16 @@ structured field names, structured field order (at every nesting depth).
 | D6 | object dtype, `StringDType` | Refused, naming column and dtype. | ITL-883 defect 3 becomes a clear error. |
 | D7 | Subclasses (`np.matrix`, `np.recarray`, `np.memmap`, user subclasses) | **Accepted and read back as plain `np.ndarray`**; documented. Hash equals the base-class value's. Rejecting them would break `recarray`/`memmap` users for no gain; the value is fully preserved. | `np.matrix` reads back as a 2-D ndarray. |
 | D8 | NumPy scalar returned where `np.ndarray` is declared | Refused at the pod with a `TypeError` naming the output key, the declared type and the returned type (ITL-883 defect 2). Arrays are never wrapped implicitly (type strictness). | `x * 2` on a 0-d array returns a scalar; users write `np.asarray(...)`. |
-| D-PATH | Logical type name | `orcapod.ndarray` (see B), which moves the pipeline hash, and so the table path, of every node with an array column, and of nothing else. | v0.2 tables are never mixed with v0.3 rows (E). Old tables stay as they are. |
+| D-PATH | Logical type name | `orcapod.ndarray` (see B), which moves the pipeline hash, and so the table path, of every node with an array column, and of nothing else. Agreed November 11. | v0.2 tables are never mixed with v0.3 rows (E). Old tables stay as they are. |
 
 ---
 
-## E. Old data: known consequence (detection and migration deferred by the developer)
+## E. Old data: known consequence (detection and migration deferred to ITL-889)
 
 No detection, no special error, no Delta read-path change, ITL-884 untouched (coordinator
 message, November 10). What a v0.2 store that holds `.npy` arrays does under v0.3:
 
-**With D-PATH as planned (new logical type name), verified by a probe on a real v0.2 Delta store**
+**With D-PATH (new logical type name, the decision), verified by a probe on a real v0.2 Delta store**
 (scratch experiment: `source -> double(x)->ndarray -> total(y)->float`,
 `direct_sum(x)->float` and an array-free `tag_only` node; the type name changed in a fresh
 process):
@@ -259,17 +275,18 @@ process):
 - So under v0.3 the array nodes **recompute every row once**, and their v0.2 results are no longer
   returned. Nothing is damaged and no table becomes unreadable.
 
-**Without D-PATH** (keeping the name `numpy.ndarray` for the type hash, so paths stay):
-new-format rows are appended into the v0.2 tables. Delta accepts the append, the next read fails,
-and Orcapod reports no rows (b7, ITL-884). The array-free downstream tables recompute and hide
-their old rows (c3). This damages v0.2 stores, so I do not recommend it.
+**The rejected alternative** (keeping the name `numpy.ndarray` for the type hash, so paths
+stay): new-format rows are appended into the v0.2 tables. Delta accepts the append, the next
+read fails, and Orcapod reports no rows (b7, ITL-884). The array-free downstream tables
+recompute and hide their old rows (c3). This damages v0.2 stores, which is why D-PATH was
+chosen.
 
 For the CHANGELOG and docs: "v0.3 changes how arrays are stored and hashed. A store written by
 v0.2 that holds `numpy.ndarray` columns is not migrated: under v0.3 every node that handles
 arrays recomputes into new tables, and its v0.2 results are no longer returned (they remain on
 disk, readable with v0.2). Use a fresh store, or keep using v0.2 for that store. A migration is
-planned after v0.3." The tests will pin the D-PATH behaviour on a v0.2-format Delta store fixture
-(new tables, old tables byte-identical, no unreadable table).
+planned after v0.3 (ITL-889)." The tests pin the D-PATH behaviour on a v0.2-format Delta store
+fixture (new tables, old tables byte-identical, no unreadable table).
 
 ---
 
@@ -291,9 +308,8 @@ torch type will add its own tag mapping (including `bfloat16`) and its own name 
 
 ## G. Golden hash tests (PR #284)
 
-**PR #284 is not on main yet** (open, checked November 10). I will rebase onto it if it merges
-before my PR; otherwise I will list the moves in my PR and the second PR to land updates them.
-Pinned entries that move, all array entries, nothing else:
+PR #284 merged before this PR. Pinned entries that move, all array entries, nothing else
+(approved by the developer together with the migration assessment in E):
 
 | File | Entries | Why |
 |---|---|---|
@@ -302,10 +318,10 @@ Pinned entries that move, all array entries, nothing else:
 | `schema.json` | `single_field.ndarray.arrow_type`, `single_field.ndarray.schema_hash` | new storage type; type name in the schema hash |
 | `datagram.json` | `ndarray.content_hash`, `ndarray.pipeline_hash`, `ndarray.row[...].data_hash` (2), the `ndarray.row[...]._tag_*::<pipeline hash>` keys (4) and `ndarray.system_tag_columns` | value hash; pipeline hash in system tag column names |
 
-`arrow.json` and `pipeline.json` have no array cases and must not move; the test run will show
-that every non-array entry is unchanged. I will add golden pins for a few arrays of my own
-(0-d, empty, Fortran, big-endian, structured) with the digest computed by an independent
-reference implementation of C1 in the test (plain `hashlib` + `struct`, no Orcapod code).
+`arrow.json` and `pipeline.json` have no array cases and do not move; every non-array entry is
+unchanged. Golden pins for further arrays (0-d, empty, Fortran, big-endian, structured) check
+the digest against an independent reference implementation of C1 in the test (plain `hashlib`
++ `struct`, no Orcapod code).
 
 ---
 
@@ -332,19 +348,18 @@ Risks:
 
 1. **Polars and struct-backed extension types.** Prototyped: works with nullable children (F1).
 2. **MergeJoin sorting a struct column.** Prototyped: needs the array ordering key (F3).
-3. **Delta with the struct column.** Prototyped: in-memory and Delta, sync and async pass;
-   the cached re-run in a fresh process is still to be verified with the real type.
-4. **Golden churn if #284 lands late.** Mechanical, but must be listed in the PR.
-5. **D-PATH is a table path change for array nodes.** Needs the developer's explicit yes.
+3. **Delta with the struct column.** In-memory and Delta, sync and async pass; the cached
+   re-run in a fresh process is verified with the real type
+   (`tests/test_arrays/test_array_cached_rerun.py`).
+4. **Golden churn from #284.** #284 merged first; the moved entries are listed in G and in the PR.
+5. **D-PATH is a table path change for array nodes.** Agreed by the developer, November 11.
 
-Cuts if time runs short, in order: the extra golden array pins beyond four values; docs worked
-example (keep the format and digest definition); refusal of `longdouble` (fall back to accepting
-it with a platform-dependent note). Not cuttable: storage layout, digest and label, operator and
-database coverage, the scalar-return check, the CHANGELOG entry.
+Nothing was cut: the extra golden pins, the docs worked example and the `longdouble` refusal
+are all in the PR.
 
 ---
 
-## Implementation outline (for the plan after approval)
+## Implementation outline
 
 1. `array_format.py` (struct, version, digest) with unit tests against an independent reference.
 2. `numpy_type.py`: tag mapping, canonicalisation, refusals; `LogicalNumpyArray` renamed to the
@@ -352,8 +367,7 @@ database coverage, the scalar-return check, the CHANGELOG entry.
 3. `NumpyArrayHandler` on the new digest and label.
 4. Function pod output check for declared `np.ndarray` (D8).
 5. Context JSON and changelog line; CHANGELOG entry; docs (`docs/reference/hashing.md` plus a
-   value-types section; there is none on main, so a new `docs/concepts/` page or a section in
-   an existing one, to be decided in the plan).
+   value-types page, `docs/concepts/arrays.md`).
 6. Tests first, through the public interface: every dtype class, round trip, invariances and
    differences, every operator including Batch, GroupBy and MergeJoin with a colliding array
    column, sync and async, in-memory and Delta, cached re-run in a fresh process, cross-process

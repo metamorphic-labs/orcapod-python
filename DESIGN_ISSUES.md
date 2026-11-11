@@ -2312,8 +2312,10 @@ their mask silently. `StringDType` failed with a misleading pickle error. A pod 
 
 v0.3 moves to the value-based format of `superpowers/specs/2026-11-10-array-format-v0.3.md`:
 extension `orcapod.ndarray` over `struct<dtype, shape, data>` (little-endian, C order), hashed
-by value under a versioned label, with old data neither detected nor migrated (deferred by the
-developer).
+by value under the label `ndarray_v1` (developer's decisions, November 10 and 11, 2026). Old
+data is neither detected nor migrated in v0.3; migration is deferred to ITL-889. Accepting
+`longdouble`/`clongdouble`, unit-less datetimes and titled structured dtypes, refused in v0.3,
+is reconsidered in ITL-911.
 
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null

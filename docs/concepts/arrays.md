@@ -31,7 +31,7 @@ for tag, data in scale.pod(source).iter_data():
     stores. Under v0.3, every node that handles arrays computes again into new tables, and its
     v0.2 results are no longer returned. They stay on disk, readable with v0.2. Start v0.3
     pipelines with a fresh store, or keep using v0.2 for an existing one. A migration is
-    planned after v0.3.
+    planned after v0.3 (ITL-889).
 
 ## What counts as the same array
 
@@ -89,6 +89,9 @@ Some arrays are refused when they are written, with a `ValueError` (an
 | Structured dtypes with field titles | titles are aliases of fields | drop the titles |
 
 Extended data may be supported later, stored as several parts rather than as one array.
+Whether `longdouble` and `clongdouble`, unit-less datetimes and timedeltas, and structured
+dtypes with titles should be accepted in a later release is tracked in ITL-911; v0.3 refuses
+them.
 
 ```python
 try:
