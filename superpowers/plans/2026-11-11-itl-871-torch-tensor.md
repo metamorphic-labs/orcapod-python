@@ -24,6 +24,12 @@
   the xfail once #293 is on main. Findings reported: ITL-896 (terminal operator node empty after
   async run), in-memory pass-through of the returned object (raised with the developer).
   Next: Task 8 (full suite, ruff, basedpyright, torch on 3.11-3.13, merge main, draft PR).
+- Task 8 done: draft PR #300 (https://github.com/metamorphic-labs/orcapod-python/pull/300),
+  CI green, CodeRabbit rounds 1 and 2 answered (round 1 fixes in e118c40c; #289-owned findings
+  relayed). Open follow-ups: (1) when #289 gains the recursive MergeJoin ordering key for lists
+  of arrays, merge #289's tip and add a colliding list[torch.Tensor] MergeJoin test; (2) remove
+  the delta-async xfail once #293 (ITL-864) is on main; (3) merge main after #289 lands;
+  (4) apply the developer's decisions on items (a)-(d) if they differ from the provisional picks.
 
 ## Commands
 
