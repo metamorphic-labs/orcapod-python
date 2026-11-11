@@ -29,8 +29,10 @@ from uuid_utils import uuid7
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import ContentIdentifiableBase
+from orcapod.errors import InvalidDictKeysError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
+from orcapod.semantic_types.dict_order import canonical_python_value
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -119,6 +121,9 @@ class Datagram(ContentIdentifiableBase):
             if python_schema
             else inferred
         )
+        self._data_dict = self._canonical_dict_values(
+            data_columns, self._data_python_schema
+        )
         self._data_arrow_schema: pa.Schema | None = None
 
         if meta_info is not None:
@@ -129,6 +134,28 @@ class Datagram(ContentIdentifiableBase):
         )
         self._meta_table: pa.Table | None = None
         self._context_table: pa.Table | None = None
+
+    def _canonical_dict_values(
+        self, columns: dict[str, DataValue], schema: Schema
+    ) -> dict[str, DataValue]:
+        """Return ``columns`` with every dict value in canonical key order.
+
+        A dict is order independent (ITL-905): its entries are stored and hashed in
+        canonical key order, so a value built here holds the same order a stored copy
+        reads back with. Dicts are copied, never mutated; dicts inside other objects
+        (dataclass or pydantic fields) are left as given.
+        """
+        out: dict[str, DataValue] = {}
+        for name, value in columns.items():
+            try:
+                out[name] = canonical_python_value(
+                    value,
+                    schema.get(name),
+                    self.converter.get_python_to_arrow_converter,
+                )
+            except InvalidDictKeysError as exc:
+                raise InvalidDictKeysError(f"Column {name!r}: {exc}") from exc
+        return out
 
     def _init_from_table(
         self,
