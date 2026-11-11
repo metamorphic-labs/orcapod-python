@@ -2240,5 +2240,8 @@ schemas, tables and row order, sync and async). Regressions:
 `test_async_sync_equivalence.py` is removed, and the SemiJoin meta case now uses nested meta
 columns. Open: ITL-829's second case (a non-nullable key against a nullable one, raised by
 `schema_utils.intersection_schemas` during input validation) is unchanged and keeps its strict
-xfail. With an empty right input the async path cannot see the right key types, so a key type
-mismatch that the sync path reports yields an empty result there.
+xfail. The async path checks key types on the first row of each input, because
+`async_execute` receives only channels and no stream exposes its Arrow schema without rows.
+So when either input is empty (left or right), a key type mismatch that the sync path reports
+yields an empty result on the async path instead of an error. `Join`'s async key check
+(`_check_shared_key_types`) has the same limit.

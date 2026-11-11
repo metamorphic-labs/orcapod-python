@@ -206,6 +206,11 @@ class SemiJoin(BinaryOperator):
 
         Falls back to barrier mode when the right input is empty (schema
         cannot be inferred from data) or when there are no common keys.
+
+        Key types are checked (``require_shared_arrow_type``) on the first row
+        of each input, since channels carry no schema. When either input is
+        empty there is nothing to check, so a key type mismatch the sync path
+        reports gives an empty result here (as in ``Join``'s async path).
         """
         try:
             left_ch, right_ch = inputs[0], inputs[1]

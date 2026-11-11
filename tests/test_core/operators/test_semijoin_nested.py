@@ -114,6 +114,7 @@ def right_with(kind: str) -> ArrowTableSource:
 
 
 def scalar_left() -> ArrowTableSource:
+    """Tag ``k: int16`` in the order 4, 1, 3, 2 and a scalar ``v: int8``."""
     return _source(
         {
             "k": pa.array([4, 1, 3, 2], pa.int16()),
@@ -125,6 +126,7 @@ def scalar_left() -> ArrowTableSource:
 
 
 def scalar_right() -> ArrowTableSource:
+    """Tag ``k: int16`` in the order 2, 9, 4 and a scalar ``w: int8``."""
     return _source(
         {"k": pa.array([2, 9, 4], pa.int16()), "w": pa.array([1, 2, 3], pa.int8())},
         tags=("k",),
@@ -163,6 +165,7 @@ def assert_semijoin_result(
 
 
 async def _run_async(sources: Sequence[StreamProtocol]) -> list[Row]:
+    """Run SemiJoin's async path over channels fed from ``sources``."""
     op = SemiJoin()
     # A pipeline validates its inputs before async execution; SemiJoin's async
     # path reads the common keys that validation records (empty-right case).
@@ -197,6 +200,7 @@ def zero_rows(stream: StreamProtocol) -> ArrowTableStream:
 
 @pytest.mark.parametrize("kind", NESTED_KINDS)
 def test_nested_column_on_kept_side(kind: str) -> None:
+    """A nested or logical column on the left passes through, in left order."""
     left = left_with(kind)
     expected = expected_rows(left, lambda row: row["k"] in (2, 4))
     assert expected.column("k").to_pylist() == [4, 2]  # left order
@@ -205,6 +209,7 @@ def test_nested_column_on_kept_side(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", NESTED_KINDS)
 def test_nested_column_on_filtering_side(kind: str) -> None:
+    """A nested or logical column on the right does not block the join."""
     left = scalar_left()
     assert_semijoin_result(
         left, right_with(kind), expected_rows(left, lambda row: row["k"] in (2, 4))
@@ -213,6 +218,7 @@ def test_nested_column_on_filtering_side(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", NESTED_KINDS)
 def test_nested_columns_on_both_sides(kind: str) -> None:
+    """Nested or logical columns on both inputs."""
     left = left_with(kind)
     assert_semijoin_result(
         left, right_with(kind), expected_rows(left, lambda row: row["k"] in (2, 4))
@@ -221,12 +227,14 @@ def test_nested_columns_on_both_sides(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", NESTED_KINDS)
 def test_zero_row_left(kind: str) -> None:
+    """A zero-row left input gives a zero-row result with the left schema."""
     left = zero_rows(left_with(kind))
     assert_semijoin_result(left, right_with(kind), expected_rows(left, lambda _: True))
 
 
 @pytest.mark.parametrize("kind", NESTED_KINDS)
 def test_zero_row_right(kind: str) -> None:
+    """A zero-row right input gives a zero-row result with the left schema."""
     left = left_with(kind)
     assert_semijoin_result(
         left, zero_rows(right_with(kind)), expected_rows(left, lambda _: False)
@@ -314,6 +322,7 @@ def test_list_key() -> None:
 
 
 def test_path_key() -> None:
+    """A ``Path`` (logical, string storage) key matches by value."""
     left = keyed(
         "l", _logical_column([Path("/a"), Path("/b"), Path("/c")], Path), [0, 1, 2]
     )
@@ -356,6 +365,7 @@ def test_string_vs_large_string_key_csv_vs_dict(tmp_path: Path) -> None:
 
 
 def mismatched_key_sources() -> tuple[ArrowTableSource, ArrowTableSource]:
+    """Two sources whose shared tag ``k`` is ``int8`` on one side and ``int16`` on the other."""
     left = _source(
         {"k": pa.array([1, 2], pa.int8()), "v": pa.array([1, 2], pa.int8())},
         tags=("k",),
@@ -380,6 +390,7 @@ def test_key_type_mismatch_raises_sync() -> None:
 
 
 def test_key_type_mismatch_raises_async() -> None:
+    """The async path raises the same error as the sync path."""
     left, right = mismatched_key_sources()
     with pytest.raises(InputValidationError, match=MISMATCH):
         _ = async_semijoin_rows(left, right)
@@ -390,6 +401,7 @@ def test_key_type_mismatch_raises_async() -> None:
 
 @pytest.mark.parametrize("kind", NESTED_KINDS)
 def test_predicted_schema_equals_materialized(kind: str) -> None:
+    """The predicted output schema equals the materialized one."""
     left, right = left_with(kind), right_with(kind)
     op = SemiJoin()
     for all_info in (False, True):
