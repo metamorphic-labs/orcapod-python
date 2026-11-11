@@ -24,11 +24,17 @@ from orcapod.operators import (  # noqa: E402
     SelectDataColumns,
     SemiJoin,
 )
+from orcapod.protocols.core_protocols import StreamProtocol  # noqa: E402
 from orcapod.sources import DictSource  # noqa: E402
+from tests.test_core.operators.test_async_sync_equivalence import (  # noqa: E402
+    async_rows,
+    sync_rows,
+)
 from tests.test_torch.tensor_cases import (  # noqa: E402
     TENSORS,
     assert_same_tensors_any_order,
     assert_tensors_identical,
+    same_tensor,
 )
 
 NAMES = sorted(TENSORS)
@@ -174,3 +180,57 @@ def test_merge_join_order_does_not_depend_on_input_order() -> None:
         assert len(f) == len(b) == 2
         for x, y in zip(f, b, strict=True):
             assert_tensors_identical(x, y)
+
+
+def grouped_tensors_source(source_id: str, shift: int = 0) -> StreamProtocol:
+    """``tensors_source`` grouped on ``g``, so ``x`` becomes ``list[torch.Tensor]``."""
+    return GroupBy(by=["g"])(tensors_source(source_id, shift))
+
+
+def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
+    """Each group's merged ``x`` holds the left and the right member lists."""
+    assert sorted(got) == ["g0", "g1", "g2"]
+    for group, merged in got.items():
+        names = [n for n in NAMES if GROUP[n] == group]
+        assert len(merged) == 2
+        expected = [
+            [expected_x(n) for n in names],
+            [expected_x(n, shift) for n in names],
+        ]
+        for members in merged:
+            assert any(
+                len(members) == len(e)
+                and all(same_tensor(g, x) for g, x in zip(members, e, strict=True))
+                for e in expected
+            )
+
+
+@pytest.mark.parametrize("shift", [0, 1])
+def test_merge_join_colliding_grouped_tensor_column(shift: int) -> None:
+    """MergeJoin merges colliding ``list[torch.Tensor]`` columns, in a stable order."""
+    left = grouped_tensors_source("left")
+    right = grouped_tensors_source("right", shift)
+    out = MergeJoin()(left, right)
+    got = {fields(t)["g"]: fields(d)["x"] for t, d in out.iter_data()}
+    assert_merged_groups(got, shift)
+    # The swapped call yields the same table. Source info is left out: on tied values
+    # from inputs with one pipeline hash, its order follows the call.
+    swapped = MergeJoin()(right, left)
+    assert swapped.as_table().equals(out.as_table())
+
+
+def test_merge_join_colliding_grouped_tensor_column_async_equals_sync() -> None:
+    """The async MergeJoin of ``list[torch.Tensor]`` columns yields the sync data."""
+    left = grouped_tensors_source("left")
+    right = grouped_tensors_source("right", 1)
+    expected = {fields(t)["g"]: d for t, d in sync_rows(MergeJoin(), left, right)}
+    # The async path is under test: this helper drives ``async_execute`` over channels.
+    actual = {fields(t)["g"]: d for t, d in async_rows(MergeJoin(), left, right)}
+    # Data only: after GroupBy, MergeJoin's async system tag column names differ from
+    # the sync ones for any column type (reported separately, as for arrays).
+    assert sorted(actual) == sorted(expected)
+    for group, data in actual.items():
+        assert data.arrow_schema() == expected[group].arrow_schema()
+        assert data.content_hash() == expected[group].content_hash()
+        assert data.source_info() == expected[group].source_info()
+    assert_merged_groups({g: fields(d)["x"] for g, d in actual.items()}, 1)
