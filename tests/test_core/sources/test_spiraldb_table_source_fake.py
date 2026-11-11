@@ -19,8 +19,11 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import InputValidationError
 from orcapod.operators import Join, SelectDataColumns
+from orcapod.databases import SpiralDBConnector
 from orcapod.sources import SpiralDBTableSource
+from orcapod.types import Schema
 from tests.test_databases import fake_pyspiral
 
 _PROJECT = "edi-sample"
@@ -229,22 +232,21 @@ class TestSourceId:
 
     @pytest.fixture()
     def two_projects(self, tmp_path: Path):
-        """Provide two fake projects holding the same one-row ``subject`` table."""
+        """Provide two fake projects holding the same one-row ``subject`` table.
+
+        Each is written through ``SpiralDBConnector``, which records its non-nullable
+        columns (ITL-936); ``default.unrecorded`` holds the same row without a record.
+        """
         with fake_pyspiral.install(tmp_path / "spiral"):
+            rows = pa.table({"subject_id": ["m1"], "sex": ["F"]}, schema=self._SUBJECT)
+            keys = pa.schema([pa.field("subject_id", pa.string(), False)])
             for project in ("edi-sample-a", "edi-sample-b"):
-                table = (
-                    fake_pyspiral.FakeSpiral()
-                    .project(project)
-                    .create_table(
-                        "default.subject",
-                        key_schema=pa.schema(
-                            [pa.field("subject_id", pa.string(), False)]
-                        ),
-                    )
+                fake = fake_pyspiral.FakeSpiral().project(project)
+                fake.create_table("default.subject", key_schema=keys)
+                SpiralDBConnector(project).upsert_records(
+                    "subject", rows, id_column="subject_id"
                 )
-                table.write(
-                    pa.table({"subject_id": ["m1"], "sex": ["F"]}, schema=self._SUBJECT)
-                )
+                fake.create_table("default.unrecorded", key_schema=keys).write(rows)
             yield
 
     @staticmethod
@@ -271,8 +273,34 @@ class TestSourceId:
         identity_a, identity_b = self._identity(a), self._identity(b)
         assert all(x != y for x, y in zip(identity_a, identity_b, strict=True))
 
+    def test_unrecorded_table_hashes_are_unchanged(self, two_projects):
+        # A table without a nullability record reads exactly as before ITL-936: every
+        # column nullable, as SpiralDB reports it. Values pinned at 49956a6a, before the
+        # record existed.
+        source = SpiralDBTableSource("edi-sample-a", "unrecorded", source_id="subject")
+        assert source.output_schema() == (
+            Schema({"subject_id": str | None}),
+            Schema({"sex": str | None}),
+        )
+        assert self._identity(source) == (
+            "semantic_v0.1:0380725acb9073df747380b348f72a8a66bbe52f02e46fb3df795e7518e7f4f6",
+            "18d1efa53fbc52b6a40f406eca35ca81",
+            "subject::row_0::sex",
+        )
+        assert source.pipeline_hash().to_string() == (
+            "semantic_v0.1:61796d9cdbd5afce45b2b99b1efe306a745ee63bdf4952e841772a04c450498a"
+        )
+        row_hash = source.as_table(columns={"content_hash": True}).column(
+            "_content_hash"
+        )
+        assert row_hash.to_pylist() == [
+            "arrow_v0.1:0000017a393c2f094ebfb6ecb72d0a0d5ef088243f38b709695c846dbd4a17b095caf9"
+        ]
+
     def test_explicit_source_id_keeps_its_hashes(self, two_projects):
-        # Values pinned on main (ebf2511b) before the default changed.
+        # Values pinned on main (ebf2511b) before the default changed. The table was
+        # written non-null; with the nullability record it reads back non-null, so the
+        # hashes are those of the table as written.
         source = SpiralDBTableSource("edi-sample-a", "subject", source_id="subject")
         assert self._identity(source) == (
             "semantic_v0.1:1f4ecfe64566d1684d7cdf1319f0274a7048e0124f8026c815814de7d0e365d3",
@@ -285,15 +313,25 @@ class TestSourceId:
 
 
 class TestNonNullableColumns:
-    """A column SpiralDB reports non-null arrives as ``T``, not ``T | None`` (ITL-926 C1).
+    """A column written non-null arrives as ``T``, not ``T | None`` (ITL-926 C1, ITL-936).
 
-    The EDI tables are to be migrated to non-nullable columns (developer, November 11, 2026).
+    SpiralDB reports every column and struct field nullable, so this holds only for tables
+    that carry Orcapod's nullability record: here, tables written through
+    ``SpiralDBConnector``. The same rows written without the record read as ``T | None``.
     """
 
     _KEYS = pa.schema(
         [
             pa.field("subject_id", pa.string(), False),
             pa.field("session_start_datetime", _TS, False),
+        ]
+    )
+    _SESSION = pa.schema(
+        [
+            *_KEYS,
+            pa.field("total_trials", pa.int64(), False),
+            pa.field("weight", pa.float64(), False),
+            pa.field("booth", pa.string(), True),
         ]
     )
     _ITEM = pa.field("item", pa.float32(), False)
@@ -303,30 +341,29 @@ class TestNonNullableColumns:
 
     @pytest.fixture()
     def strict_root(self, tmp_path: Path):
-        """Provide ``session`` and ``unit`` tables whose columns are written non-null."""
+        """Provide recorded ``session`` and ``unit`` tables and an unrecorded copy of session."""
         root = tmp_path / "spiral"
         with fake_pyspiral.install(root):
             project = fake_pyspiral.FakeSpiral().project(_PROJECT)
-            session = project.create_table("default.session", key_schema=self._KEYS)
-            session.write(
-                pa.table(
-                    {
-                        "subject_id": ["m1", "m2"],
-                        "session_start_datetime": pa.array(_STARTS, _TS),
-                        "total_trials": pa.array([10, 20], pa.int64()),
-                        "booth": ["b1", None],
-                    },
-                    schema=pa.schema(
-                        [
-                            *self._KEYS,
-                            pa.field("total_trials", pa.int64(), False),
-                            pa.field("booth", pa.string(), True),
-                        ]
-                    ),
-                )
+            connector = SpiralDBConnector(_PROJECT)
+            session_rows = pa.table(
+                {
+                    "subject_id": ["m1", "m2"],
+                    "session_start_datetime": pa.array(_STARTS, _TS),
+                    "total_trials": pa.array([10, 20], pa.int64()),
+                    "weight": pa.array([2.5, 4.0], pa.float64()),
+                    "booth": ["b1", None],
+                },
+                schema=self._SESSION,
             )
-            unit = project.create_table("default.unit", key_schema=self._KEYS)
-            unit.write(
+            project.create_table("default.session", key_schema=self._KEYS)
+            connector.upsert_records("session", session_rows, id_column="subject_id")
+            project.create_table(
+                "default.session_unrecorded", key_schema=self._KEYS
+            ).write(session_rows)
+            project.create_table("default.unit", key_schema=self._KEYS)
+            connector.upsert_records(
+                "unit",
                 pa.table(
                     {
                         "subject_id": ["m1", "m2"],
@@ -344,14 +381,27 @@ class TestNonNullableColumns:
                             pa.field("quality", self._QUALITY, False),
                         ]
                     ),
-                )
+                ),
+                id_column="subject_id",
             )
             yield root
 
     def test_schema_keeps_declared_nullability(self, strict_root):
         tag, data = SpiralDBTableSource(_PROJECT, "session").output_schema()
         assert dict(tag) == {"subject_id": str, "session_start_datetime": dt.datetime}
-        assert dict(data) == {"total_trials": int, "booth": str | None}
+        assert dict(data) == {"total_trials": int, "weight": float, "booth": str | None}
+
+    def test_unrecorded_table_is_all_optional(self, strict_root):
+        tag, data = SpiralDBTableSource(_PROJECT, "session_unrecorded").output_schema()
+        assert dict(tag) == {
+            "subject_id": str | None,
+            "session_start_datetime": dt.datetime | None,
+        }
+        assert dict(data) == {
+            "total_trials": int | None,
+            "weight": float | None,
+            "booth": str | None,
+        }
 
     def test_arrow_fields_keep_nullability_at_every_depth(self, strict_root):
         schema = SpiralDBTableSource(_PROJECT, "unit").as_table().schema
@@ -364,12 +414,29 @@ class TestNonNullableColumns:
         assert not quality.type.field("snr").nullable
         assert quality.type.field("note").nullable
 
+    def test_plain_float_pod_is_refused_on_an_unrecorded_table(self, strict_root):
+        @function_pod(output_keys="half")
+        def halve(weight: float) -> float:
+            return weight / 2
+
+        source = SpiralDBTableSource(_PROJECT, "session_unrecorded")
+        with pytest.raises(ValueError, match="float \\| None"):
+            halve.pod(SelectDataColumns(["weight"])(source))
+
+    def test_join_of_recorded_and_unrecorded_keys_is_refused(self, strict_root):
+        # Type strictness: a key that is T on one side and T | None on the other.
+        with pytest.raises(InputValidationError, match="str \\| None"):
+            Join()(
+                SpiralDBTableSource(_PROJECT, "unit"),
+                SpiralDBTableSource(_PROJECT, "session_unrecorded"),
+            )
+
     def test_plain_typed_pod_runs_through_join_and_save_load(
         self, strict_root, tmp_path
     ):
-        @function_pod(output_keys="trials_x2")
-        def double(total_trials: int) -> int:
-            return 2 * total_trials
+        @function_pod(output_keys="score")
+        def score(total_trials: int, weight: float) -> float:
+            return total_trials * weight
 
         store = tmp_path / "store"
         job = PipelineJob(name="strict", store=DeltaTableDatabase(store))
@@ -379,11 +446,13 @@ class TestNonNullableColumns:
                 SpiralDBTableSource(_PROJECT, "unit"),
                 label="joined",
             )
-            trials = SelectDataColumns(["total_trials"])(joined, label="trials")
-            double.pod(trials, label="double")
+            trials = SelectDataColumns(["total_trials", "weight"])(
+                joined, label="trials"
+            )
+            score.pod(trials, label="score")
         job.run()
-        result = job.nodes["double"].as_table()
-        assert sorted(result.column("trials_x2").to_pylist()) == [20, 40]
+        result = job.nodes["score"].as_table()
+        assert sorted(result.column("score").to_pylist()) == [25.0, 80.0]
         assert not result.schema.field("subject_id").nullable
         assert job.nodes["joined"].output_schema()[0]["subject_id"] is str
 
@@ -391,6 +460,9 @@ class TestNonNullableColumns:
         job.save(path)
         loaded = PipelineJob.load(path, store=DeltaTableDatabase(store))
         assert loaded.unbound_sources == []
-        records = loaded.nodes["double"].get_all_records()
+        assert (
+            loaded.nodes["score"].pipeline_hash() == job.nodes["score"].pipeline_hash()
+        )
+        records = loaded.nodes["score"].get_all_records()
         assert records is not None
-        assert sorted(records.column("trials_x2").to_pylist()) == [20, 40]
+        assert sorted(records.column("score").to_pylist()) == [25.0, 80.0]
