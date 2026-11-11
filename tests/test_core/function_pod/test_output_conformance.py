@@ -267,6 +267,14 @@ class TestPipelineJobRowFailure:
         assert job.nodes["nothing"].as_table().num_rows == 0
 
 
+def _conversion_warnings(
+    record: list[warnings.WarningMessage],
+) -> list[warnings.WarningMessage]:
+    """The ValueConversionWarnings among recorded warnings (others, such as a
+    ResourceWarning from garbage collection, can arrive at any time)."""
+    return [w for w in record if w.category is errors.ValueConversionWarning]
+
+
 # (declared type, returned value, stored value, returned type name, words of the message)
 CONVERTED = [
     pytest.param(
@@ -374,7 +382,7 @@ class TestConvertedWithWarning:
             warnings.simplefilter("always")
             table = pod.pod(make_source(tuple(range(1000)))).as_table()
         assert table.num_rows == 1000
-        assert [w.category for w in record] == [errors.ValueConversionWarning]
+        assert len(_conversion_warnings(record)) == 1
 
     def test_dedup_does_not_rely_on_the_warning_registry(self) -> None:
         """catch_warnings resets the registry; the function still warns only once."""
@@ -385,8 +393,8 @@ class TestConvertedWithWarning:
         with warnings.catch_warnings(record=True) as second:
             warnings.simplefilter("always")
             pod.pod(make_source((3, 4))).as_table()
-        assert len(first) == 1
-        assert second == []
+        assert len(_conversion_warnings(first)) == 1
+        assert _conversion_warnings(second) == []
 
     def test_each_function_instance_warns(self) -> None:
         first = make_pod(list[int], (1, 2), name="twin")
@@ -395,7 +403,7 @@ class TestConvertedWithWarning:
             warnings.simplefilter("always")
             first.pod(make_source()).as_table()
             second.pod(make_source()).as_table()
-        assert len(record) == 2
+        assert len(_conversion_warnings(record)) == 2
 
     def test_error_filter_makes_it_a_row_failure(self) -> None:
         pod = make_pod(list[int], (1, 2), name="strict")
@@ -437,7 +445,7 @@ class TestAcceptedSilently:
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
             table = pod.pod(make_source()).as_table()
-        assert [w for w in record if w.category is errors.ValueConversionWarning] == []
+        assert _conversion_warnings(record) == []
         assert table["y"].to_pylist() == [stored]
 
 
