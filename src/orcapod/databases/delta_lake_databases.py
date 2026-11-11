@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod.databases.utils import coerce_record_id
+from orcapod.errors import InputValidationError, StoreReadError
 from orcapod.databases.storage_utils import (
     delta_to_pyarrow_dataset,
     is_cloud_uri,
@@ -29,6 +30,259 @@ else:
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+
+def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
+    """Return ``arrow_type`` reduced to what the append check compares.
+
+    Extension types are replaced by their storage type and every nested field is
+    made nullable, at every depth. The result is used only to compare a batch
+    with a stored table (ITL-884); it is never stored, so dropping nested
+    non-null flags here changes no schema or hash.
+
+    Args:
+        arrow_type: The Arrow type to reduce.
+
+    Returns:
+        The storage type with all nested fields nullable.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _comparable_storage_type(arrow_type.storage_type)
+    if pa.types.is_struct(arrow_type):
+        return pa.struct(
+            [pa.field(f.name, _comparable_storage_type(f.type)) for f in arrow_type]
+        )
+    if pa.types.is_large_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.large_list(pa.field(field.name, _comparable_storage_type(field.type)))
+    if pa.types.is_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.list_(pa.field(field.name, _comparable_storage_type(field.type)))
+    if pa.types.is_fixed_size_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.list_(
+            pa.field(field.name, _comparable_storage_type(field.type)),
+            arrow_type.list_size,
+        )
+    if pa.types.is_map(arrow_type):
+        key, item = arrow_type.key_field, arrow_type.item_field
+        # pyarrow accepts key and item Fields here; its stubs only list types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
+            pa.field(key.name, _comparable_storage_type(key.type), nullable=False),
+            pa.field(item.name, _comparable_storage_type(item.type)),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    return arrow_type
+
+
+def _without_null_types(arrow_type: pa.DataType) -> pa.DataType | None:
+    """Return ``arrow_type`` without the parts typed ``null``, or ``None`` if none is left.
+
+    A ``null``-typed value fits a column of any type, and Delta has no ``null``
+    type to compare it with, so the append check leaves it out at every depth: a
+    ``null`` struct field is dropped (its siblings are still compared, inside lists
+    and maps too), and a type that is ``null``, or whose list items or map keys or
+    values are entirely ``null``, is not compared.
+
+    Args:
+        arrow_type: A type already reduced by ``_comparable_storage_type``.
+
+    Returns:
+        The type to compare, or ``None`` when it should not be compared.
+    """
+    if pa.types.is_null(arrow_type):
+        return None
+    if pa.types.is_struct(arrow_type):
+        kept = [
+            pa.field(f.name, t)
+            for f in arrow_type
+            if (t := _without_null_types(f.type)) is not None
+        ]
+        return pa.struct(kept) if kept else None
+    if pa.types.is_large_list(arrow_type) or pa.types.is_list(arrow_type):
+        item = _without_null_types(arrow_type.value_type)
+        if item is None:
+            return None
+        field = pa.field(arrow_type.value_field.name, item)
+        return (
+            pa.large_list(field)
+            if pa.types.is_large_list(arrow_type)
+            else pa.list_(field)
+        )
+    if pa.types.is_fixed_size_list(arrow_type):
+        item = _without_null_types(arrow_type.value_type)
+        if item is None:
+            return None
+        return pa.list_(
+            pa.field(arrow_type.value_field.name, item), arrow_type.list_size
+        )
+    if pa.types.is_map(arrow_type):
+        key = _without_null_types(arrow_type.key_type)
+        value = _without_null_types(arrow_type.item_type)
+        if key is None or value is None:
+            return None
+        # pyarrow accepts key and item Fields here; its stubs only list types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
+            pa.field(arrow_type.key_field.name, key, nullable=False),
+            pa.field(arrow_type.item_field.name, value),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    return arrow_type
+
+
+def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
+    """Return ``schema`` with the types the Delta writer would store it as.
+
+    Applies the conversion ``deltalake.write_deltalake`` and ``DeltaTable.merge``
+    apply to incoming data (unsigned to signed integers, every timestamp to
+    microseconds, fixed-size binary to binary), then Delta's own type mapping.
+    Calling the writer's conversion instead of copying it keeps the append check
+    in step with what the writer accepts; ``test_identical_schema_appends``
+    guards it across ``deltalake`` versions.
+
+    Args:
+        schema: The schema of the rows about to be written.
+
+    Returns:
+        The schema as the Delta table would store it.
+    """
+    from arro3.core import Schema as Arro3Schema
+    from deltalake.writer._conversion import (  # pyright: ignore[reportPrivateUsage]  # the writer's own conversion, see the docstring
+        _convert_arro3_schema_to_delta,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    converted = _convert_arro3_schema_to_delta(Arro3Schema.from_arrow(schema))
+    return pa.schema(
+        deltalake.Schema.from_arrow(converted).to_arrow()  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
+    )
+
+
+def _without_field_metadata(delta_type: Any) -> Any:
+    """Return a Delta type with the metadata of every nested field dropped.
+
+    Args:
+        delta_type: A ``deltalake.schema`` type.
+
+    Returns:
+        The same type with no field metadata at any depth.
+    """
+    from deltalake.schema import ArrayType, Field, MapType, StructType
+
+    if isinstance(delta_type, StructType):
+        return StructType(
+            [
+                Field(f.name, _without_field_metadata(f.type), nullable=f.nullable)
+                for f in delta_type.fields
+            ]
+        )
+    if isinstance(delta_type, ArrayType):
+        return ArrayType(
+            _without_field_metadata(delta_type.element_type),
+            contains_null=delta_type.contains_null,
+        )
+    if isinstance(delta_type, MapType):
+        return MapType(
+            _without_field_metadata(delta_type.key_type),
+            _without_field_metadata(delta_type.value_type),
+            value_contains_null=delta_type.value_contains_null,
+        )
+    return delta_type
+
+
+def _stored_arrow_schema(delta_table: deltalake.DeltaTable) -> pa.Schema:
+    """Return the Arrow schema of the table's stored Delta schema, without metadata.
+
+    Delta keeps the Arrow field metadata it was written with, including the
+    extension type name of a logical type. Reading that back into pyarrow would
+    rebuild the registered extension type over Delta's own storage type (``list``
+    where Orcapod wrote ``large_list``), which the extension type rejects. The
+    append check compares storage types only, so the metadata is dropped first.
+
+    Args:
+        delta_table: The loaded stored table.
+
+    Returns:
+        The stored schema as plain Arrow types.
+    """
+    from deltalake.schema import Field, Schema
+
+    stored = delta_table.schema()
+    plain = Schema(
+        [
+            Field(f.name, _without_field_metadata(f.type), nullable=f.nullable)
+            for f in stored.fields
+        ]
+    )
+    return pa.schema(plain.to_arrow())  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
+
+
+def _types_conflict(stored: pa.DataType, incoming: pa.DataType) -> bool:
+    """Return ``True`` if ``incoming`` changes a type that ``stored`` already has.
+
+    Both types must already be reduced by ``_comparable_storage_type``. Struct
+    fields are matched by name at every depth, through list and map types. A
+    field present on only one side is not a conflict, just as a top-level column
+    present on only one side is not: adding or omitting it is schema evolution,
+    which Delta's merge accepts or rejects itself. Any other difference is a
+    conflict.
+
+    Args:
+        stored: The type the stored table has.
+        incoming: The type the new rows have.
+
+    Returns:
+        Whether a type the stored table already has would change.
+    """
+    if pa.types.is_struct(stored) and pa.types.is_struct(incoming):
+        stored_fields = {f.name: f.type for f in stored}
+        return any(
+            _types_conflict(stored_fields[f.name], f.type)
+            for f in incoming
+            if f.name in stored_fields
+        )
+    if (pa.types.is_large_list(stored) and pa.types.is_large_list(incoming)) or (
+        pa.types.is_list(stored) and pa.types.is_list(incoming)
+    ):
+        return _types_conflict(stored.value_type, incoming.value_type)
+    if pa.types.is_fixed_size_list(stored) and pa.types.is_fixed_size_list(incoming):
+        return stored.list_size != incoming.list_size or _types_conflict(
+            stored.value_type, incoming.value_type
+        )
+    if pa.types.is_map(stored) and pa.types.is_map(incoming):
+        return _types_conflict(stored.key_type, incoming.key_type) or _types_conflict(
+            stored.item_type, incoming.item_type
+        )
+    return stored != incoming
+
+
+def _store_error_to_raise(errors: list[Exception]) -> Exception | None:
+    """Pick the store error a failed flush raises as itself.
+
+    A ``StoreReadError`` is preferred, because it is the error that fails a run
+    whatever the orchestrator's ``error_policy``; failing that, an
+    ``InputValidationError`` from a refused append.
+
+    Args:
+        errors: The error of every batch that failed, in flush order.
+
+    Returns:
+        The first ``StoreReadError``, else the first ``InputValidationError``, or
+        ``None`` when no batch failed with a store error.
+    """
+    for kind in (StoreReadError, InputValidationError):
+        chosen = next((e for e in errors if isinstance(e, kind)), None)
+        if chosen is not None:
+            return chosen
+    return None
+
+
+class _DeltaTableReadError(Exception):
+    """A Delta table's data could not be read; the backend error is the ``__cause__``.
+
+    Raised by ``DeltaTableDatabase._read_delta_table`` so that its callers, which
+    know the table's path, can tell a failed read from a bad filter and raise
+    ``StoreReadError``.
+    """
 
 
 class DeltaTableDatabase:
@@ -61,6 +315,9 @@ class DeltaTableDatabase:
         _scoped_path: tuple[str, ...] = (),
         _shared_pending_batches: "dict[str, pa.Table] | None" = None,
         _shared_pending_record_ids: "defaultdict[str, set[bytes]] | None" = None,
+        _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
+        _shared_existing_ids_cache: "dict[str, set[bytes]] | None" = None,
+        _shared_cache_dirty: "dict[str, bool] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -85,9 +342,16 @@ class DeltaTableDatabase:
                 )
         # For cloud paths: create_base_path is silently ignored (no directory needed).
 
-        self._delta_table_cache: dict[str, deltalake.DeltaTable] = {}
-        # Shared pending state — when constructed via at(), these dicts are shared
-        # with the root instance so that root.flush() can flush all scoped writes.
+        # Shared state — when constructed via at(), these dicts are shared with the
+        # root instance. Any handle's flush() writes every pending key of the family
+        # and refreshes the loaded table and existing-ids entries for it, so these
+        # caches must be family-wide too: a per-handle cache would keep serving the
+        # snapshot a sibling loaded before the flush (ITL-864). All of them are
+        # touched only from the thread that drives the pipeline (the async
+        # orchestrator runs only user functions in worker threads).
+        self._delta_table_cache: dict[str, deltalake.DeltaTable] = (
+            _shared_delta_table_cache if _shared_delta_table_cache is not None else {}
+        )
         if _shared_pending_batches is not None:
             self._pending_batches = _shared_pending_batches
         else:
@@ -96,8 +360,16 @@ class DeltaTableDatabase:
             self._pending_record_ids = _shared_pending_record_ids
         else:
             self._pending_record_ids: dict[str, set[bytes]] = defaultdict(set)
-        self._existing_ids_cache: dict[str, set[str]] = defaultdict(set)
-        self._cache_dirty: dict[str, bool] = defaultdict(lambda: True)
+        self._existing_ids_cache: dict[str, set[bytes]] = (
+            _shared_existing_ids_cache
+            if _shared_existing_ids_cache is not None
+            else defaultdict(set)
+        )
+        self._cache_dirty: dict[str, bool] = (
+            _shared_cache_dirty
+            if _shared_cache_dirty is not None
+            else defaultdict(lambda: True)
+        )
 
     def _clear_pending(self):
         """Clear all pending state."""
@@ -217,11 +489,23 @@ class DeltaTableDatabase:
             # Table doesn't exist
             return None
         except Exception as e:
-            logger.error(f"Error loading Delta table for {record_key}: {e}")
-            # Try to clear any corrupted cache
-            if record_key in self._delta_table_cache:
-                self._delta_table_cache.pop(record_key)
-            raise
+            # The table exists but could not be loaded: never report it as absent.
+            self._delta_table_cache.pop(record_key, None)
+            raise self._read_failed(record_path) from e
+
+    def _read_failed(self, record_path: tuple[str, ...]) -> StoreReadError:
+        """Build the error for a table at ``record_path`` that exists but cannot be read.
+
+        Args:
+            record_path: Path components relative to this database view.
+
+        Returns:
+            A ``StoreReadError`` naming the table; the caller raises it from the
+            backend's exception.
+        """
+        return StoreReadError(
+            self._get_table_uri(record_path), self._path_prefix + record_path
+        )
 
     def table_exists(self, record_path: tuple[str, ...]) -> bool:
         """Return ``True`` if a Delta table exists at ``record_path``.
@@ -321,35 +605,38 @@ class DeltaTableDatabase:
             # Get all existing IDs from Delta table using standard RECORD_ID_COLUMN
             # TODO: replace this with more targetted loading of only the target column and in batches
             arrow_table = delta_to_pyarrow_dataset(delta_table).to_table()
-            if arrow_table.num_rows == 0:
-                self._existing_ids_cache[record_key] = set()
-            elif self.RECORD_ID_COLUMN not in arrow_table.column_names:
-                # TODO: replace this with proper checking of the table schema first!
-                logger.warning(f"Delta table missing {self.RECORD_ID_COLUMN} column")
-                self._existing_ids_cache[record_key] = set()
-            else:
-                existing_ids = cast(
-                    set[str], set(arrow_table[self.RECORD_ID_COLUMN].to_pylist())
-                )
-                self._existing_ids_cache[record_key] = existing_ids
-
-            self._cache_dirty[record_key] = False
-            logger.debug(
-                f"Refreshed existing IDs cache: {len(self._existing_ids_cache)} IDs"
-            )
-
         except Exception as e:
-            logger.error(f"Failed to refresh existing IDs cache: {e}")
-            self._existing_ids_cache[record_key] = set()
-            self._cache_dirty[record_key] = False
-            raise
+            # Stay dirty: the loaded table is cached, so a clean cache would never
+            # be refreshed and stored ids would read as unstored (ITL-864).
+            self._cache_dirty[record_key] = True
+            raise self._read_failed(record_path) from e
 
-    def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[str]:
+        if arrow_table.num_rows == 0:
+            self._existing_ids_cache[record_key] = set()
+        elif self.RECORD_ID_COLUMN not in arrow_table.column_names:
+            # TODO: replace this with proper checking of the table schema first!
+            logger.warning(f"Delta table missing {self.RECORD_ID_COLUMN} column")
+            self._existing_ids_cache[record_key] = set()
+        else:
+            existing_ids = cast(
+                set[bytes], set(arrow_table[self.RECORD_ID_COLUMN].to_pylist())
+            )
+            self._existing_ids_cache[record_key] = existing_ids
+
+        self._cache_dirty[record_key] = False
+        logger.debug(
+            f"Refreshed existing IDs cache: {len(self._existing_ids_cache)} IDs"
+        )
+
+    def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[bytes]:
         """Get the set of existing IDs in the Delta table, using cache when possible."""
         record_key = self._get_record_key(record_path)
+        # A table loaded by a read is cached before any ids are, so a missing
+        # id entry needs a refresh as much as a dirty one does.
         if (
             self._cache_dirty.get(record_key)
             or record_key not in self._delta_table_cache
+            or record_key not in self._existing_ids_cache
         ):
             self._refresh_existing_ids_cache(record_path)
         return self._existing_ids_cache.get(record_key) or set()
@@ -613,7 +900,7 @@ class DeltaTableDatabase:
         else:
             self._pending_batches[record_key] = pa.concat_tables([pending_batch, table])
 
-        pending_ids = cast(list[str], table[self.RECORD_ID_COLUMN].to_pylist())
+        pending_ids = cast(list[bytes], table[self.RECORD_ID_COLUMN].to_pylist())
         self._pending_record_ids[record_key].update(pending_ids)
 
     def _should_auto_flush(self, record_path: tuple[str, ...]) -> bool:
@@ -624,6 +911,97 @@ class DeltaTableDatabase:
             and self._pending_batches[record_key].num_rows >= self.batch_size
         )
 
+    def _pending_not_stored(self, record_path: tuple[str, ...]) -> pa.Table | None:
+        """Return the pending rows a flush would insert at ``record_path``.
+
+        A flush inserts only rows whose record id is not stored yet (the merge is
+        ``when_not_matched_insert_all``), so a pending row with a stored id is
+        never returned by a read: the stored row is.
+
+        Args:
+            record_path: Path components relative to this database view.
+
+        Returns:
+            The pending rows whose record id is not stored, or ``None`` if there
+            are none.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is None or pending.num_rows == 0:
+            return None
+        stored_ids = self._get_existing_ids(record_path)
+        if stored_ids:
+            # The mask is built from the pending ids against the cached set, so its
+            # cost follows the pending batch, not the stored table. A null id is
+            # never matched by the merge (``null = null`` is not true), so its row
+            # is kept.
+            keep = [
+                record_id is None or record_id not in stored_ids
+                for record_id in pending[self.RECORD_ID_COLUMN].to_pylist()
+            ]
+            pending = pending.filter(pa.array(keep, type=pa.bool_()))
+        return pending if pending.num_rows > 0 else None
+
+    def _combine_stored_and_pending(
+        self,
+        stored: pa.Table | None,
+        pending: pa.Table | None,
+        record_id_column: str | None,
+    ) -> pa.Table | None:
+        """Combine stored rows with pending rows into one read result.
+
+        Combined rows have the schema a flush would give them: both parts take
+        their large layouts (a stored table reads back large), a column missing
+        on one side is null-filled, a ``null``-typed column takes the other
+        side's type, nullability is merged (nullable if either side is), and
+        struct children are merged, as Delta's merge evolves the stored schema.
+        A column whose types still differ raises ``pyarrow.ArrowTypeError``;
+        nothing is widened. A single part is returned as it is.
+
+        Args:
+            stored: Rows read from the Delta table, or ``None``.
+            pending: Pending rows that are not stored (see ``_pending_not_stored``),
+                already filtered by the read's condition, or ``None``.
+            record_id_column: Name to give the record id column, or ``None`` to
+                drop it.
+
+        Returns:
+            The combined rows, or ``None`` if there are none.
+        """
+        parts = [t for t in (stored, pending) if t is not None and t.num_rows > 0]
+        if not parts:
+            return None
+        if len(parts) == 1:
+            table = parts[0]
+        else:
+            table = pa.concat_tables(
+                [self._large_layout(t) for t in parts], promote_options="default"
+            )
+        return self._handle_record_id_column(table, record_id_column)
+
+    @staticmethod
+    def _large_layout(table: pa.Table) -> pa.Table:
+        """Return ``table`` with every column in its large layout.
+
+        Only layouts change (``string`` to ``large_string``, ``list`` to
+        ``large_list``, recursively); ``null`` stays ``null``, and names,
+        nullability and metadata are kept.
+
+        Args:
+            table: The table to normalize.
+
+        Returns:
+            The table with large-normalized column types.
+        """
+        schema = table.schema
+        for index, field in enumerate(table.schema):
+            schema = schema.set(
+                index,
+                field.with_type(
+                    arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+                ),
+            )
+        return table if schema.equals(table.schema) else table.cast(schema)
+
     def get_all_records(
         self,
         record_path: tuple[str, ...],
@@ -633,11 +1011,16 @@ class DeltaTableDatabase:
         """
         Get all records from both pending batch and Delta table.
 
+        Every read method returns the rows a flush would leave: the stored rows
+        plus the pending rows whose record id is not stored yet, as seen through
+        any handle of this ``at()`` family.
+
         Returns:
             Combined Arrow table with all records, or None if no records exist
-        """
-        record_key = self._get_record_key(record_path)
 
+        Raises:
+            StoreReadError: If the Delta table exists but could not be read.
+        """
         tables_to_combine = []
 
         # Add Delta table data
@@ -646,29 +1029,15 @@ class DeltaTableDatabase:
                 delta_table_data = delta_to_pyarrow_dataset(
                     delta_table, as_large_types=True
                 ).to_table()
-                if delta_table_data.num_rows > 0:
-                    tables_to_combine.append(delta_table_data)
             except Exception as e:
-                logger.warning(f"Error reading Delta table: {e}")
+                raise self._read_failed(record_path) from e
+            if delta_table_data.num_rows > 0:
+                tables_to_combine.append(delta_table_data)
 
-        # Add pending batch data
-        if (
-            retrieve_pending
-            and (pending_batch := self._pending_batches.get(record_key)) is not None
-        ):
-            if pending_batch.num_rows > 0:
-                tables_to_combine.append(pending_batch)
-
-        if not tables_to_combine:
-            return None
-
-        if len(tables_to_combine) == 1:
-            table_to_return = tables_to_combine[0]
-        else:
-            table_to_return = pa.concat_tables(tables_to_combine)
-
-        # Handle record_id_column if specified
-        return self._handle_record_id_column(table_to_return, record_id_column)
+        # Add the pending rows a flush would insert
+        pending = self._pending_not_stored(record_path) if retrieve_pending else None
+        stored = pa.concat_tables(tables_to_combine) if tables_to_combine else None
+        return self._combine_stored_and_pending(stored, pending, record_id_column)
 
     def get_records_with_column_value(
         self,
@@ -679,9 +1048,6 @@ class DeltaTableDatabase:
     ) -> "pa.Table | None":
         if flush:
             self.flush_batch(record_path)
-        # check if record_id is found in pending batches
-        record_key = self._get_record_key(record_path)
-        pending_batch = self._pending_batches.get(record_key)
 
         if isinstance(column_values, Mapping):
             # Convert Mapping to list of tuples
@@ -695,30 +1061,38 @@ class DeltaTableDatabase:
         for next_expression in expressions[1:]:
             combined_expression = combined_expression & next_expression
 
-        if pending_batch is not None:
-            filtered_table = pending_batch.filter(combined_expression)
-            return self._handle_record_id_column(filtered_table, record_id_column)
-
-        # Now check the Delta table
+        pending = self._pending_not_stored(record_path)
         delta_table = self._get_delta_table(record_path)
+
+        # A side without a queried column holds null there once flushed, and
+        # ``column == value`` never matches null, so it contributes no rows. A
+        # column neither side has is unknown: the filter raises as before.
+        queried = {c for c, _ in pair_list}
+        stored_columns = (
+            set()
+            if delta_table is None
+            else {field.name for field in delta_table.schema().fields}
+        )
+        pending_columns = set() if pending is None else set(pending.column_names)
+        if queried <= stored_columns | pending_columns:
+            if not queried <= pending_columns:
+                pending = None
+            if not queried <= stored_columns:
+                delta_table = None
+
+        if pending is not None:
+            pending = pending.filter(combined_expression)
+
         if delta_table is None:
-            return None
+            return self._combine_stored_and_pending(None, pending, record_id_column)
 
+        # Use schema-preserving read
         try:
-            # Use schema-preserving read
             result = self._read_delta_table(delta_table, expression=combined_expression)
+        except _DeltaTableReadError as e:
+            raise self._read_failed(record_path) from e.__cause__
 
-            if len(result) == 0:
-                return None
-
-            # Handle (remove/rename) the record id column before returning
-            return self._handle_record_id_column(result, record_id_column)
-
-        except Exception as e:
-            logger.error(
-                f"Error getting record with {column_values} from {'/'.join(record_path)}: {e}"
-            )
-            raise e
+        return self._combine_stored_and_pending(result, pending, record_id_column)
 
     def get_record_by_id(
         self,
@@ -742,9 +1116,12 @@ class DeltaTableDatabase:
             self.flush_batch(record_path)
 
         record_id = coerce_record_id(record_id)
-        # check if record_id is found in pending batches
+        # Serve a pending record only if its id is not stored: a flush keeps the
+        # stored row and drops the pending one.
         record_key = self._get_record_key(record_path)
-        if record_id in self._pending_record_ids[record_key]:
+        if record_id in self._pending_record_ids[
+            record_key
+        ] and record_id not in self._get_existing_ids(record_path):
             # Return the pending record after removing the entry id column
             pending_batch = self._pending_batches[record_key]
             assert pending_batch is not None, "Pending batch should not be None"
@@ -762,22 +1139,18 @@ class DeltaTableDatabase:
         if delta_table is None:
             return None
 
+        # Use schema-preserving read
+        filter_expr = self._create_record_id_filter(record_id)
         try:
-            # Use schema-preserving read
-            filter_expr = self._create_record_id_filter(record_id)
             result = self._read_delta_table(delta_table, filters=filter_expr)
+        except _DeltaTableReadError as e:
+            raise self._read_failed(record_path) from e.__cause__
 
-            if len(result) == 0:
-                return None
+        if len(result) == 0:
+            return None
 
-            # Handle (remove/rename) the record id column before returning
-            return self._handle_record_id_column(result, record_id_column)
-
-        except Exception as e:
-            logger.error(
-                f"Error getting record {record_id} from {'/'.join(record_path)}: {e}"
-            )
-            raise e
+        # Handle (remove/rename) the record id column before returning
+        return self._handle_record_id_column(result, record_id_column)
 
     def get_records_by_ids(
         self,
@@ -815,26 +1188,28 @@ class DeltaTableDatabase:
         if len(record_ids) == 0:
             return None
 
-        # check inside the batch
         delta_table = self._get_delta_table(record_path)
-        if delta_table is None:
-            return None
-        try:
+        # Reading the stored ids drops the pending rows a flush would not insert;
+        # it raises StoreReadError when the stored table cannot be read.
+        pending = self._pending_not_stored(record_path)
+        result = None
+        if delta_table is not None:
             # Use schema-preserving read with filters
             filter_expr = self._create_record_ids_filter(record_ids_list)
-            result = self._read_delta_table(delta_table, filters=filter_expr)
+            try:
+                result = self._read_delta_table(delta_table, filters=filter_expr)
+            except _DeltaTableReadError as e:
+                raise self._read_failed(record_path) from e.__cause__
 
-            if len(result) == 0:
-                return None
-
-            # Handle record_id column based on parameter
-            return self._handle_record_id_column(result, record_id_column)
-
-        except Exception as e:
-            logger.error(
-                f"Error getting records by IDs from {'/'.join(record_path)}: {e}"
+        if pending is not None:
+            id_type = pending.schema.field(self.RECORD_ID_COLUMN).type
+            pending = pending.filter(
+                pc.is_in(
+                    pending[self.RECORD_ID_COLUMN],
+                    value_set=pa.array(record_ids_list, type=id_type),
+                )
             )
-            return None
+        return self._combine_stored_and_pending(result, pending, record_id_column)
 
     def _read_delta_table(
         self,
@@ -848,13 +1223,22 @@ class DeltaTableDatabase:
         Args:
             delta_table: The Delta table to read from
             filters: Optional filters to apply
+            expression: Optional filter expression, used instead of ``filters``
 
         Returns:
             Arrow table with preserved schema
+
+        Raises:
+            _DeltaTableReadError: If the table's data could not be read, with the
+                backend's error as its ``__cause__``. An error in the filter itself
+                (an unknown column, say) is raised as is.
         """
         filter_expr = None
         # Use to_pyarrow_dataset with as_large_types for Polars compatible arrow table loading
-        dataset = delta_to_pyarrow_dataset(delta_table, as_large_types=True)
+        try:
+            dataset = delta_to_pyarrow_dataset(delta_table, as_large_types=True)
+        except Exception as e:
+            raise _DeltaTableReadError from e
         if filters and expression is None:
             for filt in filters:
                 if len(filt) == 3:
@@ -868,7 +1252,7 @@ class DeltaTableDatabase:
                             f"Unsupported filter operation: {op}. Falling back to table-level filter application which may be less efficient."
                         )
                         # Fallback to table-level filtering
-                        return dataset.to_table()(filters=filters)  # pyright: ignore[reportCallIssue]  # pre-existing bug, removed by ITL-884 (PR #290)
+                        return dataset.to_table()(filters=filters)  # pyright: ignore[reportCallIssue]  # pre-existing bug; unreachable, this class builds only "=" and "in" filters
 
                     if filter_expr is None:
                         filter_expr = expr
@@ -880,7 +1264,11 @@ class DeltaTableDatabase:
         # Convert view types before filtering: PyArrow has no comparison/sort
         # kernels for string_view, so filtering the scan directly crashes
         # (ENG-601). Trades predicate pushdown for correctness.
-        table = arrow_utils.normalize_table_view_types(dataset.to_table())
+        try:
+            scanned = dataset.to_table()
+        except Exception as e:
+            raise _DeltaTableReadError from e
+        table = arrow_utils.normalize_table_view_types(scanned)
         if filter_expr is not None:
             return table.filter(filter_expr)
         return table
@@ -929,7 +1317,21 @@ class DeltaTableDatabase:
         )
 
     def flush(self) -> None:
-        """Flush all pending batches."""
+        """Flush all pending batches.
+
+        Every pending batch is attempted, even after one fails. A batch that fails
+        stays queued, so a later flush tries it again, and each failure is logged.
+
+        Raises:
+            StoreReadError: If a batch's existing table could not be loaded. It is
+                raised as itself; every other batch that failed in this flush is
+                added to it as a note.
+            InputValidationError: If no batch failed with ``StoreReadError`` but a
+                batch's column types differ from its stored table's. Other failed
+                batches are added to it as notes.
+            RuntimeError: If batches failed with other errors only, naming the
+                failed batches, with the first failure as its ``__cause__``.
+        """
         errors: list[tuple[str, Exception]] = []
         for record_key in list(self._pending_batches.keys()):
             try:
@@ -938,6 +1340,16 @@ class DeltaTableDatabase:
                 logger.error(f"Error flushing batch for {record_key}: {e}")
                 errors.append((record_key, e))
         if errors:
+            store_error = _store_error_to_raise([e for _, e in errors])
+            if store_error is not None:
+                # Keep every other failure visible on the error that is raised.
+                for record_key, other in errors:
+                    if other is not store_error:
+                        store_error.add_note(
+                            f"Another batch also failed to flush ({record_key}): "
+                            f"{type(other).__name__}: {other}"
+                        )
+                raise store_error
             failed_keys = [k for k, _ in errors]
             raise RuntimeError(
                 f"Failed to flush {len(errors)} batch(es): {failed_keys}"
@@ -995,18 +1407,19 @@ class DeltaTableDatabase:
 
                 os.makedirs(table_uri, exist_ok=True)
 
-            # Check if Delta table exists at this URI
-            try:
-                import deltalake as _dl
+            # Check if Delta table exists at this URI. Only TableNotFoundError
+            # means "absent": a table that exists but cannot be loaded must never
+            # be replaced by the mode="overwrite" write below (ITL-884).
+            from deltalake.exceptions import TableNotFoundError
 
-                delta_table = _dl.DeltaTable(
+            try:
+                delta_table = deltalake.DeltaTable(
                     table_uri, storage_options=self._storage_options or None
                 )
-            except (
-                _dl.exceptions.TableNotFoundError,
-                _dl.exceptions.DeltaProtocolError,
-            ):
+            except TableNotFoundError:
                 delta_table = None
+            except Exception as load_error:
+                raise StoreReadError(table_uri, abs_path_components) from load_error
 
             if delta_table is None:
                 # TODO: reconsider mode="overwrite" here
@@ -1021,6 +1434,16 @@ class DeltaTableDatabase:
                     f"Created new Delta table for {record_key} with {len(combined_table)} records"
                 )
             else:
+                mismatch = self._incompatible_append_column(delta_table, combined_table)
+                if mismatch is not None:
+                    column, stored_type, incoming_type = mismatch
+                    raise InputValidationError(
+                        f"Cannot append to the stored table {table_uri!r}: column "
+                        f"{column!r} is stored as {stored_type} but the new rows have "
+                        f"{incoming_type} (input type "
+                        f"{combined_table.schema.field(column).type}). "
+                        "The stored rows are unchanged and nothing was written."
+                    )
                 delta_table.merge(
                     source=combined_table,
                     predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
@@ -1049,6 +1472,58 @@ class DeltaTableDatabase:
             self._pending_batches[record_key] = pending_batch
             self._pending_record_ids[record_key] = pending_ids
             raise
+
+    @staticmethod
+    def _incompatible_append_column(
+        delta_table: deltalake.DeltaTable, batch: pa.Table
+    ) -> tuple[str, pa.DataType, pa.DataType] | None:
+        """Find a column whose type in ``batch`` differs from the stored table's.
+
+        Delta's merge either casts such a batch to the stored type (``int32`` or
+        ``float64`` rows into an ``int64`` column) or, when an extension type is
+        involved, writes data files the table can no longer read. ``null``-typed
+        parts of the batch fit any stored type and are not compared (see
+        ``_without_null_types``). The batch's types
+        are first converted exactly as the Delta writer converts them (see
+        ``_as_delta_writer_stores``), then both sides are compared with extension
+        types reduced to storage, large-normalized and nullability ignored, so a
+        type Delta stores differently (``uint64`` as ``int64``, ``timestamp[ns]``
+        as ``timestamp[us]``) is not reported. Columns and nested
+        struct fields present on only one side are allowed (schema evolution);
+        see ``_types_conflict``. The stored schema comes from the loaded log; no
+        data is read.
+
+        Args:
+            delta_table: The loaded stored table.
+            batch: The rows about to be merged into it.
+
+        Returns:
+            ``(column, stored_type, incoming_type)`` for the first column whose
+            compared types differ, or ``None`` when the batch can be appended.
+        """
+        stored = _stored_arrow_schema(delta_table)
+        compared = [
+            (f.name, _without_null_types(_comparable_storage_type(f.type)))
+            for f in batch.schema
+        ]
+        incoming = _as_delta_writer_stores(
+            pa.schema([pa.field(name, t) for name, t in compared if t is not None])
+        )
+        for field in incoming:
+            index = stored.get_field_index(field.name)
+            if index < 0:
+                continue
+            stored_type = _comparable_storage_type(
+                arrow_utils.normalize_to_large_types(
+                    stored.field(index).type, keep_null=True
+                )
+            )
+            incoming_type = _comparable_storage_type(
+                arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            )
+            if _types_conflict(stored_type, incoming_type):
+                return field.name, stored_type, incoming_type
+        return None
 
     @property
     def base_path(self) -> tuple[str, ...]:
@@ -1102,6 +1577,9 @@ class DeltaTableDatabase:
             _scoped_path=new_scoped_path,
             _shared_pending_batches=root_instance._pending_batches,
             _shared_pending_record_ids=root_instance._pending_record_ids,
+            _shared_delta_table_cache=root_instance._delta_table_cache,
+            _shared_existing_ids_cache=root_instance._existing_ids_cache,
+            _shared_cache_dirty=root_instance._cache_dirty,
         )
 
     def list_sources(self) -> list[tuple[str, ...]]:

@@ -12,6 +12,7 @@ from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
+from orcapod.errors import StoreReadError, StoreWriteError
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
@@ -28,6 +29,35 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
+
+
+def _flush_best_effort(
+    run_error: BaseException, *databases: ArrowDatabaseProtocol
+) -> None:
+    """Flush each database, noting instead of raising if a flush fails.
+
+    Used when a run has already failed: the run's own error is the one to report,
+    and a second failure while committing the writes that did succeed must not
+    replace it. A flush failure is logged and added as a note to ``run_error``,
+    so the caller learns that pending results may not have been stored.
+
+    Args:
+        run_error: The error the run failed with, which the caller re-raises.
+        *databases: The databases to flush.
+    """
+    for database in databases:
+        try:
+            database.flush()
+        except Exception as flush_error:
+            logger.exception(
+                "Could not flush pending writes after the run failed; "
+                "the rows they hold were not stored"
+            )
+            run_error.add_note(
+                "Flushing pending writes after this failure also failed "
+                + f"({type(flush_error).__name__}: {flush_error}); results that were "
+                + "still pending may not have been stored."
+            )
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -736,6 +766,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Raises:
             ValueError: If no store is set.
             RuntimeError: If no pipeline has been compiled.
+            StoreWriteError: If a node's results or records could not be written
+                to the store, whatever the orchestrator's ``error_policy``. The run
+                stops at the first failed write. Writes that succeeded before it
+                are flushed first, so rows stored before the failure are kept, and
+                re-running the job does not recompute stored function results.
+            StoreReadError: If a stored table exists but could not be read,
+                whatever the orchestrator's ``error_policy``, also when the read
+                was needed to write a node's results. Its rows are not recomputed
+                and the table is not overwritten.
         """
         import hashlib
         import uuid
@@ -827,20 +866,42 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         snapshot_hash = hashlib.sha256("\n".join(leaf_hashes).encode()).hexdigest()[:16]
         pipeline_uri = "/".join(self._name) + "@" + snapshot_hash
 
-        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        effective_orchestrator.run(
-            exec_dag,
-            observer=effective_observer,
-            run_id=run_id,
-            pipeline_uri=pipeline_uri,
-            materialize_results=materialize_results,
-        )
-
-        # Flush databases.
         pipeline_db = self._store.at(*self._name)
         result_db = pipeline_db.at("_result")
-        pipeline_db.flush()
-        result_db.flush()
+
+        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+        try:
+            effective_orchestrator.run(
+                exec_dag,
+                observer=effective_observer,
+                run_id=run_id,
+                pipeline_uri=pipeline_uri,
+                materialize_results=materialize_results,
+            )
+        except Exception as run_error:
+            # Commit the writes that did succeed before the failure, so their rows
+            # do not look dropped, then report the failure itself.
+            _flush_best_effort(run_error, pipeline_db, result_db)
+            raise
+
+        # Flush databases. Every view of the store shares one set of pending
+        # batches, so a failed batch can leave the ones after it unwritten.
+        pending_note = (
+            "Writes that were still pending when the flush failed, such as a "
+            + "cache_mode=LOG operator's output or a node's last records, may not "
+            + "have been stored."
+        )
+        try:
+            pipeline_db.flush()
+            result_db.flush()
+        except StoreReadError as exc:
+            # A stored table could not be read: report the read failure itself.
+            exc.add_note(pending_note)
+            raise
+        except Exception as exc:
+            flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
+            flush_error.add_note(pending_note)
+            raise flush_error from exc
 
         # Mutate self in place.
         self._has_run = True
