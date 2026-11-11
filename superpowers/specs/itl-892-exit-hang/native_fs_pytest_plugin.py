@@ -5,6 +5,7 @@ Usage (repository root):
         uv run pytest -p native_fs_pytest_plugin tests/
 """
 
-from repro_orcapod import apply_patch
+import importlib
 
-apply_patch("native-fs")
+# Imported by name: this directory is put on PYTHONPATH by the command above.
+importlib.import_module("repro_orcapod").apply_patch("native-fs")

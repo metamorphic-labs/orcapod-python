@@ -80,6 +80,7 @@ def main() -> None:
     ).when_not_matched_insert_all().execute()
     table = deltalake.DeltaTable(path)
     checks = 0
+    rows = 0
     for flt in (
         None,
         pc.field("i8") > 10,
@@ -89,8 +90,9 @@ def main() -> None:
         assert a.schema.equals(b.schema, check_metadata=True), (a.schema, b.schema)
         assert a.equals(b), "values differ"
         checks += 1
+        rows = a.num_rows
     print(
-        f"files={len(table.file_uris())} last_filter_rows={a.num_rows} "
+        f"files={len(table.file_uris())} last_filter_rows={rows} "
         f"checks={checks} identical schema+values"
     )
     print("done", flush=True)

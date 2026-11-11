@@ -157,7 +157,7 @@ def main() -> None:
         help="prototype a mitigation without editing src/",
     )
     args = ap.parse_args()
-    apply_patch(os.environ.get("ITL892_PATCH", args.patch))
+    apply_patch(os.environ.get("ITL892_PATCH") or str(args.patch))
     store = Path(tempfile.mkdtemp())
     if args.mode == "pipeline-sync":
         pipeline(store, "sync")
