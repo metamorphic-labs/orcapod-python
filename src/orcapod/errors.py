@@ -35,6 +35,96 @@ class DataFunctionUnavailableError(RuntimeError):
     """
 
 
+def type_text(annotation: object) -> str:
+    """Return a short, readable name for a type or annotation, for error messages.
+
+    Builtin classes are shown bare (``int``); other classes with their module
+    (``numpy.int8``, ``decimal.Decimal``); generic aliases and unions as Python prints
+    them (``list[int]``, ``int | None``). Never use this for hashing or identity.
+
+    Args:
+        annotation: A class or a typing annotation.
+
+    Returns:
+        The display name.
+    """
+    if isinstance(annotation, type) and not hasattr(annotation, "__origin__"):
+        module = annotation.__module__
+        if module in ("builtins", "__main__"):
+            return annotation.__qualname__
+        return f"{module}.{annotation.__qualname__}"
+    return str(annotation).replace("typing.", "")
+
+
+class OutputTypeError(TypeError, ValueError):
+    """A function returned a value that does not match its declared output type.
+
+    Orcapod never converts a returned value implicitly (ITL-895): pyarrow would
+    otherwise truncate a ``float`` returned for an output declared ``int``. The data
+    function raises this before anything is stored or hashed, so a pipeline treats it
+    like any other failure of the function: a row failure under ``error_policy``,
+    reported to the observer's ``on_data_crash``.
+
+    It subclasses both ``TypeError`` (a value of the wrong type) and ``ValueError``
+    (it also wraps conversion failures of a value of the right type, such as an
+    integer out of range for the declared width or a naive ``datetime`` under the
+    strict timezone policy, which were ``ValueError`` before).
+
+    Attributes:
+        function_name: Name of the function pod's function.
+        output_key: Name of the output column.
+        declared_type: The declared type of that output.
+        value: The value the function returned for that output.
+    """
+
+    def __init__(
+        self,
+        function_name: str,
+        output_key: str,
+        declared_type: object,
+        value: object,
+        detail: str | None = None,
+    ) -> None:
+        """Create the error for one output of one call.
+
+        Args:
+            function_name: Name of the function pod's function.
+            output_key: Name of the output column.
+            declared_type: The declared type of that output.
+            value: The value the function returned for that output.
+            detail: Where inside the value the mismatch is, or why the conversion
+                failed, when that is not the value as a whole.
+        """
+        self.function_name = function_name
+        self.output_key = output_key
+        self.declared_type = declared_type
+        self.value = value
+        self.detail = detail
+        where = f": {detail}" if detail else ""
+        value_repr = repr(value)
+        if len(value_repr) > 80:
+            value_repr = value_repr[:77] + "..."
+        super().__init__(
+            f"Function {function_name!r} returned {type_text(type(value))} "
+            f"({value_repr}) for output {output_key!r}, which is declared "
+            f"{type_text(declared_type)}{where}. Orcapod does not convert types "
+            "implicitly; convert the value in the function."
+        )
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickle with the constructor arguments (executors send errors across processes)."""
+        return (
+            type(self),
+            (
+                self.function_name,
+                self.output_key,
+                self.declared_type,
+                self.value,
+                self.detail,
+            ),
+        )
+
+
 class FieldNotResolvableError(LookupError):
     """
     Raised when a source cannot resolve a field value for a given record ID.

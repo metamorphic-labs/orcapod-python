@@ -21,12 +21,14 @@ from orcapod.hashing.hash_utils import (
     get_function_signature,
 )
 from orcapod.core.result_cache import ResultCache
+from orcapod.errors import OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types.output_conformance import find_nonconformance
 from orcapod.types import DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
@@ -569,13 +571,33 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     def _build_output_data(self, values: Any) -> DataProtocol:
         """Build an output Data from raw function return values.
 
+        Every returned value is checked against its declared output type and then
+        converted to Arrow here, eagerly, so the Data holds exactly the values that are
+        stored and hashed (ITL-895). Without the check pyarrow would coerce some
+        mismatches silently, for example truncating ``1.5`` returned for ``-> int``.
+
         Args:
             values: Raw return value from the wrapped function.
 
         Returns:
             A Data containing the parsed outputs with source info.
+
+        Raises:
+            OutputTypeError: If a returned value does not conform to its declared type,
+                or cannot be converted to it.
         """
         output_data = parse_function_outputs(self._output_keys, values)
+        output_schema = self.output_data_schema
+        for key, value in output_data.items():
+            problem = find_nonconformance(value, output_schema[key])
+            if problem is not None:
+                raise OutputTypeError(
+                    self.canonical_function_name,
+                    key,
+                    output_schema[key],
+                    value,
+                    problem.describe(),
+                )
 
         def combine(*components: tuple[str, ...]) -> str:
             inner_parsed = [":".join(component) for component in components]
@@ -586,13 +608,58 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             k: combine(self.uri, (new_record_uuid.hex,), (k,)) for k in output_data
         }
 
+        if not output_data:
+            return Data(
+                output_data,
+                source_info=source_info,
+                record_uuid=new_record_uuid,
+                python_schema=output_schema,
+                data_context=self.data_context,
+            )
         return Data(
-            output_data,
+            self._convert_outputs(output_data, output_schema),
             source_info=source_info,
             record_uuid=new_record_uuid,
-            python_schema=self.output_data_schema,
             data_context=self.data_context,
         )
+
+    def _convert_outputs(
+        self, output_data: dict[str, DataValue], output_schema: Schema
+    ) -> pa.Table:
+        """Convert checked outputs to a one-row Arrow table with the declared types.
+
+        Args:
+            output_data: The parsed outputs, already checked against ``output_schema``.
+            output_schema: The declared output types.
+
+        Returns:
+            The one-row table, typed by the declared schema.
+
+        Raises:
+            OutputTypeError: If an output cannot be converted, for example an integer
+                out of range for its declared width; it names that output.
+        """
+        converter = self.data_context.type_converter
+        try:
+            return converter.python_dicts_to_arrow_table(
+                [output_data], python_schema=output_schema
+            )
+        except Exception as exc:
+            # Find the output that fails on its own, so the error can name it.
+            for key, value in output_data.items():
+                try:
+                    converter.python_dicts_to_arrow_table(
+                        [{key: value}], python_schema={key: output_schema[key]}
+                    )
+                except Exception:
+                    raise OutputTypeError(
+                        self.canonical_function_name,
+                        key,
+                        output_schema[key],
+                        value,
+                        f"{type(exc).__name__}: {exc}",
+                    ) from exc
+            raise
 
     def _call_async_function_sync(self, data: DataProtocol, **kwargs: Any) -> Any:
         """Run the wrapped async function synchronously.
