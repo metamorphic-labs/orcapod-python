@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sys
+from typing import Any
 import warnings
 from datetime import date, datetime
 
@@ -34,14 +35,16 @@ def exprs():
         "cast": pl.col("x").cast(pl.Int64) > 0,
         "nan": pl.col("x") > float("nan"),
         "lit_true": pl.lit(True),
-        "map_elements": pl.col("x").map_elements(lambda v: v > 0, return_dtype=pl.Boolean),
+        "map_elements": pl.col("x").map_elements(
+            lambda v: v > 0, return_dtype=pl.Boolean
+        ),
     }
 
 
 def main():
-    out = {"version": pl.__version__}
+    out: dict[str, Any] = {"version": pl.__version__}
     for name, e in exprs().items():
-        rec = {"str": str(e)}
+        rec: dict[str, Any] = {"str": str(e)}
         try:
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")

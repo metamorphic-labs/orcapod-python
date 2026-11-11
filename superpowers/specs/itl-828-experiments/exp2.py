@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sys
+from typing import Any
 from datetime import date, timedelta
 
 import polars as pl
@@ -38,15 +39,19 @@ def exprs():
         "is_in_dates": pl.col("d").is_in([date(2024, 1, 1)]),
         "str_starts": pl.col("s").str.starts_with("a"),
         "mean_cmp": pl.col("x") > pl.col("x").mean(),
-        "map_elements": pl.col("x").map_elements(lambda v: v > 0, return_dtype=pl.Boolean),
-        "map_batches": pl.col("x").map_batches(lambda s: s > 0, return_dtype=pl.Boolean),
+        "map_elements": pl.col("x").map_elements(
+            lambda v: v > 0, return_dtype=pl.Boolean
+        ),
+        "map_batches": pl.col("x").map_batches(
+            lambda s: s > 0, return_dtype=pl.Boolean
+        ),
     }
 
 
 def main():
-    out = {"version": pl.__version__}
+    out: dict[str, Any] = {"version": pl.__version__}
     for name, e in exprs().items():
-        rec = {"str": str(e)}
+        rec: dict[str, Any] = {"str": str(e)}
         try:
             b = e.meta.serialize(format="binary")
             rec["bin_sha"] = hashlib.sha256(b).hexdigest()[:16]

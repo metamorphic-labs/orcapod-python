@@ -74,14 +74,14 @@ CORPUS: list[tuple[str, Callable[[], pl.Expr], Any]] = [
     ),
     (
         "eq_bool",
-        lambda: pl.col("x") == True,
+        lambda: pl.col("x") == True,  # noqa: E712 - builds an Expr, not a bool
         {"binary": ["eq", {"col": "x"}, {"lit": {"boolean": True}}]},
-    ),  # noqa: E712
+    ),
     (
         "eq_null",
-        lambda: pl.col("x") == None,
+        lambda: pl.col("x") == None,  # noqa: E711 - builds an Expr, not a bool
         {"binary": ["eq", {"col": "x"}, {"lit": {"null": None}}]},
-    ),  # noqa: E711
+    ),
     ("gt_date", lambda: pl.col("x") > date(2024, 1, 1), _gt_x({"date": 19723})),
     ("gt_time", lambda: pl.col("x") > time(12, 0), _gt_x({"time": 43200000000000})),
     (

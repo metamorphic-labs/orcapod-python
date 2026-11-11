@@ -2245,3 +2245,35 @@ xfail. The async path checks key types on the first row of each input, because
 So when either input is empty (left or right), a key type mismatch that the sync path reports
 yields an empty result on the async path instead of an error. `Join`'s async key check
 (`_check_shared_key_types`) has the same limit.
+
+---
+
+## `src/orcapod/core/operators/filters.py` — `PolarsFilter` identity and nullability (ITL-828)
+
+### PF1 — An expression predicate could not be hashed, and a filter broke a join inside a job
+**Status:** in progress (PF1a resolved; PF1b open)
+
+**PF1a.** `stream.polars_filter(pl.col("x") > 0).pipeline_hash()` raised `TypeError` (no
+semantic handler for `pl.Expr`), so an expression filter failed upstream of a join and anywhere
+inside a `PipelineJob`.
+
+**Fix (PF1a):** `PolarsExprHandler` hashes a `pl.Expr` as `polars_expr_v1`: a strict parser
+turns `Expr.meta.serialize(format="json")` into a tree in an Orcapod-owned grammar
+(`hashing/semantic_hashing/polars_expr.py`), hashed as sha256 of its canonical JSON. Polars'
+serialization is not hashed directly: it changed layout between 1.20, 1.30 and 1.36. Unknown
+nodes and unsupported expressions (Python functions, multi-column selectors, aggregations,
+`alias`, `when/then`, non-finite literals, `pl.Series` literals) raise `ValueError` naming the
+expression, so a Polars layout change fails loudly instead of moving a hash. `predicates` is
+normalized to a tuple. The identity design awaits the developer's confirmation.
+
+Also fixed: inside a `PipelineJob` any `PolarsFilter` (keyword constraints too) upstream of a
+`Join` raised `InputValidationError` (`str` vs `str | None`), because Polars returns every field
+nullable and the filter restored types but not nullability. Tag, system-tag, source-info and
+meta columns now get their input nullability back. No golden value moved.
+
+**PF1b (open).** Data columns of a filtered stream still come back nullable, which breaks the
+rule that operators never change nullability. Restoring them too (drop the exclusion in
+`PolarsFilter.unary_static_process`) makes a filtered row's data hash equal to its source row's,
+but moves the pinned `pipeline:polars_filter` row data hashes, which are the cache keys of any
+function pod downstream of a filter, so a 0.2 store would recompute those results once. Awaiting
+the developer's decision.

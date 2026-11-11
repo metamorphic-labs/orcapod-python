@@ -48,7 +48,7 @@ def _names() -> DictSource:
 
 
 def _ids(stream) -> list[str]:
-    return sorted(stream.as_table().column("id").to_pylist())
+    return sorted(str(v) for v in stream.as_table().column("id").to_pylist())
 
 
 class TestHashes:
@@ -93,7 +93,10 @@ def test_expression_filter_upstream_of_join():
     filtered = _readings().polars_filter(pl.col("x") > 0)
     joined = Join()(filtered, _names())
     table = joined.as_table()
-    assert sorted(table.column("name").to_pylist()) == ["alpha", "gamma"]
+    assert sorted(str(v) for v in table.column("name").to_pylist()) == [
+        "alpha",
+        "gamma",
+    ]
     assert joined.pipeline_hash() is not None
 
 

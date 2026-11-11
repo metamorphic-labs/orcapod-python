@@ -301,7 +301,7 @@ def _list_literal(value: Any) -> Any:
         raise _fail("unexpected list literal layout (not one column)")
     series = frame.to_series()
     dtype = _polars_dtype(series.dtype)
-    if series.dtype in (pl.Float32, pl.Float64):
+    if series.dtype.is_float():
         payload = [
             None if v is None else _float_hex(v, float32=series.dtype == pl.Float32)
             for v in series.to_list()
