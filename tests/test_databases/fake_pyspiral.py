@@ -39,7 +39,8 @@ connector's docstrings, pyspiral's own documentation) or is an assumption to con
   type's zero value (a null written to an ``int32`` field read back as ``0``). Switch it off
   only to model a store that keeps nullability.
 * ``reject_struct_nulls`` (documented by pyspiral ``Table.write``): a null struct value is
-  refused unless written with ``push_down_nulls=True``.
+  refused unless written with ``push_down_nulls=True``, which turns it into a struct of null
+  fields (observed live, ITL-936; top-level struct columns only in the fake).
 * Rows come back sorted by key and writes upsert by key (SpiralDB is a key-sorted store).
 """
 
@@ -170,6 +171,36 @@ def _zero_struct_field_nulls(
                     for i in range(written.num_fields)
                 ],
                 mask=struct.is_null(),
+            )
+        )
+    return pa.chunked_array(chunks)
+
+
+def _push_down_struct_nulls(col: pa.ChunkedArray[Any]) -> pa.ChunkedArray[Any]:
+    """Turn each null struct of a top-level struct column into a struct of null fields.
+
+    What ``push_down_nulls=True`` was seen to do live (pyspiral 0.16.33, ITL-936): the
+    struct-level null and any values under it are lost.
+    """
+    if not pa.types.is_struct(col.type) or not col.null_count:
+        return col
+    chunks = []
+    for chunk in col.chunks:
+        struct = cast("pa.StructArray", chunk)
+        valid = struct.is_valid()
+        children = [
+            pc.if_else(
+                valid, struct.field(i), pa.scalar(None, struct.type.field(i).type)
+            )
+            for i in range(struct.type.num_fields)
+        ]
+        chunks.append(
+            pa.StructArray.from_arrays(
+                children,
+                fields=[
+                    struct.type.field(i).with_nullable(True)
+                    for i in range(struct.type.num_fields)
+                ],
             )
         )
     return pa.chunked_array(chunks)
@@ -405,6 +436,8 @@ class FakeTable:
         arrays = []
         for f in table.schema:
             col = table.column(f.name)
+            if push_down_nulls:
+                col = _push_down_struct_nulls(col)
             if b.server_nullability:
                 # Arrow validates the outgoing batch on the client (live, ITL-936).
                 if not f.nullable and col.null_count:

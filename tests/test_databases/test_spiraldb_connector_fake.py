@@ -23,6 +23,7 @@ from orcapod.errors import (
     NullabilityRecordError,
     NullabilityRecordMismatchError,
     NullInNonNullableColumnError,
+    UnsupportedValueError,
 )
 from orcapod.utils import arrow_utils
 from orcapod.sources import ArrowTableSource, SpiralDBTableSource
@@ -422,3 +423,88 @@ class TestResultStoreOnSpiral:
         db.add_record(_PATH, "r2", _result(2))
         with pytest.raises(ValueError, match="Schema mismatch"):
             db.flush()
+
+
+_INNER = pa.struct([pa.field("a", pa.int32())])
+
+
+class TestStructLevelNulls:
+    """SpiralDB cannot store a null struct (ITL-936).
+
+    Live, pyspiral 0.16.33: written with ``push_down_nulls=True``, a null struct reads back
+    as a struct of null fields (value and hash change). The connector never passes
+    ``push_down_nulls`` and refuses a null struct at any depth before writing anything.
+    """
+
+    @pytest.fixture()
+    def fake(self, tmp_path: Path):
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            project = fake_pyspiral.FakeSpiral().project("p")
+            project.create_table("default.t", key_schema=[("k", pa.int64())])
+            yield project
+
+    @pytest.mark.parametrize(
+        ("column", "values", "path"),
+        [
+            ("g", pa.array([{"a": 1}, None], _INNER), "g"),
+            (
+                "outer",
+                pa.array(
+                    [{"inner": {"a": 1}}, {"inner": None}],
+                    pa.struct([pa.field("inner", _INNER)]),
+                ),
+                "outer.inner",
+            ),
+            ("items", pa.array([[{"a": 1}], [None]], pa.list_(_INNER)), "items[]"),
+        ],
+    )
+    def test_null_struct_is_refused_before_writing(self, fake, column, values, path):
+        rows = pa.table({"k": pa.array([1, 2], pa.int64()), column: values})
+        with pytest.raises(UnsupportedValueError) as info:
+            SpiralDBConnector("p").upsert_records("t", rows, id_column="k")
+        message = str(info.value)
+        assert repr(path) in message
+        assert _TABLE in message
+        table = fake.table("default.t")
+        assert table.schema().to_arrow().names == ["k"]  # nothing written
+        assert read_nullability_record(table.get_metadata()) is None
+
+    def test_struct_with_null_fields_is_written(self, fake):
+        rows = pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "g": pa.array([{"a": 1}, {"a": None}], _INNER),
+                "items": pa.array([[{"a": 1}], None], pa.list_(_INNER)),
+            }
+        )
+        connector = SpiralDBConnector("p")
+        connector.upsert_records("t", rows, id_column="k")
+        back = pa.Table.from_batches(connector.iter_batches('SELECT * FROM "t"'))
+        assert back.column("g").to_pylist() == [{"a": 1}, {"a": None}]
+        assert back.column("items").to_pylist() == [[{"a": 1}], None]
+
+    def test_push_down_nulls_turns_a_null_struct_into_null_fields(self, fake):
+        # What any writer passing push_down_nulls=True gets (live, ITL-936).
+        table = fake.table("default.t")
+        table.write(
+            pa.table(
+                {
+                    "k": pa.array([1, 2], pa.int64()),
+                    "g": pa.array([{"a": 1}, None], _INNER),
+                }
+            ),
+            push_down_nulls=True,
+        )
+        stored = fake_pyspiral.FakeSpiral().scan(table.select()).to_table()
+        assert stored.column("g").to_pylist() == [{"a": 1}, {"a": None}]
+
+    def test_result_store_refuses_a_null_struct(self, tmp_path: Path):
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            db = ConnectorArrowDatabase(SpiralDBConnector("p"))
+            db.add_record(
+                ("results", "fn"),
+                "r1",
+                pa.table({"g": pa.array([None], _INNER)}),
+            )
+            with pytest.raises(UnsupportedValueError, match="'g'"):
+                db.flush()

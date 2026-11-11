@@ -37,8 +37,9 @@ from orcapod.databases.spiraldb_nullability import (
 )
 from orcapod.errors import (
     NullabilityRecordError,
-    NullInNonNullableColumnError,
     NullabilityRecordMismatchError,
+    NullInNonNullableColumnError,
+    UnsupportedValueError,
 )
 from orcapod.types import ColumnInfo
 from orcapod.utils import arrow_utils
@@ -305,6 +306,50 @@ def _parse_table_name(query: str) -> str:
     if not m:
         raise ValueError(f"Cannot parse table name from query: {query!r}")
     return m.group(1)
+
+
+def _null_struct_path(data: pa.Table) -> str | None:
+    """Return the path of the first struct (at any depth) holding a struct-level null.
+
+    SpiralDB cannot store a null struct: pyspiral refuses one unless written with
+    ``push_down_nulls=True``, which turns it into a struct of null fields (live, ITL-936).
+
+    Args:
+        data: The rows to be written.
+
+    Returns:
+        The path (``g``, ``outer.inner``, ``items[]``), or ``None`` if there is none.
+    """
+    import pyarrow as _pa  # noqa: PLC0415
+
+    def walk(arrays: list[Any], t: pa.DataType, path: str) -> str | None:
+        arrays = [a.storage if isinstance(a, _pa.ExtensionArray) else a for a in arrays]
+        if isinstance(t, _pa.ExtensionType):
+            t = t.storage_type
+        if _pa.types.is_struct(t):
+            if any(a.null_count for a in arrays):
+                return path
+            for i in range(t.num_fields):
+                child = t.field(i)
+                found = walk(
+                    [a.field(i) for a in arrays], child.type, f"{path}.{child.name}"
+                )
+                if found is not None:
+                    return found
+        elif (
+            _pa.types.is_list(t)
+            or _pa.types.is_large_list(t)
+            or _pa.types.is_fixed_size_list(t)
+        ):
+            return walk([a.flatten() for a in arrays], t.value_type, f"{path}[]")
+        return None
+
+    for name in data.column_names:
+        column = data.column(name)
+        found = walk(list(column.chunks), column.type, name)
+        if found is not None:
+            return found
+    return None
 
 
 @contextmanager
@@ -654,6 +699,9 @@ class SpiralDBConnector:
                 non-nullable paths than ``records.schema``. Nothing is written.
             NullabilityRecordError: If the table's record cannot be read, or
                 ``records`` has a non-nullable field inside a map.
+            UnsupportedValueError: If ``records`` holds a null struct at any depth, which
+                SpiralDB cannot store. Nothing is written; ``push_down_nulls`` is never
+                passed.
         """
         self._require_open()
         tbl = self._project.table(self._table_id(table_name))
@@ -679,6 +727,13 @@ class SpiralDBConnector:
         # stores a null written to a non-null struct field as the type's zero, so every
         # non-nullable path is checked here before anything is written.
         qualified = self._qualified(table_name)
+        null_struct = _null_struct_path(records)
+        if null_struct is not None:
+            raise UnsupportedValueError(
+                f"table {qualified}: column {null_struct!r} holds a null struct, which "
+                "SpiralDB cannot store (it would read back as a struct of null fields); "
+                "nothing was written"
+            )
         with _about_table(qualified):
             paths = schema_paths(records.schema)
             check_no_nulls(records, paths)

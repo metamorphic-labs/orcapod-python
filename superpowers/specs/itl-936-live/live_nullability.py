@@ -25,6 +25,9 @@ may be left behind). Checks:
    fields: a struct written null with ``push_down_nulls=True`` (child value present
    underneath), a null list with items underneath, null items in a nullable list, a null in a
    nullable struct field. Reports the rows and the child arrays as read back.
+   ``struct_null_without_push_down``: a null struct written straight through pyspiral without
+   ``push_down_nulls`` (refused, or what is stored); ``struct_null_connector``: the same rows
+   through ``SpiralDBConnector`` are refused by Orcapod before anything is written.
 5. ``metadata``: several keys in one ``set_metadata`` call; a 400-column record (chunked);
    an entry over 8 KiB (expected refused).
 
@@ -184,6 +187,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
     from orcapod.errors import (
         NullabilityRecordMismatchError,
         NullInNonNullableColumnError,
+        UnsupportedValueError,
     )
     from orcapod.sources import SpiralDBTableSource
     from orcapod.types import ColumnInfo
@@ -191,7 +195,10 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
     run = time.strftime("%Y%m%d%H%M%S")
     client = sp.Spiral()
     proj = client.project(project)
-    names = {n: f"itl936_{run}_{n}" for n in ("a", "b", "hidden", "meta")}
+    names = {
+        n: f"itl936_{run}_{n}"
+        for n in ("a", "b", "hidden", "struct_null", "struct_null_orcapod", "meta")
+    }
     created: list[str] = []
     ok = True
     try:
@@ -304,6 +311,48 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
             "read_l_validity": back.column("l").is_valid().to_pylist(),
             "schema": _schema_text(back.schema),
         }
+
+        # 4b. a null struct WITHOUT push_down_nulls, straight through pyspiral: refused?
+        plain = proj.create_table(
+            f"{dataset}.{names['struct_null']}",
+            key_schema=pa.schema([pa.field("k", pa.int64(), False)]),
+        )
+        created.append(names["struct_null"])
+        struct_null = pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "g": pa.array([{"x": 1, "y": 1}, None], g_nullable),
+            }
+        )
+        try:
+            plain.write(struct_null)
+            stored = client.scan(plain.select()).to_table()
+            report["struct_null_without_push_down"] = {
+                "write": "accepted",
+                "read_rows": stored.to_pylist(),
+                "read_g_validity": stored.column("g").is_valid().to_pylist(),
+            }
+        except Exception as exc:  # noqa: BLE001 - the probe records whatever SpiralDB raises
+            report["struct_null_without_push_down"] = {
+                "write": f"refused: {type(exc).__name__}: {exc}"
+            }
+        # ... and through the connector: refused by Orcapod before anything is written
+        connector.create_table_if_not_exists(
+            names["struct_null_orcapod"], key_info, pk_column="k"
+        )
+        created.append(names["struct_null_orcapod"])
+        try:
+            connector.upsert_records(
+                names["struct_null_orcapod"], struct_null, id_column="k"
+            )
+            orcapod_refusal = "NOT refused"
+        except UnsupportedValueError as exc:
+            orcapod_refusal = str(exc)
+        report["struct_null_connector"] = {
+            "error": orcapod_refusal,
+            "ok": "NOT" not in orcapod_refusal,
+        }
+        ok = ok and bool(report["struct_null_connector"]["ok"])
 
         # 5. metadata
         meta_tbl = proj.create_table(

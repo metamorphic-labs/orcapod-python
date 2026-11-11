@@ -126,6 +126,11 @@ their `source_id` explicitly and keep it when loaded.
   `content_hash`, so write it before building pipelines on the table. A
   `ConnectorArrowDatabase` on SpiralDB gives new result tables a nullability record, so results
   read back with their written nullability; existing result tables are not changed.
+- **SpiralDB null structs are refused** (ITL-936). SpiralDB cannot store a null struct: written
+  with pyspiral's `push_down_nulls=True` it reads back as a struct of null fields (live,
+  pyspiral 0.16.33). `SpiralDBConnector.upsert_records` now refuses a null struct at any depth
+  with `orcapod.errors.UnsupportedValueError` naming the table and column, before anything is
+  written; it never passes `push_down_nulls`.
 
 ### Fixed
 

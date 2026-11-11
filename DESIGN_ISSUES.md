@@ -2516,6 +2516,12 @@ refuses a write that disagrees with the record, and on read restores the record 
 `get_column_info` and checks and restores every batch in `iter_batches`
 (`NullInNonNullableColumnError` / `NullabilityRecordError`, naming the table). Tables without
 a record are unchanged. The pyspiral fake now reports nullability as the server does. Open:
-the corruption itself is SpiralDB's (to raise with Spiral); live verification of the
-connector on `edi-tutorial-v1-841226` is pending (coordinator-run).
+the corruption itself is SpiralDB's (to raise with Spiral).
+
+Live check (coordinator, `superpowers/specs/itl-936-live/live_nullability.py write`): the
+connector's nullability record, refusals, a Join and save/load pass. Also found: SpiralDB
+cannot store a null struct. Written with `push_down_nulls=True`, `g = null` reads back as
+`g = {x: null, y: null}` with the struct valid (value and hash change); null lists, null list
+items and null struct fields survive. The connector now refuses a null struct at any depth
+with `UnsupportedValueError` before writing, and never passes `push_down_nulls`.
 

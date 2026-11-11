@@ -141,6 +141,13 @@ fields included (SpiralDB would store a null written to a non-nullable struct fi
 and a later write whose non-nullable columns differ from the nullability record. It never adds
 a nullability record to a table that already holds rows, and never changes one.
 
+SpiralDB cannot store a null struct, at any depth (a struct column, a struct field of a struct,
+a struct inside a list): a writer passing pyspiral's `push_down_nulls=True` gets back a struct
+whose fields are all null instead, a different value with a different hash. `SpiralDBConnector`
+therefore refuses a write holding a null struct with `UnsupportedValueError` naming the table
+and the column, and writes nothing. Null lists, null list items and null struct fields are
+stored as written.
+
 Other writers give a table its nullability record with `write_nullability_record`, passing the
 Arrow schema the data was written with. It reads no data, so check first that no non-nullable
 column holds a null. The same call replaces a wrong nullability record.
