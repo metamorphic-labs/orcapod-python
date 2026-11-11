@@ -245,7 +245,7 @@ class LogicalTorchTensor(BaseLogicalType):
             The ``pa.ExtensionType`` over ``ARRAY_STORAGE_TYPE``.
         """
         if LogicalTorchTensor._arrow_ext is None:
-            LogicalTorchTensor._arrow_ext = LogicalTorchTensor._arrow_ext_class()
+            LogicalTorchTensor._arrow_ext = LogicalTorchTensor._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # the generated class takes no arguments
         return LogicalTorchTensor._arrow_ext
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
@@ -255,7 +255,7 @@ class LogicalTorchTensor(BaseLogicalType):
             The ``pl.BaseExtension`` registered under ``orcapod.torch_tensor``.
         """
         if LogicalTorchTensor._polars_ext is None:
-            LogicalTorchTensor._polars_ext = LogicalTorchTensor._polars_ext_class()
+            LogicalTorchTensor._polars_ext = LogicalTorchTensor._polars_ext_class()  # pyright: ignore[reportCallIssue]  # the generated class takes no arguments
         return LogicalTorchTensor._polars_ext
 
     def python_to_storage(

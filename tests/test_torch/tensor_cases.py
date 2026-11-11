@@ -88,7 +88,7 @@ def expected_digest(t: Any) -> bytes:
     return reference_digest(tag_of(t), list(t.shape), value_bytes(t))
 
 
-def assert_tensors_identical(got: object, expected: Any) -> None:
+def assert_tensors_identical(got: Any, expected: Any) -> None:
     """Assert ``got`` is a plain CPU tensor equal to ``expected`` bit for bit.
 
     Args:
@@ -104,7 +104,7 @@ def assert_tensors_identical(got: object, expected: Any) -> None:
     assert value_bytes(got) == value_bytes(expected)
 
 
-def same_tensor(a: object, b: Any) -> bool:
+def same_tensor(a: Any, b: Any) -> bool:
     """Whether ``a`` is a tensor with ``b``'s dtype, shape and bits."""
     return (
         type(a) is torch.Tensor

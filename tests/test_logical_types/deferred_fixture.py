@@ -51,10 +51,10 @@ class LogicalThing(BaseLogicalType):
         LogicalThing.instances += 1
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
-        return self._arrow_ext_class()
+        return self._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # the generated class takes no arguments
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
-        return self._polars_ext_class()
+        return self._polars_ext_class()  # pyright: ignore[reportCallIssue]  # the generated class takes no arguments
 
     def python_to_storage(self, value: Any, converter: Any = None) -> str:
         return value.text
