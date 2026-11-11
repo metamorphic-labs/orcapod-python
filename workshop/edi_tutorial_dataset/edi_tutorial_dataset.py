@@ -1,0 +1,1660 @@
+"""Build the workshop Spiral project: a small subset of the V1 EDI sample.
+
+The workshop reads EDI tables from SpiralDB through Orcapod sources. The V1 EDI sample
+project (``edi-sample-v1-855632``) is too large for a laptop, and every column in it,
+key columns included, is declared nullable. This tool copies a subset of it (a set of
+units and one time window; small tables whole) into a new project, and declares each
+column non-nullable where the EDI schema specification (v0.3.0) requires a value.
+
+Two files next to this module drive it:
+
+* ``nullability_map.json``: for every table and column, the specification's type, the
+  nullability to declare, the key columns and the foreign keys. Entries whose
+  nullability is ``null`` are decisions still pending; ``copy`` refuses to run while
+  any remain.
+* ``subset.json``: the time window, the unit IDs, and how each table is selected.
+
+Every command needs ``pyspiral>=0.16.33`` and a ``spiral login``. Run from the
+repository root, for example::
+
+    uv run --with pyspiral==0.16.33 python \\
+        workshop/edi_tutorial_dataset/edi_tutorial_dataset.py plan
+
+Commands (see ``--help`` on each):
+
+* ``plan``: read-only dry run of the whole copy against the source.
+* ``create``: create the target project and its marker table.
+* ``probe``: check, in the target project, how SpiralDB treats non-nullable columns.
+* ``copy``: copy the subset (``--dry-run`` writes nothing).
+* ``verify``: check the target against the source and the map.
+* ``derive-map`` / ``render-map``: build the map from the specification, print it as
+  Markdown.
+
+The tool reads only from ``--source-project``. It writes only to ``--target-project``,
+which must be repeated as ``--allow-writes``, must not start with ``edi-sample-v``, and
+must be a project that ``create`` made: ``create`` writes a marker table
+(``meta.edi_tutorial_build``) into the new project, and every table the tool writes
+carries the same marker in its metadata. A target holding any table without the marker
+is refused.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import re
+import sys
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.compute as pc
+
+HERE = Path(__file__).resolve().parent
+MAP_PATH = HERE / "nullability_map.json"
+SUBSET_PATH = HERE / "subset.json"
+
+MIN_PYSPIRAL = (0, 16, 33)
+DEFAULT_SOURCE = "edi-sample-v1-855632"
+MARKER_TABLE = "meta.edi_tutorial_build"
+PROBE_TABLE = "meta.nullability_probe"
+MARKER_KEY = "edi_tutorial_dataset.marker"
+STATUS_KEY = "edi_tutorial_dataset.status"
+FORBIDDEN_TARGET_PREFIXES = ("edi-sample-v",)
+TOOL_NAME = "orcapod-python workshop/edi_tutorial_dataset"
+
+# Rows per slice when two key-sorted streams are compared value by value.
+COMPARE_SLICE_ROWS = 4096
+
+
+# --------------------------------------------------------------------------- errors
+
+
+class ToolError(Exception):
+    """Base class for every error this tool raises on purpose."""
+
+
+class TargetRefusedError(ToolError):
+    """The target project is not one this tool may write to."""
+
+
+class PendingDecisionError(ToolError):
+    """The nullability map still holds decisions for the developer."""
+
+
+class SchemaMismatchError(ToolError):
+    """A table's columns or Arrow types differ from what the map records."""
+
+
+class NullInRequiredColumnError(ToolError):
+    """A column declared non-nullable holds nulls.
+
+    Attributes:
+        path: Column path, outermost first (a struct child is ``(group, field)``).
+        null_count: Number of nulls found.
+    """
+
+    def __init__(self, path: tuple[str, ...], null_count: int) -> None:
+        self.path = path
+        self.null_count = null_count
+        super().__init__(
+            f"column {'.'.join(path)!r} is declared non-nullable but holds "
+            f"{null_count} null(s); nothing is coerced"
+        )
+
+    def within(self, parent: str) -> NullInRequiredColumnError:
+        """Return the same error with ``parent`` prepended to the column path."""
+        return NullInRequiredColumnError((parent, *self.path), self.null_count)
+
+
+class StaleTableError(ToolError):
+    """A complete target table was built from a different subset or map."""
+
+
+class VerificationError(ToolError):
+    """``verify`` found problems; ``problems`` lists them."""
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = problems
+        super().__init__(f"{len(problems)} problem(s):\n  " + "\n  ".join(problems))
+
+
+# ------------------------------------------------------------------- map and subset
+
+
+@dataclasses.dataclass(frozen=True)
+class ColumnSpec:
+    """One column (or one field of a column group) in the nullability map.
+
+    Attributes:
+        arrow_type: The source column's Arrow type, as ``str(pa.DataType)``.
+        nullable: Nullability to declare; ``None`` while the decision is pending.
+        spec_type: The specification's type (``None`` if the spec does not define it).
+        key: Whether the column is part of the table's key.
+    """
+
+    arrow_type: str
+    nullable: bool | None
+    spec_type: str | None = None
+    key: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class GroupSpec:
+    """A Spiral column group (a top-level struct column) in the nullability map."""
+
+    arrow_type: str
+    nullable: bool | None
+    fields: Mapping[str, ColumnSpec]
+
+
+@dataclasses.dataclass(frozen=True)
+class ForeignKey:
+    """Child columns that must resolve to the key of rows in ``parent``.
+
+    The child columns carry the same names as the parent's key columns.
+    """
+
+    parent: str
+    columns: tuple[str, ...]
+    note: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class TableSpec:
+    """One table of the nullability map."""
+
+    name: str
+    in_spec: bool
+    keys: tuple[str, ...]
+    columns: Mapping[str, ColumnSpec]
+    groups: Mapping[str, GroupSpec]
+    foreign_keys: tuple[ForeignKey, ...]
+
+    def pending(self) -> list[str]:
+        """Return the column paths whose nullability is still undecided."""
+        out = [n for n, c in self.columns.items() if c.nullable is None]
+        for g, group in self.groups.items():
+            if group.nullable is None:
+                out.append(g)
+            out.extend(
+                f"{g}.{n}" for n, c in group.fields.items() if c.nullable is None
+            )
+        return out
+
+
+@dataclasses.dataclass(frozen=True)
+class NullabilityMap:
+    """The whole nullability map: tables by name, plus where it came from."""
+
+    spec_version: str
+    source_project: str
+    tables: Mapping[str, TableSpec]
+    raw: Mapping[str, Any]
+
+    def pending(self) -> dict[str, list[str]]:
+        """Return pending decisions by table (tables without any are left out)."""
+        return {n: p for n, t in self.tables.items() if (p := t.pending())}
+
+
+def _column_from_json(d: Mapping[str, Any]) -> ColumnSpec:
+    return ColumnSpec(
+        arrow_type=d["arrow_type"],
+        nullable=d["nullable"],
+        spec_type=d.get("spec_type"),
+        key=bool(d.get("key", False)),
+    )
+
+
+def parse_map(raw: Mapping[str, Any]) -> NullabilityMap:
+    """Build a ``NullabilityMap`` from its JSON form."""
+    tables: dict[str, TableSpec] = {}
+    for name, t in raw["tables"].items():
+        groups = {
+            g: GroupSpec(
+                arrow_type=gd["arrow_type"],
+                nullable=gd["nullable"],
+                fields={f: _column_from_json(fd) for f, fd in gd["fields"].items()},
+            )
+            for g, gd in t.get("groups", {}).items()
+        }
+        tables[name] = TableSpec(
+            name=name,
+            in_spec=bool(t["in_spec"]),
+            keys=tuple(t["keys"]),
+            columns={c: _column_from_json(cd) for c, cd in t["columns"].items()},
+            groups=groups,
+            foreign_keys=tuple(
+                ForeignKey(fk["parent"], tuple(fk["columns"]), fk.get("note", ""))
+                for fk in t.get("foreign_keys", [])
+            ),
+        )
+    return NullabilityMap(raw["spec_version"], raw["source_project"], tables, raw)
+
+
+def load_map(path: Path = MAP_PATH) -> NullabilityMap:
+    """Read the nullability map from ``path``."""
+    return parse_map(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+@dataclasses.dataclass(frozen=True)
+class Subset:
+    """Which rows of the source make up the tutorial dataset.
+
+    Attributes:
+        dataset: Spiral dataset of every table, in source and target.
+        window: Half-open ``[start, stop)`` in µs relative to ``session_start_datetime``.
+        unit_ids: The kept units.
+        tables: Selection mode per table: ``whole``, ``window``, ``window_units``,
+            ``units`` or ``trials``.
+        trial_table: The table selected by ``trials`` mode.
+        raw: The JSON form, hashed into each table's status digest.
+    """
+
+    dataset: str
+    window: tuple[int, int]
+    unit_ids: tuple[int, ...]
+    tables: Mapping[str, str]
+    trial_table: str
+    raw: Mapping[str, Any]
+
+
+SELECTION_MODES = ("whole", "window", "window_units", "units", "trials")
+
+
+def parse_subset(raw: Mapping[str, Any]) -> Subset:
+    """Build a ``Subset`` from its JSON form.
+
+    Raises:
+        ToolError: if the window is empty or a selection mode is unknown.
+    """
+    start, stop = (int(x) for x in raw["window_us"])
+    if not 0 <= start < stop:
+        raise ToolError(
+            f"window_us must satisfy 0 <= start < stop, got {[start, stop]}"
+        )
+    tables = {n: t["mode"] for n, t in raw["tables"].items()}
+    unknown = {n: m for n, m in tables.items() if m not in SELECTION_MODES}
+    if unknown:
+        raise ToolError(f"unknown selection modes {unknown}; known: {SELECTION_MODES}")
+    return Subset(
+        dataset=raw.get("dataset", "default"),
+        window=(start, stop),
+        unit_ids=tuple(sorted(int(u) for u in raw["unit_ids"])),
+        tables=tables,
+        trial_table=raw.get("trial_table", "experiment_freeviewing_trial"),
+        raw=raw,
+    )
+
+
+def load_subset(path: Path = SUBSET_PATH) -> Subset:
+    """Read the subset definition from ``path``."""
+    return parse_subset(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def table_digest(nmap: NullabilityMap, subset: Subset, table: str) -> str:
+    """Return a digest of everything that decides a table's copied content."""
+    payload = {
+        "source_project": nmap.source_project,
+        "map": nmap.raw["tables"][table],
+        "subset": {k: v for k, v in subset.raw.items() if k != "notes"},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+# ------------------------------------------------------------------ schema handling
+
+
+def _same_type_up_to_nullability(a: pa.DataType, b: pa.DataType) -> bool:
+    """Return whether two types are equal, ignoring struct children's nullability."""
+    if pa.types.is_struct(a) and pa.types.is_struct(b):
+        if a.num_fields != b.num_fields:
+            return False
+        return all(
+            a.field(i).name == b.field(i).name
+            and _same_type_up_to_nullability(a.field(i).type, b.field(i).type)
+            for i in range(a.num_fields)
+        )
+    return a == b
+
+
+def target_schema(
+    source: pa.Schema, spec: TableSpec, *, allow_pending: bool = False
+) -> pa.Schema:
+    """Return the schema the target table is written with.
+
+    Types are the source's, exactly. Nullability comes from the map: for every
+    top-level column, and for a column group and its fields.
+
+    Args:
+        source: The source table's schema.
+        spec: The table's entry in the nullability map.
+        allow_pending: Keep the source's nullability where a decision is pending
+            (used by ``plan``); otherwise a pending decision raises.
+
+    Raises:
+        SchemaMismatchError: if the source's columns or types differ from the map.
+        PendingDecisionError: if a decision is pending and ``allow_pending`` is false.
+    """
+    expected = list(spec.columns) + list(spec.groups)
+    if sorted(source.names) != sorted(expected):
+        missing = sorted(set(expected) - set(source.names))
+        extra = sorted(set(source.names) - set(expected))
+        raise SchemaMismatchError(
+            f"source columns differ from the map: missing {missing}, unexpected {extra}"
+        )
+
+    def nullability(decided: bool | None, field: pa.Field, path: str) -> bool:
+        if decided is not None:
+            return decided
+        if allow_pending:
+            return field.nullable
+        raise PendingDecisionError(f"nullability of {path!r} is pending in the map")
+
+    fields: list[pa.Field] = []
+    for field in source:
+        if field.name in spec.groups:
+            group = spec.groups[field.name]
+            if str(field.type) != group.arrow_type:
+                raise SchemaMismatchError(
+                    f"column group {field.name!r} has type {field.type}, "
+                    f"the map records {group.arrow_type}"
+                )
+            children = []
+            for child in field.type:
+                cs = group.fields.get(child.name)
+                if cs is None:
+                    raise SchemaMismatchError(
+                        f"field {field.name}.{child.name} is not in the map"
+                    )
+                children.append(
+                    child.with_nullable(
+                        nullability(cs.nullable, child, f"{field.name}.{child.name}")
+                    )
+                )
+            fields.append(
+                pa.field(
+                    field.name,
+                    pa.struct(children),
+                    nullability(group.nullable, field, field.name),
+                )
+            )
+        else:
+            cs = spec.columns[field.name]
+            if str(field.type) != cs.arrow_type:
+                raise SchemaMismatchError(
+                    f"column {field.name!r} has type {field.type}, "
+                    f"the map records {cs.arrow_type}"
+                )
+            fields.append(
+                field.with_nullable(nullability(cs.nullable, field, field.name))
+            )
+    return pa.schema(fields)
+
+
+def key_schema(schema: pa.Schema, keys: Sequence[str]) -> pa.Schema:
+    """Return the key columns of ``schema``, in key order."""
+    return pa.schema([schema.field(k) for k in keys])
+
+
+def _conform_array(arr: pa.Array, field: pa.Field) -> pa.Array:
+    """Return ``arr`` typed as ``field`` declares, refusing nulls it does not allow.
+
+    Raises:
+        SchemaMismatchError: if the types differ beyond nullability.
+        NullInRequiredColumnError: if ``field`` (or a declared struct child) is
+            non-nullable and holds nulls.
+    """
+    if not _same_type_up_to_nullability(arr.type, field.type):
+        raise SchemaMismatchError(
+            f"column {field.name!r} has type {arr.type}, expected {field.type}"
+        )
+    if not field.nullable and arr.null_count:
+        raise NullInRequiredColumnError((field.name,), arr.null_count)
+    if not pa.types.is_struct(field.type) or arr.type == field.type:
+        return arr
+    struct = arr if isinstance(arr, pa.StructArray) else None
+    if struct is None:
+        raise SchemaMismatchError(f"column {field.name!r} is not a struct array")
+    children = []
+    for child_field, child in zip(field.type, struct.flatten(), strict=True):
+        try:
+            children.append(_conform_array(child, child_field))
+        except NullInRequiredColumnError as err:
+            raise err.within(field.name) from None
+    mask = struct.is_null() if struct.null_count else None
+    return pa.StructArray.from_arrays(children, fields=list(field.type), mask=mask)
+
+
+def conform_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+    """Return ``batch`` with ``schema``'s nullability, after checking it may have it.
+
+    The column names and types must equal the schema's (nullability aside). Every
+    non-nullable column, and every non-nullable field of a struct column, must hold
+    no nulls. Nothing is cast or coerced.
+
+    Raises:
+        SchemaMismatchError: on a column or type difference.
+        NullInRequiredColumnError: on a null in a non-nullable column.
+    """
+    if batch.schema.names != schema.names:
+        raise SchemaMismatchError(
+            f"batch columns {batch.schema.names} differ from {schema.names}"
+        )
+    arrays = [
+        _conform_array(col, field)
+        for col, field in zip(batch.columns, schema, strict=True)
+    ]
+    return pa.RecordBatch.from_arrays(arrays, schema=schema)
+
+
+# --------------------------------------------------------------------- source reads
+
+
+def _qualified(subset: Subset, table: str) -> str:
+    return f"{subset.dataset}.{table}"
+
+
+def _window_filter(table: Any, ts_type: pa.DataType, window: tuple[int, int]) -> Any:
+    """Return a Spiral filter for ``window`` on ``table``'s ``timestamp`` column.
+
+    The literals carry the column's exact Arrow type: SpiralDB refuses to compare
+    ``u64`` with an ``i64`` literal.
+    """
+    start, stop = window
+    col = table["timestamp"]
+    return (col >= pa.scalar(start, ts_type)) & (col < pa.scalar(stop, ts_type))
+
+
+def _row_mask(
+    batch: pa.RecordBatch,
+    mode: str,
+    window: tuple[int, int],
+    unit_ids: pa.Array,
+    trials: pa.Array | None,
+) -> pa.Array | None:
+    """Return the client-side row mask for ``mode`` (``None`` keeps every row).
+
+    The window is also applied here, so a row outside it is dropped even if a
+    server-side filter let it through.
+    """
+    masks = []
+    if mode in ("window", "window_units"):
+        ts = batch.column(batch.schema.get_field_index("timestamp"))
+        ts_type = ts.type
+        masks.append(
+            pc.and_(
+                pc.greater_equal(ts, pa.scalar(window[0], ts_type)),
+                pc.less(ts, pa.scalar(window[1], ts_type)),
+            )
+        )
+    if mode in ("window_units", "units"):
+        col = batch.column(batch.schema.get_field_index("unit_id"))
+        masks.append(pc.is_in(col, value_set=unit_ids.cast(col.type)))
+    if mode == "trials":
+        if trials is None:
+            raise ToolError("trial selection needs the referenced trials first")
+        col = batch.column(batch.schema.get_field_index("trial_index"))
+        masks.append(pc.is_in(col, value_set=trials.cast(col.type)))
+    if not masks:
+        return None
+    mask = masks[0]
+    for m in masks[1:]:
+        mask = pc.and_(mask, m)
+    return mask
+
+
+def read_selection(
+    client: Any,
+    project: Any,
+    subset: Subset,
+    table: str,
+    mode: str,
+    trials: Sequence[int] | None = None,
+) -> Iterator[pa.RecordBatch]:
+    """Yield the selected rows of one source table, in key order.
+
+    Args:
+        client: A ``spiral.Spiral`` client (or a fake with the same surface).
+        project: The source ``Project``.
+        subset: The subset definition.
+        table: Table name (without dataset).
+        mode: The table's selection mode.
+        trials: The trial indexes to keep (``trials`` mode only).
+    """
+    t = project.table(_qualified(subset, table))
+    where = None
+    if mode in ("window", "window_units"):
+        ts_type = t.schema().to_arrow().field("timestamp").type
+        where = _window_filter(t, ts_type, subset.window)
+    unit_ids = pa.array(subset.unit_ids, pa.int64())
+    trial_arr = pa.array(sorted(trials), pa.int64()) if trials is not None else None
+    scan = client.scan(t, where=where) if where is not None else client.scan(t)
+    for batch in scan.to_record_batches():
+        mask = _row_mask(batch, mode, subset.window, unit_ids, trial_arr)
+        out = batch if mask is None else batch.filter(mask)
+        if out.num_rows:
+            yield out
+
+
+def overlapping_trials(
+    client: Any, project: Any, subset: Subset
+) -> tuple[set[int], set[int]]:
+    """Return the trials that overlap the window, and every trial in the table.
+
+    A trial overlaps ``[start, stop)`` if it starts before ``stop`` and ends at or
+    after ``start``; a trial without an end overlaps if it starts inside the window.
+    """
+    start, stop = subset.window
+    keep: set[int] = set()
+    every: set[int] = set()
+    for batch in client.scan(
+        project.table(_qualified(subset, subset.trial_table))
+    ).to_record_batches():
+        rows = batch.select(
+            ["trial_index", "trial_start_timestamp", "trial_end_timestamp"]
+        ).to_pylist()
+        for r in rows:
+            every.add(r["trial_index"])
+            begin, end = r["trial_start_timestamp"], r["trial_end_timestamp"]
+            if end is None:
+                if start <= begin < stop:
+                    keep.add(r["trial_index"])
+            elif begin < stop and end >= start:
+                keep.add(r["trial_index"])
+    return keep, every
+
+
+def kept_trials(client: Any, project: Any, subset: Subset) -> list[int]:
+    """Return the trials to keep: those overlapping the window, plus every trial a
+    kept row of another table references through ``trial_index``.
+
+    Raises:
+        ToolError: if a kept row references a trial the trial table does not hold.
+    """
+    referenced: set[int] = set()
+    for name in table_order(subset):
+        mode = subset.tables[name]
+        if mode == "trials":
+            continue
+        schema = project.table(_qualified(subset, name)).schema().to_arrow()
+        if "trial_index" not in schema.names:
+            continue
+        for batch in read_selection(client, project, subset, name, mode):
+            referenced.update(
+                x
+                for x in pc.unique(batch.column("trial_index")).to_pylist()
+                if x is not None
+            )
+    overlap, every = overlapping_trials(client, project, subset)
+    unknown = referenced - every
+    if unknown:
+        raise ToolError(
+            f"kept rows reference trials missing from {subset.trial_table}: {sorted(unknown)}"
+        )
+    return sorted(overlap | referenced)
+
+
+def table_order(subset: Subset) -> list[str]:
+    """Return the copy order: trial table last, so trial references are known."""
+    names = sorted(subset.tables)
+    trial_tables = [n for n in names if subset.tables[n] == "trials"]
+    return [n for n in names if subset.tables[n] != "trials"] + trial_tables
+
+
+# ------------------------------------------------------------- integrity bookkeeping
+
+
+@dataclasses.dataclass
+class TableResult:
+    """What the pipeline produced for one table."""
+
+    name: str
+    rows: int = 0
+    nbytes: int = 0
+    action: str = ""
+
+
+@dataclasses.dataclass
+class Integrity:
+    """Distinct key tuples, for checking foreign keys after every table is read."""
+
+    parent_keys: dict[str, set[tuple[Any, ...]]] = dataclasses.field(
+        default_factory=dict
+    )
+    child_refs: dict[tuple[str, ForeignKey], set[tuple[Any, ...]]] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def observe(self, nmap: NullabilityMap, table: str, batch: pa.RecordBatch) -> None:
+        """Record the key tuples of ``batch`` that foreign keys need."""
+        spec = nmap.tables[table]
+        if any(
+            fk.parent == table for t in nmap.tables.values() for fk in t.foreign_keys
+        ):
+            self.parent_keys.setdefault(table, set()).update(_tuples(batch, spec.keys))
+        for fk in spec.foreign_keys:
+            if fk.parent in nmap.tables:
+                self.child_refs.setdefault((table, fk), set()).update(
+                    t for t in _tuples(batch, fk.columns) if None not in t
+                )
+
+    def problems(self, present: Iterable[str]) -> list[str]:
+        """Return every unresolved reference among the tables in ``present``."""
+        present = set(present)
+        out = []
+        for (child, fk), refs in sorted(
+            self.child_refs.items(), key=lambda kv: (kv[0][0], kv[0][1].parent)
+        ):
+            if child not in present:
+                continue
+            if fk.parent not in present:
+                out.append(
+                    f"{child} -> {fk.parent}: parent table is not in the project"
+                )
+                continue
+            missing = refs - self.parent_keys.get(fk.parent, set())
+            if missing:
+                sample = sorted(missing, key=repr)[:3]
+                out.append(
+                    f"{child} -> {fk.parent} {list(fk.columns)}: {len(missing)} "
+                    f"unresolved key(s), e.g. {sample}"
+                )
+        return out
+
+
+def _tuples(batch: pa.RecordBatch, columns: Sequence[str]) -> set[tuple[Any, ...]]:
+    if not batch.num_rows:
+        return set()
+    cols = [batch.column(batch.schema.get_field_index(c)).to_pylist() for c in columns]
+    return set(zip(*cols, strict=True))
+
+
+# ----------------------------------------------------------------------- the sinks
+
+
+class DryRunSink:
+    """Accepts every batch and writes nothing."""
+
+    def open_table(
+        self, table: str, schema: pa.Schema, keys: pa.Schema, digest: str
+    ) -> str:
+        """Return the action a real copy would take for ``table``."""
+        return "would write"
+
+    def write(self, batch: pa.RecordBatch) -> None:
+        """Discard ``batch``."""
+
+    def commit(self, rows: int) -> None:
+        """Do nothing."""
+
+    def abort(self) -> None:
+        """Do nothing."""
+
+
+class SpiralSink:
+    """Writes each table to the target project in one transaction.
+
+    Every table it creates carries the build marker in its metadata, set before any
+    data is written. When a table's transaction commits, its status metadata records
+    the row count and the subset digest, so a re-run can skip it.
+    """
+
+    def __init__(self, project: Any, subset: Subset, marker: Mapping[str, Any]) -> None:
+        self._project = project
+        self._subset = subset
+        self._marker = json.dumps(marker, sort_keys=True).encode()
+        self._table: Any = None
+        self._txn: Any = None
+        self._digest = ""
+
+    def open_table(
+        self, table: str, schema: pa.Schema, keys: pa.Schema, digest: str
+    ) -> str:
+        """Prepare ``table`` for writing; return ``"skip"`` if it is already complete.
+
+        Raises:
+            TargetRefusedError: if the table exists without this build's marker.
+            StaleTableError: if it is complete for a different digest.
+            SchemaMismatchError: if its existing schema differs from ``schema``.
+        """
+        ident = _qualified(self._subset, table)
+        existing = {f"{r.dataset}.{r.table}" for r in self._project.list_tables()}
+        if ident in existing:
+            t = self._project.table(ident)
+            meta = t.get_metadata()
+            if meta.get(MARKER_KEY) != self._marker:
+                raise TargetRefusedError(f"{ident} exists without this build's marker")
+            status = json.loads(meta[STATUS_KEY]) if STATUS_KEY in meta else None
+            if status and status.get("complete"):
+                if status.get("digest") != digest:
+                    raise StaleTableError(
+                        f"{ident} is complete for a different subset or map; "
+                        "drop it and copy again"
+                    )
+                return "skip"
+            current = t.schema().to_arrow()
+            if current.names != keys.names and current != schema:
+                raise SchemaMismatchError(
+                    f"{ident} exists with schema {current}, expected {schema}"
+                )
+            action = "rewrite"
+        else:
+            t = self._project.create_table(ident, key_schema=keys)
+            t.set_metadata({MARKER_KEY: self._marker})
+            action = "create"
+        self._table = t
+        self._digest = digest
+        self._txn = t.txn()
+        return action
+
+    def write(self, batch: pa.RecordBatch) -> None:
+        """Write ``batch`` inside the open transaction."""
+        self._txn.write(batch)
+
+    def commit(self, rows: int) -> None:
+        """Commit the transaction and record the table as complete."""
+        self._txn.commit()
+        status = {"complete": True, "rows": rows, "digest": self._digest}
+        self._table.set_metadata({STATUS_KEY: json.dumps(status).encode()})
+        self._txn = None
+
+    def abort(self) -> None:
+        """Abort the open transaction, if any."""
+        if self._txn is not None:
+            self._txn.abort()
+            self._txn = None
+
+
+# --------------------------------------------------------------------- the pipeline
+
+
+@dataclasses.dataclass
+class Report:
+    """The outcome of ``plan``, ``copy`` or ``verify``."""
+
+    tables: list[TableResult]
+    kept_trials: list[int]
+    pending: dict[str, list[str]]
+    problems: list[str]
+
+    def render(self) -> str:
+        """Return a human-readable summary."""
+        lines = [f"{'table':40s} {'rows':>10s} {'MB':>9s}  action"]
+        for t in self.tables:
+            lines.append(
+                f"{t.name:40s} {t.rows:>10,d} {t.nbytes / 1e6:>9.1f}  {t.action}"
+            )
+        total = sum(t.nbytes for t in self.tables)
+        lines.append(
+            f"{'total':40s} {sum(t.rows for t in self.tables):>10,d} {total / 1e6:>9.1f}"
+        )
+        lines.append(f"kept trials: {self.kept_trials}")
+        if self.pending:
+            lines.append("pending decisions (source nullability kept in this dry run):")
+            lines.extend(f"  {t}: {cols}" for t, cols in self.pending.items())
+        if self.problems:
+            lines.append("problems:")
+            lines.extend(f"  {p}" for p in self.problems)
+        return "\n".join(lines)
+
+
+def _run(
+    client: Any,
+    source: Any,
+    nmap: NullabilityMap,
+    subset: Subset,
+    sink: DryRunSink | SpiralSink,
+    *,
+    allow_pending: bool,
+    on_table: Callable[[TableResult], None] | None = None,
+) -> Report:
+    """Read every selected source table, check it, and hand it to ``sink``."""
+    missing = sorted(set(subset.tables) - set(nmap.tables))
+    if missing:
+        raise ToolError(f"tables in the subset but not in the map: {missing}")
+    integrity = Integrity()
+    trials = (
+        kept_trials(client, source, subset)
+        if "trials" in subset.tables.values()
+        else []
+    )
+    results = []
+    for name in table_order(subset):
+        mode = subset.tables[name]
+        spec = nmap.tables[name]
+        src_schema = source.table(_qualified(subset, name)).schema().to_arrow()
+        result = TableResult(name)
+        try:
+            schema = target_schema(src_schema, spec, allow_pending=allow_pending)
+            keys = key_schema(schema, spec.keys)
+            result.action = sink.open_table(
+                name, schema, keys, table_digest(nmap, subset, name)
+            )
+            if result.action == "skip":
+                results.append(result)
+                continue
+            try:
+                for batch in read_selection(client, source, subset, name, mode, trials):
+                    out = conform_batch(batch, schema)
+                    integrity.observe(nmap, name, out)
+                    sink.write(out)
+                    result.rows += out.num_rows
+                    result.nbytes += out.nbytes
+            except BaseException:
+                sink.abort()
+                raise
+            sink.commit(result.rows)
+        except ToolError as err:
+            err.add_note(f"while processing table {name!r}")
+            raise
+        results.append(result)
+        if on_table is not None:
+            on_table(result)
+    skipped = [r.name for r in results if r.action == "skip"]
+    problems = integrity.problems(subset.tables) if not skipped else []
+    return Report(results, trials, nmap.pending(), problems)
+
+
+def plan(
+    client: Any, source_project: str, nmap: NullabilityMap, subset: Subset
+) -> Report:
+    """Run the whole copy against the source without writing anything.
+
+    Pending nullability decisions keep the source's nullability and are listed in
+    the report.
+    """
+    source = client.project(source_project)
+    return _run(client, source, nmap, subset, DryRunSink(), allow_pending=True)
+
+
+# ------------------------------------------------------------------ target guards
+
+
+def check_target_name(target: str | None, allow_writes: str | None, source: str) -> str:
+    """Return ``target`` if the names alone allow writing to it.
+
+    Raises:
+        TargetRefusedError: if no target is given, ``allow_writes`` differs from it,
+            it equals the source, or it starts with a forbidden prefix.
+    """
+    if not target:
+        raise TargetRefusedError("--target-project is required")
+    if allow_writes != target:
+        raise TargetRefusedError(
+            "--allow-writes must repeat --target-project exactly "
+            f"(got {allow_writes!r} for {target!r})"
+        )
+    if target == source:
+        raise TargetRefusedError("the target project equals the source project")
+    if target.startswith(FORBIDDEN_TARGET_PREFIXES):
+        raise TargetRefusedError(
+            f"target {target!r} starts with one of {FORBIDDEN_TARGET_PREFIXES}"
+        )
+    return target
+
+
+def read_marker(project: Any) -> dict[str, Any]:
+    """Return the build marker of a project this tool created.
+
+    Raises:
+        TargetRefusedError: if the project has no marker table, or holds a table
+            without the same marker.
+    """
+    tables = {f"{r.dataset}.{r.table}" for r in project.list_tables()}
+    if MARKER_TABLE not in tables:
+        raise TargetRefusedError(
+            f"project has no {MARKER_TABLE} table: it was not made by this tool's create step"
+        )
+    raw = project.table(MARKER_TABLE).get_metadata().get(MARKER_KEY)
+    if raw is None:
+        raise TargetRefusedError(f"{MARKER_TABLE} carries no {MARKER_KEY} metadata")
+    foreign = sorted(
+        ident
+        for ident in tables - {MARKER_TABLE}
+        if project.table(ident).get_metadata().get(MARKER_KEY) != raw
+    )
+    if foreign:
+        raise TargetRefusedError(
+            f"project holds tables this build did not write: {foreign}"
+        )
+    return json.loads(raw)
+
+
+def open_target(
+    client: Any, target: str, allow_writes: str | None, source: str
+) -> tuple[Any, dict[str, Any]]:
+    """Return the target ``Project`` and its marker after every guard has passed."""
+    check_target_name(target, allow_writes, source)
+    project = client.project(target)
+    return project, read_marker(project)
+
+
+def create_project(
+    client: Any,
+    *,
+    id_prefix: str,
+    allow_create: str | None,
+    description: str,
+    volume_id: str | None,
+    source_project: str,
+) -> str:
+    """Create the target project and its marker table; return the new project ID.
+
+    Raises:
+        TargetRefusedError: if ``allow_create`` differs from ``id_prefix``, the prefix
+            is forbidden, or the new project is not empty.
+    """
+    if allow_create != id_prefix:
+        raise TargetRefusedError("--allow-create must repeat --id-prefix exactly")
+    if id_prefix.startswith(FORBIDDEN_TARGET_PREFIXES) or id_prefix == source_project:
+        raise TargetRefusedError(f"id prefix {id_prefix!r} is forbidden")
+    before = {p.id for p in client.list_projects()}
+    created = client.create_project(
+        id_prefix=id_prefix, description=description, volume_id=volume_id
+    )
+    if created.id in before:
+        raise TargetRefusedError(f"project {created.id} existed before create")
+    project = client.project(created.id)
+    if list(project.list_tables()):
+        raise TargetRefusedError(f"new project {created.id} is not empty")
+    marker = {
+        "build_id": uuid.uuid4().hex,
+        "tool": TOOL_NAME,
+        "source_project": source_project,
+        "project_id": created.id,
+    }
+    t = project.create_table(
+        MARKER_TABLE,
+        key_schema=pa.schema([pa.field("build_id", pa.large_string(), False)]),
+    )
+    t.set_metadata({MARKER_KEY: json.dumps(marker, sort_keys=True).encode()})
+    return created.id
+
+
+def copy(
+    client: Any,
+    *,
+    source_project: str,
+    target_project: str | None,
+    allow_writes: str | None,
+    nmap: NullabilityMap,
+    subset: Subset,
+    dry_run: bool = False,
+    on_table: Callable[[TableResult], None] | None = None,
+) -> Report:
+    """Copy the subset from the source into the target project.
+
+    With ``dry_run`` the target guards still run, but nothing is written.
+
+    Raises:
+        TargetRefusedError: if the target fails a guard.
+        PendingDecisionError: if the map holds pending decisions.
+        NullInRequiredColumnError: if a selected row has a null where the map
+            forbids one (that table's transaction is aborted).
+    """
+    project, marker = open_target(
+        client, target_project or "", allow_writes, source_project
+    )
+    if marker.get("source_project") != source_project:
+        raise TargetRefusedError(
+            f"the target was created for source {marker.get('source_project')!r}"
+        )
+    pending = nmap.pending()
+    if pending:
+        raise PendingDecisionError(
+            f"decide these in the nullability map first: {pending}"
+        )
+    source = client.project(source_project)
+    sink: DryRunSink | SpiralSink = (
+        DryRunSink() if dry_run else SpiralSink(project, subset, marker)
+    )
+    return _run(
+        client, source, nmap, subset, sink, allow_pending=False, on_table=on_table
+    )
+
+
+# --------------------------------------------------------------------------- verify
+
+
+def _rechunk(batches: Iterable[pa.RecordBatch], rows: int) -> Iterator[pa.Table]:
+    """Yield tables of exactly ``rows`` rows (the last may be shorter)."""
+    pending: list[pa.RecordBatch] = []
+    count = 0
+    for b in batches:
+        pending.append(b)
+        count += b.num_rows
+        while count >= rows:
+            t = pa.Table.from_batches(pending)
+            yield t.slice(0, rows)
+            rest = t.slice(rows)
+            pending = rest.to_batches()
+            count = rest.num_rows
+    if count:
+        yield pa.Table.from_batches(pending)
+
+
+def verify(
+    client: Any,
+    *,
+    source_project: str,
+    target_project: str,
+    nmap: NullabilityMap,
+    subset: Subset,
+) -> Report:
+    """Check the target project against the source, the map and the subset.
+
+    Checks: the project holds exactly the subset's tables (plus the marker table);
+    each table's schema has the source's types exactly and the map's nullability, its
+    key columns are the source's, in order, and non-null; required columns hold no
+    nulls; every foreign key resolves; and every row equals the source selection.
+
+    Raises:
+        VerificationError: listing every problem found.
+    """
+    target = client.project(target_project)
+    read_marker(target)
+    source = client.project(source_project)
+    problems: list[str] = []
+    present = {r.table for r in target.list_tables() if r.dataset == subset.dataset}
+    if present != set(subset.tables):
+        problems.append(
+            f"tables differ: missing {sorted(set(subset.tables) - present)}, "
+            f"unexpected {sorted(present - set(subset.tables))}"
+        )
+    trials = (
+        kept_trials(client, source, subset)
+        if "trials" in subset.tables.values()
+        else []
+    )
+    integrity = Integrity()
+    results = []
+    for name in table_order(subset):
+        if name not in present:
+            continue
+        spec = nmap.tables[name]
+        t = target.table(_qualified(subset, name))
+        src_schema = source.table(_qualified(subset, name)).schema().to_arrow()
+        want = target_schema(src_schema, spec, allow_pending=True)
+        got = t.schema().to_arrow()
+        if got != want:
+            problems.append(f"{name}: schema {got} differs from expected {want}")
+        got_keys = t.key_schema.to_arrow()
+        if got_keys.names != list(spec.keys):
+            problems.append(
+                f"{name}: key columns {got_keys.names} != {list(spec.keys)}"
+            )
+        if any(f.nullable for f in got_keys):
+            problems.append(f"{name}: key columns are nullable: {got_keys}")
+        mode = subset.tables[name]
+        expected = (
+            conform_batch(b, want)
+            for b in read_selection(client, source, subset, name, mode, trials)
+        )
+        actual_batches: list[int] = [0]
+
+        def observed(
+            batches: Iterable[pa.RecordBatch], table: str = name
+        ) -> Iterator[pa.RecordBatch]:
+            for b in batches:
+                actual_batches[0] += b.num_rows
+                integrity.observe(nmap, table, b)
+                yield b
+
+        actual = observed(client.scan(t).to_record_batches())
+        result = TableResult(name, action="verified")
+        mismatch = _compare_streams(expected, actual, want)
+        result.rows = actual_batches[0]
+        if mismatch:
+            problems.append(f"{name}: {mismatch}")
+        results.append(result)
+    problems.extend(integrity.problems(present))
+    report = Report(results, trials, nmap.pending(), problems)
+    if problems:
+        raise VerificationError(problems)
+    return report
+
+
+def _compare_streams(
+    expected: Iterable[pa.RecordBatch],
+    actual: Iterable[pa.RecordBatch],
+    schema: pa.Schema,
+) -> str:
+    """Return a description of the first difference, or ``""`` if the rows are equal."""
+    exp_iter = _rechunk(expected, COMPARE_SLICE_ROWS)
+    act_iter = _rechunk(actual, COMPARE_SLICE_ROWS)
+    offset = 0
+    while True:
+        e = next(exp_iter, None)
+        a = next(act_iter, None)
+        if e is None and a is None:
+            return ""
+        if e is None or a is None or e.num_rows != a.num_rows:
+            e_rows = (
+                offset
+                + (e.num_rows if e is not None else 0)
+                + sum(t.num_rows for t in exp_iter)
+            )
+            a_rows = (
+                offset
+                + (a.num_rows if a is not None else 0)
+                + sum(t.num_rows for t in act_iter)
+            )
+            return f"row count {a_rows} differs from expected {e_rows}"
+        if a.schema.names != schema.names:
+            return f"columns {a.schema.names} differ from {schema.names}"
+        for i, name in enumerate(schema.names):
+            want_col = e.column(i)
+            got_col = a.column(i)
+            if got_col.null_count and not schema.field(i).nullable:
+                return f"column {name!r} holds {got_col.null_count} null(s) but is required"
+            if not got_col.equals(want_col):
+                return f"column {name!r} differs from the source in rows {offset}..{offset + e.num_rows - 1}"
+        offset += e.num_rows
+
+
+# ------------------------------------------------------------------------ the probe
+
+
+def probe_nullability(
+    client: Any, *, target_project: str, allow_writes: str | None, source_project: str
+) -> dict[str, Any]:
+    """Record how SpiralDB treats non-nullable columns, in a scratch table.
+
+    Writes to ``meta.nullability_probe`` in the target (a project ``create`` made) and
+    drops it afterwards. Returns what was observed: the nullability SpiralDB reports
+    after a non-nullable write, and what a write of a null into a non-nullable column
+    and a write with a nullable field for a non-nullable column do.
+    """
+    project, _ = open_target(client, target_project, allow_writes, source_project)
+    tables = {f"{r.dataset}.{r.table}" for r in project.list_tables()}
+    if PROBE_TABLE in tables:
+        project.drop_table(PROBE_TABLE)
+    keys = pa.schema([pa.field("k", pa.int64(), False)])
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("v", pa.int32(), False),
+            pa.field("w", pa.int32(), True),
+        ]
+    )
+    out: dict[str, Any] = {}
+    t = project.create_table(PROBE_TABLE, key_schema=keys)
+    try:
+        out["key_schema_after_create"] = str(t.key_schema.to_arrow())
+        with t.txn() as txn:
+            txn.write(
+                pa.RecordBatch.from_arrays(
+                    [
+                        pa.array([1, 2], pa.int64()),
+                        pa.array([10, 20], pa.int32()),
+                        pa.array([None, 5], pa.int32()),
+                    ],
+                    schema=schema,
+                )
+            )
+        out["schema_after_non_null_write"] = str(t.schema().to_arrow())
+        scanned = client.scan(t).to_table()
+        out["scan_schema"] = str(scanned.schema)
+        for label, batch in {
+            "null_into_non_nullable": pa.RecordBatch.from_arrays(
+                [
+                    pa.array([3], pa.int64()),
+                    pa.array([None], pa.int32()),
+                    pa.array([1], pa.int32()),
+                ],
+                schema=schema,
+            ),
+            "nullable_field_no_nulls": pa.RecordBatch.from_arrays(
+                [
+                    pa.array([4], pa.int64()),
+                    pa.array([40], pa.int32()),
+                    pa.array([1], pa.int32()),
+                ],
+                names=["k", "v", "w"],
+            ),
+        }.items():
+            try:
+                with t.txn() as txn:
+                    txn.write(batch)
+                rows = client.scan(t).to_table().to_pylist()
+                out[label] = {
+                    "raised": None,
+                    "rows_after": rows,
+                    "schema_after": str(t.schema().to_arrow()),
+                }
+            except Exception as err:  # noqa: BLE001 - the probe records whatever SpiralDB raises
+                out[label] = {"raised": f"{type(err).__name__}: {err}"}
+    finally:
+        project.drop_table(PROBE_TABLE)
+    return out
+
+
+# ---------------------------------------------------------------- deriving the map
+
+_SPEC_PRIMITIVES = {
+    "utf8": pa.string(),
+    "u8": pa.uint8(),
+    "u16": pa.uint16(),
+    "u32": pa.uint32(),
+    "u64": pa.uint64(),
+    "i16": pa.int16(),
+    "i32": pa.int32(),
+    "i64": pa.int64(),
+    "f32": pa.float32(),
+    "f64": pa.float64(),
+    "bool": pa.bool_(),
+    "datetime": pa.timestamp("us"),
+    "date": pa.date32(),
+}
+
+
+def spec_arrow_type(spec_type: str) -> tuple[pa.DataType, bool]:
+    """Return the Arrow type and nullability a specification type denotes.
+
+    A trailing ``?`` marks a nullable value, at any nesting level.
+
+    Raises:
+        ToolError: for a type this tool does not know.
+    """
+    s = spec_type.strip().strip("`")
+    nullable = s.endswith("?")
+    if nullable:
+        s = s[:-1]
+    if s in _SPEC_PRIMITIVES:
+        return _SPEC_PRIMITIVES[s], nullable
+    if m := re.fullmatch(r"fixed_size_list\((.*)\)\[(\d+)\]", s):
+        inner, inner_nullable = spec_arrow_type(m.group(1))
+        return pa.list_(
+            pa.field("item", inner, inner_nullable), int(m.group(2))
+        ), nullable
+    if m := re.fullmatch(r"list\((.*)\)", s):
+        inner, inner_nullable = spec_arrow_type(m.group(1))
+        return pa.list_(pa.field("item", inner, inner_nullable)), nullable
+    raise ToolError(f"unknown specification type {spec_type!r}")
+
+
+def parse_spec_tables(text: str) -> dict[str, list[dict[str, Any]]]:
+    """Return the column tables of ``edi_schema_spec.md`` by table name.
+
+    Each column is ``{"column", "type", "pk", "fk", "fk_parents", "group"}``; a
+    ``**... (`name` column group)**`` row starts a column group.
+    """
+    tables: dict[str, list[dict[str, Any]]] = {}
+    current: str | None = None
+    group: str | None = None
+    for line in text.splitlines():
+        if m := re.match(r"^####\s+(\w+)\s*$", line):
+            current, group = m.group(1), None
+            tables[current] = []
+            continue
+        if current is None or not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or cells[0] == "Column" or set(cells[0]) <= set("-: "):
+            continue
+        if m := re.search(r"`(\w+)` column group", cells[0]):
+            group = m.group(1)
+            continue
+        desc = cells[3] if len(cells) > 3 else ""
+        tables[current].append(
+            {
+                "column": cells[0].strip("`"),
+                "type": cells[1],
+                "pk": "PK" in cells[2],
+                "fk": "FK" in cells[2],
+                "fk_parents": re.findall(r"FK →\s*`(\w+)", desc),
+                "group": group,
+            }
+        )
+    return tables
+
+
+# References the specification does not declare as foreign keys, checked because the
+# subset keeps whole trials and units. Each is ``child: [(parent, note)]``.
+EXTRA_REFERENCES: dict[str, list[tuple[str, str]]] = {
+    "experiment_freeviewing_event": [
+        ("experiment_freeviewing_trial", "trial_index; not an FK in the spec")
+    ],
+    "experiment_screen_capture_event": [
+        ("experiment_freeviewing_trial", "trial_index; not an FK in the spec"),
+        (
+            "experiment",
+            "the spec's parent experiment_screen_capture is not in the sample",
+        ),
+    ],
+    "experiment_screen_capture_frame_270p": [("experiment", "table not in the spec")],
+    "sample_unit": [("unit", "table not in the spec")],
+}
+
+
+def derive_map(
+    spec_text: str,
+    spec_version: str,
+    source_project: str,
+    source_schemas: Mapping[str, tuple[pa.Schema, Sequence[str]]],
+) -> dict[str, Any]:
+    """Build the JSON form of the nullability map.
+
+    Args:
+        spec_text: The text of ``edi_schema_spec.md``.
+        spec_version: The specification's version, recorded in the map.
+        source_project: The source project's ID, recorded in the map.
+        source_schemas: Per table, its Arrow schema and key columns as SpiralDB
+            reports them.
+
+    Returns:
+        The map. A column the specification defines gets the specification's
+        nullability; a column or table it does not define gets ``nullable: null``
+        (pending), as does each column group struct (the specification types only
+        the group's fields). Specification types that disagree with the source's
+        are listed under ``mismatches``.
+    """
+    spec = parse_spec_tables(spec_text)
+    out: dict[str, Any] = {
+        "spec_version": spec_version,
+        "source_project": source_project,
+        "mismatches": [],
+        "absent_from_sample": sorted(t for t in spec if t not in source_schemas),
+        "tables": {},
+    }
+    for table, (schema, keys) in sorted(source_schemas.items()):
+        rows = {r["column"]: r for r in spec.get(table, [])}
+        in_spec = table in spec
+        entry: dict[str, Any] = {
+            "in_spec": in_spec,
+            "keys": list(keys),
+            "columns": {},
+            "groups": {},
+        }
+
+        def column(
+            field: pa.Field, row: dict[str, Any] | None, *, is_key: bool
+        ) -> dict[str, Any]:
+            if row is None:
+                if in_spec:
+                    out["mismatches"].append(f"{table}.{field.name}: not in the spec")
+                return {
+                    "arrow_type": str(field.type),
+                    "nullable": None,
+                    "spec_type": None,
+                    "key": is_key,
+                }
+            want, nullable = spec_arrow_type(row["type"])
+            if want != field.type:
+                out["mismatches"].append(
+                    f"{table}.{field.name}: spec {row['type']} is {want}, source is {field.type}"
+                )
+            if row["pk"] != is_key:
+                out["mismatches"].append(
+                    f"{table}.{field.name}: spec key={row['pk']}, source key={is_key}"
+                )
+            return {
+                "arrow_type": str(field.type),
+                "nullable": nullable,
+                "spec_type": row["type"],
+                "key": is_key,
+            }
+
+        for field in schema:
+            if pa.types.is_struct(field.type) and field.name not in rows:
+                entry["groups"][field.name] = {
+                    "arrow_type": str(field.type),
+                    "nullable": None,
+                    "fields": {
+                        child.name: column(child, rows.get(child.name), is_key=False)
+                        for child in field.type
+                    },
+                }
+            else:
+                entry["columns"][field.name] = column(
+                    field, rows.get(field.name), is_key=field.name in keys
+                )
+        if in_spec:
+            spec_keys = [r["column"] for r in spec[table] if r["pk"]]
+            if spec_keys != list(keys):
+                out["mismatches"].append(
+                    f"{table}: spec key {spec_keys}, source key {list(keys)}"
+                )
+            listed = set(entry["columns"]) | {
+                f for g in entry["groups"].values() for f in g["fields"]
+            }
+            for name in rows:
+                if name not in listed:
+                    out["mismatches"].append(
+                        f"{table}.{name}: in the spec, not in the source"
+                    )
+        parents: list[tuple[str, str]] = []
+        for r in spec.get(table, []):
+            parents.extend((p, "") for p in r["fk_parents"] if p != table)
+        parents.extend(EXTRA_REFERENCES.get(table, []))
+        fks = []
+        seen: set[str] = set()
+        for parent, note in parents:
+            if parent in seen:
+                continue
+            seen.add(parent)
+            if parent not in source_schemas:
+                fks.append(
+                    {
+                        "parent": parent,
+                        "columns": [],
+                        "note": "parent table not in the sample; not checked",
+                    }
+                )
+                continue
+            pkeys = list(source_schemas[parent][1])
+            if not set(pkeys) <= set(schema.names):
+                out["mismatches"].append(
+                    f"{table} -> {parent}: child lacks parent key columns {sorted(set(pkeys) - set(schema.names))}"
+                )
+                continue
+            fks.append({"parent": parent, "columns": pkeys, "note": note})
+        entry["foreign_keys"] = [fk for fk in fks if fk["columns"]]
+        entry["unchecked_references"] = [fk for fk in fks if not fk["columns"]]
+        out["tables"][table] = entry
+    return out
+
+
+def render_map(nmap: NullabilityMap) -> str:
+    """Return the map as Markdown tables, one row per column."""
+    lines = []
+    for name, t in sorted(nmap.tables.items()):
+        lines.append(
+            f"### `{name}`{'' if t.in_spec else ' (not in the specification)'}\n"
+        )
+        lines.append("| Column | Arrow type | Spec type | Key | Declared |")
+        lines.append("| --- | --- | --- | --- | --- |")
+
+        def row(col: str, c: ColumnSpec) -> str:
+            declared = (
+                "pending"
+                if c.nullable is None
+                else ("nullable" if c.nullable else "**required**")
+            )
+            return f"| `{col}` | `{c.arrow_type}` | {f'`{c.spec_type}`' if c.spec_type else '—'} | {'key' if c.key else ''} | {declared} |"
+
+        for col, c in t.columns.items():
+            lines.append(row(col, c))
+        for g, group in t.groups.items():
+            declared = (
+                "pending"
+                if group.nullable is None
+                else ("nullable" if group.nullable else "**required**")
+            )
+            lines.append(f"| `{g}` (column group) | struct | — | | {declared} |")
+            for col, c in group.fields.items():
+                lines.append(row(f"{g}.{col}", c))
+        if t.foreign_keys:
+            lines.append("")
+            lines.extend(
+                f"References `{fk.parent}` on {', '.join(f'`{c}`' for c in fk.columns)}"
+                + (f" ({fk.note})" if fk.note else "")
+                + "."
+                for fk in t.foreign_keys
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------- CLI
+
+
+def connect() -> Any:
+    """Return a ``spiral.Spiral`` client, after checking the pyspiral version.
+
+    Raises:
+        ToolError: if pyspiral is missing or older than 0.16.33.
+    """
+    try:
+        from importlib.metadata import version
+
+        import spiral
+    except ImportError as err:
+        raise ToolError(
+            "pyspiral is not installed; run with `uv run --with pyspiral==0.16.33 ...`"
+        ) from err
+    found = tuple(int(x) for x in re.findall(r"\d+", version("pyspiral"))[:3])
+    if found < MIN_PYSPIRAL:
+        raise ToolError(
+            f"pyspiral {version('pyspiral')} is too old: 0.16.33 or newer uses the "
+            "`spiral login` credentials"
+        )
+    return spiral.Spiral()
+
+
+def _source_schemas(
+    client: Any, project_id: str, dataset: str
+) -> dict[str, tuple[pa.Schema, list[str]]]:
+    project = client.project(project_id)
+    out = {}
+    for r in project.list_tables():
+        if r.dataset != dataset:
+            continue
+        t = project.table(f"{dataset}.{r.table}")
+        out[r.table] = (t.schema().to_arrow(), list(t.key_schema.to_arrow().names))
+    return out
+
+
+def _parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="edi_tutorial_dataset.py",
+        description="Build the workshop Spiral project from the V1 EDI sample.",
+    )
+    p.add_argument("--map", type=Path, default=MAP_PATH, help="nullability map JSON")
+    p.add_argument("--subset", type=Path, default=SUBSET_PATH, help="subset JSON")
+    p.add_argument("--source-project", default=DEFAULT_SOURCE)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("plan", help="read-only dry run of the copy")
+
+    c = sub.add_parser("create", help="create the target project and its marker table")
+    c.add_argument("--id-prefix", required=True)
+    c.add_argument("--allow-create", required=True, help="repeat --id-prefix")
+    c.add_argument("--description", required=True)
+    c.add_argument("--volume", default=None, help="Spiral Volume ID for the new tables")
+
+    for name, helptext in (
+        ("probe", "check how SpiralDB treats non-nullable columns (scratch table)"),
+        ("copy", "copy the subset into the target"),
+    ):
+        s = sub.add_parser(name, help=helptext)
+        s.add_argument("--target-project", required=True)
+        s.add_argument("--allow-writes", required=True, help="repeat --target-project")
+        if name == "copy":
+            s.add_argument("--dry-run", action="store_true")
+
+    v = sub.add_parser("verify", help="check the target against the source and the map")
+    v.add_argument("--target-project", required=True)
+
+    d = sub.add_parser("derive-map", help="build the nullability map from the spec")
+    d.add_argument("--spec", type=Path, required=True, help="edi_schema_spec.md")
+    d.add_argument("--spec-version", required=True)
+    d.add_argument("--output", type=Path, required=True)
+
+    sub.add_parser("render-map", help="print the map as Markdown")
+    return p
+
+
+def main(
+    argv: Sequence[str] | None = None, client_factory: Callable[[], Any] = connect
+) -> int:
+    """Run the command line; return the process exit code."""
+    args = _parser().parse_args(argv)
+    try:
+        if args.command == "render-map":
+            print(render_map(load_map(args.map)))
+            return 0
+        client = client_factory()
+        if args.command == "derive-map":
+            subset = load_subset(args.subset)
+            raw = derive_map(
+                args.spec.read_text(encoding="utf-8"),
+                args.spec_version,
+                args.source_project,
+                _source_schemas(client, args.source_project, subset.dataset),
+            )
+            args.output.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+            print(f"wrote {args.output}; {len(raw['mismatches'])} mismatch(es)")
+            return 0
+        if args.command == "create":
+            pid = create_project(
+                client,
+                id_prefix=args.id_prefix,
+                allow_create=args.allow_create,
+                description=args.description,
+                volume_id=args.volume,
+                source_project=args.source_project,
+            )
+            print(f"created project {pid}")
+            return 0
+        if args.command == "probe":
+            result = probe_nullability(
+                client,
+                target_project=args.target_project,
+                allow_writes=args.allow_writes,
+                source_project=args.source_project,
+            )
+            print(json.dumps(result, indent=2, default=str))
+            return 0
+        nmap, subset = load_map(args.map), load_subset(args.subset)
+        if args.command == "plan":
+            report = plan(client, args.source_project, nmap, subset)
+        elif args.command == "copy":
+            report = copy(
+                client,
+                source_project=args.source_project,
+                target_project=args.target_project,
+                allow_writes=args.allow_writes,
+                nmap=nmap,
+                subset=subset,
+                dry_run=args.dry_run,
+                on_table=lambda r: print(
+                    f"{r.action:12s} {r.name} ({r.rows:,d} rows)", flush=True
+                ),
+            )
+        else:
+            report = verify(
+                client,
+                source_project=args.source_project,
+                target_project=args.target_project,
+                nmap=nmap,
+                subset=subset,
+            )
+        print(report.render())
+        return 1 if report.problems else 0
+    except ToolError as err:
+        print(f"error: {err}", file=sys.stderr)
+        for note in getattr(err, "__notes__", []):
+            print(f"  {note}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

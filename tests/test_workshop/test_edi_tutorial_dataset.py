@@ -1,0 +1,840 @@
+"""The workshop EDI dataset tool, run against an in-memory fake of pyspiral.
+
+``workshop/edi_tutorial_dataset/edi_tutorial_dataset.py`` builds a Spiral project the
+workshop depends on and may write to Spiral, so its guards and its copy are tested like
+library code. The source here is a small synthetic project with the EDI sample's shapes:
+composite keys, ``u64`` and ``i64`` timestamps, a column group, a ``fixed_size_list``
+column, and tables in and outside the specification.
+"""
+
+from __future__ import annotations
+
+import copy as copy_module
+import datetime
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pyarrow as pa
+import pytest
+
+from tests.test_workshop.fake_spiral import FakeSpiral
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TOOL_DIR = REPO_ROOT / "workshop" / "edi_tutorial_dataset"
+TOOL = TOOL_DIR / "edi_tutorial_dataset.py"
+
+SOURCE = "edi-sample-v1-855632"
+
+
+def _load_tool() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("edi_tutorial_dataset", TOOL)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["edi_tutorial_dataset"] = module  # dataclasses resolve their module
+    spec.loader.exec_module(module)
+    return module
+
+
+tool = _load_tool()
+
+# A cut-down specification in the format of edi_schema_spec.md.
+MINI_SPEC = """
+#### session
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| subject_id | utf8 | PK | Subject |
+| session_start_datetime | datetime | PK | Start |
+| booth | utf8 | | Booth |
+| session_notes | utf8? | | Notes |
+
+#### experiment
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| experiment_preprocessing_hash | utf8 | PK, FK | hash |
+| subject_id | utf8 | PK, FK | Subject (FK → `session`) |
+| session_start_datetime | datetime | PK, FK | Start (FK → `session`) |
+| experiment_index | u32 | PK | index |
+| task_id | utf8 | FK | Task |
+
+#### experiment_freeviewing_trial
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| experiment_preprocessing_hash | utf8 | PK, FK | (FK → `experiment`) |
+| subject_id | utf8 | PK, FK | (FK → `experiment`) |
+| session_start_datetime | datetime | PK, FK | (FK → `experiment`) |
+| experiment_index | u32 | PK, FK | (FK → `experiment`) |
+| trial_index | u32 | PK | trial |
+| trial_start_timestamp | u64 | | start |
+| trial_end_timestamp | u64? | | end |
+
+#### experiment_freeviewing_event
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| experiment_preprocessing_hash | utf8 | PK, FK | (FK → `experiment`) |
+| subject_id | utf8 | PK, FK | (FK → `experiment`) |
+| session_start_datetime | datetime | PK, FK | (FK → `experiment`) |
+| experiment_index | u32 | PK, FK | (FK → `experiment`) |
+| timestamp | u64 | PK | time |
+| name | utf8 | PK | name |
+| trial_index | u32 | | trial |
+
+#### unit
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| subject_id | utf8 | PK, FK | (FK → `session`) |
+| session_start_datetime | datetime | PK, FK | (FK → `session`) |
+| unit_id | u32 | PK | unit |
+| **Classification labels (`labels` column group)** |  |  |  |
+| kilosort_label | bool? | | label |
+| bombcell_label | utf8? | | label |
+
+#### spike_event
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| subject_id | utf8 | PK, FK | (FK → `unit`) |
+| session_start_datetime | datetime | PK, FK | (FK → `unit`) |
+| timestamp | u64 | PK | time |
+| unit_id | u32 | PK, FK | (FK → `unit`) |
+| spike_amplitude_uv | f32 | | amplitude |
+
+#### lfp_timeseries
+
+| Column | Type | Key | Description |
+| --- | --- | --- | --- |
+| subject_id | utf8 | PK, FK | (FK → `session`) |
+| session_start_datetime | datetime | PK, FK | (FK → `session`) |
+| timestamp | u64 | PK | time |
+| lfp_voltage_uv | fixed_size_list(f32?)[4] | | voltages |
+"""
+
+SST = datetime.datetime(2026, 3, 24, 17, 54, 17)
+HASH = "semantic_v0.1:abc"
+EXP_KEYS = {
+    "experiment_preprocessing_hash": pa.string(),
+    "subject_id": pa.string(),
+    "session_start_datetime": pa.timestamp("us"),
+    "experiment_index": pa.uint32(),
+}
+EXP_ROW = {
+    "experiment_preprocessing_hash": HASH,
+    "subject_id": "Goliath",
+    "session_start_datetime": SST,
+    "experiment_index": 1,
+}
+SESSION_ROW = {"subject_id": "Goliath", "session_start_datetime": SST}
+
+WINDOW = (100, 200)
+# trial 0 ends before the window, 1 lies inside it, 2 straddles its end, 3 starts
+# after it but an event inside the window references it, 4 is never referenced.
+TRIALS = [(0, 50, 99), (1, 100, 150), (2, 160, 260), (3, 300, 400), (4, 500, None)]
+EVENTS = [(90, "a", 0), (120, "b", 1), (170, "c", 2), (199, "d", 3), (250, "e", 2)]
+UNITS = [1, 2, 3]
+KEPT_UNITS = [1, 3]
+
+
+def _nullable(types: dict[str, pa.DataType]) -> pa.Schema:
+    """The live sample declares every column nullable, keys included."""
+    return pa.schema([pa.field(n, t, True) for n, t in types.items()])
+
+
+def _table(types: dict[str, pa.DataType], rows: list[dict[str, Any]]) -> pa.Table:
+    return pa.Table.from_pylist(rows, schema=_nullable(types))
+
+
+def build_source(client: FakeSpiral) -> None:
+    """Store the synthetic source project in ``client``."""
+    add = client.add_table
+    add(
+        SOURCE,
+        "default.session",
+        _table(
+            {
+                "subject_id": pa.string(),
+                "session_start_datetime": pa.timestamp("us"),
+                "booth": pa.string(),
+                "session_notes": pa.string(),
+            },
+            [{**SESSION_ROW, "booth": "2", "session_notes": None}],
+        ),
+        ["subject_id", "session_start_datetime"],
+    )
+    add(
+        SOURCE,
+        "default.experiment",
+        _table(
+            {**EXP_KEYS, "task_id": pa.string()},
+            [{**EXP_ROW, "task_id": "FreeViewing"}],
+        ),
+        list(EXP_KEYS),
+    )
+    add(
+        SOURCE,
+        "default.experiment_freeviewing_trial",
+        _table(
+            {
+                **EXP_KEYS,
+                "trial_index": pa.uint32(),
+                "trial_start_timestamp": pa.uint64(),
+                "trial_end_timestamp": pa.uint64(),
+            },
+            [
+                {
+                    **EXP_ROW,
+                    "trial_index": i,
+                    "trial_start_timestamp": s,
+                    "trial_end_timestamp": e,
+                }
+                for i, s, e in TRIALS
+            ],
+        ),
+        [*EXP_KEYS, "trial_index"],
+    )
+    add(
+        SOURCE,
+        "default.experiment_freeviewing_event",
+        _table(
+            {
+                **EXP_KEYS,
+                "timestamp": pa.uint64(),
+                "name": pa.string(),
+                "trial_index": pa.uint32(),
+            },
+            [
+                {**EXP_ROW, "timestamp": t, "name": n, "trial_index": i}
+                for t, n, i in EVENTS
+            ],
+        ),
+        [*EXP_KEYS, "timestamp", "name"],
+    )
+    labels = pa.struct(
+        [("kilosort_label", pa.bool_()), ("bombcell_label", pa.string())]
+    )
+    add(
+        SOURCE,
+        "default.unit",
+        _table(
+            {
+                "subject_id": pa.string(),
+                "session_start_datetime": pa.timestamp("us"),
+                "unit_id": pa.uint32(),
+                "labels": labels,
+            },
+            [
+                {
+                    **SESSION_ROW,
+                    "unit_id": u,
+                    "labels": {"kilosort_label": u == 1, "bombcell_label": None},
+                }
+                for u in UNITS
+            ],
+        ),
+        ["subject_id", "session_start_datetime", "unit_id"],
+    )
+    add(
+        SOURCE,
+        "default.spike_event",
+        _table(
+            {
+                "subject_id": pa.string(),
+                "session_start_datetime": pa.timestamp("us"),
+                "timestamp": pa.uint64(),
+                "unit_id": pa.uint32(),
+                "spike_amplitude_uv": pa.float32(),
+            },
+            [
+                {
+                    **SESSION_ROW,
+                    "timestamp": t,
+                    "unit_id": u,
+                    "spike_amplitude_uv": float(t + u),
+                }
+                for t in range(90, 261, 10)
+                for u in UNITS
+            ],
+        ),
+        ["subject_id", "session_start_datetime", "timestamp", "unit_id"],
+    )
+    add(
+        SOURCE,
+        "default.lfp_timeseries",
+        _table(
+            {
+                "subject_id": pa.string(),
+                "session_start_datetime": pa.timestamp("us"),
+                "timestamp": pa.uint64(),
+                "lfp_voltage_uv": pa.list_(pa.float32(), 4),
+            },
+            [
+                {
+                    **SESSION_ROW,
+                    "timestamp": t,
+                    "lfp_voltage_uv": [1.0, None, float(t), 0.5],
+                }
+                for t in range(95, 206, 5)
+            ],
+        ),
+        ["subject_id", "session_start_datetime", "timestamp"],
+    )
+    add(
+        SOURCE,
+        "default.experiment_screen_capture_frame_270p",
+        _table(
+            {
+                **EXP_KEYS,
+                "screen_capture_import_version_id": pa.int64(),
+                "timestamp": pa.int64(),
+                "frame_index": pa.uint32(),
+                "frame_jpeg": pa.large_binary(),
+            },
+            [
+                {
+                    **EXP_ROW,
+                    "screen_capture_import_version_id": 0,
+                    "timestamp": t,
+                    "frame_index": i,
+                    "frame_jpeg": b"\xff\xd8" + bytes([i]),
+                }
+                for i, t in enumerate(range(70, 251, 30))
+            ],
+        ),
+        [*EXP_KEYS, "screen_capture_import_version_id", "timestamp", "frame_index"],
+    )
+    add(
+        SOURCE,
+        "default.sample_info",
+        _table(
+            {"region": pa.string(), "n_units": pa.int64()},
+            [{"region": "V1", "n_units": 3}],
+        ),
+        ["region"],
+    )
+
+
+SUBSET_JSON = {
+    "dataset": "default",
+    "window_us": list(WINDOW),
+    "unit_ids": KEPT_UNITS,
+    "trial_table": "experiment_freeviewing_trial",
+    "tables": {
+        "session": {"mode": "whole"},
+        "experiment": {"mode": "whole"},
+        "experiment_freeviewing_trial": {"mode": "trials"},
+        "experiment_freeviewing_event": {"mode": "window"},
+        "unit": {"mode": "units"},
+        "spike_event": {"mode": "window_units"},
+        "lfp_timeseries": {"mode": "window"},
+        "experiment_screen_capture_frame_270p": {"mode": "window"},
+        "sample_info": {"mode": "whole"},
+    },
+}
+
+
+def _source_schemas(client: FakeSpiral) -> dict[str, tuple[pa.Schema, list[str]]]:
+    project = client.project(SOURCE)
+    return {
+        r.table: (
+            project.table(f"default.{r.table}").schema().to_arrow(),
+            project.table(f"default.{r.table}").key_schema.to_arrow().names,
+        )
+        for r in project.list_tables()
+    }
+
+
+def derived_map(client: FakeSpiral) -> dict[str, Any]:
+    """The map ``derive-map`` builds for the synthetic source (decisions pending)."""
+    return tool.derive_map(MINI_SPEC, "0.3.0", SOURCE, _source_schemas(client))
+
+
+def decide(raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve every pending decision the way a developer might."""
+    raw = copy_module.deepcopy(raw)
+    for t in raw["tables"].values():
+        for c in t["columns"].values():
+            if c["nullable"] is None:
+                c["nullable"] = not c["key"]
+        for g in t["groups"].values():
+            if g["nullable"] is None:
+                g["nullable"] = False
+    return raw
+
+
+@pytest.fixture
+def client() -> FakeSpiral:
+    c = FakeSpiral()
+    build_source(c)
+    return c
+
+
+@pytest.fixture
+def nmap(client: FakeSpiral):
+    return tool.parse_map(decide(derived_map(client)))
+
+
+@pytest.fixture
+def subset():
+    return tool.parse_subset(SUBSET_JSON)
+
+
+def make_target(client: FakeSpiral) -> str:
+    return tool.create_project(
+        client,
+        id_prefix="edi-sample-tutorial",
+        allow_create="edi-sample-tutorial",
+        description="edi-tutorial-v1",
+        volume_id="vol_test",
+        source_project=SOURCE,
+    )
+
+
+def run_copy(client: FakeSpiral, target: str, nmap: Any, subset: Any, **kw: Any):
+    return tool.copy(
+        client,
+        source_project=SOURCE,
+        target_project=target,
+        allow_writes=target,
+        nmap=nmap,
+        subset=subset,
+        **kw,
+    )
+
+
+def writes_to(client: FakeSpiral, project: str) -> list[tuple[str, str, str]]:
+    return [entry for entry in client.log if entry[0] == project]
+
+
+# ------------------------------------------------------------------------ derive-map
+
+
+class TestDeriveMap:
+    def test_spec_nullability_and_keys(self, client):
+        raw = derived_map(client)
+        session = raw["tables"]["session"]["columns"]
+        assert (
+            session["subject_id"]["nullable"] is False and session["subject_id"]["key"]
+        )
+        assert session["booth"]["nullable"] is False
+        assert session["session_notes"]["nullable"] is True
+        assert raw["mismatches"] == []
+
+    def test_tables_outside_the_spec_and_groups_are_pending(self, client):
+        nm = tool.parse_map(derived_map(client))
+        pending = nm.pending()
+        assert set(pending) == {
+            "experiment_screen_capture_frame_270p",
+            "sample_info",
+            "unit",
+        }
+        assert pending["unit"] == ["labels"]
+
+    def test_type_difference_is_a_mismatch(self, client):
+        schemas = _source_schemas(client)
+        schema, keys = schemas["spike_event"]
+        i = schema.get_field_index("spike_amplitude_uv")
+        schemas["spike_event"] = (
+            schema.set(i, pa.field("spike_amplitude_uv", pa.float64())),
+            keys,
+        )
+        raw = tool.derive_map(MINI_SPEC, "0.3.0", SOURCE, schemas)
+        assert any("spike_event.spike_amplitude_uv" in m for m in raw["mismatches"])
+
+    def test_foreign_keys_use_the_parents_key_columns(self, client):
+        raw = derived_map(client)
+        fks = {
+            fk["parent"]: fk["columns"]
+            for fk in raw["tables"]["spike_event"]["foreign_keys"]
+        }
+        assert fks == {"unit": ["subject_id", "session_start_datetime", "unit_id"]}
+        event_fks = {
+            fk["parent"]
+            for fk in raw["tables"]["experiment_freeviewing_event"]["foreign_keys"]
+        }
+        assert event_fks == {"experiment", "experiment_freeviewing_trial"}
+
+    def test_render_map_lists_every_column(self, client):
+        text = tool.render_map(tool.parse_map(derived_map(client)))
+        assert "| `spike_amplitude_uv` | `float` | `f32` |  | **required** |" in text
+        assert "| `labels` (column group) | struct | — | | pending |" in text
+
+
+# ---------------------------------------------------------------------------- guards
+
+
+class TestTargetGuards:
+    def test_allow_writes_must_repeat_the_target(self, client, nmap, subset):
+        target = make_target(client)
+        with pytest.raises(tool.TargetRefusedError, match="allow-writes"):
+            tool.copy(
+                client,
+                source_project=SOURCE,
+                target_project=target,
+                allow_writes=target + "x",
+                nmap=nmap,
+                subset=subset,
+            )
+
+    def test_source_is_refused_as_target(self, client, nmap, subset):
+        with pytest.raises(tool.TargetRefusedError):
+            run_copy(client, SOURCE, nmap, subset)
+
+    @pytest.mark.parametrize(
+        "target", ["edi-sample-v2-303737", "edi-sample-v1-tutorial"]
+    )
+    def test_edi_sample_v_prefix_is_refused(self, client, nmap, subset, target):
+        with pytest.raises(tool.TargetRefusedError, match="edi-sample-v"):
+            run_copy(client, target, nmap, subset)
+
+    def test_project_without_marker_is_refused(self, client, nmap, subset):
+        client.add_table(
+            "edi-sample-46d-924415",
+            "default.subject",
+            _table({"subject_id": pa.string()}, [{"subject_id": "x"}]),
+            ["subject_id"],
+        )
+        with pytest.raises(tool.TargetRefusedError, match="create step"):
+            run_copy(client, "edi-sample-46d-924415", nmap, subset)
+        assert writes_to(client, "edi-sample-46d-924415") == []
+
+    def test_project_with_a_foreign_table_is_refused(self, client, nmap, subset):
+        target = make_target(client)
+        client.add_table(
+            target, "default.other", _table({"k": pa.string()}, [{"k": "x"}]), ["k"]
+        )
+        with pytest.raises(tool.TargetRefusedError, match="did not write"):
+            run_copy(client, target, nmap, subset)
+
+    def test_create_refuses_a_forbidden_prefix(self, client):
+        with pytest.raises(tool.TargetRefusedError):
+            tool.create_project(
+                client,
+                id_prefix="edi-sample-v1",
+                allow_create="edi-sample-v1",
+                description="x",
+                volume_id=None,
+                source_project=SOURCE,
+            )
+
+    def test_create_requires_the_prefix_twice(self, client):
+        with pytest.raises(tool.TargetRefusedError):
+            tool.create_project(
+                client,
+                id_prefix="edi-sample-tutorial",
+                allow_create=None,
+                description="x",
+                volume_id=None,
+                source_project=SOURCE,
+            )
+
+    def test_create_makes_a_marked_project_on_the_volume(self, client):
+        target = make_target(client)
+        assert target.startswith("edi-sample-tutorial-")
+        assert (target, "create_project", "vol_test") in client.log
+        marker = tool.read_marker(client.project(target))
+        assert marker["source_project"] == SOURCE
+
+    def test_pending_decisions_block_the_copy(self, client, subset):
+        target = make_target(client)
+        pending = tool.parse_map(derived_map(client))
+        with pytest.raises(tool.PendingDecisionError):
+            run_copy(client, target, pending, subset)
+        assert [op for _, op, _ in writes_to(client, target)] == [
+            "create_project",
+            "create_table",
+            "set_metadata",
+        ]
+
+
+# ------------------------------------------------------------------------------ copy
+
+
+class TestCopy:
+    def test_copies_the_subset_and_never_writes_the_source(self, client, nmap, subset):
+        target = make_target(client)
+        report = run_copy(client, target, nmap, subset)
+        assert writes_to(client, SOURCE) == []
+        rows = {t.name: t.rows for t in report.tables}
+        # spikes at 100..190 for units 1 and 3
+        assert rows["spike_event"] == 20
+        assert (
+            sorted(
+                set(
+                    client.rows(target, "default.spike_event")
+                    .column("unit_id")
+                    .to_pylist()
+                )
+            )
+            == KEPT_UNITS
+        )
+        assert rows["lfp_timeseries"] == 20  # 100, 105, ..., 195
+        assert client.rows(
+            target, "default.experiment_screen_capture_frame_270p"
+        ).column("timestamp").to_pylist() == [100, 130, 160, 190]
+        assert rows["experiment_freeviewing_event"] == 3  # 120, 170, 199
+        assert report.kept_trials == [1, 2, 3]
+        assert rows["unit"] == 2 and rows["session"] == 1 and rows["sample_info"] == 1
+        assert report.problems == []
+
+    def test_declares_nullability_from_the_map(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        t = client.project(target).table("default.spike_event")
+        schema = t.schema().to_arrow()
+        assert all(not f.nullable for f in schema)
+        assert all(not f.nullable for f in t.key_schema.to_arrow())
+        session = client.project(target).table("default.session").schema().to_arrow()
+        assert session.field("session_notes").nullable
+        assert not session.field("booth").nullable
+        lfp = client.project(target).table("default.lfp_timeseries").schema().to_arrow()
+        # types exactly as the source, item nullability included
+        assert lfp.field("lfp_voltage_uv").type == pa.list_(pa.float32(), 4)
+        assert not lfp.field("lfp_voltage_uv").nullable
+
+    def test_column_group_keeps_its_fields_and_gets_its_nullability(
+        self, client, nmap, subset
+    ):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        unit = client.project(target).table("default.unit").schema().to_arrow()
+        labels = unit.field("labels")
+        assert not labels.nullable
+        assert [f.name for f in labels.type] == ["kilosort_label", "bombcell_label"]
+        assert all(f.nullable for f in labels.type)
+
+    def test_a_null_in_a_required_column_fails_loudly(self, client, nmap, subset):
+        data = client.rows(SOURCE, "default.spike_event")
+        i = data.schema.get_field_index("spike_amplitude_uv")
+        values = data.column(i).to_pylist()
+        values[data.column("timestamp").to_pylist().index(150)] = None
+        client.add_table(
+            SOURCE,
+            "default.spike_event",
+            data.set_column(i, data.schema.field(i), pa.array(values, pa.float32())),
+            ["subject_id", "session_start_datetime", "timestamp", "unit_id"],
+        )
+        target = make_target(client)
+        with pytest.raises(tool.NullInRequiredColumnError) as info:
+            run_copy(client, target, nmap, subset)
+        assert info.value.path == ("spike_amplitude_uv",)
+        assert any("spike_event" in note for note in info.value.__notes__)
+        # the aborted transaction left no rows behind
+        assert client.project(target).table(
+            "default.spike_event"
+        ).schema().to_arrow().names == [
+            "subject_id",
+            "session_start_datetime",
+            "timestamp",
+            "unit_id",
+        ]
+
+    def test_a_null_in_a_required_group_field_fails_loudly(self, client, subset):
+        raw = decide(derived_map(client))
+        raw["tables"]["unit"]["groups"]["labels"]["fields"]["bombcell_label"][
+            "nullable"
+        ] = False
+        target = make_target(client)
+        with pytest.raises(tool.NullInRequiredColumnError) as info:
+            run_copy(client, target, tool.parse_map(raw), subset)
+        assert info.value.path == ("labels", "bombcell_label")
+
+    def test_source_type_drift_is_refused(self, client, nmap, subset):
+        data = client.rows(SOURCE, "default.session")
+        i = data.schema.get_field_index("booth")
+        client.add_table(
+            SOURCE,
+            "default.session",
+            data.set_column(
+                i,
+                pa.field("booth", pa.large_string()),
+                data.column(i).cast(pa.large_string()),
+            ),
+            ["subject_id", "session_start_datetime"],
+        )
+        target = make_target(client)
+        with pytest.raises(tool.SchemaMismatchError, match="booth"):
+            run_copy(client, target, nmap, subset)
+
+    def test_dry_run_writes_nothing(self, client, nmap, subset):
+        target = make_target(client)
+        before = list(client.log)
+        report = run_copy(client, target, nmap, subset, dry_run=True)
+        assert client.log == before
+        assert {t.action for t in report.tables} == {"would write"}
+
+    def test_plan_reads_only(self, client, subset):
+        before = list(client.log)
+        report = tool.plan(client, SOURCE, tool.parse_map(derived_map(client)), subset)
+        assert client.log == before
+        assert set(report.pending) == {
+            "experiment_screen_capture_frame_270p",
+            "sample_info",
+            "unit",
+        }
+        assert sum(t.rows for t in report.tables) > 0
+
+    def test_rerun_skips_complete_tables(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        before = {
+            name: client.rows(target, f"default.{name}")
+            for name in SUBSET_JSON["tables"]
+        }
+        log_size = len(client.log)
+        report = run_copy(client, target, nmap, subset)
+        assert {t.action for t in report.tables} == {"skip"}
+        assert len(client.log) == log_size
+        for name, table in before.items():
+            assert client.rows(target, f"default.{name}").equals(table)
+
+    def test_rerun_after_a_failure_completes(self, client, nmap, subset):
+        target = make_target(client)
+        good = client.rows(SOURCE, "default.spike_event")
+        i = good.schema.get_field_index("spike_amplitude_uv")
+        bad = good.set_column(
+            i, good.schema.field(i), pa.array([None] * good.num_rows, pa.float32())
+        )
+        keys = ["subject_id", "session_start_datetime", "timestamp", "unit_id"]
+        client.add_table(SOURCE, "default.spike_event", bad, keys)
+        with pytest.raises(tool.NullInRequiredColumnError):
+            run_copy(client, target, nmap, subset)
+        client.add_table(SOURCE, "default.spike_event", good, keys)
+        report = run_copy(client, target, nmap, subset)
+        actions = {t.name: t.action for t in report.tables}
+        assert actions["spike_event"] == "rewrite"
+        assert actions["session"] == "skip"
+        tool.verify(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            nmap=nmap,
+            subset=subset,
+        )
+
+    def test_a_changed_subset_is_refused_for_complete_tables(
+        self, client, nmap, subset
+    ):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        changed = tool.parse_subset({**SUBSET_JSON, "unit_ids": [1]})
+        with pytest.raises(tool.StaleTableError):
+            run_copy(client, target, nmap, changed)
+
+    def test_window_literals_carry_the_column_type(self, client, nmap, subset):
+        # the fake, like SpiralDB, refuses a u64 column compared with an i64 literal;
+        # the frames table keys time as int64 and the others as uint64
+        target = make_target(client)
+        report = run_copy(client, target, nmap, subset)
+        assert {t.name: t.rows for t in report.tables}[
+            "experiment_screen_capture_frame_270p"
+        ] == 4
+
+
+# ---------------------------------------------------------------------------- verify
+
+
+class TestVerify:
+    def test_passes_after_copy(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        report = tool.verify(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            nmap=nmap,
+            subset=subset,
+        )
+        assert report.problems == []
+
+    def test_detects_a_changed_value(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.spike_event"]
+        assert stored.data is not None
+        i = stored.data.schema.get_field_index("spike_amplitude_uv")
+        values = stored.data.column(i).to_pylist()
+        values[0] += 1
+        stored.data = stored.data.set_column(
+            i, stored.data.schema.field(i), pa.array(values, pa.float32())
+        )
+        with pytest.raises(tool.VerificationError, match="spike_amplitude_uv"):
+            tool.verify(
+                client,
+                source_project=SOURCE,
+                target_project=target,
+                nmap=nmap,
+                subset=subset,
+            )
+
+    def test_detects_a_missing_row_and_a_dangling_reference(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.experiment_freeviewing_trial"]
+        assert stored.data is not None
+        stored.data = stored.data.filter(
+            pa.compute.not_equal(stored.data.column("trial_index"), 3)
+        )
+        with pytest.raises(tool.VerificationError) as info:
+            tool.verify(
+                client,
+                source_project=SOURCE,
+                target_project=target,
+                nmap=nmap,
+                subset=subset,
+            )
+        text = "\n".join(info.value.problems)
+        assert "row count" in text
+        assert "experiment_freeviewing_event -> experiment_freeviewing_trial" in text
+
+    def test_detects_nullability_that_differs_from_the_map(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.session"]
+        assert stored.data is not None
+        stored.data = stored.data.cast(
+            pa.schema([f.with_nullable(True) for f in stored.data.schema])
+        )
+        with pytest.raises(tool.VerificationError, match="session: schema"):
+            tool.verify(
+                client,
+                source_project=SOURCE,
+                target_project=target,
+                nmap=nmap,
+                subset=subset,
+            )
+
+
+# ------------------------------------------------------------------- committed files
+
+
+class TestCommittedFiles:
+    def test_map_and_subset_load_and_agree(self):
+        nm = tool.load_map()
+        sub = tool.load_subset()
+        assert nm.source_project == SOURCE
+        assert set(sub.tables) <= set(nm.tables)
+        start, stop = sub.window
+        assert 0 < stop - start <= 200_000_000  # at most 200 s
+
+    def test_cli_render_map(self, capsys):
+        assert tool.main(["render-map"]) == 0
+        assert "### `spike_event`" in capsys.readouterr().out
+
+    def test_cli_plan_uses_the_given_client(self, client, capsys, tmp_path):
+        map_path = tmp_path / "map.json"
+        map_path.write_text(json.dumps(derived_map(client)))
+        subset_path = tmp_path / "subset.json"
+        subset_path.write_text(json.dumps(SUBSET_JSON))
+        code = tool.main(
+            ["--map", str(map_path), "--subset", str(subset_path), "plan"],
+            client_factory=lambda: client,
+        )
+        assert code == 0
+        assert "pending decisions" in capsys.readouterr().out
