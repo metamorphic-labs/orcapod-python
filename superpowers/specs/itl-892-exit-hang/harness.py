@@ -93,7 +93,11 @@ def main() -> int:
                 proc = r.pop("proc")
                 if sampled is None and not args.no_sample:
                     sampled = _sample_stack(proc.pid, args.label) or "unavailable"
-                os.killpg(proc.pid, signal.SIGKILL)
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (PermissionError, ProcessLookupError):
+                    # macOS refuses killpg once the leader is a zombie; it already exited.
+                    proc.kill()
                 out, _ = proc.communicate()
                 r["done"] = "done" in (out or "")
             results.append(r)

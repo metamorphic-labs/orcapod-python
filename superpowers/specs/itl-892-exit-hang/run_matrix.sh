@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ITL-892 macOS matrix. Run from the repository root:
 #   bash superpowers/specs/itl-892-exit-hang/run_matrix.sh <group> [N]
-# Groups: ops, readpath, threads, mitigations, python, versions, orcapod.
+# Groups: ops, readpath, threads, mitigations, python, versions, orcapod,
+#         orcapod-python, orcapod-patches.
 # Each cell appends one JSON line to superpowers/specs/itl-892-exit-hang/results.jsonl.
 set -u
 D=superpowers/specs/itl-892-exit-hang
@@ -37,7 +38,7 @@ threads)
   H --label "$OP in fork child" -- python $D/repro_pure.py --op "$OP" --mp fork
   H --label "$OP in spawn child" -- python $D/repro_pure.py --op "$OP" --mp spawn ;;
 mitigations)
-  for m in del atexit_del os_exit; do
+  for m in ${MITS:-del atexit_del os_exit atexit_sleep atexit_sleep_long}; do
     H --label "$OP mitigation=$m" -- python $D/repro_pure.py --op "$OP" --mitigation "$m"
   done ;;
 python)
@@ -61,6 +62,13 @@ orcapod-python)
     for m in ${MODES:-plain-read pipeline-sync pipeline-async}; do
       uv run --isolated --frozen --python "$py" python $D/harness.py -n "$N" -t "$T" -j "$J" \
         --label "orcapod $m py$py locked" -- python $D/repro_orcapod.py "$m"
+    done
+  done ;;
+orcapod-patches)
+  # Options (b)/(c) prototyped by wrapping deltalake in the repro; src/ unchanged.
+  for p in ${PATCHES:-native-fs no-threads atexit-gc}; do
+    for m in ${MODES:-plain-read source-read pipeline-sync pipeline-async}; do
+      H --label "orcapod $m patch=$p py3.12 locked" -- python $D/repro_orcapod.py "$m" --patch "$p"
     done
   done ;;
 *) echo "unknown group $1"; exit 2 ;;

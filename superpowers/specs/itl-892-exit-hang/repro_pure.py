@@ -145,7 +145,14 @@ def main() -> None:
     ap.add_argument(
         "--mitigation",
         default="none",
-        choices=["none", "del", "atexit_del", "os_exit"],
+        choices=[
+            "none",
+            "del",
+            "atexit_del",
+            "os_exit",
+            "atexit_sleep",
+            "atexit_sleep_long",
+        ],
     )
     ap.add_argument("--mp", default="none", choices=["none", "fork", "spawn"])
     args = ap.parse_args()
@@ -178,6 +185,14 @@ def main() -> None:
         gc.collect()
     elif args.mitigation == "atexit_del":
         atexit.register(lambda: (keep.clear(), gc.collect()))
+    elif args.mitigation in ("atexit_sleep", "atexit_sleep_long"):
+        # Release the GIL before finalization so pool workers can drop their Python
+        # references while the interpreter can still give them the GIL (the idea of
+        # apache/arrow#54467, approximated from Python).
+        import time
+
+        delay = 0.05 if args.mitigation == "atexit_sleep" else 0.5
+        atexit.register(time.sleep, delay)
     elif args.mitigation == "os_exit":
         sys.stdout.flush()
         os._exit(0)

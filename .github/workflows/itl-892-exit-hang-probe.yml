@@ -42,31 +42,30 @@ jobs:
       - name: Install dependencies (locked)
         run: uv sync --locked --dev --python ${{ matrix.python-version }}
 
-      - name: Probe
+      - name: Probe (round 2 - mitigations through Orcapod, regression check)
         env:
           UV_PYTHON: ${{ matrix.python-version }}
         run: |
           D=superpowers/specs/itl-892-exit-hang
-          rm -f $D/results.jsonl
+          rm -rf $D/results.jsonl $D/samples
           H() { uv run python $D/harness.py -n 100 -t "$T" -j "$J" "$@"; }
           py=${{ matrix.python-version }}
-          H --label "linux op=dataset_scan py$py locked" -- python $D/repro_pure.py --op dataset_scan
-          H --label "linux op=to_table py$py locked" -- python $D/repro_pure.py --op to_table
-          H --label "linux op=itl864 py$py locked" -- python $D/repro_pure.py --op itl864
-          H --label "linux dataset_scan native_fs py$py locked" -- python $D/repro_pure.py --op dataset_scan --read-via native_fs
-          H --label "linux dataset_scan no_threads py$py locked" -- python $D/repro_pure.py --op dataset_scan --read-via no_threads
-          H --label "linux dataset_scan io_threads=1 py$py locked" -- python $D/repro_pure.py --op dataset_scan --io-threads 1
-          H --label "linux dataset_scan mitigation=del py$py locked" -- python $D/repro_pure.py --op dataset_scan --mitigation del
-          for m in plain-read source-read pipeline-sync pipeline-async; do
-            H --label "linux orcapod $m py$py locked" -- python $D/repro_orcapod.py "$m"
+          for m in atexit_sleep atexit_sleep_long; do
+            H --label "linux dataset_scan mitigation=$m py$py locked" -- python $D/repro_pure.py --op dataset_scan --mitigation "$m"
           done
-          for v in "22.0.0 1.0.2" "26.0.1 1.6.6"; do
-            set -- $v
-            uv run --no-project --with "pyarrow==$1" --with "deltalake==$2" python $D/harness.py \
-              -n 100 -t "$T" -j "$J" --label "linux op=dataset_scan py$py pa$1 dl$2" -- \
-              python $D/repro_pure.py --op dataset_scan
+          for p in none native-fs atexit-sleep atexit-gc; do
+            for m in plain-read source-read pipeline-sync; do
+              H --label "linux orcapod $m patch=$p py$py locked" -- python $D/repro_orcapod.py "$m" --patch "$p"
+            done
           done
           cat $D/results.jsonl >> "$GITHUB_STEP_SUMMARY"
+          # Prototype regression check: expected to FAIL unpatched and PASS with native-fs.
+          set +e
+          start=$(date +%s); uv run pytest $D/regression_check_proto.py -q -p no:cacheprovider 2>&1 | tail -4
+          echo "unpatched regression check: rc=${PIPESTATUS[0]} secs=$(( $(date +%s) - start ))"
+          start=$(date +%s); ITL892_PATCH=native-fs uv run pytest $D/regression_check_proto.py -q -p no:cacheprovider 2>&1 | tail -4
+          echo "native-fs regression check: rc=${PIPESTATUS[0]} secs=$(( $(date +%s) - start ))"
+          exit 0
 
       - name: Upload results and stacks
         if: always()

@@ -14,6 +14,7 @@ Prints ``done`` and returns normally so the interpreter runs its shutdown.
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
 from pathlib import Path
 
@@ -78,6 +79,65 @@ def source_read(store_dir: Path) -> None:
     src.as_table()
 
 
+def apply_patch(name: str) -> None:
+    """Prototype a mitigation by wrapping deltalake, so ``src/`` stays unchanged.
+
+    native-fs   Local tables are scanned through a native pyarrow filesystem rooted at
+                the table, instead of deltalake's default
+                ``PyFileSystem(DeltaStorageHandler)``; option (c).
+    no-threads  Every ``Dataset.to_table`` built by deltalake runs with
+                ``use_threads=False``; option (c), alternative.
+    atexit-gc   An ``atexit`` hook runs ``gc.collect()``; option (b).
+    atexit-sleep  An ``atexit`` hook releases the GIL for 50 ms so pool workers can drop
+                their Python references before finalization; option (b), after
+                apache/arrow#54467.
+    """
+    if name == "none":
+        return
+    if name == "atexit-sleep":
+        import atexit
+        import time
+
+        atexit.register(time.sleep, 0.05)
+        return
+    if name == "atexit-gc":
+        import atexit
+        import gc
+
+        atexit.register(gc.collect)
+        return
+
+    import deltalake
+    import pyarrow.fs as pa_fs
+
+    original = deltalake.DeltaTable.to_pyarrow_dataset
+
+    def to_pyarrow_dataset(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if name == "native-fs" and kwargs.get("filesystem") is None:
+            uri = self.table_uri
+            local = uri[len("file://") :] if uri.startswith("file://") else uri
+            if "://" not in local:
+                kwargs["filesystem"] = pa_fs.SubTreeFileSystem(
+                    local, pa_fs.LocalFileSystem()
+                )
+        ds = original(self, *args, **kwargs)
+        if name == "no-threads":
+            to_table = ds.to_table
+
+            class _NoThreads:
+                def __getattr__(self, attr: str):  # noqa: ANN204
+                    return getattr(ds, attr)
+
+                def to_table(self, *a, **kw):  # noqa: ANN002, ANN003, ANN202
+                    kw["use_threads"] = False
+                    return to_table(*a, **kw)
+
+            return _NoThreads()
+        return ds
+
+    deltalake.DeltaTable.to_pyarrow_dataset = to_pyarrow_dataset  # pyright: ignore[reportAttributeAccessIssue]  # experiment-only monkeypatch
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -90,7 +150,14 @@ def main() -> None:
             "rerun",
         ],
     )
+    ap.add_argument(
+        "--patch",
+        default="none",
+        choices=["none", "native-fs", "no-threads", "atexit-gc", "atexit-sleep"],
+        help="prototype a mitigation without editing src/",
+    )
     args = ap.parse_args()
+    apply_patch(os.environ.get("ITL892_PATCH", args.patch))
     store = Path(tempfile.mkdtemp())
     if args.mode == "pipeline-sync":
         pipeline(store, "sync")
