@@ -5,8 +5,24 @@
 **Basis:** the v0.3 array format (`superpowers/specs/2026-11-10-array-format-v0.3.md`,
 `src/orcapod/logical_types/array_format.py`, `numpy_type.py`) and the ITL-874 storage review
 (`superpowers/specs/2026-11-10-array-tensor-storage.md`, section B4, `b6_torch_mapping.py`).
-**Status:** Draft for approval. Items are marked CONFIRMED (decided by the developer, relayed in
-the task brief) or PENDING (my proposal).
+**Status:** Implementing on provisional picks (coordinator, November 11, 2026); items (a) to (d)
+await the developer's confirmation. Each pick is a single constant or switch, so a change is
+cheap. Items are marked CONFIRMED (decided by the developer, relayed in the task brief),
+PENDING (proposal as first written) or superseded by the picks below.
+
+**Provisional picks (coordinator, November 11, 2026)**
+
+- (a) Name **`orcapod.torch_tensor`**, label **`torch_tensor_v1`** (over `orcapod.tensor` /
+  `tensor_v1`: other tensor libraries may come later and each library's array is a distinct
+  type). Every later mention of `orcapod.tensor` and `tensor_v1` reads as these names.
+- (b) The NumPy-shared dtypes **plus `bfloat16` only**. `complex32` and the float8 family are
+  refused, naming column and reason; adding them later is additive.
+- (c) GPU and grad-requiring tensors accepted as described, never mutated, documented.
+- (d) **P1**: torch is a peer dependency. No `pyproject.toml`, `uv.lock` or required-workflow
+  change. **No `run-torch-tests.yml`** until the developer approves it; the torch tests are run
+  locally on Python 3.11 to 3.13 and the results pasted in the PR.
+- (e), (f): approved as written.
+- The PR is a draft against `main`, stacked on #289.
 
 Facts in this document were checked on torch 2.15.0 (CPU and MPS, macOS arm64) with
 `uv run --with torch`; CUDA was not available.
