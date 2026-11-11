@@ -48,6 +48,65 @@ Data with no rows has no columns to read, so `DictSource(data=[], ...)` raises
 `ValueError: Table is empty`. To build a source with no rows, pass `data_schema=` so the
 columns are known.
 
+### SpiralDB tables
+
+`SpiralDBTableSource` exposes a table in a [SpiralDB](https://spiraldb.com) project as a
+source. Install the extra and log in once; the `spiral` command comes with the extra, and
+pyspiral keeps the login in its per-user directory (`~/Library/Application Support/pyspiral/`
+on macOS, `~/.config/pyspiral/` on Linux):
+
+```bash
+pip install "orcapod[spiraldb]"
+spiral login
+```
+
+Log in before you build a source. Without a saved login, pyspiral starts a sign-in in the
+browser and waits until it is completed.
+
+To find the tables of a project and their key columns:
+
+<!-- docs-test: skip -->
+```python
+from orcapod.databases import SpiralDBConnector
+
+with SpiralDBConnector("edi-sample-v1-855632") as spiral:
+    print(spiral.get_table_names())
+    print(spiral.get_pk_columns("session"))
+```
+
+The table's key columns become the tag columns, and every other column is a data column:
+
+<!-- docs-test: skip -->
+```python
+from orcapod.sources import SpiralDBTableSource
+
+sessions = SpiralDBTableSource("edi-sample-v1-855632", "session")
+experiments = SpiralDBTableSource("edi-sample-v1-855632", "experiment")
+print(sessions.output_schema())
+sessions.as_df()  # also as_polars_df(), as_pandas_df(), as_lazy_frame(), as_table()
+```
+
+Things to know about Spiral tables:
+
+- **Columns are nullable.** SpiralDB reports every column as nullable, key columns included,
+  so each tag and data column has the type `T | None` (`str | None`,
+  `datetime.datetime | None`, ...). A function pod receiving such a column must accept `None`:
+  annotate the parameter `x: float | None`, not `x: float`, or the pod refuses the stream.
+- **Types are kept.** Arrow types come through unchanged (`uint32` stays `uint32`), except
+  that strings, binaries and lists become their large variants. Joining two Spiral tables on
+  their shared key columns works; joining with another source requires the same Arrow types on
+  both sides (`uint32` against `int64` is an error, not a conversion).
+- **The whole table is read when the source is built.** Use tables of up to a few hundred
+  thousand rows. Very large tables (for example `spike_event`) need the streaming source that
+  is still being designed.
+- **Not yet supported:** columns of type `fixed_size_list` (the source cannot be built), time
+  zones (SpiralDB stores timestamps without one), and Orcapod logical types such as `Path`
+  (they come back as their storage type).
+- **Record identity.** A row's record ID comes from its position in the table, which SpiralDB
+  orders by key. A row inserted before existing rows changes the IDs of the rows after it.
+  The default `source_id` is the table name, so pass `source_id=` when you use tables with
+  the same name from two projects.
+
 ### `DerivedSource`
 
 A `DerivedSource` reads the stored results of a node of a

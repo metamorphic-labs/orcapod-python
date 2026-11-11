@@ -1700,6 +1700,14 @@ was bumped from `>=0.11.0` to `>=0.14.0` to document the effective floor.
 No connector code changes were needed — the public API is fully compatible
 across this version range.
 
+**Update (ITL-926, November 11, 2026):** the floor is now `>=0.16.33`, and the lock pins
+pyspiral 0.16.33 and substrait 0.30.0. pyspiral 0.14.9 did not use the login saved by the
+0.16.33 `spiral login` CLI: it started a fresh device sign-in. Every call the connector makes
+has the same signature in 0.16.33 (`Table.key_schema` now returns a Spiral `Schema`; only
+`.names` is used). pyspiral appears frozen at 0.16.33; its successor `spiral-sdk` (same import
+name `spiral`) has a new table model and reads keyed (legacy) tables only through a private,
+windowed call, so moving to it is a separate issue.
+
 **Ongoing:** pyspiral releases frequently. See PLT-1785 for the tracking issue
 covering routine version bumps.
 
@@ -2410,3 +2418,34 @@ source row.
 2026). A filtered row's data hash now equals its source row's. The pinned
 `pipeline:polars_filter` row data hashes moved (approved); they are the cache keys of any
 function pod downstream of a filter, so a 0.2 store recomputes those results once.
+
+## `src/orcapod/core/sources/spiraldb_table_source.py` — Spiral tables as a workshop source (ITL-926)
+
+### SP2 — A Spiral table source was unverified on v0.3, and is limited for large or unusual tables
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-926 (follow-ups: ITL-186 streaming source)
+
+Re-verified against the EDI sample project (`edi-sample-v1-855632`, read-only) and a
+disk-backed pyspiral fake (`tests/test_databases/fake_pyspiral.py`). The workshop path works:
+a `SpiralDBTableSource` with a composite key, a `Join` of two Spiral sources, a function pod,
+a Delta store, a re-run with no function calls, save and load, and the same hashes in a fresh
+process. Findings, with repro scripts, are in `superpowers/specs/itl-926-live/FINDINGS.md`.
+
+**Fixed:**
+
+* Nested string, binary and list types are normalized to large variants on both read paths
+  (ITL-40).
+* Errors name the project and dataset.
+* pyspiral is raised to 0.16.33.
+
+**Open (developer decisions pending):**
+
+* Every Spiral column is nullable, so a function pod must annotate `T | None`.
+* `fixed_size_list` columns cannot be hashed (starfix).
+* The whole table is read at construction, which rules out tables such as `spike_event`
+  (8.1M rows); the streaming design is in
+  `superpowers/specs/2026-11-11-itl-186-spiral-streaming-source-design.md`.
+* Record IDs are positional (key-based IDs are a hash decision).
+* `source_id` defaults to the bare table name.
+

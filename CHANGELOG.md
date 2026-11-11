@@ -105,6 +105,22 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
 - `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
   have the same hashes (`predicates` is stored as a tuple).
 
+#### SpiralDB table source (ITL-926)
+
+- The `spiraldb` extra requires `pyspiral>=0.16.33` (was `>=0.14.0`). pyspiral 0.14.9 does not
+  use the login saved by a current `spiral login`; 0.16.33 does, and keeps every call
+  `SpiralDBConnector` makes.
+- `SpiralDBConnector.get_column_info` and `iter_batches` normalize every column to its large
+  Arrow variants at every nesting level (`list<string>` becomes `large_list<large_string>`),
+  so both report the same types (ITL-40). Before, only top-level `string` and `binary`
+  columns were converted. Widths, nullability and nested field names are unchanged, and so
+  are all hashes.
+- `SpiralDBTableSource` errors name the project and dataset searched. Before, a wrong
+  project, dataset or table all gave `Table 'x' not found in database.`
+- The docstrings give the real location of the saved `spiral login`
+  (`~/Library/Application Support/pyspiral/` on macOS). `docs/concepts/sources.md` has a
+  SpiralDB section: setup, discovery, nullable columns, and current limits.
+
 ## [0.2.0] — 2026-11-10
 
 **Distribution:** Orcapod is MIT licensed starting with `0.2.0` (it was proprietary on
