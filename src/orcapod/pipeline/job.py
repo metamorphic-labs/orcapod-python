@@ -987,9 +987,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # stubs whose content_hash() matches the _node_content_hash column in the
         # DB — required for _filter_by_content_hash() in get_all_records().
         node_job_content_hashes: dict[str, str] = {}
+        # Whether each function node's pipeline table exists in the store, so that
+        # load() can tell a store that holds this run's results from one that does
+        # not (a different store passed to load(), or a moved one).
+        node_has_stored_records: dict[str, bool] = {}
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
                 node_job_content_hashes[node.label] = node.content_hash().to_string()
+                node_has_stored_records[node.label] = node._pipeline_table_exists()
 
         output: dict[str, Any] = {
             "orcapod_pipeline_job_version": PIPELINE_JOB_FORMAT_VERSION,
@@ -998,6 +1003,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "status": status,
                 "unbound_sources": list(self.unbound_sources),
                 "node_job_content_hashes": node_job_content_hashes,
+                "node_has_stored_records": node_has_stored_records,
             },
             "pipeline": pipeline_data,
             "bindings": {
@@ -1167,6 +1173,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         node_job_content_hashes: dict[str, str] = run_block.get(
             "node_job_content_hashes", {}
         )
+        # Absent in files saved before ITL-904: such nodes read zero rows from a
+        # store that has none, as before.
+        node_has_stored_records: dict[str, bool] = run_block.get(
+            "node_has_stored_records", {}
+        )
 
         for node_hash in _nx.topological_sort(job._hash_graph):
             bp_node = pipeline._persistent_node_map.get(node_hash)
@@ -1197,6 +1208,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     descriptor,
                     input_stream=input_stream,
                     job_content_hash=live_content_hash,
+                    expect_stored_records=node_has_stored_records.get(
+                        bp_node.label, False
+                    ),
                 )
                 job._persistent_node_map[node_hash] = fjn
 

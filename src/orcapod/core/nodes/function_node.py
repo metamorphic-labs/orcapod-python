@@ -824,6 +824,10 @@ class FunctionJobNode(FunctionNodeBase):
         # .node_config setter or PipelineJob.apply_node_config().
         self._node_config: NodeConfig = NodeConfig()
 
+        # Set by from_descriptor() for a loaded node whose saved run had stored
+        # records; a live node computes its own results.
+        self._expects_stored_records: bool = False
+
         self.attach_databases(
             pipeline_database=pipeline_database,
             result_database=result_database,
@@ -991,6 +995,7 @@ class FunctionJobNode(FunctionNodeBase):
         input_stream: StreamProtocol | None = None,
         databases: dict[str, Any] | None = None,
         job_content_hash: str | None = None,
+        expect_stored_records: bool = False,
     ) -> "FunctionJobNode":
         """Create a read-only ``FunctionJobNode`` stub from a serialized descriptor.
 
@@ -1017,6 +1022,10 @@ class FunctionJobNode(FunctionNodeBase):
                 column written to the DB at execution time.  Required for
                 ``get_all_records()`` to correctly filter DB rows when
                 ``table_scope="pipeline_hash"`` (the default).
+            expect_stored_records: Whether the store held this node's pipeline
+                table when the job was saved. When ``True``, reading the node
+                from a store without that table raises instead of returning zero
+                rows, because the store is not the one the job ran against.
 
         Returns:
             A ``FunctionJobNode`` in read-only stub mode
@@ -1112,6 +1121,7 @@ class FunctionJobNode(FunctionNodeBase):
 
         # FunctionJobNode — orchestrator config
         node._node_config = NodeConfig()
+        node._expects_stored_records = expect_stored_records
 
         # FunctionJobNode — DB persistence state (wired by attach_databases)
         node._pipeline_database = None
@@ -1187,6 +1197,43 @@ class FunctionJobNode(FunctionNodeBase):
             f"FunctionJobNode {self.label!r} was loaded without a store, so its stored "
             "results cannot be read. Pass the store to PipelineJob.load(path, "
             "store=...) or call job.bind(store=...)."
+        )
+
+    def _pipeline_table_exists(self) -> bool:
+        """Return whether this node's pipeline table exists in the attached store."""
+        if self._pipeline_database is None:
+            return False
+        return self._pipeline_database.table_exists(self._versioned_pipeline_path)
+
+    def _require_expected_records(self) -> None:
+        """Raise if the saved run stored this node's records but the store has none.
+
+        A loaded node reads only what its store holds. When the job was saved
+        with this node's pipeline table in the store and the attached store has
+        no such table, the store is not the one the job ran against; reading
+        zero rows would make the stored results look lost.
+
+        Raises:
+            RuntimeError: If the saved run stored records for this node and the
+                attached store has no table for it.
+        """
+        if not self._expects_stored_records or self._pipeline_table_exists():
+            return
+        assert self._pipeline_database is not None  # attached: status is READ_ONLY
+        store_config = self._pipeline_database.to_config()
+        location = store_config.get("root_uri")
+        store = (
+            f"store at {location!r}"
+            if location
+            else f"{store_config.get('type', 'attached')} store"
+        )
+        table = "/".join(
+            self._pipeline_database.base_path + self._versioned_pipeline_path
+        )
+        raise RuntimeError(
+            f"FunctionJobNode {self.label!r}: the saved run stored results for this "
+            f"node, but the attached {store} has no table {table!r} for it. Load the "
+            "job with the store it ran against: PipelineJob.load(path, store=...)."
         )
 
     def _require_pipeline_database(self) -> ArrowDatabaseProtocol:
@@ -2305,6 +2352,7 @@ class FunctionJobNode(FunctionNodeBase):
 
             if self.load_status == LoadStatus.UNAVAILABLE:
                 raise self._no_store_error()
+            self._require_expected_records()
             fetched = self._fetch_joined_records()
             stored = self._stored_rows_stream(fetched) if fetched is not None else None
             if stored is not None:
@@ -2349,6 +2397,9 @@ class FunctionJobNode(FunctionNodeBase):
         if self.is_stale:
             self.clear_cache()
 
+        if self._function_pod is None:
+            # A loaded node: its rows can come only from the store.
+            self._require_expected_records()
         if not self._cached_output_datas and self._cached_function_pod is not None:
             # Hot-load from DB on the first call when store is empty.
             loaded = self._load_cached_entries()

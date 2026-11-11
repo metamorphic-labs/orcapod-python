@@ -126,14 +126,76 @@ def test_loaded_function_node_with_store_is_read_only(saved: pathlib.Path) -> No
     assert _load(saved).nodes["dbl"].load_status == LoadStatus.READ_ONLY
 
 
-def test_loaded_function_node_with_nothing_stored_returns_zero_rows(
+def test_loaded_function_node_saved_with_records_raises_on_a_store_without_them(
     saved: pathlib.Path,
 ) -> None:
+    # The saved run stored this node's records, so a store without them is not the
+    # store the job ran against: zero rows would make the results look lost.
     node = _load(saved, store=InMemoryArrowDatabase()).nodes["dbl"]
+    for read in (node.as_table, lambda: list(node.iter_data())):
+        with pytest.raises(RuntimeError) as excinfo:
+            _ = read()
+        message = str(excinfo.value)
+        assert message.startswith(
+            "FunctionJobNode 'dbl': the saved run stored results for this node, but "
+            "the attached in_memory store has no table 'loaded_demo/double/"
+        )
+        assert message.endswith(
+            "Load the job with the store it ran against: "
+            "PipelineJob.load(path, store=...)."
+        )
+
+
+def test_mismatched_delta_store_error_names_the_store_location(
+    saved: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    from orcapod.databases import DeltaTableDatabase
+
+    other = tmp_path / "other_store"
+    node = _load(saved, store=DeltaTableDatabase(str(other))).nodes["dbl"]
+    with pytest.raises(RuntimeError, match="the attached store at '") as excinfo:
+        _ = node.as_table()
+    assert str(other) in str(excinfo.value)
+
+
+def test_saved_file_records_which_nodes_had_stored_records(
+    saved: pathlib.Path,
+) -> None:
+    run = json.loads((saved / "job.json").read_text())["run"]
+    assert run["node_has_stored_records"] == {
+        "dbl": True,
+        "inc": True,
+        "half": True,
+        "sq": True,
+    }
+
+
+def test_loaded_function_node_with_nothing_stored_returns_zero_rows(
+    saved: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    def nothing_stored(data: dict[str, Any]) -> None:
+        data["run"]["node_has_stored_records"]["dbl"] = False
+
+    path = _rewrite_job_file(saved, tmp_path, nothing_stored)
+    node = PipelineJob.load(path, store=InMemoryArrowDatabase()).nodes["dbl"]
     table = node.as_table()
     assert table.num_rows == 0
     assert table.column_names == ["id", "dbl"]
     assert list(node.iter_data()) == []
+
+
+def test_file_saved_without_the_stored_records_field_reads_zero_rows(
+    saved: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    # Files saved before the field existed load as before: a store without the
+    # node's records gives zero rows.
+    def drop_field(data: dict[str, Any]) -> None:
+        del data["run"]["node_has_stored_records"]
+
+    path = _rewrite_job_file(saved, tmp_path, drop_field)
+    job = PipelineJob.load(path, store=InMemoryArrowDatabase())
+    assert job.nodes["dbl"].as_table().num_rows == 0
+    assert PipelineJob.load(path).nodes["dbl"].as_table().num_rows == 2
 
 
 def test_loaded_function_node_without_store_says_how_to_attach_one(
