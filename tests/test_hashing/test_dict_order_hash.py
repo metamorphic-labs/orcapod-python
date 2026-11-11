@@ -78,6 +78,10 @@ def total(m: dict[str, int]) -> int:
     return sum(m.values())
 
 
+def tally(n: int) -> dict[str, int]:
+    return {"z": n, "a": n}
+
+
 def echo(m: dict[str, int]) -> dict[str, int]:
     return m
 
@@ -343,7 +347,8 @@ class TestV020Store:
     ``data/v0_2_0_dict_store.tar.gz`` was produced by v0.2.0 running ``total`` over two
     inputs: ``k=unsorted`` holding ``{"b": 2, "a": 1}`` (stored in that order, so its
     v0.2.0 input hash is order dependent) and ``k=sorted`` holding ``{"a": 1, "c": 3}``
-    (already in key order, so its hash does not move). ``data/generate_v0_2_0_dict_store.py``
+    (already in key order, so its hash does not move); and ``tally`` over ``n=5``,
+    whose output ``{"z": 5, "a": 5}`` is stored in insertion order. ``data/generate_v0_2_0_dict_store.py``
     regenerates it from a checkout of the ``v0.2.0`` tag.
     """
 
@@ -393,3 +398,25 @@ class TestV020Store:
             out.get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
             for out in again.values()
         )
+
+    def test_cached_unsorted_dict_output_is_served_as_stored(self, store):
+        # A v0.2.0 row is read back as stored: an Arrow table is never re-sorted, so a
+        # cache hit returns the old insertion order and hash until it is recomputed.
+        inputs = DictSource(
+            data=[{"k": "r", "n": 5}],
+            tag_columns=["k"],
+            data_schema={"k": str, "n": int},
+            source_id="itl905_v020_int",
+        )
+        pod = CachedFunctionPod(_pod(tally, "counts"), result_database=store)
+        [(_, cached)] = list(pod.process(inputs).iter_data())
+        fresh_pod = CachedFunctionPod(
+            _pod(tally, "counts"), result_database=InMemoryArrowDatabase()
+        )
+        [(_, fresh)] = list(fresh_pod.process(inputs).iter_data())
+
+        assert cached.get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
+        assert list(cached.as_dict()["counts"]) == ["z", "a"]
+        assert list(fresh.as_dict()["counts"]) == ["a", "z"]
+        assert cached.as_dict() == fresh.as_dict()
+        assert cached.content_hash() != fresh.content_hash()
