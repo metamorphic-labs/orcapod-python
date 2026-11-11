@@ -227,4 +227,11 @@ the golden and doc tests). Merge origin/main, push, open the PR (Fixes ITL-904),
 ## Progress notes
 
 - [x] Step 1 investigation and ask; approved November 11, 2026.
-- [ ] Task 1 … Task 8
+- [x] Tasks 1–6 and 8 done and pushed. The developer approved option (1) (additive
+  `run.node_has_stored_records`), so it is in the PR.
+- [x] Coordinator decision: the loaded `as_table(all_info=True)` follows the stream semantics
+  (`_context_key`, `_source_*` included). The live `FunctionJobNode.as_table()` drops those
+  columns; that is a separate bug, for the coordinator to file.
+- [x] Merged origin/main (PR #296 landed). Conflicts in the example and in DESIGN_ISSUES.md
+  are resolved: both entries are kept.
+- [ ] Task 7: full suite, PR, CodeRabbit.
