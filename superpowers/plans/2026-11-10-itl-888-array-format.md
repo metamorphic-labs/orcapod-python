@@ -232,3 +232,14 @@ layouts keep it, MergeJoin over arrays differing only in field order (both argum
 unsorted and nested structured arrays added to `ARRAYS` (round trip on in-memory and Delta,
 sync and async, every operator). Golden: no structured entries, nothing moves. Docs, spec D3,
 CHANGELOG, DESIGN_ISSUES, PR body and ITL-888 wording updated.
+
+## Merge of origin/main after PR #287 (2026-11-11, task_0d716f1fc6fc)
+
+Plan (mechanical, coordinator-scoped; no behaviour change beyond keeping both sides):
+1. `git merge origin/main` (cf4f67c7) — merge commit, no rebase/force-push.
+2. Resolve conflicts additively: CHANGELOG one `[0.3.0] — unreleased` section with both
+   sides' entries; DESIGN_ISSUES both entries; code keeps both behaviours (ITL-878 store-write
+   failure handling + ITL-888 ndarray output check / UnsupportedValueError); re-read merged code.
+3. Golden: `git diff origin/main -- tests/test_hashing/golden/` must equal this PR's approved diff.
+4. Verify: pytest on 3.11/3.12/3.13, ruff check, ruff format --check, basedpyright exit code.
+5. Push; wait for CI + CodeRabbit on new head; read review bodies + inline threads.
