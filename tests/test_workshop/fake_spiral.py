@@ -34,7 +34,7 @@ import pyarrow.compute as pc
 class Expr:
     """A filter expression over one table's columns."""
 
-    def evaluate(self, table: pa.Table) -> pa.ChunkedArray:  # pragma: no cover
+    def evaluate(self, table: pa.Table) -> Any:  # pragma: no cover
         raise NotImplementedError
 
     def _compare(self, other: Any, op: str) -> Expr:
@@ -52,30 +52,25 @@ class Expr:
     def __lt__(self, other: Any) -> Expr:
         return self._compare(other, "less")
 
-    def __eq__(self, other: Any) -> Expr:  # type: ignore[override]
-        return self._compare(other, "equal")
-
     def __and__(self, other: Expr) -> Expr:
         return And(self, other)
-
-    __hash__ = None  # type: ignore[assignment]
 
 
 @dataclasses.dataclass(eq=False)
 class Column(Expr):
     name: str
 
-    def evaluate(self, table: pa.Table) -> pa.ChunkedArray:
+    def evaluate(self, table: pa.Table) -> Any:
         return table.column(self.name)
 
 
 @dataclasses.dataclass(eq=False)
 class Compare(Expr):
-    left: Column
+    left: Expr
     right: Any
     op: str
 
-    def evaluate(self, table: pa.Table) -> pa.ChunkedArray:
+    def evaluate(self, table: pa.Table) -> Any:
         col = self.left.evaluate(table)
         if not isinstance(self.right, pa.Scalar) or self.right.type != col.type:
             got = (
@@ -92,7 +87,7 @@ class And(Expr):
     left: Expr
     right: Expr
 
-    def evaluate(self, table: pa.Table) -> pa.ChunkedArray:
+    def evaluate(self, table: pa.Table) -> Any:
         return pc.and_(self.left.evaluate(table), self.right.evaluate(table))
 
 

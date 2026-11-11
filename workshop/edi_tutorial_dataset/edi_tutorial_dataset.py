@@ -350,14 +350,14 @@ def target_schema(
             f"source columns differ from the map: missing {missing}, unexpected {extra}"
         )
 
-    def nullability(decided: bool | None, field: pa.Field, path: str) -> bool:
+    def nullability(decided: bool | None, field: pa.Field[Any], path: str) -> bool:
         if decided is not None:
             return decided
         if allow_pending:
             return field.nullable
         raise PendingDecisionError(f"nullability of {path!r} is pending in the map")
 
-    fields: list[pa.Field] = []
+    fields: list[pa.Field[Any]] = []
     for field in source:
         if field.name in spec.groups:
             group = spec.groups[field.name]
@@ -403,7 +403,7 @@ def key_schema(schema: pa.Schema, keys: Sequence[str]) -> pa.Schema:
     return pa.schema([schema.field(k) for k in keys])
 
 
-def _conform_array(arr: pa.Array, field: pa.Field) -> pa.Array:
+def _conform_array(arr: pa.Array[Any], field: pa.Field[Any]) -> pa.Array[Any]:
     """Return ``arr`` typed as ``field`` declares, refusing nulls it does not allow.
 
     Raises:
@@ -476,9 +476,9 @@ def _row_mask(
     batch: pa.RecordBatch,
     mode: str,
     window: tuple[int, int],
-    unit_ids: pa.Array,
-    trials: pa.Array | None,
-) -> pa.Array | None:
+    unit_ids: pa.Array[Any],
+    trials: pa.Array[Any] | None,
+) -> pa.Array[Any] | None:
     """Return the client-side row mask for ``mode`` (``None`` keeps every row).
 
     The window is also applied here, so a row outside it is dropped even if a
@@ -1292,7 +1292,7 @@ def parse_spec_tables(text: str) -> dict[str, list[dict[str, Any]]]:
     for line in text.splitlines():
         if m := re.match(r"^####\s+(\w+)\s*$", line):
             current, group = m.group(1), None
-            tables[current] = []
+            tables[m.group(1)] = []
             continue
         if current is None or not line.startswith("|"):
             continue
@@ -1375,7 +1375,7 @@ def derive_map(
         }
 
         def column(
-            field: pa.Field, row: dict[str, Any] | None, *, is_key: bool
+            field: pa.Field[Any], row: dict[str, Any] | None, *, is_key: bool
         ) -> dict[str, Any]:
             if row is None:
                 if in_spec:
@@ -1515,7 +1515,7 @@ def connect() -> Any:
     try:
         from importlib.metadata import version
 
-        import spiral
+        import spiral  # pyright: ignore[reportMissingImports]  # optional; see connect()
     except ImportError as err:
         raise ToolError(
             "pyspiral is not installed; run with `uv run --with pyspiral==0.16.33 ...`"

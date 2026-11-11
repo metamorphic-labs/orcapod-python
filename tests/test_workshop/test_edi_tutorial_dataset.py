@@ -19,6 +19,7 @@ from types import ModuleType
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from tests.test_workshop.fake_spiral import FakeSpiral
@@ -779,7 +780,7 @@ class TestVerify:
         stored = client._projects[target]["default.experiment_freeviewing_trial"]
         assert stored.data is not None
         stored.data = stored.data.filter(
-            pa.compute.not_equal(stored.data.column("trial_index"), 3)
+            pc.not_equal(stored.data.column("trial_index"), pa.scalar(3, pa.uint32()))
         )
         with pytest.raises(tool.VerificationError) as info:
             tool.verify(

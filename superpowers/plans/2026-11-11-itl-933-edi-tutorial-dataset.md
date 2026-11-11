@@ -93,12 +93,12 @@ selection row by row (streamed, both sides key-sorted).
 1. [x] Read the brief, the issue, the spec, the inputs, PR #274's layout, the ITL-926 findings
    and fake, and the pyspiral 0.16.33 API.
 2. [x] Live read-only measurements (above).
-3. [ ] Write the fake and failing tests for: the target guards, the marker, null rejection,
+3. [x] Write the fake and failing tests for: the target guards, the marker, null rejection,
    type strictness, idempotent re-run, dry run writes nothing, verify catches each defect.
-4. [ ] Implement the tool until the tests pass; ruff and basedpyright clean.
-5. [ ] Write `nullability_map.json` (with `derive-map`) and `subset.json`; run `plan` live
+4. [x] Implement the tool until the tests pass; ruff and basedpyright clean.
+5. [x] Write `nullability_map.json` (with `derive-map`) and `subset.json`; run `plan` live
    (read-only) and record the per-table numbers.
-6. [ ] README with the human nullability table and the commands.
+6. [x] README (draft) with the human nullability table and the commands.
 7. [ ] WIP commit and push; send the coordinator ONE `ask` with the mismatches, the subset
    numbers, the project/volume commands and the live-step commands.
 8. [ ] Phase 2 (after approval): the coordinator runs `create`, `probe`, `copy`, `verify`; fix
@@ -113,3 +113,14 @@ selection row by row (streamed, both sides key-sorted).
   only.
 * Filter literals must carry the column's exact Arrow type (`pa.scalar(x, pa.uint64())`); an
   `int64` literal against a `u64` column fails with `Cannot compare different DTypes`.
+
+## Phase 1 results (November 11, 2026)
+
+* `plan` live, read-only: `superpowers/plans/2026-11-11-itl-933-plan-live.txt`. 204,948 rows,
+  361 MB uncompressed, 103 s, peak RSS 715 MB.
+* Source integrity break found by `plan`: 58 of 383 `lfp_location` rows reference
+  `('AFNI_D99v2', 'White Matter')`, which `atlas_label` does not hold.
+* Tests: 34 pass; mutation checks (null check, marker check, typed literals, trial references,
+  prefix guard, abort) each fail at least one test.
+* basedpyright: 0 errors, about 1,160 warnings (mostly `reportAny` from the untyped client and
+  unannotated fixtures). To reduce in Phase 2 with Protocol types for the client surface.
