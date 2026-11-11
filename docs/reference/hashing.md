@@ -520,9 +520,9 @@ row, so it can be recomputed from a stored table by any SHA-256 implementation. 
 |---|---|
 | C or Fortran order, strides, views | yes |
 | Little- or big-endian byte order | yes |
-| Structured field order, alignment padding | yes |
+| Structured offsets, alignment padding | yes |
 | `np.matrix`, `np.recarray`, `np.memmap` against the plain array | yes |
-| Dtype (including width), shape, any element bit, structured field names | no |
+| Dtype (including width), shape, any element bit, structured field names or field order | no |
 
 The reference implementation below uses only the standard library, and the vectors are pinned:
 

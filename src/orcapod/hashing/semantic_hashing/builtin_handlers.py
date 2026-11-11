@@ -315,11 +315,12 @@ class NumpyArrayHandler:
     """Hasher for ``numpy.ndarray``: the version-1 value digest under ``ndarray_v1``.
 
     The array is put in its canonical form (C order, little-endian, structured
-    fields sorted by name and packed; see ``logical_types.numpy_type``), which is
+    fields packed in declared order; see ``logical_types.numpy_type``), which is
     exactly what ``LogicalNumpyArray`` stores. The digest is
     ``array_format.array_digest_v1(tag, shape, data)`` of that stored row, so
-    memory layout, byte order, structured field order and subclass do not change
-    the hash, while dtype, shape and every element bit do.
+    memory layout, byte order, structured padding and subclass do not change the
+    hash, while dtype (including structured field names and order), shape and
+    every element bit do.
 
     The label ``ndarray_v1`` names the definition (and binds the digest to the
     ndarray type): another array type sharing the digest body uses its own label.

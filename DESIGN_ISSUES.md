@@ -2258,7 +2258,7 @@ yields an empty result on the async path instead of an error. `Join`'s async key
 Arrays were stored as the exact `np.save` file in a `large_binary` column under extension name
 `numpy.ndarray`, and hashed as SHA-256 of that file under the bare label `sha256`. The hash
 followed the file, not the value: equal arrays in C and Fortran order, in little- and big-endian
-byte order, or with structured fields in another order hashed differently. Masked arrays lost
+byte order, or with structured fields at other offsets hashed differently. Masked arrays lost
 their mask silently. `StringDType` failed with a misleading pickle error. A pod declared
 `-> np.ndarray` could return a NumPy scalar unchecked.
 

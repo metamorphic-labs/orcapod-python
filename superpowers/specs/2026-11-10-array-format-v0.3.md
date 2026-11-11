@@ -8,7 +8,7 @@ candidate 4c, sections C4 and C5; experiments `b0`, `c1`, `c2`, `c3`, `b7`).
 
 **Decisions (developer, November 10, 2026).** The identity rules D1 to D8 are confirmed as
 written here: identity is dtype, shape and element bits; memory layout, byte order and
-structured field order are not identity; little-endian storage; hashing by bits; extended data
+structured field order are not identity (field order revised November 11, below); little-endian storage; hashing by bits; extended data
 (masked, object, `StringDType`) refused, and if supported later stored as multi-part data, not
 as one array; subclasses treated as arrays unless a more specific registered type exists; array
 and tensor distinct. Proceeding provisionally, each a one-line change: the names
@@ -29,10 +29,10 @@ definition and the hash label below are public commitments once v0.3 is tagged.
   no longer registered and is never written again.
 - The hash is defined on the value: SHA-256 over a length-prefixed encoding of exactly those three
   stored fields. Its label is **`ndarray_v1`**, replacing the bare `sha256`. Memory order, strides,
-  byte order and structured field order do not change it.
+  byte order and structured offsets and padding do not change it; structured field order does.
 - The canonical form is applied at **storage** time, so a stored row *is* its canonical value: a
   Fortran array reads back C-ordered, `>f4` reads back `<f4`, a structured dtype reads back with
-  its fields sorted by name and packed. The digest is a function of the stored row alone, so a
+  its fields in declared order and packed. The digest is a function of the stored row alone, so a
   later migration or a starfix reimplementation can recompute it without NumPy.
 - Masked arrays, object dtype, `StringDType`, `longdouble` and unit-less datetimes are refused at
   write time with a `ValueError` naming the column and the dtype. A NumPy scalar returned where
@@ -105,8 +105,8 @@ dtypes that are supported:
 The unit and multiplier are written as NumPy writes them inside the brackets (`ns`, `10ms`, `D`,
 `W`, ...); the multiplier is omitted when it is 1.
 
-**Structured dtypes.** The tag is a JSON array with one entry per field, sorted by field name
-(Unicode code point order): `[name, tag]`, or `[name, tag, [d0, d1, ...]]` for a subarray field.
+**Structured dtypes.** The tag is a JSON array with one entry per field, in the dtype's declared
+field order (`dtype.names`): `[name, tag]`, or `[name, tag, [d0, d1, ...]]` for a subarray field.
 A nested structured field has a nested array as its tag. The text is the output of
 `json.dumps(value, separators=(",", ":"), ensure_ascii=True)`: no whitespace, non-ASCII and
 control characters escaped as lowercase `\uXXXX` (surrogate pairs above U+FFFF), `"` and `\`
@@ -115,10 +115,10 @@ those choices, so another implementation can reproduce it. A tag beginning with 
 structured; no scalar tag begins with `[`.
 
 Example: `np.dtype([("b", ">f8"), ("a", "<i4", (2,))])` has the tag
-`[["a","int32",[2]],["b","float64"]]` and 8 + 8 = 16 bytes per element, `a` first.
+`[["b","float64"],["a","int32",[2]]]` and 8 + 8 = 16 bytes per element, `b` first.
 
 The tag relates to NumPy's `descr` as follows: it is `descr` with byte order removed, kind and
-width spelled out, fields sorted by name and offsets/padding dropped (fields are packed).
+width spelled out, fields in declared order and offsets/padding dropped (fields are packed).
 
 **Refused dtypes** (`ValueError` naming the column and the dtype, at write time):
 
@@ -128,14 +128,14 @@ width spelled out, fields sorted by name and offsets/padding dropped (fields are
 | NumPy 2 `StringDType` (`T`) | variable width, object-like storage (ITL-883 defect 3) |
 | `longdouble`, `clongdouble` (`g`, `G`) | width and format differ by platform (float64 on arm64 macOS, 80-bit on x86-64 Linux), so neither bytes nor hash would be portable. **PENDING** (alternative: accept and tag `longdouble` with platform-dependent hashes) |
 | `datetime64`/`timedelta64` without a unit (`M8`, `m8`) | no defined meaning for the int64 value. **PENDING** (rare; alternative: tag `datetime64[generic]`) |
-| structured dtype with field titles | titles are aliases that cannot be represented once fields are sorted. **PENDING** (rare) |
+| structured dtype with field titles | titles are aliases the tag does not represent. **PENDING** (rare) |
 
 ### A3. Canonicalisation on write (PENDING with D below)
 
 `python_to_storage(arr)`:
 
 1. Refuse masked arrays (`np.ma.MaskedArray`) and the dtypes above.
-2. Build the canonical NumPy dtype: little-endian, packed, structured fields sorted by name,
+2. Build the canonical NumPy dtype: little-endian, packed, structured fields in declared order,
    recursively.
 3. Copy field by field into a C-contiguous array of that dtype. Field-by-field assignment is
    required: NumPy assigns between structured dtypes *by position*, so a plain `astype` would
@@ -214,11 +214,11 @@ C-contiguous canonical array's buffer directly (c1: about 0.1 s for 128 MiB).
 ### C3. Invariances (CONFIRMED for layout by c1; PENDING for byte and field order, see D)
 
 Same hash: C vs Fortran order, any strides or views, a transposed-twice view, big- vs
-little-endian copies, structured field order, aligned vs packed structured dtypes, subclass vs
-base class.
+little-endian copies, aligned, padded or offset-reordered structured dtypes with the same
+declared fields, subclass vs base class.
 Different hash: dtype (including width: `int32` vs `int64`), shape (including `(0,3)` vs `(3,0)`
 and `()` vs `(1,)`), any element bit (including `-0.0` vs `0.0` and different NaN payloads),
-structured field names.
+structured field names, structured field order (at every nesting depth).
 
 ---
 
@@ -228,7 +228,7 @@ structured field names.
 |---|---|---|---|
 | D1 | What identity is | The value: dtype tag, shape, C-order little-endian packed buffer. Not the `.npy` file. | Layout-free hash; the digest is reproducible outside NumPy. |
 | D2 | Byte order | Not identity. Canonicalised to little-endian on write; `>f4` reads back as `<f4`. | Round trip exact in value, not in `dtype.byteorder`. |
-| D3 | Structured field order | Not identity (ITL-465). Fields sorted by name on write; field names and types are identity. | `(b, a)` reads back as `(a, b)`. Padding/alignment is dropped (packed). |
+| D3 | Structured field order | **Identity** (revised by the developer, November 11, 2026; was "not identity", ITL-465). Field names, types and declared order are identity, at every depth; offsets, padding, alignment and itemsize are layout. | `(b, a)` reads back as `(b, a)`, packed; `(a, b)` and `(b, a)` hash differently. |
 | D4 | `-0.0` vs `0.0`, NaN payloads | Hashed by bits, so different. | Matches the stored bytes; no float normalisation. |
 | D5 | Masked arrays | Refused (ITL-883 defect 1). | No silent mask loss. Users store `data` and `mask` as two arrays. |
 | D6 | object dtype, `StringDType` | Refused, naming column and dtype. | ITL-883 defect 3 becomes a clear error. |

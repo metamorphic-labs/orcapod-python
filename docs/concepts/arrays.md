@@ -42,9 +42,11 @@ element bits.
   of equal values are the same array. An array always reads back in C order.
 - **Byte order does not count.** Arrays are stored little-endian; a big-endian `>f4` array
   reads back as `<f4` with equal values.
-- **Structured field order does not count**, but field names and field types do. Fields are
-  stored sorted by name and packed, so `[("b", "f8"), ("a", "i4")]` reads back as
-  `[("a", "i4"), ("b", "f8")]`.
+- **Structured field order counts**, as do field names and field types, at every nesting
+  depth: `[("a", "i4"), ("b", "f8")]` and `[("b", "f8"), ("a", "i4")]` are different arrays,
+  as they are to NumPy's own dtype equality. Offsets, padding and alignment do not count:
+  fields are stored packed in declared order, so an aligned `[("b", "f8"), ("a", "i2")]`
+  reads back as the packed `[("b", "<f8"), ("a", "<i2")]`.
 - **Dtype counts**, including width: `int32` and `int64` arrays with equal values differ.
 - **Shape counts**, including empty shapes: `(0, 3)` and `(3, 0)` differ, and so do a 0-d
   array and a one-element 1-d array.
@@ -65,6 +67,10 @@ print(hasher.hash_object(a) == hasher.hash_object(np.asfortranarray(a)))
 print(hasher.hash_object(a) == hasher.hash_object(a.astype(">f4")))
 # True
 print(hasher.hash_object(a) == hasher.hash_object(a.astype(np.float64)))
+# False
+ab = np.zeros(1, dtype=[("a", "i4"), ("b", "f8")])
+ba = np.zeros(1, dtype=[("b", "f8"), ("a", "i4")])
+print(hasher.hash_object(ab) == hasher.hash_object(ba))
 # False
 ```
 
@@ -126,7 +132,7 @@ print(table.column("signal").chunk(0).storage[0].as_py()["dtype"])
 
 The tag names the element type without a byte order. For a structured dtype, the tag is a JSON
 list with one `[name, tag]` entry per field, or `[name, tag, [dims]]` for a subarray field,
-sorted by name. It is written with no whitespace and with non-ASCII characters escaped
+in declared field order. It is written with no whitespace and with non-ASCII characters escaped
 (`json.dumps(..., separators=(",", ":"), ensure_ascii=True)`).
 
 | NumPy | Tag | Element bytes |

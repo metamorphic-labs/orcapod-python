@@ -220,3 +220,15 @@ main is b197544e (v0.2.0 tagged at 70f53f64; #291 SemiJoin via Polars, ITL-847, 
   columns, sync and async; confirm no golden or existing hash moves.
 - C: structured dtype tag entry with other than 2 or 3 parts raises ValueError naming the tag;
   test.
+
+### Field order is identity (developer, November 11, 2026; relayed by the coordinator)
+
+Reverses identity rule D3: a structured dtype's field order is identity at every depth, as
+NumPy's dtype equality has it. Offsets, padding, alignment, itemsize and byte order stay layout.
+Change: `_tag_value` walks `dtype.names` (declared order) instead of `sorted(dtype.fields)`;
+read-back follows the tag. Tests: declared-order storage and read-back (nested too), field
+order and nested field order change the hash and the stored value, padded and offset-swapped
+layouts keep it, MergeJoin over arrays differing only in field order (both argument orders),
+unsorted and nested structured arrays added to `ARRAYS` (round trip on in-memory and Delta,
+sync and async, every operator). Golden: no structured entries, nothing moves. Docs, spec D3,
+CHANGELOG, DESIGN_ISSUES, PR body and ITL-888 wording updated.

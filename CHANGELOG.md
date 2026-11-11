@@ -17,10 +17,11 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   data: large_binary>`: an Orcapod dtype tag, the shape, and the elements in C order,
   little-endian, packed. It replaces the `.npy` file under `numpy.ndarray`; that name is no
   longer registered or written.
-- **Identity.** An array is its dtype, shape and element bits. Memory layout, byte order,
-  structured field order and padding, and subclass are not part of it. Arrays read back
-  canonical: C order, little-endian (`>f4` reads back `<f4`), structured fields sorted by name
-  and packed, as plain `np.ndarray`.
+- **Identity.** An array is its dtype, shape and element bits. A structured dtype's field
+  names, types and order are part of the dtype, at every nesting depth. Memory layout, byte
+  order, structured offsets and padding, and subclass are not part of it. Arrays read back
+  canonical: C order, little-endian (`>f4` reads back `<f4`), structured fields packed in
+  their declared order, as plain `np.ndarray`.
 - **Hash.** `NumpyArrayHandler` returns `ContentHash("ndarray_v1", digest)`. The digest is
   SHA-256 over a length-prefixed encoding of the stored row (`docs/reference/hashing.md`,
   section 8), and the label replaces the bare `sha256`. Because the logical type name is now
