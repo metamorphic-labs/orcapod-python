@@ -219,13 +219,24 @@ class OperatorNodeBase(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        """Return output schema, using stored value in read-only mode."""
+        """Return output schema, using stored value in read-only mode.
+
+        Raises:
+            ValueError: If the node was loaded and a column's saved type cannot be
+                restored to a Python type (a logical type such as ``Path``).
+        """
         if self._operator is None:
             from orcapod.pipeline.serialization import deserialize_output_schema
 
-            return deserialize_output_schema(
-                self._stored_schema, self.data_context.type_converter
-            )
+            try:
+                return deserialize_output_schema(
+                    self._stored_schema, self.data_context.type_converter
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"Cannot restore the output schema of loaded node {self.label!r}: "
+                    f"{exc}"
+                ) from exc
         return self._operator.output_schema(
             *self._input_streams,
             columns=columns,

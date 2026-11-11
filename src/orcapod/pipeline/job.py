@@ -994,7 +994,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
                 node_job_content_hashes[node.label] = node.content_hash().to_string()
-                node_has_stored_records[node.label] = node._pipeline_table_exists()
+                # A loaded node keeps the expectation it was saved with: a store
+                # attached since then that lacks the table does not mean the
+                # original run stored nothing.
+                node_has_stored_records[node.label] = (
+                    node._expects_stored_records or node._pipeline_table_exists()
+                )
 
         output: dict[str, Any] = {
             "orcapod_pipeline_job_version": PIPELINE_JOB_FORMAT_VERSION,

@@ -19,7 +19,9 @@
   node saved with records raises, naming the store, when the attached store lacks them,
   instead of returning no rows. Loading a job in which an operator consumes a function
   node no longer crashes with `InputValidationError`, and a loaded node's
-  `output_schema()` reports Python types. A `PipelineJob` does not store operator outputs, so
+  `output_schema()` reports Python types; a saved type it cannot restore (a logical type such
+  as `Path`) raises an error naming the column. Saved `timestamp`, `duration`, `time` and
+  `decimal` types are now read back. A `PipelineJob` does not store operator outputs, so
   reading a loaded operator node raises instead of returning an empty table. In-memory
   sources (`DictSource`, `ListSource`, `ArrowTableSource`, `DataFrameSource`) are logged at
   INFO with the remedy instead of a "skipping" warning. A loaded job stays read-only and

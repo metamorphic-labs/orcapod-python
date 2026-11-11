@@ -2367,6 +2367,17 @@ Saving a job and loading it with `PipelineJob.load` failed in four ways:
   before.
 - A loaded node's `output_schema()` returns Python types (`deserialize_output_schema`), and its
   data context comes from the descriptor.
+- `parse_arrow_type_string` reads the parameterized types it used to reject: `timestamp[us, tz=UTC]`,
+  `duration`, `time32`, `time64`, `date64` and `decimal128`/`decimal256`. Commas inside `[...]` and
+  `(...)` no longer split struct fields.
+- A saved type that still cannot be restored makes `output_schema()` raise. That covers a logical
+  type such as `Path`, saved as `extension<orcapod.path<...>>`. The error names the node, the
+  column and the saved type string. The stored rows remain readable with their stored types.
+- `get_all_records()` on a loaded node raises the same store errors as `as_table()`.
+- Re-saving a loaded job keeps each node's saved expectation of stored records.
+- `as_table()` keeps one row per entry, as `iter_data()` does.
+- A loaded node whose results lived in an ephemeral store yields `EmptyData` placeholders from
+  `iter_data()`. Its `as_table()` raises an error saying the ephemeral store is not saved.
 - A loaded operator node with nothing stored raises and names its input nodes.
 - Loading logs in-memory sources at INFO, and any other source or store failure at WARNING
   with the exception. Each message states the consequence and the remedy.
@@ -2375,3 +2386,10 @@ Saving a job and loading it with `PipelineJob.load` failed in four ways:
 
 Regressions: `tests/test_pipeline/loaded_job/`, which saves in a separate process and loads
 in the test process, for each source kind.
+
+Open, for a follow-up:
+- The saved type strings drop nullability (`float | None` is saved as `double`), so a loaded
+  node reports the non-null type.
+- Logical (extension) types are saved as strings that cannot be restored.
+
+Both need a richer saved type format.

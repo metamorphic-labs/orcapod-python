@@ -39,25 +39,30 @@ FUNCTION_NODES = ("dbl", "inc", "half", "sq")
 
 @function_pod(output_keys="dbl")
 def double(x: int) -> int:
+    """Double *x*."""
     return 2 * x
 
 
 @function_pod(output_keys="cc")
 def increment(c: int | None) -> int:
+    """Add one to *c*, reading a missing value as zero."""
     return (c or 0) + 1
 
 
 @function_pod(output_keys="dd")
 def halve(d: float | None) -> float:
+    """Halve *d*, reading a missing value as zero."""
     return (d or 0.0) / 2
 
 
 @function_pod(output_keys="zz")
 def square(z: int) -> int:
+    """Square *z*."""
     return z * z
 
 
 def main(root: pathlib.Path) -> None:
+    """Build, run and save the job, writing everything into *root*."""
     root.mkdir(parents=True, exist_ok=True)
     _ = (root / "c.csv").write_text("id,c\n0,7\n1,8\n")
     write_deltalake(

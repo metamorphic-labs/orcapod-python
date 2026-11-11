@@ -662,11 +662,27 @@ def deserialize_output_schema(
 
     Returns:
         The tag schema and the data schema, with Python types.
+
+    Raises:
+        ValueError: If a column's saved type cannot be restored to a Python type,
+            such as a logical (extension) type like ``Path``. The message names
+            the column and its saved type string.
     """
-    return (
-        Schema(deserialize_schema(output_schema.get("tag", {}), type_converter)),
-        Schema(deserialize_schema(output_schema.get("data", {}), type_converter)),
-    )
+
+    def restore(columns: dict[str, str]) -> Schema:
+        restored: dict[str, Any] = {}
+        for name, type_str in columns.items():
+            try:
+                arrow_type = parse_arrow_type_string(type_str)
+                restored[name] = type_converter.arrow_type_to_python_type(arrow_type)
+            except Exception as exc:
+                raise ValueError(
+                    f"Column {name!r} has the saved type {type_str!r}, which cannot "
+                    "be restored to a Python type."
+                ) from exc
+        return Schema(restored)
+
+    return restore(output_schema.get("tag", {})), restore(output_schema.get("data", {}))
 
 
 def parse_arrow_type_string(type_str: str) -> Any:
@@ -696,6 +712,9 @@ def parse_arrow_type_string(type_str: str) -> Any:
         factory = _get_arrow_primitive_types().get(type_str)
         if factory is not None:
             return factory()
+        parameterized = _parse_parameterized_type(type_str)
+        if parameterized is not None:
+            return parameterized
         raise ValueError(f"Unknown Arrow type: {type_str!r}")
 
     # Nested types — parse the outer type and recurse
@@ -736,6 +755,44 @@ def parse_arrow_type_string(type_str: str) -> Any:
     raise ValueError(f"Unknown nested Arrow type: {type_str!r}")
 
 
+def _parse_parameterized_type(type_str: str) -> Any | None:
+    """Parse a parameterized non-nested Arrow type string, or return ``None``.
+
+    Handles the canonical ``str()`` forms of ``timestamp[us]``,
+    ``timestamp[us, tz=UTC]``, ``duration[us]``, ``time32[ms]``,
+    ``time64[us]``, ``date64[ms]``, ``decimal128(10, 2)`` and
+    ``decimal256(40, 2)``.
+
+    Args:
+        type_str: Arrow type string, stripped of surrounding whitespace.
+
+    Returns:
+        The corresponding ``pa.DataType``, or ``None`` if *type_str* is not one
+        of these forms.
+    """
+    import re
+    from typing import Literal, cast
+
+    import pyarrow as pa
+
+    # Each regex admits only the units Arrow accepts, so the casts below hold.
+    if match := re.fullmatch(r"timestamp\[(s|ms|us|ns)(?:, tz=(.+))?\]", type_str):
+        unit = cast(Literal["s", "ms", "us", "ns"], match.group(1))
+        return pa.timestamp(unit, tz=match.group(2))
+    if match := re.fullmatch(r"duration\[(s|ms|us|ns)\]", type_str):
+        return pa.duration(cast(Literal["s", "ms", "us", "ns"], match.group(1)))
+    if match := re.fullmatch(r"time32\[(s|ms)\]", type_str):
+        return pa.time32(cast(Literal["s", "ms"], match.group(1)))
+    if match := re.fullmatch(r"time64\[(us|ns)\]", type_str):
+        return pa.time64(cast(Literal["us", "ns"], match.group(1)))
+    if type_str == "date64[ms]":
+        return pa.date64()
+    if match := re.fullmatch(r"decimal(128|256)\((\d+), (-?\d+)\)", type_str):
+        factory = pa.decimal128 if match.group(1) == "128" else pa.decimal256
+        return factory(int(match.group(2)), int(match.group(3)))
+    return None
+
+
 def _strip_field_name(s: str) -> str:
     """Strip the ``"item: "`` or ``"field_name: "`` prefix from a child type string."""
     if ":" in s:
@@ -748,7 +805,10 @@ def _strip_field_name(s: str) -> str:
 
 
 def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
-    """Split *s* on *sep*, but only at the top level (not inside ``<>``).
+    """Split *s* on *sep*, but only at the top level (not inside ``<>``, ``[]`` or ``()``).
+
+    Brackets and parentheses count because parameterized types carry commas,
+    e.g. ``timestamp[us, tz=UTC]`` and ``decimal128(10, 2)``.
 
     Args:
         s: String to split.
@@ -762,9 +822,9 @@ def _split_top_level(s: str, sep: str, max_splits: int = -1) -> list[str]:
     depth = 0
     current: list[str] = []
     for ch in s:
-        if ch == "<":
+        if ch in "<[(":
             depth += 1
-        elif ch == ">":
+        elif ch in ">])":
             depth -= 1
         if ch == sep and depth == 0 and (max_splits == -1 or len(parts) < max_splits):
             parts.append("".join(current))

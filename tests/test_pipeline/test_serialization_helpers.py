@@ -246,6 +246,44 @@ class TestParseArrowTypeStringPrimitives:
         assert parse_arrow_type_string("  int64  ") == pa.int64()
 
 
+class TestParseArrowTypeStringParameterized:
+    """parse_arrow_type_string for parameterized types written as ``str(pa.DataType)``."""
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.timestamp("s"),
+            pa.timestamp("us"),
+            pa.timestamp("us", tz="UTC"),
+            pa.timestamp("ns", tz="Europe/Berlin"),
+            pa.duration("ms"),
+            pa.time32("s"),
+            pa.time64("us"),
+            pa.date32(),
+            pa.date64(),
+            pa.decimal128(10, 2),
+            pa.decimal256(40, -3),
+        ],
+    )
+    def test_round_trips_its_canonical_string(self, arrow_type):
+        """Each type parses back from its own ``str()``."""
+        assert parse_arrow_type_string(str(arrow_type)) == arrow_type
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [
+            pa.struct(
+                [("a", pa.timestamp("us", tz="UTC")), ("b", pa.decimal128(5, 1))]
+            ),
+            pa.large_list(pa.timestamp("us", tz="UTC")),
+            pa.map_(pa.large_string(), pa.decimal256(40, 2)),
+        ],
+    )
+    def test_commas_inside_parameters_do_not_split_fields(self, arrow_type):
+        """A comma inside ``[...]`` or ``(...)`` is not a field separator."""
+        assert parse_arrow_type_string(str(arrow_type)) == arrow_type
+
+
 class TestParseArrowTypeStringNested:
     """parse_arrow_type_string for nested (parameterized) types."""
 

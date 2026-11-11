@@ -306,13 +306,24 @@ class FunctionNodeBase(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        """Return output schema, using stored value in read-only mode."""
+        """Return output schema, using stored value in read-only mode.
+
+        Raises:
+            ValueError: If the node was loaded and a column's saved type cannot be
+                restored to a Python type (a logical type such as ``Path``).
+        """
         if self._function_pod is None:
             from orcapod.pipeline.serialization import deserialize_output_schema
 
-            return deserialize_output_schema(
-                self._stored_schema, self.data_context.type_converter
-            )
+            try:
+                return deserialize_output_schema(
+                    self._stored_schema, self.data_context.type_converter
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"Cannot restore the output schema of loaded node {self.label!r}: "
+                    f"{exc}"
+                ) from exc
         tag_schema = self._input_stream.output_schema(
             columns=columns, all_info=all_info
         )[0]
@@ -1129,6 +1140,12 @@ class FunctionJobNode(FunctionNodeBase):
         node._pipeline_database = None
         node._cached_function_pod = None
 
+        # FunctionJobNode — ephemeral result store (same defaults as __init__).
+        # A loaded node has no function pod, so it never gets an ephemeral pod;
+        # _fetch_joined_records reads it to resolve ephemeral pipeline records.
+        node.ephemeral_result_store = None
+        node._ephemeral_cached_pod = None
+
         # Wire databases if provided
         pipeline_db = (databases or {}).get("pipeline")
         result_db = (databases or {}).get("result")
@@ -1206,6 +1223,19 @@ class FunctionJobNode(FunctionNodeBase):
         if self._pipeline_database is None:
             return False
         return self._pipeline_database.table_exists(self._versioned_pipeline_path)
+
+    def _require_readable_stub(self) -> None:
+        """Raise unless this loaded node can read its stored results.
+
+        Raises:
+            RuntimeError: If no store is attached, or the saved run stored records
+                that the attached store does not have.
+        """
+        from orcapod.pipeline.serialization import LoadStatus
+
+        if self.load_status == LoadStatus.UNAVAILABLE:
+            raise self._no_store_error()
+        self._require_expected_records()
 
     def _require_expected_records(self) -> None:
         """Raise if the saved run stored this node's records but the store has none.
@@ -1909,7 +1939,14 @@ class FunctionJobNode(FunctionNodeBase):
             A ``pa.Table`` of joined results, or ``None`` if no database is
             attached, either DB fetch returns ``None``, or the join produces
             no rows.
+
+        Raises:
+            RuntimeError: If the node was loaded by ``PipelineJob.load`` and no
+                store is attached, or its saved run stored records that the
+                attached store does not have.
         """
+        if self._function_pod is None:
+            self._require_readable_stub()
         fetched = self._fetch_joined_records()
         if fetched is None:
             return None
@@ -2210,7 +2247,8 @@ class FunctionJobNode(FunctionNodeBase):
         """Return the persistent stored rows of *fetched* as a stream.
 
         The stream is built over the stored Arrow records with the internal
-        columns dropped, so every column keeps the type it was stored with.
+        columns dropped, so every column keeps the type it was stored with. A
+        base entry with several records contributes only its last one.
 
         Returns:
             The base entry ID of each row, in stream order, and the stream; or
@@ -2219,9 +2257,18 @@ class FunctionJobNode(FunctionNodeBase):
         joined = fetched.table
         if joined.num_rows == 0:
             return None
-        base_entry_ids = cast(
+        all_base_entry_ids = cast(
             list[bytes], joined.column(_PIPELINE_BASE_ENTRY_ID_COL).to_pylist()
         )
+        # One row per base entry ID, as the in-memory cache keeps them: when a
+        # base entry has several records (a recomputation), the last one wins,
+        # in the position where the base entry first appears.
+        last_row_of: dict[bytes, int] = {}
+        for row, base_entry_id in enumerate(all_base_entry_ids):
+            last_row_of[base_entry_id] = row
+        base_entry_ids = list(last_row_of)
+        if len(base_entry_ids) < joined.num_rows:
+            joined = joined.take(pa.array(list(last_row_of.values()), type=pa.int64()))
         drop_cols = [
             c
             for c in joined.column_names
@@ -2347,16 +2394,26 @@ class FunctionJobNode(FunctionNodeBase):
         table has zero rows and the node's columns.
 
         Raises:
-            RuntimeError: If the node was loaded and no store is attached.
+            RuntimeError: If the node was loaded and no store is attached, its
+                saved run stored records the attached store does not have, or
+                some of its results were kept in an ephemeral store, which is
+                not saved with the job.
         """
         if self._function_pod is None:
-            from orcapod.pipeline.serialization import LoadStatus
-
-            if self.load_status == LoadStatus.UNAVAILABLE:
-                raise self._no_store_error()
-            self._require_expected_records()
+            self._require_readable_stub()
             fetched = self._fetch_joined_records()
-            stored = self._stored_rows_stream(fetched) if fetched is not None else None
+            if fetched is None:
+                return super().as_table(columns=columns, all_info=all_info)
+            stored = self._stored_rows_stream(fetched)
+            stored_ids = set(stored[0]) if stored is not None else set()
+            ephemeral = [k for k in fetched.empty_data_tokens if k not in stored_ids]
+            if ephemeral:
+                raise RuntimeError(
+                    f"FunctionJobNode {self.label!r}: the saved run kept "
+                    f"{len(ephemeral)} of its results in an ephemeral store, which "
+                    "is not saved with the job, so they cannot be read into a "
+                    "table. iter_data() yields them as EmptyData placeholders."
+                )
             if stored is not None:
                 return stored[1].as_table(columns=columns, all_info=all_info)
         return super().as_table(columns=columns, all_info=all_info)
