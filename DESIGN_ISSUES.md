@@ -2333,10 +2333,15 @@ tensors. Users converted at every pod boundary by hand.
 
 **Fix:** `LogicalTorchTensor` (`orcapod.torch_tensor`) stores a tensor in the shared array
 struct and `TorchTensorHandler` hashes it under `torch_tensor_v1` (the array digest body). Both
-register on first use through new deferred entries in the data context, so PyTorch stays an
-optional peer dependency that `import orcapod` never imports. The name, the label, the dtype
-set (NumPy-shared plus `bfloat16`), accepting GPU and grad tensors, and the peer-dependency
-packaging are provisional picks awaiting the developer's confirmation.
+register on first use through new deferred entries in the data context, so `import orcapod`
+never imports PyTorch, and support depends only on `torch` being importable. Developer
+decisions (November 11, 2026): name `orcapod.torch_tensor` and label `torch_tensor_v1`; dtypes
+are the NumPy-shared ones plus `bfloat16`, `complex32` and the float8 family as raw bits, with
+a dtype the installed torch lacks failing when read, never at import; GPU and grad tensors are
+stored from a detached CPU copy with `ValueConversionWarning`, issued once per function output
+or source column and conversion; packaging is the convenience extra `orcapod[torch]`. The dev
+dependency group pulls the extra, with CPU-only wheels on Linux, so the required CI always runs
+the torch tests. A guard test fails if torch is missing under CI.
 
 Known limits: within one in-memory run a downstream pod receives the very tensor the upstream
 pod returned (device, gradients and layout included); only stored or read-back values are

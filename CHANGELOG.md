@@ -51,13 +51,18 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
 
 - **`torch.Tensor` is a value type**: a source column, a function pod parameter or return value,
   stored, cached and re-run like an ndarray, sync and async, in memory and in Delta stores.
-  PyTorch is an optional peer dependency (install it yourself; tested with PyTorch 2.15). The
-  PyTorch build must support the installed NumPy, because tensors convert through NumPy.
+  PyTorch is optional: support works whenever `torch` can be imported, however it was
+  installed; the new extra `orcapod[torch]` (`torch>=2.3`) installs it from PyPI. Tested with
+  PyTorch 2.15. The PyTorch build must support the installed NumPy, because tensors convert
+  through NumPy.
   `import orcapod` never imports PyTorch: the type is set up on first use, and reading a
   stored tensor column without PyTorch raises `orcapod.errors.MissingOptionalDependencyError`.
 - **Storage.** Extension type `orcapod.torch_tensor` (metadata `{"version":1}`) over the same
-  struct as `orcapod.ndarray`, with the same dtype tags and bytes for shared dtypes, plus
-  `bfloat16` (its 16-bit patterns, tag `bfloat16`).
+  struct as `orcapod.ndarray`, with the same dtype tags and bytes for shared dtypes. The
+  dtypes NumPy lacks are stored as raw bits under the PyTorch dtype name: `bfloat16`,
+  `complex32` (real then imaginary `float16`) and `float8_e4m3fn`, `float8_e5m2`,
+  `float8_e4m3fnuz`, `float8_e5m2fnuz`, `float8_e8m0fnu`. Reading a stored dtype that the
+  installed PyTorch lacks raises `ValueError` naming the dtype and the PyTorch version.
 - **Identity and hash.** A tensor is its dtype, shape and element bits; device, gradient state,
   memory layout, lazy conjugate/negative views and subclass are not stored. `TorchTensorHandler`
   returns `ContentHash("torch_tensor_v1", digest)` with the array digest of the stored row, so
@@ -65,9 +70,13 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   require gradients are accepted and stored from a detached CPU copy; the caller's tensor is
   never modified. Tensors read back on the CPU, contiguous, without gradients, with the exact
   stored dtype and shape.
+- **`orcapod.errors.ValueConversionWarning`** (a `UserWarning`) reports such a conversion,
+  naming the function and output (or the source and column), what was converted and how to
+  avoid it (`value.detach().cpu()`). A function warns once per output and conversion, however
+  many rows it processes; `DictSource` and `ListSource` warn once per column with the count.
+  Under `-W error::orcapod.errors.ValueConversionWarning` every conversion raises.
 - **Refused at write time**, naming the column and reason: sparse, mkldnn, quantized, nested
-  and meta tensors, named tensors, and other dtypes (`complex32`, the `float8` types,
-  sub-byte types). A pod declared `-> torch.Tensor` that returns an ndarray or a number raises
+  and meta tensors, named tensors, and other dtypes (sub-byte and packed types, `bcomplex32`). A pod declared `-> torch.Tensor` that returns an ndarray or a number raises
   `TypeError` naming the output.
 - **Registries** accept `deferred_logical_types` (`LogicalTypeRegistry`) and `deferred_handlers`
   (`PythonTypeHandlerRegistry`): a value type named by its qualified class name and extension

@@ -152,18 +152,21 @@ different hashes.
 
 ## PyTorch tensors
 
-A `torch.Tensor` can be a data value too. PyTorch is an optional dependency: install it
-yourself, with the build that suits your hardware (see pytorch.org), next to Orcapod. Orcapod
-is tested with PyTorch 2.15. Orcapod converts tensors through NumPy (`Tensor.numpy()` and
-`torch.from_numpy`), so your PyTorch build must support the NumPy version you have installed:
-some older builds cannot use NumPy 2 and fail with "Numpy is not available". If you see that
-error, upgrade PyTorch or install a NumPy version your PyTorch build supports. Importing
-Orcapod never imports PyTorch. The tensor type
-is set up the first time Orcapod meets a tensor or a `torch.Tensor` annotation, or reads a
-stored tensor column. Reading a stored tensor column without PyTorch installed raises
+A `torch.Tensor` can be a data value too. PyTorch is an optional dependency. Tensor support
+works whenever PyTorch can be imported, however it was installed: `pip install "orcapod[torch]"`
+installs it from PyPI, or install the build that suits your hardware yourself (see
+pytorch.org; on Linux the PyPI build includes CUDA, and pytorch.org also offers smaller
+CPU-only builds). Orcapod needs PyTorch 2.3 or later and is tested with PyTorch 2.15. Orcapod
+converts tensors through NumPy (`Tensor.numpy()` and `torch.from_numpy`), so your PyTorch build
+must support the NumPy version you have installed: some older builds cannot use NumPy 2 and
+fail with "Numpy is not available". If you see that error, upgrade PyTorch or install a NumPy
+version your PyTorch build supports.
+
+Importing Orcapod never imports PyTorch. The tensor type is set up the first time Orcapod
+meets a tensor or a `torch.Tensor` annotation, or reads a stored tensor column. Reading a
+stored tensor column without PyTorch installed raises
 `orcapod.errors.MissingOptionalDependencyError`, which names the missing package.
 
-<!-- docs-test: skip -->
 ```python
 import torch
 
@@ -202,8 +205,32 @@ do not count, and are not stored:
 | Subclass, such as `torch.nn.Parameter` | stored as a plain tensor |
 
 Orcapod never modifies your tensor: it reads it through a detached copy or view. A pod may
-return a GPU tensor or one that still tracks gradients; its value is stored on the CPU, with
-no warning.
+return a GPU tensor or one that still tracks gradients, and a source may hold one. Its value is
+stored from a detached CPU copy, and Orcapod issues `orcapod.errors.ValueConversionWarning`,
+which names the function and output (or the source and column), says what was converted, and
+how to avoid it: return or pass `value.detach().cpu()`. A function warns once per output and
+conversion, however many rows it processes; a source warns once per column, with the number
+of values converted. Plain CPU tensors without gradients never warn. To treat the conversion
+as an error, run with `-W error::orcapod.errors.ValueConversionWarning`; every conversion then
+raises, and in a pipeline that row fails.
+
+```python
+import warnings
+
+from orcapod.errors import ValueConversionWarning
+
+@function_pod(output_keys="weights")
+def fit(signal: torch.Tensor) -> torch.Tensor:
+    return (signal * 0.5).requires_grad_(True)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    list(fit.pod(tensors).iter_data())
+print(caught[0].category is ValueConversionWarning)
+# True
+print(caught[0].message)
+# Function 'fit' output 'weights' returned a torch tensor that tracks gradients (requires_grad=True); Orcapod stored a detached CPU copy, and the returned tensor is unchanged. Return value.detach().cpu() to avoid this warning.
+```
 
 **What comes back.** A tensor read from a store or a source is a CPU, contiguous, writeable,
 plain `torch.Tensor` without gradients, with exactly the stored dtype and shape (a `bfloat16`
@@ -213,9 +240,20 @@ holds for NumPy arrays (a Fortran-ordered array passes through in Fortran order)
 that do not depend on device, gradient state or layout of their inputs.
 
 **Dtypes.** `bool`, `int8` to `int64`, `uint8` to `uint64`, `float16`, `float32`, `float64`,
-`complex64` and `complex128` use the NumPy tags and bytes from the table above. `bfloat16` is
-stored as its 16-bit pattern under the tag `bfloat16`. Everything else is refused when it is
-written, with an `UnsupportedValueError` that names the column and the reason:
+`complex64` and `complex128` use the NumPy tags and bytes from the table above. The dtypes
+NumPy does not have are stored as their raw bits, each element little-endian, under the
+PyTorch dtype name as the tag:
+
+| Dtype | Element bytes |
+|---|---|
+| `bfloat16` | 2: the bfloat16 bit pattern |
+| `complex32` | 4: the real part, then the imaginary part, each a `float16` |
+| `float8_e4m3fn`, `float8_e5m2`, `float8_e4m3fnuz`, `float8_e5m2fnuz`, `float8_e8m0fnu` | 1: the float8 bit pattern |
+
+A stored dtype that your PyTorch does not have (`float8_e8m0fnu` needs PyTorch 2.7) raises a
+`ValueError` naming the dtype and your PyTorch version when it is read; everything else still
+works. Everything else is refused when it is written, with an `UnsupportedValueError` that
+names the column and the reason:
 
 | Tensor | What to do |
 |---|---|
@@ -224,13 +262,12 @@ written, with an `UnsupportedValueError` that names the column and the reason:
 | nested (jagged) | store the parts as separate tensors |
 | on the `meta` device | it holds no data |
 | named dimensions (PyTorch before 2.15) | `.rename(None)` |
-| `complex32`, the `float8` types, sub-byte types | convert to a supported dtype |
+| sub-byte and packed dtypes (`int1` to `int7`, `uint1` to `uint7`, `float4_e2m1fn_x2`, `bits*`), `bcomplex32` | convert to a supported dtype |
 
 A function pod that declares `-> torch.Tensor` must return a tensor. An `np.ndarray` or a
 Python number raises `TypeError` that names the output. Return `torch.as_tensor(...)`
 instead.
 
-<!-- docs-test: skip -->
 ```python
 from orcapod.contexts import get_default_context
 

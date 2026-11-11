@@ -521,7 +521,10 @@ digest=D)`, and a stored tensor cell becomes the token
 `b"orcapod:torch_tensor::torch_tensor_v1:" + D`. A tensor and an ndarray with equal dtype,
 shape and values therefore share `D` but not their hashes. Device, gradient state, memory
 layout, lazy conjugate and negative views, and subclass do not change a tensor's `D`. The
-`bfloat16` tag stores the 16-bit patterns of the values.
+dtypes NumPy does not have store their raw bits under the PyTorch dtype name: `bfloat16` the
+16-bit patterns, `complex32` the real then the imaginary `float16` of each element, and the
+`float8` tags (`float8_e4m3fn`, `float8_e5m2`, `float8_e4m3fnuz`, `float8_e5m2fnuz`,
+`float8_e8m0fnu`) one byte per element.
 
 | Variation | Same `D`? |
 |---|---|
