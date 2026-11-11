@@ -20,6 +20,17 @@ class SchemaInconsistencyError(InputValidationError):
     """
 
 
+class TypeIdentityError(ValueError):
+    """Raised when stored values and a registered user class disagree on identity.
+
+    A stored dataclass or pydantic column records its class's identity (name, kind and
+    field types). This error is raised when the class found for that name has a
+    different identity or a different Arrow storage type, or when the column was
+    written by an Orcapod version that did not record the identity. The message names
+    the column where it is known, the class, and both shapes.
+    """
+
+
 class DuplicateTagError(ValueError):
     """Raised when duplicate tag values are found and skip_duplicates=False"""
 
