@@ -771,8 +771,9 @@ explicitly on `StaticOutputPod`.
 ---
 
 ### O3 — `_materialize_to_stream` broadcasts row 0's provenance to every row
-**Status:** open
+**Status:** resolved
 **Severity:** high
+**Issue:** ITL-845
 
 `StaticOutputOperatorPod._materialize_to_stream` (`core/operators/static_output_pod.py:223`)
 reads the source info of the *first* row and applies it to the whole concatenated table:
@@ -784,10 +785,10 @@ source_info = rows[0][1].source_info()
 ```
 
 The comment is half right. All rows do share the same data *column names*, but not the same
-*tokens* — a provenance token embeds a per-row identifier (`...::row_0::value` versus
-`...::row_1::value`, built by `_make_provenance_token` in `core/sources/stream_builder.py`).
-So every row from index 1 onward is attributed to row 0. `sync_orchestrator.py:207,222`
-repeats the pattern.
+*source-info tokens* (the per-column `_source_*` values) — a source-info token embeds a per-row
+identifier (`...::row_0::value` versus `...::row_1::value`, built by `_make_provenance_token`
+in `core/sources/stream_builder.py`). So every row from index 1 onward is attributed to row 0.
+`sync_orchestrator.py:207,222` repeats the pattern.
 
 Observed directly in a `MergeJoin` round-trip: row 1 of the output carried `row_0` tokens.
 
@@ -798,6 +799,20 @@ That crash is now fixed, which converts a loud failure into a quiet wrong answer
 
 Fix: build the source-info mapping per row rather than once from row 0, or push the
 provenance into the concatenated table before constructing the stream.
+
+**Fix:** Both materializers build their table with one helper,
+`StaticOutputOperatorPod._rows_to_table`, and no longer pass `source_info` to
+`ArrowTableStream`, so each row's own `_source_*` columns pass through. A `_source_*` field
+is non-nullable unless some row's source-info token is `None`, which keeps stored schemas and
+Arrow types as they were. The sync orchestrator materializes every node's buffer this way, so
+the fix also corrects the input provenance written to function-node tag tables. Data values,
+content and pipeline hashes, and function-node record IDs do not change; an operator node's
+stored `_record_hash` changes for each row whose token was wrong. Rows stored before the fix
+keep their wrong tokens and are not rewritten or recomputed; dropping the pipeline tables
+(keeping `_result/`) and re-running refills them correctly without re-running functions.
+Correcting stored values is tracked in ITL-853. Regression tests:
+`tests/test_core/operators/test_materialize_source_info.py`,
+`tests/test_pipeline/test_tag_table_source_info.py`.
 
 ---
 
@@ -2061,3 +2076,98 @@ their values on `main` in `tests/test_semantic_types/test_struct_layout_identity
 unions do not have this problem: their Python types do not depend on child layouts. This is a
 workaround (`TODO(ITL-841)` in the code); ITL-841 revisits the treatment of large variants
 everywhere.
+
+---
+
+## `src/orcapod/core/operators/join.py` — async path
+
+### JA1 — `Join`'s async path rebuilt rows from Python values
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-837
+
+`Join.async_execute` merged each matched pair by building `Tag(merged_dict)` and
+`Data(merged_dict)` from `as_dict()` values (`_merge_pair_rename` for two inputs,
+`_merge_pair_passthrough` and `_rename_sys_tags` for the staggered path of three or more), so
+every column's Arrow type was inferred again: `int16` and `int8` became `int64`, nullability
+was lost, a `dict` column could not be built, and the Tag/Data content hashes differed from the
+sync path for the same rows. `Data.content_hash()` is the input hash a function node stores, so
+cache hits did not carry over between sync and async runs.
+
+The developer's standing rules, which the fix follows:
+
+- Never infer an Arrow type from Python values when the input already has one; no bare
+  `pa.array(values)` / `from_pylist` without a schema, no hand-written inference table. Where
+  no Arrow type is known, use the data context's type converter.
+- Arrow types are normalized to their large variants (`arrow_utils.normalize_to_large_types`).
+  Width, nullability (top level and nested), struct fields and logical types never change.
+  Anything else that disagrees is an error, never a promotion.
+- A list of a logical type is the logical list of that logical type.
+- Operators take the data context from the stream or the datagrams they are given, never from
+  `self.data_context` or a hand-called `contexts.resolve_context`; operators carry no
+  converter state.
+- `Join` is commutative: async output columns follow the sync path's canonical order.
+
+**Fix:** the async merge builds each row from the inputs' Arrow tables (`as_table()`): tag
+columns in canonical order with a shared key taking the right input's field as the sync path
+does, data columns stacked with `hstack_tables`, source info merged, system tags renamed as
+before. The new `Tag`/`Data` take the left (canonically first) input datagram's
+`data_context_key`. A shared tag key whose Arrow types still differ after large-normalization
+raises `InputValidationError` on both paths; the sync path used to keep the right input's type
+silently. The rule (moved out of `MergeJoin` so both operators share it) is
+`arrow_utils.shared_arrow_type`, which takes only the two types and returns the shared large
+type or `None`; `core/operators/base.require_shared_arrow_type` raises the error naming the
+operator, the column and both types, for every `Join` and `MergeJoin` call site.
+`Datagram.copy()` no longer turns a lazy Python schema into an empty one (it broke `schema()`
+of async `Index`/`Pick` rows; ITL-859).
+`tests/test_core/operators/test_async_sync_equivalence.py` runs every operator with its own
+async path through both paths and compares types, nullability, column order, system tags,
+content and schema hashes; differences that are not type re-inference are strict xfails:
+ITL-838 (`Data.select`/`drop` keep dropped columns' source info), ITL-846 (sync `SemiJoin`
+over nested columns; `ArrowHasher.hash_schema` on extension types). The ITL-845 (O3, row-0
+source info) xfails were removed once that fix merged; those provenance cases now pass. The
+developer's principle behind the shared-key error: Orcapod is type strict and performs no
+implicit type expansion or conversion, except normalization to large variants.
+Meta columns (ITL-854, ITL-857; developer decision): `Join` drops every input's `Data` meta
+(`__`) columns, and the `_source___*` source-info columns of a raw `ArrowTableStream`'s `__`
+columns, on both paths. The sync path used to keep them and rename collisions with an index
+suffix, which could duplicate a name an input already had (ITL-857). The async path used to
+drop them. Nothing downstream of a `Join` reads or stores them, and meta is not hashed.
+`output_schema()` leaves the `__` names a raw stream lists as data out of the prediction, and
+two inputs that share only a meta name join. How meta columns should be handled across
+operators and pods is a separate design question (ITL-867). `MergeJoin` still carries input
+meta on its sync path (colliding names are merged into lists like data) and drops it on its
+barrier async path (ITL-846).
+
+---
+
+## `src/orcapod/core/streams/arrow_table_stream.py`, `src/orcapod/utils/arrow_utils.py` — nested source info
+
+### SI1 — Aggregating an already aggregated stream raised `ArrowTypeError`
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-849
+
+`GroupBy` or `Batch` over a stream whose source-info columns were already list-valued (the
+output of `MergeJoin`, `Batch` or `GroupBy`) raised `ArrowTypeError: Expected bytes, got a
+'list' object` as soon as its rows were materialized (`as_table`, `iter_data`, any hash). The
+aggregation itself was correct: `build_aggregated_table` typed `_source_x` as
+`large_list<large_list<large_string>>`. The crash was downstream of it.
+`ArrowTableStream.iter_data` passed each row's source info to `Data` as Python values, and
+`prepare_prefixed_columns` typed every list token as `list<large_string>`, one level too
+shallow. All five allowed chains failed (MergeJoin→GroupBy, MergeJoin→Batch, Batch→Batch,
+GroupBy→Batch, GroupBy→GroupBy), sync and async. Batch→GroupBy is rejected by design
+(`GroupBy` keys only on scalar tags).
+
+**Fix:** `iter_data` hands each row's source info to `Data` as Arrow columns, batched together
+with the tag and data columns so rows still pair up across chunk layouts (ITL-816), so the
+stream's type is kept instead of re-inferred. `arrow_utils.source_info_arrow_type` (moved from
+`tag_data`) is the one source-info type rule and types Python-supplied tokens at any depth:
+each list level takes its element type from the first element that is not `None` or an empty
+list, so `[[], [["a"]]]` is three levels deep. `Data`'s Python source-info type is read off it.
+The result is a list of the incoming list type (`large_list<large_list<...>>`, element types
+exactly the large-normalized inputs, `Path` as `list[list[orcapod.path]]`). The predicted schema
+equals the materialized one. Hashes of pipelines that already worked are unchanged.
+Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
+barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
+xfail.

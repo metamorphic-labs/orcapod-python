@@ -2,16 +2,15 @@
 
 ## [0.2.0] — unreleased
 
-<!-- RELEASE-DAY: replace "unreleased" with the publish date (YYYY-MM-DD), resolve the
-     publish target open item below, then delete this comment. See
+<!-- RELEASE-DAY: replace "unreleased" with the release date (YYYY-MM-DD). If 0.2.0 is
+     not published to PyPI, replace the second sentence of the Distribution paragraph with
+     "0.2.0 is a tag only; 0.3.0 is the first release published to PyPI from this
+     repository." Then delete this comment. See
      superpowers/plans/2026-11-09-v0.2-release-checklist.md. -->
 
-> **OPEN ITEM — Publish target: pending the internal registry. The release is BLOCKED until
-> the organization's internal Python package registry is available.** `0.2.0` will be
-> published there, not to public PyPI, until public development resumes in January 2027.
-> The registry URL, authentication and install command will be filled in once the registry
-> exists. Publishing to PyPI / TestPyPI is superseded; the Release workflow still targets
-> them, and switching it to the internal registry is not yet possible.
+**Distribution:** Orcapod is MIT licensed starting with `0.2.0` (it was proprietary on
+`main` between #277 and #283; no release carried that license). `0.2.0` is published on
+PyPI as `orcapod`: install it with `pip install orcapod` or `uv add orcapod`.
 
 Everything merged to `main` since `v0.1.2`. `0.1.3` and `0.1.4` were patch releases cut
 from a separate branch; their one fix is also in this release (see
@@ -60,6 +59,12 @@ it raises `orcapod.errors.SchemaVersionError`. Nothing is read or overwritten.
 
    Migration copies rows to the versioned path and leaves the v0 table untouched; it is
    idempotent, so it can be re-run.
+
+   **Known issue (ITL-863):** migrating the pipeline table of a function node written by a
+   released `0.1.x` (reported on `0.1.4`) fails with `ArrowInvalid: Could not convert b'…'
+   with type bytes: was not a utf8 string`, because the migration casts the binary
+   system-tag record-ID column to a string. Migrating the result table succeeds. Until
+   ITL-863 is fixed, use option 2 for such a node.
 
 2. *Ignore and recompute.* Opt a node out of the check and let it recompute from scratch:
 
@@ -228,6 +233,72 @@ columns and per-row `Tag` / `Data` keys, in every process. Ordered operators suc
 different order than on `0.1.x`; address columns by name. No hash, system tag, record ID
 or stored value changes, because hashing does not depend on column order.
 
+#### `Join` gives the same rows on its async path as on its sync path (ITL-837 #280)
+
+`Join`'s async path (`async_execute`, used by async pipelines) rebuilt every merged row from
+Python values, so each column's Arrow type was inferred again: an `int16` tag or an `int8`
+data column became `int64`, and a `dict` column could not be built at all. It now builds the
+merged row from the input rows' Arrow tables, for two inputs and for three or more. Types,
+nullability, column order, system tags and content hashes now equal those of the sync path.
+
+**Hashes:** the `Tag` and `Data` content hashes of rows produced by an async `Join` over
+columns narrower than `int64`/`double` change (they now equal the sync values), along with the
+stored input hashes of any function node downstream of such a join. Sync hashes, stream content
+hashes and pipeline hashes are unchanged.
+
+**Behaviour change:** when a shared tag key has different Arrow types in two `Join` inputs
+(for example `int16` and `int32`), `Join` now raises `InputValidationError` naming the column
+and both types, on both paths. The sync path used to keep the right-hand input's type silently.
+Types that differ only in layout (`string` and `large_string`) still join.
+
+**Also fixed:** `Datagram.copy()` gave a copy of an Arrow-backed datagram an empty Python
+`schema()` when the schema had not been computed yet; async `Index` and `Pick` returned such
+rows (ITL-859).
+
+#### `Join` no longer carries its inputs' meta columns (ITL-854, ITL-857 #280)
+
+`Join` now drops every input's `Data` meta (`__`-prefixed) columns, on the sync and async
+paths, for two inputs or more: for example a cached function pod's `__computed` flag, the
+result cache's `__pf_*` and `__pod_ts` columns, and the `__` columns of a raw
+`ArrowTableStream`, along with their `_source___*` source-info columns. Previously the sync
+path kept them, renaming colliding names with an index suffix (`__computed_1`), while the
+async path dropped them. That rename could also give two columns the same name and fail with
+a Polars `DuplicateError` (ITL-857). Nothing downstream of a `Join` reads these columns, and
+none of them is hashed: content hashes, pipeline hashes, record IDs and stored tables are
+unchanged. `Join.output_schema()` no longer lists the `__` columns a raw `ArrowTableStream`
+reports as data, matching the joined table. Two inputs that share only a meta column name now
+join instead of failing validation.
+
+#### Materialized rows keep their own source info (ITL-845 #282)
+
+When rows were collected and turned back into a stream, every row got the source-info
+(`_source_*`) tokens of the first row, so rows after the first were attributed to row 0. This
+affected the sync orchestrator, which does this between every pair of nodes (so every
+function-node tag table written by a sync `PipelineJob` recorded the wrong input provenance),
+the async path of every operator that collects its input (`MergeJoin`, `Batch`, `GroupBy`,
+`PolarsFilter` and the other barrier operators), sync `Index` and `Pick`, and operator nodes
+(`OperatorJobNode.execute` and `async_execute`). After `Batch`, a batch could even list more
+tokens than it had members. Each row now keeps its own tokens.
+
+Only `_source_*` values change. Data values, Arrow types and stored schemas, content hashes,
+pipeline hashes and function-node record IDs are unchanged. The one stored ID that covers
+`_source_*` values is an operator node's per-row `_record_hash`: it changes for every row
+whose token was wrong, and stays the same for rows whose token was right.
+
+**Stored data is not repaired.** Rows stored before this fix (function-node tag tables, and
+operator-node tables written with `cache_mode=LOG`) keep the wrong source-info token for every
+row after the first; nothing else in them is wrong. Orcapod does not rewrite, repair or
+recompute them: a re-run serves function-node rows from the cache unchanged, but stores
+corrected operator-node rows next to the old ones, so that table then holds both versions of
+those rows. To get correct stored values, drop the pipeline tables (the function-node tag
+tables, whose paths end in `pdb_v1`, and any operator-node tables) and re-run the job. The
+function result tables (under `_result/`, ending in `rdb_v1`) can be kept: the re-run then
+serves every result from them and runs no function again. A table's path is the job name
+followed by the node's `node_identity_path` (plus `pdb_v1` for a function node); in a
+`DeltaTableDatabase` it is that directory under the root, and the SQL connectors name the
+table by joining the path components with `__`, each with non-alphanumeric characters
+replaced by `_`. Correcting stored values is tracked in ITL-853.
+
 #### Shipped in 0.1.2 but never recorded here
 
 These two breaking changes were released in `0.1.2` without a changelog entry. They are
@@ -323,8 +394,12 @@ not on PyPI at the time of writing; install it from its repository.
   types. See *Breaking changes and migration*. (ITL-834 #279)
 - `Join` and `MergeJoin` column order follows argument symmetry. See *Breaking changes and
   migration*. (ITL-817 #272)
-- Packaging: the license is proprietary (`LicenseRef-Metamorphic-Proprietary`), and the
-  `LICENSE` file ships in the wheel and the sdist; `pymongo` and `pyyaml` are removed from
+- `Join` raises `InputValidationError` when a shared tag key has different Arrow types in two
+  inputs (layout-only differences such as `string` and `large_string` still join), its async
+  path keeps the inputs' Arrow types, and it drops its inputs' meta (`__`) columns on both
+  paths. See *Breaking changes and migration*. (ITL-837, ITL-854, ITL-857 #280)
+- The license is MIT (`license = "MIT"`, the MIT text in `LICENSE`). (ITL-875 #283)
+- Packaging: the `LICENSE` file ships in the wheel and the sdist; `pymongo` and `pyyaml` are removed from
   the runtime dependencies; `basedpyright` and `typing_extensions` move to the `dev` group;
   the sdist contains only the package source, `README.md`, `LICENSE` and the package
   metadata; `orcapod.__version__` is added. (ITL-827 #277)
@@ -372,9 +447,31 @@ not on PyPI at the time of writing; install it from its repository.
   orchestrator with `ArrowInvalid: Schema at index N was different`, because cached rows
   came back with a different column order. Buffer materialization now aligns rows by
   column name. (ITL-817 #272)
+- Rows collected and turned back into a stream (the sync orchestrator between nodes, the
+  async path of barrier operators, sync `Index` / `Pick`, operator nodes) keep their own
+  source-info tokens instead of all taking row 0's. Stored rows are not repaired; see
+  *Breaking changes and migration*. (ITL-845 #282)
+- `GroupBy` or `Batch` after `MergeJoin`, `Batch` or `GroupBy` no longer raises
+  `ArrowTypeError: Expected bytes, got a 'list' object` when its rows are materialized. A
+  list column becomes a list of its incoming list type (`large_list<large_list<int8>>`,
+  element types unchanged, `Path` as `list[list[Path]]`), and its source info is a list of
+  the members' source info. Hashes of pipelines that already worked are unchanged.
+  (ITL-849 #281)
+- `Join`'s async path no longer infers Arrow types from Python values (`int16` / `int8`
+  became `int64`, and `dict` columns failed); a `Join` of three or more inputs no longer
+  fails with a Polars `DuplicateError` when two inputs share a meta column name. See
+  *Breaking changes and migration*. (ITL-837, ITL-857 #280)
+- `Datagram.copy()` of an Arrow-backed datagram whose schema had not been computed yet no
+  longer reports an empty Python `schema()`; async `Index` and `Pick` returned such rows.
+  (ITL-859 #280)
 
 ### Known limitations
 
+- **Migrating a function node's pipeline table written by a released `0.1.x` fails.**
+  `orcapod migrate pipeline-db` and `migrate_pipeline_v0_to_v1` raise `ArrowInvalid` on a
+  tag table written by `0.1.4`, because the binary system-tag record-ID column is cast to a
+  string. Workaround: set `ignore_schema=("v0",)` on the node (the `merge` form under
+  *Breaking changes and migration*) and let it recompute. (ITL-863)
 - **Operator-node tables have no migration path.** `OperatorJobNode` stores
   `__node_content_hash` as `large_binary` but has neither a schema-version check nor a
   migration utility. An operator-node table written by `0.1.x` fails with an Arrow schema
@@ -398,9 +495,10 @@ not on PyPI at the time of writing; install it from its repository.
 - **Arrow types are not part of `Schema`, and the rule for inputs whose Arrow types disagree
   is not settled for every operator.** `output_schema()` reports Python types, so a
   disagreement such as `int8` vs `int64` or `string` vs `large_string` is not visible when
-  the graph is built. `MergeJoin` normalizes both inputs and raises `InputValidationError`
-  if they still differ (see *Breaking changes and migration*); the other multi-input
-  operators do not apply that rule yet. (ITL-835)
+  the graph is built. `MergeJoin` (colliding data columns and shared tags) and `Join`
+  (shared tag keys, sync and async) normalize both inputs and raise `InputValidationError`
+  if they still differ (see *Breaking changes and migration*). `SemiJoin` does not apply that
+  rule yet: disagreeing key types fail with Arrow's own `ArrowInvalid`. (ITL-835)
 - **Large-variant normalization is not applied everywhere.** `MergeJoin`, `PolarsFilter`,
   `Index`, `Pick`, `Batch` and `GroupBy` emit large variants; `Join`, `SemiJoin`, `MapTags`,
   `MapData`, the column-selection operators and sources keep whatever layout their input
@@ -414,6 +512,24 @@ not on PyPI at the time of writing; install it from its repository.
   aggregates that are now `large_list<...>`, nested non-null flags that are now kept, and
   narrow columns that no longer widen have not been tested against each database backend
   when appended to an existing table. (ITL-851)
+- **Stored source-info tokens written before the ITL-845 fix stay wrong.** Function-node tag
+  tables and operator-node `LOG` tables keep row 0's `_source_*` token on every later row
+  until those pipeline tables are dropped and refilled; result tables can be kept. Orcapod
+  has no repair, and no policy yet for stored data that a fix leaves wrong. (ITL-853)
+- **Meta (`__`) columns have no written rule.** Which meta columns each element writes and
+  exposes, and what operators do with them, is not specified. `Join` now drops them on both
+  paths, but other operators do not yet give the same meta columns on their sync and async
+  paths: the async path of `MergeJoin`, `Batch`, `GroupBy` and `PolarsFilter` drops them,
+  and the sync path of `SelectDataColumns`, `Index` and `Pick` drops some the async path
+  keeps (expected-failure tests, ITL-846). A raw `ArrowTableStream` over a table with `__`
+  columns treats them as data. (ITL-867)
+- **The async path does not handle zero-row inputs like the sync path.** An async barrier
+  operator (for example `PolarsFilter`) whose input yields no rows raises `ValueError:
+  Cannot materialize an empty list of rows into a stream`, where the sync path returns an
+  empty stream
+  (ITL-865). An async `Join` whose input yields no rows cannot check its shared-key types,
+  so disagreeing types give an empty result instead of the sync path's
+  `InputValidationError` (ITL-856).
 - **The Arrow hasher cannot hash some types**: `null`-typed columns, canonical PyArrow
   extension types such as `arrow.uuid`, and map and fixed-size-list columns raise
   `NotImplementedError`. (ITL-848)

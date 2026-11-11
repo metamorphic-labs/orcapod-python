@@ -216,6 +216,15 @@ uv run pytest tests/
 - The Graphviz `dot` binary is optional. The tests that render a graph to an image skip
   when `dot` is not on `PATH` and run when it is.
 
+## Testing conventions
+
+Tests use the **public interface** wherever possible (developer, November 10, 2026): drive an
+operator by calling it, `op(stream)`, and read the result through the stream's public methods.
+Use a non-public entry point (`unary_static_process`, `static_process`,
+`binary_static_process`, `_private` helpers) only when the test is specifically about that
+entry point. The standing exception is verifying a schema prediction, which must compare
+against `static_process(...).output_schema(...)`; see "Important implementation details".
+
 ---
 
 ## Project layout
@@ -428,6 +437,10 @@ then through the data context's type converter — never call `pa.array(values)`
 inference widens `int8` to `int64`, `float32` to `double`, and takes decimal precision from the
 data. The rules:
 
+- **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
+  expands or converts a type implicitly; the only exception is normalization to large variants.
+  Inputs that disagree on a column's type are an error naming the column and both types, on
+  every execution path (sync and async).
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
   to `large_list`, recursively). Width, nullability and logical (extension) types are never
@@ -440,13 +453,25 @@ data. The rules:
   `arrow_utils.aggregated_list_type` (directly or through `build_aggregated_table`):
   `large_list<normalized T>`, or for a logical `T` the logical list type from the type converter
   (it raises, naming the column, if the converter has none; never strip the element to its
-  storage type). Source-info list columns are `large_list<large_string>`. Zero-row and
+  storage type). Source-info list columns are `large_list` of the incoming source-info type:
+  `large_list<large_string>` over scalar tokens, one list level deeper for each further
+  aggregation (`Batch` or `GroupBy` after `MergeJoin`, `Batch` or `GroupBy` gives
+  `large_list<large_list<large_string>>`, ITL-849). An already list-valued data column
+  likewise becomes a list of its incoming list type; never flatten it. Zero-row and
   non-empty results have the same types.
 - When two inputs give the same column different Arrow types, normalize both: equal proceeds,
   anything else raises `InputValidationError` naming the column and both types — no widening,
-  promotion or picking a side. For `MergeJoin` this is `_resolve_disagreeing_types`, called in
-  `binary_static_process` before the join; `output_schema()` exposes only Python types, so such
-  disagreements are invisible at graph-build time.
+  promotion or picking a side. The rule is `arrow_utils.shared_arrow_type`, which takes only the
+  two types and returns the shared large type or `None`; the error is raised by
+  `core/operators/base.require_shared_arrow_type`, called by `MergeJoin` in
+  `binary_static_process` and by `Join` (shared tag keys, sync and async) before the join.
+  Keep error wording in the caller, not in the type rule. `output_schema()` exposes only Python
+  types, so such disagreements are invisible at graph-build time.
+- An operator with its own `async_execute` must yield exactly the rows of its sync path (types,
+  nullability, column order, system tags, content hashes). Build output rows from the incoming
+  datagrams' Arrow tables (`as_table()`), never from `as_dict()` values, and take the data
+  context from those datagrams (`data_context_key`). Add new async operators to
+  `tests/test_core/operators/test_async_sync_equivalence.py`.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   `struct<b: string>` and `struct<b: large_string>` are one Python type (a workaround,
   `TODO(ITL-841)`).
@@ -482,10 +507,14 @@ data. The rules:
   tag values with the system `record_id` as tiebreaker, so the hashed lists are stable across
   runs. Groups themselves are emitted in key order, so a reordered input yields a
   byte-identical table.
-- `Data` source-info values may be `str`, `None`, or `list[...]`; the Arrow and Python types
-  are derived from the value, with `None` mapping to `large_string`. A many→one operator must
-  emit a list for **every** row of a list-valued column — mixing a bare `None` into some rows
-  makes per-row `as_table()` schemas diverge and `pa.concat_tables` fail on the barrier path.
+- `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
+  Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
+  That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
+  tokens supplied as Python values: `ArrowTableStream.iter_data` hands each row's source info
+  to `Data` as Arrow columns, so a type the stream already has is never re-inferred. A
+  many→one operator must emit a list for **every** row of a list-valued column — mixing a bare
+  `None` into some rows makes per-row `as_table()` schemas diverge and `pa.concat_tables` fail
+  on the barrier path.
 - Aggregating operators (`Batch`, `GroupBy`) must build list-valued columns via
   `arrow_utils.build_aggregated_table`, never `pa.list_(field.type)`. The helper types every list
   column with `aggregated_list_type`: `large_list` of the large-normalized element, or, because
