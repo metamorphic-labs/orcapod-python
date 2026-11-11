@@ -35,7 +35,7 @@ def main() -> None:
     args = parser.parse_args()
     signal.alarm(args.timeout)
 
-    import spiral
+    import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     sp = spiral.Spiral()
     project = sp.project(args.project)

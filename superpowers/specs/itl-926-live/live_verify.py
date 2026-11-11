@@ -126,7 +126,7 @@ def _field_desc(f: pa.Field[Any]) -> str:
 
 class Run:
     def __init__(self, args: argparse.Namespace) -> None:
-        import spiral as sp
+        import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
         self.args = args
         self.overrides = {"server.url": args.server_url} if args.server_url else None

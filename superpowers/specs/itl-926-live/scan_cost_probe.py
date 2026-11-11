@@ -19,7 +19,7 @@ import time
 
 def main() -> None:
     signal.alarm(900)
-    import spiral
+    import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     project_id, tables = sys.argv[1], sys.argv[2:]
     sp = spiral.Spiral()

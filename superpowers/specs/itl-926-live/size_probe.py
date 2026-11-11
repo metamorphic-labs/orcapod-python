@@ -50,7 +50,7 @@ def _child(project: str, table: str) -> None:
 
 
 def _sizes(project_id: str, dataset: str) -> dict[str, dict[str, Any]]:
-    import spiral
+    import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     sp = spiral.Spiral()
     project = sp.project(project_id)
