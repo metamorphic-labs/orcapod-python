@@ -1058,10 +1058,12 @@ class OperatorJobNode(OperatorNodeBase):
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Return an iterator over (tag, data) pairs.
 
-        Read-only: never triggers computation. Returns empty before ``run()``,
-        ``execute()`` or ``async_execute()`` populates the cache, and after
-        ``clear_cache()``. Call ``node.is_stale`` before iterating if you need
-        to detect outdated cached data.
+        Read-only: never triggers computation. Yields the rows of the latest
+        ``run()``, ``execute()`` or ``async_execute()``. With nothing cached in
+        memory (before a run, or after ``clear_cache()``), a node in
+        ``CacheMode.REPLAY`` with a database yields the rows stored there; in
+        any other mode it yields nothing. Call ``node.is_stale`` before
+        iterating if you need to detect outdated cached data.
         """
         if self._cached_output_stream is not None:
             return self._cached_output_stream.iter_data()
@@ -1078,9 +1080,11 @@ class OperatorJobNode(OperatorNodeBase):
     ) -> "pa.Table":
         """Return the output as a PyArrow table.
 
-        Read-only: never triggers computation. Returns a zero-row table
-        with the node's columns before ``run()``, ``execute()`` or
-        ``async_execute()`` is called, and after ``clear_cache()``.
+        Read-only: never triggers computation. Returns the rows of the latest
+        ``run()``, ``execute()`` or ``async_execute()``. With nothing cached in
+        memory (before a run, or after ``clear_cache()``), a node in
+        ``CacheMode.REPLAY`` with a database returns the rows stored there; in
+        any other mode it returns a zero-row table with the node's columns.
         """
         if self._cached_output_stream is not None:
             return self._cached_output_stream.as_table(
