@@ -24,13 +24,13 @@ __all__ = ["register_type"]
 
 @overload
 def register_type(
-    cls: T, /, *, name: str | None = None, qualified: bool | None = None
+    cls: T, /, *, name: str | None = None, qualified_name: bool | None = None
 ) -> T: ...
 
 
 @overload
 def register_type(
-    *, name: str | None = None, qualified: bool | None = None
+    *, name: str | None = None, qualified_name: bool | None = None
 ) -> Callable[[T], T]: ...
 
 
@@ -39,7 +39,7 @@ def register_type(
     /,
     *,
     name: str | None = None,
-    qualified: bool | None = None,
+    qualified_name: bool | None = None,
 ) -> T | Callable[[T], T]:
     """Declare the name a dataclass or pydantic model is identified by.
 
@@ -49,7 +49,7 @@ def register_type(
 
     Without arguments the class keeps its default name: its class name if it is
     defined in a notebook or script, its module path and class name if it is defined
-    in a module. ``qualified=False`` names a module class by its class name alone,
+    in a module. ``qualified_name=False`` names a module class by its class name alone,
     without retyping it.
 
     Declare the name before the class is first used in a source or pod. Declaring the
@@ -59,7 +59,7 @@ def register_type(
         cls: The class, when called directly.
         name: The declared name, e.g. ``"Point"`` or ``"geo.Point"``. It must not be
             empty, contain ``@`` or whitespace, or start with ``orcapod.``.
-        qualified: Only without ``name``. ``False``: the class name (``"Point"``).
+        qualified_name: Only without ``name``. ``False``: the class name (``"Point"``).
             ``True``: the module path and class name (``"pkg.models.Point"``).
 
     Returns:
@@ -67,7 +67,7 @@ def register_type(
 
     Raises:
         TypeError: If the class is not a dataclass or pydantic model.
-        ValueError: If both ``name`` and ``qualified`` are given, the name is invalid,
+        ValueError: If both ``name`` and ``qualified_name`` are given, the name is invalid,
             the class is defined inside a function, or the class is already
             registered under a different name.
 
@@ -82,7 +82,7 @@ def register_type(
     """
 
     def decorate(target: T) -> T:
-        _uci.declare(target, name, qualified=qualified)
+        _uci.declare(target, name, qualified_name=qualified_name)
         return target
 
     if cls is None:

@@ -118,7 +118,7 @@ def is_main_class(cls: type) -> bool:
     return cls.__module__ in MAIN_MODULES
 
 
-def default_name(cls: type, *, qualified: bool | None = None) -> str:
+def default_name(cls: type, *, qualified_name: bool | None = None) -> str:
     """Return the name a class gets without a declared name.
 
     Args:
@@ -131,9 +131,9 @@ def default_name(cls: type, *, qualified: bool | None = None) -> str:
     Returns:
         The name component.
     """
-    if qualified is None:
-        qualified = not is_main_class(cls)
-    if not qualified:
+    if qualified_name is None:
+        qualified_name = not is_main_class(cls)
+    if not qualified_name:
         return cls.__qualname__
     module = cls.__module__
     if not is_main_class(cls):
@@ -158,7 +158,7 @@ def resolve_name(cls: type) -> str:
     return default_name(cls)
 
 
-def declare(cls: type, name: str | None, *, qualified: bool | None = None) -> None:
+def declare(cls: type, name: str | None, *, qualified_name: bool | None = None) -> None:
     """Record the name a user class is identified by.
 
     Registration never modifies the class: the name is kept in a process-wide table
@@ -167,13 +167,13 @@ def declare(cls: type, name: str | None, *, qualified: bool | None = None) -> No
 
     Args:
         cls: A dataclass or pydantic model class.
-        name: The declared name, or ``None`` for ``default_name(cls, qualified=...)``.
-        qualified: Only without ``name``: ``False`` for the class name alone,
+        name: The declared name, or ``None`` for ``default_name(cls, qualified_name=...)``.
+        qualified_name: Only without ``name``: ``False`` for the class name alone,
             ``True`` for ``module.qualname``, ``None`` for the location rule.
 
     Raises:
         TypeError: If ``cls`` is not a dataclass or pydantic model class.
-        ValueError: If both ``name`` and ``qualified`` are given, the class is local,
+        ValueError: If both ``name`` and ``qualified_name`` are given, the class is local,
             the name is invalid, or the class is already registered (declared or used)
             under a different name.
     """
@@ -183,15 +183,17 @@ def declare(cls: type, name: str | None, *, qualified: bool | None = None) -> No
             f"Only dataclasses and pydantic models can be registered as types, "
             f"got {cls!r}."
         )
-    if name is not None and qualified is not None:
+    if name is not None and qualified_name is not None:
         raise ValueError(
-            "Pass either name=... or qualified=..., not both: qualified only chooses "
+            "Pass either name=... or qualified_name=..., not both: qualified_name only chooses "
             "between the class name and its module path when no name is given."
         )
     reject_local_class(cls)
     if name is not None:
         validate_name(name)
-    effective = name if name is not None else default_name(cls, qualified=qualified)
+    effective = (
+        name if name is not None else default_name(cls, qualified_name=qualified_name)
+    )
     previous = _built.get(cls) or _declared.get(cls)
     if previous is not None and previous != effective:
         raise ValueError(

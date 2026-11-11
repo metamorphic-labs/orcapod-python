@@ -109,19 +109,19 @@ def test_declaring_after_use_under_another_name_raises() -> None:
         op.register_type(UsedFirst, name="itl881.UsedFirst")
 
 
-@op.register_type(qualified=False)
+@op.register_type(qualified_name=False)
 @dataclasses.dataclass
 class ShortNamed:
     x: int
 
 
-def test_qualified_false_names_a_module_class_by_its_class_name() -> None:
+def test_qualified_name_false_names_a_module_class_by_its_class_name() -> None:
     assert _name_part(ShortNamed(1)) == "ShortNamed"
 
 
-def test_name_and_qualified_together_raise() -> None:
+def test_name_and_qualified_name_together_raise() -> None:
     with pytest.raises(ValueError, match="either name"):
-        op.register_type(Undeclared, name="itl881.X", qualified=False)
+        op.register_type(Undeclared, name="itl881.X", qualified_name=False)
 
 
 @dataclasses.dataclass

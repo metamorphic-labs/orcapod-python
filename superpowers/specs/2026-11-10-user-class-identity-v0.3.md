@@ -22,9 +22,9 @@ Each decision is marked **CONFIRMED** (the developer decided it, November 10, 20
 | P1 | A field typed by another user class carries that class's identity as that class was registered | CONFIRMED: developer decision, November 10, 2026 |
 | D-cycle | A self-referential or cyclic class is rejected with a clear `TypeError` | CONFIRMED by the coordinator from this proposal: Arrow cannot store a recursive struct |
 | D-format | Identity string = name + `@` + the full 64-hex SHA-256 of the record (the "fold") | CONFIRMED: developer, November 10, 2026; alternative B (fields only in metadata) not pursued, appendix A |
-| D-naming | No process-wide naming switch: fixed location rule, per-class `register_type(name=...)` or `register_type(qualified=False)` | CONFIRMED: developer dropped `set_type_naming`; a project-wide choice would live in the data context, not in v0.3 |
+| D-naming | No process-wide naming switch: fixed location rule, per-class `register_type(name=...)` or `register_type(qualified_name=False)` | CONFIRMED: developer dropped `set_type_naming`; a project-wide choice would live in the data context, not in v0.3 |
 | D-mutation | `register_type` never modifies the class; same name again is a no-op; another name raises | CONFIRMED: developer |
-| P2 | Public API name `register_type` and argument `qualified` | `register_type` accepted by the developer; `qualified=False` proposed and implemented provisionally |
+| P2 | Public API name `register_type` and argument `qualified_name` | CONFIRMED: developer, November 10, 2026 |
 | D-hash | The 25 golden entries in §e move; nothing else | CONFIRMED by the coordinator: follows from decision 2; the PR lists every moved entry |
 | D-legacy | Reading a pre-0.3 user-class column directly raises a clear error | CONFIRMED by the coordinator: a consequence of the identity check; nothing extra is built |
 | D-notice | One-time notice when a `__main__` class is first registered (S3) | CONFIRMED in scope by the coordinator; last item before the cuts |
@@ -42,8 +42,8 @@ A user class's identity is an **identity record** with three components:
 The name is a string chosen once per class, by the first rule that applies:
 
 1. **Declared name.** The user declared one (§b). Used verbatim.
-2. **Per-class choice without a name:** `register_type(qualified=False)` gives
-   `cls.__qualname__`; `register_type(qualified=True)` gives `module.qualname`.
+2. **Per-class choice without a name:** `register_type(qualified_name=False)` gives
+   `cls.__qualname__`; `register_type(qualified_name=True)` gives `module.qualname`.
 3. **`__main__` class** (`cls.__module__` is `"__main__"` or `"__mp_main__"`, the name a
    `multiprocessing` spawn child gives the main module, W14): `cls.__qualname__`
    (`"Point"`, or `"Outer.Point"` for a nested class).
@@ -192,7 +192,7 @@ class Point: ...
 @dataclass
 class Point: ...
 
-@op.register_type(qualified=False)    # a module class named by its class name: "Point"
+@op.register_type(qualified_name=False)    # a module class named by its class name: "Point"
 @dataclass
 class Point: ...
 
@@ -202,7 +202,7 @@ op.register_type(Point, name="Point") # call form, for classes you do not own
 - `register_type` records the name for the class object in a process-wide weak-keyed
   table. It never modifies the class (no attributes, no dataclass parameters, no pydantic
   config) and returns the same object. It checks the kind, the name, `name` and
-  `qualified` not both given, and that the class is not local. The logical type is built
+  `qualified_name` not both given, and that the class is not local. The logical type is built
   at first use, so declarations may come in any order (§a). Classes never declared are
   registered on first use under the location rule.
 - Registering the same class again with the same name is a no-op. A different name raises
@@ -217,7 +217,7 @@ op.register_type(Point, name="Point") # call form, for classes you do not own
 | Case | What happens | What the user sees |
 |---|---|---|
 | Same fields, same `module.qualname` (cell re-run, `%autoreload`, W1/W3/W4) | Same identity: the identity is rebound to the new class object (§c) | nothing |
-| Same fields, different `module.qualname` (two modules declare `"Point"`, or use `qualified=False`) | Same identity by definition: they are the same type; values read back are built as the most recently registered class | one `UserWarning` per rebinding naming both classes. Warranted: values come back as a different class object than may be expected |
+| Same fields, different `module.qualname` (two modules declare `"Point"`, or use `qualified_name=False`) | Same identity by definition: they are the same type; values read back are built as the most recently registered class | one `UserWarning` per rebinding naming both classes. Warranted: values come back as a different class object than may be expected |
 | Different fields (W2 with changed fields, or two modules) | Different identities: two types that happen to share a display name; no clash | nothing at registration. Reading picks the class whose identity matches (§d) |
 
 ## c. Rebinding rule (S1) — CONFIRMED (developer answer to S1)
@@ -236,7 +236,7 @@ op.register_type(Point, name="Point") # call form, for classes you do not own
 - **Still raises:**
   1. One class object registered under two names (§b), including a declaration after
      the class was already used under its default name.
-  2. An invalid declared name, or `name` together with `qualified` (§a, §b).
+  2. An invalid declared name, or `name` together with `qualified_name` (§a, §b).
   3. A local class (`<locals>`), as today.
   4. A shape disagreement on read (§d, S2).
   5. A self-referential or cyclic class (D-cycle).

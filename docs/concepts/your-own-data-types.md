@@ -150,7 +150,7 @@ print("function calls:", len(calls))
 
 - `name="..."`: the name to use, the same wherever the class is defined. It must not be
   empty, contain `@` or spaces, or start with `orcapod.`.
-- `qualified=False`: name a module class by its class name alone, without retyping it.
+- `qualified_name=False`: name a module class by its class name alone, without retyping it.
 - no arguments: keep the default name.
 
 It never changes your class; it records the name in Orcapod's registry and returns the

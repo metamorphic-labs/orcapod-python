@@ -7,7 +7,7 @@
 #### `op.register_type` — declare the name of your own data types (ITL-881)
 
 `@op.register_type(name="Point")` declares the name a dataclass or pydantic model is
-identified by, wherever the class is defined. `@op.register_type(qualified=False)` names a
+identified by, wherever the class is defined. `@op.register_type(qualified_name=False)` names a
 module class by its class name alone. Registration never modifies the class; declaring the
 same class under a second name raises `ValueError`. See
 [Your Own Data Types](docs/concepts/your-own-data-types.md).

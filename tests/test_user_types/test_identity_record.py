@@ -119,12 +119,14 @@ class TestNames:
     def test_nested_main_class_uses_qualname(self) -> None:
         assert uci.resolve_name(_make_class("__main__", "Outer.Point")) == "Outer.Point"
 
-    def test_default_name_qualified_false(self) -> None:
-        assert uci.default_name(_make_class("pkg.models"), qualified=False) == "Point"
+    def test_default_name_qualified_name_false(self) -> None:
+        assert (
+            uci.default_name(_make_class("pkg.models"), qualified_name=False) == "Point"
+        )
 
-    def test_default_name_qualified_true_for_main(self) -> None:
+    def test_default_name_qualified_name_true_for_main(self) -> None:
         cls = _make_class("__main__")
-        assert uci.default_name(cls, qualified=True) == "__main__.Point"
+        assert uci.default_name(cls, qualified_name=True) == "__main__.Point"
 
     def test_declared_name_wins(self) -> None:
         cls = _make_class("pkg.models")
