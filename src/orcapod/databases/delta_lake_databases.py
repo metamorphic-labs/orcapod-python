@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
     import pyarrow.compute as pc
+    import pyarrow.dataset as pa_ds
     from upath import UPath
 else:
     deltalake = LazyModule("deltalake")
@@ -651,7 +652,11 @@ class DeltaTableDatabase:
         Raises:
             Exception: The backend's error when the table's data cannot be read.
         """
-        dataset = delta_to_pyarrow_dataset(delta_table, as_large_types=True)
+        # deltalake builds a FileSystemDataset; its data files identify a version.
+        dataset = cast(
+            "pa_ds.FileSystemDataset",
+            delta_to_pyarrow_dataset(delta_table, as_large_types=True),
+        )
         table = arrow_utils.normalize_table_view_types(dataset.to_table())
         return table.combine_chunks(), frozenset(dataset.files), dataset.schema
 
@@ -1135,10 +1140,11 @@ class DeltaTableDatabase:
         if flush:
             self.flush_batch(record_path)
 
+        pair_list: list[tuple[str, Any]]
         if isinstance(column_values, Mapping):
             # Convert Mapping to list of tuples
-            pair_list = list(column_values.items())
-        elif isinstance(column_values, Collection):
+            pair_list = list(cast(Mapping[str, Any], column_values).items())
+        else:
             # Ensure it's a list of tuples
             pair_list = cast(list[tuple[str, Any]], list(column_values))
 
@@ -1648,9 +1654,16 @@ class DeltaTableDatabase:
         snapshot = _CommittedSnapshot(version, ids=base.ids | inserted_ids)
         if base.rows is None:
             return snapshot
-        dataset = delta_to_pyarrow_dataset(committed, as_large_types=True)
+        dataset = cast(
+            "pa_ds.FileSystemDataset",
+            delta_to_pyarrow_dataset(committed, as_large_types=True),
+        )
         files = frozenset(dataset.files)
-        if not base.files <= files or not dataset.schema.equals(base.dataset_schema):
+        if (
+            base.dataset_schema is None
+            or not base.files <= files
+            or not dataset.schema.equals(base.dataset_schema)
+        ):
             return snapshot
         added = files - base.files
         new_rows = arrow_utils.normalize_table_view_types(

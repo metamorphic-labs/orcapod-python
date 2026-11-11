@@ -19,6 +19,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import deltalake
 import pyarrow as pa
@@ -166,7 +167,7 @@ def stable(store: Path) -> dict[str, list[tuple[object, ...]]]:
 
 
 @pytest.fixture(scope="module")
-def uninterrupted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, list]:
+def uninterrupted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, list[Any]]:
     """The stable columns of a run that was never interrupted."""
     tmp = tmp_path_factory.mktemp("uninterrupted")
     code, calls = run_job(tmp, tmp / "store", 100, "sync")
@@ -176,7 +177,7 @@ def uninterrupted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, list]:
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 def test_crash_mid_batch_keeps_committed_batches(
-    tmp_path: Path, orchestrator: str, uninterrupted: dict[str, list]
+    tmp_path: Path, orchestrator: str, uninterrupted: dict[str, list[Any]]
 ) -> None:
     """Killed at row 234 with 100 rows per commit: 200 rows stored, 50 recomputed."""
     store = tmp_path / "store"
@@ -199,7 +200,7 @@ def test_crash_mid_batch_keeps_committed_batches(
 
 
 def test_crash_between_result_and_pipeline_commits(
-    tmp_path: Path, uninterrupted: dict[str, list]
+    tmp_path: Path, uninterrupted: dict[str, list[Any]]
 ) -> None:
     """Results committed without their pipeline records are reused, not recomputed."""
     store = tmp_path / "store"

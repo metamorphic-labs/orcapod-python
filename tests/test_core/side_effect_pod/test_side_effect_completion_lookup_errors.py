@@ -46,9 +46,8 @@ def test_completion_lookup_failure_names_the_node_and_row() -> None:
         delivered.append(value)
 
     pod = SideEffectPod(deliver, config=SideEffectPodConfig(track_completion=True))
-    job = PipelineJob(
-        name="effects", store=UnreadableCompletions(InMemoryArrowDatabase())
-    )  # pyright: ignore[reportArgumentType]  # failing wrapper of a real store
+    store = UnreadableCompletions(InMemoryArrowDatabase())
+    job = PipelineJob(name="effects", store=store)  # pyright: ignore[reportArgumentType]  # failing wrapper of a real store
     with job:
         pod.process(DictSource([{"id": 0, "value": 10}], tag_columns=["id"]))
 

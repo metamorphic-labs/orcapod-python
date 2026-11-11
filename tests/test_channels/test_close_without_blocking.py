@@ -19,16 +19,16 @@ import asyncio
 
 import pytest
 
-from orcapod.channels import BroadcastChannel, Channel, ChannelClosed
+from orcapod.channels import BroadcastChannel, Channel, ChannelClosed, WritableChannel
 
 # A close that blocks fails the test after this many seconds instead of hanging it.
 NO_BLOCK = 1.0
 
 
-async def _fill(writer: object, items: list[int]) -> None:
+async def _fill(writer: WritableChannel[int], items: list[int]) -> None:
     """Send every item without waiting for a reader (the buffer must hold them)."""
     for item in items:
-        await asyncio.wait_for(writer.send(item), NO_BLOCK)  # type: ignore[attr-defined]
+        await asyncio.wait_for(writer.send(item), NO_BLOCK)
 
 
 class TestChannelCloseOnFullQueue:

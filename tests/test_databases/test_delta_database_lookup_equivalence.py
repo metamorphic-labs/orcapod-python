@@ -10,7 +10,7 @@ Delta does not define a row order, so rows are compared sorted by record id.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -92,7 +92,7 @@ def _assert_all_lookups(db: DeltaTableDatabase) -> None:
         _assert_same(actual, _expected(db, pairs))
     everything = db.get_all_records(PATH, record_id_column="rid")
     assert everything is not None
-    ids = everything["rid"].to_pylist()
+    ids = cast(list[bytes], everything["rid"].to_pylist())
     for wanted in (ids[:1], ids[::3], ids + [b"id-absent"], [b"id-absent"]):
         by_ids = db.get_records_by_ids(PATH, wanted, record_id_column="rid")
         expected = everything.filter(pc.is_in(everything["rid"], pa.array(wanted)))

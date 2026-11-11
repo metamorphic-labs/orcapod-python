@@ -87,9 +87,8 @@ def run_in_thread(job: PipelineJob, timeout: float = 120.0) -> BaseException | N
 @pytest.mark.parametrize("store", list(STORES))
 def test_function_node_store_failure_raises(tmp_path: Path, store: str) -> None:
     """A failed pipeline-record write at row 3 of 250 fails the run."""
-    job = PipelineJob(
-        name="nohang", store=FailPipelineRecords(STORES[store](tmp_path), {"n": 0})
-    )
+    failing = FailPipelineRecords(STORES[store](tmp_path), {"n": 0})
+    job = PipelineJob(name="nohang", store=failing)  # pyright: ignore[reportArgumentType]  # failing wrapper of a real store
     with job:
         source = DictSource(
             data=[{"k": i, "x": i} for i in range(N_ROWS)],

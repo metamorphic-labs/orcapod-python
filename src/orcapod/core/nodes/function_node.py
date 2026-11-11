@@ -2673,7 +2673,7 @@ class FunctionJobNode(FunctionNodeBase):
                     async for output_tag, output_data in result_channel.reader:
                         correlation_key = output_tag.get_meta_value(_TAG_NODE_INPUT_REF)
                         original_tag, input_data, base_entry_id = input_store.pop(
-                            correlation_key
+                            cast(bytes, correlation_key)
                         )
                         result_computed = bool(
                             output_data.get_meta_value(

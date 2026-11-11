@@ -113,8 +113,10 @@ def test_each_table_is_committed_once_per_batch(
 ) -> None:
     """250 rows at 100 per commit (the default) give 3 commits per table, all appends."""
     job = build_job(DeltaTableDatabase(tmp_path), n_rows)
-    kwargs = {} if every is None else {"commit_every_rows": every}
-    job.run(orchestrator=ORCHESTRATORS[orchestrator](), **kwargs)
+    if every is None:
+        job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    else:
+        job.run(orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=every)
     for kind, table in table_dirs(tmp_path).items():
         assert operations(table) == ["WRITE"] * commits, kind
         assert stored_rows(table) == n_rows, kind
@@ -144,7 +146,10 @@ def test_a_node_run_on_its_own_commits_every_row(tmp_path: Path) -> None:
 
 def test_a_cached_pod_used_on_its_own_commits_every_row(tmp_path: Path) -> None:
     """A ``CachedFunctionPod`` used directly commits each stored result."""
-    cached = CachedFunctionPod(double.pod, result_database=DeltaTableDatabase(tmp_path))
+    cached = CachedFunctionPod(
+        double.pod,  # pyright: ignore[reportArgumentType]  # a decorated pod satisfies the protocol at run time
+        result_database=DeltaTableDatabase(tmp_path),
+    )
     source = DictSource(
         data=[{"k": i, "x": i} for i in range(4)], tag_columns=["k"], source_id="src"
     )
@@ -352,8 +357,10 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
 
     shared_in_memory = InMemoryArrowDatabase()
     calls_before = len(_DOUBLE_CALLS)
+    jobs: list[PipelineJob] = []
     for _ in range(2):
         job = PipelineJob(name="ephemeral", store=make_store())
+        jobs.append(job)
         with job:
             source = DictSource(
                 data=[{"k": i, "x": i} for i in range(5)],
@@ -365,7 +372,7 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
         job.set_ephemeral_store(InMemoryArrowDatabase())
         job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     assert len(_DOUBLE_CALLS) - calls_before == 10
-    node = job.nodes["dbl"]
+    node = jobs[-1].nodes["dbl"]
     assert node.as_table().num_rows == 5
     records = node.get_all_records()
     assert records is not None and records.num_rows == 5
