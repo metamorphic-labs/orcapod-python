@@ -10,7 +10,7 @@ import logging
 import pytest
 
 import orcapod as op
-from orcapod import function_pod
+from orcapod import FunctionPod, function_pod
 from orcapod.nodes import FunctionNode
 from orcapod.sources import DictSource
 
@@ -115,9 +115,13 @@ def test_missing_parameter_error_names_the_parameter(
 def test_function_node_extra_column_error_is_the_same(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    def bmi(weight: float, height: float) -> float:
+        return weight / (height**2)
+
+    pod = FunctionPod.from_fn(bmi, output_keys="bmi")
     with caplog.at_level(logging.DEBUG):
         with pytest.raises(ValueError) as excinfo:
-            FunctionNode(compute_bmi.pod, _wide_source())
+            _ = FunctionNode(pod, _wide_source())
 
     message = str(excinfo.value)
     assert "data data" not in message
