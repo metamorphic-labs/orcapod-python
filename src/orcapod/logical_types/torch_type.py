@@ -19,11 +19,16 @@ stored dtype and shape.
 
 Supported dtypes: ``bool``, ``int8`` to ``int64``, ``uint8`` to ``uint64``,
 ``float16``, ``float32``, ``float64``, ``complex64`` and ``complex128`` (the same
-tags and bytes as NumPy), and ``bfloat16`` (its bits, under the tag
-``bfloat16``). Everything else is refused at write time with
-``UnsupportedValueError`` naming the reason (the type converter adds the
-column): sparse and mkldnn layouts, quantized, nested and meta tensors, named
-tensors, and other dtypes (``complex32``, the float8 family, sub-byte types).
+tags and bytes as NumPy), and the torch-only dtypes ``bfloat16``, ``complex32``
+and the float8 family (``float8_e4m3fn``, ``float8_e5m2``, ``float8_e4m3fnuz``,
+``float8_e5m2fnuz``, ``float8_e8m0fnu``), stored as their raw bits under the
+torch dtype name. A torch dtype is looked up when it is used, never at import:
+reading a stored dtype that the installed torch does not have raises
+``ValueError`` naming the dtype and the torch version. Everything else is
+refused at write time with ``UnsupportedValueError`` naming the reason (the type
+converter adds the column): sparse and mkldnn layouts, quantized, nested and
+meta tensors, named tensors, and other dtypes (sub-byte and packed types,
+``bcomplex32``).
 
 This module imports torch; it is loaded on first use through the deferred
 registration in the data context (``orcapod.utils.deferred_types``), so
@@ -79,25 +84,44 @@ _SHARED_TAGS = (
 )
 """Tags whose element bytes are the same as NumPy's (and whose name is the torch dtype name)."""
 
-_RAW_BIT_TAGS: dict[str, str] = {"bfloat16": "int16"}
-"""Tags without a NumPy dtype, mapped to the same-width tag their bits are read through."""
+_RAW_BIT_TAGS: dict[str, tuple[str, int]] = {
+    "bfloat16": ("int16", 1),
+    "complex32": ("int16", 2),
+    "float8_e4m3fn": ("uint8", 1),
+    "float8_e5m2": ("uint8", 1),
+    "float8_e4m3fnuz": ("uint8", 1),
+    "float8_e5m2fnuz": ("uint8", 1),
+    "float8_e8m0fnu": ("uint8", 1),
+}
+"""Tags without a NumPy dtype: the NumPy tag their bits are stored as, and how many
+of those make one element (``complex32`` is a real then an imaginary binary16)."""
+
+_SUPPORTED_TAGS = frozenset(_SHARED_TAGS) | frozenset(_RAW_BIT_TAGS)
 
 
-def _build_tables() -> tuple[dict[Any, str], dict[str, Any]]:
-    """Map the supported torch dtypes to tags and back.
+def _tag_of(dtype: Any) -> str | None:
+    """Return the tag of a torch dtype (its name), or ``None`` if it is not supported."""
+    tag = str(dtype).removeprefix("torch.")
+    return tag if tag in _SUPPORTED_TAGS else None
 
-    A dtype that this torch version lacks (``uint16`` and wider before torch
-    2.3) is simply absent.
+
+def _dtype_of(tag: str) -> Any:
+    """Return the torch dtype for a supported tag, looked up in the installed torch.
+
+    Raises:
+        ValueError: If the tag is not a tensor tag, or the installed torch does not
+            have the dtype (for example ``float8_e8m0fnu`` before torch 2.7).
     """
-    to_tag: dict[Any, str] = {}
-    for tag in (*_SHARED_TAGS, *_RAW_BIT_TAGS):
-        dtype = getattr(torch, tag, None)
-        if isinstance(dtype, torch.dtype):
-            to_tag[dtype] = tag
-    return to_tag, {tag: dtype for dtype, tag in to_tag.items()}
-
-
-_DTYPE_TO_TAG, _TAG_TO_DTYPE = _build_tables()
+    if tag not in _SUPPORTED_TAGS:
+        raise ValueError(f"unknown torch tensor dtype tag {tag!r}")
+    dtype = getattr(torch, tag, None)
+    if not isinstance(dtype, torch.dtype):
+        raise ValueError(
+            f"stored torch tensor has dtype {tag!r}, which the installed PyTorch "
+            f"{torch.__version__} does not have; install a PyTorch version that has "
+            "it to read this value"
+        )
+    return dtype
 
 
 def _refuse(what: str, reason: str) -> UnsupportedValueError:
@@ -149,12 +173,12 @@ def _check_storable(value: Any) -> str:
             f"dimension names {tuple(names)}",
             "named tensors are not supported (drop the names with .rename(None))",
         )
-    tag = _DTYPE_TO_TAG.get(value.dtype)
+    tag = _tag_of(value.dtype)
     if tag is None:
         raise _refuse(
             f"dtype {value.dtype}",
             "this dtype is not supported in Orcapod v0.3 (supported: bool, integer, "
-            "float16/32/64, bfloat16, complex64/128)",
+            "float16/32/64, bfloat16, the float8 types, complex32/64/128)",
         )
     return tag
 
@@ -181,30 +205,35 @@ def canonical_tensor(value: Any) -> tuple[str, tuple[int, ...], memoryview]:
     if t.device.type != "cpu":
         t = t.to("cpu")
     t = t.resolve_conj().resolve_neg().contiguous()
+    if tag == "complex32":
+        # NumPy has no complex32: store each element's real then imaginary binary16.
+        t = torch.view_as_real(t)
     raw = _RAW_BIT_TAGS.get(tag)
     if raw is not None:
-        t = t.view(_TAG_TO_DTYPE[raw])
+        t = t.view(_dtype_of(raw[0]))
     _, array = canonical_array(t.numpy())
     return tag, tuple(int(d) for d in value.shape), array_bytes(array)
 
 
 def _tensor_from_row(tag: str, dims: tuple[int, ...], data: bytes) -> Any:
     """Build a writeable CPU tensor from a stored row's fields."""
-    dtype = _TAG_TO_DTYPE.get(tag)
-    if dtype is None:
-        raise ValueError(f"unknown torch tensor dtype tag {tag!r}")
-    np_dtype = tag_to_dtype(_RAW_BIT_TAGS.get(tag, tag))
-    count = int(np.prod(dims, dtype=np.int64)) if dims else 1
+    dtype = _dtype_of(tag)
+    raw_tag, parts = _RAW_BIT_TAGS.get(tag, (tag, 1))
+    np_dtype = tag_to_dtype(raw_tag)
+    count = (int(np.prod(dims, dtype=np.int64)) if dims else 1) * parts
     if len(data) != count * np_dtype.itemsize:
         raise ValueError(
             f"stored torch tensor value has {len(data)} data bytes; dtype {tag!r} "
             f"and shape {list(dims)} need {count * np_dtype.itemsize}"
         )
-    array = np.frombuffer(data, dtype=np_dtype, count=count).reshape(dims)
+    array = np.frombuffer(data, dtype=np_dtype, count=count)
+    array = array.reshape((*dims, parts) if parts > 1 else dims)
     # A native-order, owned copy: torch.from_numpy needs native byte order, and the
     # tensor must not share memory with Arrow.
     array = array.astype(np_dtype.newbyteorder("="), copy=True)
     tensor = torch.from_numpy(array)
+    if tag == "complex32":
+        return torch.view_as_complex(tensor.view(torch.float16))
     if tag in _RAW_BIT_TAGS:
         tensor = tensor.view(dtype)
     return tensor

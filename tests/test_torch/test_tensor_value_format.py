@@ -409,7 +409,7 @@ OLDER_TORCH = textwrap.dedent(
     try:
         for _, data in ArrowTableSource(newer, tag_columns=["k"]).iter_data():
             data.as_dict()
-    except ValueError as exc:
+    except Exception as exc:  # the type converter wraps it, naming the column
         print("raised:", exc)
     else:
         print("no error")
@@ -432,5 +432,6 @@ def test_a_dtype_the_installed_torch_lacks_fails_clearly_when_read() -> None:
     lines = proc.stdout.strip().splitlines()
     assert lines[0] == "stored: [0.0, 1.0, 2.0]"
     assert lines[-1].startswith("raised:"), proc.stdout
+    assert "column 'x'" in lines[-1]
     assert "'float8_e8m0fnu'" in lines[-1]
     assert torch.__version__ in lines[-1]

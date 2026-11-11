@@ -898,6 +898,13 @@ def _torch_values() -> dict[str, Any]:
         "empty": torch.zeros((0,), dtype=torch.float32),
         "bool": torch.tensor([True, False, True]),
         "bfloat16": torch.tensor([1.5, -2.25, 3.0], dtype=torch.bfloat16),
+        "complex32": torch.tensor([1 + 2j, -0.5 + 0.25j], dtype=torch.complex32),
+        # Powers of two are exact in every float8 format.
+        "float8_e4m3fn": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fn),
+        "float8_e5m2": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e5m2),
+        "float8_e4m3fnuz": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fnuz),
+        "float8_e5m2fnuz": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e5m2fnuz),
+        "float8_e8m0fnu": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e8m0fnu),
         "zero_dim": torch.tensor(2.5),
         "non_contiguous": base.T,
     }
