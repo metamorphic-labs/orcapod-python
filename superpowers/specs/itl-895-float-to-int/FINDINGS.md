@@ -2,7 +2,9 @@
 
 Investigated on `b197544e` (origin/main, November 11, 2026). Each claim has a script in this
 directory, and its captured output is in `outputs/`. Run any script with
-`uv run python superpowers/specs/itl-895-float-to-int/<script>.py`.
+`uv run python superpowers/specs/itl-895-float-to-int/<script>.py`. The scripts show the
+behaviour **before** the fix: run them at commit `07037243`. After the fix, the
+function-output paths raise `OutputTypeError` instead.
 
 ## TL;DR
 
