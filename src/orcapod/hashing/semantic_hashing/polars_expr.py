@@ -176,11 +176,11 @@ def _fail(reason: str) -> _Unsupported:
     return _Unsupported(reason)
 
 
-def _single_key(obj: Any, what: str) -> tuple[str, Any]:
+def _single_key(obj: Any) -> tuple[str, Any]:
     if isinstance(obj, str):
         return obj, None
     if not isinstance(obj, dict) or len(obj) != 1:
-        raise _fail(f"unexpected {what} layout {_short(obj)}")
+        raise _fail(f"unexpected serialization layout {_short(obj)}")
     ((key, value),) = obj.items()
     return key, value
 
@@ -190,21 +190,21 @@ def _short(obj: Any) -> str:
     return text if len(text) <= 120 else text[:117] + "..."
 
 
-def _require_keys(obj: Any, keys: set[str], what: str) -> dict[str, Any]:
+def _require_keys(obj: Any, keys: set[str]) -> dict[str, Any]:
     if not isinstance(obj, dict) or set(obj) != keys:
-        raise _fail(f"unexpected {what} layout {_short(obj)}")
+        raise _fail(f"unexpected serialization layout {_short(obj)}")
     return obj
 
 
-def _require_int(value: Any, what: str) -> int:
+def _require_int(value: Any) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
-        raise _fail(f"unexpected {what} value {_short(value)}")
+        raise _fail(f"expected an integer, got {_short(value)}")
     return value
 
 
-def _require_bool(value: Any, what: str) -> bool:
+def _require_bool(value: Any) -> bool:
     if not isinstance(value, bool):
-        raise _fail(f"unexpected {what} value {_short(value)}")
+        raise _fail(f"expected a boolean, got {_short(value)}")
     return value
 
 
@@ -231,7 +231,7 @@ def _time_unit(value: Any) -> str:
 def _time_zone(value: Any) -> str | None:
     if value is None:
         return None
-    zone = _require_keys(value, {"inner"}, "time zone")["inner"]
+    zone = _require_keys(value, {"inner"})["inner"]
     if not isinstance(zone, str):
         raise _fail(f"unexpected time zone {_short(value)}")
     return zone
@@ -239,7 +239,7 @@ def _time_zone(value: Any) -> str | None:
 
 def _dtype(obj: Any) -> Any:
     """Encode a dtype from Polars' JSON layout (without the ``Literal`` wrapper)."""
-    key, value = _single_key(obj, "dtype")
+    key, value = _single_key(obj)
     if value is None and key in _PLAIN_DTYPES:
         return _PLAIN_DTYPES[key]
     if key == "Decimal":
@@ -247,8 +247,8 @@ def _dtype(obj: Any) -> Any:
             raise _fail(f"unexpected Decimal dtype {_short(value)}")
         return {
             "decimal": [
-                _require_int(value[0], "precision"),
-                _require_int(value[1], "scale"),
+                _require_int(value[0]),
+                _require_int(value[1]),
             ]
         }
     if key == "Datetime":
@@ -316,19 +316,19 @@ def _list_literal(value: Any) -> Any:
 
 
 def _scalar_literal(obj: Any) -> Any:
-    key, value = _single_key(obj, "scalar literal")
+    key, value = _single_key(obj)
     if key == "Null":
         if value != "Null":
             raise _fail(f"unexpected null literal {_short(value)}")
         return {"null": None}
     if key == "Boolean":
-        return {"boolean": _require_bool(value, "boolean literal")}
+        return {"boolean": _require_bool(value)}
     if key == "String":
         if not isinstance(value, str):
             raise _fail(f"unexpected string literal {_short(value)}")
         return {"string": value}
     if key in _INTEGER_DTYPES:
-        return {_INTEGER_DTYPES[key]: str(_require_int(value, "integer literal"))}
+        return {_INTEGER_DTYPES[key]: str(_require_int(value))}
     if key == "Float32":
         return {"float32": _float_hex(value, float32=True)}
     if key == "Float64":
@@ -339,9 +339,9 @@ def _scalar_literal(obj: Any) -> Any:
         unscaled, precision, scale = value
         return {
             "decimal": [
-                str(_require_int(unscaled, "decimal literal")),
-                _require_int(precision, "decimal precision"),
-                _require_int(scale, "decimal scale"),
+                str(_require_int(unscaled)),
+                _require_int(precision),
+                _require_int(scale),
             ]
         }
     if key == "Binary":
@@ -352,15 +352,15 @@ def _scalar_literal(obj: Any) -> Any:
             raise _fail(f"unexpected binary literal {_short(value)}")
         return {"binary": bytes(value).hex()}
     if key == "Date":
-        return {"date": _require_int(value, "date literal")}
+        return {"date": _require_int(value)}
     if key == "Time":
-        return {"time": _require_int(value, "time literal")}
+        return {"time": _require_int(value)}
     if key == "Datetime":
         if not isinstance(value, list) or len(value) != 3:
             raise _fail(f"unexpected datetime literal {_short(value)}")
         return {
             "datetime": [
-                _require_int(value[0], "datetime literal"),
+                _require_int(value[0]),
                 _time_unit(value[1]),
                 _time_zone(value[2]),
             ]
@@ -370,7 +370,7 @@ def _scalar_literal(obj: Any) -> Any:
             raise _fail(f"unexpected duration literal {_short(value)}")
         return {
             "duration": [
-                _require_int(value[0], "duration literal"),
+                _require_int(value[0]),
                 _time_unit(value[1]),
             ]
         }
@@ -380,11 +380,11 @@ def _scalar_literal(obj: Any) -> Any:
 
 
 def _literal(obj: Any) -> Any:
-    key, value = _single_key(obj, "literal")
+    key, value = _single_key(obj)
     if key == "Dyn":
-        dyn_key, dyn_value = _single_key(value, "literal")
+        dyn_key, dyn_value = _single_key(value)
         if dyn_key == "Int":
-            return {"dyn_int": str(_require_int(dyn_value, "integer literal"))}
+            return {"dyn_int": str(_require_int(dyn_value))}
         if dyn_key == "Float":
             return {"dyn_float": _float_hex(dyn_value)}
         raise _fail(f"dynamic {dyn_key} literals are not supported")
@@ -398,45 +398,45 @@ def _literal(obj: Any) -> Any:
 
 
 def _function(obj: Any) -> Any:
-    body = _require_keys(obj, {"input", "function"}, "function")
+    body = _require_keys(obj, {"input", "function"})
     inputs = body["input"]
     if not isinstance(inputs, list):
         raise _fail(f"unexpected function inputs {_short(inputs)}")
     nodes = [_node(i) for i in inputs]
-    key, value = _single_key(body["function"], "function")
+    key, value = _single_key(body["function"])
     if key == "Negate" and value is None:
         return {"fn": ["negate", {}, nodes]}
     if key == "Boolean":
-        name, options = _single_key(value, "function")
+        name, options = _single_key(value)
         if options is None and name in _BOOLEAN_FUNCTIONS:
             return {"fn": [_BOOLEAN_FUNCTIONS[name], {}, nodes]}
         if name == "IsIn":
-            opts = _require_keys(options, {"nulls_equal"}, "is_in options")
+            opts = _require_keys(options, {"nulls_equal"})
             return {
                 "fn": [
                     "is_in",
-                    {"nulls_equal": _require_bool(opts["nulls_equal"], "nulls_equal")},
+                    {"nulls_equal": _require_bool(opts["nulls_equal"])},
                     nodes,
                 ]
             }
         if name == "IsBetween":
-            closed = _require_keys(options, {"closed"}, "is_between options")["closed"]
+            closed = _require_keys(options, {"closed"})["closed"]
             if closed not in _CLOSED:
                 raise _fail(f"unexpected is_between closed value {_short(closed)}")
             return {"fn": ["is_between", {"closed": _CLOSED[closed]}, nodes]}
         raise _fail(f"the function {name} is not supported")
     if key == "StringExpr":
-        name, options = _single_key(value, "function")
+        name, options = _single_key(value)
         if options is None and name in _STRING_FUNCTIONS:
             return {"fn": [_STRING_FUNCTIONS[name], {}, nodes]}
         if name == "Contains":
-            opts = _require_keys(options, {"literal", "strict"}, "str.contains options")
+            opts = _require_keys(options, {"literal", "strict"})
             return {
                 "fn": [
                     "str.contains",
                     {
-                        "literal": _require_bool(opts["literal"], "literal"),
-                        "strict": _require_bool(opts["strict"], "strict"),
+                        "literal": _require_bool(opts["literal"]),
+                        "strict": _require_bool(opts["strict"]),
                     },
                     nodes,
                 ]
@@ -446,7 +446,7 @@ def _function(obj: Any) -> Any:
 
 
 def _node(obj: Any) -> Any:
-    key, value = _single_key(obj, "expression")
+    key, value = _single_key(obj)
     if key in _PYTHON_FUNCTION_NODES:
         raise _fail(
             "it calls a Python function (map_elements, map_batches, ...), which cannot be "
@@ -465,7 +465,7 @@ def _node(obj: Any) -> Any:
     if key == "Literal":
         return {"lit": _literal(value)}
     if key == "BinaryExpr":
-        body = _require_keys(value, {"left", "op", "right"}, "binary expression")
+        body = _require_keys(value, {"left", "op", "right"})
         op = body["op"]
         if op not in _BINARY_OPS:
             raise _fail(f"the operator {op} is not supported")
@@ -473,8 +473,8 @@ def _node(obj: Any) -> Any:
     if key == "Function":
         return _function(value)
     if key == "Cast":
-        body = _require_keys(value, {"expr", "dtype", "options"}, "cast")
-        dtype_key, dtype_value = _single_key(body["dtype"], "cast dtype")
+        body = _require_keys(value, {"expr", "dtype", "options"})
+        dtype_key, dtype_value = _single_key(body["dtype"])
         if dtype_key != "Literal":
             raise _fail(f"unexpected cast dtype layout {_short(body['dtype'])}")
         options = body["options"]
