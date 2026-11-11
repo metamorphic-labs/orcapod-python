@@ -47,6 +47,39 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
   subclasses, whatever the registration order.
 
+#### Arrow hashing moves to starfix hash format 2: every Arrow-derived hash changes (ITL-910)
+
+**Orcapod now requires `starfix>=0.5.0,<0.6`, and the Arrow hash label moves from `arrow_v0.1`
+to `arrow_v0.2`.** starfix 0.4 (hash format 1) lost information for some inputs, so different
+data could hash the same (ITL-848): the lengths of nested lists (`[[[1]], [[2], [3]]]` and
+`[[[1], [2]], [[3]]]`), a null struct and a struct whose fields are all null, and Boolean
+columns, whose hash also depended on how the table was split into chunks. starfix 0.5 (hash
+format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are not kept.
+
+- **What moves.** Every hash computed from an Arrow table: per-row data hashes, default
+  `source_id`s and the `record_id`s and source content hashes built from them, function
+  input-data hashes, pipeline base and entry ids, operator and cached-source record hashes,
+  invocation hashes, and the hashes of `pa.Table`, pandas `DataFrame` and `Series` values. The
+  hash label in front of each (`arrow_v0.2:000002...`) shows the new format. Pipeline hashes,
+  schema hashes, system-tag column names and table paths under the default
+  `table_scope="pipeline_hash"` do not move. Paths that embed a content hash
+  (`table_scope="content_hash"`, `CachedSource` tables) move with it. Where a `GroupBy` or
+  `Batch` orders members by `record_id`, the order of members can change too.
+- **Results stored by 0.2.0.** STORED-DATA-PARAGRAPH (ITL-910 D1, pending)
+- **Now hashable.** `fixed_size_list` columns, at any depth (ITL-927): a source or operator
+  carrying one works, and its type is kept. A `fixed_size_list<T>[n]` hashes differently from a
+  `large_list<T>` with the same values. pyarrow's canonical extension types (`arrow.uuid`,
+  `arrow.fixed_shape_tensor`) hash with their extension name and metadata, so an `arrow.uuid`
+  column never hashes like the `fixed_size_binary(16)` column holding the same bytes, and
+  `StarfixArrowHasher.hash_schema` keeps the identity of extension columns (ITL-846).
+- **Now refused** with `ValueError` naming the column path and type, where starfix 0.4 hashed
+  silently: a non-nullable field holding a null; a zero-row table with a `map` column; two
+  schema nodes sharing a path (duplicate column names, for example in a `pa.Table` value, or a
+  column `"a/b"` next to a struct column `a` with a child `b`). Data of `null`, `map`,
+  interval, `string_view` and `binary_view` columns, union and run-end-encoded types are
+  still refused, now with `ValueError` instead of `NotImplementedError`.
+- Column order and struct field order are still not part of an Arrow hash.
+
 #### A changed column type is refused when appending to a Delta table (ITL-884)
 
 Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'

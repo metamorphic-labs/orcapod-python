@@ -2442,3 +2442,26 @@ results.
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
 instead. Tighten under a new storage version once nested nullability survives Polars.
+
+---
+
+## `src/orcapod/hashing/arrow_hashers.py` — Arrow hash format (starfix)
+
+### HS2 — starfix hash format 1 collided on nested lists, null structs and Booleans
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-910 (fixes the starfix side of ITL-848; ITL-927)
+
+`StarfixArrowHasher` used starfix 0.4 (hash format 1, label `arrow_v0.1`), which lost
+information for some inputs, so different data reached the same row hash: nested-list lengths
+(`[[[1]], [[2], [3]]]` and `[[[1], [2]], [[3]]]`), a null struct and a struct whose fields are
+all null, and non-nullable Boolean columns (`[True]` and `[True, False, False]`); a Boolean
+column's hash also depended on chunking. starfix 0.4 also could not hash `fixed_size_list`
+data, so a source with such a column failed at construction (ITL-927).
+
+**Fix:** starfix 0.5 (hash format 2, prefix `00 00 02`) under the new label `arrow_v0.2`
+(developer's label rule: the label moves whenever any table hash can change). Every
+Arrow-derived hash moves; the golden files were regenerated once, explicitly. Order options
+stay off. pyarrow's canonical extension types and `hash_schema` on extension columns hash with
+their extension identity instead of as their storage type. Open: what a v0.3 node does with
+rows a v0.2 store holds under `arrow_v0.1` in the same table (ITL-910 decision D1).
