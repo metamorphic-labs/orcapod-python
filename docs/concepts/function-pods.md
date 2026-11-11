@@ -218,6 +218,19 @@ print("function calls:", len(calls))
     version, e.g. `@function_pod(output_keys="bmi", version="v1.0")` (the default is
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
 
+!!! note "When the store cannot be read"
+    A table that does not exist yet reads as empty, and its rows are computed. A table that
+    exists but cannot be read (for example, a data file was deleted or damaged) is never
+    treated as empty: the run stops with `orcapod.errors.StoreReadError`, which names the
+    table and the underlying error, whatever the orchestrator's `error_policy`. Nothing is
+    recomputed or overwritten, so you can repair the table or restore the file and run again.
+
+    In a `DeltaTableDatabase`, rows whose column types differ from the stored table's
+    (`float64` values for a column stored as `int64`, say) are refused with
+    `InputValidationError`, which names the table, the column and both types. They are not
+    converted to the stored type. `string` and `large_string`, and the other large and
+    non-large layouts of one type, count as the same type.
+
 A node from a job that has run also provides:
 
 - **`get_all_records()`** -- every record this step of the job has stored, as a PyArrow

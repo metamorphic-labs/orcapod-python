@@ -2171,3 +2171,37 @@ equals the materialized one. Hashes of pipelines that already worked are unchang
 Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
 barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
 xfail.
+
+---
+
+## `src/orcapod/databases/delta_lake_databases.py` — read failures
+
+### DR1 — A Delta table that could not be read was reported as having no rows
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-884
+
+`DeltaTableDatabase.get_all_records` logged a read error at WARNING and returned `None`, and
+`get_records_by_ids` returned `None` on any error. Both conflated "the table does not exist"
+with "the table exists but cannot be read". Callers treat `None` as no rows. A function node
+recomputed with a "deleted externally" warning, its per-row lookups failed inside the
+`error_policy="continue"` handler, and the run finished without raising, so stored results
+looked dropped. `_flush_by_key` also treated a `DeltaProtocolError` on load as "no table" and
+wrote the batch with `mode="overwrite"`. The case that exposed it: an append whose column type
+differs from the stored table, which Delta's merge either casts silently to the stored type or,
+with an extension type involved, accepts and then cannot read. Other backends were not
+affected: the in-memory and connector databases (SQLite, PostgreSQL, SpiralDB) return `None`
+only for a table that does not exist and let read errors propagate.
+
+**Fix:** only `TableNotFoundError` means absent. Every other load or read error raises
+`orcapod.errors.StoreReadError`, which names the table and chains the cause. `FunctionNode.execute`, the
+async `FunctionPod` row handler and the async orchestrator let it fail the run whatever the
+`error_policy`. Before merging into an existing table, `_flush_by_key` compares the batch with
+the stored Delta schema through Delta's own type mapping (extension types by storage,
+large-normalized, nullability ignored). On a difference it raises `InputValidationError` naming the
+table, column and both types, and nothing is written. Regressions:
+`tests/test_databases/test_delta_read_failures.py` and
+`tests/test_pipeline/test_store_read_failure.py`. Open: whether a nullability-only change
+should be refused (Delta's merge relaxes a non-null nested field to nullable) belongs to the
+nullability audit, ITL-842.
+

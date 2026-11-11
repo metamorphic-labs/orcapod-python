@@ -83,6 +83,22 @@ info. Hashes of pipelines that already worked are unchanged.
 
 ### Fixed
 
+#### A Delta table that cannot be read is no longer reported as having no rows (ITL-884)
+
+When a `DeltaTableDatabase` table existed but could not be read (a missing or damaged data
+file, a log the backend cannot load, data files whose column type no longer matches the
+table), `get_all_records` and `get_records_by_ids` returned `None`, the same answer as for a
+table that does not exist. A `PipelineJob` then warned that the stored results "may have been
+deleted externally", swallowed the per-row read errors under `error_policy="continue"`, finished
+without raising, and its nodes showed no records. Every read now raises
+`orcapod.errors.StoreReadError`, which names the table and chains the backend's error, and a
+store read failure fails the run under both orchestrators whatever the `error_policy`. A table
+that does not exist still reads as empty.
+
+A flush that could not load an existing table no longer treats it as absent. Before this fix a
+`DeltaProtocolError` while loading the table made the flush write the batch with
+`mode="overwrite"`, replacing the stored rows. The flush now raises and writes nothing.
+
 #### Materialized rows keep their own source info (ITL-845)
 
 When rows were collected and turned back into a stream, every row got the source-info
@@ -114,6 +130,18 @@ table by joining the path components with `__`, each with non-alphanumeric chara
 replaced by `_`. Correcting stored values is tracked in ITL-853.
 
 ### Breaking Changes
+
+#### A changed column type is refused when appending to a Delta table (ITL-884)
+
+Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'
+column types with the stored ones. If a column's type differs, the flush raises
+`InputValidationError` naming the table, the column and both types, and writes nothing. Before,
+Delta's merge silently cast the new rows to the stored type (`int32` or `float64` rows written
+into an `int64` column, `large_binary` into `large_string`), or, when an extension (logical) type
+was involved, accepted rows the table could then no longer read. The comparison treats types the
+way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
+are the same type, an extension type is compared by its storage type, and nullability is not
+compared. New columns and missing columns are still accepted.
 
 #### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-832, ITL-813)
 
