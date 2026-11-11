@@ -35,6 +35,7 @@ _DAMAGE_ON_NEXT_CALL: list[Path] = []
 
 @function_pod(output_keys="y")
 def double(x: int) -> int:
+    """Record the call, damage any queued table, and return twice ``x``."""
     _CALLS.append(x)
     while _DAMAGE_ON_NEXT_CALL:
         require_unknown_reader_feature(_DAMAGE_ON_NEXT_CALL.pop())
@@ -43,6 +44,7 @@ def double(x: int) -> int:
 
 @function_pod(output_keys="z")
 def triple(x: int) -> int:
+    """Return three times ``x``."""
     return 3 * x
 
 
@@ -54,6 +56,7 @@ ORCHESTRATORS: dict[str, Callable[[], object]] = {
 
 @pytest.fixture(autouse=True)
 def _reset_calls():
+    """Start and end every test with no recorded calls and no queued damage."""
     _CALLS.clear()
     _DAMAGE_ON_NEXT_CALL.clear()
     yield
@@ -63,10 +66,12 @@ def _reset_calls():
 
 @pytest.fixture(params=list(ORCHESTRATORS))
 def make_orchestrator(request) -> Callable[[], object]:
+    """Return a factory for the parametrized orchestrator."""
     return ORCHESTRATORS[request.param]
 
 
 def build_job(store_path: Path, keys: str = "abc") -> PipelineJob:
+    """Build a job that doubles ``x`` for one row per key in ``keys``."""
     source = ArrowTableSource(
         pa.table({"k": list(keys), "x": list(range(1, len(keys) + 1))}),
         tag_columns=["k"],
@@ -88,6 +93,7 @@ def table_dirs(store_path: Path) -> tuple[Path, Path]:
 
 
 def delete_data_files(table: Path) -> None:
+    """Delete a table's data files, leaving its log intact."""
     for f in table.glob("*.parquet"):
         f.unlink()
 
@@ -120,6 +126,7 @@ def stored(tmp_path: Path, make_orchestrator) -> Path:
 
 
 def test_unreadable_result_table_fails_the_run(stored, make_orchestrator):
+    """An unreadable result table fails the run before any function call."""
     result_table, _ = table_dirs(stored)
     delete_data_files(result_table)
 
@@ -134,6 +141,7 @@ def test_unreadable_result_table_fails_the_run(stored, make_orchestrator):
 def test_unreadable_result_table_fails_the_run_under_continue(
     stored, make_orchestrator
 ):
+    """The per-row lookup's read failure fails the run under ``continue``."""
     # With the pipeline table gone, the job has no stored tag rows to join, so the
     # first read of the result table is the per-row cache lookup, which runs inside
     # the error_policy="continue" handler.
@@ -150,6 +158,7 @@ def test_unreadable_result_table_fails_the_run_under_continue(
 
 
 def test_store_read_failure_in_a_row_flush_fails_the_run(stored, make_orchestrator):
+    """A read failure in the flush that stores a row's result fails the run."""
     # Rows d and e are new. The result table breaks while d is computed, after
     # d's cache lookup succeeded, so the failure surfaces in the flush that stores
     # d's result, inside the error_policy="continue" per-row handler. Before the
@@ -174,6 +183,7 @@ def test_store_read_failure_in_a_row_flush_fails_the_run(stored, make_orchestrat
 
 
 def test_absent_tables_are_computed(stored, make_orchestrator):
+    """Tables that do not exist are computed and stored, not reported unreadable."""
     result_table, pipeline_table = table_dirs(stored)
     shutil.rmtree(result_table)
     shutil.rmtree(pipeline_table)
@@ -192,16 +202,19 @@ class _FailsToStartNode(NoOpObserver):
     """An observer whose ``on_node_start`` raises for one node label."""
 
     def __init__(self, label: str) -> None:
+        """Fail ``on_node_start`` for the node labelled ``label``."""
         self.label = label
 
     def on_node_start(
         self, node_label: str, node_hash: str, tag_schema: object = None
     ) -> None:
+        """Raise ``ValueError`` when the node labelled ``self.label`` starts."""
         if node_label == self.label:
             raise ValueError(f"observer failed for {node_label}")
 
 
 def test_unrelated_concurrent_failure_does_not_hide_store_read_error(tmp_path):
+    """An unrelated concurrent failure does not hide the ``StoreReadError``."""
     # Node "dbl" raises StoreReadError while loading its stored results and node
     # "tri" fails in the observer's on_node_start. Both fail before their first
     # await, so both land in the async TaskGroup's exception group. Before the fix,

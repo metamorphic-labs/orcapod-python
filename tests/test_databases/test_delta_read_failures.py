@@ -37,6 +37,7 @@ def rows(ids: list[bytes], x: pa.Array[Any], **extra: pa.Array[Any]) -> pa.Table
 
 
 def table_dir(base: Path) -> Path:
+    """Return the directory of the table at ``PATH`` under ``base``."""
     return base.joinpath(*PATH)
 
 
@@ -53,24 +54,29 @@ class _Ext(pa.ExtensionType):
     """A minimal extension type standing in for a logical type's storage."""
 
     def __init__(self, storage: pa.DataType) -> None:
+        """Wrap ``storage`` in the test extension type."""
         super().__init__(storage, "orcapod.test.itl884")
 
     def __arrow_ext_serialize__(self) -> bytes:
+        """Return the (empty) serialized parameters of the type."""
         return b""
 
     @classmethod
     def __arrow_ext_deserialize__(
         cls, storage_type: pa.DataType, serialized: bytes
     ) -> "_Ext":
+        """Rebuild the type over ``storage_type``."""
         return cls(storage_type)
 
 
 def ext_array(values: list[Any], storage: pa.DataType) -> pa.ExtensionArray[Any]:
+    """Build an extension array of ``values`` over the given storage type."""
     return pa.ExtensionArray.from_storage(_Ext(storage), pa.array(values, storage))
 
 
 @pytest.fixture
 def base(tmp_path: Path) -> Path:
+    """Return the store root, inside the test's temporary directory."""
     return tmp_path / "store"
 
 
@@ -113,6 +119,7 @@ def unsupported_reader_feature(base: Path) -> None:
 
 
 def assert_names_table(exc: StoreReadError, base: Path) -> None:
+    """Assert that ``exc`` names the table at ``PATH`` and chains its cause."""
     assert Path(exc.table) == table_dir(base)
     assert exc.table in str(exc)
     assert exc.__cause__ is not None
@@ -133,13 +140,17 @@ READS: dict[str, Callable[[DeltaTableDatabase], object]] = {
 
 
 class TestUnreadableTable:
+    """A table that exists but cannot be read raises on every read path."""
+
     @pytest.mark.parametrize("read", READS.values(), ids=list(READS))
     def test_read_raises_store_read_error(self, base, unreadable, read):
+        """Each read of the unreadable table raises ``StoreReadError`` naming it."""
         with pytest.raises(StoreReadError) as info:
             read(unreadable)
         assert_names_table(info.value, base)
 
     def test_skip_duplicates_append_raises_store_read_error(self, base, unreadable):
+        """The existing-ids read for ``skip_duplicates`` raises, never assumes none."""
         # skip_duplicates reads the stored record ids before buffering the rows.
         with pytest.raises(StoreReadError) as info:
             unreadable.add_records(
@@ -151,18 +162,23 @@ class TestUnreadableTable:
         assert_names_table(info.value, base)
 
     def test_table_still_exists(self, unreadable):
+        """The unreadable table is still reported as existing."""
         assert unreadable.table_exists(PATH)
 
 
 def test_bad_filter_is_not_reported_as_unreadable_table(stored):
+    """A bad filter column is the caller's error, not a ``StoreReadError``."""
     # The table reads fine; the filter names a column it does not have.
     with pytest.raises(pa.ArrowInvalid):
         stored.get_records_with_column_value(PATH, {"no_such_column": 1})
 
 
 class TestAbsentTable:
+    """A table that does not exist still reads as ``None``."""
+
     @pytest.mark.parametrize("read", READS.values(), ids=list(READS))
     def test_read_returns_none(self, base, read):
+        """Each read of a table that was never written returns ``None``."""
         db = DeltaTableDatabase(base_path=base)
         assert read(db) is None
         assert not db.table_exists(PATH)
@@ -174,7 +190,10 @@ class TestAbsentTable:
 
 
 class TestUnloadableTableIsNeverOverwritten:
+    """A table whose log cannot be loaded is never replaced by a flush."""
+
     def test_unsupported_reader_feature(self, base, stored):
+        """An unloadable log makes reads and the flush raise; nothing is written."""
         unsupported_reader_feature(base)
         before = snapshot(table_dir(base))
         db = DeltaTableDatabase(base_path=base)
@@ -194,6 +213,7 @@ class TestUnloadableTableIsNeverOverwritten:
     def test_protocol_error_on_load_is_not_treated_as_absent(
         self, base, stored, monkeypatch
     ):
+        """A ``DeltaProtocolError`` on load makes the flush raise, not overwrite."""
         # deltalake 1.0.2 does not raise DeltaProtocolError for a local table we can
         # build here, so the load is replaced by one that raises it for this table.
         # Before ITL-884 the flush treated this error as "no table" and wrote the
@@ -202,6 +222,7 @@ class TestUnloadableTableIsNeverOverwritten:
         target = table_dir(base)
 
         def failing_load(table_uri, *args, **kwargs):
+            """Raise ``DeltaProtocolError`` for the target table only."""
             if Path(str(table_uri)) == target:
                 raise DeltaProtocolError("simulated")
             return real(table_uri, *args, **kwargs)
@@ -226,9 +247,12 @@ class TestUnloadableTableIsNeverOverwritten:
 
 
 class TestFlushRaisesStoreErrorsThemselves:
+    """``flush`` raises store errors as themselves, with the other failures noted."""
+
     def test_store_read_error_is_raised_with_a_note_per_other_failed_batch(
         self, base, stored
     ):
+        """The ``StoreReadError`` is raised and the refused batch is noted on it."""
         other = ("results", "u")
         stored.add_records(
             other,
@@ -260,7 +284,10 @@ class TestFlushRaisesStoreErrorsThemselves:
             db.flush()
 
     def test_other_flush_failures_still_raise_runtime_error(self, base, monkeypatch):
+        """A flush that fails for another reason still raises ``RuntimeError``."""
+
         def failing_write(*args, **kwargs):
+            """Raise ``OSError`` for every write."""
             raise OSError("simulated disk failure")
 
         db = DeltaTableDatabase(base_path=base)
@@ -280,10 +307,13 @@ class TestFlushRaisesStoreErrorsThemselves:
 
 
 def append(db: DeltaTableDatabase, table: pa.Table) -> None:
+    """Add ``table`` at ``PATH`` and flush it."""
     db.add_records(PATH, table, record_id_column="rid", flush=True)
 
 
 class TestChangedColumnTypeIsRefused:
+    """An append whose column type differs from the stored table is refused."""
+
     @pytest.mark.parametrize(
         ("new_type", "value", "named"),
         [
@@ -294,6 +324,7 @@ class TestChangedColumnTypeIsRefused:
         ids=["int64->float64", "int64->int32", "int64->large_string"],
     )
     def test_plain_type_change(self, base, stored, new_type, value, named):
+        """A changed column type is refused, naming the column and both types."""
         with pytest.raises(InputValidationError) as info:
             append(stored, rows([b"c"], pa.array([value], new_type)))
         message = str(info.value)
@@ -308,6 +339,7 @@ class TestChangedColumnTypeIsRefused:
         assert back.schema.field("x").type == pa.int64()
 
     def test_extension_storage_change(self, base):
+        """A changed extension storage type is refused and the table stays readable."""
         db = DeltaTableDatabase(base_path=base)
         append(db, rows([b"a"], ext_array([b"x"], pa.large_binary())))
 
@@ -327,12 +359,16 @@ class TestChangedColumnTypeIsRefused:
 
 
 class TestLegitimateAppendsStillPass:
+    """Appends whose types match the stored table, as Delta stores them, succeed."""
+
     def read_back(self, base: Path) -> pa.Table:
+        """Read every row at ``PATH`` with a fresh database view."""
         back = DeltaTableDatabase(base_path=base).get_all_records(PATH)
         assert back is not None
         return back
 
     def test_identical_schema(self, base, stored):
+        """An append with the stored schema succeeds."""
         append(stored, rows([b"c"], pa.array([3], pa.int64())))
         assert self.read_back(base).num_rows == 3
 
@@ -350,12 +386,14 @@ class TestLegitimateAppendsStillPass:
         ids=["string->large", "large->string", "list->large", "binary->large"],
     )
     def test_large_and_non_large_layouts(self, base, first, second):
+        """Large and non-large layouts of one type count as the same type."""
         db = DeltaTableDatabase(base_path=base)
         append(db, rows([b"a"], first))
         append(db, rows([b"b"], second))
         assert self.read_back(base).num_rows == 2
 
     def test_new_column(self, base, stored):
+        """An append that adds a column succeeds."""
         append(
             stored,
             rows([b"c"], pa.array([3], pa.int64()), y=pa.array(["new"])),
@@ -365,18 +403,21 @@ class TestLegitimateAppendsStillPass:
         assert "y" in back.column_names
 
     def test_missing_column(self, base):
+        """An append that omits a stored column succeeds."""
         db = DeltaTableDatabase(base_path=base)
         append(db, rows([b"a"], pa.array([1], pa.int64()), y=pa.array(["old"])))
         append(db, rows([b"b"], pa.array([2], pa.int64())))
         assert self.read_back(base).num_rows == 2
 
     def test_extension_type_with_unchanged_storage(self, base):
+        """An extension type with unchanged storage appends."""
         db = DeltaTableDatabase(base_path=base)
         append(db, rows([b"a"], ext_array([b"x"], pa.large_binary())))
         append(db, rows([b"b"], ext_array([b"y"], pa.large_binary())))
         assert self.read_back(base).num_rows == 2
 
     def test_nullability_only_difference_is_accepted(self, base):
+        """A nullability-only difference is accepted (pinned, ITL-842)."""
         # Pins today's behaviour: the append check ignores nullability (ITL-884,
         # decision D3). Whether a nullability change should be refused belongs to
         # the nullability audit, ITL-842. The read-back assertion records what
