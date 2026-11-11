@@ -312,7 +312,7 @@ CONVERTED = [
     pytest.param(
         dict[str, list[int]],
         {"a": (1,)},
-        {"a": [1]},
+        [{"key": "a", "value": [1]}],  # a map column reads back as key/value records
         "tuple",
         "at [*]",
         id="D5-nested-names-the-place",
@@ -336,10 +336,7 @@ class TestConvertedWithWarning:
         assert type_name in message
         assert words in message
         assert "to avoid this warning" in message
-        stored_value = table["y"].to_pylist()[0]
-        if isinstance(stored, dict):
-            stored_value = dict(stored_value)
-        assert stored_value == stored
+        assert table["y"].to_pylist() == [stored]
 
     def test_warning_never_shows_the_value(self) -> None:
         """The message must be the same on every row, so it is shown once per run."""

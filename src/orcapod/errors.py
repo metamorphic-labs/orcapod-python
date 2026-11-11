@@ -84,6 +84,7 @@ class OutputTypeError(TypeError, ValueError):
         declared_type: object,
         value: object,
         detail: str | None = None,
+        hint: str | None = None,
     ) -> None:
         """Create the error for one output of one call.
 
@@ -94,21 +95,25 @@ class OutputTypeError(TypeError, ValueError):
             value: The value the function returned for that output.
             detail: Where inside the value the mismatch is, or why the conversion
                 failed, when that is not the value as a whole.
+            hint: What the function should return instead, when there is a specific
+                fix (``Return a float instead: 0.0 or float(value)``).
         """
         self.function_name: str = function_name
         self.output_key: str = output_key
         self.declared_type: object = declared_type
         self.value: object = value
         self.detail: str | None = detail
+        self.hint: str | None = hint
         where = f": {detail}" if detail else ""
         value_repr = repr(value)
         if len(value_repr) > 80:
             value_repr = value_repr[:77] + "..."
+        fix = f". {hint}." if hint else "; convert the value in the function."
         super().__init__(
             f"Function {function_name!r} returned {type_text(type(value))} "
             + f"({value_repr}) for output {output_key!r}, which is declared "
             + f"{type_text(declared_type)}{where}. Orcapod does not convert types "
-            + "implicitly; convert the value in the function."
+            + f"implicitly{fix}"
         )
 
     def __reduce__(self) -> tuple[object, ...]:
@@ -121,6 +126,83 @@ class OutputTypeError(TypeError, ValueError):
                 self.declared_type,
                 self.value,
                 self.detail,
+                self.hint,
+            ),
+        )
+
+
+class OutputConversionWarning(UserWarning):
+    """A function returned a near miss for an output, and Orcapod converted it.
+
+    A few values whose type is not exactly the declared type are accepted and converted
+    (ITL-895): a ``tuple`` for ``list[T]`` becomes a list, a ``datetime`` for ``date``
+    loses its time of day, a Python ``float`` for ``numpy.float32`` is rounded to 32
+    bits. The stored value, and the value a downstream pod receives, is the converted
+    one. The message names the types, never the value, so Python's default warning
+    filter shows it once per function, output and conversion, however many rows a run
+    has. To make it an error (a row failure in a pipeline), run with
+    ``-W error::orcapod.errors.OutputConversionWarning``.
+
+    Attributes:
+        function_name: Name of the function pod's function.
+        output_key: Name of the output column.
+        location: Where inside the returned value, by structure (``[*]`` for any list
+            element or dict value); empty for the value as a whole.
+        declared_type: The declared type at that place.
+        returned_type: The type of the returned value at that place.
+        conversion: What Orcapod did to the value (``converted it to a list``).
+        hint: How the function avoids the conversion (``Return value.date()``).
+    """
+
+    def __init__(
+        self,
+        function_name: str,
+        output_key: str,
+        location: str,
+        declared_type: object,
+        returned_type: type,
+        conversion: str,
+        hint: str,
+    ) -> None:
+        """Create the warning for one conversion of one output.
+
+        Args:
+            function_name: Name of the function pod's function.
+            output_key: Name of the output column.
+            location: Where inside the returned value, by structure; empty for the
+                value as a whole.
+            declared_type: The declared type at that place.
+            returned_type: The type of the returned value at that place.
+            conversion: What Orcapod did to the value.
+            hint: How the function avoids the conversion.
+        """
+        self.function_name: str = function_name
+        self.output_key: str = output_key
+        self.location: str = location
+        self.declared_type: object = declared_type
+        self.returned_type: type = returned_type
+        self.conversion: str = conversion
+        self.hint: str = hint
+        at = f" at {location}" if location else ""
+        super().__init__(
+            f"Function {function_name!r} returned {type_text(returned_type)} for "
+            + f"output {output_key!r}{at}, which is declared "
+            + f"{type_text(declared_type)}; Orcapod {conversion}. {hint} to avoid "
+            + "this warning."
+        )
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickle with the constructor arguments (executors send warnings across processes)."""
+        return (
+            type(self),
+            (
+                self.function_name,
+                self.output_key,
+                self.location,
+                self.declared_type,
+                self.returned_type,
+                self.conversion,
+                self.hint,
             ),
         )
 

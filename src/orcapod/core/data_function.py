@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import uuid
+import warnings
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 import typing
@@ -21,14 +22,14 @@ from orcapod.hashing.hash_utils import (
     get_function_signature,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.errors import OutputTypeError
+from orcapod.errors import OutputConversionWarning, OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.semantic_types.output_conformance import find_nonconformance
+from orcapod.semantic_types.output_conformance import Conversion, check_conformance
 from orcapod.types import DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
@@ -373,6 +374,35 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         ...
 
 
+def _warn_conversion(
+    function_name: str, output_key: str, conversion: Conversion
+) -> None:
+    """Report one converted near miss with an ``OutputConversionWarning``.
+
+    Every such warning is issued from this one line, and its message names types, never
+    values. Python's default filter shows a warning once per message and code location
+    per process, so a run shows each function x output x conversion once, however many
+    rows it has.
+
+    Args:
+        function_name: Name of the function pod's function.
+        output_key: Name of the output that was converted.
+        conversion: What was converted, where in the value and how.
+    """
+    warnings.warn(
+        OutputConversionWarning(
+            function_name,
+            output_key,
+            conversion.location,
+            conversion.expected,
+            conversion.returned_type,
+            conversion.near_miss.done,
+            conversion.near_miss.avoid,
+        ),
+        stacklevel=1,
+    )
+
+
 class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     @property
     def data_function_type_id(self) -> str:
@@ -573,8 +603,11 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         Every returned value is checked against its declared output type and then
         converted to Arrow here, eagerly, so the Data holds exactly the values that are
-        stored and hashed (ITL-895). Without the check pyarrow would coerce some
-        mismatches silently, for example truncating ``1.5`` returned for ``-> int``.
+        stored and hashed (ITL-895), and downstream pods receive those same values.
+        Without the check pyarrow would coerce some mismatches silently, for example
+        truncating ``1.5`` returned for ``-> int``. A near miss the conformance table
+        accepts with a warning (a ``tuple`` for ``list[T]``) is converted and then
+        reported with ``OutputConversionWarning``.
 
         Args:
             values: Raw return value from the wrapped function.
@@ -588,16 +621,19 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         """
         output_data = parse_function_outputs(self._output_keys, values)
         output_schema = self.output_data_schema
+        conversions: list[tuple[str, Conversion]] = []
         for key, value in output_data.items():
-            problem = find_nonconformance(value, output_schema[key])
-            if problem is not None:
+            report = check_conformance(value, output_schema[key])
+            if report.mismatch is not None:
                 raise OutputTypeError(
                     self.canonical_function_name,
                     key,
                     output_schema[key],
                     value,
-                    problem.describe(),
+                    report.mismatch.describe(),
+                    report.mismatch.hint,
                 )
+            conversions.extend((key, conversion) for conversion in report.conversions)
 
         def combine(*components: tuple[str, ...]) -> str:
             inner_parsed = [":".join(component) for component in components]
@@ -616,8 +652,11 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 python_schema=output_schema,
                 data_context=self.data_context,
             )
+        table = self._convert_outputs(output_data, output_schema)
+        for key, conversion in conversions:
+            _warn_conversion(self.canonical_function_name, key, conversion)
         return Data(
-            self._convert_outputs(output_data, output_schema),
+            table,
             source_info=source_info,
             record_uuid=new_record_uuid,
             data_context=self.data_context,
