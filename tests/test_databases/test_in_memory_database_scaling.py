@@ -23,10 +23,12 @@ WINDOW = 100
 
 
 def _key(i: int) -> bytes:
+    """Return the binary lookup key of row ``i``, like an input data hash."""
     return hashlib.sha256(str(i).encode()).digest()
 
 
 def _row(i: int) -> pa.Table:
+    """Return row ``i`` as a one-row table with a binary key, a string and an integer."""
     return pa.table(
         {
             "key": pa.array([_key(i)], type=pa.large_binary()),
@@ -49,6 +51,7 @@ def _bytes_per_row_at(stored_rows: int) -> float:
 
 
 def test_per_row_work_does_not_grow_with_stored_rows() -> None:
+    """Per-row lookup, write and flush cost the same after 1,600 stored rows as after 200."""
     small = _bytes_per_row_at(200)
     large = _bytes_per_row_at(1600)
     # Eight times the rows stored: a scan of the stored rows costs about eight times

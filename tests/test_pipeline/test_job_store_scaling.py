@@ -20,10 +20,12 @@ from tests.test_databases.arrow_work_counter import CountingDatabase
 
 @function_pod(output_keys="y")
 def double(x: int) -> int:
+    """Return twice ``x``."""
     return 2 * x
 
 
 def _store_bytes_per_row(n_rows: int, orchestrator: str) -> float:
+    """Run a one-pod job over ``n_rows`` rows and return the store's Arrow bytes per row."""
     store = CountingDatabase(InMemoryArrowDatabase())
     job = PipelineJob(name="scaling", store=store)  # pyright: ignore[reportArgumentType]  # counting wrapper of a real store
     with job:
@@ -42,6 +44,7 @@ def _store_bytes_per_row(n_rows: int, orchestrator: str) -> float:
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 def test_store_work_per_row_does_not_grow_with_rows(orchestrator: str) -> None:
+    """A job's store work per row stays flat when its rows quadruple."""
     small = _store_bytes_per_row(150, orchestrator)
     large = _store_bytes_per_row(600, orchestrator)
     # Four times the rows: a per-row scan of the stored rows costs about four times as

@@ -20,6 +20,7 @@ PATH = ("results", "v1")
 
 
 def _row(i: int, group: str, score: int) -> pa.Table:
+    """Return row ``i`` with a binary key, a group, a score and a nullable string."""
     return pa.table(
         {
             "key": pa.array([f"key-{i % 7}".encode()], type=pa.large_binary()),
@@ -33,6 +34,7 @@ def _row(i: int, group: str, score: int) -> pa.Table:
 
 
 def _fill(db: InMemoryArrowDatabase, n: int, flush_every: int = 1) -> None:
+    """Write ``n`` rows one at a time, flushing after every ``flush_every`` rows."""
     for i in range(n):
         db.add_record(PATH, f"id-{i}".encode(), _row(i, f"g{i % 4}", i % 5))
         if (i + 1) % flush_every == 0:
@@ -40,6 +42,7 @@ def _fill(db: InMemoryArrowDatabase, n: int, flush_every: int = 1) -> None:
 
 
 def _expected(db: InMemoryArrowDatabase, pairs: dict[str, Any]) -> pa.Table | None:
+    """Return what a filter of every stored row by ``pairs`` gives, or ``None``."""
     everything = db.get_all_records(PATH, record_id_column="rid")
     assert everything is not None
     expression = None
@@ -52,6 +55,7 @@ def _expected(db: InMemoryArrowDatabase, pairs: dict[str, Any]) -> pa.Table | No
 
 
 def _assert_same(actual: pa.Table | None, expected: pa.Table | None) -> None:
+    """Assert two lookup results have the same schema and rows in the same order."""
     if expected is None:
         assert actual is None
         return
@@ -75,6 +79,7 @@ LOOKUPS: list[dict[str, Any]] = [
 @pytest.mark.parametrize("pairs", LOOKUPS, ids=lambda p: "-".join(p))
 @pytest.mark.parametrize("flush_every", [1, 3, 1000])
 def test_lookup_matches_a_filter_of_all_rows(pairs: dict[str, Any], flush_every: int):
+    """Lookups over many flushes return what a filter of all rows returns."""
     db = InMemoryArrowDatabase()
     _fill(db, 90, flush_every=flush_every)
     actual = db.get_records_with_column_value(PATH, pairs, record_id_column="rid")
@@ -83,6 +88,7 @@ def test_lookup_matches_a_filter_of_all_rows(pairs: dict[str, Any], flush_every:
 
 @pytest.mark.parametrize("pairs", LOOKUPS, ids=lambda p: "-".join(p))
 def test_lookup_includes_pending_rows_after_committed_rows(pairs: dict[str, Any]):
+    """Pending matches follow committed matches, as in one filter of both."""
     db = InMemoryArrowDatabase()
     _fill(db, 60)
     for i in range(60, 75):
@@ -92,6 +98,7 @@ def test_lookup_includes_pending_rows_after_committed_rows(pairs: dict[str, Any]
 
 
 def test_lookup_accepts_a_list_of_pairs():
+    """A list of (column, value) pairs works like a mapping."""
     db = InMemoryArrowDatabase()
     _fill(db, 30)
     pairs = [("key", b"key-4"), ("group", "g0")]
@@ -101,6 +108,7 @@ def test_lookup_accepts_a_list_of_pairs():
 
 @pytest.mark.parametrize("pairs", LOOKUPS, ids=lambda p: "-".join(p))
 def test_lookup_after_a_flush_overwrites_a_committed_id(pairs: dict[str, Any]):
+    """A rewritten committed id moves its row to the end and lookups follow it."""
     db = InMemoryArrowDatabase()
     _fill(db, 40)
     _ = db.get_records_with_column_value(PATH, pairs)  # build the indexes first
@@ -117,6 +125,7 @@ def test_lookup_after_a_flush_overwrites_a_committed_id(pairs: dict[str, Any]):
 
 
 def test_indexes_follow_appends_after_they_are_built():
+    """Indexes built early stay correct as later flushes append rows."""
     db = InMemoryArrowDatabase()
     _fill(db, 20)
     _ = db.get_records_with_column_value(PATH, {"key": b"key-1"})  # build indexes
@@ -131,6 +140,7 @@ def test_indexes_follow_appends_after_they_are_built():
 
 
 def test_scoped_views_share_records_and_indexes():
+    """Writes through a scoped view are found through the root and the view."""
     root = InMemoryArrowDatabase()
     view = root.at("pipeline")
     for i in range(30):
@@ -150,6 +160,7 @@ def test_scoped_views_share_records_and_indexes():
 
 
 def test_skip_duplicates_skips_committed_and_pending_ids():
+    """``skip_duplicates`` drops ids already committed or pending."""
     db = InMemoryArrowDatabase()
     _fill(db, 20)
     db.add_record(PATH, b"id-new", _row(99, "g0", 0))
@@ -163,6 +174,7 @@ def test_skip_duplicates_skips_committed_and_pending_ids():
 
 
 def test_lookup_of_a_missing_column_still_raises():
+    """Looking up a column the table lacks raises, as a filter would."""
     db = InMemoryArrowDatabase()
     _fill(db, 5)
     with pytest.raises(pa.ArrowInvalid):
