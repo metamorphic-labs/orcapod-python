@@ -29,6 +29,10 @@ from dataclasses import dataclass
 
 from orcapod.errors import type_text
 
+if typing.TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+
 
 class Treatment(enum.Enum):
     """How a near miss is treated."""
@@ -37,7 +41,7 @@ class Treatment(enum.Enum):
     """Accepted silently: the conversion keeps the value exactly."""
 
     CONVERT_WITH_WARNING = "convert with warning"
-    """Accepted and converted, with an ``OutputConversionWarning``."""
+    """Accepted and converted, with an ``ValueConversionWarning``."""
 
     REJECT = "reject"
     """Rejected with an ``OutputTypeError`` that says what to return instead."""
@@ -214,13 +218,15 @@ def _numpy_type(declared: object) -> tuple[str, int] | None:
     return None
 
 
-def _numpy_array(value: object) -> typing.Any | None:
+def _numpy_array(value: object) -> npt.NDArray[np.generic] | None:
     """Return ``value`` if it is a NumPy array, else ``None``."""
     if not type(value).__module__.startswith("numpy"):
         return None
     import numpy as np
 
-    return value if isinstance(value, np.ndarray) else None
+    if isinstance(value, np.ndarray):
+        return typing.cast("npt.NDArray[np.generic]", value)
+    return None
 
 
 def _float_hint(value: object, declared: object) -> str:
@@ -263,8 +269,8 @@ class _Checker:
     """Walks one returned value, collecting conversions until the first mismatch."""
 
     def __init__(self, rule: Mapping[NearMiss, Treatment]) -> None:
-        self._rule = rule
-        self.conversions: dict[tuple[NearMiss, str, type], Conversion] = {}
+        self._rule: Mapping[NearMiss, Treatment] = rule
+        self.conversions: dict[tuple[NearMiss, str], Conversion] = {}
 
     def near(
         self,
@@ -281,7 +287,7 @@ class _Checker:
                 path, declared, value, _reject_hint(near_miss, value, declared)
             )
         if treatment is Treatment.CONVERT_WITH_WARNING:
-            key = (near_miss, location, type(value))
+            key = (near_miss, location)
             if key not in self.conversions:
                 self.conversions[key] = Conversion(
                     location, declared, type(value), near_miss
@@ -386,7 +392,7 @@ class _Checker:
             return None
         scalar = _numpy_scalar(value)
         if scalar is not None and scalar[0] == "b":
-            if type(value) is declared:
+            if isinstance(declared, type) and isinstance(value, declared):
                 return None
             return self.near(
                 NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared, path, location
@@ -399,7 +405,9 @@ class _Checker:
         """``int`` or a NumPy integer type; the range is checked by the conversion."""
         if isinstance(value, bool):
             return Nonconformance(path, declared, value)
-        if isinstance(value, int) or type(value) is declared:
+        if isinstance(value, int) or (
+            isinstance(declared, type) and isinstance(value, declared)
+        ):
             return None  # an int subclass such as IntEnum keeps its value
         scalar = _numpy_scalar(value)
         if scalar is not None and scalar[0] in ("i", "u"):
@@ -465,30 +473,33 @@ class _Checker:
         path: str,
         location: str,
     ) -> Nonconformance | None:
+        item: object = value  # the isinstance checks below must not narrow this one
         if isinstance(value, list):
-            return self.check_elements(value, element_type, path, location)
+            return self.check_elements(
+                typing.cast("list[object]", value), element_type, path, location
+            )
         if isinstance(value, (str, bytes, Mapping)):
-            return Nonconformance(path, declared, value)
+            return Nonconformance(path, declared, item)
         if isinstance(value, Set) and not isinstance(value, (KeysView, ItemsView)):
             near_miss = NearMiss.SET_FOR_LIST  # unordered: dict views keep their order
         elif isinstance(value, tuple):
             near_miss = NearMiss.TUPLE_FOR_LIST
         elif isinstance(value, Iterator):
-            return Nonconformance(path, declared, value, _ITERATOR_HINT)
+            return Nonconformance(path, declared, item, _ITERATOR_HINT)
         elif isinstance(value, Iterable):
             near_miss = NearMiss.ITERABLE_FOR_LIST
         else:
-            return Nonconformance(path, declared, value)
-        found = self.near(near_miss, value, declared, path, location)
+            return Nonconformance(path, declared, item)
+        found = self.near(near_miss, item, declared, path, location)
         if found is not None:
             return found
-        array = _numpy_array(value)
+        array = _numpy_array(item)
         if array is not None and array.ndim == 1 and array.dtype.kind != "O":
             # Every element has the array's dtype: checking one checks them all.
-            elements = typing.cast("list[object]", list(array[:1]))
+            elements: list[object] = list(array[:1])
             return self.check_elements(elements, element_type, path, location)
         return self.check_elements(
-            typing.cast("Iterable[object]", value), element_type, path, location
+            typing.cast("Iterable[object]", item), element_type, path, location
         )
 
     def check_elements(

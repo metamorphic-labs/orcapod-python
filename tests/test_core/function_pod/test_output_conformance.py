@@ -10,7 +10,7 @@ on both orchestrators and both store backends) and check the developer's decisio
   ``OutputTypeError`` naming the pod, the output, the declared type and the value's type,
   and saying what to return instead;
 * the rejection is a row failure in a pipeline (the run continues, the observer sees it);
-* a few near misses are converted, with an ``OutputConversionWarning`` that is shown once
+* a few near misses are converted, with a ``ValueConversionWarning`` that is issued once
   per function, output and conversion, however many rows;
 * the output a downstream pod receives is exactly the stored value;
 * conforming outputs and same-kind NumPy scalars are accepted silently and hash as before.
@@ -328,7 +328,7 @@ class TestConvertedWithWarning:
         self, declared: Any, returned: Any, stored: Any, type_name: str, words: str
     ) -> None:
         pod = make_pod(declared, returned, name="near_miss")
-        with pytest.warns(errors.OutputConversionWarning) as record:
+        with pytest.warns(errors.ValueConversionWarning) as record:
             table = pod.pod(make_source()).as_table()
         message = str(record[0].message)
         assert "'near_miss'" in message
@@ -342,26 +342,25 @@ class TestConvertedWithWarning:
         """The message must be the same on every row, so it is shown once per run."""
         first = make_pod(list[int], (1, 2), name="same")
         second = make_pod(list[int], (3, 4, 5), name="same")
-        with pytest.warns(errors.OutputConversionWarning) as one:
+        with pytest.warns(errors.ValueConversionWarning) as one:
             first.pod(make_source()).as_table()
-        with pytest.warns(errors.OutputConversionWarning) as two:
+        with pytest.warns(errors.ValueConversionWarning) as two:
             second.pod(make_source()).as_table()
         assert str(one[0].message) == str(two[0].message)
 
-    def test_warning_records_what_was_converted(self) -> None:
+    def test_message_in_full(self) -> None:
         pod = make_pod(dt.date, dt.datetime(2020, 1, 1, 12), name="day")
-        with pytest.warns(errors.OutputConversionWarning) as record:
+        with pytest.warns(errors.ValueConversionWarning) as record:
             pod.pod(make_source()).as_table()
-        warning = record[0].message
-        assert isinstance(warning, errors.OutputConversionWarning)
-        assert warning.function_name == "day"
-        assert warning.output_key == "y"
-        assert warning.declared_type is dt.date
-        assert warning.returned_type is dt.datetime
+        assert str(record[0].message) == (
+            "Function 'day' returned datetime.datetime for output 'y', which is "
+            "declared datetime.date; Orcapod dropped the time of day. Return "
+            "value.date() to avoid this warning."
+        )
 
     def test_one_value_with_two_conversions_warns_twice(self) -> None:
         pod = make_pod(list[dt.date], (dt.datetime(2020, 1, 1, 3),))
-        with pytest.warns(errors.OutputConversionWarning) as record:
+        with pytest.warns(errors.ValueConversionWarning) as record:
             table = pod.pod(make_source()).as_table()
         messages = sorted(str(w.message) for w in record)
         assert len(messages) == 2
@@ -369,13 +368,34 @@ class TestConvertedWithWarning:
         assert any("dropped the time of day" in m for m in messages)
         assert table["y"].to_pylist() == [[dt.date(2020, 1, 1)]]
 
-    def test_shown_once_for_many_rows_under_the_default_filter(self) -> None:
+    def test_issued_once_per_function_however_many_rows(self) -> None:
         pod = make_pod(list[int], (1, 2), name="many")
         with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("default")
+            warnings.simplefilter("always")
             table = pod.pod(make_source(tuple(range(1000)))).as_table()
         assert table.num_rows == 1000
-        assert [w.category for w in record] == [errors.OutputConversionWarning]
+        assert [w.category for w in record] == [errors.ValueConversionWarning]
+
+    def test_dedup_does_not_rely_on_the_warning_registry(self) -> None:
+        """catch_warnings resets the registry; the function still warns only once."""
+        pod = make_pod(list[int], (1, 2), name="again")
+        with warnings.catch_warnings(record=True) as first:
+            warnings.simplefilter("always")
+            pod.pod(make_source((1, 2))).as_table()
+        with warnings.catch_warnings(record=True) as second:
+            warnings.simplefilter("always")
+            pod.pod(make_source((3, 4))).as_table()
+        assert len(first) == 1
+        assert second == []
+
+    def test_each_function_instance_warns(self) -> None:
+        first = make_pod(list[int], (1, 2), name="twin")
+        second = make_pod(list[int], (1, 2), name="twin")
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            first.pod(make_source()).as_table()
+            second.pod(make_source()).as_table()
+        assert len(record) == 2
 
     def test_error_filter_makes_it_a_row_failure(self) -> None:
         pod = make_pod(list[int], (1, 2), name="strict")
@@ -384,23 +404,14 @@ class TestConvertedWithWarning:
         with job:
             pod.pod(make_source((1, 2)), label="strict")
         with warnings.catch_warnings():
-            warnings.simplefilter("error", errors.OutputConversionWarning)
+            warnings.simplefilter("error", errors.ValueConversionWarning)
             job.run(orchestrator=SyncPipelineOrchestrator(), observer=observer)
         assert job.nodes["strict"].as_table().num_rows == 0
         assert len(observer.crashes) == 2
+        # Escalated to an error, the warning is raised on every row, not only the first.
         assert all(
-            isinstance(c, errors.OutputConversionWarning) for c in observer.crashes
+            isinstance(c, errors.ValueConversionWarning) for c in observer.crashes
         )
-
-    def test_warning_survives_pickling(self) -> None:
-        import pickle
-
-        warning = errors.OutputConversionWarning(
-            "f", "y", "", list[int], tuple, "converted it to a list", "Return a list"
-        )
-        restored = pickle.loads(pickle.dumps(warning))
-        assert str(restored) == str(warning)
-        assert restored.returned_type is tuple
 
 
 ACCEPTED_SILENTLY = [
@@ -426,7 +437,7 @@ class TestAcceptedSilently:
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
             table = pod.pod(make_source()).as_table()
-        assert [w for w in record if w.category is errors.OutputConversionWarning] == []
+        assert [w for w in record if w.category is errors.ValueConversionWarning] == []
         assert table["y"].to_pylist() == [stored]
 
 
@@ -467,7 +478,7 @@ class TestDownstreamSeesStoredValue:
     def test_standalone(self, declared: Any, returned: Any, expected: Any) -> None:
         received: list[Any] = []
         up, down = self._chain(declared, returned, received)
-        with pytest.warns(errors.OutputConversionWarning):
+        with pytest.warns(errors.ValueConversionWarning):
             list(down.pod(up.pod(make_source())).iter_data())
         self._assert_received(received, expected)
 
@@ -488,7 +499,7 @@ class TestDownstreamSeesStoredValue:
         job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
         with job:
             down.pod(up.pod(make_source(), label="up"), label="down")
-        with pytest.warns(errors.OutputConversionWarning):
+        with pytest.warns(errors.ValueConversionWarning):
             job.run(orchestrator=orchestrator_cls())
         self._assert_received(received, expected)
         stored = job.nodes["up"].as_table()["y"].to_pylist()
@@ -498,7 +509,7 @@ class TestDownstreamSeesStoredValue:
     def test_output_as_dict_matches_as_table(
         self, declared: Any, returned: Any, expected: Any
     ) -> None:
-        with pytest.warns(errors.OutputConversionWarning):
+        with pytest.warns(errors.ValueConversionWarning):
             [(_tag, data)] = list(
                 make_pod(declared, returned).pod(make_source()).iter_data()
             )

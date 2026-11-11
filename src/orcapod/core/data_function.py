@@ -22,14 +22,18 @@ from orcapod.hashing.hash_utils import (
     get_function_signature,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.errors import OutputConversionWarning, OutputTypeError
+from orcapod.errors import OutputTypeError, ValueConversionWarning, type_text
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.semantic_types.output_conformance import Conversion, check_conformance
+from orcapod.semantic_types.output_conformance import (
+    Conversion,
+    NearMiss,
+    check_conformance,
+)
 from orcapod.types import DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
@@ -374,32 +378,28 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         ...
 
 
-def _warn_conversion(
+def _conversion_message(
     function_name: str, output_key: str, conversion: Conversion
-) -> None:
-    """Report one converted near miss with an ``OutputConversionWarning``.
+) -> str:
+    """Build the ``ValueConversionWarning`` message for one converted near miss.
 
-    Every such warning is issued from this one line, and its message names types, never
-    values. Python's default filter shows a warning once per message and code location
-    per process, so a run shows each function x output x conversion once, however many
-    rows it has.
+    The message names types and a structural location, never the value, so it is the
+    same on every row.
 
     Args:
         function_name: Name of the function pod's function.
         output_key: Name of the output that was converted.
         conversion: What was converted, where in the value and how.
+
+    Returns:
+        The message.
     """
-    warnings.warn(
-        OutputConversionWarning(
-            function_name,
-            output_key,
-            conversion.location,
-            conversion.expected,
-            conversion.returned_type,
-            conversion.near_miss.done,
-            conversion.near_miss.avoid,
-        ),
-        stacklevel=1,
+    at = f" at {conversion.location}" if conversion.location else ""
+    return (
+        f"Function {function_name!r} returned {type_text(conversion.returned_type)} "
+        + f"for output {output_key!r}{at}, which is declared "
+        + f"{type_text(conversion.expected)}; Orcapod {conversion.near_miss.done}. "
+        + f"{conversion.near_miss.avoid} to avoid this warning."
     )
 
 
@@ -431,6 +431,9 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         self._function = function
         self._is_async = inspect.iscoroutinefunction(function)
+        # Conversions already reported, as (output key, structural location, near
+        # miss): each is warned once per function instance (ITL-895).
+        self._warned_conversions: set[tuple[str, str, NearMiss]] = set()
 
         # Reject functions with variadic parameters -- PythonDataFunction maps
         # data keys to named parameters, so the full parameter set must be fixed.
@@ -607,7 +610,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         Without the check pyarrow would coerce some mismatches silently, for example
         truncating ``1.5`` returned for ``-> int``. A near miss the conformance table
         accepts with a warning (a ``tuple`` for ``list[T]``) is converted and then
-        reported with ``OutputConversionWarning``.
+        reported with ``ValueConversionWarning``, once per output and conversion.
 
         Args:
             values: Raw return value from the wrapped function.
@@ -653,14 +656,36 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 data_context=self.data_context,
             )
         table = self._convert_outputs(output_data, output_schema)
-        for key, conversion in conversions:
-            _warn_conversion(self.canonical_function_name, key, conversion)
+        self._warn_conversions(conversions)
         return Data(
             table,
             source_info=source_info,
             record_uuid=new_record_uuid,
             data_context=self.data_context,
         )
+
+    def _warn_conversions(self, conversions: list[tuple[str, Conversion]]) -> None:
+        """Issue a ``ValueConversionWarning`` for each conversion not reported yet.
+
+        Each (output, structural location, near miss) is reported once per function
+        instance, however many rows a run has. The deduplication is explicit: it does
+        not rely on Python's warning registry, which ``warnings.catch_warnings`` resets.
+        A conversion is recorded as reported only after ``warnings.warn`` returns, so
+        when a filter escalates the warning to an error it raises on every row.
+
+        Args:
+            conversions: The conversions of one call's outputs, with their output keys.
+        """
+        for key, conversion in conversions:
+            reported = (key, conversion.location, conversion.near_miss)
+            if reported in self._warned_conversions:
+                continue
+            warnings.warn(
+                _conversion_message(self.canonical_function_name, key, conversion),
+                ValueConversionWarning,
+                stacklevel=2,
+            )
+            self._warned_conversions.add(reported)
 
     def _convert_outputs(
         self, output_data: dict[str, DataValue], output_schema: Schema
