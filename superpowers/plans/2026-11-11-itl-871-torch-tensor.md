@@ -277,3 +277,21 @@ Also: no-debug-only-parameters over the whole diff; list[torch.Tensor] MergeJoin
 - Once per (function instance, output key, conversion kinds); one per (source, column) with the
   row count. A 10,000-row run where every row returns a CUDA grad tensor: 1 warning.
 - Never for plain CPU tensors without grad. Tests with `pytest.warns` / `warnings.catch_warnings`.
+
+## Phase 2 resume notes
+
+- 2c and 2e plans approved by the coordinator. Shared category `ValueConversionWarning` in
+  `orcapod.errors` (exact docstring sent to the coordinator for #299; placed just before
+  `FieldNotResolvableError`, where #299 puts its class, so the later merge conflicts visibly).
+- Done: packaging (extra, dev group, CPU index, lock), CI guard, no-torch subprocess tests,
+  complex32/float8 (+ golden additions), conversion warning (pods + DictSource/ListSource),
+  basedpyright with torch (exit 0), docs/CHANGELOG/DESIGN_ISSUES/spec, merged origin/main
+  (#287) and #289's tip (recursive list ordering), list[torch.Tensor] MergeJoin tests (fail
+  before #289's fix with TypeError dict < dict).
+- Measured: Linux CPU torch wheel 209.5 MB (cp311-313), sympy 6.3 MB, mpmath 0.5 MB; macOS
+  wheel 138.5 MB. Licenses: torch "Apache-2.0 AND ... BSD-3-Clause ... MIT AND Zlib" (passes
+  the repo's pip-licenses check), sympy/mpmath/networkx/jinja2/markupsafe BSD, fsspec
+  BSD-3-Clause, filelock Unlicense, typing_extensions PSF-2.0. CI time added: read from the
+  CI logs of the next run.
+- Left: ITL-864 xfail removal once #293 is on main; merge main again when #289 lands.
+  Next: full suite, push, PR description, mark ready, CI, CodeRabbit (read review bodies).
