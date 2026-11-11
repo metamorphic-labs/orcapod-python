@@ -24,8 +24,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from orcapod.errors import TypeIdentityError
 from orcapod.logical_types.registry import LogicalTypeRegistry
-from orcapod.logical_types.schema_walker import walk_schema
+from orcapod.logical_types.schema_walker import walk_field, walk_schema
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -56,6 +57,10 @@ def register_discovered_logical_types(
     Raises:
         ValueError: Propagated from the converter if an extension type's metadata
             has no registered factory or is malformed.
+        TypeIdentityError: If a stored user-class column does not match the class
+            found for it; the message starts with the column name.
+        ImportError: If no class can be found for a stored user-class column; the
+            message starts with the column name.
     """
     if converter is None:
         logger.debug(
@@ -73,13 +78,24 @@ def register_discovered_logical_types(
         [info.extension_name for info in found],
     )
     for info in found:
-        # Bottom-up resolve the storage type first, then register the extension
-        resolved_storage = converter.register_storage_type(info.storage_type)
-        converter.register_logical_type_from_arrow_metadata(
-            info.extension_name,
-            info.extension_metadata,
-            resolved_storage,
-        )
+        try:
+            # Bottom-up resolve the storage type first, then register the extension
+            resolved_storage = converter.register_storage_type(info.storage_type)
+            converter.register_logical_type_from_arrow_metadata(
+                info.extension_name,
+                info.extension_metadata,
+                resolved_storage,
+            )
+        except (TypeIdentityError, ImportError) as exc:
+            # Name the column(s) holding the type: the factory only knows the type.
+            columns = ", ".join(
+                repr(field.name)
+                for field in schema
+                if any(
+                    i.extension_name == info.extension_name for i in walk_field(field)
+                )
+            )
+            raise type(exc)(f"Column {columns}: {exc}") from exc
 
 
 def apply_logical_types(

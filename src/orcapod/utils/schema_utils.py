@@ -41,11 +41,15 @@ def check_schema_compatibility(
 ) -> bool:
     from beartype.door import is_subhint
 
+    from orcapod.logical_types.user_class_identity import equivalent_hints
+
     for key, type_info in incoming_types.items():
         if key not in receiving_types:
             logger.warning(f"Key '{key}' not found in parameter types.")
             return False
-        if not is_subhint(type_info, receiving_types[key]):
+        if not is_subhint(type_info, receiving_types[key]) and not equivalent_hints(
+            type_info, receiving_types[key]
+        ):
             logger.warning(
                 f"Type mismatch for key '{key}': expected {receiving_types[key]}, got {type_info}."
             )

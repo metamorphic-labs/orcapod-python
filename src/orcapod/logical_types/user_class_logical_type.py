@@ -22,7 +22,7 @@ import typing
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import RecursiveTypeError, TypeIdentityError
-from orcapod.logical_types import user_class_identity as uci
+import orcapod.logical_types.user_class_identity as uci
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
@@ -117,13 +117,13 @@ class UserClassLogicalType(BaseLogicalType):
     def get_arrow_extension_type(self) -> pa.ExtensionType:
         """Return the cached Arrow extension type (name = identity string)."""
         if self._arrow_ext is None:
-            self._arrow_ext = self._arrow_ext_class()
+            self._arrow_ext = self._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # synthesized class takes no arguments
         return self._arrow_ext
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
         """Return the cached Polars extension type."""
         if self._polars_ext is None:
-            self._polars_ext = self._polars_ext_class()
+            self._polars_ext = self._polars_ext_class()  # pyright: ignore[reportCallIssue]  # synthesized class takes no arguments
         return self._polars_ext
 
     def python_to_storage(
@@ -227,7 +227,9 @@ class UserClassLogicalTypeFactory:
         arrow_fields = []
         field_annotations: list[tuple[str, Any]] = []
         tokens: dict[str, str] = {}
-        for field_name in self.stored_field_names(python_type):
+        # Sorted by name: field order is not part of the identity, so it must not
+        # change the storage type either (same identity, same struct).
+        for field_name in sorted(self.stored_field_names(python_type)):
             annotation = hints.get(field_name, Any)
             try:
                 arrow_type = converter.register_python_class(annotation)
@@ -246,7 +248,7 @@ class UserClassLogicalTypeFactory:
 
         record = uci.identity_record(self.kind, name, tokens)
         identity = uci.identity_string(record)
-        uci.mark_built(python_type, name)
+        uci.mark_built(python_type, name, identity)
         uci.remember(self.kind, name, python_type)
         uci.notice_main_class(python_type, name)
         logger.debug("%s: built %r for %r", type(self).__name__, identity, python_type)
@@ -299,6 +301,7 @@ class UserClassLogicalTypeFactory:
                 f"record for category {self.category!r}: {record!r}."
             )
 
+        kind = self.kind
         candidates = uci.candidate_classes(kind, name)
         if not candidates:
             raise ImportError(
@@ -310,8 +313,8 @@ class UserClassLogicalTypeFactory:
 
         found: list[UserClassLogicalType] = []
         for cls in candidates:
-            converter.register_python_class(cls)
-            lt = converter.get_logical_type(cls)
+            _ = converter.register_python_class(cls)  # raises for unsupported classes
+            lt = converter.get_logical_type_for_python_type(cls)
             if not isinstance(lt, UserClassLogicalType):
                 continue
             if lt.logical_type_name == arrow_extension_name:

@@ -37,8 +37,11 @@ from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 def _identity(cls: type) -> str:
     """Return the identity string (logical type name) of a user class (ITL-881)."""
     from orcapod.contexts import get_default_context
+    from orcapod.types import Schema
 
-    lt = get_default_context().type_converter.get_logical_type_for_python_type(cls)
+    converter = get_default_context().type_converter
+    converter.ensure_types_registered_for_schemas(Schema({"value": cls}))
+    lt = converter.get_logical_type(cls)
     assert lt is not None
     return lt.logical_type_name
 
@@ -477,7 +480,7 @@ def test_delta_polars_read_delta(tmp_path: Path) -> None:
         f"Expected a Polars extension type on column 'point', got {col_dtype!r}"
     )
     assert col_dtype.ext_name() == type_name, (
-        f"Expected extension name {type_name!r}, got {col_dtype.ext_name()!r}"
+        f"Expected extension name {type_name!r}, got {col_dtype.ext_name()!r}"  # pyright: ignore[reportAttributeAccessIssue]  # polars stubs lack ext_name
     )
 
 

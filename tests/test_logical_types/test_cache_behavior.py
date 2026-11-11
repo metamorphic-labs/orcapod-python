@@ -31,8 +31,11 @@ from orcapod.logical_types.dataclass_logical_type_factory import (
 def _identity(cls: type) -> str:
     """Return the identity string (logical type name) of a user class (ITL-881)."""
     from orcapod.contexts import get_default_context
+    from orcapod.types import Schema
 
-    lt = get_default_context().type_converter.get_logical_type_for_python_type(cls)
+    converter = get_default_context().type_converter
+    converter.ensure_types_registered_for_schemas(Schema({"value": cls}))
+    lt = converter.get_logical_type(cls)
     assert lt is not None
     return lt.logical_type_name
 

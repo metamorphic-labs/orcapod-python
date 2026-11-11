@@ -10,7 +10,7 @@ Category tag: ``"orcapod.pydantic"``
 
 from __future__ import annotations
 
-from orcapod.logical_types import user_class_identity as uci
+import orcapod.logical_types.user_class_identity as uci
 from orcapod.logical_types.user_class_logical_type import (
     UserClassLogicalType,
     UserClassLogicalTypeFactory,

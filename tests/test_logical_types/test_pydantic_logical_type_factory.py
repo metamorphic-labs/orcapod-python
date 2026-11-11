@@ -14,19 +14,25 @@ from pydantic import BaseModel, PrivateAttr, computed_field, field_validator
 def _identity(cls: type) -> str:
     """Return the identity string (logical type name) of a user class (ITL-881)."""
     from orcapod.contexts import get_default_context
+    from orcapod.types import Schema
 
-    lt = get_default_context().type_converter.get_logical_type_for_python_type(cls)
+    converter = get_default_context().type_converter
+    converter.ensure_types_registered_for_schemas(Schema({"value": cls}))
+    lt = converter.get_logical_type(cls)
     assert lt is not None
     return lt.logical_type_name
 
 
-def _metadata(cls: type) -> dict:
+def _metadata(cls: type) -> dict[str, object]:
     """Return the parsed Arrow extension metadata of a user class (ITL-881)."""
     import json
 
     from orcapod.contexts import get_default_context
+    from orcapod.types import Schema
 
-    lt = get_default_context().type_converter.get_logical_type_for_python_type(cls)
+    converter = get_default_context().type_converter
+    converter.ensure_types_registered_for_schemas(Schema({"value": cls}))
+    lt = converter.get_logical_type(cls)
     assert lt is not None
     return json.loads(lt.get_arrow_extension_type().__arrow_ext_serialize__())
 

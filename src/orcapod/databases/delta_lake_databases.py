@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod.databases.utils import coerce_record_id
+from orcapod.errors import TypeIdentityError
 from orcapod.databases.storage_utils import is_cloud_uri, parse_base_path
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -574,6 +575,10 @@ class DeltaTableDatabase:
             # Get Delta table schema and convert from arro3 to pyarrow
             arro3_schema = delta_table.schema().to_arrow()
             delta_schema = pa.schema(arro3_schema)  # type: ignore
+        except TypeIdentityError:
+            # Stored and registered user-class shapes disagree: never report
+            # this as missing data (ITL-881).
+            raise
         except Exception as e:
             logger.warning(f"Could not get Delta table schema: {e}")
             return table
@@ -644,6 +649,10 @@ class DeltaTableDatabase:
                 ).to_table()
                 if delta_table_data.num_rows > 0:
                     tables_to_combine.append(delta_table_data)
+            except TypeIdentityError:
+                # Stored and registered user-class shapes disagree: never report
+                # this as missing data (ITL-881).
+                raise
             except Exception as e:
                 logger.warning(f"Error reading Delta table: {e}")
 
@@ -710,6 +719,10 @@ class DeltaTableDatabase:
             # Handle (remove/rename) the record id column before returning
             return self._handle_record_id_column(result, record_id_column)
 
+        except TypeIdentityError:
+            # Stored and registered user-class shapes disagree: never report
+            # this as missing data (ITL-881).
+            raise
         except Exception as e:
             logger.error(
                 f"Error getting record with {column_values} from {'/'.join(record_path)}: {e}"
@@ -769,6 +782,10 @@ class DeltaTableDatabase:
             # Handle (remove/rename) the record id column before returning
             return self._handle_record_id_column(result, record_id_column)
 
+        except TypeIdentityError:
+            # Stored and registered user-class shapes disagree: never report
+            # this as missing data (ITL-881).
+            raise
         except Exception as e:
             logger.error(
                 f"Error getting record {record_id} from {'/'.join(record_path)}: {e}"
@@ -826,6 +843,10 @@ class DeltaTableDatabase:
             # Handle record_id column based on parameter
             return self._handle_record_id_column(result, record_id_column)
 
+        except TypeIdentityError:
+            # Stored and registered user-class shapes disagree: never report
+            # this as missing data (ITL-881).
+            raise
         except Exception as e:
             logger.error(
                 f"Error getting records by IDs from {'/'.join(record_path)}: {e}"

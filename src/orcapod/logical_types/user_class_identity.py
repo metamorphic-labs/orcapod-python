@@ -60,6 +60,8 @@ _NAME_FORBIDDEN = re.compile(r"[@\s]")
 _declared: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
 # The name each class object was built under; a class has one name per process.
 _built: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
+# The identity string each class object was built with.
+_identity_of: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
 # Classes seen under each (kind, name), most recent last.
 _known: dict[tuple[str, str], list[weakref.ref[type]]] = {}
 # Names that already produced the one-time ``__main__`` notice.
@@ -146,7 +148,7 @@ def set_naming(
             raise ValueError(
                 f"Invalid naming style for {key}: {value!r}. Use 'name' or 'qualified'."
             )
-        _naming[key] = value
+        _naming[key] = typing.cast(NamingStyle, value)
 
 
 def is_main_class(cls: type) -> bool:
@@ -237,9 +239,53 @@ def built_name(cls: type) -> str | None:
     return _built.get(cls)
 
 
-def mark_built(cls: type, name: str) -> None:
-    """Record that ``cls`` was built under ``name`` (one name per class per process)."""
+def mark_built(cls: type, name: str, identity: str) -> None:
+    """Record that ``cls`` was built under ``name`` with ``identity``.
+
+    A class has one name per process.
+
+    Args:
+        cls: The class.
+        name: Its name component.
+        identity: Its identity string.
+    """
     _built[cls] = name
+    _identity_of[cls] = identity
+
+
+def equivalent_hints(a: Any, b: Any) -> bool:
+    """Return True if two type hints are equal up to user-class identity.
+
+    Two user classes are equivalent when they were built with the same identity string,
+    for example a notebook class and its re-definition from a re-run cell. Generic hints
+    are compared by origin and arguments; union members in any order.
+
+    Args:
+        a: A type hint.
+        b: A type hint.
+
+    Returns:
+        True if the hints denote the same types.
+    """
+    import types as _types
+
+    if a == b:
+        return True
+    if isinstance(a, type) and isinstance(b, type):
+        ident = _identity_of.get(a)
+        return ident is not None and ident == _identity_of.get(b)
+    origin_a, origin_b = typing.get_origin(a), typing.get_origin(b)
+    if origin_a is None or origin_b is None:
+        return False
+    args_a, args_b = typing.get_args(a), typing.get_args(b)
+    unions = (typing.Union, _types.UnionType)
+    if origin_a in unions and origin_b in unions:
+        return all(any(equivalent_hints(x, y) for y in args_b) for x in args_a) and all(
+            any(equivalent_hints(x, y) for x in args_a) for y in args_b
+        )
+    if origin_a != origin_b or len(args_a) != len(args_b):
+        return False
+    return all(equivalent_hints(x, y) for x, y in zip(args_a, args_b))
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +451,8 @@ def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
         inner = ", ".join(type_token(a, converter) for a in args)
         return f"{_class_token(origin)}[{inner}]"
     if isinstance(annotation, type):
-        converter.register_python_class(annotation)
-        lt = converter.get_logical_type(annotation)
+        _ = converter.register_python_class(annotation)  # raises for unsupported types
+        lt = converter.get_logical_type_for_python_type(annotation)
         if lt is not None:
             return lt.logical_type_name
         return _class_token(annotation)
