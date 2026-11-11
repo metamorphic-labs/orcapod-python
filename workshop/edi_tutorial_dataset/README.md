@@ -121,6 +121,7 @@ $TOOL probe --target-project ID --allow-writes ID   # how SpiralDB treats non-nu
 $TOOL copy --target-project ID --allow-writes ID --dry-run
 $TOOL copy --target-project ID --allow-writes ID
 $TOOL verify --target-project ID
+$TOOL orcapod-check --target-project ID     # Orcapod sources: required columns are T, not T | None
 ```
 
 The project uses the Volume every `edi-sample-*` project uses

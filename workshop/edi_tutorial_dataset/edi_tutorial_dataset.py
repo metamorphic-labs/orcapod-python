@@ -46,6 +46,7 @@ import hashlib
 import json
 import re
 import sys
+import typing
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -1271,6 +1272,64 @@ def _compare_streams(
         offset += e.num_rows
 
 
+# ---------------------------------------------------------------- the Orcapod check
+
+
+def _declared_nullable(spec: TableSpec, column: str) -> bool | None:
+    if column in spec.columns:
+        return spec.columns[column].nullable
+    if column in spec.groups:
+        return spec.groups[column].nullable
+    return None
+
+
+def orcapod_check(
+    target_project: str,
+    nmap: NullabilityMap,
+    subset: Subset,
+    make_source: Callable[[str, str, str], Any],
+) -> tuple[list[str], list[str]]:
+    """Load every target table as an Orcapod source and check its column types.
+
+    A column declared non-nullable must have a plain Python type ``T``; a nullable
+    one must be ``T | None``. Tables with a ``fixed_size_list`` column are skipped:
+    Orcapod cannot hash that type until starfix supports it (ITL-927).
+
+    Args:
+        target_project: The project to read.
+        nmap: The nullability map.
+        subset: The subset definition (which tables, which dataset).
+        make_source: Builds a source from ``(project_id, table, dataset)``; the CLI
+            passes ``SpiralDBTableSource`` (eager).
+
+    Returns:
+        One line per table describing the outcome, and the list of problems.
+    """
+    lines: list[str] = []
+    problems: list[str] = []
+    for name in sorted(subset.tables):
+        spec = nmap.tables[name]
+        types = [c.arrow_type for c in spec.columns.values()]
+        if any(t.startswith("fixed_size_list") for t in types):
+            lines.append(f"{name}: skipped (fixed_size_list, ITL-927)")
+            continue
+        source = make_source(target_project, name, subset.dataset)
+        tag_schema, data_schema = source.output_schema()
+        wrong = []
+        for column, py_type in {**tag_schema, **data_schema}.items():
+            optional = type(None) in typing.get_args(py_type)
+            declared = _declared_nullable(spec, column)
+            if declared is not None and optional != declared:
+                wrong.append(f"{column}: {py_type}")
+        if wrong:
+            problems.append(f"{name}: nullability differs from the map: {wrong}")
+        lines.append(
+            f"{name}: {len(tag_schema)} tag + {len(data_schema)} data columns"
+            + (f", WRONG {wrong}" if wrong else ", nullability as the map")
+        )
+    return lines, problems
+
+
 # ------------------------------------------------------------------------ the probe
 
 
@@ -1733,6 +1792,11 @@ def _parser() -> argparse.ArgumentParser:
     v = sub.add_parser("verify", help="check the target against the source and the map")
     v.add_argument("--target-project", required=True)
 
+    o = sub.add_parser(
+        "orcapod-check", help="load each target table as an Orcapod source (read-only)"
+    )
+    o.add_argument("--target-project", required=True)
+
     d = sub.add_parser("derive-map", help="build the nullability map from the spec")
     d.add_argument("--spec", type=Path, required=True, help="edi_schema_spec.md")
     d.add_argument("--spec-version", required=True)
@@ -1791,6 +1855,21 @@ def main(
             print(json.dumps(result, indent=2, default=str))
             return 0
         nmap, subset = load_map(args.map), load_subset(args.subset)
+        if args.command == "orcapod-check":
+            from orcapod.sources import SpiralDBTableSource
+
+            lines, problems = orcapod_check(
+                args.target_project,
+                nmap,
+                subset,
+                lambda project, table, dataset: SpiralDBTableSource(
+                    project, table, dataset=dataset
+                ),
+            )
+            print("\n".join(lines))
+            if problems:
+                print("problems:\n  " + "\n  ".join(problems))
+            return 1 if problems else 0
         if args.command == "plan":
             report = plan(client, args.source_project, nmap, subset)
         elif args.command == "copy":

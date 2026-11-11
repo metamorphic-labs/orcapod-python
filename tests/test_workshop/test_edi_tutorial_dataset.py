@@ -919,3 +919,43 @@ class TestCommittedFiles:
         )
         assert code == 0
         assert "pending decisions" in capsys.readouterr().out
+
+
+class _StubSource:
+    def __init__(self, tags: dict[str, Any], data: dict[str, Any]) -> None:
+        self._schemas = (tags, data)
+
+    def output_schema(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._schemas
+
+
+class TestOrcapodCheck:
+    def test_plain_types_for_required_and_optional_for_nullable(self, nmap, subset):
+        def make(project: str, table: str, dataset: str) -> _StubSource:
+            if table == "session":
+                return _StubSource(
+                    {"subject_id": str, "session_start_datetime": datetime.datetime},
+                    {"booth": str, "session_notes": str | None},
+                )
+            return _StubSource({}, {})
+
+        lines, problems = tool.orcapod_check("p", nmap, subset, make)
+        assert problems == []
+        assert "lfp_timeseries: skipped (fixed_size_list, ITL-927)" in lines
+
+    def test_a_required_column_seen_as_optional_is_a_problem(self, nmap, subset):
+        def make(project: str, table: str, dataset: str) -> _StubSource:
+            if table == "session":
+                return _StubSource(
+                    {
+                        "subject_id": str | None,
+                        "session_start_datetime": datetime.datetime,
+                    },
+                    {"booth": str, "session_notes": str | None},
+                )
+            return _StubSource({}, {})
+
+        _, problems = tool.orcapod_check("p", nmap, subset, make)
+        assert problems == [
+            "session: nullability differs from the map: ['subject_id: str | None']"
+        ]
