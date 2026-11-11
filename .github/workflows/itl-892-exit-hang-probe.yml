@@ -2,9 +2,8 @@
 # check; runs only on the investigation branch. Delete before the PR leaves draft.
 name: ITL-892 exit-hang probe
 
+# Data collected (runs 42969989607, 42972298798); manual trigger only from now on.
 on:
-  push:
-    branches: [eywalker/itl-892-process-hangs-at-interpreter-exit-after]
   workflow_dispatch:
 
 permissions:
