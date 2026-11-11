@@ -42,6 +42,11 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
 
 ### Added
 
+- **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
+  written to the store. It names the node, the row's tag and the table, and chains the
+  database's own exception as its cause. (ITL-878 #287)
+
+
 #### PyTorch tensors as data values (ITL-871)
 
 - **`torch.Tensor` is a value type**: a source column, a function pod parameter or return value,
@@ -67,6 +72,20 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
 - **Registries** accept `deferred_logical_types` (`LogicalTypeRegistry`) and `deferred_handlers`
   (`PythonTypeHandlerRegistry`): a value type named by its qualified class name and extension
   name, loaded on first use. No existing hash, schema or table path changes.
+
+### Fixed
+
+- A failed store write fails the run. `PipelineJob.run()` used to return normally when a
+  node's result or record could not be written (the row was skipped like a crashed function
+  under the default `error_policy="continue"`), so the node read back fewer rows than it
+  computed. It now raises `StoreWriteError` at the first failed write, whatever
+  `error_policy` is, on both orchestrators (the async one no longer raises an exception
+  group). Rows stored before the failure are committed and kept; re-running does not
+  recompute stored function results. A failed flush of pending writes raises
+  `StoreWriteError` with `flush=True` and names the store, not a row. A function output that
+  cannot be turned into a record (a naive `datetime`, a value not matching the declared
+  type) is still a row failure governed by `error_policy`, like a function that raised. See
+  *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
 
 ## [0.2.0] — 2026-11-10
 
