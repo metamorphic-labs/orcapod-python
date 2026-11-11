@@ -3,19 +3,24 @@
 pyarrow converts a Python ``float`` to an integer field by calling ``__int__``, so a pod
 declared ``-> int`` that returned ``1.5`` stored ``1`` without any error. These tests
 drive pods through the public interface (standalone streams, cached pods, ``PipelineJob``
-on both orchestrators and both store backends) and check that:
+on both orchestrators and both store backends) and check the developer's decisions
+(2026-11-11, D1-D7 and ITL-901):
 
 * a value that does not conform to its declared type is rejected with
-  ``OutputTypeError`` naming the pod, the output, the declared type and the value's type;
+  ``OutputTypeError`` naming the pod, the output, the declared type and the value's type,
+  and saying what to return instead;
 * the rejection is a row failure in a pipeline (the run continues, the observer sees it);
+* a few near misses are converted, with an ``OutputConversionWarning`` that is shown once
+  per function, output and conversion, however many rows;
 * the output a downstream pod receives is exactly the stored value;
-* cases the developer has not decided yet (ITL-895 D1, D2, D3, D5, D7) keep today's
-  behaviour, and conforming outputs hash as before.
+* conforming outputs and same-kind NumPy scalars are accepted silently and hash as before.
 """
 
 from __future__ import annotations
 
+import collections
 import datetime as dt
+import warnings
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -72,9 +77,29 @@ LOSSY = [
     pytest.param(Reading, Reading(count=1.5), "float", id="float-in-dataclass-field"),  # pyright: ignore[reportArgumentType]  # the wrong field type is the point of the test
     pytest.param(dt.date, 1.5, "float", id="number-for-date"),
     pytest.param(dt.datetime, 1.5, "float", id="number-for-datetime"),
+    pytest.param(float, 0, "int", id="D1-int-for-float"),
+    pytest.param(float, np.int64(1), "int64", id="D1-np-int64-for-float"),
+    pytest.param(np.float32, 1, "int", id="D1-int-for-np-float32"),
+    pytest.param(float, True, "bool", id="D3-bool-for-float"),
+    pytest.param(float, np.bool_(True), "bool", id="D3-np-bool-for-float"),
+    pytest.param(list[int], {1, 2}, "set", id="ITL901-set-for-list"),
     pytest.param(
-        dt.date, dt.datetime(2020, 1, 1, 12), "datetime", id="datetime-for-date"
+        list[int], frozenset({1}), "frozenset", id="ITL901-frozenset-for-list"
     ),
+    pytest.param(list[int], iter([1, 2]), "iterator", id="Q2-iterator-for-list"),
+    pytest.param(
+        list[int], (i for i in range(2)), "generator", id="Q2-generator-for-list"
+    ),
+    pytest.param(
+        list[int],
+        np.array([1.5, 2.0]),
+        "float64",
+        id="Q2-float-ndarray-for-list-of-int",
+    ),
+    pytest.param(
+        list[int], collections.deque([1, 1.5]), "float", id="Q2-float-in-deque"
+    ),
+    pytest.param(list[int], {"a": 1}, "dict", id="mapping-for-list"),
     pytest.param(str, b"x", "bytes", id="bytes-for-str"),
     pytest.param(bytes, "x", "str", id="str-for-bytes"),
     pytest.param(int, None, "NoneType", id="none-for-int"),
@@ -109,6 +134,31 @@ class TestStandalonePodRejects:
         pod = make_pod(int, 1.5)
         with pytest.raises(TypeError):
             list(pod.pod(make_source()).iter_data())
+
+    @pytest.mark.parametrize(
+        ("declared", "returned", "hint"),
+        [
+            pytest.param(
+                float, 0, "Return a float instead: 0.0 or float(value)", id="D1"
+            ),
+            pytest.param(
+                float, True, "Return a float instead: 1.0 or float(value)", id="D3"
+            ),
+            pytest.param(
+                int, 1.5, "Return an int instead: round(value)", id="float-for-int"
+            ),
+            pytest.param(list[int], {2, 1}, "sorted(value)", id="ITL901"),
+            pytest.param(list[int], iter([1]), "list(value)", id="iterator"),
+            pytest.param(int, None, "int | None", id="D4"),
+        ],
+    )
+    def test_message_says_what_to_return_instead(
+        self, declared: Any, returned: Any, hint: str
+    ) -> None:
+        pod = make_pod(declared, returned)
+        with pytest.raises(errors.OutputTypeError) as info:
+            list(pod.pod(make_source()).iter_data())
+        assert hint in str(info.value)
 
     def test_as_table_names_the_output_instead_of_a_union_error(self) -> None:
         """Mixed int / float results used to fail in as_table with a "Complex unions" error."""
@@ -217,67 +267,278 @@ class TestPipelineJobRowFailure:
         assert job.nodes["nothing"].as_table().num_rows == 0
 
 
-def _float_from_int(x: int) -> float:
-    return 1  # an int for a float output: accepted until ITL-895 D1 is decided
+# (declared type, returned value, stored value, returned type name, words of the message)
+CONVERTED = [
+    pytest.param(
+        list[int],
+        (1, 2),
+        [1, 2],
+        "tuple",
+        "converted it to a list",
+        id="D5-tuple-for-list",
+    ),
+    pytest.param(
+        dt.date,
+        dt.datetime(2020, 1, 1, 12),
+        dt.date(2020, 1, 1),
+        "datetime.datetime",
+        "dropped the time of day",
+        id="D6-datetime-for-date",
+    ),
+    pytest.param(
+        np.float32,
+        0.1,
+        float(np.float32(0.1)),
+        "float",
+        "rounded it to 32 bits",
+        id="D7-float-for-float32",
+    ),
+    pytest.param(
+        list[int],
+        collections.deque([1, 2]),
+        [1, 2],
+        "collections.deque",
+        "converted it to a list",
+        id="Q2-deque-for-list",
+    ),
+    pytest.param(
+        list[int],
+        np.array([1, 2]),
+        [1, 2],
+        "numpy.ndarray",
+        "converted it to a list",
+        id="Q2-int-ndarray-for-list",
+    ),
+    pytest.param(
+        dict[str, list[int]],
+        {"a": (1,)},
+        {"a": [1]},
+        "tuple",
+        "at [*]",
+        id="D5-nested-names-the-place",
+    ),
+]
+
+
+class TestConvertedWithWarning:
+    @pytest.mark.parametrize(
+        ("declared", "returned", "stored", "type_name", "words"), CONVERTED
+    )
+    def test_warns_and_stores_the_converted_value(
+        self, declared: Any, returned: Any, stored: Any, type_name: str, words: str
+    ) -> None:
+        pod = make_pod(declared, returned, name="near_miss")
+        with pytest.warns(errors.OutputConversionWarning) as record:
+            table = pod.pod(make_source()).as_table()
+        message = str(record[0].message)
+        assert "'near_miss'" in message
+        assert "'y'" in message
+        assert type_name in message
+        assert words in message
+        assert "to avoid this warning" in message
+        stored_value = table["y"].to_pylist()[0]
+        if isinstance(stored, dict):
+            stored_value = dict(stored_value)
+        assert stored_value == stored
+
+    def test_warning_never_shows_the_value(self) -> None:
+        """The message must be the same on every row, so it is shown once per run."""
+        first = make_pod(list[int], (1, 2), name="same")
+        second = make_pod(list[int], (3, 4, 5), name="same")
+        with pytest.warns(errors.OutputConversionWarning) as one:
+            first.pod(make_source()).as_table()
+        with pytest.warns(errors.OutputConversionWarning) as two:
+            second.pod(make_source()).as_table()
+        assert str(one[0].message) == str(two[0].message)
+
+    def test_warning_records_what_was_converted(self) -> None:
+        pod = make_pod(dt.date, dt.datetime(2020, 1, 1, 12), name="day")
+        with pytest.warns(errors.OutputConversionWarning) as record:
+            pod.pod(make_source()).as_table()
+        warning = record[0].message
+        assert isinstance(warning, errors.OutputConversionWarning)
+        assert warning.function_name == "day"
+        assert warning.output_key == "y"
+        assert warning.declared_type is dt.date
+        assert warning.returned_type is dt.datetime
+
+    def test_one_value_with_two_conversions_warns_twice(self) -> None:
+        pod = make_pod(list[dt.date], (dt.datetime(2020, 1, 1, 3),))
+        with pytest.warns(errors.OutputConversionWarning) as record:
+            table = pod.pod(make_source()).as_table()
+        messages = sorted(str(w.message) for w in record)
+        assert len(messages) == 2
+        assert any("converted it to a list" in m for m in messages)
+        assert any("dropped the time of day" in m for m in messages)
+        assert table["y"].to_pylist() == [[dt.date(2020, 1, 1)]]
+
+    def test_shown_once_for_many_rows_under_the_default_filter(self) -> None:
+        pod = make_pod(list[int], (1, 2), name="many")
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("default")
+            table = pod.pod(make_source(tuple(range(1000)))).as_table()
+        assert table.num_rows == 1000
+        assert [w.category for w in record] == [errors.OutputConversionWarning]
+
+    def test_error_filter_makes_it_a_row_failure(self) -> None:
+        pod = make_pod(list[int], (1, 2), name="strict")
+        observer = _CrashRecorder()
+        job = PipelineJob(name="itl895", store=InMemoryArrowDatabase())
+        with job:
+            pod.pod(make_source((1, 2)), label="strict")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", errors.OutputConversionWarning)
+            job.run(orchestrator=SyncPipelineOrchestrator(), observer=observer)
+        assert job.nodes["strict"].as_table().num_rows == 0
+        assert len(observer.crashes) == 2
+        assert all(
+            isinstance(c, errors.OutputConversionWarning) for c in observer.crashes
+        )
+
+    def test_warning_survives_pickling(self) -> None:
+        import pickle
+
+        warning = errors.OutputConversionWarning(
+            "f", "y", "", list[int], tuple, "converted it to a list", "Return a list"
+        )
+        restored = pickle.loads(pickle.dumps(warning))
+        assert str(restored) == str(warning)
+        assert restored.returned_type is tuple
+
+
+ACCEPTED_SILENTLY = [
+    pytest.param(int, np.int64(3), 3, id="D2-np-int64-for-int"),
+    pytest.param(bool, np.bool_(True), True, id="D2-np-bool-for-bool"),
+    pytest.param(float, np.float64(1.5), 1.5, id="D2-np-float64-for-float"),
+    pytest.param(float, np.float32(0.5), 0.5, id="D2-np-float32-for-float"),
+    pytest.param(np.int8, np.int64(3), 3, id="D2-np-int64-for-np-int8"),
+    pytest.param(np.float32, np.float32(0.5), 0.5, id="np-float32-for-np-float32"),
+    pytest.param(np.float32, np.float16(0.5), 0.5, id="D2-np-float16-for-np-float32"),
+    pytest.param(int, 3, 3, id="int-for-int"),
+    pytest.param(list[int], [1, 2], [1, 2], id="list-for-list"),
+    pytest.param(dt.date, dt.date(2020, 1, 1), dt.date(2020, 1, 1), id="date-for-date"),
+]
+
+
+class TestAcceptedSilently:
+    @pytest.mark.parametrize(("declared", "returned", "stored"), ACCEPTED_SILENTLY)
+    def test_no_warning_and_value_stored(
+        self, declared: Any, returned: Any, stored: Any
+    ) -> None:
+        pod = make_pod(declared, returned)
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            table = pod.pod(make_source()).as_table()
+        assert [w for w in record if w.category is errors.OutputConversionWarning] == []
+        assert table["y"].to_pylist() == [stored]
+
+
+# (declared type, returned value, value a downstream pod receives)
+DOWNSTREAM = [
+    pytest.param(list[int], (1, 2), [1, 2], id="D5-tuple-becomes-list"),
+    pytest.param(
+        dt.date,
+        dt.datetime(2020, 1, 1, 12),
+        dt.date(2020, 1, 1),
+        id="D6-datetime-becomes-date",
+    ),
+    pytest.param(np.float32, 0.1, float(np.float32(0.1)), id="D7-float-rounded"),
+]
 
 
 class TestDownstreamSeesStoredValue:
     """The output Data must hold what is stored: no as_dict / as_table divergence."""
 
-    def _chain(self, received: list[Any]) -> tuple[Any, Any]:
-        up = function_pod(output_keys="y")(_float_from_int)
+    def _chain(
+        self, declared: Any, returned: Any, received: list[Any]
+    ) -> tuple[Any, Any]:
+        up = make_pod(declared, returned, name="up")
 
-        @function_pod(output_keys="z")
-        def down(y: float) -> float:
+        def down(y: Any) -> int:
             received.append(y)
-            return y * 10
+            return 1
 
-        return up, down
+        down.__annotations__["y"] = declared
+        return up, function_pod(output_keys="z")(down)
 
-    def test_standalone(self) -> None:
+    @staticmethod
+    def _assert_received(received: list[Any], expected: Any) -> None:
+        assert received == [expected]
+        assert type(received[0]) is type(expected)
+
+    @pytest.mark.parametrize(("declared", "returned", "expected"), DOWNSTREAM)
+    def test_standalone(self, declared: Any, returned: Any, expected: Any) -> None:
         received: list[Any] = []
-        up, down = self._chain(received)
-        list(down.pod(up.pod(make_source())).iter_data())
-        assert received == [1.0]
-        assert type(received[0]) is float
+        up, down = self._chain(declared, returned, received)
+        with pytest.warns(errors.OutputConversionWarning):
+            list(down.pod(up.pod(make_source())).iter_data())
+        self._assert_received(received, expected)
 
     @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
-    def test_pipeline_job(self, orchestrator_cls: Any) -> None:
+    @pytest.mark.parametrize("store_kind", STORES)
+    @pytest.mark.parametrize(("declared", "returned", "expected"), DOWNSTREAM)
+    def test_pipeline_job(
+        self,
+        declared: Any,
+        returned: Any,
+        expected: Any,
+        orchestrator_cls: Any,
+        store_kind: str,
+        tmp_path: Path,
+    ) -> None:
         received: list[Any] = []
-        up, down = self._chain(received)
-        job = PipelineJob(name="itl895", store=InMemoryArrowDatabase())
+        up, down = self._chain(declared, returned, received)
+        job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
         with job:
             down.pod(up.pod(make_source(), label="up"), label="down")
-        job.run(orchestrator=orchestrator_cls())
-        assert received == [1.0]
-        assert type(received[0]) is float
+        with pytest.warns(errors.OutputConversionWarning):
+            job.run(orchestrator=orchestrator_cls())
+        self._assert_received(received, expected)
+        stored = job.nodes["up"].as_table()["y"].to_pylist()
+        assert stored == [expected]
 
-    def test_output_as_dict_matches_as_table(self) -> None:
-        up = function_pod(output_keys="y")(_float_from_int)
-        for _tag, data in up.pod(make_source()).iter_data():
-            assert data.as_dict() == data.as_table().to_pylist()[0]
-            assert type(data.as_dict()["y"]) is float
-
-
-# Cases the developer has not decided yet keep today's behaviour (ITL-895 FINDINGS sec 11).
-UNDECIDED_ACCEPTED = [
-    pytest.param(int, np.int64(3), 3, id="D2-np-int64-for-int"),
-    pytest.param(bool, np.bool_(True), True, id="D2-np-bool-for-bool"),
-    pytest.param(float, 1, 1.0, id="D1-int-for-float"),
-    pytest.param(float, True, 1.0, id="D3-bool-for-float"),
-    pytest.param(list[int], (1, 2), [1, 2], id="D5-tuple-for-list"),
-    pytest.param(np.float32, 0.1, float(np.float32(0.1)), id="D7-float-for-float32"),
-]
-
-
-class TestUndecidedCasesKeepTodaysBehaviour:
-    @pytest.mark.parametrize(("declared", "returned", "stored"), UNDECIDED_ACCEPTED)
-    def test_accepted_and_stored_as_today(
-        self, declared: Any, returned: Any, stored: Any
+    @pytest.mark.parametrize(("declared", "returned", "expected"), DOWNSTREAM)
+    def test_output_as_dict_matches_as_table(
+        self, declared: Any, returned: Any, expected: Any
     ) -> None:
-        pod = make_pod(declared, returned)
-        table = pod.pod(make_source()).as_table()
-        assert table["y"].to_pylist() == [stored]
+        with pytest.warns(errors.OutputConversionWarning):
+            [(_tag, data)] = list(
+                make_pod(declared, returned).pod(make_source()).iter_data()
+            )
+        assert data.as_dict() == data.as_table().to_pylist()[0]
+        assert data.as_dict()["y"] == expected
+
+
+class TestRejectionInPipelineJob:
+    """Every decided rejection is a row failure on both orchestrators and both stores."""
+
+    @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+    @pytest.mark.parametrize("store_kind", STORES)
+    @pytest.mark.parametrize(
+        ("declared", "returned"),
+        [
+            pytest.param(float, 0, id="D1"),
+            pytest.param(float, True, id="D3"),
+            pytest.param(list[int], {1, 2}, id="ITL901"),
+        ],
+    )
+    def test_row_failure_and_nothing_stored(
+        self,
+        declared: Any,
+        returned: Any,
+        orchestrator_cls: Any,
+        store_kind: str,
+        tmp_path: Path,
+    ) -> None:
+        pod = make_pod(declared, returned, name="rejected")
+        observer = _CrashRecorder()
+        job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
+        with job:
+            pod.pod(make_source((1,)), label="rejected")
+        job.run(orchestrator=orchestrator_cls(), observer=observer)
+        assert job.nodes["rejected"].as_table().num_rows == 0
+        assert len(observer.crashes) == 1
+        assert isinstance(observer.crashes[0], errors.OutputTypeError)
 
 
 class TestConformingOutputsUnchanged:
