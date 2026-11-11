@@ -708,23 +708,38 @@ class CrashRecorder(NoOpObserver):
         self.crashes.append((node_label, str(tag["k"])))
 
 
-def row_failure_outcome(pod: Any, orchestrator: Any) -> dict[str, Any]:
+# The per-row handlers' log messages: sync ``FunctionNode.execute`` and async
+# ``process_one`` (DEBUG there, ITL-879).
+ROW_FAILURE_LOGS = ("Data execution failed in %s: %s", "Data processing failed, skipping: %s")
+
+
+def row_failure_outcome(
+    pod: Any, orchestrator: Any, caplog: pytest.LogCaptureFixture
+) -> dict[str, Any]:
     """Run ``pod`` as node ``dbl`` and describe what the caller sees."""
     store = InMemoryArrowDatabase()
     observer = CrashRecorder()
     job = build_job(store, ROWS, pod=pod)
-    try:
-        job.run(orchestrator=orchestrator, observer=observer)
-        raised = None
-        rows = sorted(job.nodes["dbl"].as_table()["k"].to_pylist())
-    except Exception as exc:
-        raised = exc
-        rows = None
+    caplog.clear()
+    with caplog.at_level("DEBUG", logger="orcapod"):
+        try:
+            job.run(orchestrator=orchestrator, observer=observer)
+            raised = None
+            rows = sorted(job.nodes["dbl"].as_table()["k"].to_pylist())
+        except Exception as exc:
+            raised = exc
+            rows = None
+    logs = [
+        (record.levelname, record.msg)
+        for record in caplog.records
+        if record.msg in ROW_FAILURE_LOGS
+    ]
     return {
         "raised": raised,
         "rows": rows,
         "crashes": observer.crashes,
         "stored": stored_rows(store),
+        "logs": logs,
     }
 
 
@@ -738,16 +753,20 @@ class TestUnstorableOutputIsARowFailure:
     )
     @pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
     def test_reported_like_a_function_failure(
-        self, orchestrator_cls, error_policy, pod
+        self, orchestrator_cls, error_policy, pod, caplog
     ):
-        """Same raise-or-return, rows, observer report and stored rows as a raise."""
+        """Same raise-or-return, rows, log, observer report and stored rows as a raise."""
         expected = row_failure_outcome(
-            raises_for_one, orchestrator_cls(error_policy=error_policy)
+            raises_for_one, orchestrator_cls(error_policy=error_policy), caplog
         )
-        actual = row_failure_outcome(pod, orchestrator_cls(error_policy=error_policy))
+        actual = row_failure_outcome(
+            pod, orchestrator_cls(error_policy=error_policy), caplog
+        )
 
         assert not isinstance(actual["raised"], StoreWriteError), actual["raised"]
         assert (actual["raised"] is None) == (expected["raised"] is None), actual
         assert actual["rows"] == expected["rows"]
         assert actual["crashes"] == expected["crashes"] == [("dbl", "r1")]
+        assert len(expected["logs"]) == 1, expected["logs"]
+        assert actual["logs"] == expected["logs"]
         assert actual["stored"] == expected["stored"]

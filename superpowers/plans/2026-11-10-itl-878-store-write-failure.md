@@ -258,3 +258,28 @@ proposal would change. Ask the coordinator to choose (a) row failure under `erro
 reported exactly like a function failure, or (b) `StoreWriteError`. No fix before the reply.
 
 No hash, schema or stored-data change.
+
+---
+
+## Follow-up: Finding C decided — an unstorable output is a row failure (2026-11-11)
+
+**Decision (developer, November 11, 2026):** a function output that cannot be turned into a
+storable record (naive datetime, `str` for a declared `int`, `int` for a declared dataclass)
+is a ROW FAILURE governed by `error_policy`, exactly like a function that raised. It is not a
+`StoreWriteError`. No behaviour change.
+
+Resumed after a machine restart; the previous worker's local commit ff4c25cb (12 pinning
+tests) is kept.
+
+- [x] Pinning tests (`TestUnstorableOutputIsARowFailure`, sync/async x continue/fail_fast x
+      3 outputs, each compared with a function raising on the same row) also assert the
+      per-row log record (level + message) matches the function-failure one, besides the
+      observer `on_data_crash`, raise-or-return, rows and stored rows.
+- [ ] Docs (`docs/concepts/function-pods.md`, "When the store cannot be written"): store
+      failures fail the run; a function output that cannot be stored is a row failure;
+      async logs row failures at DEBUG and ignores `fail_fast` (ITL-879), unchanged here.
+- [ ] `DESIGN_ISSUES.md` SW1: the same rule.
+- [ ] Decline finding (1) with a signed top-level PR comment.
+- [ ] Merge origin/main (b197544e; CHANGELOG entries under `[0.3.0] — unreleased`), full
+      suite on 3.11/3.12/3.13, golden unchanged, ruff, format, basedpyright, push, CI,
+      CodeRabbit round (bodies too). Reconcile with #290 if it merged first.
