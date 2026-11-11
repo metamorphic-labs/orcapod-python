@@ -192,3 +192,20 @@ Each task is test-first: write the failing tests, show the failure, implement, p
     must pass `tests/test_docs`.
 12. **Verification**: full suite on 3.11, 3.12, 3.13; ruff; basedpyright; merge origin/main;
     DESIGN_ISSUES.md entry; PR out of draft.
+
+---
+
+## Resume (2026-11-11, after machine restart; dispatch ctx_c41c7c0e38ed)
+
+State on arrival: worktree clean at 9802a9ab, equal to origin; 3 CodeRabbit rounds answered.
+main is b197544e (v0.2.0 tagged at 70f53f64; #291 SemiJoin via Polars, ITL-847, merged).
+
+1. Merge origin/main (no rebase). Remove the strict xfail on `test_semijoin`
+   (`tests/test_arrays/test_array_operators.py`); it must pass. Drop the "known gap"
+   wording in the PR body, CHANGELOG (`[0.3.0]` section) and spec F2.
+2. Rerun: full suite on 3.11/3.12/3.13, golden tests (only the ndarray entries listed in the
+   PR body may differ from main), ruff check, ruff format --check, basedpyright.
+3. Push, wait for CI, request CodeRabbit once, handle a round (test/doc/wording on merit;
+   layout/digest/names/identity/behaviour → ask coordinator).
+4. If #286 merges meanwhile: merge main again (golden: keep both sets; docs/reference/hashing.md:
+   the hash label convention paragraph appears once).
