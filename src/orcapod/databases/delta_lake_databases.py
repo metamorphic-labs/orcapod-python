@@ -71,6 +71,38 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
+def _store_error_to_raise(errors: list[tuple[str, Exception]]) -> Exception | None:
+    """Pick the store error a failed flush raises as itself.
+
+    A ``StoreReadError`` is preferred, because it is the error that fails a run
+    whatever the orchestrator's ``error_policy``; failing that, an
+    ``InputValidationError`` from a refused append. Every other failed batch is
+    added to the chosen error as a note, so no failure is hidden.
+
+    Args:
+        errors: The ``(record_key, error)`` pair of every batch that failed, in
+            flush order.
+
+    Returns:
+        The chosen error with its notes added, or ``None`` when no batch failed
+        with a store error.
+    """
+    chosen: Exception | None = None
+    for kind in (StoreReadError, InputValidationError):
+        chosen = next((e for _, e in errors if isinstance(e, kind)), None)
+        if chosen is not None:
+            break
+    if chosen is None:
+        return None
+    for record_key, other in errors:
+        if other is not chosen:
+            chosen.add_note(
+                f"Another batch also failed to flush ({record_key}): "
+                f"{type(other).__name__}: {other}"
+            )
+    return chosen
+
+
 class DeltaTableDatabase:
     """
     A Delta table database with clear insert vs update semantics.
@@ -977,7 +1009,21 @@ class DeltaTableDatabase:
         )
 
     def flush(self) -> None:
-        """Flush all pending batches."""
+        """Flush all pending batches.
+
+        Every pending batch is attempted, even after one fails. A batch that fails
+        stays queued, so a later flush tries it again, and each failure is logged.
+
+        Raises:
+            StoreReadError: If a batch's existing table could not be loaded. It is
+                raised as itself; every other batch that failed in this flush is
+                added to it as a note.
+            InputValidationError: If no batch failed with ``StoreReadError`` but a
+                batch's column types differ from its stored table's. Other failed
+                batches are added to it as notes.
+            RuntimeError: If batches failed with other errors only, naming the
+                failed batches, with the first failure as its ``__cause__``.
+        """
         errors: list[tuple[str, Exception]] = []
         for record_key in list(self._pending_batches.keys()):
             try:
@@ -986,6 +1032,9 @@ class DeltaTableDatabase:
                 logger.error(f"Error flushing batch for {record_key}: {e}")
                 errors.append((record_key, e))
         if errors:
+            store_error = _store_error_to_raise(errors)
+            if store_error is not None:
+                raise store_error
             failed_keys = [k for k, _ in errors]
             raise RuntimeError(
                 f"Failed to flush {len(errors)} batch(es): {failed_keys}"

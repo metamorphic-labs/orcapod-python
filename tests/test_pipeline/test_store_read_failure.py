@@ -10,6 +10,7 @@ still be computed.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -26,11 +27,16 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
 _CALLS: list[int] = []
+# Tables the function damages on its next call, standing in for another process
+# breaking a table while the job runs.
+_DAMAGE_ON_NEXT_CALL: list[Path] = []
 
 
 @function_pod(output_keys="y")
 def double(x: int) -> int:
     _CALLS.append(x)
+    while _DAMAGE_ON_NEXT_CALL:
+        require_unknown_reader_feature(_DAMAGE_ON_NEXT_CALL.pop())
     return 2 * x
 
 
@@ -43,8 +49,10 @@ ORCHESTRATORS: dict[str, Callable[[], object]] = {
 @pytest.fixture(autouse=True)
 def _reset_calls():
     _CALLS.clear()
+    _DAMAGE_ON_NEXT_CALL.clear()
     yield
     _CALLS.clear()
+    _DAMAGE_ON_NEXT_CALL.clear()
 
 
 @pytest.fixture(params=list(ORCHESTRATORS))
@@ -52,9 +60,9 @@ def make_orchestrator(request) -> Callable[[], object]:
     return ORCHESTRATORS[request.param]
 
 
-def build_job(store_path: Path) -> PipelineJob:
+def build_job(store_path: Path, keys: str = "abc") -> PipelineJob:
     source = ArrowTableSource(
-        pa.table({"k": ["a", "b", "c"], "x": [1, 2, 3]}),
+        pa.table({"k": list(keys), "x": list(range(1, len(keys) + 1))}),
         tag_columns=["k"],
         infer_nullable=True,
     )
@@ -76,6 +84,23 @@ def table_dirs(store_path: Path) -> tuple[Path, Path]:
 def delete_data_files(table: Path) -> None:
     for f in table.glob("*.parquet"):
         f.unlink()
+
+
+def require_unknown_reader_feature(table: Path) -> None:
+    """Commit a log version that requires a reader feature deltalake does not know.
+
+    Data files already loaded stay readable through the job's open table handle,
+    but loading the table again, as every flush does, fails.
+    """
+    log = table / "_delta_log"
+    version = max(int(p.stem) for p in log.glob("*.json")) + 1
+    protocol = {
+        "minReaderVersion": 3,
+        "minWriterVersion": 7,
+        "readerFeatures": ["orcapodMadeUpFeature"],
+        "writerFeatures": ["orcapodMadeUpFeature"],
+    }
+    (log / f"{version:020d}.json").write_text(json.dumps({"protocol": protocol}))
 
 
 @pytest.fixture
@@ -116,6 +141,30 @@ def test_unreadable_result_table_fails_the_run_under_continue(
 
     assert Path(info.value.table) == result_table
     assert _CALLS == []
+
+
+def test_store_read_failure_in_a_row_flush_fails_the_run(stored, make_orchestrator):
+    # Rows d and e are new. The result table breaks while d is computed, after
+    # d's cache lookup succeeded, so the failure surfaces in the flush that stores
+    # d's result, inside the error_policy="continue" per-row handler. Before the
+    # fix the flush wrapped the StoreReadError in a RuntimeError, the handler
+    # skipped d as a failed row, computed e, and the run ended with RuntimeError.
+    result_table, _ = table_dirs(stored)
+    _DAMAGE_ON_NEXT_CALL.append(result_table)
+
+    orchestrator = make_orchestrator()
+    job = build_job(stored, keys="abcde")
+    with pytest.raises(StoreReadError) as info:
+        job.run(orchestrator=orchestrator)
+
+    assert Path(info.value.table) == result_table
+    if isinstance(orchestrator, SyncPipelineOrchestrator):
+        # The run stops at d: e is never computed.
+        assert _CALLS == [4]
+    else:
+        # The async pod computes rows concurrently, so e may already be in flight
+        # when d's flush fails.
+        assert 4 in _CALLS and len(_CALLS) <= 2
 
 
 def test_absent_tables_are_computed(stored, make_orchestrator):

@@ -4,6 +4,9 @@ Covers:
 - A table that exists but cannot be read raises ``StoreReadError`` on every read
   path, naming the table; a table that does not exist still reads as ``None``.
 - A table whose log cannot be loaded is never overwritten by a flush.
+- ``flush`` raises ``StoreReadError`` and the append refusal's
+  ``InputValidationError`` themselves, not wrapped in ``RuntimeError``, and
+  notes every other batch that failed in the same flush.
 - An append whose column types differ from the stored table is refused before
   anything is written, naming the column and both types; legitimate appends
   (same types in another layout, new or missing columns, unchanged extension
@@ -178,14 +181,14 @@ class TestUnloadableTableIsNeverOverwritten:
 
         with pytest.raises(StoreReadError):
             db.get_all_records(PATH)
-        with pytest.raises(RuntimeError) as info:
+        with pytest.raises(StoreReadError) as info:
             db.add_records(
                 PATH,
                 rows([b"c"], pa.array([3], pa.int64())),
                 record_id_column="rid",
                 flush=True,
             )
-        assert isinstance(info.value.__cause__, StoreReadError)
+        assert_names_table(info.value, base)
         assert snapshot(table_dir(base)) == before
 
     def test_protocol_error_on_load_is_not_treated_as_absent(
@@ -206,7 +209,7 @@ class TestUnloadableTableIsNeverOverwritten:
         before = snapshot(target)
         db = DeltaTableDatabase(base_path=base)
         monkeypatch.setattr(deltalake, "DeltaTable", failing_load)
-        with pytest.raises(RuntimeError) as info:
+        with pytest.raises(StoreReadError) as info:
             db.add_records(
                 PATH,
                 rows([b"c"], pa.array([3], pa.int64())),
@@ -215,11 +218,60 @@ class TestUnloadableTableIsNeverOverwritten:
             )
         monkeypatch.undo()
 
-        assert isinstance(info.value.__cause__, StoreReadError)
+        assert isinstance(info.value.__cause__, DeltaProtocolError)
         assert snapshot(target) == before
         stored_rows = DeltaTableDatabase(base_path=base).get_all_records(PATH)
         assert stored_rows is not None
         assert stored_rows.num_rows == 2
+
+
+class TestFlushRaisesStoreErrorsThemselves:
+    def test_store_read_error_is_raised_with_a_note_per_other_failed_batch(
+        self, base, stored
+    ):
+        other = ("results", "u")
+        stored.add_records(
+            other,
+            rows([b"a"], pa.array([1], pa.int64())),
+            record_id_column="rid",
+            flush=True,
+        )
+        unsupported_reader_feature(base)
+        db = DeltaTableDatabase(base_path=base)
+        # Queued first: refused at flush, because x is stored as int64.
+        db.add_records(other, rows([b"b"], pa.array([2.0])), record_id_column="rid")
+        # Queued second: its table's log cannot be loaded.
+        db.add_records(
+            PATH, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
+        )
+
+        with pytest.raises(StoreReadError) as info:
+            db.flush()
+
+        # The StoreReadError wins over the earlier refusal, because it is the one
+        # that fails a run whatever the error policy; the refusal is noted on it.
+        assert_names_table(info.value, base)
+        notes = getattr(info.value, "__notes__", [])
+        assert len(notes) == 1
+        assert "results/u" in notes[0]
+        assert "InputValidationError" in notes[0]
+        # Both failed batches stay queued, so the next flush fails the same way.
+        with pytest.raises(StoreReadError):
+            db.flush()
+
+    def test_other_flush_failures_still_raise_runtime_error(self, base, monkeypatch):
+        def failing_write(*args, **kwargs):
+            raise OSError("simulated disk failure")
+
+        db = DeltaTableDatabase(base_path=base)
+        db.add_records(
+            PATH, rows([b"a"], pa.array([1], pa.int64())), record_id_column="rid"
+        )
+        monkeypatch.setattr(deltalake, "write_deltalake", failing_write)
+
+        with pytest.raises(RuntimeError, match="Failed to flush 1 batch") as info:
+            db.flush()
+        assert isinstance(info.value.__cause__, OSError)
 
 
 # ---------------------------------------------------------------------------
@@ -229,13 +281,6 @@ class TestUnloadableTableIsNeverOverwritten:
 
 def append(db: DeltaTableDatabase, table: pa.Table) -> None:
     db.add_records(PATH, table, record_id_column="rid", flush=True)
-
-
-def refusal(info: pytest.ExceptionInfo[RuntimeError]) -> InputValidationError:
-    """The ``InputValidationError`` behind a refused flush."""
-    cause = info.value.__cause__
-    assert isinstance(cause, InputValidationError), repr(info.value)
-    return cause
 
 
 class TestChangedColumnTypeIsRefused:
@@ -249,9 +294,9 @@ class TestChangedColumnTypeIsRefused:
         ids=["int64->float64", "int64->int32", "int64->large_string"],
     )
     def test_plain_type_change(self, base, stored, new_type, value, named):
-        with pytest.raises(RuntimeError) as info:
+        with pytest.raises(InputValidationError) as info:
             append(stored, rows([b"c"], pa.array([value], new_type)))
-        message = str(refusal(info))
+        message = str(info.value)
         assert "'x'" in message
         assert "int64" in message
         assert named in message
@@ -266,12 +311,12 @@ class TestChangedColumnTypeIsRefused:
         db = DeltaTableDatabase(base_path=base)
         append(db, rows([b"a"], ext_array([b"x"], pa.large_binary())))
 
-        with pytest.raises(RuntimeError) as info:
+        with pytest.raises(InputValidationError) as info:
             append(
                 db,
                 rows([b"b"], ext_array([[1.0]], pa.large_list(pa.float32()))),
             )
-        message = str(refusal(info))
+        message = str(info.value)
         assert "'x'" in message
         assert "binary" in message
         assert "list" in message

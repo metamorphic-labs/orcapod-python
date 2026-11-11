@@ -231,6 +231,13 @@ print("function calls:", len(calls))
     converted to the stored type. `string` and `large_string`, and the other large and
     non-large layouts of one type, count as the same type.
 
+    Both errors reach you as themselves, also from `flush()` and from
+    `add_records(..., flush=True)`. When several pending tables fail in one flush, the
+    `StoreReadError` (or else the first `InputValidationError`) is raised, and each other
+    failure is attached to it as a note and logged. Failed rows stay queued, so a later
+    flush tries them again. A flush that fails for any other reason raises `RuntimeError`,
+    with the first failure as its cause.
+
 A node from a job that has run also provides:
 
 - **`get_all_records()`** -- every record this step of the job has stored, as a PyArrow

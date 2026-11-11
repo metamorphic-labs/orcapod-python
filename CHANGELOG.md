@@ -92,8 +92,9 @@ table that does not exist. A `PipelineJob` then warned that the stored results "
 deleted externally", swallowed the per-row read errors under `error_policy="continue"`, finished
 without raising, and its nodes showed no records. Every read now raises
 `orcapod.errors.StoreReadError`, which names the table and chains the backend's error, and a
-store read failure fails the run under both orchestrators whatever the `error_policy`. A table
-that does not exist still reads as empty.
+store read failure fails the run under both orchestrators whatever the `error_policy`, also
+when it happens while a row's result is being stored. A table that does not exist still reads as
+empty.
 
 A flush that could not load an existing table no longer treats it as absent. Before this fix a
 `DeltaProtocolError` while loading the table made the flush write the batch with
@@ -142,6 +143,13 @@ was involved, accepted rows the table could then no longer read. The comparison 
 way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
 are the same type, an extension type is compared by its storage type, and nullability is not
 compared. New columns and missing columns are still accepted.
+
+`DeltaTableDatabase.flush()` (and `add_records(..., flush=True)`) now raises a
+`StoreReadError` or this `InputValidationError` as itself. Before, it wrapped every failure in a
+`RuntimeError`. When several tables fail in one flush, the `StoreReadError` is raised, or else the
+first `InputValidationError`, with each other failure attached as a note and logged. Failed rows
+stay queued for the next flush. A flush that fails only for other reasons still raises
+`RuntimeError`, with the first failure as its cause.
 
 #### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-832, ITL-813)
 
