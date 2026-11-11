@@ -24,6 +24,7 @@ from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import StoreReadError
 from orcapod.pipeline import PipelineJob
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
 _CALLS: list[int] = []
@@ -38,6 +39,11 @@ def double(x: int) -> int:
     while _DAMAGE_ON_NEXT_CALL:
         require_unknown_reader_feature(_DAMAGE_ON_NEXT_CALL.pop())
     return 2 * x
+
+
+@function_pod(output_keys="z")
+def triple(x: int) -> int:
+    return 3 * x
 
 
 ORCHESTRATORS: dict[str, Callable[[], object]] = {
@@ -180,3 +186,50 @@ def test_absent_tables_are_computed(stored, make_orchestrator):
     _CALLS.clear()
     build_job(stored).run(orchestrator=make_orchestrator())
     assert _CALLS == []
+
+
+class _FailsToStartNode(NoOpObserver):
+    """An observer whose ``on_node_start`` raises for one node label."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def on_node_start(
+        self, node_label: str, node_hash: str, tag_schema: object = None
+    ) -> None:
+        if node_label == self.label:
+            raise ValueError(f"observer failed for {node_label}")
+
+
+def test_unrelated_concurrent_failure_does_not_hide_store_read_error(tmp_path):
+    # Node "dbl" raises StoreReadError while loading its stored results and node
+    # "tri" fails in the observer's on_node_start. Both fail before their first
+    # await, so both land in the async TaskGroup's exception group. Before the fix,
+    # re-raising inside "except* StoreReadError" left the unmatched ValueError in
+    # the group and the caller got an ExceptionGroup, whatever the Python version.
+    stored = tmp_path / "store"
+    _ = build_job(stored).run()
+    result_table, _ = table_dirs(stored)
+    delete_data_files(result_table)
+
+    source = ArrowTableSource(
+        pa.table({"k": ["a", "b", "c"], "x": [1, 2, 3]}),
+        tag_columns=["k"],
+        infer_nullable=True,
+    )
+    job = PipelineJob(name="itl884", store=DeltaTableDatabase(base_path=stored))
+    with job:
+        _ = double.pod(source, label="dbl")
+        _ = triple.pod(source, label="tri")
+
+    with pytest.raises(StoreReadError) as info:
+        job.run(
+            orchestrator=AsyncPipelineOrchestrator(),
+            observer=_FailsToStartNode("tri"),
+        )
+
+    assert type(info.value) is StoreReadError
+    assert Path(info.value.table) == result_table
+    assert info.value.__cause__ is not None
+    notes = getattr(info.value, "__notes__", [])
+    assert any("ValueError: observer failed for tri" in note for note in notes), notes

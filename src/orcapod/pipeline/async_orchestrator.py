@@ -251,12 +251,66 @@ class AsyncPipelineOrchestrator:
             return OrchestratorResult(
                 node_outputs=collectors if materialize_results else {}
             )
-        except* StoreReadError as group:
+        except ExceptionGroup as group:
             # A failed store read stops the run. Raise it on its own, as the sync
             # orchestrator does, rather than inside the TaskGroup's exception group.
-            raise StoreReadError.in_group(group)[0]
+            # A plain except, not except*: raising inside except* can wrap the
+            # error in a new group again.
+            store_error = _single_store_read_error(group)
+            if store_error is None:
+                raise
+            raise store_error
         finally:
             effective_observer.on_run_end(run_id)
+
+
+def _single_store_read_error(group: ExceptionGroup) -> StoreReadError | None:
+    """Pick the one ``StoreReadError`` an async run raises from its exception group.
+
+    Concurrent node tasks can fail together, so the ``TaskGroup``'s group may hold
+    several store read errors and other exceptions. The caller gets a single
+    ``StoreReadError``, as from the sync orchestrator: the first one in the group.
+    Every other exception stays attached for diagnosis: each is noted on the
+    chosen error, other store read errors are also logged at WARNING, and the
+    whole group is the chosen error's ``__context__``. Its ``__cause__`` stays the
+    backend error.
+
+    Args:
+        group: The exception group the run's ``TaskGroup`` raised.
+
+    Returns:
+        The store read error to raise, or ``None`` when the group holds none.
+    """
+    store_errors = StoreReadError.in_group(group)
+    if not store_errors:
+        return None
+    chosen = store_errors[0]
+    for other in _leaves(group):
+        if other is chosen:
+            continue
+        if isinstance(other, StoreReadError):
+            logger.warning(
+                "Another store read failed in the same run: %s",
+                other,
+                exc_info=other,
+            )
+            chosen.add_note(f"Another store read failed in the same run: {other}")
+        else:
+            chosen.add_note(
+                f"Another node failed in the same run: {type(other).__name__}: {other}"
+            )
+    return chosen
+
+
+def _leaves(group: BaseExceptionGroup) -> list[BaseException]:
+    """Return every non-group exception in ``group``, nested groups flattened."""
+    found: list[BaseException] = []
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            found.extend(_leaves(exc))
+        else:
+            found.append(exc)
+    return found
 
 
 class _CollectingWriter:

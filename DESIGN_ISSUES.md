@@ -2236,7 +2236,12 @@ async `FunctionPod` row handler and the async orchestrator let it fail the run w
 `error_policy`. Before merging into an existing table, `_flush_by_key` compares the batch with
 the stored Delta schema through Delta's own type mapping (extension types by storage,
 large-normalized, nullability ignored). On a difference it raises `InputValidationError` naming the
-table, column and both types, and nothing is written. Regressions:
+table, column and both types, and nothing is written. `flush()` raises a `StoreReadError` or
+that `InputValidationError` as itself, not wrapped in `RuntimeError`, with every other failed
+batch noted on it, so a read failure in a per-row result-cache flush still fails the run. The
+async orchestrator selects the `StoreReadError` from the `TaskGroup`'s exception group with a
+plain `except`, noting the other failures, so a concurrent unrelated failure cannot turn it into
+an `ExceptionGroup`. Regressions:
 `tests/test_databases/test_delta_read_failures.py` and
 `tests/test_pipeline/test_store_read_failure.py`. Open: whether a nullability-only change
 should be refused (Delta's merge relaxes a non-null nested field to nullable) belongs to the
