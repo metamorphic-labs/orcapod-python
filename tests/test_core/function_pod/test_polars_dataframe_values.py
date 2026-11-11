@@ -190,6 +190,39 @@ class TestOperators:
         assert data_schema["df"] is pl.DataFrame
 
 
+def _ordered_frame(*, reverse: bool) -> pl.DataFrame:
+    """Columns ``a, b`` with struct fields ``u, v``, or both orders reversed."""
+    fields = {"u": pl.Int8, "v": pl.String}
+    struct = pl.Struct(dict(reversed(fields.items())) if reverse else fields)
+    frame = pl.DataFrame(
+        {
+            "a": pl.Series([{"u": 1, "v": "x"}], dtype=struct),
+            "b": pl.Series([2], dtype=pl.Int8),
+        }
+    )
+    return frame.select("b", "a") if reverse else frame
+
+
+@function_pod(output_keys="df")
+def make_ordered_frame(reverse: bool) -> pl.DataFrame:
+    return _ordered_frame(reverse=reverse)
+
+
+@function_pod(output_keys="names")
+def leading_names(df: pl.DataFrame) -> str:
+    """The first column's name and the first field name of column ``a``."""
+    first_field = df.schema["a"]
+    assert isinstance(first_field, pl.Struct)
+    return f"{df.columns[0]}/{first_field.fields[0].name}"
+
+
+def _order_source() -> DictSource:
+    return DictSource(
+        [{"k": "fwd", "reverse": False}, {"k": "rev", "reverse": True}],
+        tag_columns=["k"],
+    )
+
+
 _STORES: dict[str, Callable[[Path], ArrowDatabaseProtocol]] = {
     "in_memory": lambda _: InMemoryArrowDatabase(),
     "delta": lambda tmp: DeltaTableDatabase(tmp / "delta"),
@@ -219,6 +252,30 @@ class TestPipelineStores:
             tag["k"]: data["height"] for tag, data in job.nodes["height"].iter_data()
         }
         assert heights == {"a": 1, "b": 3}
+
+    @pytest.mark.parametrize("store_name", list(_STORES))
+    @pytest.mark.parametrize("orchestrator_name", list(_ORCHESTRATORS))
+    def test_column_and_struct_field_order_kept_and_distinguished(
+        self, store_name: str, orchestrator_name: str, tmp_path: Path
+    ) -> None:
+        """Frames differing only in order are stored exactly and are distinct cache keys.
+
+        A cached pod that returns ``df.columns[0]`` computes for each order instead of
+        reusing the other order's result.
+        """
+        job = PipelineJob(name="order", store=_STORES[store_name](tmp_path))
+        with job:
+            frames = make_ordered_frame.pod(_order_source(), label="make")
+            leading_names.pod(frames, label="names")
+        job.run(orchestrator=_ORCHESTRATORS[orchestrator_name]())
+
+        got = {tag["k"]: data["df"] for tag, data in job.nodes["make"].iter_data()}
+        _assert_exact(got["fwd"], _ordered_frame(reverse=False))
+        _assert_exact(got["rev"], _ordered_frame(reverse=True))
+        names = {
+            tag["k"]: data["names"] for tag, data in job.nodes["names"].iter_data()
+        }
+        assert names == {"fwd": "a/u", "rev": "b/v"}
 
     @pytest.mark.xfail(
         strict=True,

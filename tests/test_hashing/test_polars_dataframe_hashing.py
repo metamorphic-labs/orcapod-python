@@ -1,11 +1,12 @@
 """Content hashing of ``pl.DataFrame`` and ``pl.Series`` values (ITL-578).
 
 The hash of a frame-valued data column is a cache key. It depends on the frame's logical
-content: its values, row count, and each column's name and dtype (in Orcapod's own dtype
-grammar, see ``orcapod.logical_types.polars_type``). Like every Orcapod table hash it does not
-depend on column order or struct field order. It does not depend on how the frame happens to
-be laid out in memory (chunking, slice offsets, the bytes under null slots), and it is the same
-in every process.
+content, everything a pod can observe through the public Polars API: its values (a null
+struct and a struct of nulls included), row count, column order, and each column's name and
+dtype in Orcapod's own dtype grammar (see ``orcapod.logical_types.polars_type``), struct field
+order and a ``Categorical``'s ``Categories`` included. It does not depend on how the frame
+happens to be laid out in memory (chunking, slice offsets, the bytes under null slots), and it
+is the same in every process.
 
 Hashes are taken through the public path a cache lookup uses: the ``content_hash()`` of the
 ``Data`` a frame-valued source yields. The pinned values themselves live in the shared
@@ -50,6 +51,7 @@ def _all_distinct(values: list[pl.DataFrame] | list[pl.Series]) -> bool:
 
 
 _BASE = pl.DataFrame({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+_XSTRUCT = pl.Struct({"x": pl.Int8})
 
 
 class TestEqualFramesHashEqual:
@@ -76,28 +78,11 @@ class TestEqualFramesHashEqual:
             pl.DataFrame({"s": ["a", "b"], "l": [[1], [2, 3]]})
         )
 
-    def test_column_order_does_not_matter(self) -> None:
-        """Column order is not identity, as for every Orcapod table hash (starfix)."""
-        assert _data_hash(_BASE.select("y", "x")) == _data_hash(_BASE)
-
-    def test_struct_field_order_does_not_matter(self) -> None:
-        ab = pl.DataFrame(
-            {
-                "s": pl.Series(
-                    [{"a": 1, "b": "x"}],
-                    dtype=pl.Struct({"a": pl.Int64, "b": pl.String}),
-                )
-            }
-        )
-        ba = pl.DataFrame(
-            {
-                "s": pl.Series(
-                    [{"b": "x", "a": 1}],
-                    dtype=pl.Struct({"b": pl.String, "a": pl.Int64}),
-                )
-            }
-        )
-        assert _data_hash(ab) == _data_hash(ba)
+    def test_default_categoricals_hash_equal(self) -> None:
+        values = ["b", "a"]
+        assert _data_hash(
+            pl.DataFrame({"c": pl.Series(values, dtype=pl.Categorical)})
+        ) == _data_hash(pl.DataFrame({"c": pl.Series(values, dtype=pl.Categorical())}))
 
     def test_value_read_back_from_a_database_hashes_the_same(
         self, tmp_path: Path
@@ -132,6 +117,69 @@ class TestDifferentFramesHashDifferent:
 
     def test_row_order(self) -> None:
         assert _data_hash(_BASE.reverse()) != _data_hash(_BASE)
+
+    def test_column_order(self) -> None:
+        """A pod can observe column order (``df.columns[0]``), so it is identity."""
+        assert _data_hash(_BASE.select("y", "x")) != _data_hash(_BASE)
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            pytest.param(lambda dtype: dtype, id="top-level"),
+            pytest.param(pl.List, id="in-list"),
+            pytest.param(lambda dtype: pl.Array(dtype, 1), id="in-array"),
+            pytest.param(lambda dtype: pl.Struct({"outer": dtype}), id="in-struct"),
+        ],
+    )
+    def test_struct_field_order(self, wrap: Any) -> None:
+        """Struct fields are ordered and visible to pod code, at every nesting depth."""
+        ab = pl.Struct({"a": pl.Int64, "b": pl.String})
+        ba = pl.Struct({"b": pl.String, "a": pl.Int64})
+        frames = [
+            pl.DataFrame({"s": pl.Series([None], dtype=wrap(dtype))})
+            for dtype in (ab, ba)
+        ]
+        assert _all_distinct(frames)
+
+    def test_struct_field_order_in_series(self) -> None:
+        ab = pl.Series("s", [{"a": 1, "b": "x"}])
+        assert _data_hash(ab) != _data_hash(
+            ab.struct.unnest().select("b", "a").to_struct("s")
+        )
+
+    @pytest.mark.parametrize(
+        ("wrap", "dtype"),
+        [
+            pytest.param(lambda v: v, _XSTRUCT, id="top-level"),
+            pytest.param(lambda v: [v], pl.List(_XSTRUCT), id="in-list"),
+            pytest.param(
+                lambda v: {"outer": v}, pl.Struct({"outer": _XSTRUCT}), id="in-struct"
+            ),
+        ],
+    )
+    def test_null_struct_and_struct_of_nulls(self, wrap: Any, dtype: Any) -> None:
+        """``is_null()`` tells a null struct from a struct whose fields are all null."""
+        null_struct = pl.DataFrame(
+            {"s": pl.Series([wrap(None), wrap({"x": 1})], dtype=dtype)}
+        )
+        struct_of_nulls = pl.DataFrame(
+            {"s": pl.Series([wrap({"x": None}), wrap({"x": 1})], dtype=dtype)}
+        )
+        assert _data_hash(null_struct) != _data_hash(struct_of_nulls)
+
+    def test_categorical_categories_are_identity(self) -> None:
+        """A ``Categorical``'s ``Categories`` name, namespace and physical width."""
+        values = ["a", "b"]
+        frames = [
+            pl.DataFrame({"c": pl.Series(values, dtype=pl.Categorical(categories))})
+            for categories in (
+                pl.Categories(),
+                pl.Categories("units"),
+                pl.Categories("units", "lab"),
+                pl.Categories("units", "lab", pl.UInt8),
+            )
+        ]
+        assert _all_distinct(frames)
 
     def test_integer_width_and_signedness(self) -> None:
         frames = [
@@ -327,6 +375,7 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
         "i": pl.Series([1, None, 3], dtype=pl.Int8),
         "e": pl.Series(["a", "b", None], dtype=pl.Enum(["b", "a"])),
         "t": pl.Series([dt.datetime(2020, 1, 1)] * 3, dtype=pl.Datetime("ms", "UTC")),
+        "c": pl.Series(["y", None, "x"], dtype=pl.Categorical),
     })
     source = DictSource([{"k": "a", "v": df}], tag_columns=["k"],
                         data_schema={"k": str, "v": pl.DataFrame})
@@ -362,6 +411,7 @@ def test_hash_is_identical_across_processes(seed: str) -> None:
                 "t": pl.Series(
                     [dt.datetime(2020, 1, 1)] * 3, dtype=pl.Datetime("ms", "UTC")
                 ),
+                "c": pl.Series(["y", None, "x"], dtype=pl.Categorical),
             }
         )
     )
@@ -384,15 +434,21 @@ class TestDescriptorGrammar:
             }
         )
         assert polars_dtype_descriptor(dtype, "col") == {
-            "struct": {
-                "e": {"enum": ["y", "x"]},
-                "a": {"array": [{"array": ["int16", 3]}, 2]},
-                "t": {"list": {"datetime": ["ms", "UTC"]}},
-                "m": {"decimal": [10, 2]},
-                "d": {"duration": "ns"},
-                "c": "categorical",
-                "n": "null",
-            }
+            "struct": [
+                ["e", {"enum": ["y", "x"]}],
+                ["a", {"array": [{"array": ["int16", 3]}, 2]}],
+                ["t", {"list": {"datetime": ["ms", "UTC"]}}],
+                ["m", {"decimal": [10, 2]}],
+                ["d", {"duration": "ns"}],
+                ["c", {"categorical": ["", "", "uint32"]}],
+                ["n", "null"],
+            ]
+        }
+
+    def test_categorical_categories_encoding(self) -> None:
+        dtype = pl.Categorical(pl.Categories("units", "lab", pl.UInt8))
+        assert polars_dtype_descriptor(dtype, "col") == {
+            "categorical": ["units", "lab", "uint8"]
         }
 
     def test_dtype_outside_the_grammar_names_the_column(self) -> None:

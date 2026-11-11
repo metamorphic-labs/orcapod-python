@@ -27,3 +27,26 @@ design decisions.
 - CodeRabbit round on 2abaf4c5: column-order cache-key finding declined (coordinator approved,
   developer decision Nov 10), docs caveat added in hashing.md and function-pods.md; body-only
   items answered as no-change in one top-level comment.
+
+## Revision — developer decision, November 11, 2026: order is identity
+
+Everything a pod can observe as a frame's logical content is identity (coordinator approved
+the property table). Labels stay `polars_dataframe_v1` / `polars_series_v1` (unreleased).
+
+1. Descriptor: `columns` and `struct` become ordered lists of `[name, dtype]` pairs, at every
+   depth (column order, struct field order).
+2. Struct validity: the hash projection turns each struct into
+   `struct<valid: bool not null, fields: struct<positional children>>`, children nulled under a
+   null parent, so a null struct differs from a struct of nulls (top level and nested).
+   starfix root cause is on ITL-848; the Arrow table hash is not touched.
+3. Categorical: `{"categorical": [name, namespace, physical]}` from its `Categories`.
+4. OUT: chunking, rechunk, sortedness flags (not stored), physical codes / registry, Arrow
+   layout, memory, `_PL_*` metadata. Stated in docs/reference/hashing.md.
+5. Tests first: reordered columns / struct fields (nested) differ; null struct vs struct of
+   nulls differ; Categories params differ, default `Categorical()` equal across processes;
+   in-memory + Delta, sync + async preserve order; cached pod returning `df.columns[0]`
+   recomputes for a reordered frame.
+6. Golden: regenerate only the `polars_*` entries; diff must touch no other line.
+7. Docs: remove the column-order caveat (9ed28caa), state the new rule + OUT list. CHANGELOG:
+   add `[0.3.0] — unreleased` above `[0.2.0]` with the ITL-578 entry. PR description.
+8. Reply on CodeRabbit thread 4536018197: accepted.

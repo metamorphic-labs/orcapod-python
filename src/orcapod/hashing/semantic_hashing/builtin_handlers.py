@@ -498,10 +498,11 @@ class PolarsDataFrameHandler:
     """Hasher for ``pl.DataFrame``: Orcapod's dtype descriptor plus a starfix value digest.
 
     Delegates to ``polars_frame_content_hash`` in ``orcapod.logical_types.polars_type``,
-    whose module docstring defines the scheme. The hash ignores chunking, slice offsets, the
-    bytes under null slots, column order and struct field order, and distinguishes every
-    dtype parameter (Enum categories and their order, Decimal precision and scale, Datetime
-    unit and time zone, Duration unit, Array shape).
+    whose module docstring defines the scheme. The hash ignores chunking, slice offsets and the
+    bytes under null slots, and distinguishes column order, struct field order, a null struct
+    from a struct of nulls, and every dtype parameter (Enum categories and their order,
+    Categorical ``Categories``, Decimal precision and scale, Datetime unit and time zone,
+    Duration unit, Array shape).
     """
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:

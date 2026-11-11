@@ -270,44 +270,50 @@ under the label `polars_dataframe_v1` for a frame and `polars_series_v1` for a S
 
 `values` is the frame exported with `compat_level=oldest`, with top-level `Null` columns left
 out, `Array` cast to `large_list`, nested `Null` cast to an all-null `bool` and dictionaries
-decoded, for hashing only. Like every Orcapod table hash it ignores column order and struct
-field order. `descriptor` is canonical JSON (keys sorted, compact separators, UTF-8) in a
-grammar Orcapod owns, never Polars' `repr`:
+decoded, and each struct turned into `struct<valid: bool, fields: struct<...>>`, its validity
+plus its children with the parent's nulls propagated, for hashing only. starfix ignores column
+order and struct field order and hashes a null struct like a struct of nulls; the descriptor
+carries the orders and `valid` the struct's own nulls. `descriptor` is canonical JSON (keys
+sorted, compact separators, UTF-8) in a grammar Orcapod owns, never Polars' `repr`:
 
 ```text
 frame:  {"kind": "polars.dataframe", "height": <rows>,
-         "columns": {<name>: <dtype>, ...}}
+         "columns": [[<name>, <dtype>], ...]}        in column order
 series: {"kind": "polars.series", "name": <name>, "height": <rows>,
          "dtype": <dtype>}
 
 <dtype> := "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
          | "float16" | "float32" | "float64" | "boolean" | "string" | "binary"
-         | "date" | "time" | "null" | "categorical"
+         | "date" | "time" | "null"
+         | {"categorical": [<name>, <namespace>, <physical>]}   its Categories
          | {"enum": [<category>, ...]}               every declared category, in order
          | {"decimal": [<precision>, <scale>]}
          | {"datetime": [<unit>, <time zone or null>]}
          | {"duration": <unit>}
          | {"list": <dtype>}
          | {"array": [<dtype>, <size>]}              a multi-dimensional array nests
-         | {"struct": {<field>: <dtype>, ...}}
+         | {"struct": [[<field>, <dtype>], ...]}     in field order
 ```
 
-So two frames hash equal exactly when they have the same row count, the same column names,
-the same dtype for each name (Enum categories and their order, Decimal precision and scale,
-Datetime unit and time zone, Duration unit and Array shape included) and the same values.
-An Enum's full enumeration of choices is part of its dtype: all its declared categories in
+The rule: everything a pod can observe through the public Polars API as the frame's logical
+content is identity. So two frames hash equal exactly when they have the same row count, the
+same column names in the same order, the same dtype for each column (struct fields and their
+order at every depth, Enum categories and their order, a `Categorical`'s `Categories` name,
+namespace and physical width, Decimal precision and scale, Datetime unit and time zone,
+Duration unit and Array shape included) and the same values (a null struct differs from a
+struct whose fields are all null; a null differs from NaN, and `0.0` from `-0.0`). A pod that
+returns `df.columns[0]` therefore never receives another frame's cached result. An Enum's full enumeration of choices is part of its dtype: all its declared categories in
 declared order, including categories no row holds, so `Enum(["a", "b"])`, `Enum(["b", "a"])`
-and `Enum(["a", "b", "z"])` hash differently over the same values. Chunking, slice offsets,
-the bytes under null slots, column order and struct field order do not matter. The labels are
+and `Enum(["a", "b", "z"])` hash differently over the same values.
+
+Physical properties are not identity: chunking (`n_chunks()`) and rechunking, slice offsets,
+the bytes under null slots, sortedness flags (`Series.flags`, which storage does not keep: a
+frame read back has them cleared), physical `Categorical` codes (`to_physical()`) and the
+contents of the process-wide category registry, which depend on what the process saw before,
+the Arrow layout Polars exports (string views, large or small offsets) and memory size. The labels are
 the only version marker: a change to the grammar or the digest is a new definition under new
 labels (`polars_dataframe_v2`, `polars_series_v2`). A dtype outside the grammar raises
 `ValueError` naming the column.
-
-Because column order and struct field order are not part of the hash, two frames that differ
-only in those orders share a cache entry. A pod must not depend on them: a cached pod that
-returns `df.columns[0]` gives the first column of whichever frame was computed first, for
-both frames. A pod that needs a particular order selects or sorts the columns explicitly
-(`df.select(sorted(df.columns))`, or `pl.col(name).struct.field(...)` by name).
 
 ---
 

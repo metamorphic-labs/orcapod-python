@@ -252,19 +252,18 @@ type.
 A `polars.DataFrame` comes back with exactly the schema it was stored with: column order and
 names, integer and float widths, `Categorical`, `Enum` with its category order, `Decimal`
 precision and scale, `Datetime` unit and time zone, `Duration` unit, `List`, `Array` shape,
-`Struct` fields and `Null`. A `polars.Series` keeps its name, dtype and values the same way.
+`Struct` fields in their order and `Null`. A `polars.Series` keeps its name, dtype and values the same way.
 Dtypes that cannot be stored and read back exactly (`Object`, `Int128`, `UInt128`, and Polars
 extension dtypes) raise `ValueError` naming the column when the value is stored, so convert
 such a column explicitly before returning the frame.
 
-A Polars value's content hash, which is its cache key, covers its row count, column names,
-dtypes and values, but not its column order, its struct field order or its memory layout. See
+A Polars value's content hash, which is its cache key, covers everything a pod can observe
+about the value: its row count, column names and their order, dtypes (struct fields and their
+order included) and values, but not its memory layout (chunking) or sortedness flags. So a
+pod that depends on column order, such as one returning `df.columns[0]`, gets a separate cache
+entry for each order. See
 [Logical-typed values](../reference/hashing.md#1c-logical-typed-values-inside-a-data-column)
-for the exact scheme. Two frames that differ only in column order therefore share a hash and
-a cache entry, so a pod must not depend on a frame's column order: a cached pod that returns
-`df.columns[0]` gives whichever first column was computed first for both frames. If a pod
-needs a particular order, it selects or sorts the columns explicitly
-(`df.select(sorted(df.columns))`).
+for the exact scheme.
 
 ```python
 import polars as pl

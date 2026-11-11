@@ -11,7 +11,8 @@ The frame is exported with ``compat_level=pl.CompatLevel.oldest()``, so strings 
 are written as ``large_string`` / ``large_binary`` (never the view types) whatever the
 installed Polars defaults to, and its chunks are combined into a single record batch. Reading
 the stream back with ``pl.from_arrow`` restores the original Polars schema exactly: column
-order and names, integer width and signedness, float width, ``Categorical``, ``Enum`` with its
+order and names, integer width and signedness, float width, ``Categorical`` with its
+``Categories`` (name, namespace, physical width), ``Enum`` with its
 category order, ``Decimal`` precision and scale, ``Datetime`` unit and time zone, ``Duration``
 unit, ``List``, ``Array`` shape, ``Struct`` field order, and ``Null``.
 
@@ -35,15 +36,17 @@ plus digest) and is its only version marker: the bytes produced under a label ne
 and a new definition gets a new label, so old and new hashes can be told apart by inspection.
 
 ``starfix_digest`` is ``starfix.ArrowDigester.hash_table`` of a hash-only Arrow projection of
-the values (see ``_hash_projection``). Like every Orcapod table hash it ignores column order
-and struct field order, and hashes a dictionary-encoded column by its values.
+the values (see ``_hash_projection``). starfix ignores column order and struct field order and
+hashes a dictionary-encoded column by its values; the descriptor carries the orders. starfix
+also hashes a null struct like a struct whose fields are all null, so the projection makes
+each struct's validity one of its values (``_with_struct_validity``).
 
 ``descriptor`` is canonical JSON (keys sorted, separators ``","`` and ``":"``, UTF-8) that
 carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``repr`` or its
 ``_PL_*`` metadata)::
 
     frame:  {"kind": "polars.dataframe", "height": <rows>,
-             "columns": {<name>: <dtype>, ...}}
+             "columns": [[<name>, <dtype>], ...]}   in column order
     series: {"kind": "polars.series", "name": <name>, "height": <rows>,
              "dtype": <dtype>}
 
@@ -51,16 +54,19 @@ carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``re
              | "uint8" | "uint16" | "uint32" | "uint64"
              | "float16" | "float32" | "float64"
              | "boolean" | "string" | "binary" | "date" | "time" | "null"
-             | "categorical"
+             | {"categorical": [<name>, <namespace>, <physical>]}   its Categories
              | {"enum": [<category>, ...]}          every declared category, in order
              | {"decimal": [<precision>, <scale>]}
              | {"datetime": [<unit>, <time zone or null>]}
              | {"duration": <unit>}
              | {"list": <dtype>}
              | {"array": [<dtype>, <size>]}         a multi-dimensional array nests
-             | {"struct": {<field>: <dtype>, ...}}
+             | {"struct": [[<field>, <dtype>], ...]}   in field order
 
-Keys are sorted, so column order and struct field order are not part of the identity. An
+The identity is everything a pod can observe through the public Polars API as the frame's
+logical content (developer's decision, November 11, 2026): column order and struct field
+order, at every depth, are part of it. Physical properties are not: chunking, sortedness
+flags (which storage does not keep), physical ``Categorical`` codes, Arrow layout. An
 Enum's full enumeration of choices is part of its dtype: its categories in declared order,
 including categories no row holds, so ``Enum(["a", "b"])``, ``Enum(["b", "a"])`` and
 ``Enum(["a", "b", "z"])`` hash differently over the same values. Any change to the grammar or
@@ -125,7 +131,6 @@ _PLAIN_DTYPE_NAMES: dict[object, str] = {
     pl.Date: "date",
     pl.Time: "time",
     pl.Null: "null",
-    pl.Categorical: "categorical",
 }
 
 
@@ -190,13 +195,25 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
 
     Returns:
         A JSON-serialisable value: a ``str`` for a plain dtype, a one-key ``dict`` for a
-        parameterised one.
+        parameterised one. Struct fields are an ordered list of ``[name, dtype]`` pairs, so
+        their order is part of the descriptor.
 
     Raises:
         ValueError: If ``dtype`` (or a dtype nested in it) is outside the grammar.
     """
     if isinstance(dtype, pl.Enum):
         return {"enum": dtype.categories.to_list()}
+    if dtype is pl.Categorical or isinstance(dtype, pl.Categorical):
+        categories = (
+            dtype if isinstance(dtype, pl.Categorical) else pl.Categorical()
+        ).categories
+        return {
+            "categorical": [
+                categories.name(),
+                categories.namespace(),
+                _PLAIN_DTYPE_NAMES[categories.physical()],
+            ]
+        }
     if isinstance(dtype, pl.Decimal):
         return {"decimal": [dtype.precision, dtype.scale]}
     if isinstance(dtype, pl.Datetime):
@@ -209,10 +226,10 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
         return {"array": [polars_dtype_descriptor(dtype.inner, column), dtype.size]}
     if isinstance(dtype, pl.Struct):
         return {
-            "struct": {
-                field.name: polars_dtype_descriptor(field.dtype, column)
+            "struct": [
+                [field.name, polars_dtype_descriptor(field.dtype, column)]
                 for field in dtype.fields
-            }
+            ]
         }
     if not isinstance(dtype, pl.BaseExtension):
         dtype_class = dtype if isinstance(dtype, type) else type(dtype)
@@ -257,11 +274,75 @@ def _hash_projection_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
+def _struct_validity_type(arrow_type: pa.DataType) -> pa.DataType:
+    """The type ``_with_struct_validity`` gives an array of ``arrow_type``.
+
+    Args:
+        arrow_type: A type already mapped by ``_hash_projection_type``.
+
+    Returns:
+        ``arrow_type`` with every struct, at any depth, replaced by
+        ``struct<valid: bool not null, fields: struct<...>>``.
+    """
+    if pa.types.is_large_list(arrow_type):
+        item = arrow_type.value_field
+        return pa.large_list(item.with_type(_struct_validity_type(item.type)))
+    if pa.types.is_struct(arrow_type):
+        fields = pa.struct(
+            [field.with_type(_struct_validity_type(field.type)) for field in arrow_type]
+        )
+        return pa.struct(
+            [pa.field("valid", pa.bool_(), nullable=False), pa.field("fields", fields)]
+        )
+    return arrow_type
+
+
+def _with_struct_validity(array: pa.Array) -> pa.Array:
+    """Make every struct's own validity part of its values, at any depth.
+
+    starfix hashes a null struct like a struct whose fields are all null, but Polars tells
+    them apart (``is_null()``). Each struct becomes a non-null
+    ``struct<valid: bool, fields: struct<...>>``, where ``valid`` is the struct's validity
+    and ``fields`` holds its children with the parent's nulls propagated into them
+    (``StructArray.flatten``), so the bytes under a null struct never reach the digest.
+
+    Args:
+        array: An array whose type was mapped by ``_hash_projection_type``.
+
+    Returns:
+        The array with type ``_struct_validity_type(array.type)``.
+    """
+    arrow_type = array.type
+    if pa.types.is_large_list(arrow_type):
+        values = _with_struct_validity(array.values)
+        return pa.LargeListArray.from_arrays(
+            array.offsets,
+            values,
+            type=_struct_validity_type(arrow_type),
+            mask=array.is_null() if array.null_count else None,
+        )
+    if pa.types.is_struct(arrow_type):
+        children = [_with_struct_validity(child) for child in array.flatten()]
+        fields = pa.StructArray.from_arrays(
+            children,
+            fields=[
+                field.with_type(child.type)
+                for field, child in zip(arrow_type, children, strict=True)
+            ],
+        )
+        return pa.StructArray.from_arrays(
+            [array.is_valid(), fields],
+            fields=list(_struct_validity_type(arrow_type)),
+        )
+    return array
+
+
 def _hash_projection(df: pl.DataFrame) -> pa.Table:
     """Build the Arrow table whose starfix digest stands for the frame's values.
 
     Top-level ``Null`` columns are left out: their content is fully determined by their
-    dtype and the row count, both in the descriptor.
+    dtype and the row count, both in the descriptor. Each struct carries its own validity
+    (see ``_with_struct_validity``).
 
     Args:
         df: The frame to hash. Its dtypes must already be inside the grammar.
@@ -275,7 +356,18 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
     target = pa.schema(
         [field.with_type(_hash_projection_type(field.type)) for field in kept]
     )
-    return table.cast(target)
+    table = table.cast(target)
+    columns = [
+        pa.chunked_array(
+            [_with_struct_validity(chunk) for chunk in column.chunks],
+            type=_struct_validity_type(column.type),
+        )
+        for column in table.columns
+    ]
+    schema = pa.schema(
+        [field.with_type(_struct_validity_type(field.type)) for field in table.schema]
+    )
+    return pa.Table.from_arrays(columns, schema=schema)
 
 
 def _content_hash(
@@ -319,10 +411,10 @@ def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
     descriptor = {
         "kind": "polars.dataframe",
         "height": df.height,
-        "columns": {
-            name: polars_dtype_descriptor(dtype, name)
+        "columns": [
+            [name, polars_dtype_descriptor(dtype, name)]
             for name, dtype in df.schema.items()
-        },
+        ],
     }
     return _content_hash(descriptor, df, POLARS_DATAFRAME_HASH_METHOD)
 
