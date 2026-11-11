@@ -2236,7 +2236,10 @@ stored rows plus the pending rows whose record id is not stored (`_pending_not_s
 `None` when there are none. These dicts are touched only from the thread that drives the
 pipeline; the async orchestrator runs only user functions in worker threads. Regression tests:
 `tests/test_databases/test_delta_read_your_writes.py` and
-`tests/test_pipeline/test_delta_node_records_after_run.py`.
+`tests/test_pipeline/test_delta_node_records_after_run.py`. A failed stored-id refresh leaves
+the cache dirty, so the next read retries it instead of treating every stored id as unstored
+and returning duplicates; in `get_records_by_ids` the refresh shares the stored read's error
+handling.
 
 Still open: a handle does not see writes made by another process, or by a separate
 `DeltaTableDatabase` root on the same path, until it reloads the table; this is unchanged.

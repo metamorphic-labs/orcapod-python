@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import cast
 from pathlib import Path
 
+import deltalake
 import pyarrow as pa
 import pytest
 
@@ -182,3 +183,49 @@ def test_pending_row_with_stored_id_reads_as_flush_keeps_it(
         assert _values(db.get_records_by_ids(PATH, [b"a", b"d"])) == [1, 4], when
         assert _values(db.get_records_with_column_value(PATH, {"g": 0})) == [1, 4], when
         db.flush()
+
+
+@pytest.fixture
+def fail_id_refresh_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the next stored-ID refresh fail once, as a transient storage error would.
+
+    ``DeltaTable.to_pyarrow_table`` is the backend call the stored-ID refresh makes; the
+    read methods scan through ``to_pyarrow_dataset``, so only the refresh fails.
+    """
+    original = deltalake.DeltaTable.to_pyarrow_table
+    calls = {"n": 0}
+
+    def to_pyarrow_table(self: deltalake.DeltaTable) -> pa.Table:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("transient storage error")
+        return original(self)
+
+    monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_table", to_pyarrow_table)
+
+
+@pytest.mark.usefixtures("fail_id_refresh_once")
+@pytest.mark.parametrize("method", list(READS))
+def test_failed_id_refresh_is_retried_by_the_next_read(
+    tmp_path: Path, method: str
+) -> None:
+    """After a failed stored-ID refresh, a pending row with a stored id is still not returned."""
+    db = DeltaTableDatabase(tmp_path).at(SCOPE)
+    db.add_records(PATH, _rows(["b"], [2]), flush=True)
+    db.add_records(PATH, _rows(["a", "b"], [1, 20]))
+
+    with pytest.raises(OSError, match="transient storage error"):
+        _ = db.get_all_records(PATH)
+
+    assert _values(READS[method](db, PATH)) == EXPECTED[method]
+
+
+@pytest.mark.usefixtures("fail_id_refresh_once")
+def test_get_records_by_ids_handles_failed_id_refresh_like_a_failed_read(
+    stored_and_pending: DeltaTableDatabase,
+) -> None:
+    """A failed stored-ID refresh follows the method's stored-read error behaviour."""
+    db = stored_and_pending
+
+    assert db.get_records_by_ids(PATH, [b"a", b"c"]) is None
+    assert _values(db.get_records_by_ids(PATH, [b"a", b"c"])) == [1, 3]

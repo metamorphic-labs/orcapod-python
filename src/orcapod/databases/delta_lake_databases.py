@@ -354,8 +354,10 @@ class DeltaTableDatabase:
 
         except Exception as e:
             logger.error(f"Failed to refresh existing IDs cache: {e}")
+            # Stay dirty: the loaded table is cached, so a clean empty cache would
+            # never be refreshed and stored ids would read as unstored.
             self._existing_ids_cache[record_key] = set()
-            self._cache_dirty[record_key] = False
+            self._cache_dirty[record_key] = True
             raise
 
     def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[bytes]:
@@ -863,8 +865,22 @@ class DeltaTableDatabase:
         if len(record_ids) == 0:
             return None
 
-        # check inside the batch
-        pending = self._pending_not_stored(record_path)
+        delta_table = self._get_delta_table(record_path)
+        try:
+            # Reading the stored ids (to drop pending rows a flush would not
+            # insert) is a stored read too, so it shares the read's handler.
+            pending = self._pending_not_stored(record_path)
+            result = None
+            if delta_table is not None:
+                # Use schema-preserving read with filters
+                filter_expr = self._create_record_ids_filter(record_ids_list)
+                result = self._read_delta_table(delta_table, filters=filter_expr)
+        except Exception as e:
+            logger.error(
+                f"Error getting records by IDs from {'/'.join(record_path)}: {e}"
+            )
+            return None
+
         if pending is not None:
             id_type = pending.schema.field(self.RECORD_ID_COLUMN).type
             pending = pending.filter(
@@ -873,20 +889,6 @@ class DeltaTableDatabase:
                     value_set=pa.array(record_ids_list, type=id_type),
                 )
             )
-
-        delta_table = self._get_delta_table(record_path)
-        if delta_table is None:
-            return self._combine_stored_and_pending(None, pending, record_id_column)
-        try:
-            # Use schema-preserving read with filters
-            filter_expr = self._create_record_ids_filter(record_ids_list)
-            result = self._read_delta_table(delta_table, filters=filter_expr)
-        except Exception as e:
-            logger.error(
-                f"Error getting records by IDs from {'/'.join(record_path)}: {e}"
-            )
-            return None
-
         return self._combine_stored_and_pending(result, pending, record_id_column)
 
     def _read_delta_table(
