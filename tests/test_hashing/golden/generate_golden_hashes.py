@@ -133,6 +133,12 @@ def main(argv: list[str] | None = None) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for group, values in computed.items():
         path = golden_path(group, args.output_dir)
+        missing = cases.unavailable_entries(group)
+        if missing and path.exists():
+            # Keep the pins this environment cannot compute (an older optional
+            # dependency), so the file is never rewritten without them.
+            pinned = json.loads(path.read_text(encoding="utf-8"))
+            values = {**values, **{e: pinned[e] for e in missing if e in pinned}}
         path.write_text(dump(values), encoding="utf-8")
         print(f"wrote {len(values)} entries to {path}")
 

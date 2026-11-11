@@ -384,8 +384,10 @@ OLDER_TORCH = textwrap.dedent(
     import pyarrow as pa
     import torch
 
-    # Simulate a PyTorch that predates float8_e8m0fnu (added in torch 2.7).
-    del torch.float8_e8m0fnu
+    # Simulate a PyTorch that predates float8_e8m0fnu (added in torch 2.7); a supported
+    # torch older than 2.7 lacks it already.
+    if hasattr(torch, "float8_e8m0fnu"):
+        del torch.float8_e8m0fnu
 
     from orcapod.sources import ArrowTableSource, DictSource
 

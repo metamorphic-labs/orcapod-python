@@ -87,6 +87,8 @@ def test_golden_file_present(group: str) -> None:
 
 @pytest.mark.parametrize(("group", "entry"), GOLDEN_ENTRIES)
 def test_golden_entry(live: dict[str, dict[str, Any]], group: str, entry: str) -> None:
+    if entry in cases.unavailable_entries(group):
+        pytest.skip(f"{group}:{entry} needs a newer version of an optional dependency")
     actual = live[group].get(entry, "<entry no longer produced>")
     expected = GOLDEN[group][entry]
     assert actual == expected, _moved_message(group, entry, expected, actual)
@@ -140,7 +142,8 @@ def test_values_independent_of_process_and_hash_seed(seed: str) -> None:
         _moved_message(group, entry, value, computed[group].get(entry))
         for group in cases.available_groups()
         for entry, value in GOLDEN[group].items()
-        if computed[group].get(entry) != value
+        if entry not in cases.unavailable_entries(group)
+        and computed[group].get(entry) != value
     ]
     assert not moved, f"PYTHONHASHSEED={seed}:\n" + "\n".join(moved[:5])
 
@@ -310,3 +313,49 @@ def test_tensor_and_ndarray_pins_share_the_digest_body(name: str) -> None:
     array_label, array_body = GOLDEN["semantic"][f"value.ndarray.{name}"].split(":")
     assert (tensor_label, array_label) == ("torch_tensor_v1", "ndarray_v1")
     assert tensor_body == array_body
+
+
+OLDER_TORCH_GOLDEN = """
+import json
+import pathlib
+import shutil
+import sys
+
+import torch
+
+# Simulate a supported PyTorch that predates float8_e8m0fnu (added in torch 2.7).
+if hasattr(torch, "float8_e8m0fnu"):
+    del torch.float8_e8m0fnu
+
+from tests.test_hashing.golden import cases
+from tests.test_hashing.golden.generate_golden_hashes import golden_path, main
+
+live = cases.compute_group("torch")
+print("produced:", "value.float8_e8m0fnu" in live)
+print("unavailable:", sorted(cases.unavailable_entries("torch")))
+out = pathlib.Path(sys.argv[1])
+shutil.copy(golden_path("torch"), out / "torch.json")
+main(["--group", "torch", "--output-dir", str(out)])
+kept = json.loads((out / "torch.json").read_text())
+pinned = json.loads(golden_path("torch").read_text())
+print("pins kept:", kept == pinned)
+"""
+
+
+@pytest.mark.skipif(not cases.group_available("torch"), reason="needs torch")
+def test_torch_group_runs_on_a_torch_without_a_newer_dtype(tmp_path: Path) -> None:
+    """With a torch lacking a pinned dtype, the group computes, skips that entry, keeps its pin."""
+    repo_root = Path(__file__).resolve().parents[3]
+    proc = subprocess.run(
+        [sys.executable, "-c", OLDER_TORCH_GOLDEN, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        cwd=repo_root,
+        timeout=GENERATOR_TIMEOUT_S,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    lines = [line for line in proc.stdout.splitlines() if ": " in line]
+    assert "produced: False" in lines
+    assert "unavailable: ['value.float8_e8m0fnu']" in lines
+    assert "pins kept: True" in lines

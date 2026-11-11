@@ -899,14 +899,48 @@ def _torch_values() -> dict[str, Any]:
         "bool": torch.tensor([True, False, True]),
         "bfloat16": torch.tensor([1.5, -2.25, 3.0], dtype=torch.bfloat16),
         "complex32": torch.tensor([1 + 2j, -0.5 + 0.25j], dtype=torch.complex32),
-        # Powers of two are exact in every float8 format.
-        "float8_e4m3fn": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fn),
-        "float8_e5m2": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e5m2),
-        "float8_e4m3fnuz": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e4m3fnuz),
-        "float8_e5m2fnuz": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e5m2fnuz),
-        "float8_e8m0fnu": torch.tensor([0.5, 1.0, 2.0]).to(torch.float8_e8m0fnu),
         "zero_dim": torch.tensor(2.5),
         "non_contiguous": base.T,
+        # Powers of two are exact in every float8 format. A dtype this torch lacks is
+        # left out; its pinned entry is listed by unavailable_entries.
+        **{
+            name: torch.tensor([0.5, 1.0, 2.0]).to(dtype)
+            for name in TORCH_VERSIONED_DTYPES
+            if isinstance(dtype := getattr(torch, name, None), torch.dtype)
+        },
+    }
+
+
+TORCH_VERSIONED_DTYPES = (
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+)
+"""Pinned torch dtypes that a supported torch may lack (``float8_e8m0fnu`` needs 2.7)."""
+
+
+def unavailable_entries(group: str) -> set[str]:
+    """Pinned entries of ``group`` that this environment cannot compute.
+
+    These are the ``value.*`` entries of torch dtypes the installed torch lacks. The
+    golden test skips them and the generator keeps their pins.
+
+    Args:
+        group: One of ``GROUPS``.
+
+    Returns:
+        The entry names; empty for every group but an available ``torch`` group.
+    """
+    if group != "torch" or not group_available(group):
+        return set()
+    import torch
+
+    return {
+        f"value.{name}"
+        for name in TORCH_VERSIONED_DTYPES
+        if not isinstance(getattr(torch, name, None), torch.dtype)
     }
 
 
