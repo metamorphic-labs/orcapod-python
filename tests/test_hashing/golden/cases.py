@@ -908,6 +908,7 @@ def _polars_values() -> dict[str, Any]:
 
 
 def _polars_types() -> dict[str, Any]:
+    """Polars classes whose type, stored Arrow type and ``Schema`` hashes are pinned."""
     import polars as pl
 
     return {"dataframe": pl.DataFrame, "series": pl.Series}
@@ -915,18 +916,21 @@ def _polars_types() -> dict[str, Any]:
 
 @case("semantic", "polars_value")
 def semantic_polars_values() -> dict[str, Any]:
+    """Semantic hash of each Polars value (the ``PolarsDataFrameHandler`` digest)."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(v).to_string() for k, v in _polars_values().items()}
 
 
 @case("semantic", "polars_type")
 def semantic_polars_types() -> dict[str, Any]:
+    """Semantic hash of the ``pl.DataFrame`` and ``pl.Series`` type objects."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(t).to_string() for k, t in _polars_types().items()}
 
 
 @case("schema", "polars_single_field")
 def schema_polars_single_field() -> dict[str, Any]:
+    """Stored Arrow type and single-field ``Schema`` hash of each Polars class."""
     from orcapod.types import Schema
 
     ctx = _ctx()
@@ -959,6 +963,7 @@ def datagram_polars_data_hash() -> dict[str, Any]:
 
 
 def _polars_rows() -> dict[str, list[dict[str, Any]]]:
+    """Rows of the Polars-valued sources whose identities are pinned."""
     import polars as pl
 
     return {
@@ -974,6 +979,15 @@ def _polars_rows() -> dict[str, list[dict[str, Any]]]:
 
 
 def _make_polars_datagram_case(name: str) -> CaseFn:
+    """Build the case summarizing the Polars-valued ``DictSource`` named ``name``.
+
+    Args:
+        name: A key of ``_polars_rows()``.
+
+    Returns:
+        A case function returning the source's ``stream_summary``.
+    """
+
     def run() -> dict[str, Any]:
         import polars as pl
 
