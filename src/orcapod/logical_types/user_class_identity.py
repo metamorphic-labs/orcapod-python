@@ -25,6 +25,7 @@ import json
 import re
 import sys
 import typing
+import unicodedata
 import warnings
 import weakref
 from typing import TYPE_CHECKING, Any, Literal
@@ -53,8 +54,11 @@ _NAME_FORBIDDEN = re.compile(r"[@\s]")
 _declared: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
 # The name each class object was built under; a class has one name per process.
 _built: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
-# The identity string each class object was built with.
+# The identity string and record each class object was built with.
 _identity_of: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
+_record_of: weakref.WeakKeyDictionary[type, dict[str, Any]] = (
+    weakref.WeakKeyDictionary()
+)
 # Classes seen under each (kind, name), most recent last.
 _known: dict[tuple[str, str], list[weakref.ref[type]]] = {}
 # Names that already produced the one-time ``__main__`` notice.
@@ -135,11 +139,12 @@ def default_name(cls: type, *, qualified_name: bool | None = None) -> str:
         qualified_name = not is_main_class(cls)
     if not qualified_name:
         return cls.__qualname__
-    module = cls.__module__
-    if not is_main_class(cls):
-        from orcapod.utils.canonical_type_names import canonical_module_name
+    if is_main_class(cls):
+        # A spawn child names the main module "__mp_main__"; both are "__main__".
+        return f"__main__.{cls.__qualname__}"
+    from orcapod.utils.canonical_type_names import canonical_module_name
 
-        module = canonical_module_name(cls) or module
+    module = canonical_module_name(cls) or cls.__module__
     return f"{module}.{cls.__qualname__}"
 
 
@@ -191,6 +196,8 @@ def declare(cls: type, name: str | None, *, qualified_name: bool | None = None) 
     reject_local_class(cls)
     if name is not None:
         validate_name(name)
+        # One spelling per name: the same name typed in two Unicode forms is one name.
+        name = unicodedata.normalize("NFC", name)
     effective = (
         name if name is not None else default_name(cls, qualified_name=qualified_name)
     )
@@ -228,7 +235,19 @@ def built_name(cls: type) -> str | None:
     return _built.get(cls)
 
 
-def mark_built(cls: type, name: str, identity: str) -> None:
+def identity_of(cls: type) -> str | None:
+    """Return the identity string ``cls`` was built with, or ``None`` if not built."""
+    return _identity_of.get(cls)
+
+
+def built_record(cls: type) -> dict[str, Any] | None:
+    """Return the identity record ``cls`` was built with, or ``None`` if not built."""
+    return _record_of.get(cls)
+
+
+def mark_built(
+    cls: type, name: str, identity: str, record: dict[str, Any] | None = None
+) -> None:
     """Record that ``cls`` was built under ``name`` with ``identity``.
 
     A class has one name per process.
@@ -237,9 +256,12 @@ def mark_built(cls: type, name: str, identity: str) -> None:
         cls: The class.
         name: Its name component.
         identity: Its identity string.
+        record: Its identity record.
     """
     _built[cls] = name
     _identity_of[cls] = identity
+    if record is not None:
+        _record_of[cls] = record
 
 
 def equivalent_hints(a: Any, b: Any) -> bool:

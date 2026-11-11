@@ -36,27 +36,6 @@ def _sanitize(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "_", name)
 
 
-def _canonical_storage(t: pa.DataType) -> pa.DataType:
-    """Return the canonical large-variant for string/binary families; identity elsewhere.
-
-    Maps:
-      ``string`` / ``string_view``  → ``large_string``
-      ``binary`` / ``binary_view``  → ``large_binary``
-      ``large_string`` / ``large_binary`` → unchanged (already canonical)
-      anything else → unchanged
-
-    Used in ``__arrow_ext_deserialize__`` to accept physically-equivalent but
-    layout-different string/binary variants that Delta Lake or other compaction
-    tools may write (e.g. delta-rs ``optimize.compact()`` normalises
-    ``large_string`` columns to plain ``string`` in the rewritten Parquet files).
-    """
-    if pa.types.is_string(t) or pa.types.is_string_view(t):
-        return pa.large_string()
-    if pa.types.is_binary(t) or pa.types.is_binary_view(t):
-        return pa.large_binary()
-    return t
-
-
 def make_arrow_extension_type(
     extension_name: str,
     storage_type: pa.DataType,
@@ -123,9 +102,13 @@ def make_arrow_extension_type(
         #
         # Cross-family mismatches (string where large_binary was registered, or
         # vice-versa) are genuine semantic errors and always raise.
-        if _canonical_storage(_storage) == _storage:
-            # _storage is the canonical large form — accept any same-family variant.
-            storage_ok = _canonical_storage(storage_type) == _storage
+        from orcapod.utils.arrow_utils import normalize_to_large_types
+
+        if normalize_to_large_types(_storage) == _storage:
+            # _storage is the canonical large form — accept any same-family variant,
+            # at any nesting depth (a struct field rewritten from large_string to
+            # string by Delta compaction, ITL-881).
+            storage_ok = normalize_to_large_types(storage_type) == _storage
         else:
             # Non-canonical _storage — require exact match.
             storage_ok = storage_type == _storage

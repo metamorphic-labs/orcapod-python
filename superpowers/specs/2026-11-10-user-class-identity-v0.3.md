@@ -54,7 +54,10 @@ Rules 3 and 4 are fixed (D-naming): no process-wide switch changes them, so a cl
 identity never depends on whether or when some setting was called.
 
 A name must be non-empty, must not contain `@` or whitespace, and must not start with
-`orcapod.` (reserved for built-in types such as `orcapod.path`). A class whose
+`orcapod.` (reserved for built-in types such as `orcapod.path`). A declared name is
+NFC-normalized, so one name typed in two Unicode forms is one name (Python already
+normalizes class and field identifiers). With `qualified_name=True`, a `__main__` class is
+named `__main__.<qualname>` in a `multiprocessing` spawn child too. A class whose
 `__qualname__` contains `<locals>` stays rejected in v0.3, even with a declared name
 (scope, §g).
 
@@ -124,6 +127,13 @@ classes (only the resulting fields count). Computed fields are deferred (D-compu
 later decision to include them adds a key that is absent when empty, so it would move
 only classes that have computed fields.
 
+A type with a logical type contributes its logical type *name*, so those names are part of
+user-class identities: adding or renaming a built-in logical type (for example a new
+`orcapod.ndarray` from PR #289, where today an `np.ndarray` field gives the token
+`numpy.ndarray`) moves the identity of every class with such a field. Built-in logical
+type names are already a stability commitment (`orcapod.path`); after #289 lands this
+branch adds a golden fixture with an ndarray field.
+
 The token is built from the Python annotation, not the Arrow type, because the developer
 named field *types* and because the Arrow type cannot tell `str` from `orcapod.path`
 (both `large_string`).
@@ -133,7 +143,8 @@ named field *types* and because the Arrow type cannot tell `str` from `orcapod.p
 ```
 identity string = f"{name}@{fingerprint}"
 fingerprint     = sha256(canonical_json(record)).hexdigest()      # full 64 hex digits
-canonical_json  = json.dumps(record, sort_keys=True, separators=(",", ":"))
+canonical_json  = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                  # hashed as UTF-8
 ```
 
 `Point(x: int, y: float)` as a dataclass gives
@@ -271,7 +282,16 @@ Outcomes:
 - **Same identity, different Arrow storage** (possible only if two data contexts map one
   annotation to different Arrow types): `TypeIdentityError` naming the column, the class
   and both struct types. The existing check in the synthesized
-  `__arrow_ext_deserialize__` raises it.
+  `__arrow_ext_deserialize__` raises it. Storage that differs only in large versus
+  non-large layouts, at any depth, is accepted: Delta compaction rewrites a struct field
+  `large_string` as `string` (found in review; on `main` this read failed into 0 rows).
+- **Candidates are tested without registering them.** A class found by name that is not
+  yet used in the process is described without fixing its name, so a failed read never
+  stops the user from then declaring the class under the stored name. When a candidate
+  has the stored fields under another name, the error says to declare it.
+- **Extension metadata is compared byte for byte**, like the extension name. It is part
+  of the per-row data hash already (`ARROW:extension:*` keys are hashed), so any change to
+  it is a hash change and needs the same approval; it is not a separate format risk.
 - These errors propagate. `DeltaTableDatabase` today catches every read error and logs
   "Error reading Delta table"; it re-raises `TypeIdentityError` in all five read paths
   (`get_all_records`, the record lookups, the schema read), so a run can no longer report
@@ -332,7 +352,9 @@ unaffected.
   `builtin_handlers.py` or `v0.1.json` (the identity reaches hashing through the
   logical type name), adds a new docs page instead of editing `function-pods.md` beyond a
   link, and edits the golden files only by regeneration.
-- **PR #289** (`orcapod.ndarray`) adds `array_format.py` and tests; no file in common.
+- **PR #289** (`orcapod.ndarray`) adds `array_format.py` and tests; no file in common, but
+  a field typed `np.ndarray` contributes its logical type name to the identity (§a), so
+  after #289 lands the ndarray token is re-checked and pinned with a golden fixture.
 - **Preferred order:** #286 and #289 merge first. This branch then merges `origin/main`,
   re-runs E08 against the new main to confirm the moved set, and regenerates the golden
   files; the PR's golden diff must then show only the §e entries plus the additions. If

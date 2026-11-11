@@ -363,3 +363,56 @@ def test_read_with_different_fields_raises_naming_both_shapes(workdir: Path) -> 
     assert out["error"].startswith("TypeIdentityError: Column 'q'"), out
     assert "{x: int, y: int}" in out["message"]
     assert "{x: int, y: float}" in out["message"]
+
+
+def test_failed_read_leaves_the_class_free_to_be_declared(workdir: Path) -> None:
+    """A read that rejects a candidate class must not fix that class's name."""
+    _store_from_notebook(workdir)
+    write_files(
+        workdir,
+        {
+            "pkg/__init__.py": "",
+            "pkg/models.py": """
+                from dataclasses import dataclass
+
+                @dataclass
+                class Point:
+                    x: int
+                    y: int
+            """,
+        },
+    )
+    code = """
+import os
+from pathlib import Path
+import orcapod as op
+from child_harness import error_text, report
+from orcapod.contexts import get_default_context
+from orcapod.databases import DeltaTableDatabase, ExtensionAwareDatabase
+import wsjob
+from pkg.models import Point
+
+root = Path(os.environ["WS_DB"])
+path = tuple(next(p for p in wsjob.table_paths(root) if "/_result/" in p).split("/"))
+converter = get_default_context().type_converter
+
+def read():
+    db = ExtensionAwareDatabase(DeltaTableDatabase(root), converter=converter)
+    table = db.get_all_records(path)
+    return [repr(r["q"]) for r in converter.arrow_table_to_python_dicts(table.select(["q"]))]
+
+out = {}
+try:
+    read()
+except Exception as exc:
+    out["first"] = error_text(exc)
+    out["message"] = str(exc)
+op.register_type(Point, name="Point")
+out["second"] = sorted(read())
+report(out)
+"""
+    out = _script(workdir, code)
+    assert out["first"].startswith("TypeIdentityError"), out
+    assert "pkg.models.Point" in out["message"]
+    assert "op.register_type(<class>, name='Point')" in out["message"]
+    assert out["second"] == ["Point(x=1, y=1)", "Point(x=2, y=2)"]

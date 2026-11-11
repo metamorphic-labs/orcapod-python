@@ -222,6 +222,39 @@ class UserClassLogicalTypeFactory:
         """
         uci.reject_local_class(python_type)
         name = uci.built_name(python_type) or uci.resolve_name(python_type)
+        record, storage_type, field_annotations = self._describe(
+            python_type, name, converter
+        )
+        identity = uci.identity_string(record)
+        uci.mark_built(python_type, name, identity, record)
+        uci.remember(self.kind, name, python_type)
+        uci.notice_main_class(python_type, name)
+        logger.debug("%s: built %r for %r", type(self).__name__, identity, python_type)
+        return self.logical_type_class(
+            identity, python_type, storage_type, field_annotations, record
+        )
+
+    def _describe(
+        self, python_type: type, name: str, converter: TypeConverterProtocol
+    ) -> tuple[dict[str, Any], pa.StructType, list[tuple[str, Any]]]:
+        """Return the identity record, storage struct and field annotations of a class.
+
+        Does not register ``python_type`` itself (its field types are registered, as
+        their Arrow types are needed), so the read path can test a candidate class
+        without fixing its name.
+
+        Args:
+            python_type: The class.
+            name: The name component to use.
+            converter: The active converter for field-type resolution.
+
+        Returns:
+            ``(record, storage_type, field_annotations)``.
+
+        Raises:
+            ValueError: If the type hints cannot be resolved.
+            RecursiveTypeError: If the class refers back to itself, naming the path.
+        """
         hints = _type_hints(python_type)
 
         arrow_fields = []
@@ -247,14 +280,7 @@ class UserClassLogicalTypeFactory:
             tokens[field_name] = uci.type_token(annotation, converter)
 
         record = uci.identity_record(self.kind, name, tokens)
-        identity = uci.identity_string(record)
-        uci.mark_built(python_type, name, identity)
-        uci.remember(self.kind, name, python_type)
-        uci.notice_main_class(python_type, name)
-        logger.debug("%s: built %r for %r", type(self).__name__, identity, python_type)
-        return self.logical_type_class(
-            identity, python_type, pa.struct(arrow_fields), field_annotations, record
-        )
+        return record, pa.struct(arrow_fields), field_annotations
 
     # ------------------------------------------------------------------
     # Read path
@@ -311,29 +337,61 @@ class UserClassLogicalTypeFactory:
                 f"op.register_type({name.rsplit('.', 1)[-1]}, name={name!r})."
             )
 
-        found: list[UserClassLogicalType] = []
+        mismatches: list[str] = []
+        renamable = False  # a candidate has the stored fields under another name
         for cls in candidates:
-            _ = converter.register_python_class(cls)  # raises for unsupported classes
-            lt = converter.get_logical_type_for_python_type(cls)
-            if not isinstance(lt, UserClassLogicalType):
+            built = uci.identity_of(cls)
+            if built is not None:
+                if built != arrow_extension_name:
+                    built_record = uci.built_record(cls)
+                    mismatches.append(_describe_candidate(cls, built_record))
+                    continue
+                lt = converter.get_logical_type_for_python_type(cls)
+                if isinstance(lt, UserClassLogicalType):
+                    _check_storage(lt, storage_type, record)
+                    return lt
                 continue
-            if lt.logical_type_name == arrow_extension_name:
+            # Not used yet in this process: test it without registering it, so a
+            # non-matching candidate keeps its freedom to be declared under a name.
+            try:
+                candidate_record, _, _ = self._describe(
+                    cls, uci.resolve_name(cls), converter
+                )
+            except (TypeError, ValueError) as exc:
+                mismatches.append(
+                    f"{cls.__module__}.{cls.__qualname__} (cannot be stored: {exc})"
+                )
+                continue
+            if uci.identity_string(candidate_record) != arrow_extension_name:
+                mismatches.append(_describe_candidate(cls, candidate_record))
+                renamable = renamable or candidate_record["fields"] == record["fields"]
+                continue
+            _ = converter.register_python_class(cls)
+            lt = converter.get_logical_type_for_python_type(cls)
+            if isinstance(lt, UserClassLogicalType):
                 _check_storage(lt, storage_type, record)
                 return lt
-            found.append(lt)
 
-        registered = "; ".join(
-            uci.describe_record(lt.identity_record)
-            if lt.identity_record is not None
-            else lt.logical_type_name
-            for lt in found
+        hint = (
+            f" A class with the stored fields exists under another name: register it "
+            f"as {name!r} before it is first used, e.g. "
+            f"op.register_type(<class>, name={name!r})."
+            if renamable
+            else " A class with the same name but different fields is a different "
+            "type; restore the stored fields, or use the class with the new fields "
+            "to compute new results."
         )
         raise TypeIdentityError(
-            f"Stored values of {uci.describe_record(record)} do not match the "
-            f"registered class: {registered}. A class with the same name but different "
-            f"fields is a different type; restore the stored fields, or use the class "
-            f"with the new fields to compute new results."
+            f"Stored values of {uci.describe_record(record)} do not match the classes "
+            f"found: {'; '.join(mismatches)}.{hint}"
         )
+
+
+def _describe_candidate(cls: type, record: dict[str, Any] | None) -> str:
+    where = f"{cls.__module__}.{cls.__qualname__}"
+    if record is None:
+        return where
+    return f"{where} as {uci.describe_record(record)}"
 
 
 def _type_hints(python_type: type) -> dict[str, Any]:

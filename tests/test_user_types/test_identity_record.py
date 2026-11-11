@@ -124,9 +124,17 @@ class TestNames:
             uci.default_name(_make_class("pkg.models"), qualified_name=False) == "Point"
         )
 
-    def test_default_name_qualified_name_true_for_main(self) -> None:
-        cls = _make_class("__main__")
+    @pytest.mark.parametrize("module", ["__main__", "__mp_main__"])
+    def test_default_name_qualified_name_true_for_main(self, module: str) -> None:
+        cls = _make_class(module)
         assert uci.default_name(cls, qualified_name=True) == "__main__.Point"
+
+    def test_declared_names_are_nfc_normalized(self) -> None:
+        composed, decomposed = "Caf\u00e9", "Cafe\u0301"
+        first, second = _make_class("pkg.a"), _make_class("pkg.b")
+        uci.declare(first, composed)
+        uci.declare(second, decomposed)
+        assert uci.resolve_name(first) == uci.resolve_name(second) == composed
 
     def test_declared_name_wins(self) -> None:
         cls = _make_class("pkg.models")

@@ -50,3 +50,38 @@ def test_storage_mismatch_raises_instead_of_reading_nothing(tmp_path: Path) -> N
 
     with pytest.raises(TypeIdentityError, match="expected storage_type"):
         DeltaTableDatabase(tmp_path).get_all_records(("points",))
+
+
+@op.register_type(name="itl881.Labelled")
+@dataclasses.dataclass
+class Labelled:
+    label: str
+    n: int
+
+
+def _run_labelled(db_root: Path) -> tuple[int, list[Labelled]]:
+    from orcapod import PipelineJob, function_pod
+
+    calls: list[Labelled] = []
+
+    @function_pod(output_keys="q")
+    def echo(p: Labelled) -> Labelled:
+        calls.append(p)
+        return p
+
+    rows: list[Any] = [{"k": f"r{i}", "p": Labelled(f"x{i}", i)} for i in (1, 2)]
+    job = PipelineJob(name="compact", store=DeltaTableDatabase(db_root))
+    with job:
+        echo.pod(DictSource(data=rows, tag_columns=["k"], source_id="s"), label="echo")
+    job.run()
+    values = [data.as_dict()["q"] for _, data in job.nodes["echo"].iter_data()]
+    return len(calls), sorted(values, key=lambda v: v.n)
+
+
+def test_stored_values_read_after_delta_compaction(tmp_path: Path) -> None:
+    """Delta compaction rewrites large_string struct fields as string; still readable."""
+    expected = [Labelled("x1", 1), Labelled("x2", 2)]
+    assert _run_labelled(tmp_path) == (2, expected)
+    for log in tmp_path.rglob("_delta_log"):
+        deltalake.DeltaTable(str(log.parent)).optimize.compact()
+    assert _run_labelled(tmp_path) == (0, expected)
