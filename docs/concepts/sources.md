@@ -116,34 +116,34 @@ Things to know about Spiral tables:
 
 SpiralDB reports every column as nullable, key columns included, and every field of a struct
 column too, whatever nullability the data was written with; only list items keep a non-null
-flag. Orcapod therefore keeps its own **nullability record** in each table's key-value
-metadata: the list of the table's non-nullable columns and nested fields.
+flag. Orcapod therefore keeps a **nullability record** for each table: the list of the table's
+non-nullable columns and nested fields. The nullability record is an entry in the table's
+key-value metadata, next to the data; it is not a row of the table.
 
-- **A table with a record** (written by `SpiralDBConnector`, by a `ConnectorArrowDatabase`
-  on SpiralDB, or recorded with `write_nullability_record`, as the tables of the workshop
-  project are): recorded columns have the type `T`, so a function pod can take `x: float`.
-  Every batch read is checked: a null in a recorded column raises
-  `NullInNonNullableColumnError` naming the table and the column, so a wrong record never
-  hides a null. A record that cannot be read in full (unknown version, missing part, a column
-  the table does not have) raises `NullabilityRecordError`.
-- **A table without a record** (for example the EDI sample tables): every column has the type
-  `T | None` (`str | None`, `datetime.datetime | None`, ...). A function pod receiving such a
-  column must accept `None`: annotate the parameter `x: float | None`, not `x: float`, or the
-  pod refuses the stream. Such a table reads exactly as it did before records existed.
-- **Joins are type strict.** A key column that is `T` in a recorded table and `T | None` in an
-  unrecorded one is an error, not a conversion.
+- **A table with a nullability record** (written by `SpiralDBConnector`, by a
+  `ConnectorArrowDatabase` on SpiralDB, or given one with `write_nullability_record`, as the
+  tables of the workshop project are): the columns it lists have the type `T`, so a function
+  pod can take `x: float`. Every batch read is checked: a null in a listed column raises
+  `NullInNonNullableColumnError` naming the table and the column, so a wrong nullability
+  record never hides a null. A nullability record that cannot be read in full (unknown
+  version, missing part, a column the table does not have) raises `NullabilityRecordError`.
+- **A table without a nullability record** (for example the EDI sample tables): every column
+  has the type `T | None` (`str | None`, `datetime.datetime | None`, ...). A function pod
+  receiving such a column must accept `None`: annotate the parameter `x: float | None`, not
+  `x: float`, or the pod refuses the stream. Such a table reads exactly as it did before
+  nullability records existed: same schema, same hashes.
+- **Joins are type strict.** A key column that is `T` in a table with a nullability record and
+  `T | None` in a table without one is an error, not a conversion.
 
-`SpiralDBConnector` writes the record on a table's first write, before the rows. It refuses a
-write that holds a null in a column its schema declares non-nullable, nested fields included
-(SpiralDB would store a null written to a non-nullable struct field as `0`), and a later write
-whose non-nullable columns differ from the record. It never adds a record to a table that
-already holds rows, and never changes one.
+`SpiralDBConnector` writes the nullability record on a table's first write, before the rows.
+It refuses a write that holds a null in a column its schema declares non-nullable, nested
+fields included (SpiralDB would store a null written to a non-nullable struct field as `0`),
+and a later write whose non-nullable columns differ from the nullability record. It never adds
+a nullability record to a table that already holds rows, and never changes one.
 
-Other writers record a table with `write_nullability_record`, passing the Arrow schema the
-data was written with. It reads no data, so check first that no non-nullable column holds a
-null. The same call replaces a wrong record. Recording or changing a record changes the
-table's schema as Orcapod reads it, and with it the source's `pipeline_hash` and
-`content_hash`: results computed from the table before are not reused.
+Other writers give a table its nullability record with `write_nullability_record`, passing the
+Arrow schema the data was written with. It reads no data, so check first that no non-nullable
+column holds a null. The same call replaces a wrong nullability record.
 
 <!-- docs-test: skip -->
 ```python
@@ -156,17 +156,44 @@ table = spiral.Spiral().project("my-project-123456").table("default.session")
 schema = pa.schema(
     [
         pa.field("subject_id", pa.string(), nullable=False),
+        pa.field("weight", pa.float64(), nullable=False),
         pa.field("booth", pa.string(), nullable=True),
     ]
 )
-write_nullability_record(table, schema)  # True if a record was written
+write_nullability_record(table, schema)  # True if it was written, False if already current
 print(read_nullability_record(table.get_metadata()))
-# frozenset({('subject_id',)})
+# frozenset({('subject_id',), ('weight',)})
 ```
 
-The record is stored under the key `__orcapod_nullability__` (format `orcapod.nullability`,
-version 1), split over further keys when a wide table needs more than SpiralDB's 8 KiB per
-entry. Other SpiralDB clients ignore it and still see every column as nullable.
+**Adding or changing a nullability record changes the table's identity in Orcapod.** The
+nullability is part of the schema, and the schema is part of a source's `pipeline_hash` and
+`content_hash`. For the `session` table above:
+
+<!-- docs-test: skip -->
+```python
+from orcapod.sources import SpiralDBTableSource
+
+# Before write_nullability_record:
+SpiralDBTableSource("my-project-123456", "session").output_schema()
+# (Schema({'subject_id': str | None}), Schema({'weight': float | None, 'booth': str | None}))
+
+# After it:
+SpiralDBTableSource("my-project-123456", "session").output_schema()
+# (Schema({'subject_id': str}), Schema({'weight': float, 'booth': str | None}))
+```
+
+The two sources have different `pipeline_hash` and `content_hash` values, and so do the nodes
+built on them. A pipeline built on the table before it had a nullability record keeps its
+stored results under its old identity: after the change, those nodes compute again under new
+identities, and the earlier results are not reused (nothing stored is changed or deleted).
+Pods annotated `weight: float | None` keep working, since they also accept `float`. So the
+practical rule is: **write the nullability record when the table is created, before anyone
+builds pipelines on it.**
+
+The nullability record is stored under the metadata key `__orcapod_nullability__` (format
+`orcapod.nullability`, version 1), split over further keys when a wide table needs more than
+SpiralDB's 8 KiB per metadata entry. Other SpiralDB clients ignore it and still see every
+column as nullable.
 
 ### `DerivedSource`
 

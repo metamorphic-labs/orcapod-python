@@ -108,22 +108,24 @@ their `source_id` explicitly and keep it when loaded.
   `except StoreError` handles both. (ITL-884 #290)
 - **SpiralDB nullability record** (ITL-936). SpiralDB reports every top-level column (key
   columns included) and every struct field as nullable, whatever was written; only list items
-  keep a non-null flag. `SpiralDBConnector` now records a table's non-nullable columns and
-  nested fields in its key-value metadata (key `__orcapod_nullability__`, format
-  `orcapod.nullability` version 1, chunked under SpiralDB's 8 KiB entry limit) on the table's
-  first write, and `get_column_info` and `iter_batches` restore them, so a
-  `SpiralDBTableSource` over a recorded table gives `T`, not `T | None`, and a function pod can
-  take `x: float`. Every batch of a recorded table is checked: a null in a recorded column
-  raises `orcapod.errors.NullInNonNullableColumnError` naming the table and column. A write
-  holding a null in a non-nullable column is refused before anything is written (SpiralDB
-  stores a null written to a non-nullable struct field as `0`), and a write whose non-nullable
-  columns differ from the record raises `NullabilityRecordMismatchError`. An unreadable record
-  raises `NullabilityRecordError`. `orcapod.databases.write_nullability_record` and
-  `read_nullability_record` let other writers record a table. Tables without a record read
-  exactly as before (same schema and hashes); a table that gains a record has a different
-  schema, `pipeline_hash` and `content_hash`. A `ConnectorArrowDatabase` on SpiralDB records
-  new result tables, so results read back with their written nullability; existing result
-  tables are not changed.
+  keep a non-null flag. `SpiralDBConnector` now keeps a *nullability record* of each table's
+  non-nullable columns and nested fields: an entry in the table's key-value metadata, not a
+  data row (key `__orcapod_nullability__`, format `orcapod.nullability` version 1, chunked
+  under SpiralDB's 8 KiB entry limit). It writes the nullability record on a table's first
+  write, and `get_column_info` and `iter_batches` restore it, so a `SpiralDBTableSource` over
+  such a table gives `T`, not `T | None`, and a function pod can take `x: float`. Every batch
+  of such a table is checked: a null in a listed column raises
+  `orcapod.errors.NullInNonNullableColumnError` naming the table and column. A write holding a
+  null in a non-nullable column is refused before anything is written (SpiralDB stores a null
+  written to a non-nullable struct field as `0`), and a write whose non-nullable columns differ
+  from the nullability record raises `NullabilityRecordMismatchError`. An unreadable
+  nullability record raises `NullabilityRecordError`.
+  `orcapod.databases.write_nullability_record` and `read_nullability_record` let other writers
+  give a table its nullability record. Tables without one read exactly as before (same schema
+  and hashes); a table that gains one has a different schema, `pipeline_hash` and
+  `content_hash`, so write it before building pipelines on the table. A
+  `ConnectorArrowDatabase` on SpiralDB gives new result tables a nullability record, so results
+  read back with their written nullability; existing result tables are not changed.
 
 ### Fixed
 
