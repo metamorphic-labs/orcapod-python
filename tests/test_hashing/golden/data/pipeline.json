@@ -74,10 +74,10 @@
   "index_pick.index.pipeline_hash": "semantic_v0.1:375b6916dd1d0c46e5553b471809ef66120dc092a19192a1f7b052e2481299c1",
   "index_pick.index.row[{\"subject\":\"s1\"}]._tag_record_id::2ae63653af6a57129ca7c6edfa8aa02c0511f59a8ee4acb678e223bb6302e22a": "dd65b531e3d957a0ae3f2fba11e021d5",
   "index_pick.index.row[{\"subject\":\"s1\"}]._tag_source_id::2ae63653af6a57129ca7c6edfa8aa02c0511f59a8ee4acb678e223bb6302e22a": "lists",
-  "index_pick.index.row[{\"subject\":\"s1\"}].data_hash": "arrow_v0.1:00000189f1942fbc40737ff78f6428f7be73a5dc531b1426c075ae3d5bc790b4ef8fcd",
+  "index_pick.index.row[{\"subject\":\"s1\"}].data_hash": "arrow_v0.1:000001e070353e8d329a2b9d9924105603730a2348626034ae79ccca0473c189415feb",
   "index_pick.index.row[{\"subject\":\"s2\"}]._tag_record_id::2ae63653af6a57129ca7c6edfa8aa02c0511f59a8ee4acb678e223bb6302e22a": "00c12388e8c4522893b029b39a8ec7aa",
   "index_pick.index.row[{\"subject\":\"s2\"}]._tag_source_id::2ae63653af6a57129ca7c6edfa8aa02c0511f59a8ee4acb678e223bb6302e22a": "lists",
-  "index_pick.index.row[{\"subject\":\"s2\"}].data_hash": "arrow_v0.1:00000164b528c22b7183231910091256b6cb1d63bef2ded631aa330114a2fef997ed8c",
+  "index_pick.index.row[{\"subject\":\"s2\"}].data_hash": "arrow_v0.1:00000119e013179645c0e80233af8ab0406ac1e04b789ce333197ed7a6d11b9e95d1bd",
   "index_pick.index.system_tag_columns": [
     "_tag_source_id::2ae63653af6a57129ca7c6edfa8aa02c0511f59a8ee4acb678e223bb6302e22a",
     "_tag_record_id::2ae63653af6a57129ca7c6edfa8aa02c0511f59a8ee4acb678e223bb6302e22a"
