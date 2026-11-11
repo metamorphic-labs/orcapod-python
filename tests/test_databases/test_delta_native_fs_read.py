@@ -83,7 +83,7 @@ def test_pipeline_store_reads_match_default_reader_for_logical_types(
         return Measurement(label=f"m{x}", value=x / 3, tags=list(range(x)))
 
     @op.function_pod(output_keys=["arr"])
-    def array(x: int) -> np.ndarray:
+    def array(x: int) -> np.ndarray:  # pyright: ignore[reportMissingTypeArgument]  # Orcapod's numpy logical type is declared on bare ndarray
         return np.arange(x + 1, dtype=np.int16).reshape(1, -1)
 
     @op.function_pod(output_keys=["df"])
@@ -201,6 +201,7 @@ def test_delta_table_source_matches_default_reader(
 
 
 def test_local_tables_open_on_a_native_filesystem(tmp_path: Path) -> None:
+    import pyarrow.dataset as pa_ds
     import pyarrow.fs as pa_fs
 
     from orcapod.databases.storage_utils import delta_to_pyarrow_dataset
@@ -209,12 +210,11 @@ def test_local_tables_open_on_a_native_filesystem(tmp_path: Path) -> None:
     table = deltalake.DeltaTable(str(tmp_path))
 
     native = delta_to_pyarrow_dataset(table, as_large_types=True)
+    assert isinstance(native, pa_ds.FileSystemDataset)
     assert isinstance(native.filesystem, pa_fs.SubTreeFileSystem)
     assert isinstance(native.filesystem.base_fs, pa_fs.LocalFileSystem)
 
     # A filesystem chosen by the caller is used as given (here one the helper never builds).
-    import fsspec
-
-    chosen = pa_fs.PyFileSystem(pa_fs.FSSpecHandler(fsspec.filesystem("file")))
-    opened = delta_to_pyarrow_dataset(table, filesystem=chosen)
-    assert isinstance(opened.filesystem, pa_fs.PyFileSystem)
+    opened = delta_to_pyarrow_dataset(table, filesystem=pa_fs.LocalFileSystem())
+    assert isinstance(opened, pa_ds.FileSystemDataset)
+    assert isinstance(opened.filesystem, pa_fs.LocalFileSystem)

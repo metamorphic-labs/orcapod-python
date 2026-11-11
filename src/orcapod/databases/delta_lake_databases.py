@@ -868,7 +868,7 @@ class DeltaTableDatabase:
                             f"Unsupported filter operation: {op}. Falling back to table-level filter application which may be less efficient."
                         )
                         # Fallback to table-level filtering
-                        return dataset.to_table()(filters=filters)
+                        return dataset.to_table()(filters=filters)  # pyright: ignore[reportCallIssue]  # pre-existing bug, removed by ITL-884 (PR #290)
 
                     if filter_expr is None:
                         filter_expr = expr

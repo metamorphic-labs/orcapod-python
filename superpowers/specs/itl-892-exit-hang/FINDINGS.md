@@ -1,6 +1,8 @@
 # ITL-892: process does not exit after reading a Delta table
 
-November 10, 2026. Investigation only: no change to `src/` or `uv.lock`. Scripts, raw results
+November 10, 2026. **Outcome:** the coordinator approved option (c) plus the (d) note. It is
+implemented in the same PR (`storage_utils.delta_to_pyarrow_dataset`, two new test modules,
+`docs/troubleshooting.md`). The investigation itself changed no `src/` file or `uv.lock`. Scripts, raw results
 and native stacks are in this directory; the tables are produced by `summarize.py`.
 
 ## 1. Summary
@@ -106,7 +108,7 @@ raises the rate a little; it is not the cause.
 
 **Platforms.** macOS arm64: measured here. Linux x86_64: measured on GitHub `ubuntu-latest`
 through a temporary workflow on this branch (`.github/workflows/itl-892-exit-hang-probe.yml`,
-not a required check; to be deleted before the PR leaves draft). Docker is not installed on
+not a required check, since deleted; GitHub Actions runs 42969989607 and 42972298798). Docker is not installed on
 this machine.
 
 ## 4. Versions and upstream
