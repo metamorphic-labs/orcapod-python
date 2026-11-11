@@ -488,6 +488,12 @@ in any data-level preimage; they serve logging, observability, and result inspec
 
 ## 8. Array Value Digest
 
+**Value hash labels.** A type whose values are hashed by a dedicated handler labels its hash
+`<type>_v<N>`, for example `ndarray_v1` (and later `tensor_v1`). The label is the
+`ContentHash.method` and appears in every token built from the hash. The bytes produced under
+an existing label never change. A new definition gets a new label, so a hash always says
+which definition produced it.
+
 A `numpy.ndarray` value is hashed by value (since v0.3, ITL-888). The semantic hasher's
 `NumpyArrayHandler` returns `ContentHash(method="ndarray_v1", digest=D)`, where `D` is the
 version-1 array digest of the array's stored row. Inside a table hash, an array cell becomes
