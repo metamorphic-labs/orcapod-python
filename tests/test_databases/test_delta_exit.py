@@ -99,6 +99,11 @@ def _run_once(script: str, store: Path) -> str | None:
 def test_process_exits_after_reading_a_local_delta_store(
     tmp_path: Path, script: str
 ) -> None:
+    """Every one of ``RUNS`` fresh interpreters reads a local Delta store and exits cleanly.
+
+    Each run must finish within ``DEADLINE_S`` with exit code 0. A run that misses the
+    deadline or aborts is the ITL-892 exit hang.
+    """
     stores = [tmp_path / f"run{i}" for i in range(RUNS)]
     with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
         failures = [

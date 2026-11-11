@@ -48,6 +48,7 @@ def _run(mode: str) -> str | None:
 
 @pytest.mark.parametrize("mode", ["plain-read", "source-read"])
 def test_process_exits_after_delta_read(mode: str) -> None:
+    """Every one of ``RUNS`` fresh interpreters runs ``mode`` and exits cleanly."""
     with ThreadPoolExecutor(max_workers=JOBS) as pool:
         failures = [f for f in pool.map(_run, [mode] * RUNS) if f is not None]
     assert not failures, (

@@ -29,6 +29,8 @@ from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
 @dataclass
 class Measurement:
+    """A dataclass output, stored through Orcapod's dataclass logical type."""
+
     label: str
     value: float
     tags: list[int]
@@ -44,10 +46,18 @@ def _default_reader(table_dir: Path) -> pa.Table:
 
 
 def _delta_table_dirs(root: Path) -> list[Path]:
+    """Return every Delta table directory under ``root``, sorted."""
     return sorted(p.parent for p in root.rglob("_delta_log"))
 
 
 def _assert_identical(actual: pa.Table, expected: pa.Table, sort_by: str) -> None:
+    """Assert equal schemas, metadata included, and equal values after sorting.
+
+    Args:
+        actual: The table Orcapod read.
+        expected: The table deltalake's default reader read.
+        sort_by: Column that orders both tables before the value comparison.
+    """
     assert actual.schema.equals(expected.schema, check_metadata=True), (
         f"schema differs:\n{actual.schema}\nvs default reader:\n{expected.schema}"
     )
@@ -61,6 +71,11 @@ def test_pipeline_store_reads_match_default_reader_for_logical_types(
     tmp_path: Path,
     orchestrator: type[SyncPipelineOrchestrator | AsyncPipelineOrchestrator],
 ) -> None:
+    """Every table a pipeline writes reads back exactly as deltalake's default reader reads it.
+
+    The pods return logical types (Path, a dataclass, numpy, pandas), a nullable value and
+    a list, under both orchestrators.
+    """
     files = []
     for i in range(3):
         f = tmp_path / "inputs" / f"f{i}.txt"
@@ -76,22 +91,27 @@ def test_pipeline_store_reads_match_default_reader_for_logical_types(
 
     @op.function_pod(output_keys=["path"])
     def same_path(f: Path) -> Path:
+        """Return the input path, so the store holds a ``Path`` column."""
         return f
 
     @op.function_pod(output_keys=["m"])
     def measure(x: int) -> Measurement:
+        """Return a dataclass built from ``x``."""
         return Measurement(label=f"m{x}", value=x / 3, tags=list(range(x)))
 
     @op.function_pod(output_keys=["arr"])
     def array(x: int) -> np.ndarray:  # pyright: ignore[reportMissingTypeArgument]  # Orcapod's numpy logical type is declared on bare ndarray
+        """Return an ``int16`` numpy array of shape (1, x + 1)."""
         return np.arange(x + 1, dtype=np.int16).reshape(1, -1)
 
     @op.function_pod(output_keys=["df"])
     def frame(x: int) -> pd.DataFrame:
+        """Return a two-row DataFrame with a null string."""
         return pd.DataFrame({"a": [x, x + 1], "b": [str(x), None]})
 
     @op.function_pod(output_keys=["maybe", "values"])
     def mixed(x: int) -> tuple[int | None, list[int]]:
+        """Return a nullable int and a list of ints."""
         return (None if x == 1 else x, [x] * x)
 
     store_dir = tmp_path / "store"
@@ -125,6 +145,14 @@ def test_pipeline_store_reads_match_default_reader_for_logical_types(
 
 
 def _typed_table(offset: int) -> pa.Table:
+    """Build rows with narrow, decimal, timestamp, nested and non-nullable columns.
+
+    Args:
+        offset: Makes the ids of each call distinct, so appends add new rows.
+
+    Returns:
+        The table, with a ``part`` column whose values need escaping in a partition path.
+    """
     schema = pa.schema(
         [
             pa.field("id", pa.large_string(), nullable=False),
@@ -179,6 +207,7 @@ def _typed_table(offset: int) -> pa.Table:
 def test_delta_table_source_matches_default_reader(
     tmp_path: Path, partitioned: bool
 ) -> None:
+    """``DeltaTableSource`` reads flat and partitioned tables exactly as the default reader does."""
     table_dir = tmp_path / "table"
     partition_by = ["part"] if partitioned else None
     deltalake.write_deltalake(
@@ -201,6 +230,7 @@ def test_delta_table_source_matches_default_reader(
 
 
 def test_local_tables_open_on_a_native_filesystem(tmp_path: Path) -> None:
+    """Local tables open on a native filesystem, and a caller's filesystem is kept as given."""
     import pyarrow.dataset as pa_ds
     import pyarrow.fs as pa_fs
 

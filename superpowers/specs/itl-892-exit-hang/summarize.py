@@ -16,6 +16,14 @@ HERE = Path(__file__).resolve().parent
 
 
 def load(path: Path) -> dict[str, dict[str, object]]:
+    """Load a ``results.jsonl`` file, keeping the last entry for each label.
+
+    Args:
+        path: The file.
+
+    Returns:
+        Entries keyed by label.
+    """
     rows: dict[str, dict[str, object]] = {}
     for line in path.read_text().splitlines():
         if line.strip():
@@ -25,6 +33,15 @@ def load(path: Path) -> dict[str, dict[str, object]]:
 
 
 def render(title: str, rows: dict[str, dict[str, object]]) -> str:
+    """Render one platform's entries as a Markdown table.
+
+    Args:
+        title: Heading for the table.
+        rows: Entries keyed by label.
+
+    Returns:
+        The Markdown.
+    """
     out = [
         f"### {title}",
         "",
@@ -47,6 +64,7 @@ def render(title: str, rows: dict[str, dict[str, object]]) -> str:
 
 
 def main() -> None:
+    """Print the hang-rate tables for macOS and each Linux round."""
     print(render("macOS arm64 (this machine)", load(HERE / "results.jsonl")))
     for path in sorted((HERE / "linux").glob("*/results.jsonl")):
         print(

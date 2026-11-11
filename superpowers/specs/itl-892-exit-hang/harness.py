@@ -51,6 +51,17 @@ def _sample_stack(pid: int, label: str) -> str | None:
 
 
 def _run_one(cmd: list[str], timeout: float, env: dict[str, str]) -> dict[str, Any]:
+    """Run ``cmd`` once and classify the outcome.
+
+    Args:
+        cmd: The command to run.
+        timeout: Seconds before the run counts as hung.
+        env: Environment for the child.
+
+    Returns:
+        The outcome. A hung run also carries the live process, for the caller to sample
+        and kill.
+    """
     t0 = time.monotonic()
     proc = subprocess.Popen(
         cmd,
@@ -74,6 +85,11 @@ def _run_one(cmd: list[str], timeout: float, env: dict[str, str]) -> dict[str, A
 
 
 def main() -> int:
+    """Run one cell of the matrix and append its summary to ``results.jsonl``.
+
+    Returns:
+        The process exit code.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--label", required=True)
     ap.add_argument("-n", type=int, default=40)

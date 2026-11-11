@@ -20,6 +20,13 @@ from pathlib import Path
 
 
 def pipeline(store_dir: Path, orchestrator_name: str, runs: int = 1) -> None:
+    """Run a one-pod pipeline on a Delta store and read the node's records back.
+
+    Args:
+        store_dir: Root of the Delta store.
+        orchestrator_name: ``sync`` or ``async``.
+        runs: How many times to build and run the pipeline.
+    """
     import orcapod as op
     from orcapod.databases import DeltaTableDatabase
     from orcapod.pipeline import AsyncPipelineOrchestrator, PipelineJob
@@ -32,6 +39,7 @@ def pipeline(store_dir: Path, orchestrator_name: str, runs: int = 1) -> None:
 
     @op.function_pod(output_keys=["result"])
     def double(x: int) -> int:
+        """Return ``2 * x``."""
         return x * 2
 
     for _ in range(runs):
@@ -47,6 +55,11 @@ def pipeline(store_dir: Path, orchestrator_name: str, runs: int = 1) -> None:
 
 
 def plain_read(store_dir: Path) -> None:
+    """Write three records, then read them through a fresh ``DeltaTableDatabase``.
+
+    Args:
+        store_dir: Root of the Delta store.
+    """
     import pyarrow as pa
 
     from orcapod.databases import DeltaTableDatabase
@@ -61,10 +74,17 @@ def plain_read(store_dir: Path) -> None:
     db.add_records(("t",), table, record_id_column="__record_id")
     db.flush()
     fresh = DeltaTableDatabase(store_dir)
-    fresh.get_all_records(("t",), record_id_column="__record_id")
+    records = fresh.get_all_records(("t",), record_id_column="__record_id")
+    # get_all_records returns None when a scan fails, so a broken patch must not pass.
+    assert records is not None and records.num_rows == 3, records
 
 
 def source_read(store_dir: Path) -> None:
+    """Write a Delta table with deltalake and read it through ``DeltaTableSource``.
+
+    Args:
+        store_dir: Directory for the table.
+    """
     import deltalake
     import pyarrow as pa
 
@@ -76,7 +96,7 @@ def source_read(store_dir: Path) -> None:
         pa.table({"id": pa.array([1, 2, 3]), "x": pa.array([1.0, 2.0, 3.0])}),
     )
     src = op.sources.DeltaTableSource(path, tag_columns=["id"])
-    src.as_table()
+    assert src.as_table().num_rows == 3
 
 
 def apply_patch(name: str) -> None:
@@ -113,6 +133,7 @@ def apply_patch(name: str) -> None:
     original = deltalake.DeltaTable.to_pyarrow_dataset
 
     def to_pyarrow_dataset(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        """Open the dataset with the selected prototype applied."""
         if name == "native-fs" and kwargs.get("filesystem") is None:
             uri = self.table_uri
             local = uri[len("file://") :] if uri.startswith("file://") else uri
@@ -125,10 +146,14 @@ def apply_patch(name: str) -> None:
             to_table = ds.to_table
 
             class _NoThreads:
+                """Dataset proxy whose ``to_table`` runs single-threaded."""
+
                 def __getattr__(self, attr: str):  # noqa: ANN204
+                    """Forward every other attribute to the wrapped dataset."""
                     return getattr(ds, attr)
 
                 def to_table(self, *a, **kw):  # noqa: ANN002, ANN003, ANN202
+                    """Scan the wrapped dataset with ``use_threads=False``."""
                     kw["use_threads"] = False
                     return to_table(*a, **kw)
 
@@ -139,6 +164,7 @@ def apply_patch(name: str) -> None:
 
 
 def main() -> None:
+    """Apply the selected patch, run the selected scenario and print ``done``."""
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "mode",

@@ -28,6 +28,12 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
 - In a script that reads a cloud Delta store, end it by flushing your outputs and calling
   `os._exit(0)`. That skips interpreter shutdown, where the hang happens. It also skips
   `atexit` handlers and other cleanup, so close files and flush stores first.
-- When reading Delta tables directly with deltalake, pass a native filesystem for local tables:
-  `dt.to_pyarrow_dataset(filesystem=pyarrow.fs.SubTreeFileSystem(dt.table_uri,
-  pyarrow.fs.LocalFileSystem()))`.
+- When reading local Delta tables directly with deltalake, pass a native filesystem. Resolve
+  `dt.table_uri` first: it is percent-encoded, and newer deltalake versions return a
+  `file://` URI.
+
+  ```python
+  uri = dt.table_uri if "://" in dt.table_uri else "file://" + dt.table_uri
+  fs, root = pyarrow.fs.FileSystem.from_uri(uri)
+  dataset = dt.to_pyarrow_dataset(filesystem=pyarrow.fs.SubTreeFileSystem(root, fs))
+  ```

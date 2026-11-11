@@ -25,6 +25,15 @@ import tempfile
 
 
 def build(path: str, i: int):
+    """Build the one-row table written in round ``i``.
+
+    Args:
+        path: Table directory (unused; kept for the call sites).
+        i: Round number.
+
+    Returns:
+        The table.
+    """
     import pyarrow as pa
 
     return pa.table(
@@ -41,6 +50,7 @@ def run(op: str, read_via: str, rounds: int = 4) -> list[object]:
     path = tempfile.mkdtemp()
 
     def read() -> None:
+        """Read the table through the selected reader, keeping every object it creates."""
         dt = deltalake.DeltaTable(path)
         keep.append(dt)
         if read_via == "dataset":
@@ -122,6 +132,7 @@ def run(op: str, read_via: str, rounds: int = 4) -> list[object]:
 
 
 def main() -> None:
+    """Run the selected operation, apply the selected mitigation and print ``done``."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--op", default="itl864")
     ap.add_argument(
@@ -175,6 +186,9 @@ def main() -> None:
         p = ctx.Process(target=run, args=(args.op, args.read_via, args.rounds))
         p.start()
         p.join()
+        if p.exitcode != 0:
+            # A child that raised or died on a signal is a failed run, not a clean one.
+            sys.exit(f"child process failed with exit code {p.exitcode}")
         keep: list[object] = []
     else:
         keep = run(args.op, args.read_via, args.rounds)

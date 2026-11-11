@@ -21,6 +21,14 @@ import pyarrow.fs as pa_fs
 
 
 def make(i: int) -> pa.Table:
+    """Build 50 rows covering narrow, decimal, timestamp, binary, nested and null columns.
+
+    Args:
+        i: Batch number, which keeps the ids of each batch distinct.
+
+    Returns:
+        The table.
+    """
     schema = pa.schema(
         [
             pa.field("id", pa.large_string(), nullable=False),
@@ -59,6 +67,16 @@ def make(i: int) -> pa.Table:
 def read(
     table: deltalake.DeltaTable, native: bool, flt: pc.Expression | None
 ) -> pa.Table:
+    """Read ``table`` through the default or the native filesystem, sorted by ``id``.
+
+    Args:
+        table: The Delta table.
+        native: Read through a native ``SubTreeFileSystem`` instead of deltalake's.
+        flt: Optional filter applied by the scan.
+
+    Returns:
+        The scanned rows.
+    """
     kwargs = {}
     if native:
         kwargs["filesystem"] = pa_fs.SubTreeFileSystem(
@@ -69,6 +87,7 @@ def read(
 
 
 def main() -> None:
+    """Compare default and native reads of one table across versions and filters."""
     path = tempfile.mkdtemp()
     deltalake.write_deltalake(path, make(0))
     deltalake.write_deltalake(path, make(1), mode="append")
