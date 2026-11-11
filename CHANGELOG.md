@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0] — unreleased
+
+### Fixed
+
+- A function pod no longer stores a returned value that does not match its declared output
+  type. pyarrow converts a `float` for an integer field with `__int__`, so a pod declared
+  `-> int` that returned `1.5` stored `1` with no error, on every path (standalone, cached,
+  `PipelineJob` sync and async, in-memory and Delta). The returned value is now checked and
+  the function pod raises `orcapod.errors.OutputTypeError` (a `TypeError` and a
+  `ValueError`). The error names the function, the output, the declared type and the type of
+  the value. In a `PipelineJob` it is a row failure under `error_policy`, like any other
+  exception the function raises. Also rejected now: `numpy.float64`, `Decimal` or `Fraction`
+  for an integer (also truncated before), a number for `date` or `datetime` (read as epoch
+  ticks before), a `datetime` for `date` (time dropped before), `bytes` for `str` and the
+  reverse, the same mismatches inside lists, dicts and dataclass fields, and `None` for an
+  output not declared `T | None` (a NULL in a not-null field, which left an in-memory node
+  unreadable). Each output is converted to Arrow as soon as it is returned, so a downstream
+  pod receives exactly the stored value: before, it saw `1.5` on some paths and `1` on others.
+  Stored results of conforming values and their hashes are unchanged. Rows stored wrongly
+  before this fix are still served from the store, because the function is not called again
+  for them. To find them, call the function again on the stored inputs and compare.
+  (ITL-895)
+
 ## [0.2.0] — 2026-11-10
 
 **Distribution:** Orcapod is MIT licensed starting with `0.2.0` (it was proprietary on

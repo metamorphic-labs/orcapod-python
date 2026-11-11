@@ -135,6 +135,46 @@ The same step is available as a stream method: `wide.select_data_columns(["weigh
 Tag columns are never affected by this rule -- a function pod passes all tags through
 untouched.
 
+## Return values must match the declared type
+
+Each value the function returns is checked against its declared output type before it is
+stored or hashed. Orcapod never converts a returned value implicitly. A `float` returned
+for an output declared `int` is rejected; it is not truncated. The `OutputTypeError` names the
+function, the output, the declared type and the type of the value:
+
+```python
+from orcapod.errors import OutputTypeError
+
+@function_pod(output_keys="half_weight")
+def halve(weight: float) -> int:
+    return weight / 2  # a float, although the function says it returns an int
+
+weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"])
+
+try:
+    list(halve.pod(weights).iter_data())
+except OutputTypeError as err:
+    print(err)
+# Function 'halve' returned float (12.65) for output 'half_weight', which is declared int. Orcapod does not convert types implicitly; convert the value in the function.
+```
+
+Fix the function (`return round(weight / 2)`), or declare the type it really returns
+(`-> float`). Values inside containers are checked too: a `1.5` in a `list[int]`, a
+`dict[str, int]` or an `int` field of a dataclass is rejected the same way. So are `None`
+for an output not declared `T | None`, a number for a `date` or `datetime`, a `datetime` for
+a `date`, and `bytes` for `str` (or the reverse).
+
+`OutputTypeError` is a `TypeError` (and a `ValueError`). Inside a `PipelineJob` it counts as
+a failure of the function for that row, like an exception the function raises itself. With
+the default `error_policy="continue"` the row is skipped and reported to the observer, and
+the other rows are computed and stored. With `error_policy="fail_fast"` the run stops.
+
+A few conversions that keep the value are still accepted while their rules are being
+decided: an `int` or `bool` for a `float` output, a NumPy scalar of the same kind (such as
+`numpy.int64` for `int`), a `tuple` for a `list`, and a Python `float` for a
+`numpy.float32` output. The stored value always has the declared type, and so does the
+value a downstream pod receives.
+
 ## `PipelineJob` -- database-backed, cached execution
 
 Applying a pod directly, as above, computes in memory and keeps nothing. To store results and

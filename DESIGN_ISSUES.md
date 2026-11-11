@@ -2245,3 +2245,42 @@ xfail. The async path checks key types on the first row of each input, because
 So when either input is empty (left or right), a key type mismatch that the sync path reports
 yields an empty result on the async path instead of an error. `Join`'s async key check
 (`_check_shared_key_types`) has the same limit.
+
+---
+
+## `src/orcapod/core/data_function.py` — returned values not checked against the declared type
+
+### FO1 — A pod declared `-> int` stored `1.5` as `1`
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-895
+
+`PythonDataFunction._build_output_data` built `Data(output, python_schema=declared)` without
+looking at the values. The Arrow table was built later with
+`pa.Table.from_pylist(rows, schema=...)`, and the type converter passes primitives through
+unchanged. pyarrow's integer converter calls `__int__` on a non-`int`, so `1.5`,
+`numpy.float64(1.5)`, `Decimal` and `Fraction` were truncated. Numbers were read as epoch ticks
+for date and timestamp fields, `bytes` and `str` were decoded and encoded into each other, and
+`None` became a NULL in a not-null field. The `Data` kept the raw dict, so `as_dict()` gave
+`1.5` while `as_table()`, the store and the hash gave `1`. Downstream pods read `as_dict()`, so
+the same graph gave different results standalone, on the sync orchestrator and on the async
+orchestrator. Present in every release up to v0.2.0. Root-cause evidence:
+`superpowers/specs/itl-895-float-to-int/FINDINGS.md`.
+
+**Fix (function outputs):** `semantic_types/output_conformance.py` checks each returned value
+against its declared type, including inside lists, dicts and dataclass fields, under one rule
+table (`OUTPUT_CONFORMANCE`). `_build_output_data` raises `OutputTypeError` for a mismatch, and
+otherwise converts the outputs to Arrow eagerly, so the `Data` holds exactly what is stored and
+hashed. The error is raised inside the function call, so it is a row failure under
+`error_policy`. Regressions: `tests/test_core/function_pod/test_output_conformance.py`.
+
+**Open:**
+- The developer still has to decide the near-miss conversions D1-D7 (FINDINGS section 11).
+  Undecided entries keep today's behaviour: an `int` or `bool` for `float`, NumPy scalars of
+  the same kind, a `tuple` for `list`, and a `float` for `numpy.float32`.
+- Inputs built from Python values (`DictSource` and `ListSource` with a declared schema,
+  `Datagram`, `Data` and `Tag` from dicts, `Datagram.update` / `with_columns`) still go through
+  the unchecked conversion and truncate the same way.
+- Rows stored wrongly before the fix are served unchanged. They are not repaired
+  automatically.
+
