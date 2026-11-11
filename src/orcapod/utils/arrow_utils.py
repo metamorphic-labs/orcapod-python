@@ -240,52 +240,38 @@ def normalize_schema_to_large_types(schema: "pa.Schema") -> "pa.Schema":
         return schema
 
 
-def resolve_disagreeing_types(
-    name: str, left_type: "pa.DataType", right_type: "pa.DataType", operator: str
-) -> "pa.DataType":
-    """Decide the output type of a column whose two inputs' Arrow types may differ.
+def shared_arrow_type(
+    left_type: "pa.DataType", right_type: "pa.DataType"
+) -> "pa.DataType | None":
+    """Return the Arrow type two types of one column share, or ``None``.
 
-    This is the single place that rule lives, for every operator that combines
-    one column from two inputs (``MergeJoin``'s colliding data and source-info
-    columns, a shared tag key in ``Join`` and ``MergeJoin``). The disagreement
-    cannot be seen at graph-build time: ``output_schema()`` returns Python
-    types, under which ``int8`` and ``int64``, or ``string`` and
-    ``large_string``, are the same, so operators call this as soon as they have
-    the input tables (or datagrams), before the join.
+    This is the single place the rule lives for an operator that combines one
+    column from two inputs (``MergeJoin``'s colliding data and source-info
+    columns, a shared tag key in ``Join`` and ``MergeJoin``).
 
     Both types are normalized to their large variants
-    (``normalize_to_large_types``: ``string`` to ``large_string``, ``binary``
-    to ``large_binary``, ``list`` to ``large_list``, recursively), which the
-    Arrow hasher treats as identical. If the normalized types are equal, that
-    is the output type. Anything else (integer or float width, timestamp unit,
-    decimal precision, struct fields, nullability of a nested field, logical
-    type) is an error: an operator never widens, promotes or picks a side. The
-    result does not depend on argument order.
+    (``normalize_to_large_types`` with ``keep_null=True``: ``string`` to
+    ``large_string``, ``binary`` to ``large_binary``, ``list`` to
+    ``large_list``, recursively), which the Arrow hasher treats as identical.
+    If the normalized types are equal, that is the shared type. Any other
+    difference (integer or float width, timestamp unit, decimal precision,
+    struct fields, nullability of a nested field, logical type) means there is
+    no shared type: nothing is widened, promoted or picked. The result does
+    not depend on argument order.
 
     Args:
-        name: Column name, for the error message.
         left_type: The column's Arrow type in one input.
         right_type: The column's Arrow type in the other input.
-        operator: The operator's name, for the error message.
 
     Returns:
-        The large-normalized type both inputs share.
-
-    Raises:
-        InputValidationError: If the types still differ after normalization.
+        The large-normalized type both inputs share, or ``None`` when the types
+        still differ after normalization.
     """
-    from orcapod.errors import InputValidationError
-
     normalized_left = normalize_to_large_types(left_type, keep_null=True)
     normalized_right = normalize_to_large_types(right_type, keep_null=True)
     if normalized_left == normalized_right:
         return normalized_left
-    raise InputValidationError(
-        f"{operator} inputs disagree on the Arrow type of column {name!r}: "
-        f"{left_type} in one input and {right_type} in the other. {operator} "
-        f"never widens or promotes a type; cast one input explicitly so both "
-        f"have the same Arrow type."
-    )
+    return None
 
 
 def normalize_table_to_large_types(table: "pa.Table") -> "pa.Table":

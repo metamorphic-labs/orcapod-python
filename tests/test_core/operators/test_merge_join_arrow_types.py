@@ -41,7 +41,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.utils.arrow_utils import (
     normalize_to_large_types,
-    resolve_disagreeing_types,
+    shared_arrow_type,
 )
 
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
@@ -335,45 +335,57 @@ def _ordered(
     return (left, right) if order == "LR" else (right, left)
 
 
-class TestResolveDisagreeingTypes:
-    """The single decision point for inputs whose Arrow types differ."""
+class TestSharedArrowType:
+    """The single rule for two Arrow types of one column: shared type or None."""
+
+    @pytest.mark.parametrize(
+        "arrow_type",
+        [pa.int8(), pa.string(), pa.list_(pa.int8()), STRUCT],
+        ids=str,
+    )
+    def test_equal_types_give_the_large_type(self, arrow_type: pa.DataType) -> None:
+        """Equal types share their large-normalized form."""
+        expected = normalize_to_large_types(arrow_type, keep_null=True)
+        assert shared_arrow_type(arrow_type, arrow_type) == expected
 
     @pytest.mark.parametrize(
         ("left", "right", "values", "expected"),
         [*LAYOUT_PAIRS, STRUCT_LAYOUT_PAIR],
         ids=_ids,
     )
-    def test_layout_only_difference_resolves_to_large(
+    def test_layout_only_difference_gives_the_large_type(
         self,
         left: pa.DataType,
         right: pa.DataType,
         values: list[Any],
         expected: pa.DataType,
     ) -> None:
-        """Layout-only differences resolve to the large variant, in either order."""
+        """Layout-only differences share the large variant, in either order."""
         del values
-        assert resolve_disagreeing_types("c", left, right, "MergeJoin") == expected
-        assert resolve_disagreeing_types("c", right, left, "MergeJoin") == expected
+        assert shared_arrow_type(left, right) == expected
+        assert shared_arrow_type(right, left) == expected
 
     @pytest.mark.parametrize(("left", "right", "values"), MISMATCHED_PAIRS, ids=_ids)
-    def test_other_difference_raises(
+    def test_other_difference_gives_none(
         self, left: pa.DataType, right: pa.DataType, values: list[Any]
     ) -> None:
-        """Any other difference raises, naming the column and both types."""
+        """Width, unit, precision or nested-width differences share no type."""
         del values
-        for first, second in ((left, right), (right, left)):
-            with pytest.raises(InputValidationError) as excinfo:
-                resolve_disagreeing_types("col", first, second, "MergeJoin")
-            message = str(excinfo.value)
-            assert "'col'" in message
-            assert str(first) in message
-            assert str(second) in message
+        assert shared_arrow_type(left, right) is None
+        assert shared_arrow_type(right, left) is None
 
-    def test_struct_with_different_fields_raises(self) -> None:
+    def test_struct_with_different_fields_gives_none(self) -> None:
         """Structs whose fields differ are not layout variants of each other."""
         other = pa.struct([("a", pa.int8()), ("c", pa.string())])
-        with pytest.raises(InputValidationError):
-            resolve_disagreeing_types("s", STRUCT, other, "MergeJoin")
+        assert shared_arrow_type(STRUCT, other) is None
+        assert shared_arrow_type(other, STRUCT) is None
+
+    def test_nested_nullability_difference_gives_none(self) -> None:
+        """A list item's non-null flag is part of the type, not its layout."""
+        non_null_items = pa.list_(pa.field("item", pa.int8(), nullable=False))
+        nullable_items = pa.large_list(pa.int8())
+        assert shared_arrow_type(non_null_items, nullable_items) is None
+        assert shared_arrow_type(nullable_items, non_null_items) is None
 
 
 class TestDisagreeingInputs:
@@ -426,6 +438,27 @@ class TestDisagreeingInputs:
         op.validate_inputs(first, second)
         with pytest.raises(InputValidationError, match=r"'x'"):
             op.static_process(first, second)
+
+    @pytest.mark.parametrize(
+        ("left_type", "right_type", "values"), MISMATCHED_PAIRS, ids=_ids
+    )
+    @pytest.mark.parametrize("order", ["LR", "RL"])
+    def test_disagreement_error_names_operator_column_and_both_types(
+        self,
+        left_type: pa.DataType,
+        right_type: pa.DataType,
+        values: list[Any],
+        order: str,
+    ) -> None:
+        """The error names MergeJoin, the column and both input types as given."""
+        first, second = _ordered(*_pair(left_type, right_type, values, 2), order)
+        with pytest.raises(InputValidationError) as excinfo:
+            _ = MergeJoin()(first, second).as_table()
+        message = str(excinfo.value)
+        assert message.startswith("MergeJoin inputs disagree")
+        assert "'x'" in message
+        assert str(left_type) in message
+        assert str(right_type) in message
 
     @pytest.mark.parametrize(
         ("left_type", "right_type", "values", "expected"), LAYOUT_PAIRS[:2], ids=_ids

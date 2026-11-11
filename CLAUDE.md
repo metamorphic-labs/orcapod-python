@@ -461,10 +461,12 @@ data. The rules:
   non-empty results have the same types.
 - When two inputs give the same column different Arrow types, normalize both: equal proceeds,
   anything else raises `InputValidationError` naming the column and both types — no widening,
-  promotion or picking a side. This is `arrow_utils.resolve_disagreeing_types`, called by
-  `MergeJoin` in `binary_static_process` and by `Join` (shared tag keys, sync and async) before
-  the join; `output_schema()` exposes only Python types, so such disagreements are invisible at
-  graph-build time.
+  promotion or picking a side. The rule is `arrow_utils.shared_arrow_type`, which takes only the
+  two types and returns the shared large type or `None`; the error is raised by
+  `core/operators/base.require_shared_arrow_type`, called by `MergeJoin` in
+  `binary_static_process` and by `Join` (shared tag keys, sync and async) before the join.
+  Keep error wording in the caller, not in the type rule. `output_schema()` exposes only Python
+  types, so such disagreements are invisible at graph-build time.
 - An operator with its own `async_execute` must yield exactly the rows of its sync path (types,
   nullability, column order, system tags, content hashes). Build output rows from the incoming
   datagrams' Arrow tables (`as_table()`), never from `as_dict()` values, and take the data

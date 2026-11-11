@@ -4,7 +4,10 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
-from orcapod.core.operators.base import NonZeroInputOperator
+from orcapod.core.operators.base import (
+    NonZeroInputOperator,
+    require_shared_arrow_type,
+)
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
@@ -234,11 +237,11 @@ class Join(NonZeroInputOperator):
             # A shared tag key must have one Arrow type in both inputs (up to
             # layout); otherwise Polars would join and keep one side's type.
             for key in sorted(common_tag_keys):
-                _ = arrow_utils.resolve_disagreeing_types(
+                _ = require_shared_arrow_type(
+                    "Join",
                     key,
                     arrow_utils.column_arrow_type(table.schema, key),
                     arrow_utils.column_arrow_type(next_table.schema, key),
-                    "Join",
                 )
             common_tag_keys.add(COMMON_JOIN_KEY)
 
@@ -662,15 +665,15 @@ class Join(NonZeroInputOperator):
 
         Raises:
             InputValidationError: If a key's large-normalized Arrow types differ
-                (``arrow_utils.resolve_disagreeing_types``).
+                (``require_shared_arrow_type``).
         """
         first_schema, second_schema = first.arrow_schema(), second.arrow_schema()
         for key in keys:
-            _ = arrow_utils.resolve_disagreeing_types(
+            _ = require_shared_arrow_type(
+                "Join",
                 key,
                 arrow_utils.column_arrow_type(first_schema, key),
                 arrow_utils.column_arrow_type(second_schema, key),
-                "Join",
             )
 
     @staticmethod
@@ -731,7 +734,7 @@ class Join(NonZeroInputOperator):
         Raises:
             InputValidationError: If a shared column's large-normalized Arrow
                 types differ between the two tags
-                (``arrow_utils.resolve_disagreeing_types``).
+                (``require_shared_arrow_type``).
         """
         tables = [left.as_table()]
         if right is not None:
@@ -744,9 +747,7 @@ class Join(NonZeroInputOperator):
             for index, name in enumerate(table.column_names):
                 arrow_type = table.schema.types[index]
                 if name in types:
-                    _ = arrow_utils.resolve_disagreeing_types(
-                        name, types[name], arrow_type, "Join"
-                    )
+                    _ = require_shared_arrow_type("Join", name, types[name], arrow_type)
                 types[name] = arrow_type
                 fields[name] = table.schema.field(index)
                 arrays[name] = table.column(index)

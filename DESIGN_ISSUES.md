@@ -2098,10 +2098,13 @@ columns in canonical order with a shared key taking the right input's field as t
 does, data columns stacked with `hstack_tables`, source info merged, system tags renamed as
 before. The new `Tag`/`Data` take the left (canonically first) input datagram's
 `data_context_key`. A shared tag key whose Arrow types still differ after large-normalization
-raises `InputValidationError` on both paths through `arrow_utils.resolve_disagreeing_types`
-(moved there from `MergeJoin` so both operators share one rule); the sync path used to keep the
-right input's type silently. `Datagram.copy()` no longer turns a lazy Python schema into an
-empty one (it broke `schema()` of async `Index`/`Pick` rows; ITL-859).
+raises `InputValidationError` on both paths; the sync path used to keep the right input's type
+silently. The rule (moved out of `MergeJoin` so both operators share it) is
+`arrow_utils.shared_arrow_type`, which takes only the two types and returns the shared large
+type or `None`; `core/operators/base.require_shared_arrow_type` raises the error naming the
+operator, the column and both types, for every `Join` and `MergeJoin` call site.
+`Datagram.copy()` no longer turns a lazy Python schema into an empty one (it broke `schema()`
+of async `Index`/`Pick` rows; ITL-859).
 `tests/test_core/operators/test_async_sync_equivalence.py` runs every operator with its own
 async path through both paths and compares types, nullability, column order, system tags,
 content and schema hashes; differences that are not type re-inference are strict xfails:
