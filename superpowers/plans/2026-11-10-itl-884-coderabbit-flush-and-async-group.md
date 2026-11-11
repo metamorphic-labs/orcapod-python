@@ -128,7 +128,7 @@ docstring gets a Raises section. Run Task 1's tests: PASS.
             # A failed store read stops the run. Raise it on its own, as the sync
             # orchestrator does, rather than inside the TaskGroup's exception group.
             # A plain except (not except*) so the raise is never wrapped again.
-            store_error = _single_store_read_error(group)
+            store_error = _single_store_error(group, topo_order)
             if store_error is None:
                 raise
             raise store_error
