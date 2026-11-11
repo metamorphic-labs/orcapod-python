@@ -20,7 +20,7 @@ pytest.importorskip("torch")
 
 import numpy as np  # noqa: E402
 import pyarrow as pa  # noqa: E402
-import torch  # noqa: E402  # pyright: ignore[reportMissingImports]  # optional peer dependency, importorskip above
+import torch  # noqa: E402
 
 from orcapod import function_pod  # noqa: E402
 from orcapod.contexts import get_default_context  # noqa: E402
@@ -368,7 +368,7 @@ def test_declared_tensor_subclass_accepts_a_plain_tensor() -> None:
     @function_pod(output_keys="y")
     def as_parameter(x: torch.Tensor) -> torch.nn.Parameter:
         """Return a plain tensor where ``nn.Parameter`` is declared."""
-        return x * 2  # a plain tensor; the column type is orcapod.torch_tensor
+        return x * 2  # pyright: ignore[reportReturnType]  # deliberately a plain tensor; the column type is orcapod.torch_tensor
 
     source = DictSource(data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"])
     got = [d.as_dict()["y"] for _, d in as_parameter.pod(source).iter_data()]

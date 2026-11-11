@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 import pyarrow as pa
-import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency, loaded lazily
+import torch
 
 from orcapod.errors import UnsupportedValueError
 from orcapod.logical_types.array_format import (

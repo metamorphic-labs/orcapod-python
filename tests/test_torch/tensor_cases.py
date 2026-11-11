@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
-import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency; callers importorskip it
+import torch
 
 TENSORS: dict[str, Any] = {
     "bool": torch.tensor([[True, False, True], [False, False, True]]),

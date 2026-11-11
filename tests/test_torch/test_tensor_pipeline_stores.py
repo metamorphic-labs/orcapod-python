@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("torch")
 
-import torch  # noqa: E402  # pyright: ignore[reportMissingImports]  # optional peer dependency, importorskip above
+import torch  # noqa: E402
 
 from orcapod import PipelineJob, function_pod  # noqa: E402
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase  # noqa: E402

@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("torch")
 
 import numpy as np  # noqa: E402
-import torch  # noqa: E402  # pyright: ignore[reportMissingImports]  # optional peer dependency, importorskip above
+import torch  # noqa: E402
 
 from orcapod import function_pod  # noqa: E402
 from orcapod.sources import ArrowTableSource, DictSource  # noqa: E402
