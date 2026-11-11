@@ -303,6 +303,12 @@ the only version marker: a change to the grammar or the digest is a new definiti
 labels (`polars_dataframe_v2`, `polars_series_v2`). A dtype outside the grammar raises
 `ValueError` naming the column.
 
+Because column order and struct field order are not part of the hash, two frames that differ
+only in those orders share a cache entry. A pod must not depend on them: a cached pod that
+returns `df.columns[0]` gives the first column of whichever frame was computed first, for
+both frames. A pod that needs a particular order selects or sorts the columns explicitly
+(`df.select(sorted(df.columns))`, or `pl.col(name).struct.field(...)` by name).
+
 ---
 
 ## 2. Source Provenance & System Tags

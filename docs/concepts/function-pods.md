@@ -258,9 +258,13 @@ extension dtypes) raise `ValueError` naming the column when the value is stored,
 such a column explicitly before returning the frame.
 
 A Polars value's content hash, which is its cache key, covers its row count, column names,
-dtypes and values, but not its column order or memory layout. See
+dtypes and values, but not its column order, its struct field order or its memory layout. See
 [Logical-typed values](../reference/hashing.md#1c-logical-typed-values-inside-a-data-column)
-for the exact scheme.
+for the exact scheme. Two frames that differ only in column order therefore share a hash and
+a cache entry, so a pod must not depend on a frame's column order: a cached pod that returns
+`df.columns[0]` gives whichever first column was computed first for both frames. If a pod
+needs a particular order, it selects or sorts the columns explicitly
+(`df.select(sorted(df.columns))`).
 
 ```python
 import polars as pl

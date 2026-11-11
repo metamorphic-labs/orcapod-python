@@ -23,3 +23,7 @@ design decisions.
 ## Progress notes
 
 - (update as steps complete)
+- Merge fbf2ed66, SemiJoin test 2abaf4c5; suite green 3.11/3.12/3.13; CI green.
+- CodeRabbit round on 2abaf4c5: column-order cache-key finding declined (coordinator approved,
+  developer decision Nov 10), docs caveat added in hashing.md and function-pods.md; body-only
+  items answered as no-change in one top-level comment.
