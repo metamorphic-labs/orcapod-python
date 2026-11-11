@@ -187,3 +187,12 @@ Run the Task 2 tests and expect PASS.
   `uv run --with basedpyright basedpyright` (exit code 0) and `uv run pytest tests/`.
 - Commit in Conventional Commits style: `test(databases): ...` for the failing tests first,
   then `fix(databases): ...`, then `docs: ...`.
+
+## Resume notes (2026-11-11, after machine restart)
+
+- Arrived to a clean worktree at d32c84d1, in sync with origin; PR #290 had 0 open threads
+  but conflicted with main after #291 (ITL-847).
+- Merged origin/main (b197544e) as b4387c00: only DESIGN_ISSUES.md conflicted; kept SJ1 (main)
+  then DR1 (this PR) at the end, additions-only against both sides. CHANGELOG auto-merged
+  (#291 did not touch it). Pushed.
+- Next: full suite on 3.11/3.12/3.13, CI green, one CodeRabbit request, worker_done.
