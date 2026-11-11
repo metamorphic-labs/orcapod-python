@@ -250,7 +250,7 @@ class StoreWriteError(RuntimeError):
         Returns:
             The ``StoreWriteError`` leaves in the order the group holds them.
         """
-        found: "list[StoreWriteError]" = []
+        found: list[StoreWriteError] = []
         for exc in group.exceptions:
             if isinstance(exc, BaseExceptionGroup):
                 found.extend(cls.in_group(exc))

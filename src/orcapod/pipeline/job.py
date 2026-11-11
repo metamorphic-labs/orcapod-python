@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _flush_best_effort(*databases: "ArrowDatabaseProtocol") -> None:
+def _flush_best_effort(*databases: ArrowDatabaseProtocol) -> None:
     """Flush each database, logging instead of raising if a flush fails.
 
     Used when a run has already failed: the run's own error is the one to report,
