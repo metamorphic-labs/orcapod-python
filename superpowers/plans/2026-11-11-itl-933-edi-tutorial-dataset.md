@@ -124,3 +124,21 @@ selection row by row (streamed, both sides key-sorted).
   prefix guard, abort) each fail at least one test.
 * basedpyright: 0 errors, about 1,160 warnings (mostly `reportAny` from the untyped client and
   unannotated fixtures). To reduce in Phase 2 with Protocol types for the client surface.
+
+## Phase 2 notes (November 11, 2026)
+
+* Developer decisions applied (decisions.json): see the README. Project created by the
+  coordinator: `edi-tutorial-v1-841226` (marker table only so far).
+* Probe on the server: SpiralDB stores every top-level column nullable (keys included) and
+  every struct field nullable; only list items keep a non-null flag. pyspiral's
+  `Schema.from_arrow` already makes top-level columns nullable (my local check suggested
+  struct fields kept the flag; the server does not). A top-level null under a non-null
+  declaration is refused by Arrow's batch validation, not by a stored constraint.
+* Consequence: copy enforces required columns before writing; verify expects the storable
+  schema and checks required columns from the data. Orcapod sources still show `T | None`;
+  the developer is choosing between O1 (nullability record in table metadata + Orcapod
+  support), O2 (accept `T | None`) and O3 (source parameter). `annotate --key` can add the
+  record later without touching data.
+* `copy --tables X --replace` refreshes a table after a source fix (the EDI owner is adding
+  the `White Matter` row to `atlas_label`).
+* `copy --dry-run` ran live against `edi-tutorial-v1-841226`: exit 0, 204,947 rows.

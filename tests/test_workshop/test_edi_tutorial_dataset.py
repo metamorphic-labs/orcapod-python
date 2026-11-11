@@ -615,28 +615,35 @@ class TestCopy:
         assert rows["unit"] == 2 and rows["session"] == 1 and rows["sample_info"] == 1
         assert report.problems == []
 
-    def test_declares_nullability_from_the_map(self, client, nmap, subset):
-        target = make_target(client)
-        run_copy(client, target, nmap, subset)
-        t = client.project(target).table("default.spike_event")
-        schema = t.schema().to_arrow()
-        assert all(not f.nullable for f in schema)
-        assert all(not f.nullable for f in t.key_schema.to_arrow())
-        session = client.project(target).table("default.session").schema().to_arrow()
-        assert session.field("session_notes").nullable
-        assert not session.field("booth").nullable
-        lfp = client.project(target).table("default.lfp_timeseries").schema().to_arrow()
-        # types exactly as the source, item nullability included
-        assert lfp.field("lfp_voltage_uv").type == pa.list_(pa.float32(), 4)
-        assert not lfp.field("lfp_voltage_uv").nullable
-
-    def test_column_group_keeps_its_fields_and_gets_its_nullability(
+    def test_writes_the_maps_nullability_and_spiral_stores_it_nullable(
         self, client, nmap, subset
     ):
         target = make_target(client)
         run_copy(client, target, nmap, subset)
-        unit = client.project(target).table("default.unit").schema().to_arrow()
-        labels = unit.field("labels")
+        written = client.written_schemas[(target, "default.spike_event")][0]
+        assert all(not f.nullable for f in written)
+        session = client.written_schemas[(target, "default.session")][0]
+        assert session.field("session_notes").nullable
+        assert not session.field("booth").nullable
+        # SpiralDB keeps every top-level column nullable, keys included ...
+        stored = client.project(target).table("default.spike_event").schema().to_arrow()
+        assert all(f.nullable for f in stored)
+        assert all(
+            f.nullable
+            for f in client.project(target)
+            .table("default.spike_event")
+            .key_schema.to_arrow()
+        )
+        # ... and the types stay exactly the source's, list item flags included
+        lfp = client.project(target).table("default.lfp_timeseries").schema().to_arrow()
+        assert lfp.field("lfp_voltage_uv").type == pa.list_(pa.float32(), 4)
+
+    def test_column_group_is_written_required_with_its_fields(
+        self, client, nmap, subset
+    ):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        labels = client.written_schemas[(target, "default.unit")][0].field("labels")
         assert not labels.nullable
         assert [f.name for f in labels.type] == ["kilosort_label", "bombcell_label"]
         assert all(f.nullable for f in labels.type)
@@ -897,13 +904,39 @@ class TestVerify:
         )
         assert verified.problems == [] and verified.accepted == []
 
-    def test_detects_nullability_that_differs_from_the_map(self, client, nmap, subset):
+    def test_detects_a_null_in_a_required_column(self, client, nmap, subset):
+        # SpiralDB stores the column nullable, so only the data can show the breach
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.session"]
+        assert stored.data is not None
+        i = stored.data.schema.get_field_index("booth")
+        stored.data = stored.data.set_column(
+            i, stored.data.schema.field(i), pa.array([None], pa.string())
+        )
+        with pytest.raises(
+            tool.VerificationError, match="'booth' is declared non-nullable"
+        ):
+            tool.verify(
+                client,
+                source_project=SOURCE,
+                target_project=target,
+                nmap=nmap,
+                subset=subset,
+            )
+
+    def test_detects_a_schema_that_differs_from_the_source(self, client, nmap, subset):
         target = make_target(client)
         run_copy(client, target, nmap, subset)
         stored = client._projects[target]["default.session"]
         assert stored.data is not None
         stored.data = stored.data.cast(
-            pa.schema([f.with_nullable(True) for f in stored.data.schema])
+            pa.schema(
+                [
+                    f.with_type(pa.large_string()) if f.name == "booth" else f
+                    for f in stored.data.schema
+                ]
+            )
         )
         with pytest.raises(tool.VerificationError, match="session: schema"):
             tool.verify(
@@ -913,9 +946,6 @@ class TestVerify:
                 nmap=nmap,
                 subset=subset,
             )
-
-
-# ------------------------------------------------------------------- committed files
 
 
 class TestCommittedFiles:
@@ -1013,3 +1043,112 @@ class TestProbe:
                 allow_writes="test-orcapod-885785",
                 source_project=SOURCE,
             )
+
+
+UNIT_KEYS = ["subject_id", "session_start_datetime", "unit_id"]
+
+
+class TestReplace:
+    def test_a_source_fix_is_picked_up_by_replacing_one_table(self, client, subset):
+        # the source's unit table first lacks unit 3 (an accepted exception), then the
+        # owner adds it back, as with atlas_label 'White Matter' live
+        units = client.rows(SOURCE, "default.unit")
+        missing = units.filter(
+            pc.not_equal(units.column("unit_id"), pa.scalar(3, pa.uint32()))
+        )
+        client.add_table(SOURCE, "default.unit", missing, UNIT_KEYS)
+        raw = decide(derived_map(client))
+        raw["tables"]["spike_event"]["foreign_keys"][0]["accepted_unresolved"] = [
+            ["Goliath", SST.isoformat(), 3]
+        ]
+        nm = tool.parse_map(raw)
+        target = make_target(client)
+        first = run_copy(client, target, nm, subset)
+        assert len(first.accepted) == 1
+
+        client.add_table(SOURCE, "default.unit", units, UNIT_KEYS)
+        before = len(client.log)
+        report = run_copy(client, target, nm, subset, tables=["unit"], replace=True)
+        assert [(r.name, r.action, r.rows) for r in report.tables] == [
+            ("unit", "replace", 2)
+        ]
+        touched = {e[2] for e in client.log[before:] if e[1] != "set_metadata"}
+        assert touched == {"default.unit"}
+        verified = tool.verify(
+            client, source_project=SOURCE, target_project=target, nmap=nm, subset=subset
+        )
+        assert verified.problems == [] and verified.accepted == []
+        record = json.loads(
+            client.project(target)
+            .table(tool.MARKER_TABLE)
+            .get_metadata()[tool.PROVENANCE_KEY]
+        )
+        assert record["rows"]["unit"] == 2 and record["rows"]["spike_event"] == 20
+
+    def test_replacing_twice_gives_the_same_table(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        run_copy(client, target, nmap, subset, tables=["session"], replace=True)
+        once = client.rows(target, "default.session")
+        run_copy(client, target, nmap, subset, tables=["session"], replace=True)
+        assert client.rows(target, "default.session").equals(once)
+
+    def test_replace_needs_tables(self, client, nmap, subset):
+        target = make_target(client)
+        with pytest.raises(tool.ToolError, match="--replace needs --tables"):
+            run_copy(client, target, nmap, subset, replace=True)
+
+    def test_unknown_tables_are_refused(self, client, nmap, subset):
+        target = make_target(client)
+        with pytest.raises(tool.ToolError, match="not in the subset"):
+            run_copy(client, target, nmap, subset, tables=["atlas"], replace=True)
+
+    def test_dry_run_replace_writes_nothing(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        before = list(client.log)
+        report = run_copy(
+            client, target, nmap, subset, tables=["session"], replace=True, dry_run=True
+        )
+        assert client.log == before
+        assert [r.action for r in report.tables] == ["would replace"]
+
+
+class TestAnnotate:
+    def test_writes_metadata_only_and_is_idempotent(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        before = len(client.log)
+        lines = tool.annotate(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            allow_writes=target,
+            nmap=nmap,
+            subset=subset,
+            key="test.nullability",
+        )
+        assert all(line.endswith("annotated") for line in lines)
+        assert {e[1] for e in client.log[before:]} == {"set_metadata"}
+        meta = client.project(target).table("default.session").get_metadata()
+        record = json.loads(meta["test.nullability"])
+        assert record["columns"]["booth"] is False
+        assert record["columns"]["session_notes"] is True
+        unit = json.loads(
+            client.project(target)
+            .table("default.unit")
+            .get_metadata()["test.nullability"]
+        )
+        assert unit["groups"]["labels"]["nullable"] is False
+        after = len(client.log)
+        again = tool.annotate(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            allow_writes=target,
+            nmap=nmap,
+            subset=subset,
+            key="test.nullability",
+        )
+        assert all(line.endswith("unchanged") for line in again)
+        assert len(client.log) == after

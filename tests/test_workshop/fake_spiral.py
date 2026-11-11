@@ -13,9 +13,13 @@ Modelled on pyspiral 0.16.33 and on what was seen live (ITL-926, ITL-933):
   data is written), ``get_metadata`` / ``set_metadata`` (upsert), ``txn()`` with
   ``write``, ``commit``, ``abort`` and the context-manager protocol.
 * Writes upsert by key and keep rows sorted by key. The first write fixes the table's
-  schema; a later write with a different schema raises. A struct-level null raises,
-  as SpiralDB refuses one. ``enforce_non_null`` makes a null in a non-nullable column
-  raise (what SpiralDB does is checked live by the tool's ``probe`` command).
+  schema; a later write whose schema differs beyond nullability raises. A struct-level
+  null raises, as SpiralDB refuses one.
+* Nullability as the server keeps it (live probe on edi-tutorial-v1-841226, November 11,
+  2026): every top-level column, keys included, and every struct field is stored
+  nullable; only list and fixed-size-list items keep a non-null flag. A top-level null
+  under a non-null declaration is refused (Arrow validates the incoming batch); a null
+  in a struct field declared non-null is accepted.
 
 Every mutating call is appended to ``Spiral.log`` as ``(project_id, operation, name)``.
 """
@@ -123,6 +127,29 @@ class _Stored:
     metadata: dict[str, bytes] = dataclasses.field(default_factory=dict)
 
 
+def stored_type(t: pa.DataType) -> pa.DataType:
+    """Return ``t`` as the server stores it: struct fields nullable, list items kept."""
+    if pa.types.is_struct(t):
+        return pa.struct([pa.field(f.name, stored_type(f.type), True) for f in t])
+    if pa.types.is_fixed_size_list(t):
+        item = t.value_field
+        return pa.list_(
+            pa.field(item.name, stored_type(item.type), item.nullable), t.list_size
+        )
+    if pa.types.is_list(t):
+        item = t.value_field
+        return pa.list_(pa.field(item.name, stored_type(item.type), item.nullable))
+    if pa.types.is_large_list(t):
+        item = t.value_field
+        return pa.large_list(pa.field(item.name, stored_type(item.type), item.nullable))
+    return t
+
+
+def stored_schema(schema: pa.Schema) -> pa.Schema:
+    """Return ``schema`` as the server stores it: every top-level column nullable."""
+    return pa.schema([pa.field(f.name, stored_type(f.type), True) for f in schema])
+
+
 class FakeTxn:
     def __init__(self, table: FakeTable) -> None:
         self._table = table
@@ -192,27 +219,36 @@ class FakeTable:
 
     def _check_write(self, batch: pa.RecordBatch | pa.Table) -> None:
         self._spiral.log.append((self._project_id, "write", self._ident))
+        self._spiral.written_schemas.setdefault(
+            (self._project_id, self._ident), []
+        ).append(batch.schema)
         keys = self._stored.key_schema
         for k in keys:
             if k.name not in batch.schema.names:
                 raise ValueError(f"write is missing key column {k.name!r}")
-            if batch.schema.field(k.name) != k:
+            if stored_schema(pa.schema([batch.schema.field(k.name)])).field(0) != k:
                 raise ValueError(
                     f"key column {batch.schema.field(k.name)} differs from key schema {k}"
                 )
         data = self._stored.data
-        if data is not None and batch.schema != data.schema:
+        if data is not None and stored_schema(batch.schema) != data.schema:
             raise ValueError(f"write schema {batch.schema} differs from {data.schema}")
         for i, field in enumerate(batch.schema):
             col = batch.column(i)
             if pa.types.is_struct(field.type) and col.null_count:
                 raise ValueError("SpiralDB does not allow struct-level nulls")
-            if self._spiral.enforce_non_null and not field.nullable and col.null_count:
-                raise ValueError(f"null in non-nullable column {field.name!r}")
+            if not field.nullable and col.null_count:
+                raise ValueError(
+                    f"Column '{field.name}' is declared as non-nullable but contains "
+                    "null values"
+                )
 
     def _commit(self, incoming: pa.Table) -> None:
         stored = self._stored
         keys = stored.key_schema.names
+        incoming = pa.Table.from_arrays(
+            incoming.columns, schema=stored_schema(incoming.schema)
+        )
         if stored.data is not None:
             new_keys = set(
                 zip(*(incoming.column(k).to_pylist() for k in keys), strict=True)
@@ -275,7 +311,7 @@ class FakeProject:
         self._spiral.log.append((self.id, "create_table", identifier))
         if identifier in self._tables:
             raise ValueError(f"Table already exists: {identifier}")
-        self._tables[identifier] = _Stored(key_schema)
+        self._tables[identifier] = _Stored(stored_schema(key_schema))
         return FakeTable(self._spiral, self.id, identifier)
 
     def drop_table(self, identifier: str) -> None:
@@ -286,13 +322,13 @@ class FakeProject:
 class FakeSpiral:
     """The client. ``batch_rows`` sets how many rows each scanned batch holds."""
 
-    def __init__(self, *, batch_rows: int = 3, enforce_non_null: bool = False) -> None:
+    def __init__(self, *, batch_rows: int = 3) -> None:
         self._projects: dict[str, dict[str, _Stored]] = {}
         self._descriptions: dict[str, str] = {}
         self._suffix = itertools.count(100001)
         self.batch_rows = batch_rows
-        self.enforce_non_null = enforce_non_null
         self.log: list[tuple[str, str, str]] = []
+        self.written_schemas: dict[tuple[str, str], list[pa.Schema]] = {}
 
     # -- setup helpers for tests (not part of pyspiral) --------------------------
     def add_table(

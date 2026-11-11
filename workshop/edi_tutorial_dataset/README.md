@@ -72,6 +72,24 @@ Every required column holds no nulls in the source, key columns included. In the
 `lfp_voltage_uv` has one null element per row (a channel removed in preprocessing), which
 the specification allows (`fixed_size_list(f32?)[384]`).
 
+### What SpiralDB stores
+
+SpiralDB cannot store a non-null column. Probed on the project with pyspiral 0.16.33 on
+November 11, 2026, it keeps every top-level column nullable, key columns included, and every
+struct field nullable; only list items keep a non-null flag. pyspiral's own
+`Schema.from_arrow` already turns a non-null key column into a nullable one, and a null
+written into a struct field declared non-null is accepted. So:
+
+* the copy writes each batch with the map's nullability and refuses a null in a required
+  column before writing (its table's transaction is aborted). Nothing is coerced;
+* `verify` expects the stored schema SpiralDB can hold (the source's types, every column
+  nullable except list items) and checks, from the data, that every required column holds
+  no nulls;
+* Orcapod sources on these tables still show every column as `T | None`. Showing the
+  declared nullability needs a record of it in each table's metadata and Orcapod support
+  for reading it, which is under discussion. `annotate` writes such a record (table
+  metadata only, never data) once its key and format are decided.
+
 Print the full per-column table with:
 
 ```bash
@@ -124,6 +142,9 @@ $TOOL probe --target-project ID --allow-writes ID   # how SpiralDB treats non-nu
 $TOOL copy --target-project ID --allow-writes ID --dry-run
 $TOOL copy --target-project ID --allow-writes ID
 $TOOL verify --target-project ID
+$TOOL copy --target-project ID --allow-writes ID --tables atlas_label --replace
+                                            # copy one table again after a source fix
+$TOOL annotate --target-project ID --allow-writes ID --key KEY   # nullability records
 $TOOL orcapod-check --target-project ID     # Orcapod sources: required columns are T, not T | None
 ```
 
@@ -145,6 +166,9 @@ Safety rules:
 * `create` refuses an ID prefix starting with `edi-sample-v`.
 * Re-running `copy` skips tables already complete for the same map and subset, and rewrites
   an incomplete one. A complete table built from a different subset is refused.
+* `copy --tables T1,T2 --replace` drops those tables (they must carry the marker) and
+  copies them again from the source; running it twice gives the same tables. Between the
+  drop and the end of the copy, the table is missing.
 
 `verify` checks that the project holds exactly the subset's tables, that each table has the
 source's types and the map's nullability, that its key columns are the source's (in order,

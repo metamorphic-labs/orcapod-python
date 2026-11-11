@@ -422,6 +422,31 @@ def key_schema(schema: pa.Schema, keys: Sequence[str]) -> pa.Schema:
     return pa.schema([schema.field(k) for k in keys])
 
 
+def _stored_type(t: pa.DataType) -> pa.DataType:
+    if pa.types.is_struct(t):
+        return pa.struct([pa.field(f.name, _stored_type(f.type), True) for f in t])
+    if pa.types.is_fixed_size_list(t):
+        item = t.value_field
+        return pa.list_(item.with_type(_stored_type(item.type)), t.list_size)
+    if pa.types.is_list(t):
+        return pa.list_(t.value_field.with_type(_stored_type(t.value_field.type)))
+    if pa.types.is_large_list(t):
+        return pa.large_list(t.value_field.with_type(_stored_type(t.value_field.type)))
+    return t
+
+
+def stored_schema(schema: pa.Schema) -> pa.Schema:
+    """Return ``schema`` as SpiralDB stores it.
+
+    SpiralDB (pyspiral 0.16.33, probed live on November 11, 2026) stores every
+    top-level column nullable, key columns included, and every struct field nullable;
+    only list and fixed-size-list items keep a non-null flag. The nullability the map
+    declares is therefore enforced by the copy (a null in a required column stops it)
+    and checked by ``verify`` from the data, not from the stored schema.
+    """
+    return pa.schema([pa.field(f.name, _stored_type(f.type), True) for f in schema])
+
+
 def _conform_array(arr: pa.Array[Any], field: pa.Field[Any]) -> pa.Array[Any]:
     """Return ``arr`` typed as ``field`` declares, refusing nulls it does not allow.
 
@@ -719,15 +744,22 @@ def _tuples(batch: pa.RecordBatch, columns: Sequence[str]) -> set[tuple[Any, ...
 
 
 class DryRunSink:
-    """Accepts every batch and writes nothing."""
+    """Accepts every batch and writes nothing.
+
+    Args:
+        replace: Tables a real copy would drop and copy again.
+    """
 
     skipped_rows = 0
+
+    def __init__(self, replace: Iterable[str] = ()) -> None:
+        self._replace = frozenset(replace)
 
     def open_table(
         self, table: str, schema: pa.Schema, keys: pa.Schema, digest: str
     ) -> str:
         """Return the action a real copy would take for ``table``."""
-        return "would write"
+        return "would replace" if table in self._replace else "would write"
 
     def write(self, batch: pa.RecordBatch) -> None:
         """Discard ``batch``."""
@@ -747,9 +779,16 @@ class SpiralSink:
     the row count and the subset digest, so a re-run can skip it.
     """
 
-    def __init__(self, project: Any, subset: Subset, marker: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        project: Any,
+        subset: Subset,
+        marker: Mapping[str, Any],
+        replace: Iterable[str] = (),
+    ) -> None:
         self._project = project
         self._subset = subset
+        self._replace = frozenset(replace)
         self._marker = json.dumps(marker, sort_keys=True).encode()
         self._table: Any = None
         self._txn: Any = None
@@ -768,6 +807,17 @@ class SpiralSink:
         """
         ident = _qualified(self._subset, table)
         existing = {f"{r.dataset}.{r.table}" for r in self._project.list_tables()}
+        if ident in existing and table in self._replace:
+            if (
+                self._project.table(ident).get_metadata().get(MARKER_KEY)
+                != self._marker
+            ):
+                raise TargetRefusedError(f"{ident} exists without this build's marker")
+            self._project.drop_table(ident)
+            existing.discard(ident)
+            replaced = True
+        else:
+            replaced = False
         if ident in existing:
             t = self._project.table(ident)
             meta = t.get_metadata()
@@ -783,7 +833,9 @@ class SpiralSink:
                 self.skipped_rows = int(status.get("rows", 0))
                 return "skip"
             current = t.schema().to_arrow()
-            if current.names != keys.names and current != schema:
+            if current.names != keys.names and stored_schema(current) != stored_schema(
+                schema
+            ):
                 raise SchemaMismatchError(
                     f"{ident} exists with schema {current}, expected {schema}"
                 )
@@ -791,7 +843,7 @@ class SpiralSink:
         else:
             t = self._project.create_table(ident, key_schema=keys)
             t.set_metadata({MARKER_KEY: self._marker})
-            action = "create"
+            action = "replace" if replaced else "create"
         self._table = t
         self._digest = digest
         self._txn = t.txn()
@@ -861,8 +913,13 @@ def _run(
     *,
     allow_pending: bool,
     on_table: Callable[[TableResult], None] | None = None,
+    only: Iterable[str] | None = None,
 ) -> Report:
-    """Read every selected source table, check it, and hand it to ``sink``."""
+    """Read every selected source table, check it, and hand it to ``sink``.
+
+    ``only`` restricts the run to those tables; foreign keys are then left to
+    ``verify``, which sees every table.
+    """
     missing = sorted(set(subset.tables) - set(nmap.tables))
     if missing:
         raise ToolError(f"tables in the subset but not in the map: {missing}")
@@ -873,7 +930,10 @@ def _run(
         else []
     )
     results = []
+    selected = set(subset.tables) if only is None else set(only)
     for name in table_order(subset):
+        if name not in selected:
+            continue
         mode = subset.tables[name]
         spec = nmap.tables[name]
         src_schema = source.table(_qualified(subset, name)).schema().to_arrow()
@@ -905,9 +965,9 @@ def _run(
         results.append(result)
         if on_table is not None:
             on_table(result)
-    skipped = [r.name for r in results if r.action == "skip"]
-    problems = integrity.problems(subset.tables) if not skipped else []
-    accepted = integrity.accepted(subset.tables) if not skipped else []
+    complete = only is None and not any(r.action == "skip" for r in results)
+    problems = integrity.problems(subset.tables) if complete else []
+    accepted = integrity.accepted(subset.tables) if complete else []
     return Report(results, trials, nmap.pending(), problems, accepted)
 
 
@@ -1037,10 +1097,15 @@ def copy(
     subset: Subset,
     dry_run: bool = False,
     on_table: Callable[[TableResult], None] | None = None,
+    tables: Sequence[str] | None = None,
+    replace: bool = False,
 ) -> Report:
     """Copy the subset from the source into the target project.
 
-    With ``dry_run`` the target guards still run, but nothing is written.
+    With ``dry_run`` the target guards still run, but nothing is written. ``tables``
+    restricts the copy to those tables; with ``replace`` each of them is dropped (it
+    must carry this build's marker) and copied again from the source, which picks up
+    a change made in the source after the first copy.
 
     Raises:
         TargetRefusedError: if the target fails a guard.
@@ -1060,14 +1125,32 @@ def copy(
         raise PendingDecisionError(
             f"decide these in the nullability map first: {pending}"
         )
+    if replace and not tables:
+        raise ToolError("--replace needs --tables naming the tables to copy again")
+    unknown = sorted(set(tables or ()) - set(subset.tables))
+    if unknown:
+        raise ToolError(f"tables not in the subset: {unknown}")
+    replacing = tuple(tables or ()) if replace else ()
     source = client.project(source_project)
     sink: DryRunSink | SpiralSink = (
-        DryRunSink() if dry_run else SpiralSink(project, subset, marker)
+        DryRunSink(replacing)
+        if dry_run
+        else SpiralSink(project, subset, marker, replacing)
     )
     report = _run(
-        client, source, nmap, subset, sink, allow_pending=False, on_table=on_table
+        client,
+        source,
+        nmap,
+        subset,
+        sink,
+        allow_pending=False,
+        on_table=on_table,
+        only=tables,
     )
     record = provenance(client, source_project, nmap, subset, report)
+    existing = project.table(MARKER_TABLE).get_metadata().get(PROVENANCE_KEY)
+    if tables and existing is not None:
+        record["rows"] = {**json.loads(existing).get("rows", {}), **record["rows"]}
     encoded = json.dumps(record, sort_keys=True, default=str).encode()
     if len(PROVENANCE_KEY) + len(encoded) > METADATA_LIMIT:
         raise ToolError(f"provenance is {len(encoded)} bytes, over SpiralDB's 8 KiB")
@@ -1194,15 +1277,15 @@ def verify(
         src_schema = source.table(_qualified(subset, name)).schema().to_arrow()
         want = target_schema(src_schema, spec, allow_pending=True)
         got = t.schema().to_arrow()
-        if got != want:
-            problems.append(f"{name}: schema {got} differs from expected {want}")
+        if got != stored_schema(want):
+            problems.append(
+                f"{name}: schema {got} differs from expected {stored_schema(want)}"
+            )
         got_keys = t.key_schema.to_arrow()
         if got_keys.names != list(spec.keys):
             problems.append(
                 f"{name}: key columns {got_keys.names} != {list(spec.keys)}"
             )
-        if any(f.nullable for f in got_keys):
-            problems.append(f"{name}: key columns are nullable: {got_keys}")
         mode = subset.tables[name]
         expected = (
             conform_batch(b, want)
@@ -1265,11 +1348,84 @@ def _compare_streams(
         for i, name in enumerate(schema.names):
             want_col = e.column(i)
             got_col = a.column(i)
-            if got_col.null_count and not schema.field(i).nullable:
-                return f"column {name!r} holds {got_col.null_count} null(s) but is required"
+            try:
+                for chunk in got_col.chunks:
+                    _conform_array(chunk, schema.field(i))
+            except NullInRequiredColumnError as err:
+                return str(err)
+            except SchemaMismatchError as err:
+                return str(err)
+            if want_col.type != got_col.type:
+                want_col = want_col.cast(got_col.type)
             if not got_col.equals(want_col):
                 return f"column {name!r} differs from the source in rows {offset}..{offset + e.num_rows - 1}"
         offset += e.num_rows
+
+
+# ---------------------------------------------------------------------- annotate
+
+
+def nullability_record(spec: TableSpec) -> dict[str, Any]:
+    """Return the declared nullability of one table, for its metadata.
+
+    SpiralDB stores every top-level column nullable, so a reader learns which
+    columns are required only from a record like this one. Its key and format belong
+    to the Orcapod design that will read it; this is the single place to adapt.
+    """
+    return {
+        "columns": {name: c.nullable for name, c in spec.columns.items()},
+        "groups": {
+            g: {
+                "nullable": group.nullable,
+                "fields": {f: c.nullable for f, c in group.fields.items()},
+            }
+            for g, group in spec.groups.items()
+        },
+    }
+
+
+def annotate(
+    client: Any,
+    *,
+    source_project: str,
+    target_project: str,
+    allow_writes: str | None,
+    nmap: NullabilityMap,
+    subset: Subset,
+    key: str,
+) -> list[str]:
+    """Write each copied table's nullability record under the metadata key ``key``.
+
+    Only table metadata is written, never data, so it can run on tables copied
+    earlier. A table whose record is already current is left alone.
+
+    Returns:
+        One line per table: ``annotated`` or ``unchanged``.
+
+    Raises:
+        TargetRefusedError: if the target fails a guard.
+        ToolError: if a subset table is missing from the target, or a record does not
+            fit SpiralDB's 8 KiB metadata limit.
+    """
+    project, _ = open_target(client, target_project, allow_writes, source_project)
+    present = {f"{r.dataset}.{r.table}" for r in project.list_tables()}
+    lines = []
+    for name in sorted(subset.tables):
+        ident = _qualified(subset, name)
+        if ident not in present:
+            raise ToolError(f"{ident} is not in the target; copy it first")
+        value = json.dumps(
+            nullability_record(nmap.tables[name]), sort_keys=True
+        ).encode()
+        if len(key) + len(value) > METADATA_LIMIT:
+            raise ToolError(f"{ident}: the record is {len(value)} bytes, over 8 KiB")
+        table = project.table(ident)
+        if table.get_metadata().get(key) == value:
+            lines.append(f"{name}: unchanged")
+            continue
+        table.set_metadata({key: value})
+        lines.append(f"{name}: annotated")
+    return lines
 
 
 # ---------------------------------------------------------------- the Orcapod check
@@ -1360,8 +1516,10 @@ def _probe_batch(
             pa.array([v], pa.int32()),
             pa.array([None], pa.int32()),
             g,
+            # pyarrow-stubs types `type` as None; pyarrow accepts a FixedSizeListType
             pa.FixedSizeListArray.from_arrays(
-                pa.array([1.0, 2.0], pa.float32()), type=items
+                pa.array([1.0, 2.0], pa.float32()),
+                type=items,  # pyright: ignore[reportArgumentType]
             ),
         ],
         schema=schema,
@@ -1805,6 +1963,21 @@ def _parser() -> argparse.ArgumentParser:
         s.add_argument("--allow-writes", required=True, help="repeat --target-project")
         if name == "copy":
             s.add_argument("--dry-run", action="store_true")
+            s.add_argument(
+                "--tables", default=None, help="comma-separated: copy only these tables"
+            )
+            s.add_argument(
+                "--replace",
+                action="store_true",
+                help="drop the --tables and copy them again from the source",
+            )
+
+    a = sub.add_parser(
+        "annotate", help="write each table's nullability record (metadata only)"
+    )
+    a.add_argument("--target-project", required=True)
+    a.add_argument("--allow-writes", required=True, help="repeat --target-project")
+    a.add_argument("--key", required=True, help="the table-metadata key to write")
 
     v = sub.add_parser("verify", help="check the target against the source and the map")
     v.add_argument("--target-project", required=True)
@@ -1872,6 +2045,21 @@ def main(
             print(json.dumps(result, indent=2, default=str))
             return 0
         nmap, subset = load_map(args.map), load_subset(args.subset)
+        if args.command == "annotate":
+            print(
+                "\n".join(
+                    annotate(
+                        client,
+                        source_project=args.source_project,
+                        target_project=args.target_project,
+                        allow_writes=args.allow_writes,
+                        nmap=nmap,
+                        subset=subset,
+                        key=args.key,
+                    )
+                )
+            )
+            return 0
         if args.command == "orcapod-check":
             from orcapod.sources import SpiralDBTableSource
 
@@ -1898,6 +2086,8 @@ def main(
                 nmap=nmap,
                 subset=subset,
                 dry_run=args.dry_run,
+                tables=args.tables.split(",") if args.tables else None,
+                replace=args.replace,
                 on_table=lambda r: print(
                     f"{r.action:12s} {r.name} ({r.rows:,d} rows)", flush=True
                 ),
