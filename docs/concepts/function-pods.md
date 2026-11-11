@@ -141,7 +141,8 @@ untouched.
 Each value the function returns is checked against its declared output type before it is
 stored or hashed. A `float` returned for an output declared `int` is rejected; it is not
 truncated. The `OutputTypeError` names the function, the output, the declared type and the
-type of the value, and says what to return instead:
+type of the value (never the value itself, which stays on the error's `value` attribute),
+and says what to return instead:
 
 ```python
 from orcapod.errors import OutputTypeError
@@ -156,7 +157,7 @@ try:
     list(halve.pod(weights).iter_data())
 except OutputTypeError as err:
     print(err)
-# Function 'halve' returned float (12.65) for output 'half_weight', which is declared int. Orcapod does not convert types implicitly. Return an int instead: round(value), or int(value) to truncate.
+# Function 'halve' returned float for output 'half_weight', which is declared int. Orcapod does not convert types implicitly. Return an int instead: round(value), or int(value) to truncate.
 ```
 
 Fix the function (`return round(weight / 2)`), or declare the type it really returns
@@ -165,19 +166,23 @@ Fix the function (`return round(weight / 2)`), or declare the type it really ret
 `OutputTypeError` is a `TypeError` (and a `ValueError`). Inside a `PipelineJob` it counts as
 a failure of the function for that row, like an exception the function raises itself. With
 the default `error_policy="continue"` the row is skipped and reported to the observer, and
-the other rows are computed and stored. With `error_policy="fail_fast"` the run stops.
+the other rows are computed and stored. With `error_policy="fail_fast"` the synchronous
+orchestrator stops the run; the asynchronous orchestrator does not stop for row failures yet
+(ITL-879, see below).
 
 A few near misses are accepted. Some keep the value exactly and are accepted silently; others
 change it, and are converted with a `ValueConversionWarning`:
 
 | Declared | Returned | Result |
 |---|---|---|
-| any type | a value of that type, or of a subclass (an `IntEnum` for `int`) | accepted |
+| any type | a value of exactly that type, or of a subclass that keeps its value (an `IntEnum` for `int`), unless a row below says otherwise | accepted |
+| `int` | a `bool` (a subclass of `int`) | rejected |
 | `int`, `float`, `bool` or a NumPy scalar type | a NumPy scalar of the same kind (`numpy.int64` for `int`, `numpy.float32` for `float`, `numpy.bool_` for `bool`) | accepted |
 | a NumPy integer type (`numpy.int8`) | a Python `int` | accepted; out of range is an error |
 | `list[T]` | a `tuple`, or another ordered container (NumPy array, `deque`, `range`, dict view) | converted to a list, with a warning |
-| `date` | a `datetime` | the time of day is dropped, with a warning |
+| `date` | a `datetime` (a subclass of `date`) | the time of day is dropped, with a warning |
 | `numpy.float32` | a Python `float` or a `numpy.float64` | rounded to 32 bits, with a warning |
+| `float` | a `numpy.longdouble` wider than 64 bits (as on most x86 Linux builds; on others it is 64-bit and accepted) | rounded to 64 bits, with a warning |
 | `float` or `numpy.float32` | an `int` or a NumPy integer | rejected: return `0.0` or `float(value)` |
 | `float` or `numpy.float32` | a `bool` | rejected: return `1.0` or `float(value)` |
 | `int` | a `float`, `Decimal`, `Fraction` or NumPy float | rejected: return `round(value)` |

@@ -6,7 +6,8 @@
 
 - **`orcapod.errors.OutputTypeError`** — raised when a function pod returns a value that
   does not match its declared output type. It names the function, the output, the declared
-  type and the type of the value, and says what to return instead (ITL-895).
+  type and the type of the value (never the value itself, which stays on its `value`
+  attribute), and says what to return instead (ITL-895).
 - **`orcapod.errors.ValueConversionWarning`** — issued when Orcapod accepts a value and
   stores a converted form of it, such as a `tuple` returned for a `list` output. The message
   names the function, the output, the declared and returned types, what was converted and
@@ -36,7 +37,8 @@
   float array returned for `list[int]` was truncated too). Still accepted, converted, and
   reported with `ValueConversionWarning`: a `tuple` or another ordered container (NumPy
   array, `deque`, `range`, dict view) for a `list`, a `datetime` for a `date` (the time of
-  day is dropped), and a Python `float` for `numpy.float32` (rounded to 32 bits). A NumPy
+  day is dropped), a Python `float` for `numpy.float32` (rounded to 32 bits), and a
+  `numpy.longdouble` wider than 64 bits for `float` (rounded to 64 bits). A NumPy
   scalar of the declared kind (`numpy.int64` for `int`) is accepted silently. Each output is
   converted to Arrow as soon as it is returned, so a downstream pod receives exactly the
   stored value: before, it saw `1.5` on some paths and `1` on others. Stored results of

@@ -2355,7 +2355,8 @@ against its declared type, including inside lists, dicts and dataclass fields. O
 `OUTPUT_CONFORMANCE`, says how each near miss is treated, following the developer's decisions
 of 2026-11-11: an `int` or `bool` for `float`, a `set` for `list` (ITL-901) and one-shot
 iterators are rejected; a `tuple` or other ordered container for `list`, a `datetime` for
-`date` and a `float` for `numpy.float32` are converted with a `ValueConversionWarning` (once
+`date`, a `float` for `numpy.float32` and a wider `numpy.longdouble` for `float` are
+converted with a `ValueConversionWarning` (once
 per function instance, output and conversion; explicit, not through the warning registry);
 same-kind NumPy scalars are accepted. `_build_output_data` raises `OutputTypeError` (which says
 what to return instead) for a mismatch, and otherwise converts the outputs to Arrow eagerly,

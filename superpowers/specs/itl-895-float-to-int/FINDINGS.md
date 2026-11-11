@@ -1,10 +1,12 @@
 # ITL-895 root cause: a pod declared `-> int` stores `1.5` as `1`
 
 Investigated on `b197544e` (origin/main, November 11, 2026). Each claim has a script in this
-directory, and its captured output is in `outputs/`. Run any script with
-`uv run python superpowers/specs/itl-895-float-to-int/<script>.py`. The scripts show the
-behaviour **before** the fix: run them at commit `07037243`. After the fix, the
-function-output paths raise `OutputTypeError` instead.
+directory, and its captured output is in `outputs/`. Run a script with
+`uv run python superpowers/specs/itl-895-float-to-int/<script>.py`. Scripts `01`-`08` are the
+pre-fix probes: they show the behaviour **before** the fix, so run them at commit `07037243`.
+After the fix, their function-output paths raise `OutputTypeError` instead (input paths are
+unchanged). `09_warning_dedup.py` measures the fix's `ValueConversionWarning`; run it on the
+current branch.
 
 ## TL;DR
 
@@ -215,8 +217,10 @@ inference produces a union. `FunctionNode.as_table` passes the declared schema
 - How a user can find affected rows: pick the pods whose declared outputs contain a type
   pyarrow coerces (integers, `date` / `datetime`, `str` / `bytes`, `np.float32`, lists or
   structs of these). Call the raw function on the node's stored inputs (the upstream node's
-  `iter_data()`), and flag rows whose returned value is not exactly the declared type. `07`
-  does this and finds exactly the two odd-input rows. For `None` outputs on an in-memory store,
+  `iter_data()`), and flag rows whose returned value is not exactly the declared type as
+  candidates. Some candidates were stored correctly (a same-kind NumPy scalar, for example),
+  so review each candidate's stored value and its conversion before deciding whether
+  information was lost. `07` does this and finds exactly the two odd-input rows. For `None` outputs on an in-memory store,
   the node fails to read at all; Delta never stored them.
 - Downstream rows computed from such a value can also be wrong (z=15 vs z=10 above). They
   need the same check one level down.

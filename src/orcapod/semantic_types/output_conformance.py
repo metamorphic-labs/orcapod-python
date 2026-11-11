@@ -71,6 +71,9 @@ class NearMiss(enum.Enum):
     FLOAT_FOR_FLOAT32 = "float_for_float32"
     """D7: a Python ``float`` (or a wider NumPy float) for ``numpy.float32``."""
 
+    LONGDOUBLE_FOR_FLOAT = "longdouble_for_float"
+    """A ``numpy.longdouble`` wider than 64 bits for ``float`` (the D7 analogue)."""
+
     SET_FOR_LIST = "set_for_list"
     """ITL-901: a ``set`` or ``frozenset`` for ``list[T]``."""
 
@@ -105,6 +108,7 @@ _NEAR_MISS_TEXT: dict[NearMiss, tuple[str, str]] = {
         "rounded it to 32 bits",
         "Return numpy.float32(value)",
     ),
+    NearMiss.LONGDOUBLE_FOR_FLOAT: ("rounded it to 64 bits", "Return float(value)"),
     NearMiss.SET_FOR_LIST: (
         "converted it to a list in iteration order, which differs between processes",
         "Return sorted(value)",
@@ -126,6 +130,7 @@ OUTPUT_CONFORMANCE: Mapping[NearMiss, Treatment] = types.MappingProxyType(
         NearMiss.TUPLE_FOR_LIST: Treatment.CONVERT_WITH_WARNING,  # D5
         NearMiss.DATETIME_FOR_DATE: Treatment.CONVERT_WITH_WARNING,  # D6
         NearMiss.FLOAT_FOR_FLOAT32: Treatment.CONVERT_WITH_WARNING,  # D7
+        NearMiss.LONGDOUBLE_FOR_FLOAT: Treatment.CONVERT_WITH_WARNING,  # D7 analogue
         NearMiss.SET_FOR_LIST: Treatment.REJECT,  # ITL-901
         NearMiss.ITERABLE_FOR_LIST: Treatment.CONVERT_WITH_WARNING,  # provisional
     }
@@ -150,12 +155,15 @@ class Nonconformance:
     hint: str | None = None
 
     def describe(self) -> str | None:
-        """Describe a nested mismatch for an error message; ``None`` at the top level."""
+        """Describe a nested mismatch for an error message; ``None`` at the top level.
+
+        Types only, never the value: the message is logged by pipelines.
+        """
         if not self.path:
             return None
         return (
-            f"{self.path} is {type_text(type(self.value))} ({self.value!r}), "
-            f"expected {type_text(self.expected)}"
+            f"{self.path} is {type_text(type(self.value))}, "
+            + f"expected {type_text(self.expected)}"
         )
 
 
@@ -230,6 +238,15 @@ def _numpy_array(value: object) -> npt.NDArray[np.generic] | None:
 
 
 def _float_hint(value: object, declared: object) -> str:
+    """Say what to return instead of an integer or bool for a floating output.
+
+    Args:
+        value: The returned value; for ``float`` it gives the example (``0`` -> ``0.0``).
+        declared: The declared floating type (``float`` or a NumPy float type).
+
+    Returns:
+        The hint, such as ``Return a float instead: 0.0 or float(value)``.
+    """
     if declared is float:
         try:
             example = repr(float(typing.cast(typing.SupportsFloat, value)))
@@ -253,6 +270,12 @@ def _reject_hint(near_miss: NearMiss, value: object, declared: object) -> str:
     return f"{near_miss.avoid} instead"
 
 
+def _key_text(key: object) -> str:
+    """Show a dict key in a mismatch path, shortened to at most 40 characters."""
+    text = repr(key)
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
 _FLOAT_FOR_INT_HINT = "Return an int instead: round(value), or int(value) to truncate"
 _ITERATOR_HINT = "Return a list instead: list(value)"
 
@@ -270,6 +293,16 @@ _CONFORMS: _Result = (None, ())
 
 
 def _mismatch(value: object, declared: object, hint: str | None = None) -> _Result:
+    """Return the result for a value that does not conform at this place.
+
+    Args:
+        value: The value at this place.
+        declared: The declared type at this place.
+        hint: What to return instead, when there is a specific fix.
+
+    Returns:
+        A result holding the mismatch (with an empty path) and no conversions.
+    """
     return Nonconformance("", declared, value, hint), ()
 
 
@@ -312,6 +345,7 @@ class _Checker:
     """Checks returned values against declared types under one conformance table."""
 
     def __init__(self, rule: Mapping[NearMiss, Treatment]) -> None:
+        """Check under ``rule``, the treatment of each near miss."""
         self._rule: Mapping[NearMiss, Treatment] = rule
 
     def near(self, near_miss: NearMiss, value: object, declared: object) -> _Result:
@@ -401,6 +435,7 @@ class _Checker:
         return _CONFORMS
 
     def check_bool(self, value: object, declared: object) -> _Result:
+        """``bool`` or ``numpy.bool_``: a ``bool``, or a NumPy bool (D2)."""
         if isinstance(value, bool):
             return _CONFORMS
         scalar = _numpy_scalar(value)
@@ -445,7 +480,9 @@ class _Checker:
             return _CONFORMS
         scalar = _numpy_scalar(value)
         if scalar is not None and scalar[0] == "f":
-            # A narrower NumPy float widens exactly.
+            if scalar[1] > 8:  # numpy.longdouble where it is 80 or 128 bits
+                return self.near(NearMiss.LONGDOUBLE_FOR_FLOAT, value, declared)
+            # A NumPy float of at most 64 bits widens exactly.
             return self.near(NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared)
         return self._check_not_float(value, declared)
 
@@ -463,6 +500,19 @@ class _Checker:
     def check_list(
         self, value: object, declared: object, element_type: object
     ) -> _Result:
+        """``list[T]``: a list, or a near miss the table treats (tuple, set, ordered container).
+
+        A one-shot iterator is always rejected, because checking it would consume it. A
+        NumPy array is checked by one element, since all its elements share its dtype.
+
+        Args:
+            value: The returned value.
+            declared: The declared ``list[T]``.
+            element_type: ``T``.
+
+        Returns:
+            The result, with element paths relative to ``value``.
+        """
         item: object = value  # the isinstance checks below must not narrow this one
         if isinstance(value, list):
             return self.check_elements(typing.cast("list[object]", value), element_type)
@@ -493,6 +543,15 @@ class _Checker:
 
     def check_elements(self, values: Iterable[object], element_type: object) -> _Result:
         # The path is only built for an element that does not simply conform.
+        """Check each element against ``element_type``.
+
+        Args:
+            values: The elements, in order (iterated once).
+            element_type: The declared element type.
+
+        Returns:
+            The first mismatch at ``[i]``, or the elements' conversions at ``[*]``.
+        """
         return _merge(
             _at(result, f"[{i}]", "[*]")
             for i, item in enumerate(values)
@@ -502,13 +561,23 @@ class _Checker:
     def check_items(
         self, mapping: Mapping[object, object], key_type: object, value_type: object
     ) -> Iterator[_Result]:
+        """Check each key and value of a mapping.
+
+        Args:
+            mapping: The returned mapping.
+            key_type: The declared key type.
+            value_type: The declared value type.
+
+        Yields:
+            The result of each key or value that does not simply conform, placed at its key.
+        """
         for key, item in mapping.items():
             result = self.check(key, key_type)
             if result is not _CONFORMS:
-                yield _at(result, f"[{key!r}] key", ".keys()")
+                yield _at(result, f"[{_key_text(key)}] key", ".keys()")
             result = self.check(item, value_type)
             if result is not _CONFORMS:
-                yield _at(result, f"[{key!r}]", "[*]")
+                yield _at(result, f"[{_key_text(key)}]", "[*]")
 
 
 def check_conformance(

@@ -57,6 +57,7 @@ def make_pod(declared: Any, returns: Any, name: str = "f") -> Any:
 
 
 def make_source(xs: tuple[int, ...] = (1,)) -> DictSource:
+    """A source with one row per ``x`` (tag ``k``, data ``x: int``)."""
     return DictSource(
         data=[{"k": f"r{x}", "x": x} for x in xs], tag_columns=["k"], source_id="src"
     )
@@ -109,10 +110,13 @@ LOSSY = [
 
 
 class TestStandalonePodRejects:
+    """Rejected values raise ``OutputTypeError`` from a pod applied to a stream."""
+
     @pytest.mark.parametrize(("declared", "returned", "type_name"), LOSSY)
     def test_iter_data_raises_naming_pod_output_and_types(
         self, declared: Any, returned: Any, type_name: str
     ) -> None:
+        """The message names the function, the output and the returned type."""
         pod = make_pod(declared, returned, name="lossy_fn")
         with pytest.raises(errors.OutputTypeError) as info:
             list(pod.pod(make_source()).iter_data())
@@ -122,6 +126,7 @@ class TestStandalonePodRejects:
         assert type_name in message
 
     def test_error_records_what_was_returned(self) -> None:
+        """The error keeps the function, output, declared type and value."""
         pod = make_pod(int, 1.5, name="half")
         with pytest.raises(errors.OutputTypeError) as info:
             list(pod.pod(make_source()).iter_data())
@@ -130,7 +135,38 @@ class TestStandalonePodRejects:
         assert info.value.declared_type is int
         assert info.value.value == 1.5
 
+    @pytest.mark.parametrize(
+        ("declared", "returned", "secret"),
+        [
+            pytest.param(bytes, "secret-token", "secret-token", id="top-level"),
+            pytest.param(
+                list[bytes], [b"ok", "secret-token"], "secret-token", id="nested"
+            ),
+        ],
+    )
+    def test_message_never_shows_the_value(
+        self, declared: Any, returned: Any, secret: str
+    ) -> None:
+        """Pipelines log the error, so the message names types only; the value stays on
+        the error's ``value`` attribute."""
+        pod = make_pod(declared, returned)
+        with pytest.raises(errors.OutputTypeError) as info:
+            list(pod.pod(make_source()).iter_data())
+        assert secret not in str(info.value)
+        assert info.value.value == returned
+
+    def test_long_dict_key_is_shortened_in_the_path(self) -> None:
+        """A long dict key in the mismatch path is cut to 40 characters."""
+        key = "k" * 100
+        pod = make_pod(dict[str, int], {key: 1.5})
+        with pytest.raises(errors.OutputTypeError) as info:
+            list(pod.pod(make_source()).iter_data())
+        message = str(info.value)
+        assert key not in message
+        assert "'kkkk" in message
+
     def test_error_is_a_type_error(self) -> None:
+        """Existing ``except TypeError`` handlers catch the rejection."""
         pod = make_pod(int, 1.5)
         with pytest.raises(TypeError):
             list(pod.pod(make_source()).iter_data())
@@ -155,6 +191,7 @@ class TestStandalonePodRejects:
     def test_message_says_what_to_return_instead(
         self, declared: Any, returned: Any, hint: str
     ) -> None:
+        """Each decided rejection carries a hint naming the fix."""
         pod = make_pod(declared, returned)
         with pytest.raises(errors.OutputTypeError) as info:
             list(pod.pod(make_source()).iter_data())
@@ -171,6 +208,8 @@ class TestStandalonePodRejects:
             sometimes_half.pod(make_source((1, 2))).as_table()
 
     def test_async_function_rejects(self) -> None:
+        """An async function's returned value is checked the same way."""
+
         @function_pod(output_keys="y")
         async def async_half(x: int) -> int:
             return x + 0.5  # pyright: ignore[reportReturnType]  # the wrong return type is the point of the test
@@ -180,7 +219,10 @@ class TestStandalonePodRejects:
 
 
 class TestCachedPodRejects:
+    """A pod with a ``result_database`` stores nothing for a rejected value."""
+
     def test_result_database_stores_nothing(self) -> None:
+        """A rejected value is not stored, so the next pod calls the function again."""
         db = InMemoryArrowDatabase()
 
         @function_pod(output_keys="y", result_database=db)
@@ -196,21 +238,28 @@ class TestCachedPodRejects:
 
 
 class _CrashRecorder(NoOpObserver):
+    """An observer that records the errors of failed rows."""
+
     def __init__(self) -> None:
+        """Start with no recorded errors."""
         self.crashes: list[BaseException] = []
 
     def contextualize(self, *identity_path: str) -> _CrashRecorder:
+        """Use the same recorder for every node."""
         return self
 
     def on_data_crash(self, node_label: Any, tag: Any, data: Any, error: Any) -> None:
+        """Record the error of a failed row."""
         self.crashes.append(error)
 
 
 def _half_on_even(x: int) -> int:
+    """Return an int for odd ``x`` and a float (wrong) for even ``x``."""
     return x + 0.5 if x % 2 == 0 else x  # pyright: ignore[reportReturnType]  # the wrong return type is the point of the test
 
 
 def _store(kind: str, tmp_path: Path) -> Any:
+    """A Delta store under ``tmp_path`` for ``"delta"``, else an in-memory store."""
     return (
         DeltaTableDatabase(tmp_path / "db")
         if kind == "delta"
@@ -226,11 +275,14 @@ STORES = [pytest.param("memory", id="memory"), pytest.param("delta", id="delta")
 
 
 class TestPipelineJobRowFailure:
+    """In a ``PipelineJob`` a rejected value is a row failure."""
+
     @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
     @pytest.mark.parametrize("store_kind", STORES)
     def test_bad_row_fails_and_good_rows_are_stored(
         self, orchestrator_cls: Any, store_kind: str, tmp_path: Path
     ) -> None:
+        """Only the rejected row fails; the observer gets the ``OutputTypeError``."""
         half = function_pod(output_keys="y")(_half_on_even)
         observer = _CrashRecorder()
         job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
@@ -247,6 +299,7 @@ class TestPipelineJobRowFailure:
         assert isinstance(observer.crashes[0], errors.OutputTypeError)
 
     def test_fail_fast_raises_the_output_type_error(self) -> None:
+        """Under ``fail_fast`` the sync orchestrator raises the rejection."""
         half = function_pod(output_keys="y")(_half_on_even)
         job = PipelineJob(name="itl895", store=InMemoryArrowDatabase())
         with job:
@@ -318,6 +371,18 @@ CONVERTED = [
         id="Q2-int-ndarray-for-list",
     ),
     pytest.param(
+        float,
+        np.longdouble(1.5),
+        1.5,
+        "numpy.longdouble",
+        "rounded it to 64 bits",
+        id="longdouble-for-float",
+        marks=pytest.mark.skipif(
+            np.dtype(np.longdouble).itemsize <= 8,
+            reason="numpy.longdouble is 64-bit on this platform: nothing is rounded",
+        ),
+    ),
+    pytest.param(
         dict[str, list[int]],
         {"a": (1,)},
         [{"key": "a", "value": [1]}],  # a map column reads back as key/value records
@@ -329,12 +394,15 @@ CONVERTED = [
 
 
 class TestConvertedWithWarning:
+    """Near misses that are converted, with a ``ValueConversionWarning``."""
+
     @pytest.mark.parametrize(
         ("declared", "returned", "stored", "type_name", "words"), CONVERTED
     )
     def test_warns_and_stores_the_converted_value(
         self, declared: Any, returned: Any, stored: Any, type_name: str, words: str
     ) -> None:
+        """The warning names function, output, returned type and fix; the converted value is stored."""
         pod = make_pod(declared, returned, name="near_miss")
         with pytest.warns(errors.ValueConversionWarning) as record:
             table = pod.pod(make_source()).as_table()
@@ -357,6 +425,7 @@ class TestConvertedWithWarning:
         assert str(one[0].message) == str(two[0].message)
 
     def test_message_in_full(self) -> None:
+        """The exact warning text for a datetime returned for a date."""
         pod = make_pod(dt.date, dt.datetime(2020, 1, 1, 12), name="day")
         with pytest.warns(errors.ValueConversionWarning) as record:
             pod.pod(make_source()).as_table()
@@ -367,6 +436,7 @@ class TestConvertedWithWarning:
         )
 
     def test_one_value_with_two_conversions_warns_twice(self) -> None:
+        """A tuple of datetimes for ``list[date]`` gives a list warning and a date warning."""
         pod = make_pod(list[dt.date], (dt.datetime(2020, 1, 1, 3),))
         with pytest.warns(errors.ValueConversionWarning) as record:
             table = pod.pod(make_source()).as_table()
@@ -377,6 +447,7 @@ class TestConvertedWithWarning:
         assert table["y"].to_pylist() == [[dt.date(2020, 1, 1)]]
 
     def test_issued_once_per_function_however_many_rows(self) -> None:
+        """1,000 converted rows give one warning, even under the ``always`` filter."""
         pod = make_pod(list[int], (1, 2), name="many")
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
@@ -397,6 +468,7 @@ class TestConvertedWithWarning:
         assert _conversion_warnings(second) == []
 
     def test_each_function_instance_warns(self) -> None:
+        """Two function instances each warn once."""
         first = make_pod(list[int], (1, 2), name="twin")
         second = make_pod(list[int], (1, 2), name="twin")
         with warnings.catch_warnings(record=True) as record:
@@ -406,6 +478,7 @@ class TestConvertedWithWarning:
         assert len(_conversion_warnings(record)) == 2
 
     def test_error_filter_makes_it_a_row_failure(self) -> None:
+        """An escalated warning fails every converted row, not only the first."""
         pod = make_pod(list[int], (1, 2), name="strict")
         observer = _CrashRecorder()
         job = PipelineJob(name="itl895", store=InMemoryArrowDatabase())
@@ -437,10 +510,13 @@ ACCEPTED_SILENTLY = [
 
 
 class TestAcceptedSilently:
+    """Same-kind NumPy scalars and conforming values: no warning, value stored."""
+
     @pytest.mark.parametrize(("declared", "returned", "stored"), ACCEPTED_SILENTLY)
     def test_no_warning_and_value_stored(
         self, declared: Any, returned: Any, stored: Any
     ) -> None:
+        """No ``ValueConversionWarning`` and the value is stored as returned."""
         pod = make_pod(declared, returned)
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
@@ -468,6 +544,7 @@ class TestDownstreamSeesStoredValue:
     def _chain(
         self, declared: Any, returned: Any, received: list[Any]
     ) -> tuple[Any, Any]:
+        """Build ``up`` (returns ``returned`` for ``declared``) feeding ``down``, which records its input."""
         up = make_pod(declared, returned, name="up")
 
         def down(y: Any) -> int:
@@ -479,11 +556,13 @@ class TestDownstreamSeesStoredValue:
 
     @staticmethod
     def _assert_received(received: list[Any], expected: Any) -> None:
+        """``down`` received exactly ``expected``, with its type."""
         assert received == [expected]
         assert type(received[0]) is type(expected)
 
     @pytest.mark.parametrize(("declared", "returned", "expected"), DOWNSTREAM)
     def test_standalone(self, declared: Any, returned: Any, expected: Any) -> None:
+        """A downstream pod applied in memory receives the converted value."""
         received: list[Any] = []
         up, down = self._chain(declared, returned, received)
         with pytest.warns(errors.ValueConversionWarning):
@@ -502,6 +581,7 @@ class TestDownstreamSeesStoredValue:
         store_kind: str,
         tmp_path: Path,
     ) -> None:
+        """On both orchestrators and stores, downstream receives the stored, converted value."""
         received: list[Any] = []
         up, down = self._chain(declared, returned, received)
         job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
@@ -517,6 +597,7 @@ class TestDownstreamSeesStoredValue:
     def test_output_as_dict_matches_as_table(
         self, declared: Any, returned: Any, expected: Any
     ) -> None:
+        """The output ``Data`` gives the same converted value as a dict and as a table."""
         with pytest.warns(errors.ValueConversionWarning):
             [(_tag, data)] = list(
                 make_pod(declared, returned).pod(make_source()).iter_data()
@@ -546,6 +627,7 @@ class TestRejectionInPipelineJob:
         store_kind: str,
         tmp_path: Path,
     ) -> None:
+        """D1, D3 and ITL-901 rejections fail the row and store nothing."""
         pod = make_pod(declared, returned, name="rejected")
         observer = _CrashRecorder()
         job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
@@ -558,7 +640,10 @@ class TestRejectionInPipelineJob:
 
 
 class TestConformingOutputsUnchanged:
+    """Conforming outputs are stored and hashed as before ITL-895."""
+
     def test_content_hash_matches_a_plain_data(self) -> None:
+        """A conforming output hashes like ``Data`` built from the same value."""
         pod = make_pod(int, 1)
         [(_tag, data)] = list(pod.pod(make_source()).iter_data())
         expected = Data({"y": 1}, python_schema={"y": int}).content_hash()
@@ -580,6 +665,7 @@ class TestConformingOutputsUnchanged:
         ],
     )
     def test_conforming_value_round_trips(self, declared: Any, returned: Any) -> None:
+        """A conforming value comes back unchanged from ``as_dict``."""
         pod = make_pod(declared, returned)
         [(_tag, data)] = list(pod.pod(make_source()).iter_data())
         assert data.as_dict()["y"] == returned
@@ -598,6 +684,7 @@ class TestConversionFailuresNameTheOutput:
     def test_raises_output_type_error_that_is_a_value_error(
         self, declared: Any, returned: Any
     ) -> None:
+        """A conversion failure names the output and is still a ``ValueError``."""
         pod = make_pod(declared, returned, name="unstorable")
         with pytest.raises(errors.OutputTypeError, match="'unstorable'") as info:
             list(pod.pod(make_source()).iter_data())
@@ -605,6 +692,7 @@ class TestConversionFailuresNameTheOutput:
         assert info.value.output_key == "y"
 
     def test_error_survives_pickling(self) -> None:
+        """The error pickles with its arguments (executors send it across processes)."""
         import pickle
 
         error = errors.OutputTypeError("f", "y", int, 1.5)

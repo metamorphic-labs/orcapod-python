@@ -109,13 +109,12 @@ class OutputTypeError(TypeError, ValueError):
         self.detail: str | None = detail
         self.hint: str | None = hint
         where = f": {detail}" if detail else ""
-        value_repr = repr(value)
-        if len(value_repr) > 80:
-            value_repr = value_repr[:77] + "..."
         fix = f". {hint}." if hint else "; convert the value in the function."
+        # Types only, never the value: pipelines log this message, and a returned value
+        # can be large or sensitive. The value itself stays on ``self.value``.
         super().__init__(
             f"Function {function_name!r} returned {type_text(type(value))} "
-            + f"({value_repr}) for output {output_key!r}, which is declared "
+            + f"for output {output_key!r}, which is declared "
             + f"{type_text(declared_type)}{where}. Orcapod does not convert types "
             + f"implicitly{fix}"
         )
