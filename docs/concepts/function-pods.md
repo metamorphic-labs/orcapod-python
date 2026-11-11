@@ -287,9 +287,9 @@ recordings = DictSource(
 )
 readings = load_readings.pod(recordings)
 for tag, data in readings.iter_data():
-    print(tag["session"], data["readings"].schema)
-# s1 Schema({'sample': UInt16, 'voltage': Float32})
-# s2 Schema({'sample': UInt16, 'voltage': Float32})
+    print(tag["session"], dict(data["readings"].schema))
+# s1 {'sample': UInt16, 'voltage': Float32}
+# s2 {'sample': UInt16, 'voltage': Float32}
 
 for tag, data in count_rows.pod(readings).iter_data():
     print(tag["session"], data["n_rows"])

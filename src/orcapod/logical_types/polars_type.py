@@ -359,8 +359,8 @@ class LogicalPolarsDataFrame(BaseLogicalType):
     Example:
         >>> lt = LogicalPolarsDataFrame()
         >>> df = pl.DataFrame({"x": [1, 2]}, schema={"x": pl.Int8})
-        >>> lt.storage_to_python(lt.python_to_storage(df)).schema
-        Schema([('x', Int8)])
+        >>> dict(lt.storage_to_python(lt.python_to_storage(df)).schema)
+        {'x': Int8}
     """
 
     _arrow_ext_class = make_arrow_extension_type("polars.dataframe", pa.large_binary())
