@@ -8,7 +8,16 @@
 
 **Tech Stack:** Python, PyArrow, starfix 0.4 (unchanged), pytest via `uv run`.
 
-**Status:** STEP 1 (plan + migration assessment) — awaiting coordinator approval. No library code yet.
+**Status (November 11, 2026, final design):** implemented on the branch; see "Outcome" at
+the end, which supersedes sections 2, 4 and 5 where they differ.
+
+> **Developer rulings (November 11, 2026):** Orcapod sorts dict and set values before storing
+> them into Arrow; this is not starfix's concern. Hashing an Arrow table NEVER sorts anything
+> (starfix ignores only column order and struct field order): a `list<struct<key, value>>`
+> that arrives in Arrow form is an ordered list and its order is part of its hash. So fix 2
+> (hash-time sorting) was implemented and then REMOVED. Plain `set[T]` was folded in (separate
+> commit). In-memory canonical copy (fix 3) and raising on NaN/duplicate keys are kept,
+> provisional pending the developer.
 
 ---
 
@@ -195,3 +204,27 @@ def sort_dict_entries(entries: list[dict], column: str) -> list[dict]:
 2. Approve fix 3 (in-memory canonical copy of dict values in plain containers; dataclass/pydantic internals left as given)?
 3. NaN keys and duplicate keys raise (including when hashing a v0.2.0 stored row that has duplicates, only possible via Arrow-native input) — OK?
 4. The `set[T]` per-process hash bug: separate issue (recommended), or fold into this PR (same mechanism: sort plain `set[T]` on write)?
+
+---
+
+## Outcome (as implemented)
+
+Commits on `eywalker/itl-905-a-dict-values-insertion-order-changes-its`:
+1. tests first (failing) incl. a Delta store written by v0.2.0 (`tests/test_hashing/data/`).
+2. converter sorts dict entries (`semantic_types/canonical_order.py`, `CanonicalOrderError`).
+3. hash-time sort (later reverted by ruling).
+4. `Datagram` in-memory canonical copy.
+5. golden: re-pin `pipeline:index_pick.index.row[s1|s2].data_hash` (approved), then additions only
+   (`arrow:dict_order`, `datagram:dict_order`).
+6. plain `set[T]` sorted at conversion (+ module/error rename).
+7. revert hash-time sort; Arrow-native unsorted vs sorted pinned as DIFFERENT.
+8. v0.2.0 fixture extended with a dict-returning pod: cache hit serves the stored order/hash.
+9. docs (hashing reference 1c), CHANGELOG `[0.3.0]`, DESIGN_ISSUES DO1.
+
+Correction to section 5: the golden suite DID hold one out-of-order dict
+(`pipeline:index_pick`, `meta={"k":..,"j":..}`); my first survey truncated grep output. An AST
+walk over every dict literal in `cases.py` found no other dict reaching Arrow out of key order
+(`datagram:nested` is key-sorted; `semantic:*` dicts go to the semantic hasher only).
+
+Performance: the Arrow hasher is byte-for-byte unchanged from `main`, so hashing tables with no
+dict columns costs nothing extra. Conversion adds one sort per dict or set value.
