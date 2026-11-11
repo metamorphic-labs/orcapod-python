@@ -135,7 +135,38 @@ class StarfixArrowHasher:
         return ContentHash(method=self._hasher_id, digest=digest)
 
     def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
-        """Hash an Arrow table (or ``RecordBatch``) using starfix."""
+        """Hash an Arrow table (or ``RecordBatch``) using starfix.
+
+        Column order and struct field order are not part of the hash: this is the hash of
+        Orcapod's own tables (streams, datagrams, rows), which ignore order on purpose.
+        """
+        return ContentHash(
+            method=self._hasher_id, digest=self._digest(table, ordered=False)
+        )
+
+    def hash_table_ordered(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+        """Hash an Arrow table (or ``RecordBatch``) as a value, order included.
+
+        The same as ``hash_table`` (the same semantic preprocessing, so a ``File`` column is
+        hashed by its content), except that the order of the columns and of the fields of
+        every struct, at every depth, is part of the hash. The two never coincide: starfix
+        records the order options in the digest header.
+        """
+        return ContentHash(
+            method=self._hasher_id, digest=self._digest(table, ordered=True)
+        )
+
+    def _digest(self, table: "pa.Table | pa.RecordBatch", *, ordered: bool) -> bytes:
+        """Preprocess ``table`` and return its starfix digest; the only starfix table call.
+
+        Args:
+            table: The table or record batch to hash.
+            ordered: Whether column order and struct field order are part of the digest
+                (starfix's ``ordered_columns`` and ``ordered_struct_fields``).
+
+        Returns:
+            The starfix digest (version prefix included).
+        """
         if isinstance(table, pa.RecordBatch):
             table = pa.Table.from_batches([table])
 
@@ -148,5 +179,9 @@ class StarfixArrowHasher:
             )
         else:
             clean_table = processed_table
-        digest = ArrowDigester.hash_table(clean_table, include_metadata=include_meta)
-        return ContentHash(method=self._hasher_id, digest=digest)
+        return ArrowDigester.hash_table(
+            clean_table,
+            include_metadata=include_meta,
+            ordered_columns=ordered,
+            ordered_struct_fields=ordered,
+        )

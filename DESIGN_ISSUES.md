@@ -2314,8 +2314,9 @@ column order (sync; async once the cache is warm).
 
 **Fix (pending the starfix 0.5.0 release, ITL-898):** labels `pandas_dataframe_v1` /
 `pandas_series_v1`, `sha256(descriptor + b"\x00" + ordered digest)`. The ordered digest is
-starfix's `hash_table(..., ordered_columns=True, ordered_struct_fields=True)` of the
-positionally renamed `from_pandas` table, behind `orcapod.hashing.labelled_hash.ordered_arrow_digest`.
+the Arrow hasher's new `hash_table_ordered` of the positionally renamed `from_pandas` table:
+the same semantic preprocessing as `hash_table`, then starfix's `ordered_columns` and
+`ordered_struct_fields` options (ITL-898). Both entry points share one private starfix call.
 The descriptor is an Orcapod-owned grammar of typed labels, `columns.names`, index levels and
 pandas dtypes (`orcapod.hashing.pandas_value_hash`). The identity matches the default
 `assert_frame_equal` / `assert_series_equal`, except `flags` (storage drops it) and `-0.0` vs

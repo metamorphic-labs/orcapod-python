@@ -160,7 +160,13 @@ class ArrowHasherProtocol(Protocol):
     @property
     def hasher_id(self) -> str: ...
 
-    def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash: ...
+    def hash_table(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+        """Hash a table ignoring column order and struct field order (streams, rows)."""
+        ...
+
+    def hash_table_ordered(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+        """Hash a table as a value: column order and struct field order are part of it."""
+        ...
 
 
 K = TypeVar("K")

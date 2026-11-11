@@ -7,28 +7,19 @@ hashes as::
 
 under a ``ContentHash`` method label ``<type>_v<N>`` (for example ``pandas_dataframe_v1``). The
 descriptor carries what the Arrow values cannot express (label types, library dtypes); the
-values digest is ``ordered_arrow_digest`` of the value's Arrow form. The label names the whole
-definition and is its only version marker: the bytes produced under a label never change, and a
-new definition gets a new label.
-
-``ordered_arrow_digest`` is the one place Orcapod asks starfix for an order-dependent digest. It
-is for values only. Orcapod streams, datagrams and rows ignore column order on purpose and keep
-using the data context's Arrow hasher.
+values digest is the data context's Arrow hasher's ``hash_table_ordered`` of the value's Arrow
+form (order included, the same semantic preprocessing as every Orcapod Arrow hash). The label
+names the whole definition and is its only version marker: the bytes produced under a label
+never change, and a new definition gets a new label.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any
-
-from starfix import ArrowDigester
+from typing import Any
 
 from orcapod.types import ContentHash
-from orcapod.utils.arrow_utils import normalize_extension_columns
-
-if TYPE_CHECKING:
-    import pyarrow as pa
 
 
 def canonical_json(descriptor: Any) -> bytes:
@@ -63,28 +54,3 @@ def labelled_content_hash(
     """
     payload = canonical_json(descriptor) + b"\x00" + values_digest
     return ContentHash(method=method, digest=hashlib.sha256(payload).digest())
-
-
-def ordered_arrow_digest(table: pa.Table) -> bytes:
-    """Return starfix's digest of ``table`` with column order and struct field order included.
-
-    Uses starfix's per-call options ``ordered_columns`` and ``ordered_struct_fields`` (hash
-    format 2), so permuting the columns, or the fields of a struct at any depth, changes the
-    digest, while chunking does not. Extension-typed columns (for example pyarrow's pandas
-    ``Period`` type) are hashed by their storage; the caller's descriptor carries their type.
-
-    Args:
-        table: The Arrow form of a value.
-
-    Returns:
-        The starfix digest (format-2 version prefix included).
-
-    Raises:
-        ValueError: If starfix rejects the schema, for example two columns or two fields of
-            one struct with the same name.
-    """
-    return ArrowDigester.hash_table(
-        normalize_extension_columns(table),
-        ordered_columns=True,
-        ordered_struct_fields=True,
-    )

@@ -2,7 +2,7 @@
 
 A pandas value hashes as::
 
-    sha256(canonical_json(descriptor) + b"\\x00" + ordered_arrow_digest(values_table))
+    sha256(canonical_json(descriptor) + b"\\x00" + arrow_hasher.hash_table_ordered(values_table))
 
 under the ``ContentHash`` method label ``"pandas_dataframe_v1"`` (a frame) or
 ``"pandas_series_v1"`` (a Series); see ``orcapod.hashing.labelled_hash``. The label names this
@@ -20,9 +20,11 @@ Values table
 ``pa.Table.from_pandas(value, preserve_index=True)`` with its fields renamed by position:
 ``c0 .. cN-1`` for the columns in order, then ``i0 .. iM-1`` for the index levels in order.
 Labels are not Arrow field names: they are in the descriptor, typed. A Series is hashed as its
-one-column frame. The digest includes column order and struct field order at every depth
-(starfix's ordered options), the Arrow types (with starfix's large / non-large unification),
-the row count and the values; a categorical column is hashed by its values.
+one-column frame. The digest is the data context's Arrow hasher's ``hash_table_ordered``: the
+same preprocessing as every Orcapod Arrow hash, with column order and struct field order at every
+depth included (starfix's ordered options). It covers the Arrow types (with starfix's large /
+non-large unification), the row count and the values; a categorical column is hashed by its
+values.
 
 Descriptor grammar
 ------------------
@@ -62,9 +64,10 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from orcapod.hashing.labelled_hash import labelled_content_hash, ordered_arrow_digest
+from orcapod.hashing.labelled_hash import labelled_content_hash
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
     from orcapod.types import ContentHash
 
 
@@ -259,11 +262,15 @@ def _values_table(df: pd.DataFrame) -> pa.Table:
     return table.rename_columns(columns + levels)
 
 
-def pandas_frame_content_hash(df: pd.DataFrame) -> ContentHash:
+def pandas_frame_content_hash(
+    df: pd.DataFrame, arrow_hasher: ArrowHasherProtocol
+) -> ContentHash:
     """Return the ``pandas_dataframe_v1`` content hash of a DataFrame.
 
     Args:
         df: The DataFrame.
+        arrow_hasher: The data context's Arrow hasher, whose ``hash_table_ordered`` digests
+            the values table.
 
     Returns:
         A ``ContentHash`` with method ``"pandas_dataframe_v1"``.
@@ -273,15 +280,19 @@ def pandas_frame_content_hash(df: pd.DataFrame) -> ContentHash:
             to Arrow.
     """
     descriptor = pandas_frame_descriptor(df)
-    digest = ordered_arrow_digest(_values_table(df))
+    digest = arrow_hasher.hash_table_ordered(_values_table(df)).digest
     return labelled_content_hash(PANDAS_DATAFRAME_HASH_METHOD, descriptor, digest)
 
 
-def pandas_series_content_hash(series: pd.Series) -> ContentHash:
+def pandas_series_content_hash(
+    series: pd.Series, arrow_hasher: ArrowHasherProtocol
+) -> ContentHash:
     """Return the ``pandas_series_v1`` content hash of a Series.
 
     Args:
         series: The Series.
+        arrow_hasher: The data context's Arrow hasher, whose ``hash_table_ordered`` digests
+            the values table.
 
     Returns:
         A ``ContentHash`` with method ``"pandas_series_v1"``.
@@ -291,5 +302,7 @@ def pandas_series_content_hash(series: pd.Series) -> ContentHash:
             converted to Arrow.
     """
     descriptor = pandas_series_descriptor(series)
-    digest = ordered_arrow_digest(_values_table(series.to_frame(name="c0")))
+    digest = arrow_hasher.hash_table_ordered(
+        _values_table(series.to_frame(name="c0"))
+    ).digest
     return labelled_content_hash(PANDAS_SERIES_HASH_METHOD, descriptor, digest)

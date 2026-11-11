@@ -13,8 +13,8 @@ Built-in PythonTypeHandlerProtocol implementations.
   FileHandler           -- orcapod.File: file content hash
   DirectoryHandler      -- orcapod.Directory: recursive Merkle tree hash
   NumpyArrayHandler     -- numpy.ndarray: SHA-256 ContentHash of .npy bytes
-  PandasDataFrameHandler -- pd.DataFrame: pandas_dataframe_v1 (descriptor + ordered starfix digest)
-  PandasSeriesHandler   -- pd.Series: pandas_series_v1 (descriptor + ordered starfix digest)
+  PandasDataFrameHandler -- pd.DataFrame: pandas_dataframe_v1 (descriptor + ordered Arrow digest)
+  PandasSeriesHandler   -- pd.Series: pandas_series_v1 (descriptor + ordered Arrow digest)
 
 ``register_builtin_python_type_handlers(registry)`` populates a registry
 with all of the above handlers.
@@ -366,14 +366,30 @@ class NumpyArrayHandler:
 
 
 class PandasDataFrameHandler:
-    """Hasher for ``pd.DataFrame``: Orcapod's pandas descriptor plus an ordered starfix digest.
+    """Hasher for ``pd.DataFrame``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
     Delegates to ``pandas_frame_content_hash`` in ``orcapod.hashing.pandas_value_hash``, whose
     module docstring defines the ``pandas_dataframe_v1`` scheme. The hash distinguishes what
     ``assert_frame_equal`` distinguishes with its defaults: column order, index levels and their
     order, label types, ``columns.names``, pandas dtypes and categorical categories, and the
     values (except ``flags``, and ``-0.0`` vs ``0.0``, which hash apart).
+
+    Args:
+        arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
+            digests the values. When ``None``, the default data context's ``arrow_hasher`` is
+            resolved lazily at call time (breaking the circular dependency that would arise if
+            the registry were constructed before the arrow hasher).
     """
+
+    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+        self._arrow_hasher = arrow_hasher
+
+    def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
+        if self._arrow_hasher is not None:
+            return self._arrow_hasher
+        from orcapod.contexts import get_default_context
+
+        return get_default_context().arrow_hasher  # type: ignore[return-value]
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
         """Return the content hash of ``obj``.
@@ -398,16 +414,32 @@ class PandasDataFrameHandler:
             raise TypeError(
                 f"PandasDataFrameHandler: expected pd.DataFrame, got {type(obj)!r}"
             )
-        return pandas_frame_content_hash(obj)
+        return pandas_frame_content_hash(obj, self._get_arrow_hasher())
 
 
 class PandasSeriesHandler:
-    """Hasher for ``pd.Series``: Orcapod's pandas descriptor plus an ordered starfix digest.
+    """Hasher for ``pd.Series``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
     Delegates to ``pandas_series_content_hash`` in ``orcapod.hashing.pandas_value_hash``
     (``pandas_series_v1``). The name is part of the hash, typed (``0`` and ``"0"`` differ), as in
     ``assert_series_equal``.
+
+    Args:
+        arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
+            digests the values. When ``None``, the default data context's ``arrow_hasher`` is
+            resolved lazily at call time (breaking the circular dependency that would arise if
+            the registry were constructed before the arrow hasher).
     """
+
+    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+        self._arrow_hasher = arrow_hasher
+
+    def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
+        if self._arrow_hasher is not None:
+            return self._arrow_hasher
+        from orcapod.contexts import get_default_context
+
+        return get_default_context().arrow_hasher  # type: ignore[return-value]
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
         """Return the content hash of ``obj``.
@@ -432,7 +464,7 @@ class PandasSeriesHandler:
             raise TypeError(
                 f"PandasSeriesHandler: expected pd.Series, got {type(obj)!r}"
             )
-        return pandas_series_content_hash(obj)
+        return pandas_series_content_hash(obj, self._get_arrow_hasher())
 
 
 def register_builtin_python_type_handlers(
@@ -446,13 +478,12 @@ def register_builtin_python_type_handlers(
     """Register all built-in semantic hashers into *registry*.
 
     ``pa.Table`` and ``pa.RecordBatch`` are registered via ``ArrowTableHandler``.
-    When ``arrow_hasher`` is provided it is passed through for immediate use; when
-    ``None``, ``ArrowTableHandler`` resolves the active arrow hasher lazily via
-    ``get_default_context()`` at hash time, breaking the construction-time circular
-    dependency. ``pd.DataFrame`` and ``pd.Series`` are registered via
-    ``PandasDataFrameHandler`` and ``PandasSeriesHandler``, which use their own
-    order-dependent digest (``pandas_dataframe_v1`` / ``pandas_series_v1``) and no
-    Arrow hasher.
+    ``pd.DataFrame`` and ``pd.Series`` are registered via ``PandasDataFrameHandler``
+    and ``PandasSeriesHandler`` (``pandas_dataframe_v1`` / ``pandas_series_v1``, values
+    digested by the Arrow hasher's ``hash_table_ordered``). When ``arrow_hasher`` is
+    provided it is passed through for immediate use; when ``None``, these handlers
+    resolve the active arrow hasher lazily via ``get_default_context()`` at hash time,
+    breaking the construction-time circular dependency.
 
     ``orcapod.File`` is registered via ``FileHandler`` for content-based file
     hashing. ``orcapod.Directory`` is registered via ``DirectoryHandler`` for
@@ -553,8 +584,8 @@ def register_builtin_python_type_handlers(
 
     import pandas as _pd
 
-    registry.register(_pd.DataFrame, PandasDataFrameHandler())
-    registry.register(_pd.Series, PandasSeriesHandler())
+    registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher))
+    registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher))
 
     logger.debug(
         "register_builtin_python_type_handlers: registered %d hashers",

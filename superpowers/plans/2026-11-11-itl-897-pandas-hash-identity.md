@@ -134,3 +134,26 @@ def ordered_arrow_digest(table: pa.Table) -> bytes:
       regenerate; check the diff changes only `dataframe`/pandas entries and adds the new ones.
 - [ ] `docs/reference/hashing.md`: pandas subsection under §1c (grammar, labels, what is out).
 - [ ] PR via `sensei:create-pr` with `Fixes ITL-897`, `Fixes ITL-887`; CodeRabbit rounds.
+
+## Revision (coordinator, Nov 11): one starfix call site with semantic preprocessing (option A)
+
+A `pa.Table` value must get the same semantic preprocessing as every other Arrow hash (Path
+columns by file content, extension identity kept); only the order options differ. So:
+
+- [ ] `ArrowHasherProtocol` gains `hash_table_ordered(table) -> ContentHash`. `StarfixArrowHasher`
+      implements `hash_table` and `hash_table_ordered` through one private
+      `_digest(table, *, ordered)`: preprocessing, then the single
+      `ArrowDigester.hash_table(..., include_metadata=..., ordered_columns=ordered,
+      ordered_struct_fields=ordered)` call.
+- [ ] `labelled_hash.ordered_arrow_digest` is removed; `labelled_hash` keeps `canonical_json`
+      and `labelled_content_hash`. Its digest tests move to `test_starfix_arrow_hasher.py`.
+- [ ] pandas routes through the same function: `pandas_frame_content_hash(df, arrow_hasher)`;
+      the pandas handlers take the Arrow hasher again (lazy default context, as on `main`).
+      Preprocessing is a no-op for pandas tables (`from_pandas` never yields Orcapod extension
+      types; Path / UUID objects in object columns fail `from_pandas` today and after).
+- [ ] Format-2 checks for the pandas projection: positional names avoid duplicate / aliased
+      paths; `from_pandas` fields are nullable; all-null object columns, fixed-size lists and
+      maps fail to hash on `main` already (`NotImplementedError`), so no regression.
+- [ ] Second PR (`eywalker/itl-897-arrow-table-value-order-identity`): `ArrowTableHandler` ->
+      `arrow_table_v1` via `hash_table_ordered`; `Datagram` / `ArrowTableStream` identities call
+      `hash_table` explicitly.
