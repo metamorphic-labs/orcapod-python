@@ -53,3 +53,26 @@ the property table). Labels stay `polars_dataframe_v1` / `polars_series_v1` (unr
 - Order-identity change done (4bb08754, 06f1682f); suite green 3.11/3.12/3.13; CI green on
   06f1682f. Threads 4536018197 and 4536193979 answered. CodeRabbit rate-limited on
   06f1682f at 09:43Z; retry 1 at ~10:05Z, retry 2 at ~10:25Z if needed.
+
+## Prepared for starfix ordered mode (ITL-898) — hash NOT final
+
+Developer decision, November 11, 2026: starfix gets an option to make column and struct
+field order significant; #286 will move to it. The hash is unchanged for now; the switch
+points are isolated in `logical_types/polars_type.py`:
+
+- `_values_digest(df)` — the only call into starfix. Owns the type projection
+  (`_hash_projection`) and the struct-validity workaround (`_with_table_struct_validity`).
+- `_ordered_pairs(pairs)` — the only place column and struct field order enter the descriptor.
+
+Under a starfix ordered mode:
+
+| Part | Fate |
+|---|---|
+| Order in the descriptor (`_ordered_pairs`, columns and struct fields) | Redundant if starfix hashes order and names. Harmless to keep; dropping it changes the bytes. |
+| Struct-validity wrapper (`_with_struct_validity`) | Redundant only if the new starfix spec also tells a null struct from a struct of nulls (ITL-848). Otherwise stays. |
+| Top-level `Null` columns dropped from the projection; their name, position and dtype live only in the descriptor | Stays (unless starfix hashes `null` columns), so column order still needs the descriptor for them. |
+| Nested `null` → all-null `bool`; `fixed_size_list` (Polars `Array`) → `large_list` | Stay unless starfix supports those types; the descriptor records the real dtypes. |
+| Dictionary decode (Categorical / Enum) | Stays. |
+| Descriptor dtype distinctions Arrow lacks: Enum categories and order, Categorical `Categories`, String vs Categorical vs Enum, Array size, nested Null | Stay. |
+| Descriptor `kind`, `height`, Series `name` | Stay (`height` matters for zero-column and all-Null frames). |
+| Descriptor Decimal / Datetime / Duration parameters, int / float width | Redundant with the Arrow schema starfix sees, harmless to keep. |

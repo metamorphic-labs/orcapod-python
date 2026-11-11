@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -184,6 +185,24 @@ def check_polars_schema_storable(schema: pl.Schema) -> None:
         )
 
 
+def _ordered_pairs(pairs: Iterable[tuple[str, Any]]) -> list[list[Any]]:
+    """Encode named members (columns or struct fields) as an ordered list of pairs.
+
+    The one place where column order and struct field order enter the descriptor: a JSON
+    list keeps its order under ``sort_keys``, a JSON object would not.
+
+    TODO(ITL-898): once starfix hashes column and struct field order itself, this order is
+    redundant with the values digest; the names and dtypes stay.
+
+    Args:
+        pairs: ``(name, dtype descriptor)`` pairs in the value's own order.
+
+    Returns:
+        ``[[name, dtype descriptor], ...]`` in the same order.
+    """
+    return [[name, descriptor] for name, descriptor in pairs]
+
+
 def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
     """Encode a Polars dtype in Orcapod's hash descriptor grammar.
 
@@ -226,10 +245,10 @@ def polars_dtype_descriptor(dtype: PolarsDataType, column: str) -> Any:
         return {"array": [polars_dtype_descriptor(dtype.inner, column), dtype.size]}
     if isinstance(dtype, pl.Struct):
         return {
-            "struct": [
-                [field.name, polars_dtype_descriptor(field.dtype, column)]
+            "struct": _ordered_pairs(
+                (field.name, polars_dtype_descriptor(field.dtype, column))
                 for field in dtype.fields
-            ]
+            )
         }
     if not isinstance(dtype, pl.BaseExtension):
         dtype_class = dtype if isinstance(dtype, type) else type(dtype)
@@ -350,8 +369,7 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
     """Build the Arrow table whose starfix digest stands for the frame's values.
 
     Top-level ``Null`` columns are left out: their content is fully determined by their
-    dtype and the row count, both in the descriptor. Each struct carries its own validity
-    (see ``_with_struct_validity``).
+    dtype and the row count, both in the descriptor.
 
     Args:
         df: The frame to hash. Its dtypes must already be inside the grammar.
@@ -365,7 +383,18 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
     target = pa.schema(
         [field.with_type(_hash_projection_type(field.type)) for field in kept]
     )
-    table = table.cast(target)
+    return table.cast(target)
+
+
+def _with_table_struct_validity(table: pa.Table) -> pa.Table:
+    """Apply ``_with_struct_validity`` to every column of ``table``.
+
+    Args:
+        table: A table produced by ``_hash_projection``.
+
+    Returns:
+        The table with each struct, at any depth, carrying its own validity.
+    """
     columns = [
         _with_struct_validity(column.combine_chunks()) for column in table.columns
     ]
@@ -373,6 +402,26 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
         [field.with_type(_struct_validity_type(field.type)) for field in table.schema]
     )
     return pa.Table.from_arrays(columns, schema=schema)
+
+
+def _values_digest(df: pl.DataFrame) -> bytes:
+    """The starfix digest of a frame's values: the only call into starfix.
+
+    Everything that depends on starfix's behaviour is here: the projection of types starfix
+    does not support (``_hash_projection``) and the struct-validity workaround
+    (``_with_table_struct_validity``), needed because starfix hashes a null struct like a
+    struct of nulls.
+
+    TODO(ITL-898): switch to starfix's ordered mode (column and struct field order) when it
+    is released. That changes the hash definition and the pinned ``polars_*`` golden values.
+
+    Args:
+        df: The frame to hash. Its dtypes must already be inside the grammar.
+
+    Returns:
+        ``ArrowDigester.hash_table`` of the projected table.
+    """
+    return ArrowDigester.hash_table(_with_table_struct_validity(_hash_projection(df)))
 
 
 def _content_hash(
@@ -383,7 +432,7 @@ def _content_hash(
     The digest is ``sha256(descriptor_json + b"\x00" + starfix_digest)``, where
     ``descriptor_json`` is ``descriptor`` as canonical JSON (keys sorted, separators ``","``
     and ``":"``, UTF-8, non-ASCII kept) and ``starfix_digest`` is
-    ``ArrowDigester.hash_table`` of ``_hash_projection(df)``.
+    ``_values_digest(df)``.
 
     Args:
         descriptor: The frame or Series descriptor in the module's grammar.
@@ -396,7 +445,7 @@ def _content_hash(
     descriptor_bytes = json.dumps(
         descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
-    values_digest = ArrowDigester.hash_table(_hash_projection(df))
+    values_digest = _values_digest(df)
     digest = hashlib.sha256(descriptor_bytes + b"\x00" + values_digest).digest()
     return ContentHash(method=method, digest=digest)
 
@@ -416,10 +465,10 @@ def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
     descriptor = {
         "kind": "polars.dataframe",
         "height": df.height,
-        "columns": [
-            [name, polars_dtype_descriptor(dtype, name)]
+        "columns": _ordered_pairs(
+            (name, polars_dtype_descriptor(dtype, name))
             for name, dtype in df.schema.items()
-        ],
+        ),
     }
     return _content_hash(descriptor, df, POLARS_DATAFRAME_HASH_METHOD)
 
