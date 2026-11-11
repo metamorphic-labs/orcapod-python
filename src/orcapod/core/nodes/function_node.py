@@ -50,6 +50,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
+from orcapod.databases.utils import as_table_committing
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
@@ -1253,16 +1254,16 @@ class FunctionJobNode(FunctionNodeBase):
         its own first means a crash between the two commits leaves results without
         pipeline records (found in the result cache on the rerun, so nothing is
         recomputed), never pipeline records pointing at results that were lost.
-        Only a store that commits one table on its own (``flush_batch``, the Delta
-        store) needs and offers this; for another store the pipeline flush that
-        follows commits everything.
+        Only a store that commits table by table
+        (``TableCommittingDatabaseProtocol``, the Delta store) needs and offers this;
+        for another store the pipeline flush that follows commits everything.
         """
         pod = self._cached_function_pod
         if not isinstance(pod, CachedFunctionPod):
             return
-        flush_table = getattr(pod.result_database, "flush_batch", None)
-        if flush_table is not None:
-            flush_table(pod.record_path)
+        result_database = as_table_committing(pod.result_database)
+        if result_database is not None:
+            result_database.flush_batch(pod.record_path)
 
     def _commit_pending_writes(self) -> None:
         """Commit this node's pending writes, results first (see ``_batched_commits``).

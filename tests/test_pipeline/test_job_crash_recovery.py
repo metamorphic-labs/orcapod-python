@@ -32,7 +32,8 @@ N_ROWS = 250
 # Runs one job over N_ROWS rows. Arguments: store path, calls file, commit_every_rows,
 # orchestrator ("sync" or "async"), crash ("none", "fn:<x>" or "flush:<n>").
 # "fn:<x>" exits while computing row x; "flush:<n>" exits on the n-th store-wide
-# flush, which a node's commit calls right after committing its result table.
+# flush. The run's first flush commits what was pending before it; each later one is
+# a node's commit, called right after the node committed its result table.
 JOB_SCRIPT = textwrap.dedent(
     """
     import os
@@ -205,14 +206,14 @@ def test_crash_between_result_and_pipeline_commits(
     """Results committed without their pipeline records are reused, not recomputed."""
     store = tmp_path / "store"
     # First commit: results of rows 0-99 committed, then the process dies.
-    code, _ = run_job(tmp_path, store, 100, "sync", crash="flush:1")
+    code, _ = run_job(tmp_path, store, 100, "sync", crash="flush:2")
     assert code == 3
     assert (row_count(store, "result"), row_count(store, "pipeline")) == (100, 0)
 
     # 150 rows per commit: the first batch starts with rows 0-99, whose stored
     # results are reused (pipeline records only), then computes rows 100-149. Its
     # result table is still committed first.
-    code, calls = run_job(tmp_path, store, 150, "sync", crash="flush:1")
+    code, calls = run_job(tmp_path, store, 150, "sync", crash="flush:2")
     assert code == 3
     assert sorted(calls) == list(range(100, 150))
     assert (row_count(store, "result"), row_count(store, "pipeline")) == (150, 0)

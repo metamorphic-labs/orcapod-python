@@ -20,16 +20,20 @@ from pathlib import Path
 from typing import Any
 
 import deltalake
+import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.contexts import get_default_context
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.databases.storage_utils import delta_to_pyarrow_dataset
 from orcapod.errors import StoreWriteError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+from orcapod.databases.utils import as_table_committing
 from orcapod.sources import DictSource
 from orcapod.types import NodeConfig
 
@@ -200,8 +204,9 @@ def test_a_failed_commit_names_the_node_and_keeps_earlier_batches(
     tmp_path: Path, orchestrator: str, error_policy: str
 ) -> None:
     """The second batch's commit fails: the run raises, the first batch is kept."""
-    # The first commit is two calls: the result table, then the store.
-    store = FailingCommits(DeltaTableDatabase(tmp_path), {"calls": 0, "ok": 2})
+    # The run first commits what was pending before it (one call); the node's first
+    # commit is two calls: the result table, then the store.
+    store = FailingCommits(DeltaTableDatabase(tmp_path), {"calls": 0, "ok": 3})
     job = build_job(store, 250)
     with pytest.raises(StoreWriteError) as info:
         job.run(
@@ -456,3 +461,100 @@ def test_results_are_committed_before_their_records_just_below_batch_size(
             .to_pylist()
         )
         assert referenced <= committed, entry["version"]
+
+
+def _assert_records_point_at_committed_results(root: Path) -> None:
+    """Every committed pipeline-record version references only committed results."""
+    tables = table_dirs(root)
+    result_history = deltalake.DeltaTable(str(tables["result"])).history()
+    for entry in deltalake.DeltaTable(str(tables["pipeline"])).history():
+        records = deltalake.DeltaTable(
+            str(tables["pipeline"]), version=entry["version"]
+        )
+        result_versions = [
+            r["version"] for r in result_history if r["timestamp"] <= entry["timestamp"]
+        ]
+        assert result_versions, entry
+        results = deltalake.DeltaTable(
+            str(tables["result"]), version=max(result_versions)
+        )
+        referenced = set(read_column_of(records, "__data_id"))
+        assert referenced <= set(read_column_of(results, "__record_id")), entry
+
+
+def read_column_of(table: deltalake.DeltaTable, column: str) -> list[Any]:
+    """The values of ``column`` in a loaded table version."""
+    return (
+        delta_to_pyarrow_dataset(table).to_table(columns=[column])[column].to_pylist()
+    )
+
+
+def _wrapped(store: Any, times: int) -> Any:
+    """``store`` inside ``times`` layers of ``ExtensionAwareDatabase``."""
+    converter = get_default_context().type_converter
+    for _ in range(times):
+        store = ExtensionAwareDatabase(store, converter)  # pyright: ignore[reportArgumentType]  # the context's converter; two TypeConverterProtocol definitions exist
+    return store
+
+
+def test_a_wrapped_delta_store_is_table_committing(tmp_path: Path) -> None:
+    """Wrappers expose the Delta store's batch_size and flush_batch, and only then."""
+    assert as_table_committing(_wrapped(DeltaTableDatabase(tmp_path), 1)) is not None
+    assert as_table_committing(_wrapped(InMemoryArrowDatabase(), 2)) is None
+    assert as_table_committing(InMemoryArrowDatabase()) is None
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_doubly_wrapped_delta_store_keeps_the_commit_rules(
+    tmp_path: Path, orchestrator: str
+) -> None:
+    """Through two wrappers: the batch-size rule applies and results commit first."""
+    store = _wrapped(DeltaTableDatabase(tmp_path, batch_size=50), 2)
+    table_committing = as_table_committing(store)
+    assert table_committing is not None and table_committing.batch_size == 50
+    with pytest.raises(ValueError, match="batch_size=50"):
+        build_job(store, 3).run(commit_every_rows=50)
+    build_job(store, 120).run(
+        orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=49
+    )
+    _assert_records_point_at_committed_results(tmp_path)
+
+
+def test_writes_pending_before_the_run_are_committed_first(tmp_path: Path) -> None:
+    """Rows the store held pending before ``run`` are committed before the run writes."""
+    store = DeltaTableDatabase(tmp_path)
+    leftover = pa.table({"v": pa.array([1], pa.int64())})
+    store.add_record(("leftover",), b"left-1", leftover)  # pending, never flushed
+    build_job(store, 30).run()
+    leftover_commit = deltalake.DeltaTable(str(tmp_path / "leftover")).history()
+    first_job_commit = min(
+        entry["timestamp"]
+        for table in table_dirs_except(tmp_path, "leftover")
+        for entry in deltalake.DeltaTable(str(table)).history()
+    )
+    assert leftover_commit[0]["timestamp"] <= first_job_commit
+
+
+def table_dirs_except(root: Path, name: str) -> list[Path]:
+    """The Delta tables under ``root`` except the one named ``name``."""
+    return [log.parent for log in root.rglob("_delta_log") if log.parent.name != name]
+
+
+def test_a_failed_commit_of_writes_pending_before_the_run_stops_it_first(
+    tmp_path: Path,
+) -> None:
+    """If writes left pending before the run cannot be committed, nothing is computed."""
+    calls_before = len(_DOUBLE_CALLS)
+    store = FailingCommits(DeltaTableDatabase(tmp_path), {"calls": 0, "ok": 0})
+    job = PipelineJob(name="batched", store=store)  # pyright: ignore[reportArgumentType]  # failing wrapper of a real store
+    with job:
+        counted_double.pod(
+            DictSource(data=[{"k": 1, "x": 1}], tag_columns=["k"], source_id="src"),
+            label="dbl",
+        )
+    with pytest.raises(StoreWriteError) as info:
+        job.run()
+    assert info.value.flush is True
+    notes = getattr(info.value, "__notes__", [])
+    assert any("left pending in the store before this run started" in n for n in notes)
+    assert len(_DOUBLE_CALLS) == calls_before

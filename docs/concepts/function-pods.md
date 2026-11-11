@@ -265,13 +265,17 @@ outside `job.run()`, also commits after every row. On a `DeltaTableDatabase`,
 `commit_every_rows` must be smaller than the store's `batch_size` (default 1000):
 the store commits every pending table by itself once one table holds that many pending
 rows, which would not keep the order described below, so `job.run()` refuses a larger value
-with `ValueError`. Create the store with a larger `batch_size` to commit less often.
+with `ValueError`. Create the store with a larger `batch_size` to commit less often. For the same reason, `job.run()` first commits
+whatever such a store already holds pending (writes made without a flush, or the batches of a
+run that failed); if that fails, the run stops before computing anything.
 
 **Memory.** A `DeltaTableDatabase` keeps the committed rows of every table it looks rows up
 in (each function node's result and pipeline-record tables) in memory for as long as the
-store object lives, so that a lookup never re-reads the table. Before, every lookup read the
-whole table and released it; the peak is the same, but it now lasts. For very large tables,
-use a new store object per job.
+store object lives, so that a lookup never re-reads the table. These copies are held
+together, so plan memory for all of them at once: for a function returning one `int`, about
+1.6 KB per stored row per function node (result and pipeline-record tables together), more
+for larger outputs. Before, each lookup read one whole table and released it. To release
+the copies, use a new store object, for example one per job.
 
 **What a hard crash loses.** If the process dies without raising (power loss, `kill -9`,
 the machine restarts), a durable store such as `DeltaTableDatabase` keeps every batch

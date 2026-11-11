@@ -13,10 +13,11 @@ from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
-from orcapod.errors import StoreReadError, StoreWriteError
+from orcapod.errors import StoreError, StoreReadError, StoreWriteError
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
+from orcapod.databases.utils import as_table_committing
 from orcapod.types import CacheMode, NodeConfig
 from orcapod.utils.store_errors import flush_best_effort
 
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
+
+_PENDING_BEFORE_RUN_NOTE = (
+    "These writes were left pending in the store before this run started (written "
+    "without a flush, or by a run that failed). The run stopped before computing "
+    "anything."
+)
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -788,15 +795,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "PipelineJob has no compiled pipeline. "
                 "Record invocations inside a 'with job:' block first."
             )
-        store_batch_size = getattr(self._store, "batch_size", None)
-        if isinstance(store_batch_size, int) and commit_every_rows >= store_batch_size:
+        table_committing = as_table_committing(self._store)
+        if (
+            table_committing is not None
+            and commit_every_rows >= table_committing.batch_size
+        ):
             raise ValueError(
                 f"commit_every_rows={commit_every_rows} must be smaller than the "
-                f"store's batch_size={store_batch_size}: the store commits every "
-                "pending table by itself once one table holds batch_size pending "
-                "rows, which would commit pipeline records before their results. "
-                "Use a smaller commit_every_rows, or create the store with a larger "
-                "batch_size."
+                f"store's batch_size={table_committing.batch_size}: the store commits a "
+                "table by itself once it holds batch_size pending rows, which could "
+                "commit pipeline records before their results. Use a smaller "
+                "commit_every_rows, or create the store with a larger batch_size."
             )
         if self._store is None:
             raise ValueError(
@@ -879,6 +888,22 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         pipeline_db = self._store.at(*self._name)
         result_db = pipeline_db.at("_result")
+
+        # A store that commits a table by itself at batch_size: commit what it already
+        # holds pending (writes made without a flush, or a failed run's batches) before
+        # this run writes. Those rows would otherwise count towards a table's
+        # batch_size, which could then be reached mid-run and commit this run's pipeline
+        # records ahead of their results (ITL-919).
+        if table_committing is not None:
+            try:
+                pipeline_db.flush()
+            except StoreError as exc:
+                exc.add_note(_PENDING_BEFORE_RUN_NOTE)
+                raise
+            except Exception as exc:
+                flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
+                flush_error.add_note(_PENDING_BEFORE_RUN_NOTE)
+                raise flush_error from exc
 
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         try:

@@ -2568,8 +2568,10 @@ pod: 0.09 ms).
   (ITL-923 item 3): a pending row written with `skip_duplicates=False` whose id is already
   stored is still dropped by the commit (Delta keeps the stored row; the in-memory store
   overwrites it). Memory: a store object keeps the committed rows of each table it looks rows
-  up in for as long as it lives (main read the whole table per lookup and released it; the
-  peak is the same, the lifetime is new); keeping only the lookup columns would need a read
-  per matched row. A follow-up to bound it is for the coordinator to file. The store's own
+  up in for as long as it lives, all of them at once (main read one whole table per lookup
+  and released it), so memory is cumulative over the tables: measured for an `int -> int`
+  pod, about 820 bytes per stored row for the result table and 746 for the pipeline-record
+  table, so about 1.6 GB per function node at 1M rows. Keeping only the lookup columns would
+  need a read per matched row. A follow-up to bound it is for the coordinator to file. The store's own
   size-triggered flush (`batch_size`) now commits only the full table, and `PipelineJob.run`
   refuses `commit_every_rows >= batch_size`, so the results-first order holds.
