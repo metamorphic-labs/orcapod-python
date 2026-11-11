@@ -28,36 +28,41 @@ scratchpad (listed in the plan).
 1. **All-nullable columns make every function pod with a plain type fail.** With the EDI
    schemas every tag and data column is `T | None`. `@function_pod def f(x: float)` on such a
    stream raises `ValueError: ... column 'x' has type float | None, the function expects float`.
-   Pods annotated `x: float | None` work. Repro: `e2e/edi_sim.py`.
+   Pods annotated `x: float | None` work. Repro: `repros/c1_nullable_columns_refuse_plain_pods.py`.
 2. **`fixed_size_list` columns crash source construction.** `starfix` 0.4.0 (latest) raises
    `NotImplementedError: Unsupported leaf type: fixed_size_list<...>` from
    `arrow_hasher.hash_table`. General: `ArrowTableSource` fails the same way. EDI tables hit:
    `experiment_display_params`, `experiment_freeviewing_params`,
-   `experiment_screen_capture_event`, `lfp_timeseries`.
+   `experiment_screen_capture_event`, `lfp_timeseries`. Repro:
+   `repros/c2_fixed_size_list_cannot_hash.py`. (starfix 0.5.0, about to be released, also
+   rejects FixedSizeList, so this is a starfix decision.)
 3. **Large tables cannot be used.** The source reads the whole table eagerly and
    `SourceStreamBuilder` calls `table.to_pylist()` for provenance tokens. Measured: 200k
    spike_event-shaped rows take 0.9 s and add about 210 MB of peak RSS for 8.6 MB of Arrow
    data (about 25×). There is no column projection, row filter or limit on the source.
    `spike_event`, `lfp_timeseries`, `experiment_gaze_online_timeseries` and
-   `experiment_screen_capture_frame_270p` are at risk.
+   `experiment_screen_capture_frame_270p` are at risk. Repro: `repros/c3_source_memory.py`.
 4. **pyspiral pin vs. login.** See "pyspiral" below.
 
 ### High
 
 5. **Naive timestamp tags become UTC on one read path.** `FunctionJobNode.as_table()` returns
    a `timestamp[us]` tag as `timestamp[us, tz=UTC]`; `get_all_records()` and an in-memory pod
-   keep `timestamp[us]`. General (not Spiral); repro `e2e/tz_repro.py`. EDI keys include
+   keep `timestamp[us]`. General (not Spiral); repro `repros/h1_timestamp_tag_becomes_utc.py`.
+   Being filed as a separate issue. EDI keys include
    `session_start_datetime`.
 6. **Record identity is positional by default.** Inserting a row whose key sorts first
    re-keys every later row, giving duplicate pipeline entries; function results are still
-   cached (one call). `record_id_column` takes one column only, so a composite primary key
+   cached (one call). Repro: `repros/h2_positional_record_ids.py`. `record_id_column` takes one column only, so a composite primary key
    cannot be used, and a non-unique column is accepted silently, giving two rows the same
    record ID (`comp::s=a` twice).
 7. **Reading a loaded job.** After `PipelineJob.load(path, store=...)` in a fresh process,
    `nodes[label].as_table()` raises `FunctionJobNode ... unavailable: no function pod and no
    database attached`; `get_all_records()` works. General (CSV control repro).
-8. **`get_all_records()` after the source data changed** returns the previous run's rows (3)
-   while `as_table()` shows 4. General; needs triage.
+8. **`get_all_records()` on a `DeltaTableDatabase` store misses rows right after `run()`**
+   (1 of 2), while `as_table()` and `InMemoryArrowDatabase` return all of them; a later job
+   reads every row back. General; repro `repros/h4_get_all_records_delta_after_run.py`. Being
+   filed as a separate issue.
 
 ### Medium
 

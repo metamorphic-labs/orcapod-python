@@ -46,7 +46,7 @@ def main() -> None:
     print(f"{args.project}/{args.dataset}: {len(names)} tables")
     for name in names:
         table = project.table(f"{args.dataset}.{name}")
-        key_schema = table.key_schema
+        key_schema: Any = table.key_schema
         if hasattr(key_schema, "to_arrow"):  # pyspiral >= 0.16 returns a spiral Schema
             key_schema = key_schema.to_arrow()
         schema = table.schema().to_arrow()
