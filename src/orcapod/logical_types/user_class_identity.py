@@ -355,6 +355,7 @@ def candidate_classes(kind: str, name: str) -> list[type]:
 
 
 def _walk_attributes(root: Any, parts: list[str]) -> Any:
+    """Follow ``parts`` as attributes from ``root``; return ``None`` if one is missing."""
     obj = root
     for part in parts:
         obj = getattr(obj, part, None)
@@ -364,6 +365,7 @@ def _walk_attributes(root: Any, parts: list[str]) -> Any:
 
 
 def _import_dotted(name: str) -> Any:
+    """Import the object a dotted name refers to, or return ``None`` if there is none."""
     from orcapod.logical_types.type_utils import _walk_fqcn
 
     try:
@@ -471,6 +473,7 @@ def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
 
 
 def _class_token(cls: Any) -> str:
+    """Return the type token of a class: its canonical name, builtins written bare."""
     name = canonical_type_name(cls)
     return name.removeprefix("builtins.")
 

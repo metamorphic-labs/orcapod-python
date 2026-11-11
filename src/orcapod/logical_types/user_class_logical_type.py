@@ -388,6 +388,7 @@ class UserClassLogicalTypeFactory:
 
 
 def _describe_candidate(cls: type, record: dict[str, Any] | None) -> str:
+    """Render a candidate class for a read error: its path and, if known, its identity."""
     where = f"{cls.__module__}.{cls.__qualname__}"
     if record is None:
         return where
@@ -395,6 +396,7 @@ def _describe_candidate(cls: type, record: dict[str, Any] | None) -> str:
 
 
 def _type_hints(python_type: type) -> dict[str, Any]:
+    """Return the resolved type hints of a class, as ``ValueError`` on failure."""
     try:
         return typing.get_type_hints(python_type)
     except Exception as exc:
@@ -404,6 +406,7 @@ def _type_hints(python_type: type) -> dict[str, Any]:
 def _check_storage(
     lt: UserClassLogicalType, storage_type: pa.DataType, record: dict[str, Any]
 ) -> None:
+    """Raise ``TypeIdentityError`` if stored and registered storage differ beyond layout."""
     from orcapod.utils.arrow_utils import normalize_to_large_types
 
     if normalize_to_large_types(lt.storage_type) != normalize_to_large_types(
