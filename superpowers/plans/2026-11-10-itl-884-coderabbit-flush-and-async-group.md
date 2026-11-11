@@ -14,7 +14,7 @@ each failure. When at least one batch failed with a store error, it raises the f
 `StoreReadError` (else the first `InputValidationError`) itself, with a note for every other
 failed batch. Only non-store failures keep the `RuntimeError` wrapper. The async orchestrator
 replaces `except* StoreReadError` with a plain `except ExceptionGroup` that selects one
-`StoreReadError` (`_single_store_read_error`), notes and logs the rest, and raises it, in the same
+`StoreReadError` (`_single_store_error`), notes and logs the rest, and raises it, in the same
 shape as PR #287's `_single_store_error` for `StoreWriteError` so the second PR to merge has a
 trivial conflict.
 
@@ -42,7 +42,7 @@ No hash, path or stored-schema changes. No public API added.
 - `src/orcapod/databases/delta_lake_databases.py`: `flush()` and a module helper
   `_store_error_to_raise(errors)`.
 - `src/orcapod/pipeline/async_orchestrator.py`: plain `except ExceptionGroup`, helpers
-  `_single_store_read_error(group)` and `_leaves(group)` (identical to #287's `_leaves`).
+  `_single_store_error(group, topo_order)` and `_leaves(group)` (identical to #287's `_leaves`).
 - Tests: `tests/test_databases/test_delta_read_failures.py` (assert the bare error types, add a
   multi-batch test), `tests/test_pipeline/test_store_read_failure.py` (flush during per-row
   processing, both orchestrators; concurrent unrelated failure, async).
@@ -134,7 +134,7 @@ docstring gets a Raises section. Run Task 1's tests: PASS.
             raise store_error
 ```
 
-`_single_store_read_error(group)`: `StoreReadError.in_group(group)`; none gives `None`; the first
+`_single_store_error(group, topo_order)`: `StoreReadError.in_group(group)`; none gives `None`; the first
 is chosen; every other leaf (`_leaves`) is noted on it ("Another store read failed in the same
 run: ..." also logged at WARNING; "Another node failed in the same run: <type>: <msg>"). Its
 `__cause__` stays the backend error; the group is its `__context__`. Run: PASS.
