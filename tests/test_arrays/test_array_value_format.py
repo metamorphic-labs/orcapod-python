@@ -502,9 +502,13 @@ def test_declared_ndarray_check_recognizes_parameterized_aliases() -> None:
     # today (ITL-869), so the check is exercised directly for when they are allowed.
     import numpy.typing as npt_
 
-    from orcapod.core.data_function import _declared_ndarray_type  # pyright: ignore[reportPrivateUsage]
+    from orcapod.core.data_function import _declared_array_type  # pyright: ignore[reportPrivateUsage]
 
-    assert _declared_ndarray_type(np.ndarray) is np.ndarray
-    assert _declared_ndarray_type(npt_.NDArray[np.float32]) is np.ndarray
-    assert _declared_ndarray_type(npt_.NDArray[np.float32] | None) is np.ndarray
-    assert _declared_ndarray_type(float) is None
+    def required(declared: object) -> object:
+        found = _declared_array_type(declared)
+        return None if found is None else found[0]
+
+    assert required(np.ndarray) is np.ndarray
+    assert required(npt_.NDArray[np.float32]) is np.ndarray
+    assert required(npt_.NDArray[np.float32] | None) is np.ndarray
+    assert required(float) is None

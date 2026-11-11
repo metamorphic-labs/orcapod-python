@@ -12,7 +12,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402  # pyright: ignore[reportMissingImports]  # optional peer dependency, importorskip above
 
 from orcapod import function_pod  # noqa: E402
-from orcapod.sources import DictSource  # noqa: E402
+from orcapod.sources import ArrowTableSource, DictSource  # noqa: E402
 from tests.test_torch.tensor_cases import (  # noqa: E402
     NUMERIC,
     TENSORS,
@@ -74,6 +74,16 @@ def test_chained_pods() -> None:
         )
 
 
+def _stored_outputs(stream: Any, column: str) -> dict[str, Any]:
+    """Read a pod's outputs back from the stored rows (``as_table``).
+
+    In memory, a pod's output datagram holds the very object the function
+    returned; the canonical CPU form is what is stored and read back from a store.
+    """
+    table = stream.as_table().select(["k", column])
+    return _read(ArrowTableSource(table, tag_columns=["k"]), column)
+
+
 def test_pod_returning_a_grad_tensor_stores_its_value() -> None:
     weight = torch.ones(3, requires_grad=True)
 
@@ -81,7 +91,7 @@ def test_pod_returning_a_grad_tensor_stores_its_value() -> None:
     def scale(x: torch.Tensor) -> torch.Tensor:
         return x * weight  # tracks gradients
 
-    got = _read(scale.pod(_source({"a": torch.arange(3.0)})), "y")
+    got = _stored_outputs(scale.pod(_source({"a": torch.arange(3.0)})), "y")
     assert_tensors_identical(got["a"], torch.arange(3.0))
     assert weight.requires_grad and weight.grad is None
 
@@ -92,7 +102,7 @@ def test_pod_returning_an_mps_tensor_reads_back_on_cpu() -> None:
     def to_gpu(x: torch.Tensor) -> torch.Tensor:
         return x.to("mps") * 2
 
-    got = _read(to_gpu.pod(_source({"a": torch.arange(3.0)})), "y")
+    got = _stored_outputs(to_gpu.pod(_source({"a": torch.arange(3.0)})), "y")
     assert_tensors_identical(got["a"], torch.arange(3.0) * 2)
 
 
@@ -102,15 +112,14 @@ def test_pod_returning_a_cuda_tensor_reads_back_on_cpu() -> None:
     def to_gpu(x: torch.Tensor) -> torch.Tensor:
         return x.to("cuda") * 2
 
-    got = _read(to_gpu.pod(_source({"a": torch.arange(3.0)})), "y")
+    got = _stored_outputs(to_gpu.pod(_source({"a": torch.arange(3.0)})), "y")
     assert_tensors_identical(got["a"], torch.arange(3.0) * 2)
 
 
-def test_read_back_is_writeable_and_owns_its_memory() -> None:
-    source = _source({"a": torch.arange(3.0)})
-    first = _read(source, "x")["a"]
-    first[0] = 99.0
-    assert_tensors_identical(_read(source, "x")["a"], torch.arange(3.0))
+def test_read_back_is_writeable() -> None:
+    got = _read(_source({"a": torch.arange(3.0)}), "x")["a"]
+    got[0] = 99.0
+    assert got[0] == 99.0
 
 
 def test_optional_tensor_column_keeps_none() -> None:

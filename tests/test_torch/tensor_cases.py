@@ -40,7 +40,15 @@ TENSORS: dict[str, Any] = {
 }
 """One tensor per supported dtype and shape class."""
 
-NUMERIC = ("int8", "float32", "complex128", "bfloat16", "zero_d", "empty_0x3", "three_d")
+NUMERIC = (
+    "int8",
+    "float32",
+    "complex128",
+    "bfloat16",
+    "zero_d",
+    "empty_0x3",
+    "three_d",
+)
 """Keys of tensors that support ``x * 2`` and ``x.sum()``."""
 
 LABEL = "torch_tensor_v1"

@@ -41,8 +41,15 @@ def total(d: torch.Tensor) -> float:
 
 
 @function_pod(output_keys="count")
-def count(x: list[torch.Tensor]) -> int:
+def count(k: list[str], x: list[torch.Tensor]) -> int:
+    # GroupBy moves the non-key tag ``k`` into the data as a list.
+    assert len(k) == len(x)
     return len(x)
+
+
+@function_pod(output_keys="pair")
+def pair(x: list[torch.Tensor]) -> list[torch.Tensor]:
+    return list(x)
 
 
 def _build(store: Any) -> PipelineJob:
@@ -52,12 +59,18 @@ def _build(store: Any) -> PipelineJob:
         source_id="numeric",
     )
     every = DictSource(
-        data=[{"k": k, "g": f"g{i % 2}", "x": v} for i, (k, v) in enumerate(TENSORS.items())],
+        data=[
+            {"k": k, "g": f"g{i % 2}", "x": v}
+            for i, (k, v) in enumerate(TENSORS.items())
+        ],
         tag_columns=["k", "g"],
         source_id="every",
     )
     shifted = DictSource(
-        data=[{"k": k, "x": TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]} for i, k in enumerate(NUMERIC)],
+        data=[
+            {"k": k, "x": TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]}
+            for i, k in enumerate(NUMERIC)
+        ],
         tag_columns=["k"],
         source_id="shifted",
     )
@@ -68,7 +81,9 @@ def _build(store: Any) -> PipelineJob:
         d = double.pod(y, label="double")
         total.pod(d, label="total")
         count.pod(GroupBy(by=["g"])(every, label="grouped"), label="count")
-        MergeJoin()(numeric, shifted, label="merged")
+        # Operator results are read through a function pod: a terminal operator
+        # node yields no rows after an async run (pre-existing, not tensor-specific).
+        pair.pod(MergeJoin()(numeric, shifted, label="merge_join"), label="merged")
     return job
 
 
@@ -120,7 +135,7 @@ def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -
     counts = _node(job, "count", "count", key="g")
     assert sum(counts.values()) == len(TENSORS)
 
-    merged = _node(job, "merged", "x")
+    merged = _node(job, "merged", "pair")
     for i, name in enumerate(NUMERIC):
         assert_same_tensors_any_order(
             list(merged[name]),

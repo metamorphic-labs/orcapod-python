@@ -112,13 +112,24 @@ def parse_function_outputs(
 E = TypeVar("E", bound=DataFunctionExecutorProtocol)
 
 
-def _declared_ndarray_type(declared: Any) -> type | None:
-    """Return the ndarray class a declared output type requires, if any.
+_ARRAY_CLASSES: dict[tuple[str, str], str] = {
+    ("numpy", "ndarray"): "return an array, for example with np.asarray(...)",
+    ("torch", "Tensor"): "return a tensor, for example with torch.as_tensor(...)",
+}
+"""Array classes whose declared outputs are checked, by ``(module, qualname)``, with a hint."""
 
-    Handles ``np.ndarray`` (or a subclass), parameterized aliases such as
-    ``npt.NDArray[np.float32]``, and ``Optional``/``| None`` of either.
-    NumPy is never imported here: a class counts as an ndarray when its MRO
-    contains ``numpy.ndarray``.
+
+def _declared_array_type(declared: Any) -> tuple[type, str] | None:
+    """Return the array class a declared output type requires, if any.
+
+    Handles ``np.ndarray`` and ``torch.Tensor`` (or a subclass), parameterized
+    aliases such as ``npt.NDArray[np.float32]``, and ``Optional``/``| None`` of
+    either. Neither NumPy nor torch is imported here: a class counts as an array
+    class when its MRO contains ``numpy.ndarray`` or ``torch.Tensor``.
+
+    Returns:
+        ``(class, hint)`` where ``hint`` tells the user how to return one, or
+        ``None`` when the declared type is not an array class.
     """
     candidates = [declared]
     if typing.get_origin(declared) in (typing.Union, types.UnionType):
@@ -126,21 +137,24 @@ def _declared_ndarray_type(declared: Any) -> type | None:
     for candidate in candidates:
         # A parameterized alias such as npt.NDArray[np.float32] has origin np.ndarray.
         candidate = typing.get_origin(candidate) or candidate
-        if isinstance(candidate, type) and any(
-            base.__module__ == "numpy" and base.__qualname__ == "ndarray"
-            for base in candidate.__mro__
-        ):
-            return candidate
+        if not isinstance(candidate, type):
+            continue
+        for base in candidate.__mro__:
+            hint = _ARRAY_CLASSES.get((base.__module__, base.__qualname__))
+            if hint is not None:
+                return candidate, hint
     return None
 
 
-def _check_declared_ndarray_outputs(
+def _check_declared_array_outputs(
     output_data: dict[str, Any], output_schema: Schema
 ) -> None:
-    """Refuse a non-array returned for an output declared as a NumPy array (ITL-883).
+    """Refuse a non-array returned for an output declared as an array class.
 
-    A NumPy scalar (for example ``x * 2`` on a 0-d array) is not an array, and
-    Orcapod never wraps one implicitly.
+    Covers ``np.ndarray`` (ITL-883) and ``torch.Tensor`` (ITL-871). A NumPy
+    scalar (for example ``x * 2`` on a 0-d array), a Python number or an ndarray
+    returned where a tensor is declared is not that class, and Orcapod never
+    wraps or converts one implicitly.
 
     Raises:
         TypeError: Naming the output key, the declared type and the returned type.
@@ -148,13 +162,15 @@ def _check_declared_ndarray_outputs(
     for key, value in output_data.items():
         if value is None:
             continue
-        required = _declared_ndarray_type(output_schema.get(key))
-        if required is not None and not isinstance(value, required):
+        declared = _declared_array_type(output_schema.get(key))
+        if declared is None:
+            continue
+        required, hint = declared
+        if not isinstance(value, required):
             raise TypeError(
                 f"Output {key!r} is declared as {required.__module__}.{required.__qualname__}"
                 f" but the function returned {type(value).__module__}."
-                f"{type(value).__qualname__} ({value!r}); return an array, for example"
-                " with np.asarray(...)"
+                f"{type(value).__qualname__} ({value!r}); {hint}"
             )
 
 
@@ -623,7 +639,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             A Data containing the parsed outputs with source info.
         """
         output_data = parse_function_outputs(self._output_keys, values)
-        _check_declared_ndarray_outputs(output_data, self.output_data_schema)
+        _check_declared_array_outputs(output_data, self.output_data_schema)
 
         def combine(*components: tuple[str, ...]) -> str:
             inner_parsed = [":".join(component) for component in components]

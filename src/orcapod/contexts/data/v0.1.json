@@ -55,6 +55,14 @@
                             "_config": {}
                         }
                     ],
+                    "deferred_logical_types": [
+                        {
+                            "python_type": "torch.Tensor",
+                            "extension_name": "orcapod.torch_tensor",
+                            "logical_type": "orcapod.logical_types.torch_type.LogicalTorchTensor",
+                            "requires": "torch"
+                        }
+                    ],
                     "factories": [
                         {
                             "factory": {
@@ -102,6 +110,9 @@
     "python_type_handler_registry": {
         "_class": "orcapod.hashing.semantic_hashing.type_handler_registry.PythonTypeHandlerRegistry",
         "_config": {
+            "deferred_handlers": [
+                {"python_type": "torch.Tensor", "handler": "orcapod.hashing.semantic_hashing.torch_handler.TorchTensorHandler"}
+            ],
             "handlers": [
                 [{"_type": "builtins.bytes"},         {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.BytesHandler",        "_config": {}}],
                 [{"_type": "builtins.bytearray"},     {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.BytesHandler",        "_config": {}}],
@@ -163,7 +174,8 @@
             "Wired file_hasher reference into BasicDirectoryHasher so op.Directory hashing uses the same FileContentHasherProtocol as op.File hashing; required file_hasher constructor arg enforces explicit injection",
             "Moved SpikeInterface types (LogicalSIRecording, LogicalSISorting, LogicalSIMotion, LogicalSISortingAnalyzer) and their handlers to the standalone orcapod-extension-spikeinterface package; removed all SI _optional entries from this spec and SI deps from pyproject.toml; introduced OrcapodExtension protocol and op.register_extension() for normalized extension registration (ITL-473)",
             "Registered SchemaHandler for orcapod.types.Schema in the context registry; moved handler dispatch before _is_structure check in hash_object so SchemaHandler takes priority over _expand_mapping for Schema objects (ITL-639)",
-            "Hard cut (v0.3): numpy.ndarray moves to the value-based array format. LogicalNumpyArray stores extension orcapod.ndarray over struct<dtype, shape, data> (Orcapod dtype tag, shape, little-endian C-order packed bytes; extension metadata {\"version\":1}) and NumpyArrayHandler hashes by value with label ndarray_v1 (array_digest_v1 over the stored row). The old extension name numpy.ndarray (.npy bytes, label sha256) is no longer registered or written; v0.2 stores holding arrays are not migrated (ITL-888)"
+            "Hard cut (v0.3): numpy.ndarray moves to the value-based array format. LogicalNumpyArray stores extension orcapod.ndarray over struct<dtype, shape, data> (Orcapod dtype tag, shape, little-endian C-order packed bytes; extension metadata {\"version\":1}) and NumpyArrayHandler hashes by value with label ndarray_v1 (array_digest_v1 over the stored row). The old extension name numpy.ndarray (.npy bytes, label sha256) is no longer registered or written; v0.2 stores holding arrays are not migrated (ITL-888)",
+            "Added torch.Tensor as an optional value type, registered on first use so that importing orcapod never imports torch: LogicalTorchTensor stores extension orcapod.torch_tensor over the array struct (same dtype tags and bytes as numpy for shared dtypes, plus bfloat16) and TorchTensorHandler hashes by value with label torch_tensor_v1 (array_digest_v1 over the stored row). Added deferred_logical_types to LogicalTypeRegistry and deferred_handlers to PythonTypeHandlerRegistry; nothing else in the context changes (ITL-871)"
         ]
     }
 }

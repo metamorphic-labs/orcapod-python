@@ -69,7 +69,9 @@ class _StoredTensorType(pa.ExtensionType):
         return ARRAY_FORMAT_METADATA
 
     @classmethod
-    def __arrow_ext_deserialize__(cls, storage_type: pa.DataType, serialized: bytes) -> "_StoredTensorType":
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> "_StoredTensorType":
         return cls()
 
 
@@ -85,7 +87,9 @@ def test_reading_a_tensor_column_without_torch_names_the_missing_dependency() ->
             "x": pa.ExtensionArray.from_storage(_StoredTensorType(), storage),
         }
     )
-    with pytest.raises(MissingOptionalDependencyError, match="orcapod.torch_tensor.*torch"):
+    with pytest.raises(
+        MissingOptionalDependencyError, match="orcapod.torch_tensor.*torch"
+    ):
         source = ArrowTableSource(table, tag_columns=["k"])
         for _, data in source.iter_data():
             data.as_dict()

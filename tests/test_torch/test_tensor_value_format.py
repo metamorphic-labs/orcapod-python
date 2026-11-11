@@ -165,7 +165,9 @@ def _same_value_variants() -> list[tuple[str, Any, Any]]:
     [v[1:] for v in _same_value_variants()],
     ids=[v[0] for v in _same_value_variants()],
 )
-def test_layout_device_grad_and_subclass_do_not_change_the_value(a: Any, b: Any) -> None:
+def test_layout_device_grad_and_subclass_do_not_change_the_value(
+    a: Any, b: Any
+) -> None:
     assert semantic_hash(a) == semantic_hash(b)
     assert data_hash(a) == data_hash(b)
     assert stored(a) == stored(b)
@@ -177,7 +179,11 @@ DIFFERENT: list[tuple[str, Any, Any]] = [
     ("empty_shapes", torch.zeros((0, 3)), torch.zeros((3, 0))),
     ("zero_d_vs_one", torch.tensor(1.0), torch.tensor([1.0])),
     ("signed_zero", torch.tensor([0.0]), torch.tensor([-0.0])),
-    ("bfloat16_vs_float16", torch.ones(2, dtype=torch.bfloat16), torch.ones(2, dtype=torch.float16)),
+    (
+        "bfloat16_vs_float16",
+        torch.ones(2, dtype=torch.bfloat16),
+        torch.ones(2, dtype=torch.float16),
+    ),
     ("shape", torch.arange(6.0).reshape(2, 3), torch.arange(6.0).reshape(3, 2)),
 ]
 
@@ -213,7 +219,9 @@ def _snapshot(t: Any) -> tuple[Any, ...]:
 
 
 @pytest.mark.parametrize(
-    "a", [v[1] for v in _same_value_variants()], ids=[v[0] for v in _same_value_variants()]
+    "a",
+    [v[1] for v in _same_value_variants()],
+    ids=[v[0] for v in _same_value_variants()],
 )
 def test_storing_and_hashing_never_modify_the_tensor(a: Any) -> None:
     before = _snapshot(a)
