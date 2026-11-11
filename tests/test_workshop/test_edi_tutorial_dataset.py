@@ -1137,44 +1137,76 @@ class TestReplace:
         assert [r.action for r in report.tables] == ["would replace"]
 
 
+class _RecordWriter:
+    """Stands in for Orcapod's ``write_nullability_record`` (ITL-936, not on main)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, pa.Schema]] = []
+        self.current: dict[int, pa.Schema] = {}
+
+    def __call__(self, table: Any, schema: pa.Schema) -> bool:
+        self.calls.append((table, schema))
+        key = id(table._stored)
+        changed = self.current.get(key) != schema
+        if changed:
+            table.set_metadata({"__record__": str(schema).encode()})
+        self.current[key] = schema
+        return changed
+
+
 class TestAnnotate:
-    def test_writes_metadata_only_and_is_idempotent(self, client, nmap, subset):
+    def _annotate(self, client, target, nmap, subset, writer):
+        return tool.annotate(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            allow_writes=target,
+            nmap=nmap,
+            subset=subset,
+            write_record=writer,
+        )
+
+    def test_records_the_schema_the_copy_wrote_metadata_only(
+        self, client, nmap, subset
+    ):
         target = make_target(client)
         run_copy(client, target, nmap, subset)
+        writer = _RecordWriter()
         before = len(client.log)
-        lines = tool.annotate(
-            client,
-            source_project=SOURCE,
-            target_project=target,
-            allow_writes=target,
-            nmap=nmap,
-            subset=subset,
-            key="test.nullability",
-        )
-        assert all(line.endswith("annotated") for line in lines)
+        lines = self._annotate(client, target, nmap, subset, writer)
+        assert all(line.endswith("recorded") for line in lines)
         assert {e[1] for e in client.log[before:]} == {"set_metadata"}
-        meta = client.project(target).table("default.session").get_metadata()
-        record = json.loads(meta["test.nullability"])
-        assert record["columns"]["booth"] is False
-        assert record["columns"]["session_notes"] is True
-        unit = json.loads(
-            client.project(target)
-            .table("default.unit")
-            .get_metadata()["test.nullability"]
-        )
-        assert unit["groups"]["labels"]["nullable"] is False
-        after = len(client.log)
-        again = tool.annotate(
-            client,
-            source_project=SOURCE,
-            target_project=target,
-            allow_writes=target,
-            nmap=nmap,
-            subset=subset,
-            key="test.nullability",
-        )
+        declared = {tbl._ident: schema for tbl, schema in writer.calls}
+        for name in SUBSET_JSON["tables"]:
+            assert (
+                declared[f"default.{name}"]
+                == client.written_schemas[(target, f"default.{name}")][0]
+            )
+        again = self._annotate(client, target, nmap, subset, writer)
         assert all(line.endswith("unchanged") for line in again)
-        assert len(client.log) == after
+
+    def test_a_null_in_the_target_blocks_the_record(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.session"]
+        assert stored.data is not None
+        i = stored.data.schema.get_field_index("booth")
+        stored.data = stored.data.set_column(
+            i, stored.data.schema.field(i), pa.array([None], pa.string())
+        )
+        writer = _RecordWriter()
+        with pytest.raises(tool.NullInRequiredColumnError):
+            self._annotate(client, target, nmap, subset, writer)
+        assert all(tbl._ident != "default.session" for tbl, _ in writer.calls)
+
+    def test_orcapod_without_the_record_helper_is_a_clear_error(self, monkeypatch):
+        import orcapod.databases
+
+        monkeypatch.delattr(
+            orcapod.databases, "write_nullability_record", raising=False
+        )
+        with pytest.raises(tool.ToolError, match="ITL-936"):
+            tool.load_record_writer()
 
 
 class TestFloatComparison:

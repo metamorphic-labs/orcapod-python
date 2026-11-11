@@ -120,9 +120,11 @@ written into a struct field declared non-null is accepted. So:
   no nulls;
 * Orcapod sources on these tables still show every column as `T | None`. Showing the
   declared nullability needs a record of it in each table's metadata, which Orcapod's
-  Spiral connector reads and enforces: ITL-936. `annotate` writes that record (table
-  metadata only, never data). Its key and format are finalised with ITL-936; do not run it
-  before then.
+  Spiral connector reads and enforces: ITL-936. `annotate` gives each table that record
+  by calling Orcapod's `write_nullability_record` with the exact schema `copy` wrote, after
+  checking the table's data for nulls in the declared non-nullable columns. It writes table
+  metadata only, never data, and needs an Orcapod that has ITL-936; without it, `annotate`
+  stops with an error naming ITL-936.
 
 ## Commands
 
@@ -144,7 +146,7 @@ $TOOL copy --target-project ID --allow-writes ID
 $TOOL verify --target-project ID
 $TOOL copy --target-project ID --allow-writes ID --tables atlas_label --replace
                                             # copy one table again after a source fix
-$TOOL annotate --target-project ID --allow-writes ID --key KEY   # after ITL-936
+$TOOL annotate --target-project ID --allow-writes ID   # needs Orcapod with ITL-936
 $TOOL orcapod-check --target-project ID     # after ITL-936: required columns show as T
 ```
 

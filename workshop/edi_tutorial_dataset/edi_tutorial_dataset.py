@@ -1423,25 +1423,24 @@ def _compare_streams(
 # ---------------------------------------------------------------------- annotate
 
 
-def nullability_record(spec: TableSpec) -> dict[str, Any]:
-    """Return the declared nullability of one table, for its metadata.
+RecordWriter = Callable[[Any, pa.Schema], bool]
 
-    SpiralDB stores every top-level column nullable, so a reader learns which
-    columns are required only from a record like this one. The key and the format
-    are designed in ITL-936 (Orcapod's Spiral connector reads the record and enforces
-    it); until then this is a placeholder carrying the map's content, nested fields
-    included, and ``annotate`` is not to be run. Adapt this function to that format.
+
+def load_record_writer() -> RecordWriter:
+    """Return Orcapod's ``write_nullability_record`` (ITL-936).
+
+    Raises:
+        ToolError: if the installed Orcapod does not have it.
     """
-    return {
-        "columns": {name: c.nullable for name, c in spec.columns.items()},
-        "groups": {
-            g: {
-                "nullable": group.nullable,
-                "fields": {f: c.nullable for f, c in group.fields.items()},
-            }
-            for g, group in spec.groups.items()
-        },
-    }
+    import orcapod.databases
+
+    writer = getattr(orcapod.databases, "write_nullability_record", None)
+    if writer is None:
+        raise ToolError(
+            "this Orcapod has no orcapod.databases.write_nullability_record; annotate "
+            "needs Orcapod with ITL-936 (the SpiralDB nullability record)"
+        )
+    return writer
 
 
 def annotate(
@@ -1452,39 +1451,55 @@ def annotate(
     allow_writes: str | None,
     nmap: NullabilityMap,
     subset: Subset,
-    key: str,
+    write_record: RecordWriter,
 ) -> list[str]:
-    """Write each copied table's nullability record under the metadata key ``key``.
+    """Give each copied table Orcapod's nullability record (ITL-936).
 
-    Only table metadata is written, never data, so it can run on tables copied
-    earlier. A table whose record is already current is left alone.
+    The record is written by ``write_record`` (Orcapod's ``write_nullability_record``)
+    from the exact schema ``copy`` wrote the table with: the source's types and the
+    map's nullability. The record's format is Orcapod's; this tool does not encode it.
+    Before recording a table, its data in the target is read and every column the
+    schema declares non-nullable is checked for nulls, since the helper reads no data.
+    Only table metadata is written, never data; a table whose record is current is
+    left alone.
+
+    Args:
+        client: The Spiral client.
+        source_project: The source project (read for each table's schema).
+        target_project: The project to annotate (a project ``create`` made).
+        allow_writes: Must repeat ``target_project``.
+        nmap: The nullability map.
+        subset: The subset definition (which tables, which dataset).
+        write_record: Writes the record; returns whether it changed anything.
 
     Returns:
-        One line per table: ``annotated`` or ``unchanged``.
+        One line per table: ``recorded`` or ``unchanged``.
 
     Raises:
         TargetRefusedError: if the target fails a guard.
-        ToolError: if a subset table is missing from the target, or a record does not
-            fit SpiralDB's 8 KiB metadata limit.
+        ToolError: if a subset table is missing from the target.
+        NullInRequiredColumnError: if a table holds a null where the map forbids one
+            (nothing is recorded for it).
     """
     project, _ = open_target(client, target_project, allow_writes, source_project)
+    source = client.project(source_project)
     present = {f"{r.dataset}.{r.table}" for r in project.list_tables()}
     lines = []
     for name in sorted(subset.tables):
         ident = _qualified(subset, name)
         if ident not in present:
             raise ToolError(f"{ident} is not in the target; copy it first")
-        value = json.dumps(
-            nullability_record(nmap.tables[name]), sort_keys=True
-        ).encode()
-        if len(key) + len(value) > METADATA_LIMIT:
-            raise ToolError(f"{ident}: the record is {len(value)} bytes, over 8 KiB")
+        src_schema = source.table(ident).schema().to_arrow()
+        declared = target_schema(src_schema, nmap.tables[name])
         table = project.table(ident)
-        if table.get_metadata().get(key) == value:
-            lines.append(f"{name}: unchanged")
-            continue
-        table.set_metadata({key: value})
-        lines.append(f"{name}: annotated")
+        try:
+            for batch in client.scan(table).to_record_batches():
+                conform_batch(batch.select(declared.names), declared)
+        except ToolError as err:
+            err.add_note(f"while checking table {name!r} before recording it")
+            raise
+        changed = write_record(table, declared)
+        lines.append(f"{name}: {'recorded' if changed else 'unchanged'}")
     return lines
 
 
@@ -2033,11 +2048,11 @@ def _parser() -> argparse.ArgumentParser:
             )
 
     a = sub.add_parser(
-        "annotate", help="write each table's nullability record (metadata only)"
+        "annotate",
+        help="give each table Orcapod's nullability record (ITL-936; metadata only)",
     )
     a.add_argument("--target-project", required=True)
     a.add_argument("--allow-writes", required=True, help="repeat --target-project")
-    a.add_argument("--key", required=True, help="the table-metadata key to write")
 
     v = sub.add_parser("verify", help="check the target against the source and the map")
     v.add_argument("--target-project", required=True)
@@ -2115,7 +2130,7 @@ def main(
                         allow_writes=args.allow_writes,
                         nmap=nmap,
                         subset=subset,
-                        key=args.key,
+                        write_record=load_record_writer(),
                     )
                 )
             )
