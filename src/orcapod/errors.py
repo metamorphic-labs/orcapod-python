@@ -31,6 +31,15 @@ class TypeIdentityError(ValueError):
     """
 
 
+class RecursiveTypeError(TypeError):
+    """Raised when a class refers back to itself through its fields.
+
+    Arrow cannot store a recursive struct, so a dataclass or pydantic model whose
+    fields reach the class again (``next: Node | None``) cannot be stored. The message
+    names the field path, e.g. ``Node.next -> Node``.
+    """
+
+
 class DuplicateTagError(ValueError):
     """Raised when duplicate tag values are found and skip_duplicates=False"""
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import importlib
 import json
 import re
 import sys
@@ -145,8 +144,7 @@ def set_naming(
             continue
         if value not in _NAMING_STYLES:
             raise ValueError(
-                f"Invalid naming style for {key}: {value!r}. "
-                f"Use 'name' or 'qualified'."
+                f"Invalid naming style for {key}: {value!r}. Use 'name' or 'qualified'."
             )
         _naming[key] = value
 
@@ -234,6 +232,11 @@ def reject_local_class(cls: type) -> None:
         )
 
 
+def built_name(cls: type) -> str | None:
+    """Return the name ``cls`` was built under in this process, or ``None``."""
+    return _built.get(cls)
+
+
 def mark_built(cls: type, name: str) -> None:
     """Record that ``cls`` was built under ``name`` (one name per class per process)."""
     _built[cls] = name
@@ -304,15 +307,12 @@ def _walk_attributes(root: Any, parts: list[str]) -> Any:
 
 
 def _import_dotted(name: str) -> Any:
-    parts = name.split(".")
-    for split in range(len(parts) - 1, 0, -1):
-        module_name = ".".join(parts[:split])
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError:
-            continue
-        return _walk_attributes(module, parts[split:])
-    return None
+    from orcapod.logical_types.type_utils import _walk_fqcn
+
+    try:
+        return _walk_fqcn(name)
+    except ImportError:
+        return None
 
 
 # ---------------------------------------------------------------------------

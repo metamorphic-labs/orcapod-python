@@ -34,6 +34,15 @@ from orcapod.contexts import create_registry
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
 
+def _identity(cls: type) -> str:
+    """Return the identity string (logical type name) of a user class (ITL-881)."""
+    from orcapod.contexts import get_default_context
+
+    lt = get_default_context().type_converter.get_logical_type_for_python_type(cls)
+    assert lt is not None
+    return lt.logical_type_name
+
+
 # ── Module-level dataclasses ──────────────────────────────────────────────────
 # DataclassLogicalTypeFactory rejects local (in-function) classes because they
 # have no stable fully-qualified class name for reconstruction from Arrow schema.
@@ -338,12 +347,12 @@ def test_simple_dataclass_round_trip(
         tmp_path,
     )
 
-    fqcn = f"{_PointA.__module__}.{_PointA.__qualname__}"
+    type_name = _identity(_PointA)
     field = result.schema.field("point")
     assert hasattr(field.type, "extension_name"), (
         f"Expected extension type on field 'point', got {field.type!r}"
     )
-    assert field.type.extension_name == fqcn
+    assert field.type.extension_name == type_name
 
     rows = read_converter.arrow_table_to_python_dicts(result)
     assert len(rows) == 1
@@ -370,13 +379,13 @@ def test_two_dataclasses_same_shape_distinct_extension_names(
         tmp_path,
     )
 
-    fqcn_a = f"{_PointA.__module__}.{_PointA.__qualname__}"
-    fqcn_b = f"{_PointB.__module__}.{_PointB.__qualname__}"
+    type_name_a = _identity(_PointA)
+    type_name_b = _identity(_PointB)
 
     field = result.schema.field("point")
     assert hasattr(field.type, "extension_name")
-    assert field.type.extension_name == fqcn_a
-    assert field.type.extension_name != fqcn_b  # distinct from _PointB
+    assert field.type.extension_name == type_name_a
+    assert field.type.extension_name != type_name_b  # distinct from _PointB
 
     rows = read_converter.arrow_table_to_python_dicts(result)
     reconstructed = rows[0]["point"]
@@ -401,15 +410,19 @@ def test_nested_dataclass_round_trip(
         tmp_path,
     )
 
-    fqcn_outer = f"{_Outer.__module__}.{_Outer.__qualname__}"
-    fqcn_inner = f"{_Inner.__module__}.{_Inner.__qualname__}"
+    type_name_outer = _identity(_Outer)
+    type_name_inner = _identity(_Inner)
 
     assert (
-        read_converter._logical_type_registry.get_by_arrow_extension_name(fqcn_outer)
+        read_converter._logical_type_registry.get_by_arrow_extension_name(
+            type_name_outer
+        )
         is not None
     ), "_Outer should be registered after read"
     assert (
-        read_converter._logical_type_registry.get_by_arrow_extension_name(fqcn_inner)
+        read_converter._logical_type_registry.get_by_arrow_extension_name(
+            type_name_inner
+        )
         is not None
     ), "_Inner should be registered transitively after read"
 
@@ -444,7 +457,7 @@ def test_delta_polars_read_delta(tmp_path: Path) -> None:
     import polars as pl
 
     delta_path = str(tmp_path / "polars_delta")
-    fqcn = f"{_PointA.__module__}.{_PointA.__qualname__}"
+    type_name = _identity(_PointA)
 
     # Write — registers _PointA in PyArrow + Polars global registries.
     write_converter = _fresh_converter()
@@ -463,8 +476,8 @@ def test_delta_polars_read_delta(tmp_path: Path) -> None:
     assert col_dtype.is_extension(), (
         f"Expected a Polars extension type on column 'point', got {col_dtype!r}"
     )
-    assert col_dtype.ext_name() == fqcn, (
-        f"Expected extension name {fqcn!r}, got {col_dtype.ext_name()!r}"
+    assert col_dtype.ext_name() == type_name, (
+        f"Expected extension name {type_name!r}, got {col_dtype.ext_name()!r}"
     )
 
 
