@@ -20,6 +20,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
@@ -256,45 +257,110 @@ def test_loaded_function_node_with_store_is_read_only(saved: pathlib.Path) -> No
     assert _load(saved).nodes["dbl"].load_status == LoadStatus.READ_ONLY
 
 
-def test_several_records_for_one_entry_are_read_once(tmp_path: pathlib.Path) -> None:
-    """``as_table()`` keeps one row per entry, as ``iter_data()`` does."""
+def _append_recomputed_record(
+    node: Any, entry_row: int, recomputation_index: int, value: int
+) -> None:
+    """Store a recomputed result for one entry of *node*: a new result and its record.
+
+    Non-public on purpose: no public call recomputes a stored entry in a test, so
+    this writes what a recomputation writes -- a result record with *value* and a
+    pipeline record for the same base entry with *recomputation_index* -- straight
+    into the node's store.
+    """
+    from orcapod.system_constants import constants
+
+    record_id_col = constants.DATA_RECORD_ID
+    new_record_id = uuid.uuid4().bytes
+
+    reader = node._cached_function_pod
+    results = reader.result_database.get_all_records(
+        reader.record_path, record_id_column=record_id_col
+    )
+    pipeline_db = node._pipeline_database
+    table_path = node._versioned_pipeline_path
+    entry_id_col = "__pipeline_entry_id"
+    records = pipeline_db.get_all_records(table_path, record_id_column=entry_id_col)
+    record = records.slice(entry_row, 1)
+    old_record_id = record.column(record_id_col)[0]
+    result = results.filter(pc.equal(results.column(record_id_col), old_record_id))
+
+    def replaced(table: pa.Table, column: str, values: list[Any]) -> pa.Table:
+        """Return *table* with *column* set to *values*, keeping its type."""
+        field = table.schema.field(column)
+        return table.set_column(
+            table.schema.get_field_index(column),
+            field,
+            pa.array(values, type=field.type),
+        )
+
+    result = replaced(result, record_id_col, [new_record_id])
+    result = replaced(result, "dbl", [value])
+    reader.result_database.add_records(
+        reader.record_path, result, record_id_column=record_id_col, flush=True
+    )
+    record = replaced(record, entry_id_col, [uuid.uuid4().bytes])
+    record = replaced(record, "__pipeline_recomputation_index", [recomputation_index])
+    record = replaced(record, record_id_col, [new_record_id])
+    pipeline_db.add_records(
+        table_path, record, record_id_column=entry_id_col, flush=True
+    )
+
+
+def _record_double() -> None:
+    """Record ``double`` over the two-row in-memory source, labelled ``dbl``."""
 
     @function_pod(output_keys="dbl")
     def double(x: int) -> int:
         """Double *x*."""
         return 2 * x
 
-    def record() -> None:
-        """Record the pipeline under test."""
-        _ = double.pod(_dict_source(), label="dbl")
+    _ = double.pod(_dict_source(), label="dbl")
 
-    path = _save_small_job(tmp_path, record)
+
+def test_recomputed_entry_is_read_once_with_its_latest_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A loaded node reads one row per entry: the greatest recomputation index wins."""
+    path = _save_small_job(tmp_path, _record_double)
     node = PipelineJob.load(path).nodes["dbl"]
-    # Non-public on purpose: no public call writes a second pipeline record for an
-    # entry in a test (a recomputation does), so append one to the stored table.
-    entry_id_col = "__pipeline_entry_id"
-    database = node._pipeline_database
-    assert database is not None
-    table_path = node._versioned_pipeline_path
-    records = database.get_all_records(table_path, record_id_column=entry_id_col)
-    assert records is not None
-    extra = records.slice(0, 1)
-    extra = extra.set_column(
-        extra.schema.get_field_index(entry_id_col),
-        extra.schema.field(entry_id_col),
-        pa.array([uuid.uuid4().bytes], type=extra.schema.field(entry_id_col).type),
-    )
-    index_col = "__pipeline_recomputation_index"
-    extra = extra.set_column(
-        extra.schema.get_field_index(index_col),
-        extra.schema.field(index_col),
-        pa.array([1], type=extra.schema.field(index_col).type),
-    )
-    database.add_records(table_path, extra, record_id_column=entry_id_col, flush=True)
+    entry_id = next(iter(node.iter_data()))[0].as_dict()["id"]
+    # Index 2 is stored before index 1, so "last record wins" would pick 111.
+    _append_recomputed_record(node, 0, recomputation_index=2, value=222)
+    _append_recomputed_record(node, 0, recomputation_index=1, value=111)
 
     reloaded = PipelineJob.load(path).nodes["dbl"]
-    assert reloaded.as_table().num_rows == 2
-    assert len(list(reloaded.iter_data())) == 2
+    table = reloaded.as_table()
+    assert table.num_rows == 2
+    rows = {row["id"]: row["dbl"] for row in table.to_pylist()}
+    assert rows[entry_id] == 222
+    iterated = {t.as_dict()["id"]: d.as_dict()["dbl"] for t, d in reloaded.iter_data()}
+    assert iterated == rows
+
+
+def test_live_node_hot_load_reads_the_latest_recomputed_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A live node hot-loading from its store also keeps the greatest index."""
+    # Behaviour change (ITL-904): the hot-load used to keep whichever record of an
+    # entry the join returned last; it now keeps the latest recomputation.
+    store = DeltaTableDatabase(str(tmp_path / "store"))
+    job = PipelineJob(name="small", store=store)
+    with job:
+        _record_double()
+    _ = job.run()
+    node = job.nodes["dbl"]
+    entry_id = next(iter(node.iter_data()))[0].as_dict()["id"]
+    _append_recomputed_record(node, 0, recomputation_index=2, value=222)
+    _append_recomputed_record(node, 0, recomputation_index=1, value=111)
+
+    fresh = PipelineJob(name="small", store=store)
+    with fresh:
+        _record_double()
+    values = {
+        t.as_dict()["id"]: d.as_dict()["dbl"] for t, d in fresh.nodes["dbl"].iter_data()
+    }
+    assert len(values) == 2
+    assert values[entry_id] == 222
 
 
 def test_loaded_node_with_ephemeral_results_does_not_crash(
@@ -351,7 +417,7 @@ def test_loaded_function_node_saved_with_records_raises_on_a_store_without_them(
         message = str(excinfo.value)
         assert message.startswith(
             "FunctionJobNode 'dbl': the saved run stored results for this node, but "
-            "the attached in_memory store has no table 'loaded_demo/double/"
+            "the attached in_memory store has none of them (table 'loaded_demo/double/"
         )
         assert message.endswith(
             "Load the job with the store it ran against: "
@@ -368,6 +434,41 @@ def test_mismatched_delta_store_error_names_the_store_location(
     with pytest.raises(RuntimeError, match="the attached store at '") as excinfo:
         _ = node.as_table()
     assert str(other) in str(excinfo.value)
+
+
+def test_store_with_only_another_runs_records_is_a_mismatched_store(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A shared table holding another run's records, not this node's, raises."""
+
+    def record_other_source() -> None:
+        """Record ``double`` over another source: same table, other records."""
+
+        @function_pod(output_keys="dbl")
+        def double(x: int) -> int:
+            """Double *x*."""
+            return 2 * x
+
+        # A node's records are scoped by its source's identity (``source_id``), so
+        # "another run" here is a run over a different source. Its records share
+        # the pipeline table, which is keyed by the schema-only pipeline hash.
+        other = DictSource(
+            [{"id": 0, "x": 7}, {"id": 1, "x": 8}],
+            tag_columns=["id"],
+            source_id="other",
+        )
+        _ = double.pod(other, label="dbl")
+
+    path = _save_small_job(tmp_path / "this_run", _record_double)
+    _ = _save_small_job(tmp_path / "other_run", record_other_source)
+    other_store = DeltaTableDatabase(str(tmp_path / "other_run" / "store"))
+    node = PipelineJob.load(path, store=other_store).nodes["dbl"]
+    # Non-public on purpose: confirm the shared table exists, so this test checks
+    # the per-record test, not the missing-table case.
+    assert node._pipeline_database is not None
+    assert node._pipeline_database.table_exists(node._versioned_pipeline_path)
+    with pytest.raises(RuntimeError, match="the saved run stored results"):
+        _ = node.as_table()
 
 
 def test_saved_file_records_which_nodes_had_stored_records(
@@ -472,6 +573,25 @@ def test_loaded_job_still_cannot_run(saved: pathlib.Path) -> None:
         _ = _load(saved).run()
 
 
+def test_loaded_operator_only_job_cannot_run(tmp_path: pathlib.Path) -> None:
+    """A loaded job whose operators were rebuilt and sources bound still never runs."""
+    from orcapod.sources import CSVSource
+
+    (tmp_path / "a.csv").write_text("id,a\n0,1\n1,2\n")
+    (tmp_path / "b.csv").write_text("id,b\n0,3\n1,4\n")
+
+    def record() -> None:
+        """Join two CSV sources, which are rebuilt on load."""
+        left = CSVSource(str(tmp_path / "a.csv"), tag_columns=["id"], source_id="a")
+        right = CSVSource(str(tmp_path / "b.csv"), tag_columns=["id"], source_id="b")
+        _ = Join()(left, right, label="joined")
+
+    job = PipelineJob.load(_save_small_job(tmp_path, record))
+    assert job.unbound_sources == []
+    with pytest.raises(RuntimeError, match="cannot execute a loaded job"):
+        _ = job.run()
+
+
 # ---------------------------------------------------------------------------
 # Operator nodes
 # ---------------------------------------------------------------------------
@@ -485,7 +605,8 @@ def test_loaded_operator_node_raises_instead_of_returning_empty(
     expected = (
         "OperatorJobNode 'joined' has no stored results: a PipelineJob does not store "
         "operator outputs, so a loaded job cannot show them. Read the stored results of "
-        "its input nodes ('dbl', 'asrc') instead."
+        "its input nodes ('dbl', 'asrc') instead; an input source whose data was not "
+        "saved must be bound first with job.bind(sources=...)."
     )
     for read in (node.as_table, lambda: list(node.iter_data())):
         with pytest.raises(RuntimeError) as excinfo:
@@ -509,8 +630,8 @@ def test_in_memory_sources_are_logged_at_info_with_the_remedy(
     messages = {r.getMessage() for r in job_records if r.levelno == logging.INFO}
     assert (
         "Source 'dsrc' (dict) keeps its data in memory and is not saved with the job; "
-        "the loaded job has no data for it. Stored results of all nodes are still "
-        "readable. To read source node 'dsrc' itself, bind a source: "
+        "the loaded job has no data for it. Stored function-node results are still "
+        "readable from the store. To read source node 'dsrc' itself, bind a source: "
         "job.bind(sources={'dsrc': <source>})."
     ) in messages
     assert any(m.startswith("Source 'asrc' (arrow_table) keeps") for m in messages)
@@ -540,8 +661,8 @@ def test_unreconstructable_file_source_is_a_warning_with_the_reason(
     )
     assert "gone.csv" in warnings[0]
     assert warnings[0].endswith(
-        "Stored results of all nodes are still readable. To read source node 'csrc' "
-        "itself, bind a source: job.bind(sources={'csrc': <source>})."
+        "Stored function-node results are still readable from the store. To read "
+        "source node 'csrc' itself, bind a source: job.bind(sources={'csrc': <source>})."
     )
     # The stored results downstream of the missing source are still readable.
     assert job.nodes["inc"].as_table().num_rows == 2

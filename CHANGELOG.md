@@ -14,10 +14,12 @@
   and `iter_data()` return the rows the saved run stored, with their stored types (they used
   to raise "no function pod and no database attached" while `get_all_records()` worked).
   Without a store, reading says to pass `PipelineJob.load(path, store=...)` or call
-  `job.bind(store=...)`. `save()` now records whether each function node had stored records
-  (`run.node_has_stored_records`, an optional field; the format version is unchanged). A
-  node saved with records raises, naming the store, when the attached store lacks them,
-  instead of returning no rows. Loading a job in which an operator consumes a function
+  `job.bind(store=...)`. `save()` now records whether the store held records of each
+  function node (`run.node_has_stored_records`, an optional field; the format version is
+  unchanged). A node saved with records raises, naming the store, when the attached store
+  holds none of them, instead of returning no rows. When an entry has several records (it
+  was recomputed), a function node now reads the one with the greatest recomputation index,
+  on a live node too; it used to keep whichever record the store returned last. Loading a job in which an operator consumes a function
   node no longer crashes with `InputValidationError`, and a loaded node's
   `output_schema()` reports Python types; a saved type it cannot restore (a logical type such
   as `Path`) raises an error naming the column. Saved `timestamp`, `duration`, `time` and

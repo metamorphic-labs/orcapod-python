@@ -798,7 +798,8 @@ class OperatorJobNode(OperatorNodeBase):
         return RuntimeError(
             f"OperatorJobNode {self.label!r} has no stored results: a PipelineJob does "
             "not store operator outputs, so a loaded job cannot show them. Read the "
-            f"stored results of its input nodes ({inputs}) instead."
+            f"stored results of its input nodes ({inputs}) instead; an input source "
+            "whose data was not saved must be bound first with job.bind(sources=...)."
         )
 
     def _filter_by_content_hash(self, table: pa.Table) -> pa.Table:

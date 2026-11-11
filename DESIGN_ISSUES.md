@@ -2360,11 +2360,12 @@ Saving a job and loading it with `PipelineJob.load` failed in four ways:
   `ArrowTableStream` over the stored Arrow records, so stored types are kept and `all_info`
   includes system tags, source info and the data context.
 - Without a store, reading names `PipelineJob.load(path, store=...)` and `job.bind(store=...)`.
-- `save()` records `run.node_has_stored_records`: whether each function node's pipeline table
-  existed. This is an additive, optional field, and the format version is unchanged. A node
-  saved with records raises, naming the store and the table, when the attached store lacks
-  that table, instead of reading zero rows. Files saved without the field read zero rows, as
-  before.
+- `save()` records `run.node_has_stored_records`: whether the store held at least one pipeline
+  record carrying each function node's content hash. This is an additive, optional field, and
+  the format version is unchanged. A node saved with records raises, naming the store and the
+  table, when the attached store holds none of them, instead of reading zero rows. Records
+  that other runs wrote to a shared table do not count. Files saved without the field read
+  zero rows, as before.
 - A loaded node's `output_schema()` returns Python types (`deserialize_output_schema`), and its
   data context comes from the descriptor.
 - `parse_arrow_type_string` reads the parameterized types it used to reject: `timestamp[us, tz=UTC]`,
@@ -2375,14 +2376,19 @@ Saving a job and loading it with `PipelineJob.load` failed in four ways:
   column and the saved type string. The stored rows remain readable with their stored types.
 - `get_all_records()` on a loaded node raises the same store errors as `as_table()`.
 - Re-saving a loaded job keeps each node's saved expectation of stored records.
-- `as_table()` keeps one row per entry, as `iter_data()` does.
+- One row per base entry, for `as_table()` and `iter_data()` alike. When an entry has several
+  records (it was recomputed), the record with the greatest recomputation index wins. This
+  also changes a live node's hot-load from the store: it used to keep whichever record the
+  join returned last.
 - A loaded node whose results lived in an ephemeral store yields `EmptyData` placeholders from
   `iter_data()`. Its `as_table()` raises an error saying the ephemeral store is not saved.
-- A loaded operator node with nothing stored raises and names its input nodes.
+- A loaded operator node with nothing stored raises, names its input nodes, and says to bind an
+  unsaved input source first.
 - Loading logs in-memory sources at INFO, and any other source or store failure at WARNING
   with the exception. Each message states the consequence and the remedy.
-- `PipelineJob.run()` still rejects a loaded job: function pods are not saved, so a loaded job
-  is read-only by design (developer, November 11, 2026).
+- `PipelineJob.run()` rejects every loaded job, including an operator-only one whose
+  operators were rebuilt: a loaded job is read-only by design (developer, November 11,
+  2026).
 
 Regressions: `tests/test_pipeline/loaded_job/`, which saves in a separate process and loads
 in the test process, for each source kind.

@@ -1035,10 +1035,11 @@ class FunctionJobNode(FunctionNodeBase):
                 column written to the DB at execution time.  Required for
                 ``get_all_records()`` to correctly filter DB rows when
                 ``table_scope="pipeline_hash"`` (the default).
-            expect_stored_records: Whether the store held this node's pipeline
-                table when the job was saved. When ``True``, reading the node
-                from a store without that table raises instead of returning zero
-                rows, because the store is not the one the job ran against.
+            expect_stored_records: Whether the store held at least one pipeline
+                record of this node (one with this node's content hash) when the
+                job was saved. When ``True``, reading the node from a store with
+                none of them raises instead of returning zero rows, because the
+                store is not the one the job ran against.
 
         Returns:
             A ``FunctionJobNode`` in read-only stub mode
@@ -1218,11 +1219,22 @@ class FunctionJobNode(FunctionNodeBase):
             "store=...) or call job.bind(store=...)."
         )
 
-    def _pipeline_table_exists(self) -> bool:
-        """Return whether this node's pipeline table exists in the attached store."""
+    def _has_stored_records(self) -> bool:
+        """Return whether the attached store holds a pipeline record of this node.
+
+        A record belongs to this node when its ``_node_content_hash`` is this
+        node's content hash: the rows ``iter_data()`` and ``get_all_records()``
+        read back. Records of other runs in a shared pipeline table do not count.
+        """
         if self._pipeline_database is None:
             return False
-        return self._pipeline_database.table_exists(self._versioned_pipeline_path)
+        if not self._pipeline_database.table_exists(self._versioned_pipeline_path):
+            return False
+        own_records = self._pipeline_database.get_records_with_column_value(
+            self._versioned_pipeline_path,
+            {constants.NODE_CONTENT_HASH_COL: self.content_hash().to_prefixed_digest()},
+        )
+        return own_records is not None and own_records.num_rows > 0
 
     def _require_readable_stub(self) -> None:
         """Raise unless this loaded node can read its stored results.
@@ -1241,15 +1253,15 @@ class FunctionJobNode(FunctionNodeBase):
         """Raise if the saved run stored this node's records but the store has none.
 
         A loaded node reads only what its store holds. When the job was saved
-        with this node's pipeline table in the store and the attached store has
-        no such table, the store is not the one the job ran against; reading
-        zero rows would make the stored results look lost.
+        with records of this node in the store and the attached store has none
+        of them, the store is not the one the job ran against; reading zero rows
+        would make the stored results look lost.
 
         Raises:
             RuntimeError: If the saved run stored records for this node and the
-                attached store has no table for it.
+                attached store has none of them.
         """
-        if not self._expects_stored_records or self._pipeline_table_exists():
+        if not self._expects_stored_records or self._has_stored_records():
             return
         assert self._pipeline_database is not None  # attached: status is READ_ONLY
         store_config = self._pipeline_database.to_config()
@@ -1264,8 +1276,8 @@ class FunctionJobNode(FunctionNodeBase):
         )
         raise RuntimeError(
             f"FunctionJobNode {self.label!r}: the saved run stored results for this "
-            f"node, but the attached {store} has no table {table!r} for it. Load the "
-            "job with the store it ran against: PipelineJob.load(path, store=...)."
+            f"node, but the attached {store} has none of them (table {table!r}). Load "
+            "the job with the store it ran against: PipelineJob.load(path, store=...)."
         )
 
     def _require_pipeline_database(self) -> ArrowDatabaseProtocol:
@@ -2248,7 +2260,8 @@ class FunctionJobNode(FunctionNodeBase):
 
         The stream is built over the stored Arrow records with the internal
         columns dropped, so every column keeps the type it was stored with. A
-        base entry with several records contributes only its last one.
+        base entry with several records contributes only the one with the
+        greatest recomputation index.
 
         Returns:
             The base entry ID of each row, in stream order, and the stream; or
@@ -2260,15 +2273,24 @@ class FunctionJobNode(FunctionNodeBase):
         all_base_entry_ids = cast(
             list[bytes], joined.column(_PIPELINE_BASE_ENTRY_ID_COL).to_pylist()
         )
-        # One row per base entry ID, as the in-memory cache keeps them: when a
-        # base entry has several records (a recomputation), the last one wins,
-        # in the position where the base entry first appears.
-        last_row_of: dict[bytes, int] = {}
+        # One row per base entry ID: when a base entry has several records (it
+        # was recomputed), the one with the greatest recomputation index -- the
+        # latest result -- wins, in the position where the base entry first
+        # appears. Ties keep the later row.
+        recomputation_indices = cast(
+            list[int], joined.column(_PIPELINE_RECOMPUTATION_INDEX_COL).to_pylist()
+        )
+        chosen_row: dict[bytes, int] = {}
         for row, base_entry_id in enumerate(all_base_entry_ids):
-            last_row_of[base_entry_id] = row
-        base_entry_ids = list(last_row_of)
+            current = chosen_row.get(base_entry_id)
+            if (
+                current is None
+                or recomputation_indices[row] >= recomputation_indices[current]
+            ):
+                chosen_row[base_entry_id] = row
+        base_entry_ids = list(chosen_row)
         if len(base_entry_ids) < joined.num_rows:
-            joined = joined.take(pa.array(list(last_row_of.values()), type=pa.int64()))
+            joined = joined.take(pa.array(list(chosen_row.values()), type=pa.int64()))
         drop_cols = [
             c
             for c in joined.column_names

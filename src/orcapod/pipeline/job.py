@@ -117,6 +117,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self._sources_by_hash: dict[str, cp.StreamProtocol] = {}
         self._has_run: bool = False
         self._run_id: str | None = None
+        # True for a job built by load(): it reads stored results and never runs.
+        self._loaded: bool = False
 
         # Lazy cache for the corresponding Pipeline blueprint.
         # Set to None after compile() to force recomputation on next access.
@@ -791,6 +793,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "job.bind(store=InMemoryArrowDatabase())."
             )
 
+        # A loaded job reads the results its saved run stored and never runs:
+        # function pods are not saved with it, and even an operator-only loaded
+        # job, whose operators are rebuilt, stays read-only.
+        if self._loaded:
+            raise RuntimeError(
+                "PipelineJob.run() cannot execute a loaded job: PipelineJob.load() "
+                "is for reading stored results only. To run a new computation, "
+                "create a fresh PipelineJob from the original pipeline definition."
+            )
+
         # Reject loaded read-only stubs: nodes created by load() have no live
         # function pod / operator and cannot compute new outputs.  Replaying
         # cached results would silently produce no output for cache misses; a
@@ -987,9 +999,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # stubs whose content_hash() matches the _node_content_hash column in the
         # DB — required for _filter_by_content_hash() in get_all_records().
         node_job_content_hashes: dict[str, str] = {}
-        # Whether each function node's pipeline table exists in the store, so that
-        # load() can tell a store that holds this run's results from one that does
-        # not (a different store passed to load(), or a moved one).
+        # Whether the store holds at least one pipeline record of each function
+        # node (a record with the node's content hash), so that load() can tell a
+        # store that holds this run's results from one that does not (a
+        # different store passed to load(), or a moved one).
         node_has_stored_records: dict[str, bool] = {}
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
@@ -998,7 +1011,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 # attached since then that lacks the table does not mean the
                 # original run stored nothing.
                 node_has_stored_records[node.label] = (
-                    node._expects_stored_records or node._pipeline_table_exists()
+                    node._expects_stored_records or node._has_stored_records()
                 )
 
         output: dict[str, Any] = {
@@ -1099,9 +1112,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 # DataFrameSource) are not saved with the job, by design.
                 logger.info(
                     "Source %r (%s) keeps its data in memory and is not saved with the "
-                    "job; the loaded job has no data for it. Stored results of all "
-                    "nodes are still readable. To read source node %r itself, bind a "
-                    "source: job.bind(sources={%r: <source>}).",
+                    "job; the loaded job has no data for it. Stored function-node "
+                    "results are still readable from the store. To read source node "
+                    "%r itself, bind a source: job.bind(sources={%r: <source>}).",
                     spec_name,
                     source_type,
                     spec_name,
@@ -1110,8 +1123,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             except Exception as exc:
                 logger.warning(
                     "Could not reconstruct source %r (%s) from its saved config: %s. "
-                    "Stored results of all nodes are still readable. To read source "
-                    "node %r itself, bind a source: job.bind(sources={%r: <source>}).",
+                    "Stored function-node results are still readable from the store. "
+                    "To read source node %r itself, bind a source: "
+                    "job.bind(sources={%r: <source>}).",
                     spec_name,
                     source_type,
                     exc,
@@ -1144,6 +1158,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # path used by from_pipeline() would fail.  Instead, attach the loaded
         # pipeline directly as the compiled blueprint and set up source bindings.
         job = cls(name=pipeline._name, store=effective_store)
+        job._loaded = True
         job._compiled_pipeline = pipeline
         # Mark compiled so save() / compiled_pipeline can be accessed.
         job._compiled = True

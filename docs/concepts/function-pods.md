@@ -313,7 +313,8 @@ as before.
   saved run stored, with the types they were stored with. Rows come in the order the store
   returns them; sort them if order matters.
 - A `PipelineJob` does not store operator outputs (a join, a filter), so reading an operator
-  node of a loaded job raises. Read its input nodes instead.
+  node of a loaded job raises. Read its input nodes instead (an in-memory input source must be
+  bound first, see below).
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
