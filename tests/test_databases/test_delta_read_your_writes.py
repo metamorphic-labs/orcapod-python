@@ -17,6 +17,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import StoreReadError
 
 PATH = ("table",)
 SCOPE = "scope"
@@ -220,21 +221,64 @@ def test_failed_id_refresh_is_retried_by_the_next_read(
     db.add_records(PATH, _rows(["b"], [2]), flush=True)
     db.add_records(PATH, _rows(["a", "b"], [1, 20]))
 
-    with pytest.raises(OSError, match="transient storage error"):
+    # The failed refresh is a failed stored read (ITL-884): never "no stored ids".
+    with pytest.raises(StoreReadError) as info:
         _ = db.get_all_records(PATH)
+    assert isinstance(info.value.__cause__, OSError)
 
     assert _values(READS[method](db, PATH)) == EXPECTED[method]
 
 
 @pytest.mark.usefixtures("fail_id_refresh_once")
-def test_get_records_by_ids_handles_failed_id_refresh_like_a_failed_read(
+def test_get_records_by_ids_raises_on_failed_id_refresh(
     stored_and_pending: DeltaTableDatabase,
 ) -> None:
-    """A failed stored-ID refresh follows the method's stored-read error behaviour."""
+    """A failed stored-ID refresh raises ``StoreReadError``, never "no records" (ITL-884)."""
     db = stored_and_pending
 
-    assert db.get_records_by_ids(PATH, [b"a", b"c"]) is None
+    with pytest.raises(StoreReadError) as info:
+        _ = db.get_records_by_ids(PATH, [b"a", b"c"])
+    assert isinstance(info.value.__cause__, OSError)
     assert _values(db.get_records_by_ids(PATH, [b"a", b"c"])) == [1, 3]
+
+
+@pytest.mark.parametrize("cache", ["cold", "warm"])
+@pytest.mark.parametrize("method", list(READS))
+def test_unreadable_table_with_sibling_pending_rows_raises_and_drops_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, cache: str
+) -> None:
+    """A read never answers from pending rows alone when the stored table is unreadable.
+
+    ``b`` is stored and ``a`` is pending through a sibling handle. While the stored
+    table cannot be read, every read method raises ``StoreReadError`` (ITL-884)
+    rather than returning only the pending rows (ITL-864); once it is readable again
+    the same read returns both rows, so nothing was dropped from the pending batch.
+    """
+    DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
+        PATH, _rows(["b"], [2]), flush=True
+    )
+    root = DeltaTableDatabase(tmp_path)
+    reader, writer = root.at(SCOPE), root.at(SCOPE)
+    if cache == "warm":
+        # The family has loaded the table and its stored ids before the failure.
+        assert _values(reader.get_all_records(PATH)) == [2]
+        assert reader.get_record_by_id(PATH, b"a") is None
+    writer.add_records(PATH, _rows(["a"], [1]))
+
+    def unreadable(*_args: object, **_kwargs: object) -> pa.Table:
+        """Fail as a storage outage would."""
+        raise OSError("storage unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", unreadable)
+        patch.setattr(deltalake.DeltaTable, "to_pyarrow_table", unreadable)
+        with pytest.raises(StoreReadError) as info:
+            _ = READS[method](reader, PATH)
+        assert isinstance(info.value.__cause__, OSError)
+
+    assert _values(READS[method](reader, PATH)) == EXPECTED[method]
+    root.flush()
+    assert _values(READS[method](reader, PATH)) == EXPECTED[method]
 
 
 @pytest.mark.parametrize("method", list(READS))
