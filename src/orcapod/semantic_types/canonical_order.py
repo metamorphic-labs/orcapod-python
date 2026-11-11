@@ -11,8 +11,10 @@ ordered list at the Arrow level, and its order is part of its hash.
 The order is defined on storage values (what the converter produces):
 
 * ``None`` sorts first.
-* ``bool``, ``int``, ``float``, ``Decimal``: numeric. A NaN has no order and is
-  rejected. ``-0.0`` and ``0.0`` are one value.
+* ``bool``, ``int``, ``float``, ``Decimal``: numeric. A NaN of any numeric type has
+  no order and is rejected. ``-0.0`` and ``0.0`` compare equal, so within one dict or
+  set they collide (and raise, see below); a dict keyed by ``-0.0`` and one keyed by
+  ``0.0`` store different bytes and hash differently, like any float value.
 * ``str``: Unicode code point (never locale). ``bytes``: unsigned bytewise.
 * ``date``, ``datetime`` (by instant), ``time``, ``timedelta``: natural order.
 
@@ -23,9 +25,12 @@ with the same storage value, raise ``CanonicalOrderError``.
 from __future__ import annotations
 
 import math
+import numbers
 import types
 import typing
 from collections.abc import Callable
+from decimal import Decimal
+from itertools import pairwise
 from typing import Any, TypeVar, cast, get_args, get_origin
 
 from orcapod.errors import CanonicalOrderError
@@ -40,13 +45,26 @@ def _key_rank(key: object) -> _Rank:
     """Return the sort key of one storage key or set element.
 
     Raises:
-        CanonicalOrderError: If the key is a NaN float.
+        CanonicalOrderError: If the key is a NaN of any numeric type (Python ``float``,
+            NumPy floating scalars, ``Decimal``).
     """
     if key is None:
         return (0,)
-    if isinstance(key, float) and math.isnan(key):
+    if _is_nan(key):
         raise CanonicalOrderError("a NaN key or set element has no canonical order")
     return (1, key)
+
+
+def _is_nan(value: object) -> bool:
+    """Return whether ``value`` is a NaN of any numeric type.
+
+    Integers are never NaN and are not converted (a large ``int`` does not fit a float).
+    """
+    if isinstance(value, Decimal):
+        return value.is_nan()
+    if isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral):
+        return math.isnan(value)
+    return False
 
 
 def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
@@ -59,7 +77,7 @@ def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
         items = sorted(items, key=lambda item: item[0])
     except TypeError as exc:
         raise CanonicalOrderError(f"values cannot be ordered: {exc}") from exc
-    for (previous, _), (current, payload) in zip(items, items[1:]):
+    for (previous, _), (current, payload) in pairwise(items):
         if previous == current:
             raise CanonicalOrderError(f"duplicate key or set element: {payload!r}")
     return [payload for _, payload in items]

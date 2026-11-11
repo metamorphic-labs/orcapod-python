@@ -849,8 +849,13 @@ class Datagram(ContentIdentifiableBase):
             return new_d
         else:
             assert self._data_dict is not None
+            # Updated dict values are held in canonical key order, as at
+            # construction (ITL-905); the caller's dicts are copied, not mutated.
+            canonical_updates = self._canonical_dict_values(
+                updates, self._ensure_python_schema()
+            )
             new_d = self.copy(include_cache=False)
-            new_d._data_dict = {**self._data_dict, **updates}
+            new_d._data_dict = {**self._data_dict, **canonical_updates}
             new_d._data_table = None
             return new_d
 
@@ -1009,7 +1014,9 @@ class Datagram(ContentIdentifiableBase):
                 {k: schema.get(k, inferred.get(k, str)) for k in new_data}
             )
             new_d = self.copy(include_cache=False)
-            new_d._data_dict = new_data
+            # New dict values are held in canonical key order, as at construction
+            # (ITL-905); the caller's dicts are copied, not mutated.
+            new_d._data_dict = self._canonical_dict_values(new_data, new_schema)
             new_d._data_python_schema = new_schema
             new_d._data_table = None
             new_d._data_arrow_schema = None
