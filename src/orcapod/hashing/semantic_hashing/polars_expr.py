@@ -246,7 +246,10 @@ def _dtype(obj: Any) -> Any:
         if not isinstance(value, list) or len(value) != 2:
             raise _fail(f"unexpected Decimal dtype {_short(value)}")
         return {
-            "decimal": [_require_int(value[0], "precision"), _require_int(value[1], "scale")]
+            "decimal": [
+                _require_int(value[0], "precision"),
+                _require_int(value[1], "scale"),
+            ]
         }
     if key == "Datetime":
         if not isinstance(value, list) or len(value) != 2:
@@ -343,7 +346,8 @@ def _scalar_literal(obj: Any) -> Any:
         }
     if key == "Binary":
         if not isinstance(value, list) or not all(
-            isinstance(b, int) and not isinstance(b, bool) and 0 <= b < 256 for b in value
+            isinstance(b, int) and not isinstance(b, bool) and 0 <= b < 256
+            for b in value
         ):
             raise _fail(f"unexpected binary literal {_short(value)}")
         return {"binary": bytes(value).hex()}
@@ -365,7 +369,10 @@ def _scalar_literal(obj: Any) -> Any:
         if not isinstance(value, list) or len(value) != 2:
             raise _fail(f"unexpected duration literal {_short(value)}")
         return {
-            "duration": [_require_int(value[0], "duration literal"), _time_unit(value[1])]
+            "duration": [
+                _require_int(value[0], "duration literal"),
+                _time_unit(value[1]),
+            ]
         }
     if key == "List":
         return _list_literal(value)

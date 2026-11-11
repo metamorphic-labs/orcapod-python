@@ -60,17 +60,33 @@ class PolarsFilter(UnaryOperator):
         filtered_table = df.filter(*self.predicates, **self.constraints).to_arrow()
         # A filter passes every column through, so each one takes the
         # large-normalized form of its input Arrow type (string ->
-        # large_string, list -> large_list, recursively; hash-identical) and
-        # keeps its input nullability, which Polars drops (every field comes
-        # back nullable). This also undoes Polars' other changes, such as
-        # fixed_size_binary -> large_binary for system-tag record ids.
+        # large_string, list -> large_list, recursively; hash-identical).
+        # This also undoes Polars' other changes, such as fixed_size_binary ->
+        # large_binary for system-tag record ids.
+        input_fields = [
+            field.with_type(
+                arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            )
+            for field in table.schema
+        ]
+        filtered_table = arrow_utils.restore_column_types(
+            filtered_table, {field.name: field.type for field in input_fields}
+        )
+        # Polars returns every field nullable. Tag, system-tag, source-info and
+        # meta columns get their input nullability back, so a filtered stream
+        # still joins with streams whose tags are non-nullable. Data columns
+        # keep the nullable flag Polars gives them: restoring it too is correct
+        # but changes their data hashes, the function-pod cache keys, and awaits
+        # a decision (DESIGN_ISSUES.md, ITL-828 entry). Restoring every column
+        # means dropping this exclusion.
+        _, data_columns = stream.keys()
+        keeps_polars_nullability = set(data_columns)
         filtered_table = arrow_utils.restore_schema_nullability(
             filtered_table,
             pa.schema(
-                field.with_type(
-                    arrow_utils.normalize_to_large_types(field.type, keep_null=True)
-                )
-                for field in table.schema
+                field
+                for field in input_fields
+                if field.name not in keeps_polars_nullability
             ),
         )
 

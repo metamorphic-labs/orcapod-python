@@ -103,13 +103,26 @@ def score(x: int, y: int, name: str) -> int:
     return x * y + len(name)
 
 
+_FILTERS = {
+    "expression": lambda src: src.polars_filter(
+        (pl.col("x") > 0) & pl.col("y").is_in([10, 30]), label="positive"
+    ),
+    "keyword": lambda src: src.polars_filter(constraint_map={"x": 1}, label="positive"),
+    "mixed": lambda src: src.polars_filter(pl.col("x") > 0, y=10, label="positive"),
+}
+
+
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
-def test_expression_filter_inside_pipeline_job(orchestrator):
-    job = PipelineJob(name="expr_filter_job", store=InMemoryArrowDatabase())
+@pytest.mark.parametrize("kind", sorted(_FILTERS))
+def test_filter_upstream_of_join_inside_pipeline_job(kind, orchestrator):
+    expected = {
+        "expression": (["a", "c"], [15, 95]),
+        "keyword": (["a"], [15]),
+        "mixed": (["a"], [15]),
+    }
+    job = PipelineJob(name="filter_job", store=InMemoryArrowDatabase())
     with job:
-        filtered = _readings().polars_filter(
-            (pl.col("x") > 0) & pl.col("y").is_in([10, 30]), label="positive"
-        )
+        filtered = _FILTERS[kind](_readings())
         joined = Join(label="joined")(filtered, _names())
         score.pod(joined, label="score")
     if orchestrator == "async":
@@ -120,8 +133,17 @@ def test_expression_filter_inside_pipeline_job(orchestrator):
     # empty for every operator (pre-existing, reported separately), while a function node
     # serves its stored results on both paths.
     table = job.nodes["score"].as_table()
-    assert sorted(table.column("id").to_pylist()) == ["a", "c"]
-    assert sorted(table.column("score").to_pylist()) == [15, 95]
+    ids, scores = expected[kind]
+    assert sorted(table.column("id").to_pylist()) == ids
+    assert sorted(table.column("score").to_pylist()) == scores
+
+
+def test_filter_keeps_tag_nullability():
+    source = _readings()
+    filtered = source.polars_filter(pl.col("x") > 0)
+    source_field = source.as_table().schema.field("id")
+    filtered_field = filtered.as_table().schema.field("id")
+    assert filtered_field.nullable == source_field.nullable
 
 
 _JOB_SCRIPT = textwrap.dedent("""\
