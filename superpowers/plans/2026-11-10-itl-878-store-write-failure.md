@@ -282,7 +282,7 @@ tests) is kept.
 - [x] Decline finding (1) with a signed top-level PR comment (issuecomment-6791981712).
 - [x] Merged origin/main b197544e (DESIGN_ISSUES conflict: both appended sections kept);
       added the `[0.3.0] — unreleased` CHANGELOG section with this PR's entries.
-- [ ] Merge origin/main (b197544e; CHANGELOG entries under `[0.3.0] — unreleased`), full
+- [x] Merge origin/main (b197544e; CHANGELOG entries under `[0.3.0] — unreleased`), full
       suite on 3.11/3.12/3.13, golden unchanged, ruff, format, basedpyright, push, CI,
       CodeRabbit round (bodies too). Reconcile with #290 if it merged first.
 
@@ -302,4 +302,5 @@ tests) is kept.
 - (D) `StoreWriteError` message: "Rows stored before this failure are kept; re-running the job
   does not recompute stored function results." Docs explain LOG operators recompute.
 - Keep shape consistent with #290's `StoreReadError`.
-- [ ] tests, fix, one commit, replies on 4 threads, CI, CodeRabbit round, worker_done.
+- [x] tests, fix (392ee8ed), replies on the 4 threads.
+- [ ] CI and CodeRabbit on the final head, worker_done.
