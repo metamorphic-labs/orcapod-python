@@ -140,9 +140,16 @@ class ArrowTableStream(StreamBase):
     def identity_structure(self) -> Any:
         if self._producer is not None:
             return super().identity_structure()
+        # A stream ignores column order on purpose, so its table is wrapped to hash with the
+        # data context's order-independent hash_table, not through the semantic hasher's
+        # ArrowTableHandler, which hashes a pa.Table value with its order (ITL-897).
+        from orcapod.hashing.stream_table_identity import StreamTableIdentity
+
         return (
             self.__class__.__name__,
-            self.as_table(all_info=True),
+            StreamTableIdentity(
+                self.as_table(all_info=True), self.data_context.arrow_hasher
+            ),
             self._tag_columns,
         )
 

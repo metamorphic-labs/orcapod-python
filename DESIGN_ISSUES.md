@@ -2322,5 +2322,13 @@ pandas dtypes (`orcapod.hashing.pandas_value_hash`). The identity matches the de
 `assert_frame_equal` / `assert_series_equal`, except `flags` (storage drops it) and `-0.0` vs
 `0.0`. Every pandas value hash moves once; the investigation, the migration assessment and the
 developer's approval (November 11, 2026) are in
-`superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`. `pa.Table` values (same rule)
-follow in a second PR on the same helper.
+`superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`.
+
+`pa.Table` / `pa.RecordBatch` values had the same problem: `ArrowTableHandler` hashed them
+order-independently, because it was also the route by which every `Datagram` and producer-less
+`ArrowTableStream` identity reached the Arrow hasher. **Fix (second PR, same release):**
+`ArrowTableHandler` hashes values under `arrow_table_v1` with `hash_table_ordered`; datagrams and
+streams wrap their table in `StreamTableIdentity` (`orcapod.hashing.stream_table_identity`),
+whose content hash is the order-independent `hash_table` and whose `==` is `pa.Table.equals`,
+so stream and row hashes, record IDs and every golden entry stay put, and comparing streams
+still hashes nothing.

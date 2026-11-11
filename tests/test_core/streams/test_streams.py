@@ -390,10 +390,20 @@ class TestArrowTableStreamIdentityStructure:
         assert s1.content_hash() != s2.content_hash()
 
     def test_no_producer_identity_structure_contains_table(self):
-        """identity_structure() for sourceless stream embeds a pa.Table."""
+        """identity_structure() for sourceless stream embeds its table, order independent.
+
+        Uses identity_structure() because the test is about its shape: the table is wrapped so
+        it hashes with the order-independent ``hash_table`` (ITL-897), not as a table value.
+        """
+        from orcapod.hashing.stream_table_identity import StreamTableIdentity
+
         stream = make_table_stream()
         structure = stream.identity_structure()
-        assert any(isinstance(elem, pa.Table) for elem in structure)
+        wrapped = [elem for elem in structure if isinstance(elem, StreamTableIdentity)]
+        assert len(wrapped) == 1
+        assert wrapped[0].content_hash() == stream.data_context.arrow_hasher.hash_table(
+            stream.as_table(all_info=True)
+        )
 
     # -- with-source branch (source is not None) -----------------------------
 

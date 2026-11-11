@@ -24,6 +24,14 @@
   `source_id` gets a new default `source_id` (the table hash), so its record IDs, and every
   entry downstream of it, are new. Pass an explicit `source_id` to keep record IDs stable.
 
+- **A `pa.Table` or `pa.RecordBatch` hashed as a value is order dependent**, labelled
+  `arrow_table_v1` (ITL-897). Column order and struct field order, at every depth, are part
+  of its hash, as they are of `pa.Table.equals`. It gets the same semantic preprocessing as
+  every Orcapod Arrow hash (a `File` column by its content), and a `RecordBatch` hashes like
+  the one-batch table. Orcapod streams, their rows and record IDs still ignore column order on
+  purpose: their hashes do not move. Only hashes of tables passed to the semantic hasher as
+  values change; no stored key embeds one.
+
 ### Added
 
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be

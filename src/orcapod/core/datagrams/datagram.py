@@ -416,15 +416,20 @@ class Datagram(ContentIdentifiableBase):
         return arrow_utils.join_arrow_schemas(*all_schemas)
 
     def identity_structure(self) -> Any:
-        """Return the primary data table as this datagram's identity.
+        """Return the primary data table, as an order-independent identity.
 
-        The semantic hasher dispatches ``pa.Table`` to ``ArrowTableHandler``,
-        which delegates to the data context's ``arrow_hasher``.  This means
-        ``content_hash()`` (inherited from ``ContentIdentifiableBase``) produces
-        a stable, content-addressed hash of the data columns without any
-        special-casing in ``Datagram`` itself.
+        A datagram is a row of an Orcapod stream, so its identity ignores column order and
+        struct field order on purpose: its content hash is the data context's
+        ``arrow_hasher.hash_table`` of the data columns. The table is wrapped in a
+        ``StreamTableIdentity`` rather than handed to the semantic hasher bare, because
+        ``ArrowTableHandler`` hashes a ``pa.Table`` *value* with its order (``arrow_table_v1``,
+        ITL-897).
         """
-        return self._ensure_data_table()
+        from orcapod.hashing.stream_table_identity import StreamTableIdentity
+
+        return StreamTableIdentity(
+            self._ensure_data_table(), self.data_context.arrow_hasher
+        )
 
     @property
     def datagram_uuid(self) -> uuid.UUID:

@@ -8,7 +8,7 @@ Built-in PythonTypeHandlerProtocol implementations.
   SpecialFormHandler    -- typing._SpecialForm
   GenericAliasHandler   -- generic alias type annotations
   UnionTypeHandler      -- types.UnionType (Python 3.10+ X | Y syntax)
-  ArrowTableHandler     -- pa.Table / pa.RecordBatch
+  ArrowTableHandler     -- pa.Table / pa.RecordBatch values: arrow_table_v1 (ordered Arrow digest)
   SchemaHandler         -- Schema objects
   FileHandler           -- orcapod.File: file content hash
   DirectoryHandler      -- orcapod.Directory: recursive Merkle tree hash
@@ -152,8 +152,22 @@ class UnionTypeHandler:
         return {"__type__": "union", "args": hashed_args}
 
 
+ARROW_TABLE_HASH_METHOD = "arrow_table_v1"
+"""``ContentHash`` method label of a ``pa.Table`` / ``pa.RecordBatch`` value hash."""
+
+
 class ArrowTableHandler:
-    """Hasher for ``pa.Table`` and ``pa.RecordBatch`` objects.
+    """Hasher for ``pa.Table`` and ``pa.RecordBatch`` values: ``arrow_table_v1``.
+
+    A table used as a value has an order-dependent identity, as ``pa.Table.equals`` does
+    (developer's decision, November 11, 2026): the hash is the Arrow hasher's
+    ``hash_table_ordered`` digest (the same semantic preprocessing as every Orcapod Arrow hash,
+    with column order and struct field order at every depth included) under the label
+    ``arrow_table_v1``. A ``RecordBatch`` hashes like the one-batch ``Table`` with the same
+    content; chunking is not part of the hash.
+
+    Orcapod's own tables (stream and datagram identities) do not come here: they ignore order
+    on purpose and call ``arrow_hasher.hash_table`` directly.
 
     Args:
         arrow_hasher: Any object satisfying ``ArrowHasherProtocol``.  When
@@ -173,15 +187,26 @@ class ArrowTableHandler:
         return get_default_context().arrow_hasher  # type: ignore[return-value]
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+        """Return the ``arrow_table_v1`` content hash of ``obj``.
+
+        Args:
+            obj: A ``pa.Table`` or ``pa.RecordBatch``.
+            hasher: Ignored. Present for protocol conformance.
+
+        Returns:
+            A ``ContentHash`` with method ``"arrow_table_v1"``.
+
+        Raises:
+            TypeError: If ``obj`` is neither a ``pa.Table`` nor a ``pa.RecordBatch``.
+        """
         import pyarrow as _pa
 
-        if isinstance(obj, _pa.RecordBatch):
-            obj = _pa.Table.from_batches([obj])
-        if not isinstance(obj, _pa.Table):
+        if not isinstance(obj, (_pa.Table, _pa.RecordBatch)):
             raise TypeError(
                 f"ArrowTableHandler: expected pa.Table or pa.RecordBatch, got {type(obj)!r}"
             )
-        return self._get_arrow_hasher().hash_table(obj)
+        digest = self._get_arrow_hasher().hash_table_ordered(obj).digest
+        return ContentHash(method=ARROW_TABLE_HASH_METHOD, digest=digest)
 
 
 class SchemaHandler:

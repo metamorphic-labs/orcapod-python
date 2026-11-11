@@ -5,8 +5,9 @@ value has an order-dependent identity, as ``pa.Table.equals`` does. Orcapod stre
 rows (datagrams) deliberately ignore column order. Today both reach the same handler, so the
 stream guards below pin the behaviour that must survive the change.
 
-The tests assert only distinctness and equality, not a hash label or digest: the mechanism is not
-decided yet (ITL-898).
+Developer decisions, November 11, 2026: the value hash is labelled ``arrow_table_v1``, shared by
+``pa.Table`` and ``pa.RecordBatch``, and gets the same semantic preprocessing as every Orcapod Arrow
+hash (a ``File`` column by its content); only starfix's order options differ (ITL-898).
 """
 
 from __future__ import annotations
@@ -76,6 +77,40 @@ class TestTableValueOrderIsIdentity:
         rechunked = pa.concat_tables([table.slice(0, 1), table.slice(1, 1)])
         assert table.equals(rechunked)
         assert _hash(table) == _hash(rechunked)
+
+
+class TestTableValueLabel:
+    def test_table_label(self) -> None:
+        assert get_default_context().semantic_hasher.hash_object(_table()).method == (
+            "arrow_table_v1"
+        )
+
+    def test_record_batch_shares_the_table_label_and_hash(self) -> None:
+        hasher = get_default_context().semantic_hasher
+        batch = _table().to_batches()[0]
+        assert hasher.hash_object(batch).method == "arrow_table_v1"
+        assert hasher.hash_object(batch) == hasher.hash_object(_table())
+
+    def test_file_column_hashed_by_content(self, tmp_path: Any) -> None:
+        """Semantic preprocessing applies to table values: a ``File`` column by its content."""
+        from orcapod.logical_types.file_type import File
+
+        ctx = get_default_context()
+        arrow_type = ctx.type_converter.register_python_class(File)
+
+        def file_table(path: Any) -> pa.Table:
+            storage = ctx.type_converter.python_to_storage(File(path), File)
+            column = pa.ExtensionArray.from_storage(
+                arrow_type, pa.array([storage], arrow_type.storage_type)
+            )
+            return pa.Table.from_arrays([column], names=["f"])
+
+        same_a, same_b, other = (tmp_path / n for n in ("a.txt", "b.txt", "c.txt"))
+        same_a.write_text("same")
+        same_b.write_text("same")
+        other.write_text("other")
+        assert _hash(file_table(same_a)) == _hash(file_table(same_b))
+        assert _hash(file_table(same_a)) != _hash(file_table(other))
 
 
 class TestStreamsStayOrderIndependent:
