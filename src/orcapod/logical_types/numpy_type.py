@@ -35,6 +35,7 @@ from orcapod.errors import UnsupportedValueError
 from orcapod.logical_types.array_format import (
     ARRAY_FORMAT_METADATA,
     ARRAY_STORAGE_TYPE,
+    array_storage_sort_key,
 )
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.registry import (
@@ -385,7 +386,8 @@ class LogicalNumpyArray(BaseLogicalType):
     def storage_sort_key(self, storage_value: Any) -> tuple[Any, ...]:
         """Ordering key for stored values, used where operators sort values.
 
-        Orders by the stored ``(dtype tag, shape, data)``; ``None`` sorts first.
+        Orders by the stored ``(dtype tag, shape, data)``; ``None`` sorts first
+        (``array_format.array_storage_sort_key``).
 
         Args:
             storage_value: A stored row, or ``None``.
@@ -393,11 +395,4 @@ class LogicalNumpyArray(BaseLogicalType):
         Returns:
             A tuple that orders stored rows deterministically.
         """
-        if storage_value is None:
-            return (0,)
-        return (
-            1,
-            storage_value["dtype"],
-            list(storage_value["shape"]),
-            bytes(storage_value["data"]),
-        )
+        return array_storage_sort_key(storage_value)
