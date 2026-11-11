@@ -1,0 +1,93 @@
+"""ITL-897 claim (i): what one full-descriptor ``pandas_dataframe_v1`` would do per property.
+
+Takes every pair from claim (a), hashes it as released and then with the full-descriptor
+prototype (``prototype_v1.install_full_descriptor()``, this process only), and reports both next
+to pandas' own verdicts. Also checks that each value keeps its v1 hash through the storage round
+trip, and that the full descriptor still moves only the 3 pandas golden entries.
+
+Run: ``uv run python superpowers/scripts/itl_897/claim_i_v1_descriptor.py``
+"""
+
+from __future__ import annotations
+
+import sys
+import warnings
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import prototype_v1  # noqa: E402
+from claim_a_equality_vs_hash import (  # noqa: E402
+    FRAME_CASES,
+    LT_DF,
+    LT_S,
+    SERIES_CASES,
+    _passes,
+)
+from pandas.testing import assert_frame_equal, assert_series_equal  # noqa: E402
+
+from orcapod.contexts import get_default_context  # noqa: E402
+
+warnings.simplefilter("ignore")
+HASHER = get_default_context().semantic_hasher
+
+
+def _h(value: Any) -> str:
+    try:
+        return HASHER.hash_object(value).to_string()
+    except Exception as exc:  # noqa: BLE001 - reported in the table
+        return f"ERROR {type(exc).__name__}: {exc}"
+
+
+def _same(a: str, b: str) -> str:
+    if a.startswith("ERROR") or b.startswith("ERROR"):
+        return "error"
+    return "equal" if a == b else "differ"
+
+
+def main() -> None:
+    groups = [
+        ("DataFrame", FRAME_CASES, assert_frame_equal, LT_DF),
+        ("Series", SERIES_CASES, assert_series_equal, LT_S),
+    ]
+    today = {
+        (kind, name): (_h(a), _h(b))
+        for kind, cases, _, _ in groups
+        for name, a, b, _ in cases
+    }
+    prototype_v1.install_full_descriptor()
+    unstable: list[str] = []
+    for kind, cases, assert_fn, lt in groups:
+        print(f"\n## {kind}\n")
+        print("| property | equals | assert | hash today | v1 | v1 follows |")
+        print("|---|---|---|---|---|---|")
+        for name, a, b, _ in cases:
+            eq = "equal" if a.equals(b) else "differ"
+            asserted = "equal" if _passes(assert_fn, a, b) else "differ"
+            now = _same(*today[(kind, name)])
+            v1a, v1b = _h(a), _h(b)
+            v1 = _same(v1a, v1b)
+            if v1 == "error":
+                follows = (v1a if v1a.startswith("ERROR") else v1b)[:70]
+            elif v1 == eq == asserted:
+                follows = "both"
+            elif v1 == asserted:
+                follows = "assert"
+            elif v1 == eq:
+                follows = "equals"
+            else:
+                follows = "NEITHER"
+            print(f"| {name} | {eq} | {asserted} | {now} | {v1} | {follows} |")
+            for value in (a, b):
+                try:
+                    back = lt.storage_to_python(lt.python_to_storage(value))
+                except Exception:  # noqa: BLE001 - not storable on main; see claim (a)
+                    continue
+                if _h(back) != _h(value):
+                    unstable.append(f"{kind}: {name}")
+    print(f"\nv1 hash changes through storage for: {sorted(set(unstable)) or 'none'}")
+
+
+if __name__ == "__main__":
+    main()

@@ -9,7 +9,17 @@ Coordinator task `task_25c74f4198f0`, dispatch `ctx_4af6270358e5`.
       (patched into the script's process only).
 - [x] Spec: `superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`, sections (a) to (h).
 - [x] Scope addition from the coordinator (Nov 11): `pa.Table` / `RecordBatch` values, claims (f), (g), (h).
-- [ ] Send the proposal with `orca orchestration ask`; wait for decisions 1 to 4 in the spec.
+- [x] Proposal sent (ask). Coordinator: HOLD library code; decisions 1, 2, 4 go to the developer
+      (also deciding ITL-898, a starfix order option, which may replace the descriptor for orders).
+      Decision 3 (coordinator): wait for #286 to merge, then build from `main` on a shared helper.
+- [x] (i) Spec section: full `v1` descriptor per property (`claim_i_v1_descriptor.py`,
+      `prototype_v1.install_full_descriptor()`); it agrees with `assert_frame_equal` defaults except
+      `flags` (storage drops it) and `-0.0`. Same 3 golden entries move.
+- [x] (ii) Failing public-interface tests committed (14 red, 24 green), no PR:
+      `tests/test_hashing/test_pandas_value_identity.py`,
+      `tests/test_core/function_pod/test_pandas_dataframe_order.py`,
+      `tests/test_hashing/test_arrow_table_value_identity.py`.
+- [ ] Wait for the developer's decisions and #286 to merge.
 
 ## Step 2: implementation (only after approval)
 

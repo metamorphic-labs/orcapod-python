@@ -89,3 +89,143 @@ def install_arrow_table(*, separated: bool) -> None:
 
     Datagram.identity_structure = datagram_identity  # type: ignore[method-assign]
     ArrowTableStream.identity_structure = stream_identity  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
+# Full descriptor: one hash move that settles every mismatch in claim (a)
+# ---------------------------------------------------------------------------
+
+_MASKED_DTYPES = {
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt64",
+    "Float32",
+    "Float64",
+    "boolean",
+}
+
+
+def pandas_label(label: Any) -> Any:
+    """Typed JSON for a pandas label, so ``0`` and ``"0"`` differ."""
+    import numpy as np
+
+    if label is None or isinstance(label, str):
+        return label
+    if isinstance(label, (bool, np.bool_)):
+        return {"bool": bool(label)}
+    if isinstance(label, (int, np.integer)):
+        return {"int": int(label)}
+    if isinstance(label, (float, np.floating)):
+        return {"float": float(label).hex()}
+    if isinstance(label, tuple):
+        return {"tuple": [pandas_label(part) for part in label]}
+    raise ValueError(
+        f"label {label!r} of type {type(label).__name__} is outside the grammar"
+    )
+
+
+def arrow_type_descriptor(arrow_type: pa.DataType) -> Any:
+    """Arrow type with struct fields in order at every depth (layout-normalized to large)."""
+    from orcapod.utils.arrow_utils import normalize_to_large_types
+
+    if pa.types.is_struct(arrow_type):
+        return {
+            "struct": [
+                [f.name, arrow_type_descriptor(f.type)]
+                for f in arrow_type  # pyright: ignore
+            ]
+        }
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        return {"list": arrow_type_descriptor(arrow_type.value_type)}
+    return str(normalize_to_large_types(arrow_type))
+
+
+def pandas_dtype_descriptor(dtype: Any) -> Any:
+    """Orcapod-owned grammar for a pandas dtype (never ``str(dtype)`` alone)."""
+    import pandas as pd
+
+    if isinstance(dtype, pd.CategoricalDtype):
+        categories = dtype.categories
+        return {
+            "categorical": {
+                "categories": [
+                    pandas_dtype_descriptor(categories.dtype),
+                    [pandas_label(c) for c in categories],
+                ],
+                "ordered": bool(dtype.ordered),
+            }
+        }
+    if isinstance(dtype, pd.ArrowDtype):
+        return {"arrow": arrow_type_descriptor(dtype.pyarrow_dtype)}
+    if isinstance(dtype, pd.StringDtype):
+        return {"string": dtype.storage}
+    if isinstance(dtype, pd.DatetimeTZDtype):
+        return {"datetimetz": [dtype.unit, str(dtype.tz)]}
+    if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+        if dtype.name in _MASKED_DTYPES:
+            return {"masked": dtype.name}
+        raise ValueError(f"pandas dtype {dtype!r} is outside the grammar")
+    return {"numpy": dtype.name}
+
+
+def _index_descriptor(index: Any) -> list[Any]:
+    return [
+        [pandas_label(name), pandas_dtype_descriptor(index.get_level_values(i).dtype)]
+        for i, name in enumerate(index.names)
+    ]
+
+
+def frame_descriptor(df: Any) -> dict[str, Any]:
+    return {
+        "kind": "pandas.dataframe",
+        "height": len(df),
+        "columns": [
+            [pandas_label(label), pandas_dtype_descriptor(dtype)]
+            for label, dtype in zip(df.columns, df.dtypes)
+        ],
+        "columns_names": [pandas_label(name) for name in df.columns.names],
+        "index": _index_descriptor(df.index),
+    }
+
+
+def series_descriptor(series: Any) -> dict[str, Any]:
+    return {
+        "kind": "pandas.series",
+        "height": len(series),
+        "name": pandas_label(series.name),
+        "dtype": pandas_dtype_descriptor(series.dtype),
+        "index": _index_descriptor(series.index),
+    }
+
+
+def _full_hash(
+    label: str, descriptor: dict[str, Any], table: pa.Table, handler: Any
+) -> Any:
+    from orcapod.types import ContentHash
+
+    values = handler._get_arrow_hasher().hash_table(table).digest  # noqa: SLF001
+    text = json.dumps(
+        descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return ContentHash(label, hashlib.sha256(text.encode() + b"\x00" + values).digest())
+
+
+def install_full_descriptor() -> None:
+    """Patch the pandas handlers with the full-descriptor prototype (one hash move)."""
+    from orcapod.hashing.semantic_hashing import builtin_handlers as bh
+
+    def df_handle(self: Any, obj: Any, hasher: Any) -> Any:
+        table = pa.Table.from_pandas(obj, preserve_index=True)
+        return _full_hash("pandas_dataframe_v1", frame_descriptor(obj), table, self)
+
+    def series_handle(self: Any, obj: Any, hasher: Any) -> Any:
+        table = pa.Table.from_pandas(obj.to_frame(name="values"), preserve_index=True)
+        return _full_hash("pandas_series_v1", series_descriptor(obj), table, self)
+
+    bh.PandasDataFrameHandler.handle = df_handle  # type: ignore[method-assign]
+    bh.PandasSeriesHandler.handle = series_handle  # type: ignore[method-assign]

@@ -19,6 +19,7 @@ hashes; the scripts patch it into their own process only.
 | (d) golden entries that move | `claim_d_golden_diff.py` |
 | (f) paths by which a `pa.Table` reaches the hasher | `claim_f_table_value_paths.py` |
 | (g) `pa.Table` equality vs the hash | `claim_g_arrow_table_value.py` |
+| (i) full `v1` descriptor per property | `claim_i_v1_descriptor.py` |
 
 ## How a pandas value is hashed today
 
@@ -324,13 +325,117 @@ two PRs on one shared helper. The table PR goes first, or with #286, and carries
 and the helper; the pandas PR follows with its own golden change and migration note. If the
 coordinator prefers one PR, the golden diff stays the same 3 entries.
 
+## (i) One descriptor for `pandas_dataframe_v1`: settle every mismatch in one move
+
+Requested by the coordinator after step 1, so that released pandas hashes move once. The
+coordinator recommends this to the developer. The descriptor follows #286's Polars grammar and
+is built from pandas' own objects (`df.columns`, `df.dtypes`, `df.index`), not from pyarrow's
+`pandas` metadata JSON, which pyarrow may change between versions. Prototype:
+`prototype_v1.install_full_descriptor()`. Measured by `claim_i_v1_descriptor.py`.
+
+```
+frame:  {"kind": "pandas.dataframe", "height": <rows>,
+         "columns": [[<label>, <dtype>], ...],        in column order
+         "columns_names": [<label>, ...],             columns.names (one per column level)
+         "index": [[<label>, <dtype>], ...]}          index levels in order: name, dtype
+series: {"kind": "pandas.series", "height": <rows>, "name": <label>, "dtype": <dtype>,
+         "index": [[<label>, <dtype>], ...]}
+
+<label> := <str> | null | {"int": n} | {"float": <float.hex>} | {"bool": b}
+         | {"tuple": [<label>, ...]}                    MultiIndex column labels
+<dtype> := {"numpy": <numpy dtype name>}                int64, float32, bool, object,
+                                                        datetime64[ns], timedelta64[s], ...
+         | {"masked": "Int64" | ... | "Float64" | "boolean"}
+         | {"string": <storage>}                        python or pyarrow
+         | {"datetimetz": [<unit>, <tz>]}
+         | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
+         | {"arrow": <arrow type>}                      pd.ArrowDtype, struct fields in order
+```
+
+The values digest stays the Arrow hasher's digest of `pa.Table.from_pandas(value,
+preserve_index=True)`. RangeIndex and an int64 index of the same values describe the same
+(`{"numpy": "int64"}`), as pandas wants.
+
+| Property changed | `equals` | `assert` | hash today | `v1` | `v1` agrees with |
+|---|---|---|---|---|---|
+| column order | differ | differ | equal | differ | both |
+| row order, index values, column dtype, datetime unit / tz, `Int64` NA vs NaN | differ | differ | differ | differ | both |
+| index name | equal | differ | differ | differ | `assert` |
+| index type (RangeIndex vs Index[int64]) | equal | equal | equal | equal | both |
+| index dtype (int64 vs float64) | equal | differ | differ | differ | `assert` |
+| MultiIndex level names | equal | differ | differ | differ | `assert` |
+| MultiIndex level order | differ | differ | equal | differ | both |
+| `columns.name` | equal | differ | equal | differ | `assert` |
+| column label type (`0` vs `"0"`) | differ | differ | equal | differ | both |
+| MultiIndex columns vs flat labels | differ | differ | equal | differ | both |
+| categorical vs object string (ITL-887) | differ | differ | equal | differ | both |
+| categorical category order | equal | differ | equal | differ | `assert` |
+| categorical unused category | differ | differ | equal | differ | both |
+| categorical `ordered` | differ | differ | equal | differ | both |
+| `Int64` vs `int64`; `boolean` vs `bool`; `string` vs object | differ | differ | equal | differ | both |
+| struct field order (`ArrowDtype`) | differ | differ | equal | differ | both |
+| dict key order in an object column | equal | equal | equal | equal | both |
+| `attrs` | equal | equal | equal | equal | both |
+| `-0.0` vs `0.0` | equal | equal | differ | differ | neither (see below) |
+| `flags.allows_duplicate_labels` | equal | differ | equal | equal | `equals` (see below) |
+| Series name (`"a"` vs `"b"`, `None` vs `"x"`, `0` vs `"0"`) | equal | differ | differ, except `0` vs `"0"` | differ | `assert` |
+| Series MultiIndex level order; Series dtype; Series categorical | differ | differ | equal | differ | both |
+| Series `attrs` | equal | equal | equal | equal | both |
+
+The rule this gives: **`v1` distinguishes exactly what `assert_frame_equal` /
+`assert_series_equal` distinguish with their defaults**, with two exceptions:
+
+* `flags` is left out because storage drops it. Including it would give a value read back from
+  a store a different hash from the value that was stored.
+* `-0.0` vs `0.0` stays a spurious miss: the values digest compares bytes. It costs an extra
+  computation, never a wrong result. Fixing it means canonicalizing floats before starfix, for
+  pandas only. Not recommended.
+
+Every value in the table keeps its `v1` hash through the storage round trip. Golden: the full
+descriptor moves the same 3 entries as the minimal one, and nothing else.
+
+Where `equals` and `assert` disagree (index name and dtype, MultiIndex names, `columns.name`,
+category order, Series name), `v1` follows `assert`. Today's hash already does that for index
+name, index dtype, MultiIndex names and Series name, so following `assert` keeps them.
+
+**Grammar coverage is a decision.** Values that hash and store on `main` but fall outside the
+prototype grammar raise `ValueError` under it: Timestamp column labels, `period[M]` columns and
+`interval[int64, right]` columns. A `v1` that raises for them would break values that work in
+v0.2.0. Recommended: the grammar covers every label and dtype that stores today, adding
+Timestamp / Timedelta / Period labels and `{"period": <freq>}` / `{"interval": [<subtype>,
+<closed>]}` dtypes. Anything else raises `ValueError` naming the column, as the Polars grammar
+does. Sparse columns already fail today (`TypeError`).
+
+**If ITL-898 adds an order option to starfix.** The option would cover column order, MultiIndex
+level order (index levels are table fields) and struct field order. It would not cover the
+non-order rows: pandas dtypes, label types, `columns.name` and categories are not in the Arrow
+values starfix sees. A descriptor is still needed for those, so the order option would shorten
+the descriptor, not replace it.
+
+## Failing tests on the branch (red on `main` by design, no PR yet)
+
+| File | Red now | Green now (guards and preconditions) |
+|---|---|---|
+| `tests/test_hashing/test_pandas_value_identity.py` | 4: column order, MultiIndex level order (frame, Series), `ArrowDtype` struct field order | 10: pandas distinguishes each pair; equal frames hash equal; hash survives storage |
+| `tests/test_core/function_pod/test_pandas_dataframe_order.py` (public interface, in-memory and Delta, sync and async) | 6: a cached pod returning `df.columns[0]` / `df.index.names[0]` gets the other order's result (sync in one run; sync and async with a warm cache) | 6: frames stored with their order; async single run (rows race past the cache) |
+| `tests/test_hashing/test_arrow_table_value_identity.py` | 4: column order, struct field order, struct field order in a list, `RecordBatch` column order | 8: Arrow distinguishes each pair; chunking is not identity; stream content hash, row data hashes and record IDs ignore column order |
+
+The tests assert distinctness only, never a label or digest, so they hold under either
+mechanism. Under the prototypes (full pandas descriptor, separated table handler), every pandas
+test passes and every stream guard passes. The table struct-order tests still fail because the
+table prototype describes top-level fields only. When implemented,
+`test_pandas_handlers.py::test_returns_content_hash` (asserts `method == "arrow_v0.1"`) changes
+on purpose.
+
 ## Decisions requested
 
 1. Approve the labelled design (`pandas_dataframe_v1` / `pandas_series_v1`, every pandas value
    hash moves) over the sorted-order variant.
-2. Scope of `v1`: order only, or also the non-order mismatches in (a), and which ones (ITL-887
-   categorical among them).
-3. Base: wait for #286 and branch from `main` (recommended), or branch from #286's head.
+2. Scope of `v1`: the full descriptor in (i), which agrees with `assert_frame_equal` defaults
+   and settles ITL-887 (recommended), or order only. Also: grammar coverage (Timestamp labels,
+   Period, Interval) and the mechanism (descriptor vs a starfix option, ITL-898).
+3. Base: decided by the coordinator. Wait for #286 to merge, then build from `main` on a shared
+   helper.
 4. `pa.Table` values: approve the separation and `arrow_table_v1`; one PR or two; `Table` vs
    `RecordBatch`; struct field order inside stream columns (flag only).
 

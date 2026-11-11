@@ -21,6 +21,7 @@ GENERATOR = ROOT / "tests/test_hashing/golden/generate_golden_hashes.py"
 
 VARIANTS = {
     "pandas": "pandas_dataframe_v1 / pandas_series_v1 prototype only",
+    "pandas_full": "full-descriptor pandas_dataframe_v1 / pandas_series_v1 (claim i)",
     "table_naive": "arrow_table_v1 in ArrowTableHandler, datagrams and streams unchanged",
     "table_separated": "arrow_table_v1 for values; datagram and stream identities separated",
     "both_separated": "pandas prototype plus separated arrow_table_v1",
@@ -32,6 +33,8 @@ sys.path.insert(0, {here!r})
 import prototype_v1
 if {patch!r} in ("pandas", "both_separated"):
     prototype_v1.install()
+if {patch!r} == "pandas_full":
+    prototype_v1.install_full_descriptor()
 if {patch!r} == "table_naive":
     prototype_v1.install_arrow_table(separated=False)
 if {patch!r} in ("table_separated", "both_separated"):
