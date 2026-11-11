@@ -209,3 +209,14 @@ main is b197544e (v0.2.0 tagged at 70f53f64; #291 SemiJoin via Polars, ITL-847, 
    layout/digest/names/identity/behaviour → ask coordinator).
 4. If #286 merges meanwhile: merge main again (golden: keep both sets; docs/reference/hashing.md:
    the hash label convention paragraph appears once).
+
+### CodeRabbit round 4 (on 25b240ad), coordinator decisions
+
+- Fixed (ad7a3ded): ReST `::` markers; fixture mkdir; tar extraction fallback for 3.11.0-3.11.3.
+- Declined: test docstrings (as in rounds 1-3).
+- A (None from a non-optional output): not array-specific; deferred to ITL-895; reply on thread.
+- B: MergeJoin with colliding grouped array columns (`list[ndarray]`) raises TypeError. Extend
+  the array ordering key recursively to lists of arrays; test merging two grouped array
+  columns, sync and async; confirm no golden or existing hash moves.
+- C: structured dtype tag entry with other than 2 or 3 parts raises ValueError naming the tag;
+  test.

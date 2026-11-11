@@ -402,6 +402,33 @@ def test_null_child_on_read_raises_naming_the_column() -> None:
             data.as_dict()
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [["a"], ["a", "int32", [2], "extra"]],
+    ids=["one_part", "four_parts"],
+)
+def test_structured_tag_entry_with_wrong_part_count_raises_on_read(
+    entry: list[Any],
+) -> None:
+    converter = get_default_context().type_converter
+    ext = converter.python_type_to_arrow_type(np.ndarray)
+    assert isinstance(ext, pa.ExtensionType)
+    tag = json.dumps([entry])
+    storage = pa.array(
+        [{"dtype": tag, "shape": [], "data": b"\x00" * 8}], type=ext.storage_type
+    )
+    table = pa.table(
+        {
+            "k": pa.array(["r"], pa.large_string()),
+            "x": pa.ExtensionArray.from_storage(ext, storage),
+        }
+    )
+    with pytest.raises((ValueError, RuntimeError), match="malformed array dtype tag"):
+        source = ArrowTableSource(table, tag_columns=["k"])
+        for _, data in source.iter_data():
+            data.as_dict()
+
+
 # ---------------------------------------------------------------------------
 # Function pods: a declared np.ndarray return must be an ndarray
 # ---------------------------------------------------------------------------

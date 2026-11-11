@@ -178,6 +178,11 @@ def _dtype_from_value(value: Any) -> np.dtype[Any]:
     if isinstance(value, list):
         fields: list[Any] = []
         for entry in value:
+            if not isinstance(entry, list) or len(entry) not in (2, 3):
+                expected = "[name, tag] or [name, tag, shape]"
+                raise ValueError(
+                    f"malformed array dtype tag entry {entry!r}: expected {expected}"
+                )
             if len(entry) == 3:
                 fields.append((entry[0], _dtype_from_value(entry[1]), tuple(entry[2])))
             else:

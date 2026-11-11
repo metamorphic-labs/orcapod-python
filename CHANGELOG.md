@@ -32,7 +32,8 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   `clongdouble`, datetimes and timedeltas without a unit, and structured dtypes with titles.
 - **Function pods.** A pod declared `-> np.ndarray` that returns something other than an array,
   such as a NumPy scalar, now raises `TypeError` naming the output.
-- **MergeJoin** orders merged arrays by their stored `(dtype tag, shape, data)`.
+- **MergeJoin** orders merged arrays by their stored `(dtype tag, shape, data)`, and lists of
+  arrays (an array column after `GroupBy` or `Batch`) by their elements' keys, in order.
 - **Pick** on a column whose logical type has no keyed access (an array, a dataclass, a
   pydantic model) raises `InputValidationError` naming the column, instead of
   `NotImplementedError` (ITL-883).

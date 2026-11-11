@@ -322,7 +322,9 @@ A scratch prototype of the struct format (no `src/` change) was run against `tes
 - **F3** (approved): `MergeJoin` sorts colliding values as Python storage values, and struct
   storage values (dicts) cannot be ordered (the ITL-839 limitation). For the array logical type
   only, the ordering key is the stored `(dtype tag, shape, data)` tuple. That order is
-  deterministic and defined on the stored value. General struct ordering stays in ITL-839.
+  deterministic and defined on the stored value. A list of arrays at any depth (after
+  `GroupBy` or `Batch`) is ordered by the tuple of its elements' keys, `None` first
+  (CodeRabbit round 4, approved November 11). General struct ordering stays in ITL-839.
 
 ## H. Risks and cuts
 

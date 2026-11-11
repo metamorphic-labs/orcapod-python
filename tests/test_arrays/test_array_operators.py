@@ -22,11 +22,16 @@ from orcapod.operators import (
     SelectDataColumns,
     SemiJoin,
 )
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import DictSource
 from tests.test_arrays.array_cases import (
     ARRAYS,
     assert_arrays_identical,
     assert_same_arrays_any_order,
+)
+from tests.test_core.operators.test_async_sync_equivalence import (
+    async_rows,
+    sync_rows,
 )
 
 NAMES = sorted(ARRAYS)
@@ -150,3 +155,67 @@ def test_merge_join_colliding_array_column(shift: int) -> None:
         assert_same_arrays_any_order(
             list(got[name]["x"]), [expected_x(name), expected_x(name, shift)]
         )
+
+
+def grouped_arrays_source(source_id: str, shift: int = 0) -> StreamProtocol:
+    """``arrays_source`` grouped on ``g``, so ``x`` becomes ``list[np.ndarray]``."""
+    return GroupBy(by=["g"])(arrays_source(source_id, shift))
+
+
+def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
+    """Each group's merged ``x`` holds the left and the right member lists."""
+    assert sorted(got) == ["g0", "g1", "g2"]
+    for group, merged in got.items():
+        names = [n for n in NAMES if GROUP[n] == group]
+        assert len(merged) == 2
+        expected = [
+            [expected_x(n) for n in names],
+            [expected_x(n, shift) for n in names],
+        ]
+        for members in merged:
+            assert any(
+                len(members) == len(e)
+                and all(_same_array(g, x) for g, x in zip(members, e, strict=True))
+                for e in expected
+            )
+        if shift:
+            assert not all(
+                _same_array(a, b) for a, b in zip(merged[0], merged[1], strict=True)
+            )
+
+
+def _same_array(got: Any, expected: Any) -> bool:
+    try:
+        assert_arrays_identical(got, expected)
+    except AssertionError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("shift", [0, 1])
+def test_merge_join_colliding_grouped_array_column(shift: int) -> None:
+    left = grouped_arrays_source("left")
+    right = grouped_arrays_source("right", shift)
+    out = MergeJoin()(left, right)
+    got = {fields(t)["g"]: fields(d)["x"] for t, d in out.iter_data()}
+    assert_merged_groups(got, shift)
+    # The swapped call yields the same tags and data. Source info is left out: on
+    # tied values from inputs with one pipeline hash, its order follows the call.
+    swapped = MergeJoin()(right, left)
+    assert swapped.as_table().equals(out.as_table())
+
+
+def test_merge_join_colliding_grouped_array_column_async_equals_sync() -> None:
+    left = grouped_arrays_source("left")
+    right = grouped_arrays_source("right", 1)
+    expected = {fields(t)["g"]: d for t, d in sync_rows(MergeJoin(), left, right)}
+    # The async path is under test: this helper drives ``async_execute`` over channels.
+    actual = {fields(t)["g"]: d for t, d in async_rows(MergeJoin(), left, right)}
+    # Data only: after GroupBy or Batch, MergeJoin's async system tag column names
+    # differ from the sync ones on main too, for any column type (reported separately).
+    assert sorted(actual) == sorted(expected)
+    for group, data in actual.items():
+        assert data.arrow_schema() == expected[group].arrow_schema()
+        assert data.content_hash() == expected[group].content_hash()
+        assert data.source_info() == expected[group].source_info()
+    assert_merged_groups({g: fields(d)["x"] for g, d in actual.items()}, 1)
