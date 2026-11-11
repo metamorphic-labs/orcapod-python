@@ -166,3 +166,26 @@ duplicate too.
 
 ### Task 7: PR
 - [ ] Merge origin/main, push, PR (`Fixes ITL-910`, mentions ITL-848, ITL-927), CodeRabbit rounds.
+
+## D1 = D (developer, 2026-11-11): fail explicitly on rows hashed under another label
+
+Design (tests first):
+- New public `orcapod.errors.StoreHashLabelError(StoreError)` (always fails the run, whatever
+  `error_policy`): attributes `record_path`, `found_label`, `current_label`; message names the table,
+  both labels and the remedy (fresh store, or keep the version that wrote it; migration tool planned).
+  No opt-out (`ignore_schema` does not disable it).
+- Helpers in `src/orcapod/hashing/stored_hash_labels.py` return what they find (no raising):
+  `foreign_arrow_label(values, current_label)` for `b"<label>:<digest>"` columns (only `arrow_v*`
+  labels count); `foreign_hash_format(values, current_format_hex)` for hex-digest columns.
+- Detection points (one full read per table per node/cache instance, D-ii; no protocol change):
+  - FunctionJobNode pipeline table: `__pipeline_base_entry_id`; result table (via ResultCache):
+    `__input_data_hash`. Checked at `execute` / `async_execute` start and on reads
+    (`_fetch_joined_records`, `get_all_records`).
+  - ResultCache `lookup` / `store` / `get_all_records` (covers standalone cached pods).
+  - OperatorJobNode table: `_record_hash` hex, starfix format prefix vs current hasher's prefix.
+  - CachedSource table: same hex prefix, before ingesting live data.
+  - SideEffectJobNode invocation log: `record_id_hash` label, at execute/async_execute start
+    (otherwise v0.2 completions are missed and side effects run again).
+- `PipelineJob.run` pre-flight: every node's stored tables are checked before the orchestrator
+  starts, so a run raises before computing or writing anything (array nodes on fresh tables would
+  otherwise run first).
