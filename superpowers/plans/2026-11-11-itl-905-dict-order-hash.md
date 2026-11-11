@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Equal dicts give equal row hashes on every path (Python and Arrow inputs, nested, sync and async, fresh and cached), because a `dict` is order independent (developer, November 11, 2026).
+**Goal:** Equal dicts and sets built from Python values give equal row hashes on every path (nested, sync and async, fresh and cached), because a `dict` and a `set` are order independent (developer, November 11, 2026). A key/value list that arrives already in Arrow form is an ordered list and hashes as stored (ruling below).
 
-**Architecture:** One ordering rule, defined once on Arrow *storage* key values (`semantic_types/dict_order.py`). It is applied in three places: (1) the converter sorts entries when a Python dict becomes `large_list<struct<key, value>>`; (2) the Arrow hasher sorts the entries of every dict-encoded list before starfix sees them, so tables that arrive already holding unsorted entries (Arrow/Delta sources, v0.2.0 stores, operator rebuilds) hash canonically; (3) a datagram built from Python values holds its dict values in the same canonical order, so a fresh value and a cached read-back value iterate identically.
+**Architecture (final):** One ordering rule, defined once on Arrow *storage* values (`semantic_types/canonical_order.py`). It is applied in two places: (1) the converter sorts dict entries and plain `set[T]` elements when a Python value becomes Arrow; (3) a datagram built from Python values holds its dict values in the same canonical order, so a fresh value and a cached read-back value iterate identically. Fix (2), sorting dict-encoded lists at hash time, was implemented and then REMOVED by the developer's ruling: hashing an Arrow table never sorts anything. Sections 2, 4 and 5 below are the original proposal; "Outcome" at the end is authoritative.
 
 **Tech Stack:** Python, PyArrow, starfix 0.4 (unchanged), pytest via `uv run`.
 
@@ -64,7 +64,7 @@ Sort key `dict_entry_sort_key(storage_key)`, total and independent of process, l
 
 | Key type (storage) | Order |
 |---|---|
-| `None` (key type `K | None`) | first |
+| `None` (key type `K \| None`) | first |
 | `bool` | `False < True` |
 | `int` (any width) | numeric |
 | `float` | numeric; `-0.0` and `0.0` compare equal (they are one Python dict key); **NaN rejected** |
@@ -175,11 +175,13 @@ def sort_dict_entries(entries: list[dict], column: str) -> list[dict]:
 - [ ] In the `origin is dict` converter: build `[{"key": key_converter(k), "value": value_converter(v)} ...]`, then return `sort_dict_entries(entries, column=...)`. Replace the two `set(field_names) == {"key", "value"}` checks with `is_dict_arrow_type`.
 - [ ] Run Task 1 tests (Python-origin cases now pass; Arrow-native still fail) and `uv run pytest tests/test_semantic_types -q`. Commit.
 
-### Task 4: hasher sorts dict entries (fix 2)
+### Task 4: hasher sorts dict entries (fix 2) — SUPERSEDED, do not implement
+
+> Rejected by the developer (November 11, 2026) and reverted: hashing an Arrow table never sorts. `SemanticHashingVisitor.visit_list` stays unchanged.
 
 **Files:** Modify `src/orcapod/hashing/visitors.py` (`SemanticHashingVisitor.visit_list`).
 
-- [ ] After `_visit_list_elements`, if `is_dict_arrow_type(list_type)`, return `sort_dict_entries(processed, column=".".join(self._current_field_path))`. Run Task 1 tests (Arrow-native, nested, store cases pass) and `uv run pytest tests/test_hashing -q` (golden must pass unchanged). Commit.
+- [x] ~~After `_visit_list_elements`, if `is_dict_arrow_type(list_type)`, return `sort_dict_entries(processed, column=".".join(self._current_field_path))`. Run Task 1 tests (Arrow-native, nested, store cases pass) and `uv run pytest tests/test_hashing -q` (golden must pass unchanged). Commit.~~ (reverted)
 
 ### Task 5: canonical in-memory values (fix 3)
 
@@ -228,3 +230,27 @@ walk over every dict literal in `cases.py` found no other dict reaching Arrow ou
 
 Performance: the Arrow hasher is byte-for-byte unchanged from `main`, so hashing tables with no
 dict columns costs nothing extra. Conversion adds one sort per dict or set value.
+
+---
+
+## Review round 1 (CodeRabbit on `2994073e`) and merge of `main` `c8efc092`
+
+Worker 2, November 11, 2026.
+
+* Merge `origin/main` (`c8efc092`): conflicts only in `CHANGELOG.md` and `DESIGN_ISSUES.md`,
+  resolved additively (one `[0.3.0]` section with both sides; DO1 and NP1 both kept).
+  Golden diff vs main: 2 changed lines (the approved `index_pick` s1/s2 data hashes), 40 added.
+* Findings and actions:
+  1. `hashing.md` signed zero: asked coordinator (proposal: document, no normalisation).
+  2. `hashing.md` fresh vs cached: qualify for `0.2.0` cache hits; same in CHANGELOG and DO1.
+  3. `canonical_order._key_rank` NaN: reject every NaN-capable non-integral real
+     (`numpy.float32`) and Decimal NaN, not only `float`. Failing test first.
+  4. `ListLogicalType` set NaN (pre-existing code): asked coordinator (proposal: decline, report).
+  5. Plan Task 4: marked superseded (this commit).
+  6-9. Docstrings on new test helpers/classes/methods and golden case functions.
+  10. `tarfile.extractall(filter="data")` needs 3.11.4: use the filter when available, else a
+      member check (regular files and dirs only, no absolute or `..` paths).
+  11. (body) `Datagram.update` / `with_columns` dict-only branches: apply the canonical copy.
+      Failing test first.
+  12. (body nits) `itertools.pairwise`, `datetime.UTC`: apply. ast-grep CWE-78 on a constant
+      subprocess script and basedpyright "partially unknown" warnings from `DataValue`: decline.
