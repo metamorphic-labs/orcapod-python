@@ -62,6 +62,7 @@ def data_hash(value: Any) -> Any:
 
 
 def test_column_type_is_orcapod_ndarray_over_the_array_struct() -> None:
+    """An array column is ``orcapod.ndarray`` over the array struct with version metadata."""
     table = DictSource(
         data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"]
     ).as_table()
@@ -79,6 +80,7 @@ def test_column_type_is_orcapod_ndarray_over_the_array_struct() -> None:
 
 
 def test_old_extension_name_is_not_registered() -> None:
+    """Only ``orcapod.ndarray`` is registered; the old ``numpy.ndarray`` name is not."""
     converter: Any = get_default_context().type_converter
     assert converter.get_logical_type_by_arrow_extension_name("numpy.ndarray") is None
     assert (
@@ -142,6 +144,7 @@ TAG_CASES: list[tuple[str, npt.NDArray[Any], str]] = [
 def test_stored_row_holds_tag_shape_and_c_order_little_endian_data(
     array: npt.NDArray[Any], tag: str
 ) -> None:
+    """The stored row holds the dtype tag, the shape and the packed element bytes."""
     row = stored(array)
     assert row["dtype"] == tag
     assert row["shape"] == list(array.shape)
@@ -152,11 +155,13 @@ def test_stored_row_holds_tag_shape_and_c_order_little_endian_data(
     "name", ["float32", "three_d", "complex128", "unicode", "datetime64_ns"]
 )
 def test_data_is_the_c_order_little_endian_buffer(name: str) -> None:
+    """The stored data is the array's C-order, little-endian buffer."""
     array = ARRAYS[name]
     assert stored(array)["data"] == np.ascontiguousarray(array).tobytes()
 
 
 def test_zero_d_and_empty_shapes() -> None:
+    """Zero-dimensional and empty arrays store their exact shape and data."""
     assert stored(np.array(2.5))["shape"] == []
     assert stored(np.array(2.5))["data"] == struct.pack("<d", 2.5)
     assert stored(np.zeros((0, 3), np.float32)) == {
@@ -168,6 +173,7 @@ def test_zero_d_and_empty_shapes() -> None:
 
 
 def test_structured_data_is_packed_in_declared_field_order() -> None:
+    """Structured data is stored little-endian and packed in declared field order."""
     array = np.array([(1.5, 7)], dtype=[("b", ">f8"), ("a", "<i4")])
     row = stored(array)
     assert row["dtype"] == '[["b","float64"],["a","int32"]]'
@@ -180,11 +186,13 @@ def test_structured_data_is_packed_in_declared_field_order() -> None:
 
 
 def test_fortran_order_reads_back_c_order() -> None:
+    """A Fortran-ordered array reads back C-ordered with the same values."""
     array = np.asfortranarray(np.arange(6, dtype=np.float32).reshape(2, 3))
     assert_arrays_identical(read_back(array), np.ascontiguousarray(array))
 
 
 def test_strided_view_reads_back_as_its_values() -> None:
+    """A strided view reads back as a C-contiguous array of its values."""
     base = np.arange(24, dtype=np.int16).reshape(4, 6)
     view = base[::2, 1::2]
     assert_arrays_identical(read_back(view), np.ascontiguousarray(view))
@@ -192,6 +200,7 @@ def test_strided_view_reads_back_as_its_values() -> None:
 
 @pytest.mark.parametrize("dtype", [">f4", ">i8", ">c16", ">M8[ns]", ">U3"])
 def test_big_endian_reads_back_little_endian_with_equal_values(dtype: str) -> None:
+    """A big-endian array reads back little-endian with equal values."""
     raw = (
         ["ab", "c"] if dtype.startswith(">U") else np.arange(2).astype(dtype[0] + "i8")
     )
@@ -202,6 +211,7 @@ def test_big_endian_reads_back_little_endian_with_equal_values(dtype: str) -> No
 
 
 def test_structured_reads_back_in_stored_field_order_and_packed() -> None:
+    """An aligned structured array reads back in declared field order, little-endian and packed."""
     aligned = np.dtype([("b", ">f8"), ("a", "<i2")], align=True)
     array = np.array([(1.5, 7), (-2.0, 9)], dtype=aligned)
     got = read_back(array)
@@ -213,6 +223,7 @@ def test_structured_reads_back_in_stored_field_order_and_packed() -> None:
 
 
 def test_nested_structured_reads_back_in_stored_field_order() -> None:
+    """A nested structured array reads back in declared field order at every depth."""
     inner = np.dtype([("y", ">i2"), ("x", "<i2")])
     array = np.array([((1, 2), 3.5)], dtype=[("s", inner), ("a", "<f8")])
     got = read_back(array)
@@ -221,6 +232,7 @@ def test_nested_structured_reads_back_in_stored_field_order() -> None:
 
 
 def test_reordered_fields_are_a_different_stored_value() -> None:
+    """Arrays whose fields differ only in order are different stored values."""
     ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
     ba = np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")])
     assert stored(ab)["dtype"] != stored(ba)["dtype"]
@@ -230,6 +242,7 @@ def test_reordered_fields_are_a_different_stored_value() -> None:
 
 
 def test_zero_d_structured_round_trip() -> None:
+    """A zero-dimensional structured array round-trips."""
     array = np.array((3, 1.5), dtype=[("b", "<i4"), ("a", "<f8")])
     got = read_back(array)
     assert got.shape == ()
@@ -237,6 +250,7 @@ def test_zero_d_structured_round_trip() -> None:
 
 
 def test_read_back_is_writeable() -> None:
+    """An array read back from storage is writeable."""
     got = read_back(np.arange(3.0))
     got[0] = 10.0
     assert got[0] == 10.0
@@ -248,6 +262,7 @@ def test_read_back_is_writeable() -> None:
 
 
 def test_matrix_and_recarray_read_back_as_plain_arrays(tmp_path: Path) -> None:
+    """``np.matrix``, ``np.recarray`` and ``np.memmap`` read back and hash as plain arrays."""
     matrix = np.matrix([[1.0, 2.0], [3.0, 4.0]])
     rec = np.rec.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
     memmap = np.memmap(tmp_path / "m.dat", dtype=np.int32, mode="w+", shape=(3,))
@@ -265,6 +280,7 @@ class _ViewChangesValues(np.ndarray[Any, Any]):
 
 
 def test_subclass_view_override_does_not_change_stored_or_hashed_values() -> None:
+    """A subclass's ``view`` override cannot change the stored or hashed values."""
     base = np.arange(1.0, 4.0)
     sub = base.view(_ViewChangesValues)
     assert_arrays_identical(read_back(sub), base)
@@ -279,6 +295,7 @@ def test_subclass_view_override_does_not_change_stored_or_hashed_values() -> Non
 
 @pytest.mark.parametrize("name", sorted(ARRAYS))
 def test_semantic_hash_is_the_v1_digest_of_the_stored_row(name: str) -> None:
+    """The semantic hash is the ``ndarray_v1`` digest of the stored row."""
     row = stored(ARRAYS[name])
     h = semantic_hash(ARRAYS[name])
     assert h.method == "ndarray_v1"
@@ -286,6 +303,7 @@ def test_semantic_hash_is_the_v1_digest_of_the_stored_row(name: str) -> None:
 
 
 def test_pinned_digests() -> None:
+    """Pinned digests match the spec's byte rules."""
     # Pinned v1 digests; computed by ``reference_digest`` from the spec's byte rules.
     cases = {
         "float32_2x3": (np.arange(6, dtype=np.float32).reshape(2, 3), "float32"),
@@ -360,6 +378,7 @@ def _equal_value_variants() -> list[tuple[str, npt.NDArray[Any], npt.NDArray[Any
 def test_layout_byte_order_padding_and_subclass_do_not_change_the_hash(
     left: npt.NDArray[Any], right: npt.NDArray[Any]
 ) -> None:
+    """Memory layout, byte order, padding and subclass do not change the hash."""
     assert semantic_hash(left) == semantic_hash(right)
     assert data_hash(left) == data_hash(right)
 
@@ -403,11 +422,13 @@ def _different_value_pairs() -> list[tuple[str, npt.NDArray[Any], npt.NDArray[An
 def test_dtype_shape_and_bits_change_the_hash(
     left: npt.NDArray[Any], right: npt.NDArray[Any]
 ) -> None:
+    """Dtype, shape, field order and element bits change the hash."""
     assert semantic_hash(left) != semantic_hash(right)
     assert data_hash(left) != data_hash(right)
 
 
 def test_table_token_carries_extension_name_and_label() -> None:
+    """A table token carries the extension name and the ``ndarray_v1`` label."""
     # The Arrow hasher folds the extension name in front of the handler's label.
     from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 
@@ -447,12 +468,14 @@ if hasattr(np, "dtypes") and hasattr(np.dtypes, "StringDType"):
 def test_unsupported_arrays_are_refused_naming_column_and_dtype(
     value: Any, reason: str
 ) -> None:
+    """Unsupported arrays are refused at write time, naming the column and the dtype."""
     with pytest.raises(ValueError, match="'payload'") as info:
         DictSource(data=[{"k": "r", "payload": value}], tag_columns=["k"]).as_table()
     assert reason.lower() in str(info.value).lower()
 
 
 def test_null_child_on_read_raises_naming_the_column() -> None:
+    """A stored row with a null child raises on read, naming the column."""
     converter = get_default_context().type_converter
     ext = converter.python_type_to_arrow_type(np.ndarray)
     assert isinstance(ext, pa.ExtensionType)
@@ -496,6 +519,7 @@ def test_null_child_on_read_raises_naming_the_column() -> None:
 def test_malformed_structured_tag_entry_raises_on_read(
     entry: list[Any],
 ) -> None:
+    """A malformed structured tag entry raises the malformed-tag error on read."""
     converter = get_default_context().type_converter
     ext = converter.python_type_to_arrow_type(np.ndarray)
     assert isinstance(ext, pa.ExtensionType)
@@ -521,6 +545,8 @@ def test_malformed_structured_tag_entry_raises_on_read(
 
 
 def test_scalar_returned_for_declared_ndarray_is_refused_at_the_pod() -> None:
+    """A NumPy scalar returned for a declared ``np.ndarray`` output is refused at the pod."""
+
     @function_pod(output_keys="y")
     def double(x: np.ndarray) -> np.ndarray:  # pyright: ignore[reportMissingTypeArgument]  # the bare np.ndarray annotation is under test
         return x * 2  # a 0-d input gives a NumPy scalar
@@ -533,6 +559,8 @@ def test_scalar_returned_for_declared_ndarray_is_refused_at_the_pod() -> None:
 
 
 def test_none_returned_for_optional_ndarray_is_accepted() -> None:
+    """``None`` returned for an optional ``np.ndarray`` output is accepted."""
+
     @function_pod(output_keys="y")
     def nothing(x: np.ndarray) -> np.ndarray | None:  # pyright: ignore[reportMissingTypeArgument]  # the bare np.ndarray annotation is under test
         return None
@@ -547,6 +575,7 @@ def test_none_returned_for_optional_ndarray_is_accepted() -> None:
 
 
 def test_merge_join_orders_arrays_by_stored_tag_shape_and_data() -> None:
+    """``MergeJoin`` orders arrays by their stored dtype tag, shape and data."""
     small = np.array([7.5], dtype=np.float64)
     large = np.array([107.5], dtype=np.float64)
     other = np.array([1], dtype=np.int8)
@@ -576,6 +605,7 @@ def test_merge_join_orders_arrays_by_stored_tag_shape_and_data() -> None:
 
 
 def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
+    """``MergeJoin`` orders arrays that differ only in field order the same way for either input order."""
     ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
     ba = np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")])
     left = DictSource(data=[{"k": "a", "x": ba}], tag_columns=["k"], source_id="l")
@@ -592,6 +622,7 @@ def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
 
 
 def test_stored_tag_is_valid_json_for_structured() -> None:
+    """A structured dtype tag is valid JSON in declared field order."""
     tag = stored(np.zeros(1, dtype=[("b", "<f4"), ("a", "<i2", (2,))]))["dtype"]
     assert json.loads(tag) == [["b", "float32"], ["a", "int16", [2]]]
 
@@ -602,6 +633,7 @@ def test_stored_tag_is_valid_json_for_structured() -> None:
 
 
 def test_pick_on_an_array_column_raises_input_validation_error() -> None:
+    """``Pick`` on an array column raises ``InputValidationError`` naming the column."""
     from orcapod.errors import InputValidationError
     from orcapod.operators import Pick
 
@@ -613,6 +645,7 @@ def test_pick_on_an_array_column_raises_input_validation_error() -> None:
 def test_pick_on_an_array_column_raises_while_building_a_pipeline(
     tmp_path: Path,
 ) -> None:
+    """``Pick`` on an array column raises while the pipeline is being built."""
     # Operators validate their inputs when the graph is built, before either
     # orchestrator (sync or async) runs, so both paths stop here.
     from orcapod import PipelineJob
@@ -627,6 +660,7 @@ def test_pick_on_an_array_column_raises_while_building_a_pipeline(
 
 
 def test_declared_ndarray_check_recognizes_parameterized_aliases() -> None:
+    """The declared-output check recognizes ``np.ndarray`` aliases and subclasses."""
     # Non-public helper: NDArray[...] annotations are rejected when a pod is built
     # today (ITL-869), so the check is exercised directly for when they are allowed.
     import numpy.typing as npt_

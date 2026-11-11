@@ -52,11 +52,13 @@ def _run(seed: str) -> dict[str, object]:
 
 
 def test_array_hashes_stable_across_processes_and_hash_seeds() -> None:
+    """Array hashes are equal across processes and ``PYTHONHASHSEED`` values."""
     results = [_run(seed) for seed in ("0", "1", "4242", "random")]
     assert all(r == results[0] for r in results[1:])
 
 
 def test_array_hashes_match_this_process() -> None:
+    """Array hashes computed in a subprocess equal the hashes computed in this process."""
     from orcapod.contexts import get_default_context
     from tests.test_arrays.array_cases import ARRAYS
 

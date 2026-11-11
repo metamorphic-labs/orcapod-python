@@ -55,6 +55,7 @@ def store(tmp_path: Path) -> Path:
 
 
 def test_v02_store_is_left_intact_and_array_nodes_get_new_tables(store: Path) -> None:
+    """Under v0.3 a v0.2 store is left byte-identical and array nodes write new tables."""
     files_before = _files(store)
     tables_before = _tables(store)
 
@@ -96,6 +97,7 @@ def test_v02_store_is_left_intact_and_array_nodes_get_new_tables(store: Path) ->
 
 
 def test_v02_array_column_is_not_mixed_with_the_new_format(store: Path) -> None:
+    """No table holds both the old ``numpy.ndarray`` and the new ``orcapod.ndarray`` format."""
     build_job(store).run()
     for table in _tables(store):
         schema = deltalake.DeltaTable(str(store / table)).schema().to_arrow()

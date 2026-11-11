@@ -27,17 +27,20 @@ def _read(stream: Any, column: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("name", sorted(ARRAYS))
 def test_source_round_trip(name: str) -> None:
+    """Each array case reads back from a source exactly."""
     got = _read(_source({name: ARRAYS[name]}), "x")
     assert_arrays_identical(got[name], ARRAYS[name])
 
 
 def test_one_column_holds_every_dtype_and_shape() -> None:
+    """One column holding every dtype and shape reads back exactly."""
     got = _read(_source(ARRAYS), "x")
     for name, expected in ARRAYS.items():
         assert_arrays_identical(got[name], expected)
 
 
 def test_function_pod_input_and_output() -> None:
+    """A function pod receives and returns arrays exactly."""
     seen: dict[str, npt.NDArray[Any]] = {}
 
     @function_pod(output_keys="y")
@@ -52,6 +55,8 @@ def test_function_pod_input_and_output() -> None:
 
 
 def test_optional_array_column_keeps_none() -> None:
+    """An optional array output keeps ``None`` and the returned arrays."""
+
     @function_pod(output_keys="y")
     def maybe(x: np.ndarray) -> np.ndarray | None:  # pyright: ignore[reportMissingTypeArgument]  # the bare np.ndarray annotation is under test
         return None if x.size == 0 else x
@@ -65,6 +70,7 @@ def test_optional_array_column_keeps_none() -> None:
 
 
 def test_equal_arrays_have_equal_content_hashes() -> None:
+    """Equal arrays in separate sources have equal content hashes."""
     a = _source({"r": np.arange(6, dtype=np.float32).reshape(2, 3)})
     b = _source({"r": np.arange(6, dtype=np.float32).reshape(2, 3).copy()})
     (_, da), (_, db) = next(iter(a.iter_data())), next(iter(b.iter_data()))
@@ -81,6 +87,7 @@ def test_equal_arrays_have_equal_content_hashes() -> None:
     ],
 )
 def test_different_arrays_have_different_content_hashes(left: str, right: str) -> None:
+    """Different arrays have different content hashes."""
     (_, da), (_, db) = (
         next(iter(_source({"r": ARRAYS[n]}).iter_data())) for n in (left, right)
     )
@@ -88,6 +95,7 @@ def test_different_arrays_have_different_content_hashes(left: str, right: str) -
 
 
 def test_dtype_is_identity() -> None:
+    """The dtype is part of an array's identity."""
     a = np.arange(4, dtype=np.int32)
     (_, da), (_, db) = (
         next(iter(_source({"r": v}).iter_data())) for v in (a, a.astype(np.int64))
@@ -96,6 +104,7 @@ def test_dtype_is_identity() -> None:
 
 
 def test_shape_is_identity() -> None:
+    """The shape is part of an array's identity."""
     a = np.arange(6, dtype=np.int32)
     (_, da), (_, db) = (
         next(iter(_source({"r": v}).iter_data()))

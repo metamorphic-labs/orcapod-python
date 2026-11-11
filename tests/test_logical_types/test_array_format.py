@@ -41,14 +41,17 @@ CASES = [
 def test_digest_matches_independent_reference(
     tag: str, shape: tuple[int, ...], data: bytes
 ) -> None:
+    """The digest matches an independent stdlib reference implementation."""
     assert array_digest_v1(tag, shape, data) == reference_digest(tag, shape, data)
 
 
 def test_digest_is_32_bytes() -> None:
+    """The digest is 32 bytes long."""
     assert len(array_digest_v1("float32", (1,), b"\x00" * 4)) == 32
 
 
 def test_digest_accepts_any_buffer() -> None:
+    """The digest accepts bytes, memoryview and bytearray data and any shape sequence."""
     data = bytes(range(24))
     expected = array_digest_v1("float32", (6,), data)
     assert array_digest_v1("float32", (6,), memoryview(data)) == expected
@@ -56,6 +59,7 @@ def test_digest_accepts_any_buffer() -> None:
 
 
 def test_digest_separates_every_field() -> None:
+    """Every field of the stored row contributes to the digest."""
     assert array_digest_v1("int8", (0, 3), b"") != array_digest_v1("int8", (3, 0), b"")
     assert array_digest_v1("int8", (), b"\x01") != array_digest_v1(
         "int8", (1,), b"\x01"
@@ -69,11 +73,13 @@ def test_digest_separates_every_field() -> None:
 
 
 def test_digest_rejects_negative_dimension() -> None:
+    """The digest rejects a negative dimension."""
     with pytest.raises(ValueError, match="dimension"):
         _ = array_digest_v1("int8", (-1,), b"")
 
 
 def test_storage_type() -> None:
+    """The storage type is the dtype, shape and data struct of the spec."""
     # Children are nullable at the Arrow level: Polars drops nested non-null flags
     # (ITL-842), so non-null is enforced by the logical type instead.
     assert ARRAY_STORAGE_TYPE == pa.struct(

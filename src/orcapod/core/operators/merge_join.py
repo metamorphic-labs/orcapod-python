@@ -96,6 +96,18 @@ def _logical_sort_key(logical_type: Any) -> Callable[[Any], Any] | None:
         return None
 
     def list_key(storage_value: Any) -> tuple[Any, ...]:
+        """Return the ordering key of one stored list value.
+
+        A null list sorts before every non-null list. Non-null lists compare by
+        the tuple of their elements' keys, element by element in list order, so
+        a list that is a prefix of another sorts first.
+
+        Args:
+            storage_value: The stored list, or ``None`` for a null list.
+
+        Returns:
+            ``(0,)`` for a null list, otherwise ``(1, element keys...)``.
+        """
         if storage_value is None:
             return (0,)
         return (1, tuple(element_key(v) for v in storage_value))
