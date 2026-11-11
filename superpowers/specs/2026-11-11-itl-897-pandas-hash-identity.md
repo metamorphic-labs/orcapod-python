@@ -242,7 +242,16 @@ Route 2 never sees a user value, only Orcapod's own tables, so it stays order in
 is. Route 1 is shared. With the handler instrumented over the full test suite
 (`claim_f_table_value_paths.py`), its callers are:
 
-CLAIM_F_TABLE
+| Calls | Whose identity carried the table |
+|---|---|
+| 4909 | `content_hash()` of `Data` |
+| 428 | `content_hash()` of `Tag` |
+| 354 | `content_hash()` of `ArrowTableStream` (producer-less) |
+| 30 | `content_hash()` of `Datagram` |
+| 7 | `content_hash()` of `SourceJobNode` (delegates to its bound source's stream identity) |
+
+The full suite passed under the recorder (6889 passed, 96 skipped, 15 xfailed), and none of the
+5728 calls came from a `pa.Table` value hashed directly: no test exercises the value route today.
 
 The library's own uses of route 1 are stream identities: `Datagram.identity_structure` returns
 the data table (every `Tag` / `Data` content hash, so every input data hash and record ID), and a
