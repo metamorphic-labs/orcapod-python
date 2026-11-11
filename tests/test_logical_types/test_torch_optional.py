@@ -1,25 +1,47 @@
 """PyTorch stays optional: ``import orcapod`` never imports torch (ITL-871).
 
-These tests run in the default suite, where torch is usually not installed.
+The development environment installs torch (the dev group pulls ``orcapod[torch]``), so
+the behaviour without torch is checked in a subprocess whose import system refuses
+``torch`` through a ``sys.meta_path`` finder.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
-import pyarrow as pa
-import pytest
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from orcapod.errors import MissingOptionalDependencyError
-from orcapod.logical_types.array_format import ARRAY_FORMAT_METADATA, ARRAY_STORAGE_TYPE
-from orcapod.sources import ArrowTableSource
+BLOCK_TORCH = textwrap.dedent(
+    """
+    import importlib.abc
+    import sys
 
-TORCH_INSTALLED = importlib.util.find_spec("torch") is not None
+    class _BlockTorch(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "torch" or name.startswith("torch."):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return None
+
+    sys.meta_path.insert(0, _BlockTorch())
+    """
+)
+"""Prelude that makes ``torch`` unimportable, as in an environment without it."""
+
+
+def _run(script: str) -> subprocess.CompletedProcess[str]:
+    """Run ``script`` in a fresh interpreter from the repository root."""
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        cwd=REPO_ROOT,
+        timeout=300,
+    )
 
 SCRIPT = textwrap.dedent(
     """
@@ -47,54 +69,68 @@ SCRIPT = textwrap.dedent(
 
 def test_orcapod_never_imports_torch() -> None:
     """Importing Orcapod and running a pipeline leaves torch unimported."""
-    repo_root = Path(__file__).resolve().parents[2]
-    proc = subprocess.run(
-        [sys.executable, "-c", SCRIPT],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": str(repo_root)},
-        cwd=repo_root,
-        timeout=300,
-    )
+    proc = _run(SCRIPT)
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert proc.stdout.strip().splitlines()[-1] == "False"
 
 
-class _StoredTensorType(pa.ExtensionType):
-    """A stand-in for a column written by Orcapod with PyTorch installed."""
-
-    def __init__(self) -> None:
-        """Build the stand-in over the array struct."""
-        super().__init__(ARRAY_STORAGE_TYPE, "orcapod.torch_tensor")
-
-    def __arrow_ext_serialize__(self) -> bytes:
-        """Return the array format's extension metadata."""
-        return ARRAY_FORMAT_METADATA
-
-    @classmethod
-    def __arrow_ext_deserialize__(
-        cls, storage_type: pa.DataType, serialized: bytes
-    ) -> "_StoredTensorType":
-        """Rebuild the stand-in type."""
-        return cls()
+def test_orcapod_works_without_torch() -> None:
+    """The same pipeline runs when torch cannot be imported at all."""
+    proc = _run(BLOCK_TORCH + SCRIPT)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert proc.stdout.strip().splitlines()[-1] == "False"
 
 
-@pytest.mark.skipif(TORCH_INSTALLED, reason="needs an environment without torch")
-def test_reading_a_tensor_column_without_torch_names_the_missing_dependency() -> None:
-    """Reading a tensor column without torch raises naming the type and the package."""
+READ_TENSOR_COLUMN = textwrap.dedent(
+    """
+    import pyarrow as pa
+
+    from orcapod.errors import MissingOptionalDependencyError
+    from orcapod.logical_types.array_format import (
+        ARRAY_FORMAT_METADATA,
+        ARRAY_STORAGE_TYPE,
+    )
+    from orcapod.sources import ArrowTableSource
+
+    class StoredTensorType(pa.ExtensionType):
+        # Stands in for a column written by Orcapod with PyTorch installed.
+        def __init__(self):
+            super().__init__(ARRAY_STORAGE_TYPE, "orcapod.torch_tensor")
+
+        def __arrow_ext_serialize__(self):
+            return ARRAY_FORMAT_METADATA
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type, serialized):
+            return cls()
+
     storage = pa.array(
-        [{"dtype": "float32", "shape": [1], "data": b"\x00\x00\x80?"}],
+        [{"dtype": "float32", "shape": [1], "data": b"\\x00\\x00\\x80?"}],
         type=ARRAY_STORAGE_TYPE,
     )
     table = pa.table(
         {
             "k": pa.array(["r"], pa.large_string()),
-            "x": pa.ExtensionArray.from_storage(_StoredTensorType(), storage),
+            "x": pa.ExtensionArray.from_storage(StoredTensorType(), storage),
         }
     )
-    with pytest.raises(
-        MissingOptionalDependencyError, match="orcapod.torch_tensor.*torch"
-    ):
+    try:
         source = ArrowTableSource(table, tag_columns=["k"])
         for _, data in source.iter_data():
             data.as_dict()
+    except MissingOptionalDependencyError as exc:
+        print("raised:", exc)
+    else:
+        print("no error")
+    """
+)
+
+
+def test_reading_a_tensor_column_without_torch_names_the_missing_dependency() -> None:
+    """Reading a tensor column without torch raises naming the type and the package."""
+    proc = _run(BLOCK_TORCH + READ_TENSOR_COLUMN)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    last = proc.stdout.strip().splitlines()[-1]
+    assert last.startswith("raised:"), proc.stdout
+    assert "'orcapod.torch_tensor'" in last
+    assert "'torch'" in last
