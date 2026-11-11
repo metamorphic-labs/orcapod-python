@@ -550,7 +550,7 @@ def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
     left = DictSource(data=[{"k": "a", "x": ba}], tag_columns=["k"], source_id="l")
     right = DictSource(data=[{"k": "a", "x": ab}], tag_columns=["k"], source_id="r")
     outs: list[Any] = [
-        [d.as_dict()["x"] for _, d in MergeJoin()(*pair).iter_data()][0]
+        next(d.as_dict()["x"] for _, d in MergeJoin()(*pair).iter_data())
         for pair in ((left, right), (right, left))
     ]
     expected = sorted([ab, ba], key=lambda a: stored(a)["dtype"])

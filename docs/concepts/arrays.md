@@ -146,7 +146,7 @@ in declared field order. It is written with no whitespace and with non-ASCII cha
 | `U5` | `ucs4[5]` | five UCS-4 code units, each `uint32` little-endian, NUL-padded |
 | `S3` | `bytes[3]` | three raw bytes, NUL-padded |
 | `V4` | `void[4]` | four raw bytes |
-| `[("b", "f8"), ("a", "i4", (2,))]` | `[["a","int32",[2]],["b","float64"]]` | fields packed in tag order |
+| `[("b", "f8"), ("a", "i4", (2,))]` | `[["b","float64"],["a","int32",[2]]]` | fields packed in tag order |
 
 ## How an array is hashed
 
