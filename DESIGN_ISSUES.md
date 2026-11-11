@@ -2171,3 +2171,22 @@ equals the materialized one. Hashes of pipelines that already worked are unchang
 Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
 barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
 xfail.
+
+---
+
+## `src/orcapod/logical_types/` — user class identity (dataclass, pydantic)
+
+### UC1 — A user class's identity is its module-qualified name; redefinition and moves break caching
+**Status:** open (design decision pending)
+**Severity:** high
+**Issue:** ITL-881
+
+A dataclass or pydantic model is registered under `f"{__module__}.{__qualname__}"`. That
+string becomes the Arrow extension name and enters every schema, pipeline and pod hash,
+system-tag column name and DB table path, so `__main__.Point` and `pkg.models.Point` never
+share a cache. The class's fields enter only the per-row data hash: the same name with
+different fields shares tables, and reads then fail and the run returns zero rows with only
+log warnings. Re-running a notebook cell that defines the class (or `%autoreload`) raises
+`ValueError: ... already bound` until the kernel restarts. Findings, options and a
+no-hash-change workshop step: `superpowers/specs/2026-11-10-user-class-identity.md`
+(experiments in `superpowers/specs/user-class-identity-experiments/`).
