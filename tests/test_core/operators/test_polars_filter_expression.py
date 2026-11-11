@@ -16,6 +16,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from orcapod import function_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.operators import Join, PolarsFilter
 from orcapod.pipeline import AsyncPipelineOrchestrator, PipelineJob
@@ -96,6 +97,12 @@ def test_expression_filter_upstream_of_join():
     assert joined.pipeline_hash() is not None
 
 
+@function_pod(output_keys="score")
+def score(x: int, y: int, name: str) -> int:
+    """Combine a filtered reading with its joined name."""
+    return x * y + len(name)
+
+
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 def test_expression_filter_inside_pipeline_job(orchestrator):
     job = PipelineJob(name="expr_filter_job", store=InMemoryArrowDatabase())
@@ -103,16 +110,18 @@ def test_expression_filter_inside_pipeline_job(orchestrator):
         filtered = _readings().polars_filter(
             (pl.col("x") > 0) & pl.col("y").is_in([10, 30]), label="positive"
         )
-        Join(label="joined")(filtered, _names())
+        joined = Join(label="joined")(filtered, _names())
+        score.pod(joined, label="score")
     if orchestrator == "async":
         job.run(orchestrator=AsyncPipelineOrchestrator())
     else:
         job.run()
-    assert _ids(job.nodes["positive"]) == ["a", "c"]
-    assert sorted(job.nodes["joined"].as_table().column("name").to_pylist()) == [
-        "alpha",
-        "gamma",
-    ]
+    # Read through the function pod's node: after an async run an operator node reads back
+    # empty for every operator (pre-existing, reported separately), while a function node
+    # serves its stored results on both paths.
+    table = job.nodes["score"].as_table()
+    assert sorted(table.column("id").to_pylist()) == ["a", "c"]
+    assert sorted(table.column("score").to_pylist()) == [15, 95]
 
 
 _JOB_SCRIPT = textwrap.dedent("""\

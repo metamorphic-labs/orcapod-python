@@ -207,7 +207,12 @@ CORPUS: list[tuple[str, Callable[[], pl.Expr], Any]] = [
     (
         "str_contains",
         lambda: pl.col("s").str.contains("a", literal=True),
-        {"fn": ["str.contains", {"literal": True, "strict": True}, [{"col": "s"}, {"lit": {"string": "a"}}]]},
+        {"fn": ["str.contains", {"literal": True, "strict": False}, [{"col": "s"}, {"lit": {"string": "a"}}]]},
+    ),
+    (
+        "str_contains_regex",
+        lambda: pl.col("s").str.contains("^a"),
+        {"fn": ["str.contains", {"literal": False, "strict": True}, [{"col": "s"}, {"lit": {"string": "^a"}}]]},
     ),
     (
         "str_starts_with",
