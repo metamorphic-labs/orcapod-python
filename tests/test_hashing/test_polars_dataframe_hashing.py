@@ -8,7 +8,8 @@ be laid out in memory (chunking, slice offsets, the bytes under null slots), and
 in every process.
 
 Hashes are taken through the public path a cache lookup uses: the ``content_hash()`` of the
-``Data`` a frame-valued source yields.
+``Data`` a frame-valued source yields. The pinned values themselves live in the shared
+golden suite (``tests/test_hashing/golden``, the ``polars_*`` cases).
 """
 
 from __future__ import annotations
@@ -383,80 +384,3 @@ class TestDescriptorGrammar:
     def test_dtype_outside_the_grammar_names_the_column(self) -> None:
         with pytest.raises(ValueError, match=r"'col'.*Int128"):
             polars_dtype_descriptor(pl.List(pl.Int128), "col")
-
-
-def _golden_values() -> dict[str, pl.DataFrame | pl.Series]:
-    return {
-        "simple": pl.DataFrame(
-            {"x": pl.Series([1, 2, 3], dtype=pl.Int64), "y": ["a", "b", "c"]}
-        ),
-        "nulls_and_temporal": pl.DataFrame(
-            {
-                "i": pl.Series([1, None, -3], dtype=pl.Int8),
-                "t": pl.Series(
-                    [dt.datetime(2020, 1, 1, 12), None, dt.datetime(1999, 12, 31)],
-                    dtype=pl.Datetime("ms", "America/New_York"),
-                ),
-                "d": pl.Series(
-                    [dt.timedelta(seconds=1), dt.timedelta(0), None],
-                    dtype=pl.Duration("us"),
-                ),
-                "m": pl.Series(
-                    [decimal.Decimal("1.25"), None, decimal.Decimal("-0.50")],
-                    dtype=pl.Decimal(10, 2),
-                ),
-            }
-        ),
-        "nested_and_categorical": pl.DataFrame(
-            {
-                "e": pl.Series(["x", "y", None], dtype=pl.Enum(["y", "x", "z"])),
-                "c": pl.Series(["p", None, "q"], dtype=pl.Categorical),
-                "a": pl.Series([[1, 2], [3, 4], None], dtype=pl.Array(pl.Int16, 2)),
-                "s": pl.Series(
-                    [{"u": 1, "l": [1.5]}, None, {"u": None, "l": []}],
-                    dtype=pl.Struct({"u": pl.UInt16, "l": pl.List(pl.Float32)}),
-                ),
-                "n": pl.Series([None, None, None], dtype=pl.Null),
-            }
-        ),
-        "empty_with_schema": pl.DataFrame(schema={"x": pl.Int32, "b": pl.Binary}),
-        "series": pl.Series("metric", [1.5, None, 3.0], dtype=pl.Float32),
-    }
-
-
-# Pinned on November 10, 2026 (polars 1.41.2, pyarrow 23.0.1, starfix 0.4.0). These are cache
-# keys: a change here means every stored polars value misses the cache. Only change them on
-# purpose, together with a bump of POLARS_HASH_GRAMMAR_VERSION or an announced hasher change.
-# "value" is the semantic handler's hash of the object; "data" is the content hash of the
-# ``Data`` holding it in a column named "v". Kept in this module because the shared golden
-# suite (tests/test_hashing/golden/, ITL-626) is not merged yet.
-_GOLDEN = {
-    "simple": {
-        "value": "306917e01124956b9202e9ca4b79aa55b015232916ea9914e9e98917d4660f94",
-        "data": "000001acd418e856020bb0c09b22b362b2603236b6322e0b0bc836a054fdc615117547",
-    },
-    "nulls_and_temporal": {
-        "value": "a9c8bae9d486c9963fdbd10a3e5d9cb01d9e6090da681061ea43a158fab7ee93",
-        "data": "000001057fd462f8c4269cd6619489fe760d8f103640eba3571754b63aab5e4feb58d6",
-    },
-    "nested_and_categorical": {
-        "value": "21b78b7721071a3abf265525be7cd93034eb223cc431d11c58671eca4af7c091",
-        "data": "00000162d3242f6fc32246dc58dddf75a8343ac3e359cc496cbb926efd6e0b7145a80a",
-    },
-    "empty_with_schema": {
-        "value": "a25fc4db020721a983e893d64a212d7077e7b3d7396db5fcd10e9a9af6abfff3",
-        "data": "0000019b9251c5bf4d2fc6d232adb6290498aa4ca4a23f761cafc55c42d2cf59352375",
-    },
-    "series": {
-        "value": "7e4547f5f8bdf21350763f0bb2ba461f9b53a603af95df7fc9c4d2c7a2fd6018",
-        "data": "000001a6b6e2ced3ebca541ac63f50c8d75154075ff8bbe3e49370b48d9a9f2f5686cc",
-    },
-}
-
-
-@pytest.mark.parametrize("name", list(_GOLDEN))
-def test_golden_hashes(name: str) -> None:
-    value = _golden_values()[name]
-    hasher = get_default_context().semantic_hasher
-    assert hasher.hash_object(value).to_hex() == _GOLDEN[name]["value"]
-    assert _data_hash(value) == _GOLDEN[name]["data"]

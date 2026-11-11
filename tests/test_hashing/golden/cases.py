@@ -850,3 +850,146 @@ def pipeline_job() -> dict[str, Any]:
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Polars values (ITL-578) — semantic, schema and datagram entries
+# ---------------------------------------------------------------------------
+#
+# Each Polars case is separate from the groups' general cases, so running the generator
+# against a release without the Polars logical types (``--allow-errors``) loses only these
+# entries. The hash of a Polars value is a cache key; an intended change to it comes with a
+# bump of ``POLARS_HASH_GRAMMAR_VERSION`` (``orcapod.logical_types.polars_type``).
+
+
+def _polars_values() -> dict[str, Any]:
+    """Polars values whose hashes are pinned: one per dtype family the grammar names."""
+    import datetime as dt
+    import decimal
+
+    import polars as pl
+
+    return {
+        "simple": pl.DataFrame(
+            {"x": pl.Series([1, 2, 3], dtype=pl.Int64), "y": ["a", "b", "c"]}
+        ),
+        "nulls_and_temporal": pl.DataFrame(
+            {
+                "i": pl.Series([1, None, -3], dtype=pl.Int8),
+                "t": pl.Series(
+                    [dt.datetime(2020, 1, 1, 12), None, dt.datetime(1999, 12, 31)],
+                    dtype=pl.Datetime("ms", "America/New_York"),
+                ),
+                "d": pl.Series(
+                    [dt.timedelta(seconds=1), dt.timedelta(0), None],
+                    dtype=pl.Duration("us"),
+                ),
+                "m": pl.Series(
+                    [decimal.Decimal("1.25"), None, decimal.Decimal("-0.50")],
+                    dtype=pl.Decimal(10, 2),
+                ),
+            }
+        ),
+        "nested_and_categorical": pl.DataFrame(
+            {
+                "e": pl.Series(["x", "y", None], dtype=pl.Enum(["y", "x", "z"])),
+                "c": pl.Series(["p", None, "q"], dtype=pl.Categorical),
+                "a": pl.Series([[1, 2], [3, 4], None], dtype=pl.Array(pl.Int16, 2)),
+                "s": pl.Series(
+                    [{"u": 1, "l": [1.5]}, None, {"u": None, "l": []}],
+                    dtype=pl.Struct({"u": pl.UInt16, "l": pl.List(pl.Float32)}),
+                ),
+                "n": pl.Series([None, None, None], dtype=pl.Null),
+            }
+        ),
+        "empty_with_schema": pl.DataFrame(schema={"x": pl.Int32, "b": pl.Binary}),
+        "series": pl.Series("metric", [1.5, None, 3.0], dtype=pl.Float32),
+    }
+
+
+def _polars_types() -> dict[str, Any]:
+    import polars as pl
+
+    return {"dataframe": pl.DataFrame, "series": pl.Series}
+
+
+@case("semantic", "polars_value")
+def semantic_polars_values() -> dict[str, Any]:
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(v).to_string() for k, v in _polars_values().items()}
+
+
+@case("semantic", "polars_type")
+def semantic_polars_types() -> dict[str, Any]:
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(t).to_string() for k, t in _polars_types().items()}
+
+
+@case("schema", "polars_single_field")
+def schema_polars_single_field() -> dict[str, Any]:
+    from orcapod.types import Schema
+
+    ctx = _ctx()
+    out: dict[str, Any] = {}
+    for name, tp in _polars_types().items():
+        out[f"{name}.arrow_type"] = _arrow_type_text(
+            ctx.type_converter.python_type_to_arrow_type(tp)
+        )
+        out[f"{name}.schema_hash"] = ctx.semantic_hasher.hash_object(
+            Schema({"c": tp})
+        ).to_string()
+    return out
+
+
+@case("datagram", "polars_data_hash")
+def datagram_polars_data_hash() -> dict[str, Any]:
+    """Content hash of the ``Data`` holding each Polars value in its only data column."""
+    from orcapod.sources import DictSource
+
+    out: dict[str, Any] = {}
+    for name, value in _polars_values().items():
+        source = DictSource(
+            [{"k": "a", "v": value}],
+            tag_columns=["k"],
+            data_schema={"k": str, "v": type(value)},
+        )
+        ((_, data),) = list(source.iter_data())
+        out[name] = data.content_hash().to_string()
+    return out
+
+
+def _polars_rows() -> dict[str, list[dict[str, Any]]]:
+    import polars as pl
+
+    return {
+        "polars_dataframe": [
+            {"k": "r1", "c": pl.DataFrame({"a": [1, 2]})},
+            {"k": "r2", "c": pl.DataFrame({"a": [3], "b": ["x"]})},
+        ],
+        "polars_series": [
+            {"k": "r1", "c": pl.Series("a", [1, 2])},
+            {"k": "r2", "c": pl.Series("b", ["x"])},
+        ],
+    }
+
+
+def _make_polars_datagram_case(name: str) -> CaseFn:
+    def run() -> dict[str, Any]:
+        import polars as pl
+
+        from orcapod.sources import DictSource
+
+        column_type = pl.DataFrame if name == "polars_dataframe" else pl.Series
+        source = DictSource(
+            data=_polars_rows()[name],
+            tag_columns=["k"],
+            data_schema={"k": str, "c": column_type},
+            source_id=f"golden_{name}",
+        )
+        return stream_summary(source)
+
+    return run
+
+
+for _name in ("polars_dataframe", "polars_series"):
+    case("datagram", _name)(_make_polars_datagram_case(_name))

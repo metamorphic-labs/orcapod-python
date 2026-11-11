@@ -1,4 +1,11 @@
 {
+  "polars_type.dataframe": "semantic_v0.1:46e935531c5a1f077cb46a9f3b91884a9c74b65214580598a6cdfeb6b05c3c75",
+  "polars_type.series": "semantic_v0.1:1c8e7e7817c4b997f8deb59a1031765c05893f0c9176d86f4709577815fb10b2",
+  "polars_value.empty_with_schema": "sha256:a25fc4db020721a983e893d64a212d7077e7b3d7396db5fcd10e9a9af6abfff3",
+  "polars_value.nested_and_categorical": "sha256:21b78b7721071a3abf265525be7cd93034eb223cc431d11c58671eca4af7c091",
+  "polars_value.nulls_and_temporal": "sha256:a9c8bae9d486c9963fdbd10a3e5d9cb01d9e6090da681061ea43a158fab7ee93",
+  "polars_value.series": "sha256:7e4547f5f8bdf21350763f0bb2ba461f9b53a603af95df7fc9c4d2c7a2fd6018",
+  "polars_value.simple": "sha256:306917e01124956b9202e9ca4b79aa55b015232916ea9914e9e98917d4660f94",
   "type.bool": "semantic_v0.1:cd8f971312b872f0e9a3ef40aa58d6bb537258e72a9a142e0cf712f0a35020e3",
   "type.bytes": "semantic_v0.1:f65cea8d1f29ca5b96d67caf1ced2f630b509e32574a7b78b9071958818a1c59",
   "type.dataclass": "semantic_v0.1:84b8714a03d2a6784736ae38435d9ffbe87c397ea64af275d91e8bdd8281adbc",

@@ -2231,7 +2231,8 @@ the stored names. The IPC bytes are not canonical (bytes under null slots, `_PL_
 so `PolarsDataFrameHandler` / `PolarsSeriesHandler` hash
 `sha256(versioned Orcapod dtype descriptor + starfix digest of the values)` instead
 (developer's decision, November 10, 2026): column order and struct field order are not
-identity, every dtype parameter is. Golden values are pinned in
-`tests/test_hashing/test_polars_dataframe_hashing.py`. Existing hashes are unchanged. Open:
-SQLite stores reject every logical-typed column (ITL-877); the pandas handler collides on
-column order, Categorical vs String and struct field order (follow-up to decide).
+identity, every dtype parameter is. Golden values (value and data hashes, type and `Schema`
+hashes, source identities) are pinned in the shared golden suite, `tests/test_hashing/golden`
+(the `polars_*` cases). Existing hashes are unchanged: every pre-existing golden entry passes.
+Open: SQLite stores reject every logical-typed column (ITL-877); the pandas handler collides
+on column order, Categorical vs String and struct field order (follow-up to decide).
