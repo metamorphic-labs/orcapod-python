@@ -54,7 +54,9 @@ def _hash_table(
     columns = [[f.name, _order(f.type, ordered_struct_fields)] for f in table.schema]
     names = [n for n, _ in columns]
     if len(set(names)) != len(names):
-        raise ValueError("duplicate node path")  # format 2 rejects these with options on
+        raise ValueError(
+            "duplicate node path"
+        )  # format 2 rejects these with options on
     order = json.dumps(
         {
             "columns": columns if ordered_columns else sorted(columns),
