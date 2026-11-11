@@ -14,6 +14,10 @@ Every claim below has a script in `superpowers/scripts/itl_897/`, run with
 `uv run python superpowers/scripts/itl_897/<script>.py`. `prototype_v1.py` holds the prototype
 hashes; the scripts patch it into their own process only.
 
+The scripts measure the released behaviour (v0.2.0 and `main`). The implementation on this
+branch changes the pandas handlers, so run them at commit `5a89fda5`, from before the
+implementation (for example in a `git worktree`).
+
 | Claim | Script |
 |---|---|
 | (a) pandas equality vs the hash | `claim_a_equality_vs_hash.py` |

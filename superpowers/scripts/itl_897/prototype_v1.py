@@ -133,11 +133,15 @@ def pandas_label(label: Any) -> Any:
         return {"tuple": [pandas_label(part) for part in label]}
     if isinstance(label, (pd.Timestamp, dt.datetime, np.datetime64)):
         ts = pd.Timestamp(label)
+        if not isinstance(ts, pd.Timestamp):
+            return {"nat": "datetime"}
         return {"timestamp": [ts.value, ts.unit, None if ts.tz is None else str(ts.tz)]}
     if isinstance(label, dt.date):
         return {"date": label.isoformat()}
     if isinstance(label, (pd.Timedelta, dt.timedelta, np.timedelta64)):
         td = pd.Timedelta(label)
+        if not isinstance(td, pd.Timedelta):
+            return {"nat": "timedelta"}
         return {"timedelta": [td.value, td.unit]}
     if isinstance(label, pd.Period):
         return {"period": [label.ordinal, label.freqstr]}

@@ -14,6 +14,7 @@ Run: ``uv run python superpowers/scripts/itl_897/claim_d_source_identity.py``
 
 from __future__ import annotations
 
+import importlib
 import sys
 import warnings
 from pathlib import Path
@@ -25,7 +26,7 @@ from orcapod.sources import DictSource
 
 warnings.simplefilter("ignore")
 sys.path.insert(0, str(Path(__file__).parent))
-import prototype_v1  # noqa: E402
+prototype_v1 = importlib.import_module("prototype_v1")
 
 
 def _rows() -> list[dict[str, Any]]:

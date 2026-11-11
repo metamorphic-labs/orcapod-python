@@ -11,6 +11,7 @@ Run: ``uv run python superpowers/scripts/itl_897/claim_i_v1_descriptor.py``
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import sys
 import warnings
 from pathlib import Path
@@ -18,14 +19,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import prototype_v1  # noqa: E402
-from claim_a_equality_vs_hash import (  # noqa: E402
-    FRAME_CASES,
-    LT_DF,
-    LT_S,
-    SERIES_CASES,
-    _passes,
-)
+prototype_v1 = importlib.import_module("prototype_v1")
+_claim_a = importlib.import_module("claim_a_equality_vs_hash")
+FRAME_CASES, SERIES_CASES = _claim_a.FRAME_CASES, _claim_a.SERIES_CASES
+LT_DF, LT_S, _passes = _claim_a.LT_DF, _claim_a.LT_S, _claim_a._passes
 from pandas.testing import assert_frame_equal, assert_series_equal  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -63,22 +60,24 @@ COVERAGE: list[tuple[str, pd.DataFrame, pd.DataFrame]] = [
     (
         "Timestamp vs str column labels",
         _ts_labels(None),
-        pd.DataFrame([[1, 2]], columns=["2020-01-01 00:00:00", "2020-01-02 00:00:00"]),
+        pd.DataFrame(
+            [[1, 2]], columns=pd.Index(["2020-01-01 00:00:00", "2020-01-02 00:00:00"])
+        ),
     ),
     (
         "date vs Timestamp column labels",
-        pd.DataFrame([[1]], columns=[dt.date(2020, 1, 1)]),
-        pd.DataFrame([[1]], columns=[pd.Timestamp("2020-01-01")]),
+        pd.DataFrame([[1]], columns=pd.Index([dt.date(2020, 1, 1)])),
+        pd.DataFrame([[1]], columns=pd.Index([pd.Timestamp("2020-01-01")])),
     ),
     (
         "Timedelta column labels",
-        pd.DataFrame([[1]], columns=[pd.Timedelta(seconds=1)]),
-        pd.DataFrame([[1]], columns=[pd.Timedelta(seconds=2)]),
+        pd.DataFrame([[1]], columns=pd.Index([pd.Timedelta(seconds=1)])),
+        pd.DataFrame([[1]], columns=pd.Index([pd.Timedelta(seconds=2)])),
     ),
     (
         "Period column labels: freq M vs D",
-        pd.DataFrame([[1]], columns=[pd.Period("2020-01", freq="M")]),
-        pd.DataFrame([[1]], columns=[pd.Period("2020-01-01", freq="D")]),
+        pd.DataFrame([[1]], columns=pd.Index([pd.Period("2020-01", freq="M")])),
+        pd.DataFrame([[1]], columns=pd.Index([pd.Period("2020-01-01", freq="D")])),
     ),
     (
         "period column: freq M vs Q",
@@ -93,7 +92,7 @@ COVERAGE: list[tuple[str, pd.DataFrame, pd.DataFrame]] = [
     (
         "DatetimeIndex vs Index[int64]",
         pd.DataFrame({"a": [1, 2]}, index=pd.date_range("2020-01-01", periods=2)),
-        pd.DataFrame({"a": [1, 2]}, index=[0, 1]),
+        pd.DataFrame({"a": [1, 2]}, index=pd.Index([0, 1])),
     ),
 ]
 

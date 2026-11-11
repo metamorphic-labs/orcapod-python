@@ -10,6 +10,8 @@ Run: ``uv run python superpowers/scripts/itl_897/claim_g_arrow_table_value.py``
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 
 from orcapod.contexts import get_default_context
@@ -17,8 +19,8 @@ from orcapod.contexts import get_default_context
 HASHER = get_default_context().semantic_hasher
 
 
-def _t(**columns: pa.Array) -> pa.Table:
-    return pa.table(columns)
+def _t(**columns: pa.Array[Any]) -> pa.Table:
+    return pa.Table.from_arrays(list(columns.values()), names=list(columns))
 
 
 AB = _t(a=pa.array([1, 2]), b=pa.array(["x", "y"]))

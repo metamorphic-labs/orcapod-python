@@ -2293,3 +2293,33 @@ xfail. The async path checks key types on the first row of each input, because
 So when either input is empty (left or right), a key type mismatch that the sync path reports
 yields an empty result on the async path instead of an error. `Join`'s async key check
 (`_check_shared_key_types`) has the same limit.
+
+---
+
+## `src/orcapod/hashing/semantic_hashing/builtin_handlers.py` — pandas value hash identity
+
+### PV1 — pandas values that pandas tells apart hashed the same
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-897, ITL-887
+
+`PandasDataFrameHandler` and `PandasSeriesHandler` hashed `pa.Table.from_pandas(value)` with the
+Arrow hasher, which ignores column order and struct field order. The hash also never saw what
+pyarrow keeps only in its `pandas` schema metadata. So frames that `assert_frame_equal` tells
+apart hashed the same when they differed only in column order, MultiIndex level order, struct
+field order, label type (`0` vs `"0"`), `columns.name`, nullable vs NumPy dtype, `string` vs
+`object`, or categorical vs string / categories / `ordered` (ITL-887). Storage kept every one of
+them, so a cached pod returning `df.columns[0]` was handed the result computed for another
+column order (sync; async once the cache is warm).
+
+**Fix (pending the starfix 0.5.0 release, ITL-898):** labels `pandas_dataframe_v1` /
+`pandas_series_v1`, `sha256(descriptor + b"\x00" + ordered digest)`. The ordered digest is
+starfix's `hash_table(..., ordered_columns=True, ordered_struct_fields=True)` of the
+positionally renamed `from_pandas` table, behind `orcapod.hashing.labelled_hash.ordered_arrow_digest`.
+The descriptor is an Orcapod-owned grammar of typed labels, `columns.names`, index levels and
+pandas dtypes (`orcapod.hashing.pandas_value_hash`). The identity matches the default
+`assert_frame_equal` / `assert_series_equal`, except `flags` (storage drops it) and `-0.0` vs
+`0.0`. Every pandas value hash moves once; the investigation, the migration assessment and the
+developer's approval (November 11, 2026) are in
+`superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`. `pa.Table` values (same rule)
+follow in a second PR on the same helper.

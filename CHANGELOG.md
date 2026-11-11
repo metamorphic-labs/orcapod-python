@@ -2,6 +2,28 @@
 
 ## [0.3.0] — unreleased
 
+### Changed (hash)
+
+- **pandas `DataFrame` and `Series` values hash under `pandas_dataframe_v1` /
+  `pandas_series_v1`** (ITL-897, ITL-887). The hash now distinguishes what pandas'
+  `assert_frame_equal` / `assert_series_equal` distinguish with their default arguments.
+  On 0.2.0, frames that differed only in column order, MultiIndex level order, struct field
+  order, label type (`0` vs `"0"`), `columns.name`, nullable vs NumPy dtype (`Int64` vs
+  `int64`), `string` vs `object`, or categorical vs string / categories / `ordered` hashed
+  the same. A cached pod could then be handed the result computed for another frame, for
+  example the wrong `df.columns[0]`. `flags` and `attrs` are not part of the hash. `-0.0`
+  and `0.0` hash apart, which costs a recomputation, never a wrong result. Orders come from
+  starfix's ordered mode (ITL-898); the rest comes from an Orcapod-owned descriptor
+  documented in `orcapod.hashing.pandas_value_hash`.
+
+  Migration: every pandas value hash changes, and with it the data hash and cache keys of
+  every row that holds a pandas value. Function pods whose input holds a pandas value
+  recompute once, and the new results are stored next to the old rows. Stored frames and
+  table paths are unchanged, and nothing stored is dropped or rewritten; a node reads back
+  exactly its current rows. A source holding a pandas column without an explicit
+  `source_id` gets a new default `source_id` (the table hash), so its record IDs, and every
+  entry downstream of it, are new. Pass an explicit `source_id` to keep record IDs stable.
+
 ### Added
 
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be

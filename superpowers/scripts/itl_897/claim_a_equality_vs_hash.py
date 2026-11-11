@@ -67,7 +67,7 @@ def _no_dup_flag(df: pd.DataFrame) -> pd.DataFrame:
 
 # (property, value_1, value_2, keeps(roundtripped_2) -> bool)
 Keeps = Callable[[Any], bool]
-FRAME_CASES: list[tuple[str, pd.DataFrame, pd.DataFrame, Keeps]] = [
+FRAME_CASES: list[tuple[str, Any, Any, Keeps]] = [
     (
         "column order",
         _df(),
@@ -135,7 +135,7 @@ FRAME_CASES: list[tuple[str, pd.DataFrame, pd.DataFrame, Keeps]] = [
         pd.DataFrame(
             [[1, 2]], columns=pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
         ),
-        pd.DataFrame([[1, 2]], columns=["('a', 'x')", "('a', 'y')"]),
+        pd.DataFrame([[1, 2]], columns=pd.Index(["('a', 'x')", "('a', 'y')"])),
         lambda r: not isinstance(r.columns, pd.MultiIndex),
     ),
     (
@@ -242,7 +242,7 @@ FRAME_CASES: list[tuple[str, pd.DataFrame, pd.DataFrame, Keeps]] = [
     ),
 ]
 
-SERIES_CASES: list[tuple[str, pd.Series, pd.Series, Keeps]] = [
+SERIES_CASES: list[tuple[str, Any, Any, Keeps]] = [
     (
         "Series name",
         pd.Series([1, 2], name="a"),
@@ -364,10 +364,16 @@ def _report(
 
 
 EDGE_FRAMES: list[tuple[str, pd.DataFrame]] = [
-    ("duplicate column labels ['a', 'a']", pd.DataFrame([[1, 2]], columns=["a", "a"])),
-    ("labels 1 and '1' in one frame", pd.DataFrame([[1, 2]], columns=[1, "1"])),
+    (
+        "duplicate column labels ['a', 'a']",
+        pd.DataFrame([[1, 2]], columns=pd.Index(["a", "a"])),
+    ),
+    (
+        "labels 1 and '1' in one frame",
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, "1"])),
+    ),
     ("int label 0", pd.DataFrame({0: [1, 2]})),
-    ("zero columns, two rows", pd.DataFrame(index=[0, 1])),
+    ("zero columns, two rows", pd.DataFrame(index=pd.Index([0, 1]))),
 ]
 
 

@@ -34,8 +34,9 @@ warnings.simplefilter("ignore")
 
 
 def _frame(reverse: bool) -> pd.DataFrame:
-    df = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
-    return df[["b", "a"]] if reverse else df
+    if reverse:
+        return pd.DataFrame({"b": ["x", "y"], "a": [1, 2]})
+    return pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
 
 
 @function_pod(output_keys="df")
@@ -119,8 +120,11 @@ def _prototype_hash_survives_storage() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).parent))
-    import prototype_v1
-    from claim_a_equality_vs_hash import FRAME_CASES, SERIES_CASES
+    import importlib
+
+    prototype_v1 = importlib.import_module("prototype_v1")
+    claim_a = importlib.import_module("claim_a_equality_vs_hash")
+    FRAME_CASES, SERIES_CASES = claim_a.FRAME_CASES, claim_a.SERIES_CASES
 
     from orcapod.contexts import get_default_context
     from orcapod.logical_types.pandas_type import LogicalPandasSeries
