@@ -39,7 +39,35 @@ from orcapod import function_pod
 
 CaseFn = Callable[[], dict[str, Any]]
 
-GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline")
+GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline", "torch")
+
+OPTIONAL_GROUPS: dict[str, str] = {"torch": "torch"}
+"""Groups that need an optional dependency, mapped to the module they need (ITL-871).
+
+Such a group is computed, generated and checked only where the module is installed; its
+golden file is never rewritten without it.
+"""
+
+
+def group_available(group: str) -> bool:
+    """Whether ``group`` can be computed in this environment.
+
+    Args:
+        group: One of ``GROUPS``.
+
+    Returns:
+        False when the group needs an optional module that is not installed.
+    """
+    import importlib.util
+
+    module = OPTIONAL_GROUPS.get(group)
+    return module is None or importlib.util.find_spec(module) is not None
+
+
+def available_groups() -> tuple[str, ...]:
+    """The groups that can be computed in this environment, in ``GROUPS`` order."""
+    return tuple(g for g in GROUPS if group_available(g))
+
 
 _CASES: dict[str, list[tuple[str, CaseFn]]] = {group: [] for group in GROUPS}
 
@@ -92,7 +120,7 @@ def compute_group(group: str, *, allow_errors: bool = False) -> dict[str, Any]:
 
 
 def compute_all(*, allow_errors: bool = False) -> dict[str, dict[str, Any]]:
-    """Compute every golden group.
+    """Compute every golden group this environment can compute (``available_groups``).
 
     Args:
         allow_errors: Passed to ``compute_group``.
@@ -100,7 +128,7 @@ def compute_all(*, allow_errors: bool = False) -> dict[str, dict[str, Any]]:
     Returns:
         A dict mapping each group name to its computed entries.
     """
-    return {g: compute_group(g, allow_errors=allow_errors) for g in GROUPS}
+    return {g: compute_group(g, allow_errors=allow_errors) for g in available_groups()}
 
 
 # ---------------------------------------------------------------------------
@@ -850,3 +878,72 @@ def pipeline_job() -> dict[str, Any]:
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Group: torch — torch.Tensor values (ITL-871); needs the optional torch package
+# ---------------------------------------------------------------------------
+
+
+def _torch_values() -> dict[str, Any]:
+    import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
+
+    base = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    return {
+        # The same values as the ndarray.* semantic cases: equal digest bodies.
+        "int32": torch.arange(6, dtype=torch.int32).reshape(2, 3),
+        "int64": torch.arange(6, dtype=torch.int64).reshape(2, 3),
+        "float64": torch.tensor([[0.5, 1.5], [2.5, 3.5]], dtype=torch.float64),
+        "empty": torch.zeros((0,), dtype=torch.float32),
+        "bool": torch.tensor([True, False, True]),
+        "bfloat16": torch.tensor([1.5, -2.25, 3.0], dtype=torch.bfloat16),
+        "zero_dim": torch.tensor(2.5),
+        "non_contiguous": base.T,
+    }
+
+
+@case("torch", "value")
+def torch_values() -> dict[str, Any]:
+    hasher = _ctx().semantic_hasher
+    return {k: hasher.hash_object(v).to_string() for k, v in _torch_values().items()}
+
+
+@case("torch", "type")
+def torch_type() -> dict[str, Any]:
+    import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
+
+    return {
+        "torch_tensor": _ctx().semantic_hasher.hash_object(torch.Tensor).to_string()
+    }
+
+
+@case("torch", "single_field")
+def torch_single_field() -> dict[str, Any]:
+    import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
+
+    from orcapod.types import Schema
+
+    ctx = _ctx()
+    return {
+        "torch_tensor.arrow_type": _arrow_type_text(
+            ctx.type_converter.python_type_to_arrow_type(torch.Tensor)
+        ),
+        "torch_tensor.schema_hash": ctx.semantic_hasher.hash_object(
+            Schema({"c": torch.Tensor})
+        ).to_string(),
+    }
+
+
+@case("torch", "datagram")
+def torch_datagram() -> dict[str, Any]:
+    import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
+
+    from orcapod.sources import DictSource
+
+    rows = [
+        {"k": "r1", "c": torch.arange(4, dtype=torch.int64)},
+        {"k": "r2", "c": torch.tensor([[0.5, 1.5]], dtype=torch.float64)},
+    ]
+    return stream_summary(
+        DictSource(data=rows, tag_columns=["k"], source_id="golden_torch_tensor")
+    )

@@ -109,7 +109,21 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    groups = args.group or list(cases.GROUPS)
+    unavailable = [g for g in args.group or [] if not cases.group_available(g)]
+    if unavailable:
+        parser.error(
+            f"group(s) {unavailable} need an optional dependency that is not installed "
+            f"({[cases.OPTIONAL_GROUPS[g] for g in unavailable]})"
+        )
+    groups = args.group or list(cases.available_groups())
+    skipped = [
+        g for g in cases.GROUPS if g not in groups and not cases.group_available(g)
+    ]
+    if skipped and not args.stdout:
+        # Never rewrite an optional group's file without its dependency (ITL-871).
+        print(
+            f"skipped {skipped}: optional dependency not installed; files left as they are"
+        )
     computed = {
         g: cases.compute_group(g, allow_errors=args.allow_errors) for g in groups
     }

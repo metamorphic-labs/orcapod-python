@@ -42,7 +42,23 @@ def _load_golden() -> dict[str, dict[str, Any]]:
 
 
 GOLDEN = _load_golden()
-GOLDEN_ENTRIES = [(group, entry) for group in cases.GROUPS for entry in GOLDEN[group]]
+
+
+def _needs(group: str) -> Any:
+    """A skip mark for a group whose optional dependency is not installed (ITL-871)."""
+    module = cases.OPTIONAL_GROUPS.get(group)
+    return pytest.mark.skipif(
+        not cases.group_available(group),
+        reason=f"golden group {group!r} needs the optional package {module!r}",
+    )
+
+
+GOLDEN_ENTRIES = [
+    pytest.param(group, entry, id=f"{group}:{entry}", marks=_needs(group))
+    for group in cases.GROUPS
+    for entry in GOLDEN[group]
+]
+GROUP_PARAMS = [pytest.param(group, marks=_needs(group)) for group in cases.GROUPS]
 
 
 def _moved_message(group: str, entry: str, expected: Any, actual: Any) -> str:
@@ -69,16 +85,14 @@ def test_golden_file_present(group: str) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("group", "entry"), GOLDEN_ENTRIES, ids=[f"{g}:{e}" for g, e in GOLDEN_ENTRIES]
-)
+@pytest.mark.parametrize(("group", "entry"), GOLDEN_ENTRIES)
 def test_golden_entry(live: dict[str, dict[str, Any]], group: str, entry: str) -> None:
     actual = live[group].get(entry, "<entry no longer produced>")
     expected = GOLDEN[group][entry]
     assert actual == expected, _moved_message(group, entry, expected, actual)
 
 
-@pytest.mark.parametrize("group", cases.GROUPS)
+@pytest.mark.parametrize("group", GROUP_PARAMS)
 def test_no_unpinned_entries(live: dict[str, dict[str, Any]], group: str) -> None:
     unpinned = sorted(set(live[group]) - set(GOLDEN[group]))
     assert not unpinned, (
@@ -124,7 +138,7 @@ def test_values_independent_of_process_and_hash_seed(seed: str) -> None:
     computed = json.loads(result.stdout)
     moved = [
         _moved_message(group, entry, value, computed[group].get(entry))
-        for group in cases.GROUPS
+        for group in cases.available_groups()
         for entry, value in GOLDEN[group].items()
         if computed[group].get(entry) != value
     ]
@@ -251,3 +265,46 @@ def test_schema_round_trips_through_arrow_with_equal_hash(python_type: Any) -> N
     assert ctx.semantic_hasher.hash_object(
         round_tripped
     ) == ctx.semantic_hasher.hash_object(schema)
+
+
+def _reference_array_digest(tag: str, shape: tuple[int, ...], data: bytes) -> str:
+    """The version-1 array digest from its specification (``hashlib`` + ``struct`` only)."""
+    import hashlib
+    import struct
+
+    t = tag.encode("utf-8")
+    preimage = struct.pack("<Q", len(t)) + t + struct.pack("<Q", len(shape))
+    preimage += b"".join(struct.pack("<q", d) for d in shape)
+    preimage += struct.pack("<Q", len(data)) + data
+    return hashlib.sha256(preimage).hexdigest()
+
+
+TORCH_PINNED_ROWS: dict[str, tuple[str, tuple[int, ...], bytes]] = {
+    "bool": ("bool", (3,), b"\x01\x00\x01"),
+    # bfloat16 bits of 1.5, -2.25, 3.0, little-endian.
+    "bfloat16": ("bfloat16", (3,), bytes.fromhex("c03f10c04040")),
+    "zero_dim": ("float32", (), np.array(2.5, "<f4").tobytes()),
+    # The transposed (2, 3) arange stored in C order: shape (3, 2).
+    "non_contiguous": (
+        "float32",
+        (3, 2),
+        np.arange(6, dtype="<f4").reshape(2, 3).T.copy().tobytes(),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(TORCH_PINNED_ROWS))
+def test_pinned_tensor_digests_match_an_independent_reference(name: str) -> None:
+    # Runs without torch: the pinned torch_tensor_v1 values are the v1 digest of the row.
+    tag, shape, data = TORCH_PINNED_ROWS[name]
+    assert GOLDEN["torch"][f"value.{name}"] == (
+        "torch_tensor_v1:" + _reference_array_digest(tag, shape, data)
+    )
+
+
+@pytest.mark.parametrize("name", ["int32", "int64", "float64", "empty"])
+def test_tensor_and_ndarray_pins_share_the_digest_body(name: str) -> None:
+    tensor_label, tensor_body = GOLDEN["torch"][f"value.{name}"].split(":")
+    array_label, array_body = GOLDEN["semantic"][f"value.ndarray.{name}"].split(":")
+    assert (tensor_label, array_label) == ("torch_tensor_v1", "ndarray_v1")
+    assert tensor_body == array_body
