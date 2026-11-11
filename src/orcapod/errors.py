@@ -26,12 +26,13 @@ class DuplicateTagError(ValueError):
     pass
 
 
-class InvalidDictKeysError(ValueError):
-    """Raised when a dict value's keys have no canonical order.
+class CanonicalOrderError(ValueError):
+    """Raised when a dict or set value has no canonical order.
 
-    A dict is stored with its entries in canonical key order (ITL-905), so its keys must
-    be totally ordered and unique. Raised for a NaN key, keys that cannot be compared,
-    two keys with the same stored value, or a null entry in a stored key/value list.
+    Dict entries and set elements are stored in canonical order (ITL-905), so dict keys
+    and set elements must be totally ordered and unique. Raised for a NaN key or element,
+    values that cannot be compared, two keys or elements with the same stored value, or
+    a null entry in a stored key/value list.
     """
 
 

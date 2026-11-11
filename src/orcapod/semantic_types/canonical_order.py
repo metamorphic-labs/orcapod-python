@@ -1,12 +1,15 @@
-"""Canonical entry order for dict values.
+"""Canonical order for the unordered containers ``dict`` and ``set``.
 
-A ``dict[K, V]`` value is stored as ``large_list<struct<key, value>>``. A dict is order
-independent, so two equal dicts must store and hash identically whatever order their
-entries were inserted in (ITL-905). This module holds the one definition of that order.
-It is applied when a Python dict is converted to Arrow, when a datagram is built from
-Python values, and by the Arrow hasher to key/value lists that arrive already stored.
+A ``dict[K, V]`` value is stored as ``large_list<struct<key, value>>`` and a plain
+``set[T]`` as ``large_list<T>``. Both are order independent, so two equal values must
+store and hash identically whatever order their entries were inserted or iterated in
+(ITL-905). This module holds the one definition of that order. Dict entries are sorted
+by key when a Python dict is converted to Arrow, when a datagram is built from Python
+values, and by the Arrow hasher for key/value lists that arrive already stored. Set
+elements are sorted when a Python set is converted to Arrow (a stored set is a plain
+list, so it cannot be recognised later).
 
-The order is defined on storage key values (what the converter produces and what
+The order is defined on storage values (what the converter produces and what
 ``to_pylist`` reads back), so the converter and the hasher cannot disagree:
 
 * ``None`` sorts first.
@@ -16,8 +19,8 @@ The order is defined on storage key values (what the converter produces and what
 * ``date``, ``datetime`` (by instant), ``time``, ``timedelta``: natural order.
 * struct keys (a ``dict`` of field values): field by field, in field order.
 
-Keys that cannot be ordered against each other, duplicate keys and null entries raise
-``InvalidDictKeysError``.
+Keys or elements that cannot be ordered against each other, duplicate dict keys and
+null dict entries raise ``CanonicalOrderError``.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ import typing
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, get_args, get_origin
 
-from orcapod.errors import InvalidDictKeysError
+from orcapod.errors import CanonicalOrderError
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -122,7 +125,7 @@ def canonical_storage_value(arrow_type: pa.DataType, value: Any) -> Any:
         ``value`` itself when ``arrow_type`` holds no dict, otherwise a canonical copy.
 
     Raises:
-        InvalidDictKeysError: For a dict with a null entry, a NaN key, keys that cannot
+        CanonicalOrderError: For a dict with a null entry, a NaN key, keys that cannot
             be ordered against each other, or a duplicate key.
     """
     if value is None or not contains_dict_arrow_type(arrow_type):
@@ -146,12 +149,12 @@ def _key_rank(key: Any) -> tuple[Any, ...]:
     """Return the sort key of one storage key value.
 
     Raises:
-        InvalidDictKeysError: If the key is a NaN float.
+        CanonicalOrderError: If the key is a NaN float.
     """
     if key is None:
         return (0,)
     if isinstance(key, float) and math.isnan(key):
-        raise InvalidDictKeysError("a NaN dict key has no canonical order")
+        raise CanonicalOrderError("a NaN key or set element has no canonical order")
     if isinstance(key, Mapping):
         return (1, tuple(_key_rank(v) for v in key.values()))
     return (1, key)
@@ -161,15 +164,15 @@ def _sorted_by_rank(items: list[tuple[tuple[Any, ...], Any]]) -> list[Any]:
     """Sort ``(rank, payload)`` pairs by rank and return the payloads.
 
     Raises:
-        InvalidDictKeysError: If two ranks cannot be compared or are equal.
+        CanonicalOrderError: If two ranks cannot be compared or are equal.
     """
     try:
         items = sorted(items, key=lambda item: item[0])
     except TypeError as exc:
-        raise InvalidDictKeysError(f"dict keys cannot be ordered: {exc}") from exc
+        raise CanonicalOrderError(f"values cannot be ordered: {exc}") from exc
     for (previous, _), (current, payload) in zip(items, items[1:]):
         if previous == current:
-            raise InvalidDictKeysError(f"duplicate key in dict value: {payload!r}")
+            raise CanonicalOrderError(f"duplicate key or set element: {payload!r}")
     return [payload for _, payload in items]
 
 
@@ -184,15 +187,31 @@ def sort_dict_entries(entries: list[Any]) -> list[Any]:
         A new list holding the same entries, sorted by key.
 
     Raises:
-        InvalidDictKeysError: For a null entry, a NaN key, keys that cannot be ordered
+        CanonicalOrderError: For a null entry, a NaN key, keys that cannot be ordered
             against each other, or a duplicate key.
     """
     ranked = []
     for entry in entries:
         if entry is None:
-            raise InvalidDictKeysError("a dict value holds a null entry")
+            raise CanonicalOrderError("a dict value holds a null entry")
         ranked.append((_key_rank(entry["key"]), entry))
     return _sorted_by_rank(ranked)
+
+
+def sort_set_elements(elements: list[Any]) -> list[Any]:
+    """Return the storage elements of one set value in canonical order.
+
+    Args:
+        elements: The converted elements of a set.
+
+    Returns:
+        A new list holding the same elements, sorted.
+
+    Raises:
+        CanonicalOrderError: For a NaN element, elements that cannot be ordered against
+            each other, or two elements with the same storage value.
+    """
+    return _sorted_by_rank([(_key_rank(element), element) for element in elements])
 
 
 def canonical_python_value(
@@ -217,7 +236,7 @@ def canonical_python_value(
         ``value`` itself when nothing changes, otherwise a canonically ordered copy.
 
     Raises:
-        InvalidDictKeysError: For a key that has no canonical order (NaN), keys that
+        CanonicalOrderError: For a key that has no canonical order (NaN), keys that
             cannot be ordered, or two keys that convert to the same storage key.
     """
     if value is None:

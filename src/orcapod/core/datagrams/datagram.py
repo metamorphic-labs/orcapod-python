@@ -29,10 +29,10 @@ from uuid_utils import uuid7
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import ContentIdentifiableBase
-from orcapod.errors import InvalidDictKeysError
+from orcapod.errors import CanonicalOrderError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
-from orcapod.semantic_types.dict_order import canonical_python_value
+from orcapod.semantic_types.canonical_order import canonical_python_value
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -153,8 +153,8 @@ class Datagram(ContentIdentifiableBase):
                     schema.get(name),
                     self.converter.get_python_to_arrow_converter,
                 )
-            except InvalidDictKeysError as exc:
-                raise InvalidDictKeysError(f"Column {name!r}: {exc}") from exc
+            except CanonicalOrderError as exc:
+                raise CanonicalOrderError(f"Column {name!r}: {exc}") from exc
         return out
 
     def _init_from_table(

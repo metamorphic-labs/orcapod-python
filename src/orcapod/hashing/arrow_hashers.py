@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 from starfix import ArrowDigester
 
-from orcapod.errors import InvalidDictKeysError
+from orcapod.errors import CanonicalOrderError
 from orcapod.hashing.schema_cleaner import (
     clean_schema_for_hashing,
     has_extension_metadata,
 )
 from orcapod.hashing.visitors import SemanticHashingVisitor
-from orcapod.semantic_types.dict_order import (
+from orcapod.semantic_types.canonical_order import (
     canonical_storage_value,
     contains_dict_arrow_type,
 )
@@ -123,8 +123,8 @@ class StarfixArrowHasher:
                 new_columns.append(pa.array(processed_data, type=new_type))
                 new_fields.append(field.with_type(new_type))
 
-            except InvalidDictKeysError as exc:
-                raise InvalidDictKeysError(f"Column {field.name!r}: {exc}") from exc
+            except CanonicalOrderError as exc:
+                raise CanonicalOrderError(f"Column {field.name!r}: {exc}") from exc
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to process column '{field.name}': {exc}"

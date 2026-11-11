@@ -23,8 +23,12 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
 from orcapod.contexts import DataContext, resolve_context
-from orcapod.errors import InvalidDictKeysError
-from orcapod.semantic_types.dict_order import is_dict_arrow_type, sort_dict_entries
+from orcapod.errors import CanonicalOrderError
+from orcapod.semantic_types.canonical_order import (
+    is_dict_arrow_type,
+    sort_dict_entries,
+    sort_set_elements,
+)
 from orcapod.semantic_types.type_inference import infer_python_schema_from_pylist_data
 from orcapod.types import DataType, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -1010,8 +1014,8 @@ class UniversalTypeConverter:
                 if field_name in record:
                     try:
                         converted_record[field_name] = converter(record[field_name])
-                    except InvalidDictKeysError as exc:
-                        raise InvalidDictKeysError(
+                    except CanonicalOrderError as exc:
+                        raise CanonicalOrderError(
                             f"Column {field_name!r}: {exc}"
                         ) from exc
                 else:
@@ -1609,6 +1613,16 @@ class UniversalTypeConverter:
                         for k, v in value.items()
                     ]
                 )
+                if value is not None
+                else []
+            )
+
+        elif origin is set:
+            # A set has no order: elements are stored sorted, never in iteration
+            # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
+            element_converter = self.get_python_to_arrow_converter(args[0])
+            return lambda value: (
+                sort_set_elements([element_converter(item) for item in value])
                 if value is not None
                 else []
             )
