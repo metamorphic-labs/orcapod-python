@@ -32,9 +32,13 @@ def _tables(root: Path) -> set[str]:
     return {str(p.parent.relative_to(root)) for p in root.rglob("_delta_log")}
 
 
+def _is_result(table: str) -> bool:
+    return Path(table).parts[1] == "_result"
+
+
 def _node_of(table: str) -> str:
     parts = Path(table).parts
-    return parts[2] if parts[1] == "_result" else parts[1]
+    return parts[2] if _is_result(table) else parts[1]
 
 
 def _local_name(name: str) -> str:
@@ -94,13 +98,13 @@ def test_v02_store_is_left_intact_and_array_nodes_get_new_tables(store: Path) ->
     # new pipeline tables; double's result table moved too (its function identity
     # includes the ndarray output). The array-free plus_one lineage did not move.
     new_tables = _tables(store) - tables_before
-    assert {_node_of(t) for t in new_tables if "/_result/" not in f"/{t}"} == {
+    assert {_node_of(t) for t in new_tables if not _is_result(t)} == {
         "double",
         "total",
         "direct_sum",
         "plus_two",
     }
-    assert {_node_of(t) for t in new_tables if "/_result/" in f"/{t}"} == {"double"}
+    assert {_node_of(t) for t in new_tables if _is_result(t)} == {"double"}
     plus_one_files = {p for p in files_after if _node_of(p) == "plus_one"}
     assert plus_one_files == {p for p in files_before if _node_of(p) == "plus_one"}
 
@@ -126,7 +130,7 @@ def _rows(store: Path, table: str) -> list[dict[str, object]]:
 
 
 def _result_table(tables: set[str], node: str) -> str:
-    (table,) = (t for t in tables if "/_result/" in f"/{t}" and _node_of(t) == node)
+    (table,) = (t for t in tables if _is_result(t) and _node_of(t) == node)
     return table
 
 
@@ -155,7 +159,7 @@ def test_array_free_pod_downstream_of_an_array_column_reuses_its_v02_results(
         t for t in _tables(store) - tables_before if _node_of(t) == "plus_two"
     }
     assert len(new_tables) == 1
-    assert all("/_result/" not in f"/{t}" for t in new_tables)
+    assert all(not _is_result(t) for t in new_tables)
 
 
 def test_shared_result_table_keeps_v02_rows_and_adds_new_ones_without_collision(
