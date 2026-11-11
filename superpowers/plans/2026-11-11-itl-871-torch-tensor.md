@@ -295,3 +295,11 @@ Also: no-debug-only-parameters over the whole diff; list[torch.Tensor] MergeJoin
   CI logs of the next run.
 - Left: ITL-864 xfail removal once #293 is on main; merge main again when #289 lands.
   Next: full suite, push, PR description, mark ready, CI, CodeRabbit (read review bodies).
+- 2026-11-11 later: merged main (#296, #297). PR #300 marked ready; description rewritten with
+  final decisions. CI measured: torch CPU wheel 199.8 MiB, 19-24 s download per required pytest
+  job, install of all 199 packages 5.3-6.4 s, torch tests ~35-40 s; required pytest jobs went
+  from 2m29-2m50 to 3m23-4m00 (cold cache for the new lock). CodeRabbit on 7384e3e5: 2 actionable
+  (torch 2.3-2.6 lack float8_e8m0fnu) fixed in 94564573 (cases.unavailable_entries, generator
+  keeps pins); 3 nitpicks on #289 code relayed; review of 94564573 had nothing actionable;
+  docstring-coverage pre-merge warning answered (ITL-871 functions all documented).
+  Left: remove ITL-864 xfail once #293 is on main; merge main after #289 lands.
