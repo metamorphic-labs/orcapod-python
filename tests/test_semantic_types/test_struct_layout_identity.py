@@ -50,38 +50,39 @@ def _tables() -> dict[str, pa.Table]:
 
 
 _FLAT_HASHES: dict[str, object] = {
-    "stream_content": "90dab8a6e5b7b03c83ef20fbfdd4040410f05f9e20d8ca2f64d6f2ef374b8e99",
+    "stream_content": "1362a2951a4ce959504f5a33d325766ef6c35e021d166be54b2f358b8e47e97d",
     "stream_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
     "source_content": "7263fb2ff4346ac025631fd34c7204971478d83165084f9a748e61acc5e9f919",
     "source_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
     "data_rows": [
-        "0000010aa7ec467ed05cf6156b4c537186edb548c2e0e61f09d66dde96d9f644aee318",
-        "000001df354be2d86566d498a075294b6cbd403e4566dac064c6306787245d7ecf8004",
+        "000002a3b465dfc79ea3f32b39f55417f4c2372d7a3cc7ad63aef00aa9108b21b76b9c",
+        "000002e540dc3b59a01d14edc26eebff96453fb1de9018c351676cef8d1f67ee3346b2",
     ],
 }
 
-# Hashes on main (365a5f74), before the converter change.
+# Hashes on main (365a5f74), before the converter change; the stream content and per-row
+# data hashes re-recorded in starfix hash format 2 (arrow_v0.2, ITL-910).
 MAIN_HASHES: dict[str, dict[str, object]] = {
     "small": _FLAT_HASHES,
     "large": _FLAT_HASHES,
     "nested": {
-        "stream_content": "9e7d62a473a0e47a8ca74ad950245a3256248a7ed8994645198d82e4d6b33902",
+        "stream_content": "d88d09bb6c288a29cd0edbf62826bf8d9afb6b2c6b9d320aa248c4496b7d63f3",
         "stream_pipeline": "f8745264f2422bf76eaec06120aa00b510cafa0ee3abdfac3d5396a614afb3a1",
         "source_content": "2ee725a65a6050703c4164f901ac06e2137a0e2c71f7cf7b636423a1e1ac2a9b",
         "source_pipeline": "f8745264f2422bf76eaec06120aa00b510cafa0ee3abdfac3d5396a614afb3a1",
         "data_rows": [
-            "0000010f2cedeebe0599b55b059f918c148c3c0056dd9848d7fdecfc1eba992c23962f",
-            "000001618d4b5959d543202f49171b6c2b89bc5fef30b9bd157c03a13458b3ae882c8c",
+            "000002b734209953036fae7ee935c232f7949f4874dc22dca2af4ecfa2882e5ddaf457",
+            "0000024d11adcf6077042679df69776a748d71f2818fc47042913d83fa1fbebca67ad9",
         ],
     },
     "list_of_struct": {
-        "stream_content": "276d8ec2a45a4e62be7496c9ce33687558647c5369c0828671f51f357a4fb6ea",
+        "stream_content": "407a24e60bf74b666560f868d193dc35efcaf531d8d357bd7e414b861436336d",
         "stream_pipeline": "85b8d45d79762e42d1edf56c3853379193c21d5879a30166fcf3bc3c8e56a733",
         "source_content": "19a5d5780cd84af633704022bf8f7a80ba72555533390ee5e69c487f4ec253cf",
         "source_pipeline": "85b8d45d79762e42d1edf56c3853379193c21d5879a30166fcf3bc3c8e56a733",
         "data_rows": [
-            "00000151b3c44eaf49ed64174b9b47f89a779cd478c6874cbcac5a7df049d33ae1a7f9",
-            "000001dbb51ff7212e3b1dbe16f90d8d3133c5b8743d76d823fd9c903f6c9d2538eca5",
+            "000002c262cfe3995378fe521abbc19b8cd14f10f626b5e5b1259a20f6d4277677fb87",
+            "000002188277589a87f65b49271c1a2cf461ebed48ddd2fd3cb943198f420fced6862a",
         ],
     },
 }
