@@ -14,6 +14,7 @@ import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -56,6 +57,13 @@ def _assert_exact(got: object, expected: pl.DataFrame) -> None:
     assert_frame_equal(got, expected)
 
 
+def _frame_list(value: object) -> list[pl.DataFrame]:
+    """Narrow a list-valued data column to a list of frames."""
+    assert isinstance(value, list)
+    assert all(isinstance(item, pl.DataFrame) for item in value)
+    return cast(list[pl.DataFrame], value)
+
+
 @function_pod(output_keys="df")
 def make_frame(n: int) -> pl.DataFrame:
     return _frame(n)
@@ -80,12 +88,13 @@ def _int_source() -> DictSource:
 
 def _frame_source() -> DictSource:
     """Three frame-valued rows: two in group ``a``, one in group ``b``."""
+    rows: list[dict[str, Any]] = [
+        {"g": "a", "k": "1", "df": _frame(1)},
+        {"g": "a", "k": "2", "df": _frame(2)},
+        {"g": "b", "k": "3", "df": _frame(3)},
+    ]
     return DictSource(
-        [
-            {"g": "a", "k": "1", "df": _frame(1)},
-            {"g": "a", "k": "2", "df": _frame(2)},
-            {"g": "b", "k": "3", "df": _frame(3)},
-        ],
+        rows,
         tag_columns=["g", "k"],
         data_schema={"g": str, "k": str, "df": pl.DataFrame},
     )
@@ -133,7 +142,8 @@ class TestOperators:
         stream = Batch(batch_size=2)(_frame_source())
         rows = [(tag["k"], data["df"]) for tag, data in stream.iter_data()]
         assert [keys for keys, _ in rows] == [["1", "2"], ["3"]]
-        for got, n in zip(rows[0][1] + rows[1][1], [1, 2, 3], strict=True):
+        members = _frame_list(rows[0][1]) + _frame_list(rows[1][1])
+        for got, n in zip(members, [1, 2, 3], strict=True):
             _assert_exact(got, _frame(n))
 
     def test_batch_output_type_is_a_list_of_frames(self) -> None:
@@ -142,7 +152,9 @@ class TestOperators:
 
     def test_group_by_over_frame_column(self) -> None:
         stream = GroupBy(by=["g"])(_frame_source())
-        got = {tag["g"]: data["df"] for tag, data in stream.iter_data()}
+        got = {
+            str(tag["g"]): _frame_list(data["df"]) for tag, data in stream.iter_data()
+        }
         assert sorted(got) == ["a", "b"]
         for frame, n in zip(got["a"], [1, 2], strict=True):
             _assert_exact(frame, _frame(n))
@@ -155,7 +167,9 @@ class TestOperators:
             tag_columns=["g", "k"],
         )
         stream = Join()(_frame_source(), weights)
-        got = {tag["k"]: (data["df"], data["w"]) for tag, data in stream.iter_data()}
+        got = {
+            str(tag["k"]): (data["df"], data["w"]) for tag, data in stream.iter_data()
+        }
         assert sorted(got) == ["1", "3"]
         _assert_exact(got["1"][0], _frame(1))
         _assert_exact(got["3"][0], _frame(3))
@@ -257,7 +271,7 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
 )
 
 
-def _run_pipeline_process(store_path: Path, marker: Path) -> dict:
+def _run_pipeline_process(store_path: Path, marker: Path) -> dict[str, Any]:
     result = subprocess.run(
         [sys.executable, "-c", _CROSS_PROCESS_SCRIPT, str(store_path), str(marker)],
         capture_output=True,

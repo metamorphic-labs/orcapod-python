@@ -32,24 +32,33 @@ from orcapod.logical_types.registry import (
 )
 
 if TYPE_CHECKING:
+    from polars._typing import PolarsDataType
+
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
 _UNSTORABLE_DTYPES: tuple[type[pl.DataType], ...] = (pl.Object, pl.Int128, pl.UInt128)
 
 
-def _find_unstorable_dtype(dtype: pl.DataType) -> pl.DataType | None:
+def _find_unstorable_dtype(dtype: PolarsDataType) -> PolarsDataType | None:
     """Return the first dtype inside ``dtype`` that cannot round-trip exactly.
 
     Walks ``List``, ``Array`` and ``Struct`` children.
 
     Args:
-        dtype: A Polars dtype, possibly nested.
+        dtype: A Polars dtype instance or class, possibly nested.
 
     Returns:
         The offending (possibly nested) dtype, or ``None`` when every part of ``dtype`` can be
         stored losslessly.
     """
+    if isinstance(dtype, type):
+        # A bare dtype class has no children to walk.
+        return (
+            dtype
+            if issubclass(dtype, (pl.BaseExtension, *_UNSTORABLE_DTYPES))
+            else None
+        )
     if isinstance(dtype, pl.BaseExtension):
         return dtype
     if isinstance(dtype, _UNSTORABLE_DTYPES):
@@ -125,7 +134,7 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         if LogicalPolarsDataFrame._arrow_ext is None:
             LogicalPolarsDataFrame._arrow_ext = (
                 LogicalPolarsDataFrame._arrow_ext_class()
-            )
+            )  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no constructor arguments
         return LogicalPolarsDataFrame._arrow_ext
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
@@ -137,7 +146,7 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         if LogicalPolarsDataFrame._polars_ext is None:
             LogicalPolarsDataFrame._polars_ext = (
                 LogicalPolarsDataFrame._polars_ext_class()
-            )
+            )  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no constructor arguments
         return LogicalPolarsDataFrame._polars_ext
 
     def python_to_storage(
