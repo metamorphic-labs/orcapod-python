@@ -186,6 +186,10 @@ class OperatorNodeBase(StreamBase):
 
     @property
     def data_context_key(self) -> str:
+        if self._operator is None:
+            # A node loaded from a saved descriptor has no operator; its data
+            # context was restored from the descriptor by ``from_descriptor``.
+            return self._data_context.context_key
         return self._operator.data_context_key
 
     @property
@@ -217,9 +221,11 @@ class OperatorNodeBase(StreamBase):
     ) -> tuple[Schema, Schema]:
         """Return output schema, using stored value in read-only mode."""
         if self._operator is None:
-            tag = Schema(self._stored_schema.get("tag", {}))
-            data = Schema(self._stored_schema.get("data", {}))
-            return tag, data
+            from orcapod.pipeline.serialization import deserialize_output_schema
+
+            return deserialize_output_schema(
+                self._stored_schema, self.data_context.type_converter
+            )
         return self._operator.output_schema(
             *self._input_streams,
             columns=columns,
@@ -561,6 +567,10 @@ class OperatorJobNode(OperatorNodeBase):
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._cache_mode = CacheMode.OFF
 
+        # True for a node rebuilt by ``from_descriptor`` (a job loaded by
+        # ``PipelineJob.load``): its output was computed by an earlier run.
+        self._loaded = False
+
         if pipeline_database is not None:
             self.attach_databases(
                 pipeline_database=pipeline_database,
@@ -694,6 +704,7 @@ class OperatorJobNode(OperatorNodeBase):
                 )
             node._descriptor = descriptor
             node._load_status = LoadStatus.FULL
+            node._loaded = True
             return node
 
         # Read-only mode: bypass __init__, set minimum required state
@@ -727,12 +738,13 @@ class OperatorJobNode(OperatorNodeBase):
 
         # From OperatorNodeBase
         node._operator = None
-        node._input_streams = ()
+        node._input_streams = tuple(input_streams)
         node.tracker_manager = DEFAULT_TRACKER_MANAGER
 
         # From OperatorJobNode
         node._cached_output_stream = None
         node._cached_output_table = None
+        node._loaded = True
 
         # DB persistence state
         node._pipeline_database = pipeline_db
@@ -762,6 +774,21 @@ class OperatorJobNode(OperatorNodeBase):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _no_stored_results_error(self) -> RuntimeError:
+        """Return the error for reading a loaded operator node with nothing to serve.
+
+        A ``PipelineJob`` runs operators without storing their output, so a node
+        rebuilt by ``PipelineJob.load`` has no rows to read even though the saved
+        run produced them. Returning an empty table would look like the operator
+        produced nothing.
+        """
+        inputs = ", ".join(repr(stream.label) for stream in self._input_streams)
+        return RuntimeError(
+            f"OperatorJobNode {self.label!r} has no stored results: a PipelineJob does "
+            "not store operator outputs, so a loaded job cannot show them. Read the "
+            f"stored results of its input nodes ({inputs}) instead."
+        )
 
     def _filter_by_content_hash(self, table: pa.Table) -> pa.Table:
         """Filter *table* to rows whose ``NODE_CONTENT_HASH_COL`` matches this node.
@@ -1067,6 +1094,8 @@ class OperatorJobNode(OperatorNodeBase):
         db_stream = self._load_cached_stream_from_db()
         if db_stream is not None:
             return db_stream.iter_data()
+        if self._loaded:
+            raise self._no_stored_results_error()
         return iter([])
 
     def as_table(
@@ -1087,6 +1116,8 @@ class OperatorJobNode(OperatorNodeBase):
         db_stream = self._load_cached_stream_from_db()
         if db_stream is not None:
             return db_stream.as_table(columns=columns, all_info=all_info)
+        if self._loaded:
+            raise self._no_stored_results_error()
         # No cached or stored records yet: construct a zero-row table with the
         # correct schema and route it through ArrowTableStream so that the
         # ColumnConfig / all_info shaping is applied consistently.

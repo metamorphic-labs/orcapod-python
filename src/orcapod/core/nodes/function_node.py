@@ -252,6 +252,10 @@ class FunctionNodeBase(StreamBase):
 
     @property
     def data_context_key(self) -> str:
+        if self._function_pod is None:
+            # A node loaded from a saved descriptor has no function pod; its data
+            # context was restored from the descriptor by ``from_descriptor``.
+            return self._data_context.context_key
         return self._function_pod.data_context_key
 
     @property
@@ -302,9 +306,11 @@ class FunctionNodeBase(StreamBase):
     ) -> tuple[Schema, Schema]:
         """Return output schema, using stored value in read-only mode."""
         if self._function_pod is None:
-            tag = Schema(self._stored_schema.get("tag", {}))
-            data = Schema(self._stored_schema.get("data", {}))
-            return tag, data
+            from orcapod.pipeline.serialization import deserialize_output_schema
+
+            return deserialize_output_schema(
+                self._stored_schema, self.data_context.type_converter
+            )
         tag_schema = self._input_stream.output_schema(
             columns=columns, all_info=all_info
         )[0]
@@ -957,6 +963,11 @@ class FunctionJobNode(FunctionNodeBase):
                     result_database=result_database,
                     record_path=self._stored_result_record_path,
                 )
+                # With a store attached, the stub can serve the results its saved
+                # run stored, though it still cannot compute.
+                from orcapod.pipeline.serialization import LoadStatus
+
+                self._load_status = LoadStatus.READ_ONLY
 
             self._pipeline_database = pipeline_database
 
@@ -1165,6 +1176,18 @@ class FunctionJobNode(FunctionNodeBase):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _no_store_error(self) -> RuntimeError:
+        """Return the error for reading a loaded node that has no store attached.
+
+        Only a node loaded by ``PipelineJob.load`` can be ``UNAVAILABLE``: it has no
+        function pod, so its results can come only from the store.
+        """
+        return RuntimeError(
+            f"FunctionJobNode {self.label!r} was loaded without a store, so its stored "
+            "results cannot be read. Pass the store to PipelineJob.load(path, "
+            "store=...) or call job.bind(store=...)."
+        )
 
     def _require_pipeline_database(self) -> ArrowDatabaseProtocol:
         """Return the attached pipeline database, raising if there is none.
@@ -2114,6 +2137,53 @@ class FunctionJobNode(FunctionNodeBase):
             empty_taginfo_rows=empty_taginfo_rows,
         )
 
+    def _stored_tag_keys(self, fetched: _JoinedRecords) -> tuple[str, ...]:
+        """Return the user tag columns of the records in *fetched*.
+
+        Prefers the input stream's tag keys; falls back to excluding system columns
+        from the pipeline records for CACHE_ONLY / deserialized nodes.
+        """
+        if self._input_stream is not None:
+            return self._input_stream.keys()[0]
+        return tuple(
+            c
+            for c in fetched.taginfo_columns
+            if not c.startswith(constants.META_PREFIX)
+            and not c.startswith(constants.SOURCE_PREFIX)
+            and not c.startswith(constants.SYSTEM_TAG_PREFIX)
+            and c != _PIPELINE_ENTRY_ID_COL
+            and c != constants.NODE_CONTENT_HASH_COL
+        )
+
+    def _stored_rows_stream(
+        self, fetched: _JoinedRecords
+    ) -> tuple[list[bytes], ArrowTableStream] | None:
+        """Return the persistent stored rows of *fetched* as a stream.
+
+        The stream is built over the stored Arrow records with the internal
+        columns dropped, so every column keeps the type it was stored with.
+
+        Returns:
+            The base entry ID of each row, in stream order, and the stream; or
+            ``None`` when no persistent row is stored.
+        """
+        joined = fetched.table
+        if joined.num_rows == 0:
+            return None
+        base_entry_ids = cast(
+            list[bytes], joined.column(_PIPELINE_BASE_ENTRY_ID_COL).to_pylist()
+        )
+        drop_cols = [
+            c
+            for c in joined.column_names
+            if c.startswith(constants.META_PREFIX)
+            or c == constants.NODE_CONTENT_HASH_COL
+        ]
+        stream = ArrowTableStream(
+            joined.drop(drop_cols), tag_columns=self._stored_tag_keys(fetched)
+        )
+        return base_entry_ids, stream
+
     def _load_cached_entries(
         self,
         base_entry_ids: list[bytes] | None = None,
@@ -2148,36 +2218,13 @@ class FunctionJobNode(FunctionNodeBase):
         if fetched.table.num_rows == 0 and not fetched.empty_data_tokens:
             return {}
 
-        joined = fetched.table
-
-        # Derive tag keys: prefer input_stream when available; fall back to
-        # taginfo column exclusion for CACHE_ONLY / deserialized nodes.
-        if self._input_stream is not None:
-            tag_keys = self._input_stream.keys()[0]
-        else:
-            tag_keys = tuple(
-                c
-                for c in fetched.taginfo_columns
-                if not c.startswith(constants.META_PREFIX)
-                and not c.startswith(constants.SOURCE_PREFIX)
-                and not c.startswith(constants.SYSTEM_TAG_PREFIX)
-                and c != _PIPELINE_ENTRY_ID_COL
-                and c != constants.NODE_CONTENT_HASH_COL
-            )
-
+        tag_keys = self._stored_tag_keys(fetched)
         loaded: dict[bytes, tuple[TagProtocol, DataProtocol]] = {}
 
         # --- Process normal (fully matched) rows ---
-        if joined.num_rows > 0:
-            base_entry_ids_col = joined.column(_PIPELINE_BASE_ENTRY_ID_COL).to_pylist()
-            drop_cols = [
-                c
-                for c in joined.column_names
-                if c.startswith(constants.META_PREFIX)
-                or c == constants.NODE_CONTENT_HASH_COL
-            ]
-            data_table = joined.drop([c for c in drop_cols if c in joined.column_names])
-            stream = ArrowTableStream(data_table, tag_columns=tag_keys)
+        stored = self._stored_rows_stream(fetched)
+        if stored is not None:
+            base_entry_ids_col, stream = stored
             for base_eid, (tag, data) in zip(base_entry_ids_col, stream.iter_data()):
                 loaded[base_eid] = (tag, data)
 
@@ -2237,6 +2284,33 @@ class FunctionJobNode(FunctionNodeBase):
     # Iteration
     # ------------------------------------------------------------------
 
+    def as_table(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table":
+        """Return this node's results as a PyArrow table.
+
+        A node loaded by ``PipelineJob.load`` has no function pod. Its table is
+        built from the Arrow records its saved run stored, so every column keeps
+        its stored type. Row order follows the store. With nothing stored, the
+        table has zero rows and the node's columns.
+
+        Raises:
+            RuntimeError: If the node was loaded and no store is attached.
+        """
+        if self._function_pod is None:
+            from orcapod.pipeline.serialization import LoadStatus
+
+            if self.load_status == LoadStatus.UNAVAILABLE:
+                raise self._no_store_error()
+            fetched = self._fetch_joined_records()
+            stored = self._stored_rows_stream(fetched) if fetched is not None else None
+            if stored is not None:
+                return stored[1].as_table(columns=columns, all_info=all_info)
+        return super().as_table(columns=columns, all_info=all_info)
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Yield all computed (tag, data) pairs for this node.
 
@@ -2253,10 +2327,7 @@ class FunctionJobNode(FunctionNodeBase):
 
         status = self.load_status
         if status == LoadStatus.UNAVAILABLE:
-            raise RuntimeError(
-                f"FunctionJobNode {self.label!r} is unavailable: "
-                "no function pod and no database attached."
-            )
+            raise self._no_store_error()
 
         if status == LoadStatus.CACHE_ONLY:
             # Upstream unavailable; serve entirely from DB.
@@ -2301,10 +2372,7 @@ class FunctionJobNode(FunctionNodeBase):
         from orcapod.pipeline.serialization import LoadStatus
 
         if self._load_status == LoadStatus.UNAVAILABLE:
-            raise RuntimeError(
-                f"FunctionJobNode {self.label!r} is unavailable: "
-                "no function pod and no database attached."
-            )
+            raise self._no_store_error()
         if self._load_status in (LoadStatus.CACHE_ONLY, LoadStatus.READ_ONLY):
             # CACHE_ONLY: upstream unavailable; computation requires a live input stream.
             # READ_ONLY: function pod is a proxy placeholder — cannot compute.
@@ -2354,10 +2422,7 @@ class FunctionJobNode(FunctionNodeBase):
 
         if status == LoadStatus.UNAVAILABLE:
             await output.close()
-            raise RuntimeError(
-                f"FunctionJobNode {self.label!r} is unavailable: "
-                "no function pod and no database attached."
-            )
+            raise self._no_store_error()
 
         from orcapod.pipeline.observer import NoOpObserver
 

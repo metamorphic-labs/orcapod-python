@@ -24,6 +24,7 @@ import pyarrow.parquet as pq
 from deltalake import write_deltalake
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.operators import Join
 from orcapod.databases import DeltaTableDatabase
 from orcapod.sources import (
     ArrowTableSource,
@@ -58,7 +59,7 @@ def square(z: int) -> int:
 
 def main(root: pathlib.Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "c.csv").write_text("id,c\n0,7\n1,8\n")
+    _ = (root / "c.csv").write_text("id,c\n0,7\n1,8\n")
     write_deltalake(
         str(root / "dt"),
         pa.table({"id": pa.array([0, 1], pa.int64()), "d": pa.array([1.5, 2.5])}),
@@ -91,18 +92,20 @@ def main(root: pathlib.Path) -> None:
     with job:
         # A pod whose output feeds an operator: the shape that used to make
         # PipelineJob.load crash.
-        double.pod(dict_source, label="dbl").join(arrow_source, label="joined")
-        increment.pod(csv_source, label="inc")
-        halve.pod(delta_source, label="half")
-        square.pod(list_source, label="sq")
-    job.run()
+        _ = Join()(double.pod(dict_source, label="dbl"), arrow_source, label="joined")
+        _ = increment.pod(csv_source, label="inc")
+        _ = halve.pod(delta_source, label="half")
+        _ = square.pod(list_source, label="sq")
+    _ = job.run()
 
     expected = root / "expected"
     expected.mkdir()
     for label in FUNCTION_NODES:
         node = job.nodes[label]
         pq.write_table(node.as_table(), expected / f"{label}.parquet")
-        pq.write_table(node.as_table(all_info=True), expected / f"{label}.all_info.parquet")
+        pq.write_table(
+            node.as_table(all_info=True), expected / f"{label}.all_info.parquet"
+        )
 
     job.save(str(root / "job.json"))
 

@@ -8,6 +8,8 @@ import logging
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from orcapod.types import Schema
+
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
 
@@ -643,6 +645,28 @@ def deserialize_schema(
         except Exception:
             result[name] = type_str
     return result
+
+
+def deserialize_output_schema(
+    output_schema: dict[str, dict[str, str]],
+    type_converter: Any,
+) -> tuple[Schema, Schema]:
+    """Reconstruct a node's ``(tag, data)`` output schema from its saved descriptor.
+
+    Args:
+        output_schema: The descriptor's ``output_schema`` entry: ``{"tag": {...},
+            "data": {...}}``, each mapping a column name to an Arrow type string as
+            written by `serialize_schema`.
+        type_converter: The node's type converter, used to turn each Arrow type back
+            into the Python type that ``output_schema()`` reports.
+
+    Returns:
+        The tag schema and the data schema, with Python types.
+    """
+    return (
+        Schema(deserialize_schema(output_schema.get("tag", {}), type_converter)),
+        Schema(deserialize_schema(output_schema.get("data", {}), type_converter)),
+    )
 
 
 def parse_arrow_type_string(type_str: str) -> Any:
