@@ -19,8 +19,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.cached_function_pod import CachedFunctionPod
-from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.function_pod import FunctionPod
+from orcapod.core.function_pod import function_pod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.sources import ArrowTableSource, DictSource
 
@@ -91,8 +90,19 @@ def reorder(m: dict[str, int]) -> dict[str, int]:
     return dict(reversed(list(m.items())))
 
 
-def _pod(fn: Any, output_key: str) -> FunctionPod:
-    return FunctionPod(PythonDataFunction(fn, output_keys=output_key))
+def _pod(fn: Any, output_key: str) -> Any:
+    return function_pod(output_keys=output_key)(fn).pod
+
+
+def _keys(value: Any) -> list[Any]:
+    """Return a dict value's keys in iteration order."""
+    assert isinstance(value, dict)
+    return list(value)
+
+
+def _stored(source: Any, column: str) -> Any:
+    """Return the first row's stored (Arrow) value of ``column``."""
+    return source.as_table().column(column).to_pylist()[0]
 
 
 @dataclass
@@ -117,12 +127,12 @@ class TestPythonDictValues:
         assert _row_hash({"a": 1, "b": 2}, t) == _row_hash({"b": 2, "a": 1}, t)
 
     def test_stored_entries_are_in_key_order(self):
-        table = _source({"b": 2, "a": 1}).as_table()
-        assert [e["key"] for e in table.column("m").to_pylist()[0]] == ["a", "b"]
+        entries = _stored(_source({"b": 2, "a": 1}), "m")
+        assert [e["key"] for e in entries] == ["a", "b"]
 
     def test_str_keys_order_by_code_point_not_locale(self):
-        table = _source({"é": 1, "z": 2, "A": 3}).as_table()
-        assert [e["key"] for e in table.column("m").to_pylist()[0]] == ["A", "z", "é"]
+        entries = _stored(_source({"é": 1, "z": 2, "A": 3}), "m")
+        assert [e["key"] for e in entries] == ["A", "z", "é"]
 
     def test_different_values_still_hash_differently(self):
         assert _row_hash({"a": 1, "b": 2}) != _row_hash({"a": 2, "b": 1})
@@ -256,7 +266,7 @@ class TestFunctionPodDictOutputs:
     def test_fresh_pod_output_iterates_in_key_order(self):
         source = _source({"b": 2, "a": 1}, dict[str, int])
         [(_, out)] = list(_pod(echo, "out").process(source).iter_data())
-        assert list(out.as_dict()["out"]) == ["a", "b"]
+        assert _keys(out.as_dict()["out"]) == ["a", "b"]
 
     def test_pod_does_not_mutate_the_returned_dict(self):
         returned: list[dict[str, int]] = []
@@ -282,7 +292,7 @@ class TestFunctionPodDictOutputs:
         assert async_flipped is not None
         assert sync_out.content_hash() == async_plain.content_hash()
         assert async_plain.content_hash() == async_flipped.content_hash()
-        assert list(async_flipped.as_dict()["out"]) == ["a", "b"]
+        assert _keys(async_flipped.as_dict()["out"]) == ["a", "b"]
 
 
 def _delta_db(tmp_path: Path) -> DeltaTableDatabase:
@@ -336,8 +346,8 @@ class TestCachedPodHit:
         [(_, cached)] = list(pod.process(source).iter_data())
 
         assert cached.get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
-        assert list(fresh.as_dict()["out"]) == list(cached.as_dict()["out"])
-        assert list(cached.as_dict()["out"]) == ["a", "b", "c"]
+        assert _keys(fresh.as_dict()["out"]) == _keys(cached.as_dict()["out"])
+        assert _keys(cached.as_dict()["out"]) == ["a", "b", "c"]
         assert fresh.content_hash() == cached.content_hash()
 
 
@@ -416,7 +426,7 @@ class TestV020Store:
         [(_, fresh)] = list(fresh_pod.process(inputs).iter_data())
 
         assert cached.get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
-        assert list(cached.as_dict()["counts"]) == ["z", "a"]
-        assert list(fresh.as_dict()["counts"]) == ["a", "z"]
+        assert _keys(cached.as_dict()["counts"]) == ["z", "a"]
+        assert _keys(fresh.as_dict()["counts"]) == ["a", "z"]
         assert cached.as_dict() == fresh.as_dict()
         assert cached.content_hash() != fresh.content_hash()

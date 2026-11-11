@@ -36,7 +36,9 @@ def tally(n: int) -> dict[str, int]:
 db = DeltaTableDatabase(sys.argv[1])
 
 total_pod = CachedFunctionPod(
-    FunctionPod(PythonDataFunction(total, output_keys="total")), result_database=db
+    # The fixture is built with the released v0.2.0 API, unchanged.
+    FunctionPod(PythonDataFunction(total, output_keys="total")),  # pyright: ignore[reportArgumentType]
+    result_database=db,
 )
 dict_inputs = DictSource(
     data=[
@@ -50,7 +52,9 @@ dict_inputs = DictSource(
 list(total_pod.process(dict_inputs).iter_data())
 
 tally_pod = CachedFunctionPod(
-    FunctionPod(PythonDataFunction(tally, output_keys="counts")), result_database=db
+    # The fixture is built with the released v0.2.0 API, unchanged.
+    FunctionPod(PythonDataFunction(tally, output_keys="counts")),  # pyright: ignore[reportArgumentType]
+    result_database=db,
 )
 int_inputs = DictSource(
     data=[{"k": "r", "n": 5}],

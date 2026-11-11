@@ -26,12 +26,17 @@ import math
 import types
 import typing
 from collections.abc import Callable
-from typing import Any, get_args, get_origin
+from typing import Any, TypeVar, cast, get_args, get_origin
 
 from orcapod.errors import CanonicalOrderError
 
+_T = TypeVar("_T")
 
-def _key_rank(key: Any) -> tuple[Any, ...]:
+# A sort key: ``(0,)`` for None, ``(1, value)`` otherwise.
+_Rank = tuple[Any, ...]
+
+
+def _key_rank(key: object) -> _Rank:
     """Return the sort key of one storage key or set element.
 
     Raises:
@@ -44,7 +49,7 @@ def _key_rank(key: Any) -> tuple[Any, ...]:
     return (1, key)
 
 
-def _sorted_by_rank(items: list[tuple[tuple[Any, ...], Any]]) -> list[Any]:
+def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
     """Sort ``(rank, payload)`` pairs by rank and return the payloads.
 
     Raises:
@@ -60,7 +65,7 @@ def _sorted_by_rank(items: list[tuple[tuple[Any, ...], Any]]) -> list[Any]:
     return [payload for _, payload in items]
 
 
-def sort_dict_entries(entries: list[Any]) -> list[Any]:
+def sort_dict_entries(entries: list[dict[str, _T]]) -> list[dict[str, _T]]:
     """Return converted entries ``{"key": ..., "value": ...}`` in canonical key order.
 
     Args:
@@ -76,7 +81,7 @@ def sort_dict_entries(entries: list[Any]) -> list[Any]:
     return _sorted_by_rank([(_key_rank(entry["key"]), entry) for entry in entries])
 
 
-def sort_set_elements(elements: list[Any]) -> list[Any]:
+def sort_set_elements(elements: list[_T]) -> list[_T]:
     """Return the storage elements of one set value in canonical order.
 
     Args:
@@ -93,10 +98,10 @@ def sort_set_elements(elements: list[Any]) -> list[Any]:
 
 
 def canonical_python_value(
-    value: Any,
-    python_type: Any,
-    key_converter: Callable[[Any], Callable[[Any], Any]],
-) -> Any:
+    value: _T,
+    python_type: object,
+    key_converter: Callable[[Any], Callable[[Any], object]],
+) -> _T:
     """Return ``value`` with every dict in it in canonical key order.
 
     Walks ``python_type`` through ``dict``, ``list`` and ``Optional``. A dict whose order
@@ -118,32 +123,36 @@ def canonical_python_value(
             cannot be ordered, or two keys that convert to the same storage key.
     """
     if value is None:
-        return None
-    origin = get_origin(python_type)
-    args = get_args(python_type)
-    if origin is typing.Union or origin is types.UnionType:
+        return value
+    origin = cast(object, get_origin(python_type))
+    args = cast(tuple[object, ...], get_args(python_type))
+    if origin is typing.Union or origin is types.UnionType:  # pyright: ignore[reportDeprecated]  -- detects Optional[T]
         non_none = [a for a in args if a is not type(None)]
         if len(non_none) != 1:
             return value
         return canonical_python_value(value, non_none[0], key_converter)
     if origin is dict and len(args) == 2 and isinstance(value, dict):
+        original = cast(dict[object, object], value)
         to_storage = key_converter(args[0])
         items = [
             (
                 _key_rank(to_storage(k)),
                 (k, canonical_python_value(v, args[1], key_converter)),
             )
-            for k, v in value.items()
+            for k, v in original.items()
         ]
         ordered = _sorted_by_rank(items)
         unchanged = all(
             new_k is old_k and new_v is old_v
-            for (new_k, new_v), (old_k, old_v) in zip(ordered, value.items())
+            for (new_k, new_v), (old_k, old_v) in zip(ordered, original.items())
         )
-        return value if unchanged else dict(ordered)
+        return value if unchanged else cast(_T, dict(ordered))
     if origin is list and len(args) == 1 and isinstance(value, list):
-        new_items = [canonical_python_value(v, args[0], key_converter) for v in value]
-        if all(new is old for new, old in zip(new_items, value)):
+        original_items = cast(list[object], value)
+        new_items = [
+            canonical_python_value(v, args[0], key_converter) for v in original_items
+        ]
+        if all(new is old for new, old in zip(new_items, original_items)):
             return value
-        return new_items
+        return cast(_T, new_items)
     return value
