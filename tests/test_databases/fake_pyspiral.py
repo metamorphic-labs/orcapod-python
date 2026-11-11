@@ -13,7 +13,7 @@ Only the calls the connector makes are implemented:
   ``Project.table(id)``, ``Project.create_table(id, key_schema=..., exist_ok=...)``,
   ``Project.drop_table(id)``
 * ``Table.key_schema``, ``Table.schema().to_arrow()``, ``Table.select()``, ``Table.write(t)``,
-  ``Table.get_metadata()``, ``Table.set_metadata(kv)``
+  ``Table.get_metadata()``, ``Table.set_metadata(kv)``, ``Table.drop_metadata(keys)``
 * ``Scan.to_record_batches()``, ``Scan.to_table()``
 
 Tables live under a directory (``FAKE_SPIRAL_ROOT`` or the ``root`` given to ``install``), one
@@ -59,6 +59,10 @@ import pyarrow.compute as pc
 
 _ROOT_ENV = "FAKE_SPIRAL_ROOT"
 _BEHAVIOUR_FILE = "_behaviour.json"
+# pyspiral 0.16.33 ``Table.set_metadata`` limits.
+_MAX_PAIR_BYTES = 8192
+_MAX_KEY_CHARS = 255
+_MAX_ENTRIES = 1024
 
 
 @dataclass(frozen=True)
@@ -247,6 +251,14 @@ class _Store:
             json.dumps({k: v.hex() for k, v in current.items()})
         )
 
+    def drop_kv(self, project_id: str, identifier: str, keys: list[str]) -> None:
+        current = self.kv(project_id, identifier)
+        for key in keys:
+            current.pop(key, None)
+        self._path(project_id, identifier, ".kv.json").write_text(
+            json.dumps({k: v.hex() for k, v in current.items()})
+        )
+
 
 @dataclass(frozen=True)
 class TableResource:
@@ -337,8 +349,31 @@ class FakeTable:
         return self._store.kv(self._project_id, self._identifier)
 
     def set_metadata(self, metadata: dict[str, bytes]) -> None:
-        """Merge ``metadata`` into the table's key-value metadata."""
+        """Upsert ``metadata`` into the table's key-value metadata.
+
+        Enforces the limits pyspiral 0.16.33 documents for ``Table.set_metadata``: str keys
+        and bytes values, a key + value pair of at most 8 KiB, keys of at most 255
+        characters, and at most 1024 entries per table.
+
+        Raises:
+            TypeError: If a key is not ``str`` or a value not ``bytes``.
+            ValueError: If a limit is exceeded.
+        """
+        for k, v in metadata.items():
+            if not isinstance(k, str) or not isinstance(v, bytes):
+                raise TypeError("metadata keys must be str and values bytes")
+            if len(k) > _MAX_KEY_CHARS:
+                raise ValueError(f"metadata key {k[:40]!r}... exceeds 255 characters")
+            if len(k.encode()) + len(v) > _MAX_PAIR_BYTES:
+                raise ValueError(f"metadata entry {k!r} exceeds 8 KiB")
+        current = self._store.kv(self._project_id, self._identifier)
+        if len({*current, *metadata}) > _MAX_ENTRIES:
+            raise ValueError("a table can have at most 1024 metadata entries")
         self._store.set_kv(self._project_id, self._identifier, metadata)
+
+    def drop_metadata(self, keys: list[str]) -> None:
+        """Remove ``keys`` from the table's key-value metadata; absent keys are ignored."""
+        self._store.drop_kv(self._project_id, self._identifier, keys)
 
     def write(
         self, table: pa.Table, push_down_nulls: bool = False, **kwargs: Any
