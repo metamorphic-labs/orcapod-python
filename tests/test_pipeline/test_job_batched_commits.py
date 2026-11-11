@@ -195,40 +195,85 @@ def test_a_failed_commit_names_the_node_and_keeps_earlier_batches(
     assert isinstance(err.__cause__, OSError)
     # The job's flush after the failure retried the batch and failed again.
     assert any("Flushing pending writes" in n for n in getattr(err, "__notes__", []))
-    for kind, table in table_dirs(tmp_path).items():
+    tables = table_dirs(tmp_path)
+    for kind, table in tables.items():
         assert operations(table) == ["WRITE"], kind
-        assert stored_rows(table) == 100, kind
+    assert stored_rows(tables["pipeline"]) == 100
+    if orchestrator == "sync":
+        assert stored_rows(tables["result"]) == 100
+    else:
+        # Results go first: results of rows still on their way to being recorded
+        # when the first batch was committed are stored too.
+        assert 100 <= stored_rows(tables["result"]) < 150
+
+
+def ephemeral_rows(path: Path) -> int:
+    """Rows committed to the ephemeral store at ``path`` (read afresh)."""
+    (table,) = {log.parent for log in path.rglob("_delta_log")}
+    return stored_rows(table)
+
+
+def test_a_node_failing_on_a_row_commits_its_ephemeral_results(
+    tmp_path: Path,
+) -> None:
+    """A function error under ``fail_fast``: rows before it are in the ephemeral store."""
+    job = build_job(DeltaTableDatabase(tmp_path / "store"), 10, pod=double_until_7)
+    job.set_ephemeral_store(DeltaTableDatabase(tmp_path / "ephemeral"))
+    job.apply_node_config(NodeConfig(is_result_ephemeral=True))
+    # The sync orchestrator only: the async one does not apply error_policy and
+    # skips a row whose function raised.
+    with pytest.raises(ValueError, match="x is 7"):
+        job.run(
+            orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"),
+            commit_every_rows=100,
+        )
+    assert ephemeral_rows(tmp_path / "ephemeral") == 7  # rows 0 to 6
+
+
+class FailPipelineRecords:
+    """A store whose pipeline-record writes fail after the first ``ok``."""
+
+    def __init__(self, inner: Any, state: dict[str, int]) -> None:
+        """Wrap ``inner``; every view shares ``state``."""
+        self._inner = inner
+        self._state = state
+
+    def at(self, *path_components: str) -> FailPipelineRecords:
+        """A view sharing the write count."""
+        return FailPipelineRecords(self._inner.at(*path_components), self._state)
+
+    def add_record(self, record_path: tuple[str, ...], *args: Any, **kwargs: Any):
+        """Fail pipeline-record writes after the first ``ok``."""
+        self._state["n"] += 1
+        if self._state["n"] > self._state["ok"]:
+            raise OSError("disk unavailable")
+        return self._inner.add_record(record_path, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate everything else."""
+        return getattr(self._inner, name)
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
-def test_a_failing_node_commits_its_ephemeral_results(
+def test_a_node_failing_on_a_store_write_commits_its_ephemeral_results(
     tmp_path: Path, orchestrator: str
 ) -> None:
-    """Rows computed before a failure are committed to the ephemeral store."""
-    ephemeral_path = tmp_path / "ephemeral"
-    job = build_job(DeltaTableDatabase(tmp_path / "store"), 10, pod=double_until_7)
-    job.set_ephemeral_store(DeltaTableDatabase(ephemeral_path))
+    """A failed pipeline-record write: earlier rows' results are in the ephemeral store."""
+    # With ephemeral results, the job store only receives pipeline records.
+    store = FailPipelineRecords(
+        DeltaTableDatabase(tmp_path / "store"), {"n": 0, "ok": 5}
+    )
+    job = build_job(store, 50)
+    job.set_ephemeral_store(DeltaTableDatabase(tmp_path / "ephemeral"))
     job.apply_node_config(NodeConfig(is_result_ephemeral=True))
-    with pytest.raises(Exception) as info:
-        job.run(
-            orchestrator=ORCHESTRATORS[orchestrator](error_policy="fail_fast"),
-            commit_every_rows=100,
-        )
-    # The run's own error is the one raised.
-    errors = (
-        info.value.exceptions
-        if isinstance(info.value, BaseExceptionGroup)
-        else (info.value,)
-    )
-    assert any(isinstance(e, ValueError) and str(e) == "x is 7" for e in errors), (
-        info.value
-    )
-    (table,) = {log.parent for log in ephemeral_path.rglob("_delta_log")}
-    committed = stored_rows(table)
+    with pytest.raises(StoreWriteError) as info:
+        job.run(orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=100)
+    assert info.value.node_label == "dbl"
+    committed = ephemeral_rows(tmp_path / "ephemeral")
     if orchestrator == "sync":
-        assert committed == 7  # rows 0 to 6
+        assert committed == 6  # rows 0 to 5: row 5's record was the failed write
     else:
-        assert 1 <= committed <= 9  # rows computed concurrently before the failure
+        assert committed >= 6  # results of rows computed concurrently too
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
