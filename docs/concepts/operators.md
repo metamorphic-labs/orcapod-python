@@ -324,8 +324,9 @@ print(by_operator.pipeline_hash() == by_method.pipeline_hash())
 Orcapod hashes the expression through its own canonical encoding (label `polars_expr_v1`,
 see the [hashing reference](../reference/hashing.md#1c-polars-expression-predicates)), which
 covers column references; literals (numbers, strings, booleans, null, dates, times,
-datetimes, durations, decimals, bytes, and Python lists of numbers, strings, booleans,
-dates, times, datetimes or durations); comparisons; arithmetic;
+datetimes, durations, decimals, bytes, and Python lists of integers, floats, strings,
+booleans, dates, times, datetimes or durations, but not of decimals or bytes); comparisons;
+arithmetic;
 `&`, `|`, `^` and `~`; `is_null`, `is_not_null`, `is_nan`, `is_not_nan`, `is_in`,
 `is_between`, `all_horizontal`, `any_horizontal`, `str.contains`, `str.starts_with`,
 `str.ends_with`; and `cast`. A predicate over several columns is supported when each column

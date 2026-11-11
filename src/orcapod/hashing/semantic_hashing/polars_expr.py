@@ -79,8 +79,8 @@ POLARS_EXPR_HASH_LABEL = "polars_expr_v1"
 
 _SUPPORTED_TEXT = (
     "Orcapod can hash column references, literals (numbers, strings, booleans, null, "
-    "dates, times, datetimes, durations, decimals, bytes, and Python lists of numbers, "
-    "strings, booleans, dates, times, datetimes or durations), "
+    "dates, times, datetimes, durations, decimals, bytes, and Python lists of integers, "
+    "floats, strings, booleans, dates, times, datetimes or durations), "
     "comparisons, arithmetic, &, |, ^, ~, is_null, is_not_null, is_nan, is_not_nan, "
     "is_in, is_between, all_horizontal, any_horizontal, str.contains, str.starts_with, "
     "str.ends_with and cast."
