@@ -197,11 +197,82 @@ class GoldenModel(pydantic.BaseModel):
     count: int
 
 
+@dataclasses.dataclass
+class GoldenDeclared:
+    """Dataclass declared under a name (ITL-881), with an optional field."""
+
+    label: str
+    score: float | None
+
+
+class GoldenDeclaredModel(pydantic.BaseModel):
+    """Pydantic model declared under the same name and fields as ``GoldenDeclared``."""
+
+    label: str
+    score: float | None
+
+
+@dataclasses.dataclass
+class GoldenInner:
+    """Dataclass nested in ``GoldenOuter``; its identity enters the outer one."""
+
+    value: int
+
+
+@dataclasses.dataclass
+class GoldenOuter:
+    """Dataclass with a nested dataclass field and a container field."""
+
+    inner: GoldenInner
+    tags: list[str]
+
+
+@dataclasses.dataclass
+class GoldenTwinAB:
+    """Declared ``golden.Twin``; same fields as ``GoldenTwinBA`` in another order."""
+
+    a: int
+    b: str
+
+
+@dataclasses.dataclass
+class GoldenTwinBA:
+    """Declared ``golden.Twin``; must pin the same values as ``GoldenTwinAB``."""
+
+    b: str
+    a: int
+
+
+def _declare_golden_names() -> None:
+    """Declare the names of the ITL-881 fixtures (releases before v0.3 have no names)."""
+    try:
+        from orcapod import register_type
+    except ImportError:
+        return
+    register_type(GoldenDeclared, name="golden.Declared")
+    register_type(GoldenDeclaredModel, name="golden.Declared")
+    register_type(GoldenInner, name="golden.Inner")
+    register_type(GoldenOuter, name="golden.Outer")
+    register_type(GoldenTwinAB, name="golden.Twin")
+    register_type(GoldenTwinBA, name="golden.Twin")
+
+
+_declare_golden_names()
+
+
 def register_logical_classes() -> None:
     """Register the dataclass and pydantic fixtures with the default type converter."""
     tc = _ctx().type_converter
     tc.register_python_class(GoldenPoint)
     tc.register_python_class(GoldenModel)
+    for cls in (
+        GoldenDeclared,
+        GoldenDeclaredModel,
+        GoldenOuter,
+        GoldenTwinAB,
+        GoldenTwinBA,
+    ):
+        tc.register_python_class(cls)
 
 
 PATH_A = Path("/golden/data/a.txt")
@@ -280,6 +351,12 @@ def _semantic_types() -> dict[str, Any]:
         "set_uuid": set[uuid.UUID],
         "dataclass": GoldenPoint,
         "pydantic": GoldenModel,
+        "dataclass_declared": GoldenDeclared,
+        "pydantic_declared": GoldenDeclaredModel,
+        "dataclass_nested": GoldenOuter,
+        "dataclass_twin_ab": GoldenTwinAB,
+        "dataclass_twin_ba": GoldenTwinBA,
+        "list_dataclass": list[GoldenPoint],
     }
 
 
@@ -586,6 +663,26 @@ def _datagram_rows() -> dict[str, list[dict[str, Any]]]:
         ],
         "list_path": [{"k": "r1", "c": [PATH_A, PATH_B]}, {"k": "r2", "c": []}],
         "set_uuid": [{"k": "r1", "c": {UUID_A, UUID_B}}, {"k": "r2", "c": {UUID_A}}],
+        "dataclass_declared": [
+            {"k": "r1", "c": GoldenDeclared("a", 0.5)},
+            {"k": "r2", "c": GoldenDeclared("b", None)},
+        ],
+        "pydantic_declared": [
+            {"k": "r1", "c": GoldenDeclaredModel(label="a", score=0.5)},
+            {"k": "r2", "c": GoldenDeclaredModel(label="b", score=None)},
+        ],
+        "dataclass_nested": [
+            {"k": "r1", "c": GoldenOuter(GoldenInner(1), ["x", "y"])},
+            {"k": "r2", "c": GoldenOuter(GoldenInner(2), [])},
+        ],
+        "dataclass_twin_ab": [
+            {"k": "r1", "c": GoldenTwinAB(1, "x")},
+            {"k": "r2", "c": GoldenTwinAB(2, "y")},
+        ],
+        "dataclass_twin_ba": [
+            {"k": "r1", "c": GoldenTwinBA("x", 1)},
+            {"k": "r2", "c": GoldenTwinBA("y", 2)},
+        ],
     }
 
 
