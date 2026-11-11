@@ -459,3 +459,45 @@ Each cell is one `harness.py` run (`results.jsonl`, `linux/*/results.jsonl`). "h
 | linux orcapod source-read patch=atexit-gc py3.13 locked | 100 | 6 | 0 | 0 | **6%** |
 | linux orcapod pipeline-sync patch=atexit-gc py3.13 locked | 100 | 1 | 0 | 0 | **1%** |
 
+
+## 11. Proposed delta-rs issue (not filed; for the developer)
+
+**Title:** `to_pyarrow_dataset()`'s default `PyFileSystem(DeltaStorageHandler)` makes processes hang or abort at interpreter exit
+
+**Body:**
+
+> A process that scans a Delta table with `DeltaTable.to_pyarrow_dataset().to_table()` or
+> `to_pyarrow_table()` and then exits normally often fails during interpreter shutdown. It
+> hangs forever (macOS, any Python; Linux, Python 3.13), or on Linux with Python 3.11/3.12 it
+> aborts with `terminate called without an active exception`. All of its work and output are
+> done by then.
+>
+> ```python
+> import tempfile, deltalake, pyarrow as pa
+> p = tempfile.mkdtemp()
+> deltalake.write_deltalake(p, pa.table({"k": [1, 2, 3]}))
+> deltalake.DeltaTable(p).to_pyarrow_dataset().to_table()
+> print("done")  # prints, then the process may never exit
+> ```
+>
+> Rate over 100 fresh processes: about 57% on macOS arm64 and 5–38% on Linux x86_64. It
+> happens on every combination we tried: pyarrow 20.0.0–26.0.1 × deltalake 1.0.2 and 1.6.6,
+> Python 3.11–3.13. Writes and merges alone never trigger it.
+>
+> Native stacks (Python 3.13): the main thread is in `exit → __cxa_finalize →
+> arrow::internal::ThreadPool::~ThreadPool → Shutdown`. A pool worker is in
+> `parquet::arrow::FileReaderImpl::~FileReaderImpl → ReadRangeCache::~ReadRangeCache →
+> arrow::py::PyBuffer::~PyBuffer → PyGILState_Ensure → PyThread_hang_thread`. The cached
+> buffers come from `DeltaStorageHandler` (Python `bytes`; `pre_buffer=True`), and Arrow
+> releases them on a worker after `to_table()` returns. If that happens during finalization,
+> the worker cannot take the GIL. The root bug is in Arrow: apache/arrow#50482, #54536, fix PR
+> #54467.
+>
+> Passing a native filesystem avoids it completely (0/100 on macOS and Linux, identical
+> results, partitioned tables included):
+> `dt.to_pyarrow_dataset(filesystem=pyarrow.fs.SubTreeFileSystem(dt.table_uri,
+> pyarrow.fs.LocalFileSystem()))`.
+>
+> Suggestion: default to a native pyarrow filesystem for local tables (and possibly the native
+> object-store filesystems), or document the issue and the workaround in `to_pyarrow_dataset`
+> until Arrow's fix is released.
