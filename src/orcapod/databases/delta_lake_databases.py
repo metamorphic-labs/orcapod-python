@@ -57,6 +57,9 @@ class DeltaTableDatabase:
         _scoped_path: tuple[str, ...] = (),
         _shared_pending_batches: "dict[str, pa.Table] | None" = None,
         _shared_pending_record_ids: "defaultdict[str, set[bytes]] | None" = None,
+        _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
+        _shared_existing_ids_cache: "defaultdict[str, set[str]] | None" = None,
+        _shared_cache_dirty: "defaultdict[str, bool] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -81,9 +84,16 @@ class DeltaTableDatabase:
                 )
         # For cloud paths: create_base_path is silently ignored (no directory needed).
 
-        self._delta_table_cache: dict[str, deltalake.DeltaTable] = {}
-        # Shared pending state — when constructed via at(), these dicts are shared
-        # with the root instance so that root.flush() can flush all scoped writes.
+        # Shared state — when constructed via at(), these dicts are shared with the
+        # root instance. Any handle's flush() writes every pending key of the family
+        # and refreshes the loaded table and existing-ids entries for it, so these
+        # caches must be family-wide too: a per-handle cache would keep serving the
+        # snapshot a sibling loaded before the flush (ITL-864). All of them are
+        # touched only from the thread that drives the pipeline (the async
+        # orchestrator runs only user functions in worker threads).
+        self._delta_table_cache: dict[str, deltalake.DeltaTable] = (
+            _shared_delta_table_cache if _shared_delta_table_cache is not None else {}
+        )
         if _shared_pending_batches is not None:
             self._pending_batches = _shared_pending_batches
         else:
@@ -92,8 +102,16 @@ class DeltaTableDatabase:
             self._pending_record_ids = _shared_pending_record_ids
         else:
             self._pending_record_ids: dict[str, set[bytes]] = defaultdict(set)
-        self._existing_ids_cache: dict[str, set[str]] = defaultdict(set)
-        self._cache_dirty: dict[str, bool] = defaultdict(lambda: True)
+        self._existing_ids_cache: dict[str, set[str]] = (
+            _shared_existing_ids_cache
+            if _shared_existing_ids_cache is not None
+            else defaultdict(set)
+        )
+        self._cache_dirty: dict[str, bool] = (
+            _shared_cache_dirty
+            if _shared_cache_dirty is not None
+            else defaultdict(lambda: True)
+        )
 
     def _clear_pending(self):
         """Clear all pending state."""
@@ -620,6 +638,57 @@ class DeltaTableDatabase:
             and self._pending_batches[record_key].num_rows >= self.batch_size
         )
 
+    def _pending_not_stored(self, record_path: tuple[str, ...]) -> pa.Table | None:
+        """Return the pending rows a flush would insert at ``record_path``.
+
+        A flush inserts only rows whose record id is not stored yet (the merge is
+        ``when_not_matched_insert_all``), so a pending row with a stored id is
+        never returned by a read: the stored row is.
+
+        Args:
+            record_path: Path components relative to this database view.
+
+        Returns:
+            The pending rows whose record id is not stored, or ``None`` if there
+            are none.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is None or pending.num_rows == 0:
+            return None
+        stored_ids = self._get_existing_ids(record_path)
+        if stored_ids:
+            id_type = pending.schema.field(self.RECORD_ID_COLUMN).type
+            is_stored = pc.is_in(
+                pending[self.RECORD_ID_COLUMN],
+                value_set=pa.array(list(stored_ids), type=id_type),
+            )
+            pending = pending.filter(pc.invert(is_stored))
+        return pending if pending.num_rows > 0 else None
+
+    def _combine_stored_and_pending(
+        self,
+        stored: pa.Table | None,
+        pending: pa.Table | None,
+        record_id_column: str | None,
+    ) -> pa.Table | None:
+        """Combine stored rows with pending rows into one read result.
+
+        Args:
+            stored: Rows read from the Delta table, or ``None``.
+            pending: Pending rows that are not stored (see ``_pending_not_stored``),
+                already filtered by the read's condition, or ``None``.
+            record_id_column: Name to give the record id column, or ``None`` to
+                drop it.
+
+        Returns:
+            The combined rows, or ``None`` if there are none.
+        """
+        parts = [t for t in (stored, pending) if t is not None and t.num_rows > 0]
+        if not parts:
+            return None
+        table = parts[0] if len(parts) == 1 else pa.concat_tables(parts)
+        return self._handle_record_id_column(table, record_id_column)
+
     def get_all_records(
         self,
         record_path: tuple[str, ...],
@@ -629,11 +698,13 @@ class DeltaTableDatabase:
         """
         Get all records from both pending batch and Delta table.
 
+        Every read method returns the rows a flush would leave: the stored rows
+        plus the pending rows whose record id is not stored yet, as seen through
+        any handle of this ``at()`` family.
+
         Returns:
             Combined Arrow table with all records, or None if no records exist
         """
-        record_key = self._get_record_key(record_path)
-
         tables_to_combine = []
 
         # Add Delta table data
@@ -647,24 +718,10 @@ class DeltaTableDatabase:
             except Exception as e:
                 logger.warning(f"Error reading Delta table: {e}")
 
-        # Add pending batch data
-        if (
-            retrieve_pending
-            and (pending_batch := self._pending_batches.get(record_key)) is not None
-        ):
-            if pending_batch.num_rows > 0:
-                tables_to_combine.append(pending_batch)
-
-        if not tables_to_combine:
-            return None
-
-        if len(tables_to_combine) == 1:
-            table_to_return = tables_to_combine[0]
-        else:
-            table_to_return = pa.concat_tables(tables_to_combine)
-
-        # Handle record_id_column if specified
-        return self._handle_record_id_column(table_to_return, record_id_column)
+        # Add the pending rows a flush would insert
+        pending = self._pending_not_stored(record_path) if retrieve_pending else None
+        stored = pa.concat_tables(tables_to_combine) if tables_to_combine else None
+        return self._combine_stored_and_pending(stored, pending, record_id_column)
 
     def get_records_with_column_value(
         self,
@@ -675,9 +732,6 @@ class DeltaTableDatabase:
     ) -> "pa.Table | None":
         if flush:
             self.flush_batch(record_path)
-        # check if record_id is found in pending batches
-        record_key = self._get_record_key(record_path)
-        pending_batch = self._pending_batches.get(record_key)
 
         if isinstance(column_values, Mapping):
             # Convert Mapping to list of tuples
@@ -691,30 +745,25 @@ class DeltaTableDatabase:
         for next_expression in expressions[1:]:
             combined_expression = combined_expression & next_expression
 
-        if pending_batch is not None:
-            filtered_table = pending_batch.filter(combined_expression)
-            return self._handle_record_id_column(filtered_table, record_id_column)
+        pending = self._pending_not_stored(record_path)
+        if pending is not None:
+            pending = pending.filter(combined_expression)
 
         # Now check the Delta table
         delta_table = self._get_delta_table(record_path)
         if delta_table is None:
-            return None
+            return self._combine_stored_and_pending(None, pending, record_id_column)
 
         try:
             # Use schema-preserving read
             result = self._read_delta_table(delta_table, expression=combined_expression)
-
-            if len(result) == 0:
-                return None
-
-            # Handle (remove/rename) the record id column before returning
-            return self._handle_record_id_column(result, record_id_column)
-
         except Exception as e:
             logger.error(
                 f"Error getting record with {column_values} from {'/'.join(record_path)}: {e}"
             )
             raise e
+
+        return self._combine_stored_and_pending(result, pending, record_id_column)
 
     def get_record_by_id(
         self,
@@ -738,9 +787,12 @@ class DeltaTableDatabase:
             self.flush_batch(record_path)
 
         record_id = coerce_record_id(record_id)
-        # check if record_id is found in pending batches
+        # Serve a pending record only if its id is not stored: a flush keeps the
+        # stored row and drops the pending one.
         record_key = self._get_record_key(record_path)
-        if record_id in self._pending_record_ids[record_key]:
+        if record_id in self._pending_record_ids[
+            record_key
+        ] and record_id not in self._get_existing_ids(record_path):
             # Return the pending record after removing the entry id column
             pending_batch = self._pending_batches[record_key]
             assert pending_batch is not None, "Pending batch should not be None"
@@ -812,25 +864,30 @@ class DeltaTableDatabase:
             return None
 
         # check inside the batch
+        pending = self._pending_not_stored(record_path)
+        if pending is not None:
+            id_type = pending.schema.field(self.RECORD_ID_COLUMN).type
+            pending = pending.filter(
+                pc.is_in(
+                    pending[self.RECORD_ID_COLUMN],
+                    value_set=pa.array(record_ids_list, type=id_type),
+                )
+            )
+
         delta_table = self._get_delta_table(record_path)
         if delta_table is None:
-            return None
+            return self._combine_stored_and_pending(None, pending, record_id_column)
         try:
             # Use schema-preserving read with filters
             filter_expr = self._create_record_ids_filter(record_ids_list)
             result = self._read_delta_table(delta_table, filters=filter_expr)
-
-            if len(result) == 0:
-                return None
-
-            # Handle record_id column based on parameter
-            return self._handle_record_id_column(result, record_id_column)
-
         except Exception as e:
             logger.error(
                 f"Error getting records by IDs from {'/'.join(record_path)}: {e}"
             )
             return None
+
+        return self._combine_stored_and_pending(result, pending, record_id_column)
 
     def _read_delta_table(
         self,
@@ -1098,6 +1155,9 @@ class DeltaTableDatabase:
             _scoped_path=new_scoped_path,
             _shared_pending_batches=root_instance._pending_batches,
             _shared_pending_record_ids=root_instance._pending_record_ids,
+            _shared_delta_table_cache=root_instance._delta_table_cache,
+            _shared_existing_ids_cache=root_instance._existing_ids_cache,
+            _shared_cache_dirty=root_instance._cache_dirty,
         )
 
     def list_sources(self) -> list[tuple[str, ...]]:

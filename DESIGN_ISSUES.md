@@ -2208,3 +2208,37 @@ subprocesses with different `PYTHONHASHSEED` values and were verified identical 
 3.11, 3.12 and 3.13. The generator's header says when regeneration is legitimate: a changed
 value needs a migration assessment and the developer's approval. Not pinned yet: the
 `StarfixArrowHasher` gaps tracked in ITL-848.
+
+---
+
+## `src/orcapod/databases/delta_lake_databases.py` — reading back a handle family's own writes
+
+### DW1 — A read through one `at()` handle could miss rows its family had just written
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-864
+
+Right after a first `PipelineJob` run on a `DeltaTableDatabase`, `node.get_all_records()`
+returned 1 of 2 or 3 rows (plain `int -> int` pod, sync and async orchestrators), while
+`iter_data` and a fresh handle saw every row. Every `at()` handle shares the root's pending
+batches, and any handle's `flush()` writes every pending key, so the result-store handle
+flushed the pipeline table's rows. But each handle kept its own loaded-table cache, so the
+node's pipeline handle kept reading the table version it had loaded during the run. Every read
+method missed the rows a sibling flushed. Separately, the read methods merged pending and stored
+rows inconsistently: `get_records_by_ids` ignored pending rows, `get_records_with_column_value`
+ignored stored rows whenever a pending batch existed (and returned an empty table instead of
+`None`), and a pending row whose record id was already stored was returned as well, although a
+flush keeps the stored row and drops the pending one.
+
+**Fix:** the loaded-table, existing-ids and cache-dirty dicts are shared across the `at()`
+family exactly as pending state is. Every read method returns what a flush would leave: the
+stored rows plus the pending rows whose record id is not stored (`_pending_not_stored`), and
+`None` when there are none. These dicts are touched only from the thread that drives the
+pipeline; the async orchestrator runs only user functions in worker threads. Regression tests:
+`tests/test_databases/test_delta_read_your_writes.py` and
+`tests/test_pipeline/test_delta_node_records_after_run.py`.
+
+Still open: a handle does not see writes made by another process, or by a separate
+`DeltaTableDatabase` root on the same path, until it reloads the table; this is unchanged.
+Reading with a pending batch also refreshes the stored-id set when it is stale, which loads the
+whole table (D3).
