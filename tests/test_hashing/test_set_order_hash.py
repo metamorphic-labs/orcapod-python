@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from typing import Any
 
 import numpy as np
 import pytest
@@ -79,9 +80,14 @@ class TestPlainSetOrder:
 
     def test_numpy_nan_element_is_rejected(self):
         """A NaN that is not a Python ``float`` (``numpy.float32``) has no order either."""
+        # NumPy scalars are outside the declared ``DataValue`` type; DictSource accepts
+        # them at runtime, which is the case under test.
+        rows: list[dict[str, Any]] = [
+            {"k": "r", "s": {np.float32("nan"), np.float32(1.0)}}
+        ]
         with pytest.raises(ValueError, match="NaN"):
             DictSource(
-                data=[{"k": "r", "s": {np.float32("nan"), np.float32(1.0)}}],
+                data=rows,
                 tag_columns=["k"],
                 data_schema={"k": str, "s": set[float]},
             ).as_table()
