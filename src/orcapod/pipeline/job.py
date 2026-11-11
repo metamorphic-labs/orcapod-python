@@ -755,9 +755,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 the duration of the run. When ``False`` each node's buffer is
                 released as soon as the node completes, reducing peak memory.
                 This setting does not affect database persistence or post-run
-                result access — DB records are written regardless, and
-                ``job.nodes["label"].get_all_records()`` works the same in
-                either case.
+                result access: DB records are written regardless, and
+                ``job.nodes["label"]`` returns the same rows from
+                ``as_table()`` and ``iter_data()`` in either case, on either
+                orchestrator. An operator node keeps its output in memory and
+                stores nothing, so its ``get_all_records()`` returns ``None``.
 
         Returns:
             ``self`` — the same ``PipelineJob`` instance, with

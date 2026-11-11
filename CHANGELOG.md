@@ -10,6 +10,13 @@
 
 ### Fixed
 
+- After a job ran on `AsyncPipelineOrchestrator`, an operator node (`job.nodes[label]` for
+  `Join`, `MergeJoin`, `SemiJoin`, `Batch`, `GroupBy`, `MapTags`, `MapData`, `PolarsFilter` and
+  the column-selection operators) returned no rows from `as_table()` and `iter_data()`, without
+  an error. It now returns the same rows as after a sync run, whatever `materialize_results`
+  is. An operator node in a job keeps its output in memory and stores nothing, so
+  `get_all_records()` returns `None` for it on both orchestrators. (ITL-896)
+
 - A failed store write fails the run. `PipelineJob.run()` used to return normally when a
   node's result or record could not be written (the row was skipped like a crashed function
   under the default `error_policy="continue"`), so the node read back fewer rows than it
