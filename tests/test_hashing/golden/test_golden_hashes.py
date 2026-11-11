@@ -87,17 +87,31 @@ def test_no_unpinned_entries(live: dict[str, dict[str, Any]], group: str) -> Non
     )
 
 
+GENERATOR_TIMEOUT_S = 600
+
+
+def _run_generator(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            [sys.executable, str(GENERATOR), "--stdout"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=GENERATOR_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        seed = env.get("PYTHONHASHSEED")
+        pytest.fail(
+            f"golden generator timed out after {GENERATOR_TIMEOUT_S}s (PYTHONHASHSEED={seed})"
+        )
+
+
 @pytest.mark.parametrize("seed", ["0", "4242"])
 def test_values_independent_of_process_and_hash_seed(seed: str) -> None:
     env = os.environ.copy()
     env["PYTHONHASHSEED"] = seed
-    result = subprocess.run(
-        [sys.executable, str(GENERATOR), "--stdout"],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
+    result = _run_generator(env)
     assert result.returncode == 0, result.stderr
     computed = json.loads(result.stdout)
     moved = [
@@ -107,6 +121,18 @@ def test_values_independent_of_process_and_hash_seed(seed: str) -> None:
         if computed[group].get(entry) != value
     ]
     assert not moved, f"PYTHONHASHSEED={seed}:\n" + "\n".join(moved[:5])
+
+
+def test_generator_timeout_fails_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exercises the private helper because the test is about its timeout handling.
+    def hang(
+        cmd: list[str], *, timeout: float, **_: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(subprocess, "run", hang)
+    with pytest.raises(pytest.fail.Exception, match="golden generator timed out"):
+        _ = _run_generator(os.environ.copy())
 
 
 # ---------------------------------------------------------------------------
