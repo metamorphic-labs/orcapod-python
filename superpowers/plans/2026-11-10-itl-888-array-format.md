@@ -243,3 +243,19 @@ Plan (mechanical, coordinator-scoped; no behaviour change beyond keeping both si
 3. Golden: `git diff origin/main -- tests/test_hashing/golden/` must equal this PR's approved diff.
 4. Verify: pytest on 3.11/3.12/3.13, ruff check, ruff format --check, basedpyright exit code.
 5. Push; wait for CI + CodeRabbit on new head; read review bodies + inline threads.
+
+Done (2026-11-11): merged cf4f67c7 (CHANGELOG conflict) and a4e4a3e5 (DESIGN_ISSUES conflict),
+both additive; golden diff vs main unchanged. Decisions restated as decided (coordinator,
+developer confirmation November 11; ITL-889, ITL-911 deferred).
+
+### CodeRabbit round on 75f8959d (contained bug fixes, TDD)
+
+1. `_dtype_from_value`: a structured entry whose name is not a string or whose shape is not
+   a list of non-negative ints raised `TypeError` (or NumPy's own `ValueError`); raise the
+   documented "malformed array dtype tag entry" `ValueError`. Test: extend the parametrized
+   read-path test in `tests/test_arrays/test_array_value_format.py`.
+2. `canonical_array`: use `np.ndarray.view(value, np.ndarray)` so a subclass overriding
+   `view` cannot change the stored or hashed values (D7: subclasses are plain arrays). Test:
+   a subclass whose `view` returns other values stores and hashes like its base array.
+3. Body pre-merge checks: ITL-889 is deferred (referenced, not targeted); changelog entries
+   from #287/#296 come from merging main; docstring coverage declined as in earlier rounds.

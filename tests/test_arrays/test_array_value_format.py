@@ -257,6 +257,21 @@ def test_matrix_and_recarray_read_back_as_plain_arrays(tmp_path: Path) -> None:
         assert semantic_hash(sub) == semantic_hash(np.array(np.asarray(sub)))
 
 
+class _ViewChangesValues(np.ndarray[Any, Any]):
+    """A subclass whose ``view`` override returns different values."""
+
+    def view(self, *args: Any, **kwargs: Any) -> Any:
+        return np.zeros(self.shape, dtype=self.dtype)
+
+
+def test_subclass_view_override_does_not_change_stored_or_hashed_values() -> None:
+    base = np.arange(1.0, 4.0)
+    sub = base.view(_ViewChangesValues)
+    assert_arrays_identical(read_back(sub), base)
+    assert semantic_hash(sub) == semantic_hash(base)
+    assert data_hash(sub) == data_hash(base)
+
+
 # ---------------------------------------------------------------------------
 # Hash: value digest under the ndarray_v1 label
 # ---------------------------------------------------------------------------
@@ -459,10 +474,26 @@ def test_null_child_on_read_raises_naming_the_column() -> None:
 
 @pytest.mark.parametrize(
     "entry",
-    [["a"], ["a", "int32", [2], "extra"]],
-    ids=["one_part", "four_parts"],
+    [
+        ["a"],
+        ["a", "int32", [2], "extra"],
+        [1, "int32"],
+        ["a", "int32", 2],
+        ["a", "int32", ["2"]],
+        ["a", "int32", [True]],
+        ["a", "int32", [-1]],
+    ],
+    ids=[
+        "one_part",
+        "four_parts",
+        "non_string_name",
+        "shape_not_a_list",
+        "shape_of_strings",
+        "shape_of_bools",
+        "negative_dimension",
+    ],
 )
-def test_structured_tag_entry_with_wrong_part_count_raises_on_read(
+def test_malformed_structured_tag_entry_raises_on_read(
     entry: list[Any],
 ) -> None:
     converter = get_default_context().type_converter
