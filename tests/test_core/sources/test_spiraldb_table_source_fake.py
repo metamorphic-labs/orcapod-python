@@ -276,3 +276,113 @@ class TestSourceId:
         assert source.pipeline_hash().to_string() == (
             "semantic_v0.1:a771eabb35eac3fbd266b5751c75c6664556a2fab5d0d31977cefedc4b870a3d"
         )
+
+
+class TestNonNullableColumns:
+    """A column SpiralDB reports non-null arrives as ``T``, not ``T | None`` (ITL-926 C1).
+
+    The EDI tables are to be migrated to non-nullable columns (developer, November 11, 2026).
+    """
+
+    _KEYS = pa.schema(
+        [
+            pa.field("subject_id", pa.string(), False),
+            pa.field("session_start_datetime", _TS, False),
+        ]
+    )
+    _ITEM = pa.field("item", pa.float32(), False)
+    _QUALITY = pa.struct(
+        [pa.field("snr", pa.float32(), False), pa.field("note", pa.string(), True)]
+    )
+
+    @pytest.fixture()
+    def strict_root(self, tmp_path: Path):
+        root = tmp_path / "spiral"
+        with fake_pyspiral.install(root):
+            project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+            session = project.create_table("default.session", key_schema=self._KEYS)
+            session.write(
+                pa.table(
+                    {
+                        "subject_id": ["m1", "m2"],
+                        "session_start_datetime": pa.array(_STARTS, _TS),
+                        "total_trials": pa.array([10, 20], pa.int64()),
+                        "booth": ["b1", None],
+                    },
+                    schema=pa.schema(
+                        [
+                            *self._KEYS,
+                            pa.field("total_trials", pa.int64(), False),
+                            pa.field("booth", pa.string(), True),
+                        ]
+                    ),
+                )
+            )
+            unit = project.create_table("default.unit", key_schema=self._KEYS)
+            unit.write(
+                pa.table(
+                    {
+                        "subject_id": ["m1", "m2"],
+                        "session_start_datetime": pa.array(_STARTS, _TS),
+                        "spikes": pa.array([[1.0], [2.0, 3.0]], pa.list_(self._ITEM)),
+                        "quality": pa.array(
+                            [{"snr": 1.0, "note": None}, {"snr": 2.0, "note": "ok"}],
+                            self._QUALITY,
+                        ),
+                    },
+                    schema=pa.schema(
+                        [
+                            *self._KEYS,
+                            pa.field("spikes", pa.list_(self._ITEM), False),
+                            pa.field("quality", self._QUALITY, False),
+                        ]
+                    ),
+                )
+            )
+            yield root
+
+    def test_schema_keeps_declared_nullability(self, strict_root):
+        tag, data = SpiralDBTableSource(_PROJECT, "session").output_schema()
+        assert dict(tag) == {"subject_id": str, "session_start_datetime": dt.datetime}
+        assert dict(data) == {"total_trials": int, "booth": str | None}
+
+    def test_arrow_fields_keep_nullability_at_every_depth(self, strict_root):
+        schema = SpiralDBTableSource(_PROJECT, "unit").as_table().schema
+        assert not schema.field("subject_id").nullable
+        assert not schema.field("spikes").nullable
+        assert schema.field("spikes").type == pa.large_list(self._ITEM)
+        assert not schema.field("spikes").type.value_field.nullable
+        quality = schema.field("quality")
+        assert not quality.nullable
+        assert not quality.type.field("snr").nullable
+        assert quality.type.field("note").nullable
+
+    def test_plain_typed_pod_runs_through_join_and_save_load(
+        self, strict_root, tmp_path
+    ):
+        @function_pod(output_keys="trials_x2")
+        def double(total_trials: int) -> int:
+            return 2 * total_trials
+
+        store = tmp_path / "store"
+        job = PipelineJob(name="strict", store=DeltaTableDatabase(store))
+        with job:
+            joined = Join()(
+                SpiralDBTableSource(_PROJECT, "session"),
+                SpiralDBTableSource(_PROJECT, "unit"),
+                label="joined",
+            )
+            trials = SelectDataColumns(["total_trials"])(joined, label="trials")
+            double.pod(trials, label="double")
+        job.run()
+        result = job.nodes["double"].as_table()
+        assert sorted(result.column("trials_x2").to_pylist()) == [20, 40]
+        assert not result.schema.field("subject_id").nullable
+        assert job.nodes["joined"].output_schema()[0]["subject_id"] is str
+
+        path = tmp_path / "job.json"
+        job.save(path)
+        loaded = PipelineJob.load(path, store=DeltaTableDatabase(store))
+        records = loaded.nodes["double"].get_all_records()
+        assert records is not None
+        assert sorted(records.column("trials_x2").to_pylist()) == [20, 40]
