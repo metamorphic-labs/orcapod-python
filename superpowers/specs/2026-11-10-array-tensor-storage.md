@@ -66,6 +66,7 @@ prints one line per check: `[OK]`, `[DEFECT]`, `[FAIL]`, `[INFO]` or `[SKIP]`.
 | `b7_migration.py` | `.npy` to each candidate, coexistence, type change in Delta |
 | `b8_vst_support_and_out_of_table.py` | `variable_shape_tensor` in pyarrow 23.0.1, out-of-table size |
 | `c1_canonical_digest_prototype.py` | a layout-independent array digest, prototype |
+| `c2_hash_labels_and_extension_metadata.py` | the unversioned `sha256` label; extension metadata in table, schema and pipeline hashes |
 
 Environment: macOS arm64, Python 3.12, NumPy 2.2.6, pyarrow 23.0.1, polars 1.41.2,
 starfix 0.4.0, torch 2.15 (experiments only). **Not verified:** Linux, x86-64, Windows,
@@ -107,6 +108,13 @@ and re-encoded for hashing; peak traced memory was 3.1× the array size for a 12
 
 A bare `ndarray` hashed by the semantic hasher (e.g. as a function argument) gives
 `ContentHash("sha256", sha256(.npy))`, the same digest without the starfix wrapper (a1).
+
+**The label is unversioned.** Both the method (`sha256`) and the token prefix
+(`numpy:ndarray::sha256:`) name only the digest algorithm, not what is digested (c2). A
+later definition that is still SHA-256, for example the canonical digest of c1, would carry
+the same label. Old and new array hashes then cannot be told apart from the hash alone; only
+the row's `_context_key` would say which definition produced it. Any change to the array hash
+should therefore introduce a new label (e.g. a versioned method name), not reuse `sha256`.
 
 ### A3. Hash stability
 
@@ -162,7 +170,7 @@ included. A Rust or tensor implementation would have to emit NumPy's header form
 | MergeJoin float32 array with float64 array | **Accepted silently** under one column. A plain-type mismatch raises `InputValidationError` | a3_operators |
 | `PipelineJob`, in-memory and Delta, sync orchestrator | Arrays exact at every node | a3_pipeline_stores |
 | Cached re-run in a fresh process, Delta, sync→sync and async→async | Run 2 calls pods 0 times; arrays exact; source, row, output and node hashes identical across processes | a3_cached_rerun |
-| SQLite store | **Fails, also for plain ints** (not array-specific) | a3_pipeline_stores |
+| SQLite store | **Fails, also for plain ints** (not array-specific). `ConnectorArrowDatabase(SQLiteConnector)` rejects every logical-typed column at write time (ITL-877) | a3_pipeline_stores |
 | Async run, then `iter_data` on a GroupBy node | **Empty, also for plain ints** (not array-specific) | a3_pipeline_stores |
 | Sync run, then async run, same Delta store | **Fails, also for plain ints**: non-nullable `_tag_source_id` violation (not array-specific) | a3_cached_rerun |
 
@@ -222,7 +230,7 @@ Array-specific:
 
 Not array-specific, found on the way (out of ITL-874's scope; reported in the hand-off, not filed):
 
-8. SQLite is unusable as a `PipelineJob` store: ext columns are refused ("does not preserve
+8. SQLite is unusable as a `PipelineJob` store (ITL-877 covers the logical-type part): ext columns are refused ("does not preserve
    Arrow metadata"), and list columns fail to bind, plain ints included. The sync run only logs
    a warning and ends with empty nodes; the async run raises (a3_pipeline_stores, b3).
 9. After an async run, `job.nodes[...].iter_data()` on a GroupBy node is empty, and the
@@ -275,7 +283,7 @@ show layout behaviour; they are not a proposal for exact field names.
 | Polars join, filter and restore | kept | restored (Polars `Array`, ext dropped) | restored | restored | restored | restored | — |
 | Parquet, IPC, in-memory DB | OK | OK | OK | OK | OK | OK | — |
 | Delta | OK | **read fails, shown as no rows** | **read fails** | OK | OK | OK | not verified |
-| SQLite connector | storage-only OK | fails | fails | fails | fails | fails | not verified |
+| SQLite connector³ | storage-only OK | fails | fails | fails | fails | fails | not verified |
 | bool, datetime, strings | exact | **refused** | strings come back as object | exact | exact | exact | — |
 | complex, structured | exact | **refused** | refused | refused | refused | **exact** | — |
 | 0-d, empty | exact | **0-d refused** | exact | exact | exact | exact | — |
@@ -294,7 +302,9 @@ b6 (torch), b7 (migration), b8 (vst, out of table).
 ¹ In the b0 prototype of 4c the dtype is per row, so neither shape nor dtype enters the schema.
 Putting the dtype in type metadata instead (as in 4b) is possible when the annotation names it.
 ² b7 shows 4c value-exact for every case. Big-endian `.npy` values convert `>f4` to `<f4`,
-equal in value but a different NumPy dtype, and Fortran order becomes C order. Whether byte order is
+equal in value but a different NumPy dtype, and Fortran order becomes C order.
+³ `ConnectorArrowDatabase(SQLiteConnector)` rejects every logical-typed column at write time
+(ITL-877), so this row does not count against any one design. Whether byte order is
 identity is a developer decision (D4).
 
 ### B3. Observations that drive the choice
@@ -303,20 +313,29 @@ identity is a developer decision (D4).
    for the Python type, starfix only sees the handler's token (a1). A storage change can keep
    hashes, and a hash change can keep storage. Without a handler, starfix hashes the storage
    form plus the extension name, and the hash then follows the layout (b1).
-2. **The pipeline hash uses Python types, not Arrow types** (b1: `Schema({'x': np.ndarray})`
-   hashes as `type:numpy.ndarray`). Putting dtype or shape in the Arrow type does not reach
+2. **Extension metadata is hashed, other field metadata is not.** `StarfixArrowHasher` strips
+   every field metadata key except `ARROW:extension:*` and then hashes with
+   `include_metadata=True` (`hashing/schema_cleaner.py`). Whatever a design puts in
+   `ARROW:extension:metadata` (dtype, shape, permutation) is part of the Arrow schema hash.
+   For a column with no semantic handler it is part of the value hash too. Shape `[2,3]`
+   against `[3,2]` in metadata, with identical storage values, gives different table hashes
+   (c2). That metadata must therefore be serialized canonically; the `fixed_shape_tensor`
+   permutation problem (B3.5) is an example of what goes wrong otherwise.
+3. **The pipeline hash uses Python types, not Arrow types** (b1: `Schema({'x': np.ndarray})`
+   hashes as `type:numpy.ndarray`; c2: two sources that differ only in extension metadata
+   have the same pipeline hash). Putting dtype or shape in the Arrow type does not reach
    the pipeline hash unless the Python-side type carries them. Today `NDArray[...]` is
    rejected (A6), so per-column dtype or shape needs annotation work first (ITL-869 overlaps).
-3. **A storage change under an unchanged pipeline hash writes to the same table.** In Delta,
+4. **A storage change under an unchanged pipeline hash writes to the same table.** In Delta,
    appending new-format rows to a `.npy` table is accepted. The next read fails and Orcapod
    returns no rows, so the old results look dropped (b7). Any format change must therefore
    write new tables through an explicit migration (the ITL-535 framework: one migration per
    minor release, version in the path).
-4. **`fixed_shape_tensor` fits fixed-shape batches, not Orcapod values.** Shape per column means
+5. **`fixed_shape_tensor` fits fixed-shape batches, not Orcapod values.** Shape per column means
    every row in a column has one shape and the shape must be known at schema time. It refuses
    0-d arrays and half of NumPy's dtypes. Its type identity also depends on how it was built
    (default permutation and `[0, 1]` give different IPC bytes; b1).
-5. **4c keeps everything `.npy` keeps, in explicit fields.** It is exact for structured,
+6. **4c keeps everything `.npy` keeps, in explicit fields.** It is exact for structured,
    complex, datetime, strings and torch-only dtypes, because the dtype is a tag and the data is
    raw bytes. Starfix hashes it today. Size equals `.npy`. Other tools see the shape.
 
@@ -370,7 +389,7 @@ silent version bump.
 | 5 out of table | Yes (write the `.npy` bytes to a file) | Reference column | Same as 4c, and needs ITL-467 first |
 
 For every candidate, writing the new format under the old pipeline path hides old rows in Delta
-(B3.3). A reader that keeps `LogicalNumpyArray` registered for `numpy.ndarray` can still
+(B3.4). A reader that keeps `LogicalNumpyArray` registered for `numpy.ndarray` can still
 decode old values side by side with the new type (b7). What it cannot do is mix both in one
 Delta table.
 
