@@ -2637,7 +2637,15 @@ class FunctionJobNode(FunctionNodeBase):
                     try:
                         async for tag, data in input_channel:
                             base_entry_id = self.compute_base_entry_id(tag, data)
-                            if base_entry_id in cached_by_base_entry_id:
+                            # A cached EmptyData is a result that is gone (an
+                            # ephemeral result from an earlier run): compute the row
+                            # again, as the sync path does (ITL-923).
+                            if base_entry_id in cached_by_base_entry_id and not (
+                                isinstance(
+                                    cached_by_base_entry_id[base_entry_id][1],
+                                    EmptyData,
+                                )
+                            ):
                                 cached_tag, cached_data = cached_by_base_entry_id[
                                     base_entry_id
                                 ]

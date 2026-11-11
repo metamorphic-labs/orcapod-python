@@ -53,6 +53,16 @@ def double_until_7(x: int) -> int:
     return 2 * x
 
 
+_DOUBLE_CALLS: list[int] = []
+
+
+@function_pod(output_keys="y")
+def counted_double(x: int) -> int:
+    """Return twice ``x``, logging the call."""
+    _DOUBLE_CALLS.append(x)
+    return 2 * x
+
+
 def build_job(store: Any, n_rows: int, pod: Any = double) -> PipelineJob:
     """A job with one function node ``dbl`` over ``n_rows`` rows."""
     job = PipelineJob(name="batched", store=store)
@@ -81,6 +91,12 @@ def operations(table: Path) -> list[str]:
     """The table's commit operations, oldest first."""
     history = deltalake.DeltaTable(str(table)).history()
     return [str(entry["operation"]) for entry in reversed(history)]
+
+
+def read_column(table: Path, column: str) -> list[Any]:
+    """The committed values of ``column`` in ``table``, read from a fresh handle."""
+    dataset = delta_to_pyarrow_dataset(deltalake.DeltaTable(str(table)))
+    return dataset.to_table(columns=[column])[column].to_pylist()
 
 
 def stored_rows(table: Path) -> int:
@@ -314,3 +330,46 @@ def test_records_read_right_after_the_run_are_complete(
     records = job.nodes["double"].get_all_records()
     assert records is not None and records.num_rows == 2
     assert job.nodes["double"].as_table().num_rows == 2
+
+
+@pytest.mark.parametrize("store", ["in_memory", "delta"])
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
+    tmp_path: Path, orchestrator: str, store: str
+) -> None:
+    """A rerun with a fresh ephemeral store recomputes each row (ITL-923).
+
+    The first run's results are gone, so each row is computed again and gets a
+    second pipeline record (recomputation index 1); the node reads 5 rows.
+    """
+
+    def make_store() -> Any:
+        return (
+            DeltaTableDatabase(tmp_path / "store")
+            if store == "delta"
+            else shared_in_memory
+        )
+
+    shared_in_memory = InMemoryArrowDatabase()
+    calls_before = len(_DOUBLE_CALLS)
+    for _ in range(2):
+        job = PipelineJob(name="ephemeral", store=make_store())
+        with job:
+            source = DictSource(
+                data=[{"k": i, "x": i} for i in range(5)],
+                tag_columns=["k"],
+                source_id="src",
+            )
+            counted_double.pod(source, label="dbl")
+        job.apply_node_config(NodeConfig(is_result_ephemeral=True))
+        job.set_ephemeral_store(InMemoryArrowDatabase())
+        job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert len(_DOUBLE_CALLS) - calls_before == 10
+    node = job.nodes["dbl"]
+    assert node.as_table().num_rows == 5
+    records = node.get_all_records()
+    assert records is not None and records.num_rows == 5
+    if store == "delta":
+        (table,) = {log.parent for log in (tmp_path / "store").rglob("_delta_log")}
+        index = read_column(table, "__pipeline_recomputation_index")
+        assert sorted(index) == [0] * 5 + [1] * 5
