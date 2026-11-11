@@ -58,7 +58,9 @@ Delta compaction (`optimize.compact()`) rewrites a `large_string` struct field a
 `string`. Reading a stored dataclass or pydantic column with a `str` or `bytes` field then
 failed, and a cached run returned 0 rows. Extension columns now accept large and non-large
 layouts of the same type at any nesting depth, as they already did at the top level
-(ITL-602).
+(ITL-602). Known limitation: such a non-large column read over Arrow IPC or the C stream
+interface (not Parquet or Delta) gives invalid arrays, at any depth; Orcapod's own writers
+never produce one (ITL-894).
 
 
 ## [0.2.0] — 2026-11-10
