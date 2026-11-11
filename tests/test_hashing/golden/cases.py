@@ -497,6 +497,30 @@ def _arrow_tables() -> dict[str, pa.Table]:
         }
     )
     tables["empty.zero_rows"] = pa.table({"a": pa.array([], pa.int64())})
+    # Added with starfix hash format 2 (ITL-910): inputs format 1 could not hash or
+    # hashed alike (ITL-848, ITL-927).
+    tables["fixed_size_list.float32_2"] = pa.table(
+        {"a": pa.array([[0.5, 1.5], [2.5, 3.5]], pa.list_(pa.float32(), 2))}
+    )
+    tables["fixed_size_list.null_slot"] = pa.table(
+        {"a": pa.array([[1, 2], None], pa.list_(pa.int64(), 2))}
+    )
+    list3 = pa.large_list(pa.large_list(pa.large_list(pa.int64())))
+    tables["collision.list_lengths_a"] = pa.table(
+        {"a": pa.array([[[[1]], [[2], [3]]]], list3)}
+    )
+    tables["collision.list_lengths_b"] = pa.table(
+        {"a": pa.array([[[[1], [2]], [[3]]]], list3)}
+    )
+    tables["collision.null_struct"] = pa.table(
+        {"a": pa.array([None], pa.struct([("x", pa.int64())]))}
+    )
+    tables["collision.struct_of_nulls"] = pa.table(
+        {"a": pa.array([{"x": None}], pa.struct([("x", pa.int64())]))}
+    )
+    tables["bool.chunked"] = pa.Table.from_batches(
+        tables["bool"].to_batches(max_chunksize=1)
+    )
     return tables
 
 
@@ -525,6 +549,22 @@ def _extension_tables() -> dict[str, pa.Table]:
     tables["extension.unregistered_passthrough"] = pa.table(
         {"c": pa.ExtensionArray.from_storage(GoldenOpaqueType(), storage)}
     )
+    # pyarrow's canonical extension types, hashable with their identity since ITL-910.
+    tables["extension.canonical_uuid"] = pa.table(
+        {
+            "c": pa.ExtensionArray.from_storage(
+                pa.uuid(), pa.array([UUID_A.bytes, UUID_B.bytes], pa.binary(16))
+            )
+        }
+    )
+    tables["extension.canonical_fixed_shape_tensor"] = pa.table(
+        {
+            "c": pa.ExtensionArray.from_storage(
+                pa.fixed_shape_tensor(pa.float32(), [2]),
+                pa.array([[0.5, 1.5], [2.5, 3.5]], pa.list_(pa.float32(), 2)),
+            )
+        }
+    )
     return tables
 
 
@@ -542,11 +582,19 @@ def arrow_extension_table_hashes() -> dict[str, Any]:
 
 @case("arrow", "schema")
 def arrow_schema_hashes() -> dict[str, Any]:
-    # hash_schema is not reachable for extension-typed schemas yet (ITL-848), so only
-    # extension-free schemas are pinned here.
     hasher = _ctx().arrow_hasher
     return {
         k: hasher.hash_schema(t.schema).to_string() for k, t in _arrow_tables().items()
+    }
+
+
+@case("arrow", "extension_schema")
+def arrow_extension_schema_hashes() -> dict[str, Any]:
+    # hash_schema hashes extension columns with their identity since ITL-910 (ITL-846).
+    hasher = _ctx().arrow_hasher
+    return {
+        k: hasher.hash_schema(t.schema).to_string()
+        for k, t in _extension_tables().items()
     }
 
 
