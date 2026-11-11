@@ -2211,6 +2211,43 @@ value needs a migration assessment and the developer's approval. Not pinned yet:
 
 ---
 
+## `src/orcapod/core/operators/semijoin.py` — nested columns and string/large_string keys
+
+### SJ1 — `SemiJoin` failed on nested columns and on `string` vs `large_string` keys
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-847, ITL-829 (first case only)
+
+The sync path used pyarrow's Acero hash join (`join_type="left semi"`), which rejects any nested
+column: `ArrowInvalid: Data type list<item: int8> is not supported in join non-key field`. A list,
+large_list, struct or struct-backed logical column (a dataclass) on either input failed, as did a
+struct or list key. Acero also rejected a key that is `string` on one side and `large_string` on
+the other (a `CSVSource` against a `DictSource`, ITL-829). The async path built its lookup from
+`as_dict()` values, so struct and list keys were unhashable, and a null key matched a null.
+
+**Fix:** the sync path joins in Polars (`how="semi"`, `maintain_order="left"`) against the right
+input's key columns only, then casts the result to the left table's schema, so every column keeps
+the left input's exact Arrow type, top-level and nested nullability, and logical type. Before the
+join each key goes through `require_shared_arrow_type` (Polars would silently unify `int8` with
+`int16`); sync and async raise `InputValidationError` naming the column and both types. A null key
+never matches: Polars already does that for scalar keys but treats a null struct or list as equal
+to another, so right rows with a null key are dropped first. The async path checks key types on
+the first row of each side and builds its lookup from each key's Arrow storage value, frozen into
+a hashable form (nulls inside a struct or list compare equal, NaN equals NaN, as in Polars).
+Results of inputs that already worked are unchanged (content and pipeline hashes, per-row hashes,
+schemas, tables and row order, sync and async). Regressions:
+`tests/test_core/operators/test_semijoin_nested.py`; the ITL-846 strict xfail in
+`test_async_sync_equivalence.py` is removed, and the SemiJoin meta case now uses nested meta
+columns. Open: ITL-829's second case (a non-nullable key against a nullable one, raised by
+`schema_utils.intersection_schemas` during input validation) is unchanged and keeps its strict
+xfail. The async path checks key types on the first row of each input, because
+`async_execute` receives only channels and no stream exposes its Arrow schema without rows.
+So when either input is empty (left or right), a key type mismatch that the sync path reports
+yields an empty result on the async path instead of an error. `Join`'s async key check
+(`_check_shared_key_types`) has the same limit.
+
+---
+
 ## `src/orcapod/databases/delta_lake_databases.py` — reading back a handle family's own writes
 
 ### DW1 — A read through one `at()` handle could miss rows its family had just written
@@ -2250,6 +2287,10 @@ a string vs an int, a timestamp unit, a decimal precision) raise `pyarrow.ArrowT
 is widened. Before this, a read of stored rows next to pending rows with any schema difference,
 including a pending `string` column next to the stored `large_string`, raised `ArrowInvalid`;
 `get_all_records` already did so on `main`.
+A `get_records_with_column_value` query on a column that only the stored or only the pending
+rows have skips the side without it (after a flush that side holds null there, and
+`column == value` never matches null), so it returns before a flush what it returns after; a
+column neither side has still raises `ArrowInvalid`.
 
 Recorded for the nullability audit (ITL-842) and ITL-890: Delta's merge relaxes nullability (a
 non-null pending column into a nullable stored one stays nullable) and evolves struct children
