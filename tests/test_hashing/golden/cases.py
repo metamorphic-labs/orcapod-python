@@ -552,8 +552,9 @@ def arrow_schema_hashes() -> dict[str, Any]:
 
 @case("arrow", "dict_order")
 def arrow_dict_order_hashes() -> dict[str, Any]:
-    # ITL-905: a dict-encoded list hashes in canonical key order, so the sorted and
-    # unsorted tables pin the same value; a list of other structs keeps its order.
+    # ITL-905: an Arrow table is hashed exactly as stored. A key/value list that
+    # arrives in Arrow form keeps its order as identity (sorted and unsorted pin
+    # different values), like any other list of structs.
     hasher = _ctx().arrow_hasher
     kv = pa.large_list(
         pa.struct([pa.field("key", pa.large_string()), pa.field("value", pa.int64())])

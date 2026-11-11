@@ -1,152 +1,38 @@
 """Canonical order for the unordered containers ``dict`` and ``set``.
 
 A ``dict[K, V]`` value is stored as ``large_list<struct<key, value>>`` and a plain
-``set[T]`` as ``large_list<T>``. Both are order independent, so two equal values must
-store and hash identically whatever order their entries were inserted or iterated in
-(ITL-905). This module holds the one definition of that order. Dict entries are sorted
-by key when a Python dict is converted to Arrow, when a datagram is built from Python
-values, and by the Arrow hasher for key/value lists that arrive already stored. Set
-elements are sorted when a Python set is converted to Arrow (a stored set is a plain
-list, so it cannot be recognised later).
+``set[T]`` as ``large_list<T>``. A dict and a set are order independent, so the order
+they are stored in must not come from insertion or iteration order (ITL-905). Orcapod
+puts them in canonical order where a Python value becomes Arrow: in the converter, and
+in a datagram built from Python values. An Arrow table is always hashed exactly as it
+is stored; a ``list<struct<key, value>>`` that arrives already in Arrow form is an
+ordered list at the Arrow level, and its order is part of its hash.
 
-The order is defined on storage values (what the converter produces and what
-``to_pylist`` reads back), so the converter and the hasher cannot disagree:
+The order is defined on storage values (what the converter produces):
 
 * ``None`` sorts first.
-* ``bool``, ``int``, ``float``, ``Decimal``: numeric. A NaN key has no order and is
-  rejected. ``-0.0`` and ``0.0`` are one key.
+* ``bool``, ``int``, ``float``, ``Decimal``: numeric. A NaN has no order and is
+  rejected. ``-0.0`` and ``0.0`` are one value.
 * ``str``: Unicode code point (never locale). ``bytes``: unsigned bytewise.
 * ``date``, ``datetime`` (by instant), ``time``, ``timedelta``: natural order.
-* struct keys (a ``dict`` of field values): field by field, in field order.
 
-Keys or elements that cannot be ordered against each other, duplicate dict keys and
-null dict entries raise ``CanonicalOrderError``.
+Keys or elements that cannot be ordered against each other, and two keys or elements
+with the same storage value, raise ``CanonicalOrderError``.
 """
 
 from __future__ import annotations
 
-import functools
 import math
 import types
 import typing
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, get_args, get_origin
+from collections.abc import Callable
+from typing import Any, get_args, get_origin
 
 from orcapod.errors import CanonicalOrderError
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-
-
-def is_dict_arrow_type(arrow_type: pa.DataType) -> bool:
-    """Return whether ``arrow_type`` is Orcapod's encoding of a ``dict``.
-
-    A dict is a list (regular, large or fixed-size) whose element is a struct with
-    exactly two fields named ``key`` and ``value``. Any other list of structs is an
-    ordered list, whose order is part of its identity.
-
-    Args:
-        arrow_type: The Arrow type to test.
-
-    Returns:
-        True for a dict-encoded list type.
-    """
-    if not _is_list_type(arrow_type):
-        return False
-    element = arrow_type.value_type
-    return (
-        pa.types.is_struct(element)
-        and element.num_fields == 2
-        and {element.field(0).name, element.field(1).name} == {"key", "value"}
-    )
-
-
-def _is_list_type(arrow_type: pa.DataType) -> bool:
-    return (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    )
-
-
-def contains_dict_arrow_type(arrow_type: pa.DataType) -> bool:
-    """Return whether a dict-encoded list occurs anywhere in ``arrow_type``.
-
-    Looks through list elements, struct fields and extension storage.
-
-    Args:
-        arrow_type: The Arrow type to search.
-
-    Returns:
-        True if ``arrow_type`` is or contains a dict-encoded list.
-    """
-    try:
-        return _contains_dict_cached(arrow_type)
-    except TypeError:  # an extension type that does not implement __hash__
-        return _contains_dict(arrow_type)
-
-
-@functools.lru_cache(maxsize=1024)
-def _contains_dict_cached(arrow_type: pa.DataType) -> bool:
-    return _contains_dict(arrow_type)
-
-
-def _contains_dict(arrow_type: pa.DataType) -> bool:
-    if isinstance(arrow_type, pa.ExtensionType):
-        return contains_dict_arrow_type(arrow_type.storage_type)
-    if _is_list_type(arrow_type):
-        return is_dict_arrow_type(arrow_type) or contains_dict_arrow_type(
-            arrow_type.value_type
-        )
-    if pa.types.is_struct(arrow_type):
-        return any(
-            contains_dict_arrow_type(arrow_type.field(i).type)
-            for i in range(arrow_type.num_fields)
-        )
-    return False
-
-
-def canonical_storage_value(arrow_type: pa.DataType, value: Any) -> Any:
-    """Return a storage value with the entries of every dict in canonical key order.
-
-    ``value`` is one value of an Arrow column of type ``arrow_type`` as ``to_pylist``
-    reads it. Dicts at any depth (inside lists, struct fields and extension storage)
-    are sorted innermost first; every other list keeps its order. The input is not
-    mutated.
-
-    Args:
-        arrow_type: The Arrow type of ``value``.
-        value: The storage value.
-
-    Returns:
-        ``value`` itself when ``arrow_type`` holds no dict, otherwise a canonical copy.
-
-    Raises:
-        CanonicalOrderError: For a dict with a null entry, a NaN key, keys that cannot
-            be ordered against each other, or a duplicate key.
-    """
-    if value is None or not contains_dict_arrow_type(arrow_type):
-        return value
-    if isinstance(arrow_type, pa.ExtensionType):
-        return canonical_storage_value(arrow_type.storage_type, value)
-    if _is_list_type(arrow_type):
-        element_type = arrow_type.value_type
-        elements = [canonical_storage_value(element_type, v) for v in value]
-        if is_dict_arrow_type(arrow_type):
-            return sort_dict_entries(elements)
-        return elements
-    # A struct holding a dict somewhere in its fields.
-    return {
-        field.name: canonical_storage_value(field.type, value.get(field.name))
-        for field in arrow_type
-    }
 
 
 def _key_rank(key: Any) -> tuple[Any, ...]:
-    """Return the sort key of one storage key value.
+    """Return the sort key of one storage key or set element.
 
     Raises:
         CanonicalOrderError: If the key is a NaN float.
@@ -155,8 +41,6 @@ def _key_rank(key: Any) -> tuple[Any, ...]:
         return (0,)
     if isinstance(key, float) and math.isnan(key):
         raise CanonicalOrderError("a NaN key or set element has no canonical order")
-    if isinstance(key, Mapping):
-        return (1, tuple(_key_rank(v) for v in key.values()))
     return (1, key)
 
 
@@ -177,25 +61,19 @@ def _sorted_by_rank(items: list[tuple[tuple[Any, ...], Any]]) -> list[Any]:
 
 
 def sort_dict_entries(entries: list[Any]) -> list[Any]:
-    """Return storage entries ``{"key": ..., "value": ...}`` in canonical key order.
+    """Return converted entries ``{"key": ..., "value": ...}`` in canonical key order.
 
     Args:
-        entries: The entries of one dict value, as the converter produces them or as
-            ``to_pylist`` reads them back.
+        entries: The entries of one dict value, as the converter produces them.
 
     Returns:
         A new list holding the same entries, sorted by key.
 
     Raises:
-        CanonicalOrderError: For a null entry, a NaN key, keys that cannot be ordered
-            against each other, or a duplicate key.
+        CanonicalOrderError: For a NaN key, keys that cannot be ordered against each
+            other, or two keys with the same storage value.
     """
-    ranked = []
-    for entry in entries:
-        if entry is None:
-            raise CanonicalOrderError("a dict value holds a null entry")
-        ranked.append((_key_rank(entry["key"]), entry))
-    return _sorted_by_rank(ranked)
+    return _sorted_by_rank([(_key_rank(entry["key"]), entry) for entry in entries])
 
 
 def sort_set_elements(elements: list[Any]) -> list[Any]:

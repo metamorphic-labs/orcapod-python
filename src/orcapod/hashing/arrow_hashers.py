@@ -5,16 +5,11 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 from starfix import ArrowDigester
 
-from orcapod.errors import CanonicalOrderError
 from orcapod.hashing.schema_cleaner import (
     clean_schema_for_hashing,
     has_extension_metadata,
 )
 from orcapod.hashing.visitors import SemanticHashingVisitor
-from orcapod.semantic_types.canonical_order import (
-    canonical_storage_value,
-    contains_dict_arrow_type,
-)
 from orcapod.utils.arrow_utils import normalize_extension_columns
 from orcapod.types import ContentHash
 
@@ -101,14 +96,6 @@ class StarfixArrowHasher:
             )
 
             try:
-                # A dict is order independent: put the entries of every dict in the
-                # column in canonical key order before hashing, whatever order the
-                # table stores them in (ITL-905).
-                if contains_dict_arrow_type(field.type):
-                    column_data = [
-                        canonical_storage_value(field.type, value)
-                        for value in column_data
-                    ]
                 new_type: pa.DataType | None = None
                 processed_data: list[Any] = []
                 for value in column_data:
@@ -123,8 +110,6 @@ class StarfixArrowHasher:
                 new_columns.append(pa.array(processed_data, type=new_type))
                 new_fields.append(field.with_type(new_type))
 
-            except CanonicalOrderError as exc:
-                raise CanonicalOrderError(f"Column {field.name!r}: {exc}") from exc
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to process column '{field.name}': {exc}"

@@ -1,10 +1,10 @@
 """A dict's identity does not depend on its key order (ITL-905).
 
-A ``dict[K, V]`` column is stored as ``large_list<struct<key, value>>``. Equal dicts must
-give equal row hashes whatever order their entries were inserted or stored in, on every
-path: Python values through the converter, Arrow tables that already hold key/value lists,
-nested dicts, function pod outputs (sync and async), and cached results read back from a
-store. Ordered layouts (``list[tuple[K, V]]``) keep order as identity.
+A ``dict[K, V]`` column is stored as ``large_list<struct<key, value>>``. Equal Python
+dicts must give equal row hashes whatever order their entries were inserted in, on every
+path that turns a Python dict into Arrow: sources, nested dicts, dataclass fields,
+function pod outputs (sync and async), and cached results read back from a store. An
+Arrow table that already holds a key/value list is hashed exactly as stored.
 """
 
 from __future__ import annotations
@@ -191,16 +191,23 @@ class TestNestedDicts:
 
 
 class TestArrowNativeKeyValueLists:
-    def test_unsorted_and_sorted_entries_hash_equal(self):
+    """An Arrow table is hashed exactly as stored (developer, November 11, 2026).
+
+    A ``list<struct<key, value>>`` that arrives already in Arrow form is an ordered list
+    at the Arrow level; Python reads it as a dict, but its stored order is part of its
+    hash. Canonical order is established only where a Python dict becomes Arrow.
+    """
+
+    def test_unsorted_entries_hash_as_stored(self):
         sorted_entries = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
         unsorted_entries = [{"key": "b", "value": 2}, {"key": "a", "value": 1}]
-        assert _arrow_row_hash(sorted_entries) == _arrow_row_hash(unsorted_entries)
+        assert _arrow_row_hash(sorted_entries) != _arrow_row_hash(unsorted_entries)
 
-    def test_arrow_native_matches_python_dict_hash(self):
-        unsorted_entries = [{"key": "b", "value": 2}, {"key": "a", "value": 1}]
-        assert _arrow_row_hash(unsorted_entries) == _row_hash(
-            {"a": 1, "b": 2}, dict[str, int]
-        )
+    def test_key_sorted_entries_match_python_dicts_in_any_order(self):
+        sorted_entries = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
+        t = dict[str, int]
+        assert _arrow_row_hash(sorted_entries) == _row_hash({"b": 2, "a": 1}, t)
+        assert _arrow_row_hash(sorted_entries) == _row_hash({"a": 1, "b": 2}, t)
 
     def test_user_table_is_not_rewritten(self):
         unsorted_entries = [{"key": "b", "value": 2}, {"key": "a", "value": 1}]
@@ -208,38 +215,6 @@ class TestArrowNativeKeyValueLists:
         _, data = next(iter(source.iter_data()))
         data.content_hash()
         assert source.as_table().column("m").to_pylist()[0] == unsorted_entries
-
-    def test_duplicate_keys_are_rejected_naming_the_column(self):
-        entries = [{"key": "a", "value": 1}, {"key": "a", "value": 2}]
-        with pytest.raises(Exception, match="(?s)'m'.*duplicate key"):
-            _arrow_row_hash(entries)
-
-    def test_struct_keys_sort_field_by_field(self):
-        key_type = pa.struct(
-            [pa.field("f0", pa.int64()), pa.field("f1", pa.large_string())]
-        )
-        kv_type = pa.large_list(
-            pa.struct([pa.field("key", key_type), pa.field("value", pa.int64())])
-        )
-        ordered = [
-            {"key": {"f0": 0, "f1": "z"}, "value": 3},
-            {"key": {"f0": 1, "f1": "a"}, "value": 2},
-            {"key": {"f0": 1, "f1": "b"}, "value": 1},
-        ]
-
-        def kv_hash(entries: list[dict[str, Any]]) -> str:
-            table = pa.table(
-                {
-                    "k": pa.array(["r"], pa.large_string()),
-                    "m": pa.array([entries], kv_type),
-                }
-            )
-            src = ArrowTableSource(table, tag_columns=["k"], source_id="struct_keys")
-            _, data = next(iter(src.iter_data()))
-            return data.content_hash().to_string()
-
-        assert kv_hash(ordered) == kv_hash(ordered[::-1])
-        assert kv_hash(ordered) == kv_hash([ordered[1], ordered[2], ordered[0]])
 
     def test_ordered_struct_pairs_are_not_sorted(self):
         pair_type = pa.large_list(
