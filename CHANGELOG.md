@@ -95,6 +95,14 @@ info. Hashes of pipelines that already worked are unchanged.
 
 ### Fixed
 
+#### Stored dataclass and pydantic values stay readable after Delta compaction (ITL-881)
+
+Delta compaction (`optimize.compact()`) rewrites a `large_string` struct field as
+`string`. Reading a stored dataclass or pydantic column with a `str` or `bytes` field then
+failed, and a cached run returned 0 rows. Extension columns now accept large and non-large
+layouts of the same type at any nesting depth, as they already did at the top level
+(ITL-602).
+
 #### Materialized rows keep their own source info (ITL-845)
 
 When rows were collected and turned back into a stream, every row got the source-info
