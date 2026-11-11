@@ -2125,12 +2125,18 @@ async path through both paths and compares types, nullability, column order, sys
 content and schema hashes; differences that are not type re-inference are strict xfails:
 ITL-838 (`Data.select`/`drop` keep dropped columns' source info), ITL-846 (sync `SemiJoin`
 over nested columns; `ArrowHasher.hash_schema` on extension types). The ITL-845 (O3, row-0
-source info) xfails were removed once that fix merged; those provenance cases now pass. The developer's principle behind the shared-key error: Orcapod is type strict and
-performs no implicit type expansion or conversion, except normalization to large variants.
+source info) xfails were removed once that fix merged; those provenance cases now pass. The
+developer's principle behind the shared-key error: Orcapod is type strict and performs no
+implicit type expansion or conversion, except normalization to large variants.
 The async merge also carries each input's `Data` meta (`__`) columns, which it used to drop,
 renaming collisions through `Join._collision_renames`, the helper `static_process` now shares
 (ITL-854); their order differs from sync only for a raw `ArrowTableStream` that lists its `__`
 columns as data and whose meta collides or mixes with other streams (strict xfail, ITL-858).
+Open, pre-existing (ITL-857): `_collision_renames` checks a candidate name only against the
+columns accumulated so far, not against the incoming input's own names, so when that input
+already has the suffixed name (`__computed` and `__computed_1`), the rename duplicates it,
+even in a two-input join. Sync raises Polars `DuplicateError` and async fails the same way,
+since both paths share the helper; it is a strict xfail.
 
 ---
 
