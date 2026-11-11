@@ -2208,3 +2208,31 @@ subprocesses with different `PYTHONHASHSEED` values and were verified identical 
 3.11, 3.12 and 3.13. The generator's header says when regeneration is legitimate: a changed
 value needs a migration assessment and the developer's approval. Not pinned yet: the
 `StarfixArrowHasher` gaps tracked in ITL-848.
+
+---
+
+## `src/orcapod/databases/delta_lake_databases.py`, `src/orcapod/core/sources/delta_table_source.py` — exit after a Delta read
+
+### DX1 — A process that read a Delta table can hang or abort at interpreter exit
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-892
+
+`DeltaTable.to_pyarrow_dataset()` (and `to_pyarrow_table()`) reads through deltalake's
+`PyFileSystem(DeltaStorageHandler)`, a filesystem implemented in Python. After a scan returns,
+Arrow finishes tearing down the scan on a thread-pool worker. If that worker drops the last
+reference to a Python-backed buffer during interpreter finalization, CPython stops the thread,
+and `ThreadPool::~ThreadPool` in `__cxa_finalize` waits for it forever. On Linux with Python
+3.11/3.12 the process may abort with SIGABRT instead. This is upstream:
+apache/arrow#50482 and #54536, with an open fix PR, #54467. The failure follows a scan, not a
+write.
+
+Measured over 100 runs each, locked versions: one write plus one scan fails 57% of runs on
+macOS arm64 and 5–38% on Linux x86_64. A fresh `DeltaTableDatabase.get_all_records` fails 53%
+on macOS and 8–23% on Linux. `DeltaTableSource` fails 4–10%. A `PipelineJob` run fails 0–4%.
+Every pyarrow 20.0.0–26.0.1 × deltalake 1.0.2/1.6.6 combination fails, so no version pin helps.
+Scanning local tables through a native pyarrow filesystem (`SubTreeFileSystem(table_path,
+LocalFileSystem())`) gives 0/100 in every case. Its results are byte-identical. Cloud stores
+keep the Python filesystem and stay exposed until pyarrow ships the fix. Findings, scripts and
+raw results: `superpowers/specs/itl-892-exit-hang/FINDINGS.md`. The mitigation awaits the
+coordinator's approval.
