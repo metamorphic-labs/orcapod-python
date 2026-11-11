@@ -2128,15 +2128,16 @@ over nested columns; `ArrowHasher.hash_schema` on extension types). The ITL-845 
 source info) xfails were removed once that fix merged; those provenance cases now pass. The
 developer's principle behind the shared-key error: Orcapod is type strict and performs no
 implicit type expansion or conversion, except normalization to large variants.
-The async merge also carries each input's `Data` meta (`__`) columns, which it used to drop,
-renaming collisions through `Join._collision_renames`, the helper `static_process` now shares
-(ITL-854); their order differs from sync only for a raw `ArrowTableStream` that lists its `__`
-columns as data and whose meta collides or mixes with other streams (strict xfail, ITL-858).
-Open, pre-existing (ITL-857): `_collision_renames` checks a candidate name only against the
-columns accumulated so far, not against the incoming input's own names, so when that input
-already has the suffixed name (`__computed` and `__computed_1`), the rename duplicates it,
-even in a two-input join. Sync raises Polars `DuplicateError` and async fails the same way,
-since both paths share the helper; it is a strict xfail.
+Meta columns (ITL-854, ITL-857; developer decision): `Join` drops every input's `Data` meta
+(`__`) columns, and the `_source___*` source-info columns of a raw `ArrowTableStream`'s `__`
+columns, on both paths. The sync path used to keep them and rename collisions with an index
+suffix, which could duplicate a name an input already had (ITL-857). The async path used to
+drop them. Nothing downstream of a `Join` reads or stores them, and meta is not hashed.
+`output_schema()` leaves the `__` names a raw stream lists as data out of the prediction, and
+two inputs that share only a meta name join. How meta columns should be handled across
+operators and pods is a separate design question (ITL-867). `MergeJoin` still carries input
+meta on its sync path (colliding names are merged into lists like data) and drops it on its
+barrier async path (ITL-846).
 
 ---
 

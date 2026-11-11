@@ -49,7 +49,9 @@ Takes one or more streams. Used for `Join`, which performs an N-ary inner join.
 
 N-ary inner join on shared tag columns. Requires that input streams have non-overlapping
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
-order of input streams does not affect the result.
+order of input streams does not affect the result. Join drops its inputs' meta
+(`__`-prefixed) columns, such as a cached function pod's `__computed`, so they never collide
+and never appear in its output.
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical

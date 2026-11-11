@@ -490,7 +490,7 @@ META_CASES = [
 
 @pytest.mark.parametrize("case", META_CASES)
 def test_async_meta_equals_sync(case: Case) -> None:
-    """The async path carries the sync path's Data meta columns (ITL-854)."""
+    """The async path's Data meta columns equal the sync path's (Join drops them on both)."""
     sources = case.make_sources()
     expected = sync_rows(case.make_op(), *sources)
     actual = async_rows(case.make_op(), *sources)
@@ -498,7 +498,7 @@ def test_async_meta_equals_sync(case: Case) -> None:
     assert_same_meta(expected, actual)
 
 
-def _meta_stream(
+def meta_stream(
     source_id: str, value_column: str, meta: Sequence[str]
 ) -> ArrowTableStream:
     """A two-row stream on tag ``k: int16`` with ``int8`` meta columns ``meta``."""
@@ -517,19 +517,19 @@ def _meta_stream(
     )
 
 
-def _double_a(a: int) -> int:
+def double_a(a: int) -> int:
     return a * 2
 
 
-def _double_b(b: int) -> int:
+def double_b(b: int) -> int:
     return b * 2
 
 
-def _double_c(c: int) -> int:
+def double_c(c: int) -> int:
     return c * 2
 
 
-def _cached_pod_stream(column: str, function: Callable[[int], int]) -> StreamProtocol:
+def cached_pod_stream(column: str, function: Callable[[int], int]) -> StreamProtocol:
     """A cached function pod's output on tag ``k: int16``.
 
     Every row's ``Data`` carries the pod's ``__computed`` meta column, which the
@@ -549,77 +549,6 @@ def _cached_pod_stream(column: str, function: Callable[[int], int]) -> StreamPro
     )
     pod = CachedFunctionPod(function_pod, result_database=InMemoryArrowDatabase())
     return pod(source)
-
-
-COLLIDING_META = [
-    pytest.param(
-        lambda: (
-            _cached_pod_stream("a", _double_a),
-            _cached_pod_stream("b", _double_b),
-        ),
-        id="two",
-    ),
-    pytest.param(
-        lambda: (
-            _cached_pod_stream("a", _double_a),
-            _cached_pod_stream("b", _double_b),
-            _cached_pod_stream("c", _double_c),
-        ),
-        id="three",
-    ),
-]
-
-
-@pytest.mark.parametrize("make_sources", COLLIDING_META)
-def test_join_colliding_meta_async_equals_sync(
-    make_sources: Callable[[], tuple[StreamProtocol, ...]],
-) -> None:
-    """Colliding meta columns get the sync path's ``_<index>`` renames on both paths."""
-    sources = make_sources()
-    expected = sync_rows(Join(), *sources)
-    actual = async_rows(Join(), *sources)
-    assert_equivalent(expected, actual)
-    assert_same_meta(expected, actual)
-    assert list(expected[0][1].meta_columns) == [
-        "__computed",
-        *(f"__computed_{i}" for i in range(1, len(sources))),
-    ]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-858: sync Join puts the columns an input's output_schema lists first; a "
-        "raw ArrowTableStream lists its __ columns, so next to another stream's meta "
-        "columns (a cached pod's __computed) sync gives [__m, __computed] while async "
-        "keeps canonical concatenation, [__computed, __m] (async_execute never sees "
-        "input schemas)."
-    ),
-)
-def test_join_meta_order_schema_dependent() -> None:
-    """A raw stream with ``__m`` joined with a cached pod's output, both orders."""
-    raw = _meta_stream("r", "vr", ["__m"])
-    pod = _cached_pod_stream("a", _double_a)
-    for sources in ((raw, pod), (pod, raw)):
-        assert_same_meta(sync_rows(Join(), *sources), async_rows(Join(), *sources))
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-857: Join's collision rename checks only the accumulated columns, not the "
-        "next input's own names. Join()(cached pod output with __computed, raw "
-        "ArrowTableStream with __computed and __computed_1 that sorts after it) renames "
-        "the raw __computed to __computed_1, duplicating the raw __computed_1: Polars "
-        "DuplicateError on the sync path, and the shared rename fails async too."
-    ),
-)
-def test_join_meta_rename_collides_with_own_column() -> None:
-    """An input already holding ``__computed_1`` must not get a second one."""
-    pod = _cached_pod_stream("a", _double_a)
-    # Canonically after ``pod`` (pipeline hashes are schema-derived and stable).
-    raw = _meta_stream("r", "v0", ["__computed", "__computed_1"])
-    assert_same_meta(sync_rows(Join(), pod, raw), async_rows(Join(), pod, raw))
 
 
 # ── the issue's own example, pinned ────────────────────────────────────────

@@ -91,3 +91,32 @@ def require_shared_arrow_type(
 - [ ] ruff check, ruff format --check, basedpyright (exit code), pytest on 3.11/3.12/3.13.
 - [ ] One commit `refactor(operators): split shared Arrow type rule from the operator error (PR #280 review)` (+ test commit content), one push.
 - [ ] Reply on both threads (signature lines), do not resolve; wait for CI; CodeRabbit; update PR description.
+
+## Addendum (developer decision, 2026-11-10): Join drops its inputs' meta columns (ITL-854, ITL-857)
+
+The developer decided that Join neither raises on nor renames colliding meta columns: it drops
+every input's Data meta (`__`) columns, on both paths. Nothing downstream of a Join reads or
+stores them (inventory sent to the coordinator). This replaces the ITL-854 "keep and rename"
+behaviour and makes ITL-857 moot.
+
+- Tests first (public call): new `tests/test_core/operators/test_join_meta_columns.py`. Join over
+  (a) two cached function pod streams, compute and cache hit; (b) two FunctionNodes in a
+  PipelineJob; (c) raw `ArrowTableStream`s with `__` columns, colliding and not; (d) three
+  inputs, including the former ITL-857 crash. Each case runs sync and async and asserts: no
+  upstream meta column, sync == async (`assert_equivalent`), and prediction equals
+  `static_process(...).output_schema(...)`. Remove the ITL-857 and ITL-858 xfails and the
+  rename tests.
+- Code (`join.py`): a `_without_meta` helper drops `constants.META_PREFIX` columns from each input
+  table in `static_process` (a raw `ArrowTableStream` returns `__` columns as data whatever the
+  meta setting). `_joined_user_schemas` leaves `__` names out of the data schema and the
+  overlap check. Delete `_collision_renames` and the rename/reference-schema code. The async
+  `_merge_data` reads `as_table()` without meta and loses its `right_index` parameter.
+  `static_process` always checks data overlap (it raises instead of renaming, as async does).
+- Proof: dump stream content/pipeline hashes, per-row Tag/Data hashes and system tags for the
+  equivalence cases, plus all stored tables of the s1->fa, s2->fb, Join, ->fc job, sync and
+  async, before and after. Hashes and stored tables must be identical; only Join's emitted meta
+  columns change.
+- MergeJoin, SemiJoin: probe sync/async meta handling with cached pod and raw `__` inputs;
+  report, and apply the same drop only if it is a small local change.
+- Docs: Join docstrings, docs/concepts/operators.md, CHANGELOG (v0.2.0 changed), DESIGN_ISSUES
+  JA1, PR body.

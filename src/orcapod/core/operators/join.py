@@ -1,6 +1,5 @@
 import asyncio
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from functools import partial
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -76,9 +75,7 @@ class Join(NonZeroInputOperator):
 
         return tag_schema, data_schema
 
-    def _joined_user_schemas(
-        self, *streams: StreamProtocol, check_data_overlap: bool = True
-    ) -> tuple[Schema, Schema]:
+    def _joined_user_schemas(self, *streams: StreamProtocol) -> tuple[Schema, Schema]:
         """Union the inputs' tag and data schemas in Join's column order.
 
         Join is commutative, so its column order must not depend on operand
@@ -89,39 +86,28 @@ class Join(NonZeroInputOperator):
         ``static_process`` lays its table out by it.
 
         System tags are excluded: the join renames them, and
-        ``_predict_system_tag_schema`` computes them separately.
+        ``_predict_system_tag_schema`` computes them separately. Meta
+        (``__``-prefixed) columns are excluded too: Join drops them
+        (``_without_meta``), including the ones a raw ``ArrowTableStream``
+        lists as data columns in its ``output_schema``.
 
         Args:
             *streams: Two or more input streams.
-            check_data_overlap: If ``True``, raise when two inputs share a
-                data column. ``static_process`` passes ``False``: it does not
-                validate its inputs, and renames colliding columns itself.
 
         Returns:
             The ``(tag_schema, data_schema)`` of the joined user columns.
 
         Raises:
-            InputValidationError: If ``check_data_overlap`` is ``True`` and two
-                inputs share a data column.
+            InputValidationError: If two inputs share a data column.
         """
         ordered_streams = self.order_input_streams(*streams)
         stream = ordered_streams[0]
         tag_schema, data_schema = stream.output_schema()
+        data_schema = self._without_meta_fields(data_schema)
         for other_stream in ordered_streams[1:]:
             other_tag_schema, other_data_schema = other_stream.output_schema()
+            other_data_schema = self._without_meta_fields(other_data_schema)
             tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
-            if not check_data_overlap:
-                data_schema = Schema(
-                    {
-                        **data_schema,
-                        **{
-                            key: data_type
-                            for key, data_type in other_data_schema.items()
-                            if key not in data_schema
-                        },
-                    }
-                )
-                continue
             intersection_data_schema = schema_utils.intersection_schemas(
                 data_schema, other_data_schema
             )
@@ -155,9 +141,15 @@ class Join(NonZeroInputOperator):
         return Schema(system_tag_fields)
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
-        """
-        Joins two streams together based on their tags.
-        The resulting stream will contain all the tags from both streams.
+        """Join the streams on their shared tag columns.
+
+        The result holds every input's tag and data columns, source info and
+        system tags (renamed per input). It holds none of the inputs' meta
+        (``__``-prefixed) columns, which Join drops (``_without_meta``).
+
+        Raises:
+            InputValidationError: If two inputs share a data column, or a
+                shared tag key has different Arrow types in two inputs.
         """
         if len(streams) == 1:
             return streams[0]
@@ -165,6 +157,9 @@ class Join(NonZeroInputOperator):
         # Canonically order streams by pipeline_hash for deterministic
         # system tag column names regardless of input order (Join is commutative)
         ordered_streams = self.order_input_streams(*streams)
+        # The output column order, and the check that no two inputs share a
+        # data column (meta columns are dropped, so they never collide).
+        tag_schema, data_schema = self._joined_user_schemas(*streams)
 
         COMMON_JOIN_KEY = "_common"
 
@@ -173,8 +168,8 @@ class Join(NonZeroInputOperator):
         stream = ordered_streams[0]
 
         tag_keys, _ = [set(k) for k in stream.keys()]
-        table = stream.as_table(
-            columns={"source": True, "system_tags": True, "meta": True}
+        table = self._without_meta(
+            stream.as_table(columns={"source": True, "system_tags": True})
         )
         # trick to get cartesian product; use int8 explicitly so that zero-row
         # tables don't produce a null-typed column that Polars rejects on join
@@ -188,8 +183,8 @@ class Join(NonZeroInputOperator):
 
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
             next_tag_keys, _ = next_stream.keys()
-            next_table = next_stream.as_table(
-                columns={"source": True, "system_tags": True, "meta": True}
+            next_table = self._without_meta(
+                next_stream.as_table(columns={"source": True, "system_tags": True})
             )
             next_table = arrow_utils.append_to_system_tags(
                 next_table,
@@ -201,37 +196,8 @@ class Join(NonZeroInputOperator):
                 0, COMMON_JOIN_KEY, pa.array([0] * len(next_table), type=pa.int8())
             )
 
-            # Rename any non-key columns in next_table that would collide with
-            # the accumulated table, using stream-index-based suffixes instead of
-            # Polars' default ``_right`` suffix which causes cascading collisions
-            # on 3+ stream joins.  The only legitimately shared column names are
-            # the tag join keys; everything else (meta columns, their derived
-            # source-info columns, etc.) must be unique.
-            join_key_set = tag_keys.intersection(next_tag_keys) | {COMMON_JOIN_KEY}
-            rename_map = self._collision_renames(
-                set(table.column_names), next_table.column_names, join_key_set, idx
-            )
-
-            # Build a reference schema for next_table with rename_map applied to
-            # field names, preserving nullable flags — must be done BEFORE the
-            # rename so we capture the original schema.
-            next_ref_schema = pa.schema(
-                [
-                    pa.field(
-                        rename_map.get(f.name, f.name),
-                        f.type,
-                        nullable=f.nullable,
-                        metadata=f.metadata,
-                    )
-                    for f in next_table.schema
-                ]
-            )
-
-            if rename_map:
-                # Use Arrow-native rename to avoid an unnecessary Polars round-trip.
-                next_table = next_table.rename_columns(
-                    [rename_map.get(name, name) for name in next_table.column_names]
-                )
+            # Polars sets every field nullable; capture the schema before the join.
+            next_ref_schema = next_table.schema
 
             common_tag_keys = tag_keys.intersection(next_tag_keys)
             # A shared tag key must have one Arrow type in both inputs (up to
@@ -271,9 +237,6 @@ class Join(NonZeroInputOperator):
         # ``ArrowTableStream`` reads its schema from the physical order and its
         # keys from ``tag_columns``, so both must follow it. No hash or record
         # ID depends on column order.
-        tag_schema, data_schema = self._joined_user_schemas(
-            *streams, check_data_overlap=False
-        )
         tag_order = list(tag_schema.keys())
         data_order = list(data_schema.keys())
         listed = {*tag_order, *data_order}
@@ -288,39 +251,53 @@ class Join(NonZeroInputOperator):
         )
 
     @staticmethod
-    def _collision_renames(
-        existing: Collection[str],
-        incoming: Iterable[str],
-        keep: Collection[str],
-        index: int,
-    ) -> dict[str, str]:
-        """Name the incoming columns that collide with the accumulated ones.
+    def _without_meta(table: "pa.Table") -> "pa.Table":
+        """Drop the meta (``__``-prefixed) columns from an input table.
 
-        The single definition of Join's collision renaming, shared by
-        ``static_process`` and the async ``_merge_data``. A colliding column
-        ``c`` of the input at canonical position ``index`` becomes
-        ``c_{index}``, or ``c_{index + 1}``, ... when that name is taken by an
-        accumulated column or by an earlier rename.
+        Join keeps none of its inputs' meta columns. They describe how one
+        input row was produced (a cached pod's ``__computed``, the result
+        cache's ``__pf_*`` and ``__pod_ts``), nothing downstream of a Join
+        reads them, and inputs routinely share their names. A raw
+        ``ArrowTableStream`` returns its ``__`` columns from ``as_table``
+        whatever the column configuration, together with a source-info
+        column for each (``_source___x``), so both are dropped by name.
 
         Args:
-            existing: The column names already in the accumulated result.
-            incoming: The next input's column names, in order.
-            keep: Names that are legitimately shared (the join keys).
-            index: The next input's canonical position.
+            table: An input's table.
 
         Returns:
-            A map from each colliding incoming name to its new name.
+            The table without its meta columns and their source-info columns.
         """
-        rename_map: dict[str, str] = {}
-        for col in incoming:
-            if col not in keep and col in existing:
-                new_name = f"{col}_{index}"
-                counter = index
-                while new_name in existing or new_name in rename_map.values():
-                    counter += 1
-                    new_name = f"{col}_{counter}"
-                rename_map[col] = new_name
-        return rename_map
+        meta_source_prefix = f"{constants.SOURCE_PREFIX}{constants.META_PREFIX}"
+        meta = [
+            name
+            for name in table.column_names
+            if name.startswith((constants.META_PREFIX, meta_source_prefix))
+        ]
+        return table.drop_columns(meta) if meta else table
+
+    @staticmethod
+    def _without_meta_fields(schema: Schema) -> Schema:
+        """Drop the meta (``__``-prefixed) fields from a data schema.
+
+        The prediction counterpart of ``_without_meta``: a raw
+        ``ArrowTableStream`` lists its ``__`` columns as data columns.
+
+        Args:
+            schema: An input's data schema.
+
+        Returns:
+            The schema without its meta fields.
+        """
+        if not any(name.startswith(constants.META_PREFIX) for name in schema):
+            return schema
+        return Schema(
+            {
+                name: data_type
+                for name, data_type in schema.items()
+                if not name.startswith(constants.META_PREFIX)
+            }
+        )
 
     # ------------------------------------------------------------------
     # Async execution
@@ -536,7 +513,7 @@ class Join(NonZeroInputOperator):
                         current_reader,
                         renamed_readers[i],
                         target_writer,
-                        partial(self._merge_pair_passthrough, right_index=i),
+                        self._merge_pair_passthrough,
                     )
                 )
 
@@ -780,22 +757,17 @@ class Join(NonZeroInputOperator):
         return Tag(table, system_tags=system_tags, data_context=data_context_key)
 
     @staticmethod
-    def _merge_data(
-        left: DataProtocol, right: DataProtocol, right_index: int
-    ) -> DataProtocol:
+    def _merge_data(left: DataProtocol, right: DataProtocol) -> DataProtocol:
         """Merge two data datagrams as Arrow, left columns first.
 
         Every column keeps the Arrow type it already has, and the source info
-        of both sides is carried over. Meta columns are carried over too: the
-        left side's first, then the right side's, renamed where they collide
-        exactly as ``static_process`` renames them (``_collision_renames``).
+        of both sides is carried over. Neither side's meta columns are, as in
+        ``static_process`` (``_without_meta``).
 
         Args:
             left: The canonically earlier data (in a staggered join, the
                 result of the joins so far).
             right: The later data.
-            right_index: The canonical position of ``right``'s input, which
-                picks the suffix of a renamed meta column.
 
         Returns:
             The merged data, in the context of ``left``.
@@ -806,24 +778,10 @@ class Join(NonZeroInputOperator):
         """
         from orcapod.core.datagrams import Data
 
-        left_data_columns = set(left.as_table().column_names)
-        right_data_columns = set(right.as_table().column_names)
-        if overlap := left_data_columns & right_data_columns:
+        left_table, right_table = left.as_table(), right.as_table()
+        if overlap := set(left_table.column_names) & set(right_table.column_names):
             raise InputValidationError(
                 f"Join: inputs share data columns {sorted(overlap)}."
-            )
-        # Only meta (``__``) names can collide here: the data columns are
-        # disjoint (checked above), and the columns ``static_process`` also
-        # holds (tags, ``_source_``, ``_tag::``) never start with ``__``, so
-        # these names suffice to rename exactly as it does.
-        left_table = left.as_table(columns={"meta": True})
-        right_table = right.as_table(columns={"meta": True})
-        renames = Join._collision_renames(
-            set(left_table.column_names), right_table.column_names, (), right_index
-        )
-        if renames:
-            right_table = right_table.rename_columns(
-                [renames.get(name, name) for name in right_table.column_names]
             )
         return Data(
             arrow_utils.hstack_tables(left_table, right_table),
@@ -863,8 +821,7 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        # The right input is the second in canonical order.
-        return merged_tag, Join._merge_data(left_pkt, right_pkt, right_index=1)
+        return merged_tag, Join._merge_data(left_pkt, right_pkt)
 
     @staticmethod
     def _merge_pair_passthrough(
@@ -872,14 +829,12 @@ class Join(NonZeroInputOperator):
         left_pkt: DataProtocol,
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
-        right_index: int,
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, passing system tags through without renaming.
 
         Used in the staggered chain where system tags have already been
         pre-renamed by ``_rename_sys_tags``. The merged row is built from the
         inputs' Arrow tables, in the left (canonically first) tag's context.
-        ``right_index`` is the right input's canonical position.
         """
         # Combine system tags (already renamed)
         merged_sys: dict[str, DataValue] = {}
@@ -893,7 +848,7 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt, right_index)
+        return merged_tag, Join._merge_data(left_pkt, right_pkt)
 
     @staticmethod
     def _sort_merged_system_tags(merged_sys: dict) -> dict:
