@@ -280,7 +280,10 @@ class AsyncPipelineOrchestrator:
 def _start_node(
     tg: asyncio.TaskGroup, node: Any, work: Coroutine[Any, Any, None]
 ) -> None:
-    """Start a node's coroutine in ``tg``, naming the node on a store error it raises.
+    """Start a node's coroutine in ``tg``, naming the node on the store errors it raises.
+
+    A store error raised on its own or inside an exception group (a node that runs
+    its own task group) gets the node's label when it has none.
 
     Args:
         tg: The run's task group.
@@ -295,6 +298,12 @@ def _start_node(
             # Name the node the failure belongs to, if the raising site did not,
             # so _single_store_error can order it like the sync orchestrator.
             exc.add_context(node_label=node.label)
+            raise
+        except BaseExceptionGroup as group:
+            # A node that runs its own task group raises its store errors inside
+            # a group; name the node on each and re-raise the group unchanged.
+            for store_error in StoreError.in_group(group):
+                store_error.add_context(node_label=node.label)
             raise
 
     tg.create_task(run())

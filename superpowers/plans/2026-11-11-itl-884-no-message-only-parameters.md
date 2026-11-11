@@ -70,3 +70,12 @@ through list and map types; a field on one side only is not a conflict, like a t
 - D7 CHANGELOG / DESIGN_ISSUES / function-pods concept page.
 - D8 `tests/test_pipeline/test_store_errors_together.py` (sync/async × both orders, async
   order independence).
+
+## CodeRabbit round on 4f0b4f1c (coordinator approved)
+
+Accepted: CHANGELOG wording (refused append writes nothing *to that table*; new fields pass the
+check, Delta adds them per `allow_schema_evolution`), concept page scoped to `DeltaTableDatabase`
+and says a refused append in a run is a `StoreWriteError`; async `record_and_forward` names node
+and row on a `StoreError`; `_start_node` labels store errors inside a node's exception group.
+Declined: pending-rows read skip (fixed by #293). Deferred: table data without a `_delta_log`
+and connector-DB read errors -> ITL-916.

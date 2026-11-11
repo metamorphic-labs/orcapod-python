@@ -9,6 +9,7 @@ met while writing is reported as the read failure; any other failed write is a
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -32,6 +33,7 @@ from orcapod.pipeline import PipelineJob
 from orcapod.pipeline.async_orchestrator import (
     AsyncPipelineOrchestrator,
     _single_store_error,  # pyright: ignore[reportPrivateUsage]
+    _start_node,  # pyright: ignore[reportPrivateUsage]
 )
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
@@ -273,3 +275,59 @@ def test_refused_append_is_a_store_write_error(tmp_path: Path) -> None:
     assert err.node_label == "rd"
     assert isinstance(err.__cause__, InputValidationError)
     assert "'y'" in str(err.__cause__)
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_pipeline_record_read_failure_names_node_and_row(
+    tmp_path: Path, orchestrator: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read failure while recording a row's pipeline entry names the node and row."""
+    # The async node records pipeline entries outside the pod's per-row handler,
+    # so this checks that the error still gets its node and row.
+    store_path = tmp_path / "store"
+    build_job(store_path, "abc", reader_first=True).run(
+        orchestrator=ORCHESTRATORS[orchestrator]()
+    )
+    original = DeltaTableDatabase.add_record
+
+    def add_record(self: DeltaTableDatabase, record_path, record_id, record, **kwargs):
+        # Stand in for a pipeline table that cannot be read while row d's entry
+        # is recorded (the skip_duplicates check reads the stored record ids).
+        if "_result" not in self.base_path and record.column("k")[0].as_py() == "d":
+            raise StoreReadError("pipeline-table", tuple(record_path)) from OSError(
+                "data file missing"
+            )
+        return original(self, record_path, record_id, record, **kwargs)
+
+    monkeypatch.setattr(DeltaTableDatabase, "add_record", add_record)
+    with pytest.raises(StoreReadError) as info:
+        build_job(store_path, "abcd", reader_first=True).run(
+            orchestrator=ORCHESTRATORS[orchestrator]()
+        )
+
+    err = info.value
+    assert err.table == "pipeline-table"
+    assert err.node_label == "rd"
+    assert err.tag == {"k": "d"}
+
+
+def test_store_error_inside_a_node_group_gets_the_node_label() -> None:
+    """A store error a node raises inside its own exception group is labelled."""
+    # Calls the private helper directly: no public pipeline raises a store error
+    # from a node's inner task group without an annotation on the way.
+
+    class Node:
+        label = "inner"
+
+    read = StoreReadError("table", ("t",))
+
+    async def node_work() -> None:
+        raise ExceptionGroup("node", [read])
+
+    async def main() -> None:
+        async with asyncio.TaskGroup() as tg:
+            _start_node(tg, Node(), node_work())
+
+    with pytest.raises(ExceptionGroup):
+        asyncio.run(main())
+    assert read.node_label == "inner"

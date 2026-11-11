@@ -8,14 +8,16 @@
 
 Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'
 column types with the stored ones. If a column's type differs, the flush raises
-`InputValidationError` naming the table, the column and both types, and writes nothing. Before,
+`InputValidationError` naming the table, the column and both types, and writes nothing to that
+table (other tables' pending rows in the same flush may still be committed). Before,
 Delta's merge silently cast the new rows to the stored type (`int32` or `float64` rows written
 into an `int64` column, `large_binary` into `large_string`), or, when an extension (logical) type
 was involved, accepted rows the table could then no longer read. The comparison treats types the
 way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
 are the same type, an extension type is compared by its storage type, and nullability is not
 compared. Struct fields are compared by name at any depth, including inside lists and maps.
-New and missing columns, and new and missing struct fields, are still accepted.
+New and missing columns, and new and missing struct fields, pass the check; whether Delta's
+merge adds a new one follows the database's `allow_schema_evolution` setting, as before.
 
 `DeltaTableDatabase.flush()` (and `add_records(..., flush=True)`) now raises a
 `StoreReadError` or this `InputValidationError` as itself. Before, it wrapped every failure in a

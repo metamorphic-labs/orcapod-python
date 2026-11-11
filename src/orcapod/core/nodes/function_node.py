@@ -2453,14 +2453,22 @@ class FunctionJobNode(FunctionNodeBase):
                                 execution_pod.RESULT_COMPUTED_FLAG, False
                             )
                         )
-                        self.add_pipeline_record(
-                            original_tag,
-                            input_data,
-                            data_record_id=output_data.datagram_uuid,
-                            computed=result_computed,
-                            is_ephemeral=is_ephemeral,
-                            output_data_hash=output_data.content_hash(),
-                        )
+                        try:
+                            self.add_pipeline_record(
+                                original_tag,
+                                input_data,
+                                data_record_id=output_data.datagram_uuid,
+                                computed=result_computed,
+                                is_ephemeral=is_ephemeral,
+                                output_data_hash=output_data.content_hash(),
+                            )
+                        except StoreError as exc:
+                            # This runs outside the pod's per-row handler: name the
+                            # node and row here.
+                            exc.add_context(
+                                node_label=node_label, tag=original_tag.as_dict()
+                            )
+                            raise
                         # Update in-memory cache so iter_data() sees the result.
                         base_entry_id = self.compute_base_entry_id(
                             original_tag, input_data

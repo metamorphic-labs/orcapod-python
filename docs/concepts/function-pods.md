@@ -220,9 +220,10 @@ print("function calls:", len(calls))
     `"v0.0"`; a minor bump such as `"v0.1"` is not enough), or rename the function.
 
 !!! note "When the store cannot be read"
-    A table that does not exist yet reads as empty, and its rows are computed. A table that
-    exists but cannot be read (for example, a data file was deleted or damaged) is never
-    treated as empty: the run stops with `orcapod.errors.StoreReadError`, which names the
+    A table that does not exist yet reads as empty, and its rows are computed. In a
+    `DeltaTableDatabase`, a table that exists but cannot be read (for example, a data file was
+    deleted or damaged) is never treated as empty: the run stops with
+    `orcapod.errors.StoreReadError`, which names the
     table, the node and row being processed when they are known, and the underlying error,
     whatever the orchestrator's `error_policy`. Its stored rows are not recomputed and the
     table is not overwritten, so you can repair the table or restore the file and run again.
@@ -231,13 +232,15 @@ print("function calls:", len(calls))
 
     In a `DeltaTableDatabase`, rows whose column types differ from the stored table's
     (`float64` values for a column stored as `int64`, say) are refused with
-    `InputValidationError`, which names the table, the column and both types. They are not
-    converted to the stored type. `string` and `large_string`, and the other large and
-    non-large layouts of one type, count as the same type.
-    New columns and new struct fields are still accepted.
+    `InputValidationError`, which names the table, the column and both types, and nothing is
+    written to that table. They are not converted to the stored type. `string` and
+    `large_string`, and the other large and non-large layouts of one type, count as the same
+    type. New columns and new struct fields pass this check; whether they are added follows
+    the database's `allow_schema_evolution` setting. In a job run, a refused append fails the
+    run as a `StoreWriteError` whose cause is the `InputValidationError`.
 
-    Both errors reach you as themselves, also from `flush()` and from
-    `add_records(..., flush=True)`. When several pending tables fail in one flush, the
+    When you use the database directly, both errors reach you as themselves, also from
+    `flush()` and from `add_records(..., flush=True)`. When several pending tables fail in one flush, the
     `StoreReadError` (or else the first `InputValidationError`) is raised, and each other
     failure is attached to it as a note and logged. Failed rows stay queued, so a later
     flush tries them again. A flush that fails for any other reason raises `RuntimeError`,
