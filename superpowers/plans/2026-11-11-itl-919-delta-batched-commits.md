@@ -187,17 +187,17 @@ step 3 continues past failed keys (#287 `flush` semantics, unchanged): see "Rema
 ## Tasks
 
 - [x] 0. Rename branch, merge #304 (f84217b2), ask placement (approved: `run()` kwarg).
-- [ ] 1. Save this plan; WIP commit + push.
-- [ ] 2. `_row_index.py`: move helpers out of `in_memory_databases.py` (no behaviour change;
+- [x] 1. Save this plan; WIP commit + push.
+- [x] 2. `_row_index.py`: move helpers out of `in_memory_databases.py` (no behaviour change;
   #304 tests green).
-- [ ] 3. T10 Delta equivalence tests (should pass before and after: guard for the refactor).
-- [ ] 4. Store snapshot + indexed lookups (T1 store-side part fails first: Delta bytes per
+- [x] 3. T10 Delta equivalence tests (should pass before and after: guard for the refactor).
+- [x] 4. Store snapshot + indexed lookups (T1 store-side part fails first: Delta bytes per
   row grow); replace id cache; append path (T9).
-- [ ] 5. Node batching + `run(commit_every_rows=)` (T2, T3, T4 first); commit order;
+- [x] 5. Node batching + `run(commit_every_rows=)` (T2, T3, T4 first); commit order;
   failure handling (T7, T8); crash tests (T5, T6).
-- [ ] 6. side_effects context (T12) and `compute_base_entry_id` reuse (T13).
-- [ ] 7. ITL-923 ephemeral re-run check (T11).
-- [ ] 8. Docs: `docs/concepts/function-pods.md` (When the store cannot be written: commit
+- [x] 6. side_effects context (T12) and `compute_base_entry_id` reuse (T13).
+- [x] 7. ITL-923 ephemeral re-run check (T11).
+- [x] 8. Docs: `docs/concepts/function-pods.md` (When the store cannot be written: commit
   cadence, crash guarantee, commit failure), pipelines page (`commit_every_rows`),
   `CHANGELOG.md` [0.3.0], `DESIGN_ISSUES.md` PQ1 update.
 - [ ] 9. Differential (T15), timings (T16), full suite on 3.13 / 3.12 / 3.11 one at a time,
@@ -209,6 +209,22 @@ step 3 continues past failed keys (#287 `flush` semantics, unchanged): see "Rema
 
 - 2026-11-11: plan copied from the part-1 worker's scratchpad and updated with the
   developer's decisions; placement of `commit_every_rows` approved (run() keyword).
+- Store: snapshot = stored ids (id-only scan through a one-column schema, so logical list
+  types cannot break it) + stored rows (indexed, `as_large_types`), extended after own
+  commits from new data files; pending batch compacted + indexed (the unindexed pending
+  batch cost ~185 KB per lookup). Append only when all ids are new AND the batch has the
+  stored schema as the writer converts it (`_stores_as_is`), else MERGE.
+- Coordinator approvals: three #293 tests changed (snapshot answers warm reads; own commit
+  tells ids), with boundary tests added (`test_delta_committed_snapshot.py`); four #290
+  tests changed to commit-point semantics + a `commit_every_rows=1` test; both lists go in
+  the PR body ("Tests of #293 changed", "Tests of #290 changed").
+- ITL-930 (get_all_records short after run): fixed by #293 in the stack; regression test
+  added. ITL-932 (async run hangs when a node fails with > buffer rows in flight):
+  pre-existing, fixed in its own commit (channels.close never blocks). ITL-923 async
+  ephemeral rerun: fixed (route_inputs treated cached EmptyData as a hit).
+- Found, not fixed: AsyncPipelineOrchestrator ignores error_policy (documented as ITL-879).
+- Timings after (ms/row, Delta, 100/400/1000/5000): sync 2.59/1.28/1.13/1.18, async
+  2.36/1.21/1.09/1.16. Main (part-1 worker): sync 80/198/509, async 69/164/359.
 
 ---
 
