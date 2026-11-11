@@ -550,6 +550,31 @@ def arrow_schema_hashes() -> dict[str, Any]:
     }
 
 
+@case("arrow", "dict_order")
+def arrow_dict_order_hashes() -> dict[str, Any]:
+    # ITL-905: a dict-encoded list hashes in canonical key order, so the sorted and
+    # unsorted tables pin the same value; a list of other structs keeps its order.
+    hasher = _ctx().arrow_hasher
+    kv = pa.large_list(
+        pa.struct([pa.field("key", pa.large_string()), pa.field("value", pa.int64())])
+    )
+    pairs = pa.large_list(
+        pa.struct([pa.field("f0", pa.large_string()), pa.field("f1", pa.int64())])
+    )
+    ab = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
+    tables = {
+        "kv.sorted": pa.table({"m": pa.array([ab], kv)}),
+        "kv.unsorted": pa.table({"m": pa.array([ab[::-1]], kv)}),
+        "pairs.ab": pa.table(
+            {"m": pa.array([[{"f0": "a", "f1": 1}, {"f0": "b", "f1": 2}]], pairs)}
+        ),
+        "pairs.ba": pa.table(
+            {"m": pa.array([[{"f0": "b", "f1": 2}, {"f0": "a", "f1": 1}]], pairs)}
+        ),
+    }
+    return {k: hasher.hash_table(t).to_string() for k, t in tables.items()}
+
+
 # ---------------------------------------------------------------------------
 # Group: datagram — public sources carrying each logical type
 # ---------------------------------------------------------------------------
@@ -618,6 +643,34 @@ def _arrow_source(column: pa.Array[Any], nullable: bool = False) -> Any:
         ),
     )
     return ArrowTableSource(table, tag_columns=["k"], source_id="golden_arrow")
+
+
+@case("datagram", "dict_order")
+def datagram_dict_order() -> dict[str, Any]:
+    # ITL-905: rows holding equal dicts in different insertion orders pin equal hashes.
+    from orcapod.sources import DictSource
+
+    rows: dict[str, tuple[Any, list[Any]]] = {
+        "str_keys": (dict[str, int], [{"b": 2, "a": 1}, {"a": 1, "b": 2}]),
+        "int_keys": (dict[int, str], [{10: "x", 9: "y"}, {9: "y", 10: "x"}]),
+        "nested": (
+            dict[str, dict[str, int]],
+            [
+                {"y": {"d": 4, "c": 3}, "x": {"a": 1}},
+                {"x": {"a": 1}, "y": {"c": 3, "d": 4}},
+            ],
+        ),
+    }
+    out: dict[str, Any] = {}
+    for name, (value_type, values) in rows.items():
+        source = DictSource(
+            data=[{"k": f"r{i}", "m": v} for i, v in enumerate(values)],
+            tag_columns=["k"],
+            data_schema={"k": str, "m": value_type},
+            source_id=f"golden_dict_{name}",
+        )
+        out.update(_prefixed(name, stream_summary(source)))
+    return out
 
 
 @case("datagram", "arrow_source")

@@ -113,6 +113,42 @@
     "_tag_source_id::38f74931045e006f752450c2d26dbf9096c5bff65fbe952591dec83b04296a14",
     "_tag_record_id::38f74931045e006f752450c2d26dbf9096c5bff65fbe952591dec83b04296a14"
   ],
+  "dict_order.int_keys.content_hash": "semantic_v0.1:f1f37a6683326aff03d599f3c5d6d3c323d2b8410499957e9ce8b85135e79087",
+  "dict_order.int_keys.pipeline_hash": "semantic_v0.1:1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2",
+  "dict_order.int_keys.row[{\"k\":\"r0\"}]._tag_record_id::1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2": "a7a545a63e0d5cfdbbb7444d2ff924c4",
+  "dict_order.int_keys.row[{\"k\":\"r0\"}]._tag_source_id::1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2": "golden_dict_int_keys",
+  "dict_order.int_keys.row[{\"k\":\"r0\"}].data_hash": "arrow_v0.1:0000010ab832e68f5e92143d2f6f03f48f61849e7520bf0958b1eb7a90a2bb7480311c",
+  "dict_order.int_keys.row[{\"k\":\"r1\"}]._tag_record_id::1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2": "7e203bc987835298ac9b02baf41ca4cf",
+  "dict_order.int_keys.row[{\"k\":\"r1\"}]._tag_source_id::1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2": "golden_dict_int_keys",
+  "dict_order.int_keys.row[{\"k\":\"r1\"}].data_hash": "arrow_v0.1:0000010ab832e68f5e92143d2f6f03f48f61849e7520bf0958b1eb7a90a2bb7480311c",
+  "dict_order.int_keys.system_tag_columns": [
+    "_tag_source_id::1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2",
+    "_tag_record_id::1ed51934abd8eb8fd765c716cf4934bfd42f43409a5f4b94de1d9aaad7582ca2"
+  ],
+  "dict_order.nested.content_hash": "semantic_v0.1:abb3a76012b824b50a86dbd35148094767d1cc6cc83b77f1b5ef8774d9f22613",
+  "dict_order.nested.pipeline_hash": "semantic_v0.1:dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1",
+  "dict_order.nested.row[{\"k\":\"r0\"}]._tag_record_id::dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1": "f2163b15031857e7b0edc5c8092fe897",
+  "dict_order.nested.row[{\"k\":\"r0\"}]._tag_source_id::dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1": "golden_dict_nested",
+  "dict_order.nested.row[{\"k\":\"r0\"}].data_hash": "arrow_v0.1:000001404020d569538a434976cbf5970df8a23155a078020124f53b7b0db4d608e221",
+  "dict_order.nested.row[{\"k\":\"r1\"}]._tag_record_id::dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1": "f6ab4ac474e750cb89debd9cb2697ccb",
+  "dict_order.nested.row[{\"k\":\"r1\"}]._tag_source_id::dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1": "golden_dict_nested",
+  "dict_order.nested.row[{\"k\":\"r1\"}].data_hash": "arrow_v0.1:000001404020d569538a434976cbf5970df8a23155a078020124f53b7b0db4d608e221",
+  "dict_order.nested.system_tag_columns": [
+    "_tag_source_id::dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1",
+    "_tag_record_id::dd792c45f9d33453d960e667968eb8d6c3b723c6b9929fdc33aa1d1998cb53c1"
+  ],
+  "dict_order.str_keys.content_hash": "semantic_v0.1:1fbc6226941e201ddcb3e13ca09d1ced7df3fb4d68b07090e451fbeb8da4c3ed",
+  "dict_order.str_keys.pipeline_hash": "semantic_v0.1:7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636",
+  "dict_order.str_keys.row[{\"k\":\"r0\"}]._tag_record_id::7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636": "bf6c81a8f6a75d7a9615d4f2034b772f",
+  "dict_order.str_keys.row[{\"k\":\"r0\"}]._tag_source_id::7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636": "golden_dict_str_keys",
+  "dict_order.str_keys.row[{\"k\":\"r0\"}].data_hash": "arrow_v0.1:00000196dfc79e137a9b9c52285a345af1003c3835e32cc0fd07e2f0d0218b7356192c",
+  "dict_order.str_keys.row[{\"k\":\"r1\"}]._tag_record_id::7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636": "2cec7386d5645ec48bf8dfa5d661196a",
+  "dict_order.str_keys.row[{\"k\":\"r1\"}]._tag_source_id::7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636": "golden_dict_str_keys",
+  "dict_order.str_keys.row[{\"k\":\"r1\"}].data_hash": "arrow_v0.1:00000196dfc79e137a9b9c52285a345af1003c3835e32cc0fd07e2f0d0218b7356192c",
+  "dict_order.str_keys.system_tag_columns": [
+    "_tag_source_id::7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636",
+    "_tag_record_id::7f992e15265162404ce4f6dcb05344659b2ae9f060678dd3b9631e9073732636"
+  ],
   "list_path.content_hash": "semantic_v0.1:7be2936fd87936bea5dce849f7e947c7e360c4f08e8dbf2d18e18948fbb3d389",
   "list_path.pipeline_hash": "semantic_v0.1:3d12eb0f29844205335f9ffd7843afc13c308dece8bae64b9f94d980c690e020",
   "list_path.row[{\"k\":\"r1\"}]._tag_record_id::3d12eb0f29844205335f9ffd7843afc13c308dece8bae64b9f94d980c690e020": "059c77251e845bafb5a3839bf547a2f5",
