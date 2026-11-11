@@ -10,10 +10,12 @@ import logging
 import re
 from typing import TYPE_CHECKING, Iterable
 
+from orcapod.errors import MissingOptionalDependencyError
 from orcapod.logical_types.protocols import (
     LogicalTypeProtocol,
     LogicalTypeFactoryProtocol,
 )
+from orcapod.utils.deferred_types import load_object, match_deferred, module_available
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -241,6 +243,14 @@ class LogicalTypeRegistry:
     the same pattern as the ``logical_types`` constructor argument used by
     other registries in this package.
 
+    An optional ``deferred_logical_types`` list names logical types that are
+    loaded on first use, so an optional library is never imported up front
+    (ITL-871). Each entry is a dict of strings: ``python_type`` (qualified class
+    name, e.g. ``"torch.Tensor"``), ``extension_name``, ``logical_type`` (dotted
+    path of the logical type class, instantiated without arguments) and
+    ``requires`` (the module that must be importable). See
+    ``orcapod.utils.deferred_types``.
+
     An optional ``factories`` list can also be passed to pre-register
     ``LogicalTypeFactoryProtocol`` instances at construction time. Each entry is a
     dict with keys ``factory`` (the factory instance), ``category`` (optional str),
@@ -259,7 +269,13 @@ class LogicalTypeRegistry:
         self,
         logical_types: list[LogicalTypeProtocol] | None = None,
         factories: list[dict] | None = None,
+        deferred_logical_types: list[dict[str, str]] | None = None,
     ) -> None:
+        self._deferred_by_python_name: dict[str, dict[str, str]] = {}
+        self._deferred_by_arrow_name: dict[str, dict[str, str]] = {}
+        for entry in deferred_logical_types or []:
+            self._deferred_by_python_name[entry["python_type"]] = entry
+            self._deferred_by_arrow_name[entry["extension_name"]] = entry
         self._by_logical_name: dict[str, LogicalTypeProtocol] = {}
         self._by_arrow_name: dict[str, LogicalTypeProtocol] = {}
         self._by_python_type: dict[type, LogicalTypeProtocol] = {}
@@ -371,13 +387,51 @@ class LogicalTypeRegistry:
                     return registered_lt
             except TypeError:
                 continue
+        entry = match_deferred(python_type, self._deferred_by_python_name)
+        if entry is not None:
+            return self._load_deferred(entry)
         return None
 
     def get_by_arrow_extension_name(
         self, arrow_name: str
     ) -> LogicalTypeProtocol | None:
-        """Return the logical type registered under *arrow_name*, or ``None``."""
-        return self._by_arrow_name.get(arrow_name)
+        """Return the logical type registered under *arrow_name*, or ``None``.
+
+        A deferred logical type (see the class docstring) is loaded on the first
+        lookup of its extension name.
+
+        Raises:
+            MissingOptionalDependencyError: If *arrow_name* belongs to a deferred
+                logical type whose required module is not installed.
+        """
+        result = self._by_arrow_name.get(arrow_name)
+        if result is not None:
+            return result
+        entry = self._deferred_by_arrow_name.get(arrow_name)
+        if entry is None:
+            return None
+        if not module_available(entry["requires"]):
+            raise MissingOptionalDependencyError(
+                f"Arrow extension type {arrow_name!r} needs the optional dependency "
+                f"{entry['requires']!r}, which is not installed. Install it to read "
+                "or write values of this type."
+            )
+        return self._load_deferred(entry)
+
+    def _load_deferred(self, entry: dict[str, str]) -> LogicalTypeProtocol:
+        """Instantiate and register a deferred logical type.
+
+        Args:
+            entry: The deferred entry (see the class docstring).
+
+        Returns:
+            The registered logical type.
+        """
+        logical_type = load_object(entry["logical_type"])()
+        self.register_logical_type(logical_type)
+        self._deferred_by_python_name.pop(entry["python_type"], None)
+        self._deferred_by_arrow_name.pop(entry["extension_name"], None)
+        return logical_type
 
     def register_logical_type_factory(
         self,

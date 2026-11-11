@@ -11,6 +11,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
+from orcapod.utils.deferred_types import load_object, match_deferred
+
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import (
         ArrowHasherProtocol,
@@ -34,13 +36,24 @@ class PythonTypeHandlerRegistry:
     """
 
     def __init__(
-        self, handlers: list[tuple[type, "PythonTypeHandlerProtocol"]] | None = None
+        self,
+        handlers: list[tuple[type, "PythonTypeHandlerProtocol"]] | None = None,
+        deferred_handlers: list[dict[str, str]] | None = None,
     ) -> None:
         """
         Args:
             handlers: Optional list of ``(target_type, hasher)`` pairs to
                 register at construction time.
+            deferred_handlers: Optional handlers loaded on first use, so an
+                optional library is never imported up front (ITL-871). Each
+                entry is a dict of strings: ``python_type`` (qualified class
+                name, e.g. ``"torch.Tensor"``) and ``handler`` (dotted path of
+                the handler class, instantiated without arguments). See
+                ``orcapod.utils.deferred_types``.
         """
+        self._deferred: dict[str, dict[str, str]] = {
+            entry["python_type"]: entry for entry in deferred_handlers or []
+        }
         self._handlers: dict[type, "PythonTypeHandlerProtocol"] = {}
         self._lock = threading.RLock()
         if handlers:
@@ -120,7 +133,7 @@ class PythonTypeHandlerRegistry:
                         base.__name__,
                     )
                     return handler
-        return None
+            return self._load_deferred(obj_type)
 
     def get_handler_for_type(
         self, target_type: type
@@ -141,7 +154,27 @@ class PythonTypeHandlerRegistry:
                 handler = self._handlers.get(base)
                 if handler is not None:
                     return handler
-        return None
+            return self._load_deferred(target_type)
+
+    def _load_deferred(self, target_type: type) -> "PythonTypeHandlerProtocol | None":
+        """Load and register the deferred handler matching *target_type*, if any.
+
+        The match compares qualified class names along the MRO, so no optional
+        library is imported for an unrelated type. Callers hold ``self._lock``.
+
+        Args:
+            target_type: The type being looked up.
+
+        Returns:
+            The newly registered handler, or None when nothing matches.
+        """
+        entry = match_deferred(target_type, self._deferred)
+        if entry is None:
+            return None
+        handler = load_object(entry["handler"])()
+        self.register(load_object(entry["python_type"]), handler)
+        del self._deferred[entry["python_type"]]
+        return handler
 
     def has_handler(self, target_type: type) -> bool:
         """Return True if a handler is registered for *target_type* or any MRO ancestor.
