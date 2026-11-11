@@ -29,6 +29,11 @@ default `license-files`. Metadata then carries `License-Expression: MIT` and
 `License-File: LICENSE`. The build requirement is not changed (no dependency change): Task 2
 also builds with the floor, `hatchling==1.21.0`, to confirm it accepts the declaration.
 
+**Revised after review (CodeRabbit on #283, approved by the coordinator):** hatchling 1.21.0
+writes `License-Expression` under `Metadata-Version: 2.1`, which does not define the field.
+The build floor is raised to `hatchling>=1.27.0` (metadata 2.4), and the packaging test
+asserts the floor, a built Metadata-Version of at least 2.4, and the exact MIT text.
+
 Fallback (only if pip-licenses 5.5.5 does not report `MIT` for a `License-Expression`-only
 distribution): `license = { text = "MIT" }` plus `License :: OSI Approved :: MIT License`.
 
