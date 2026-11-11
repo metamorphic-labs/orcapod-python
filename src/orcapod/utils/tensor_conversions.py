@@ -13,7 +13,6 @@ been imported.
 
 from __future__ import annotations
 
-import functools
 import warnings
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -26,9 +25,12 @@ _TENSOR_CLASS = "torch.Tensor"
 _TRACKS_GRADIENTS = "that tracks gradients (requires_grad=True)"
 
 
-@functools.cache
 def _is_tensor_type(cls: type) -> bool:
-    """Whether ``cls`` is ``torch.Tensor`` or a subclass, by qualified name."""
+    """Whether ``cls`` is ``torch.Tensor`` or a subclass, by qualified name.
+
+    Not cached: a cache would keep every class it sees alive, and the MRO walk
+    is short.
+    """
     return any(qualified_name(base) == _TENSOR_CLASS for base in cls.__mro__)
 
 

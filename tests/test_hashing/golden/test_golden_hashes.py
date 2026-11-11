@@ -339,6 +339,10 @@ main(["--group", "torch", "--output-dir", str(out)])
 kept = json.loads((out / "torch.json").read_text())
 pinned = json.loads(golden_path("torch").read_text())
 print("pins kept:", kept == pinned)
+empty = out / "empty"
+main(["--group", "torch", "--output-dir", str(empty)])
+fresh = json.loads((empty / "torch.json").read_text())
+print("pins kept in an empty output dir:", fresh == pinned)
 """
 
 
@@ -359,3 +363,4 @@ def test_torch_group_runs_on_a_torch_without_a_newer_dtype(tmp_path: Path) -> No
     assert "produced: False" in lines
     assert "unavailable: ['value.float8_e8m0fnu']" in lines
     assert "pins kept: True" in lines
+    assert "pins kept in an empty output dir: True" in lines

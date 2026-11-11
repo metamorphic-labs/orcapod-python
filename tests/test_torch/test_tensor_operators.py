@@ -197,12 +197,21 @@ def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
             [expected_x(n) for n in names],
             [expected_x(n, shift) for n in names],
         ]
+        # One merged list from each input: match each list to a distinct expected one.
+        remaining = list(expected)
         for members in merged:
-            assert any(
-                len(members) == len(e)
-                and all(same_tensor(g, x) for g, x in zip(members, e, strict=True))
-                for e in expected
+            match = next(
+                (
+                    i
+                    for i, e in enumerate(remaining)
+                    if len(members) == len(e)
+                    and all(same_tensor(g, x) for g, x in zip(members, e, strict=True))
+                ),
+                None,
             )
+            assert match is not None, f"group {group}: unexpected member list"
+            del remaining[match]
+        assert not remaining
 
 
 @pytest.mark.parametrize("shift", [0, 1])

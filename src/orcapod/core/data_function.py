@@ -38,6 +38,7 @@ from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 
 if TYPE_CHECKING:
+    from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
     import pyarrow as pa
     import pyarrow.compute as pc
 else:
@@ -120,7 +121,9 @@ _ARRAY_CLASSES: dict[tuple[str, str], str] = {
 """Array classes whose declared outputs are checked, by ``(module, qualname)``, with a hint."""
 
 
-def _declared_array_type(declared: Any) -> tuple[type, str] | None:
+def _declared_array_type(
+    declared: Any, type_converter: TypeConverterProtocol
+) -> tuple[type, str] | None:
     """Return the array class a declared output type requires, if any.
 
     Handles ``np.ndarray`` and ``torch.Tensor`` (or a subclass), parameterized
@@ -128,11 +131,16 @@ def _declared_array_type(declared: Any) -> tuple[type, str] | None:
     either. Neither NumPy nor torch is imported here: a class counts as an array
     class when its MRO contains ``numpy.ndarray`` or ``torch.Tensor``.
 
-    The required class is that base class, not a declared subclass: the column
-    is stored through the base class's logical type, which reads values back as
-    the base class, so a pod declared ``-> MySubclass`` may return the plain
-    array or tensor it received. A subclass with its own registered logical type
-    is still checked by that type when the value is stored.
+    The required class is the Python type of the logical type the column is
+    stored through, the most specific one registered for the declared class. For
+    a subclass without its own logical type that is the base class, which reads
+    values back as the base class, so a pod declared ``-> MySubclass`` may return
+    the plain array or tensor it received. A subclass with its own registered
+    logical type requires that subclass.
+
+    Args:
+        declared: The declared output type.
+        type_converter: The converter whose logical types store the column.
 
     Returns:
         ``(base_class, hint)`` where ``hint`` tells the user how to return one,
@@ -149,12 +157,18 @@ def _declared_array_type(declared: Any) -> tuple[type, str] | None:
         for base in candidate.__mro__:
             hint = _ARRAY_CLASSES.get((base.__module__, base.__qualname__))
             if hint is not None:
+                logical_type = type_converter.get_logical_type(candidate)
+                stored = getattr(logical_type, "python_type", None)
+                if isinstance(stored, type) and issubclass(stored, base):
+                    return stored, hint
                 return base, hint
     return None
 
 
 def _check_declared_array_outputs(
-    output_data: dict[str, Any], output_schema: Schema
+    output_data: dict[str, Any],
+    output_schema: Schema,
+    type_converter: TypeConverterProtocol,
 ) -> None:
     """Refuse a non-array returned for an output declared as an array class.
 
@@ -163,13 +177,18 @@ def _check_declared_array_outputs(
     returned where a tensor is declared is not that class, and Orcapod never
     wraps or converts one implicitly.
 
+    Args:
+        output_data: The parsed outputs, by output key.
+        output_schema: The declared output types.
+        type_converter: The converter whose logical types store the outputs.
+
     Raises:
         TypeError: Naming the output key, the declared type and the returned type.
     """
     for key, value in output_data.items():
         if value is None:
             continue
-        declared = _declared_array_type(output_schema.get(key))
+        declared = _declared_array_type(output_schema.get(key), type_converter)
         if declared is None:
             continue
         required, hint = declared
@@ -648,7 +667,9 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             A Data containing the parsed outputs with source info.
         """
         output_data = parse_function_outputs(self._output_keys, values)
-        _check_declared_array_outputs(output_data, self.output_data_schema)
+        _check_declared_array_outputs(
+            output_data, self.output_data_schema, self.data_context.type_converter
+        )
         for key, value in output_data.items():
             conversions = tensor_conversions(value)
             if conversions:

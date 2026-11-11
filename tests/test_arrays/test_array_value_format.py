@@ -602,8 +602,10 @@ def test_declared_ndarray_check_recognizes_parameterized_aliases() -> None:
 
     from orcapod.core.data_function import _declared_array_type  # pyright: ignore[reportPrivateUsage]
 
+    converter = get_default_context().type_converter
+
     def required(declared: object) -> object:
-        found = _declared_array_type(declared)
+        found = _declared_array_type(declared, converter)
         return None if found is None else found[0]
 
     assert required(np.ndarray) is np.ndarray

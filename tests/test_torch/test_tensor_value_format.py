@@ -19,12 +19,21 @@ import pytest
 pytest.importorskip("torch")
 
 import numpy as np  # noqa: E402
+import polars as pl  # noqa: E402
 import pyarrow as pa  # noqa: E402
 import torch  # noqa: E402
 
 from orcapod import function_pod  # noqa: E402
-from orcapod.contexts import get_default_context  # noqa: E402
+from orcapod.contexts import create_registry, get_default_context  # noqa: E402
 from orcapod.errors import UnsupportedValueError  # noqa: E402
+from orcapod.logical_types.base_logical_type import BaseLogicalType  # noqa: E402
+from orcapod.logical_types.registry import (  # noqa: E402
+    make_arrow_extension_type,
+    make_polars_extension_type,
+)
+from orcapod.semantic_types.universal_converter import (  # noqa: E402
+    UniversalTypeConverter,
+)
 from orcapod.sources import DictSource  # noqa: E402
 from tests.test_torch.tensor_cases import (  # noqa: E402
     EXTENSION_NAME,
@@ -437,3 +446,63 @@ def test_a_dtype_the_installed_torch_lacks_fails_clearly_when_read() -> None:
     assert "column 'x'" in lines[-1]
     assert "'float8_e8m0fnu'" in lines[-1]
     assert torch.__version__ in lines[-1]
+
+
+class LabeledTensor(torch.Tensor):
+    """Toy tensor subclass with its own logical type."""
+
+
+class LogicalLabeledTensor(BaseLogicalType):
+    """Toy logical type for ``LabeledTensor``: stores the raw float32 bytes."""
+
+    _arrow_ext_class = make_arrow_extension_type(
+        "test.labeled_tensor", pa.large_binary()
+    )
+    _polars_ext_class = make_polars_extension_type(
+        "test.labeled_tensor", pa.large_binary()
+    )
+    logical_type_name: str = "test.labeled_tensor"
+    python_type: type = LabeledTensor
+
+    def get_arrow_extension_type(self) -> pa.ExtensionType:
+        """Return the toy extension type."""
+        return self._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # synthesized class takes no arguments
+
+    def get_polars_extension_type(self) -> pl.BaseExtension:
+        """Return the toy Polars extension type."""
+        return self._polars_ext_class()  # pyright: ignore[reportCallIssue]  # synthesized class takes no arguments
+
+    def python_to_storage(self, value: Any, converter: Any = None) -> bytes:
+        """Store the float32 bytes."""
+        return value.detach().to(torch.float32).numpy().tobytes()
+
+    def storage_to_python(self, storage_value: Any, converter: Any = None) -> Any:
+        """Read the bytes back as a ``LabeledTensor``."""
+        array = np.frombuffer(storage_value, dtype=np.float32).copy()
+        return torch.from_numpy(array).as_subclass(LabeledTensor)
+
+
+def test_declared_subclass_with_its_own_logical_type_requires_that_subclass() -> None:
+    """A pod declared ``-> LabeledTensor`` (registered) must return a ``LabeledTensor``."""
+    ctx = create_registry().get_context()
+    converter = ctx.type_converter
+    assert isinstance(converter, UniversalTypeConverter)
+    converter.register_logical_type(LogicalLabeledTensor())  # pyright: ignore[reportArgumentType]  # toy logical type implements the protocol structurally
+
+    @function_pod(output_keys="y", data_context=ctx)
+    def plain(x: torch.Tensor) -> LabeledTensor:
+        """Return a plain tensor where the registered subclass is declared."""
+        return x * 2  # pyright: ignore[reportReturnType]  # deliberately the base class
+
+    @function_pod(output_keys="y", data_context=ctx)
+    def labeled(x: torch.Tensor) -> LabeledTensor:
+        """Return the registered subclass."""
+        return (x * 2).as_subclass(LabeledTensor)
+
+    source = DictSource(
+        data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"], data_context=ctx
+    )
+    with pytest.raises(TypeError, match="'y'.*LabeledTensor.*Tensor"):
+        list(plain.pod(source).iter_data())
+    got = [d.as_dict()["y"] for _, d in labeled.pod(source).iter_data()]
+    assert type(got[0]) is LabeledTensor

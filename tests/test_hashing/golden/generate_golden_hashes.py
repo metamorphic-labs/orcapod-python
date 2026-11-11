@@ -134,11 +134,24 @@ def main(argv: list[str] | None = None) -> None:
     for group, values in computed.items():
         path = golden_path(group, args.output_dir)
         missing = cases.unavailable_entries(group)
-        if missing and path.exists():
+        if missing:
             # Keep the pins this environment cannot compute (an older optional
-            # dependency), so the file is never rewritten without them.
-            pinned = json.loads(path.read_text(encoding="utf-8"))
-            values = {**values, **{e: pinned[e] for e in missing if e in pinned}}
+            # dependency), from the target file or else the repository's, so a
+            # golden file is never written without them.
+            source = path if path.exists() else golden_path(group)
+            pinned = (
+                json.loads(source.read_text(encoding="utf-8"))
+                if source.exists()
+                else {}
+            )
+            lost = sorted(e for e in missing if e not in pinned)
+            if lost:
+                raise SystemExit(
+                    f"cannot write {path}: this environment cannot compute {lost} "
+                    "and no existing golden file pins them; install the newer "
+                    "optional dependency"
+                )
+            values = {**values, **{e: pinned[e] for e in missing}}
         path.write_text(dump(values), encoding="utf-8")
         print(f"wrote {len(values)} entries to {path}")
 
