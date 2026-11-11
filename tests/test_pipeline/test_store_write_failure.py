@@ -51,9 +51,11 @@ class Faults:
     write_marker: str | None = None
     succeed_first: int = 0
     on_flush: bool = False
+    flush_marker: str | None = None
     fail_flush_after_write_failure: bool = False
     matching_writes: int = 0
     failed_paths: list[str] = field(default_factory=list)
+    pending_paths: list[str] = field(default_factory=list)
 
 
 class FaultyStore:
@@ -72,6 +74,7 @@ class FaultyStore:
         """Raise ``OSError`` if the write to ``record_path`` is one to fail."""
         faults = self._faults
         full_path = "/".join(self._inner.base_path + tuple(record_path))
+        faults.pending_paths.append(full_path)
         if faults.write_marker is None or faults.write_marker not in full_path:
             return
         faults.matching_writes += 1
@@ -109,10 +112,20 @@ class FaultyStore:
         )
 
     def flush(self) -> None:
-        """Flush the wrapped store, or raise ``OSError`` if flushes fail."""
-        if self._faults.on_flush:
+        """Flush the wrapped store, or raise ``OSError`` if flushes fail.
+
+        With ``flush_marker`` set, a flush fails only while a write to a matching
+        table is pending, whichever view the flush is called on: every view shares
+        one set of pending batches.
+        """
+        faults = self._faults
+        if faults.on_flush:
             raise OSError("disk unavailable while flushing")
+        marker = faults.flush_marker
+        if marker is not None and any(marker in p for p in faults.pending_paths):
+            raise OSError(f"disk unavailable while flushing a pending {marker} batch")
         self._inner.flush()
+        faults.pending_paths.clear()
 
     def __getattr__(self, name: str) -> Any:
         """Delegate everything else to the wrapped store."""
@@ -187,6 +200,7 @@ def assert_store_error(
     *,
     node_label: str | None,
     names_row: bool,
+    flush: bool = False,
 ) -> None:
     """The run's error is a plain ``StoreWriteError`` naming node, row and table."""
     assert isinstance(err, StoreWriteError), f"{type(err).__name__}: {err}"
@@ -200,8 +214,12 @@ def assert_store_error(
     if faults.failed_paths:
         assert "/".join(err.record_path) == faults.failed_paths[0]
         assert faults.failed_paths[0] in message, message
+    assert err.flush is flush
+    if flush:
+        assert err.tag is None and "for row" not in message, message
+        assert "pending writes" in message and "earlier row" in message, message
     assert isinstance(err.__cause__, OSError)
-    assert "rows that are missing" in message
+    assert "does not recompute stored function results" in message
 
 
 class FailFlushAtRunEnd(NoOpObserver):
@@ -256,7 +274,7 @@ class TestFunctionNodeWriteFailure:
         assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
         assert stored_rows(inner) == 1
 
-        # A re-run on a healthy store computes only the rows that are missing.
+        # A re-run on a healthy store does not recompute the stored rows.
         calls.clear()
         rerun = build_job(inner, ROWS)
         rerun.run(orchestrator=orchestrator_cls())
@@ -317,12 +335,39 @@ class TestFunctionNodeWriteFailure:
     def test_auto_flush_failure_raises_naming_the_node(self, orchestrator_cls):
         """A failure of the result cache's flush after a row raises, naming the node."""
         faults = Faults(on_flush=True)
+        store = FaultyStore(InMemoryArrowDatabase(), faults)
+        job = build_job(store, ROWS)
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(orchestrator=orchestrator_cls())
+
+        assert_store_error(
+            exc_info.value, faults, node_label="dbl", names_row=False, flush=True
+        )
+
+    def test_auto_flush_failure_of_an_earlier_write_names_no_row(
+        self, orchestrator_cls
+    ):
+        """A result auto-flush that fails on another table's pending write names
+        neither the row being stored nor the result table.
+
+        The sync orchestrator meets the failure in the next row's result auto-flush.
+        The async one may write every pipeline record after the last result flush,
+        so the job's final flush can be the one that fails; either way it is a flush
+        error that names no row.
+        """
+        faults = Faults(flush_marker=PIPELINE_TABLE)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
         with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
+        err = exc_info.value
+        assert_store_error(err, faults, node_label=None, names_row=False, flush=True)
+        if orchestrator_cls is SyncPipelineOrchestrator:
+            assert err.node_label == "dbl"
+        assert RESULT_TABLE not in "/".join(err.record_path)
+        assert RESULT_TABLE not in str(err)
 
     def test_final_flush_failure_raises(self, orchestrator_cls):
         """A failure of the job's final flush raises ``StoreWriteError``."""
@@ -332,7 +377,9 @@ class TestFunctionNodeWriteFailure:
         with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls(), observer=FailFlushAtRunEnd(faults))
 
-        assert_store_error(exc_info.value, faults, node_label=None, names_row=False)
+        assert_store_error(
+            exc_info.value, faults, node_label=None, names_row=False, flush=True
+        )
         assert exc_info.value.record_path == (JOB_NAME,)
 
     def test_function_failure_is_still_skipped_under_continue(self, orchestrator_cls):
@@ -400,7 +447,7 @@ class TestOperatorNodeWriteFailure:
             job.run(orchestrator=orchestrator_cls(), observer=FailFlushAtRunEnd(faults))
 
         err = exc_info.value
-        assert_store_error(err, faults, node_label=None, names_row=False)
+        assert_store_error(err, faults, node_label=None, names_row=False, flush=True)
         notes = getattr(err, "__notes__", [])
         assert any(
             "pending" in note

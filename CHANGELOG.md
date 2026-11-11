@@ -15,11 +15,12 @@
   under the default `error_policy="continue"`), so the node read back fewer rows than it
   computed. It now raises `StoreWriteError` at the first failed write, whatever
   `error_policy` is, on both orchestrators (the async one no longer raises an exception
-  group). Rows stored before the failure are committed and kept; re-running computes only
-  the missing rows. A function output that cannot be turned into a record (a naive
-  `datetime`, a value not matching the declared type) is still a row failure governed by
-  `error_policy`, like a function that raised. See *When the store cannot be written* in
-  the function-pods guide. (ITL-878 #287)
+  group). Rows stored before the failure are committed and kept; re-running does not
+  recompute stored function results. A failed flush of pending writes raises
+  `StoreWriteError` with `flush=True` and names the store, not a row. A function output that
+  cannot be turned into a record (a naive `datetime`, a value not matching the declared
+  type) is still a row failure governed by `error_policy`, like a function that raised. See
+  *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
 
 ## [0.2.0] — 2026-11-10
 

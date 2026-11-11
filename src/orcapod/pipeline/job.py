@@ -770,7 +770,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 to the store, whatever the orchestrator's ``error_policy``. The run
                 stops at the first failed write. Writes that succeeded before it
                 are flushed first, so rows stored before the failure are kept, and
-                re-running the job computes only the rows that are missing.
+                re-running the job does not recompute stored function results.
         """
         import hashlib
         import uuid
@@ -885,7 +885,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             pipeline_db.flush()
             result_db.flush()
         except Exception as exc:
-            flush_error = StoreWriteError(pipeline_db.base_path)
+            flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
             # Every view of the store shares one set of pending batches, so a failed
             # batch can leave the ones after it unwritten.
             flush_error.add_note(

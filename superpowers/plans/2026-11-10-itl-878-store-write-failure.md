@@ -285,3 +285,21 @@ tests) is kept.
 - [ ] Merge origin/main (b197544e; CHANGELOG entries under `[0.3.0] — unreleased`), full
       suite on 3.11/3.12/3.13, golden unchanged, ruff, format, basedpyright, push, CI,
       CodeRabbit round (bodies too). Reconcile with #290 if it merged first.
+
+---
+
+## Follow-up: CodeRabbit round 3 (review of d305c806), approved by the coordinator 2026-11-11
+
+- (A) docs: a normal return stores every result that could be turned into a record; point to
+  the row-failure paragraph.
+- (B) docs: a side effect whose delivery completed but whose invocation-log write failed is
+  delivered again on re-run (track_completion has no record); check or make it idempotent.
+- (C) `ResultCache.store`: separate `add_record` from auto-`flush`. A flush failure raises
+  `StoreWriteError(result_db.base_path, flush=True)`; new keyword-only `flush: bool`
+  attribute; `add_context` then sets the node label but not the row tag; message says pending
+  writes could not be committed and the failing write may belong to an earlier row or another
+  table. `job.py` final flush uses `flush=True`. Test first.
+- (D) `StoreWriteError` message: "Rows stored before this failure are kept; re-running the job
+  does not recompute stored function results." Docs explain LOG operators recompute.
+- Keep shape consistent with #290's `StoreReadError`.
+- [ ] tests, fix, one commit, replies on 4 threads, CI, CodeRabbit round, worker_done.

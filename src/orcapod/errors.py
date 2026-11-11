@@ -208,17 +208,21 @@ class StoreWriteError(RuntimeError):
     ``error_policy``: ``error_policy="continue"`` skips rows whose *function*
     raised, never rows that could not be stored. The run stops at the first
     failed write. Rows stored before the failure are kept, and re-running the
-    job computes only the rows that are missing.
+    job does not recompute stored function results.
 
     The backend's own exception is chained as ``__cause__``.
 
     Attributes:
         record_path: Path of the table the write was for, relative to the
-            database view the writer holds.
+            database view the writer holds. For a failed flush, the base path of
+            the database view that was flushed.
         node_label: Label of the node whose write failed, or ``None`` when the
             failure is not tied to one node (a flush at the end of a run).
         tag: Tag values of the row being stored, or ``None`` when the write
-            covered many rows (an operator's output) or no row.
+            covered many rows (an operator's output), no row, or was a flush.
+        flush: ``True`` when committing pending writes failed. Every view of a
+            store shares one set of pending writes, so the write that failed may
+            belong to an earlier row or another table than the one being stored.
     """
 
     def __init__(
@@ -226,17 +230,22 @@ class StoreWriteError(RuntimeError):
         record_path: tuple[str, ...],
         node_label: str | None = None,
         tag: Mapping[str, Any] | None = None,
+        *,
+        flush: bool = False,
     ) -> None:
         """Create the error for one failed write.
 
         Args:
-            record_path: Path of the table the write was for.
+            record_path: Path of the table the write was for, or of the database
+                view that was flushed.
             node_label: Label of the node whose write failed, if the write site knows it.
             tag: Tag values of the row being stored, if the write covered one row.
+            flush: Whether committing pending writes failed.
         """
-        self.record_path = tuple(record_path)
-        self.node_label = node_label
-        self.tag = dict(tag) if tag is not None else None
+        self.record_path: tuple[str, ...] = tuple(record_path)
+        self.node_label: str | None = node_label
+        self.tag: dict[str, Any] | None = dict(tag) if tag is not None else None
+        self.flush: bool = flush
         super().__init__(self.record_path, node_label, tag)
 
     @classmethod
@@ -263,13 +272,16 @@ class StoreWriteError(RuntimeError):
     ) -> None:
         """Fill in the node label and row tag if the write site did not know them.
 
+        A failed flush never takes a row tag: the pending write that failed may
+        belong to another row.
+
         Args:
             node_label: Label of the node that owns the write.
             tag: Tag values of the row being stored.
         """
         if self.node_label is None:
             self.node_label = node_label
-        if self.tag is None and tag is not None:
+        if self.tag is None and tag is not None and not self.flush:
             self.tag = dict(tag)
 
     def __str__(self) -> str:
@@ -282,9 +294,18 @@ class StoreWriteError(RuntimeError):
             if cause is not None
             else ""
         )
+        retry = (
+            "The run was stopped. Rows stored before this failure are kept; "
+            "re-running the job does not recompute stored function results."
+        )
+        if self.flush:
+            node = f" for node {self.node_label!r}" if self.node_label else ""
+            return (
+                f"Could not commit pending writes to the store{node} "
+                f"(store {'/'.join(self.record_path)!r}){reason}. The failing write "
+                "may belong to an earlier row or another table of this store. " + retry
+            )
         return (
             f"Could not write to the store for {where}{row} "
-            f"(table {'/'.join(self.record_path)!r}){reason}. The run was stopped. "
-            "Rows stored before this failure are kept; re-running the job computes "
-            "only the rows that are missing."
+            f"(table {'/'.join(self.record_path)!r}){reason}. " + retry
         )

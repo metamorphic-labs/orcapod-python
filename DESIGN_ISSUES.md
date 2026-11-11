@@ -2244,6 +2244,9 @@ on it (`orcapod.utils.store_errors`), not raised in its place, so a node functio
 another cached pod cannot turn that pod's store failure into a skipped row. When concurrent
 node tasks fail together, the async orchestrator raises the store error of the node first in
 topological order, notes the other failures on it and logs other store errors at WARNING.
+A failed flush (the result cache's per-row auto-flush or the job's final flush) raises
+`StoreWriteError(flush=True)` naming the store and no row: views of one store share their
+pending writes, so the failing batch may be an earlier row's or another table's.
 The rule (developer, November 11, 2026): store failures fail the run; a function output that
 cannot be stored (a naive `datetime`, a value not matching the declared type, rejected while
 `ResultCache.store` prepares the record, before any write) is a row failure governed by

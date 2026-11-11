@@ -235,7 +235,11 @@ stored -- the disk is full, the connection drops, or the database cannot hold on
 output types -- `job.run()` raises `StoreWriteError` (from `orcapod.errors`) at the first
 failed write, on both the synchronous and the asynchronous orchestrator. The error names the
 node, the row being stored and the table, and the database's own exception is chained as its
-cause. A run that returns normally has stored every result it computed.
+cause. When committing pending writes fails, the error has `flush=True` and names the store
+instead of a row and table: every view of a store shares its pending writes, so the write
+that failed may belong to an earlier row or another table. A run that returns normally has
+stored every result that could be turned into a record; a result rejected before that is a
+row failure (see below).
 
 This holds whatever `error_policy` the orchestrator was given. `error_policy="continue"` (the
 default) skips rows whose *function* raised and keeps going; it never skips a row because it
@@ -250,7 +254,12 @@ orchestrator would have stopped at; the other failures are logged and noted on i
 
 After the failure, rows stored before it are kept: `job.run()` commits the writes that
 succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
-fixed, run the job again; only the rows that are missing are computed.
+fixed, run the job again: stored function results are not recomputed, only the missing ones
+are. An operator with `cache_mode=LOG` recomputes its output on every run, as it always does.
+A side effect is different: if its delivery completed but the write to its invocation log
+failed, there is no record that it completed, and `track_completion` delivers it again on the
+re-run. Before re-running, check which side effects already completed, or make the side
+effect safe to repeat.
 
 A value your function returned for one row that cannot be turned into a record at all is a
 different case: a naive `datetime`, a `str` from a function declared to return `int`, or an

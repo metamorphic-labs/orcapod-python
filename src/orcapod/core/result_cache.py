@@ -294,10 +294,17 @@ class ResultCache:
                 data_table,
                 skip_duplicates=skip_duplicates,
             )
-            if self._auto_flush:
-                self._result_database.flush()
         except Exception as exc:
             raise StoreWriteError(self._versioned_record_path) from exc
+        if self._auto_flush:
+            try:
+                self._result_database.flush()
+            except Exception as exc:
+                # Views of one store share their pending writes, so the batch that
+                # failed may be an earlier row's or another table's.
+                raise StoreWriteError(
+                    self._result_database.base_path, flush=True
+                ) from exc
 
     def get_all_records(
         self, include_system_columns: bool = False
