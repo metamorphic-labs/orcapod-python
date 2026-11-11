@@ -228,6 +228,26 @@ A node from a job that has run also provides:
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
   of another pipeline
 
+### When the store cannot be written
+
+A failed write to the store always fails the run. If a node's results or records cannot be
+stored -- the disk is full, the connection drops, or the database cannot hold one of the
+output types -- `job.run()` raises `StoreWriteError` (from `orcapod.errors`) at the first
+failed write, on both the synchronous and the asynchronous orchestrator. The error names the
+node, the row being stored and the table, and the database's own exception is chained as its
+cause. A run that returns normally has stored every result it computed.
+
+This holds whatever `error_policy` the orchestrator was given. `error_policy="continue"` (the
+default) skips rows whose *function* raised and keeps going; it never skips a row because it
+could not be stored.
+
+After the failure, rows stored before it are kept: `job.run()` commits the writes that
+succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
+fixed, run the job again; only the rows that are missing are computed.
+
+This is the contract for now. An opt-in mode that tolerates store failures may be added
+later.
+
 ## Multiple input streams
 
 If you pass multiple streams to a function pod, they are automatically joined (using

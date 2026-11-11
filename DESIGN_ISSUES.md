@@ -2171,3 +2171,37 @@ equals the materialized one. Hashes of pipelines that already worked are unchang
 Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
 barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
 xfail.
+
+---
+
+## `src/orcapod/pipeline/job.py`, orchestrators, node write paths — store write failures
+
+### SW1 — A failed store write did not fail `PipelineJob.run()`
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-878
+
+A node's write to the store ran inside the per-row handler meant for function failures:
+`FunctionNode.execute` (sync) and `_FunctionPodBase.async_execute.process_one` (async) wrap
+compute *and* the result-table and pipeline-table writes in one `except Exception`. With the
+default `error_policy="continue"` a failed write was skipped like a crashed function: the sync
+path logged a WARNING, the async path logged only at DEBUG, `job.run()` returned normally and
+the node read back fewer rows (none when every write failed, e.g. a logical-type output on
+`SQLiteConnector`, ITL-877). An operator LOG write failure did raise, but before `job.run()`'s
+final flush, so the upstream function node's pending pipeline rows were never committed while
+its result rows were; async callers got an `ExceptionGroup`.
+
+**Fix:** Contract, for now (developer, November 10, 2026): a failed store write always fails
+the run, whatever `error_policy` is. Every node write site (`ResultCache.store`,
+`FunctionNode.add_pipeline_record`, `OperatorNode._store_output_stream`, the side-effect
+invocation log) raises `orcapod.errors.StoreWriteError`, chained from the backend error and
+naming the node, the row's tag and the table. The per-row handlers re-raise it, so the run
+stops at the first failed write; `error_policy` still decides only about rows whose function
+raised. `AsyncPipelineOrchestrator` unwraps it from the `TaskGroup` exception group, so both
+orchestrators raise the same error. `PipelineJob.run()` flushes the writes that succeeded
+before re-raising (a flush failure there is logged, not raised over the original), and wraps a
+failure of its final flush. Nothing stored is rewritten; no hash, path or schema change. An
+opt-in mode that tolerates store failures is a possible later option. Regressions:
+`tests/test_pipeline/test_store_write_failure.py`. Related, not fixed here: the async
+orchestrator ignores `error_policy` (ITL-879); connector and Delta `flush` drop a batch whose
+write fails (ITL-880).
