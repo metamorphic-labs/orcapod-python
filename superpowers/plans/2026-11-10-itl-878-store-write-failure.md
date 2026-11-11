@@ -275,11 +275,13 @@ tests) is kept.
       3 outputs, each compared with a function raising on the same row) also assert the
       per-row log record (level + message) matches the function-failure one, besides the
       observer `on_data_crash`, raise-or-return, rows and stored rows.
-- [ ] Docs (`docs/concepts/function-pods.md`, "When the store cannot be written"): store
+- [x] Docs (`docs/concepts/function-pods.md`, "When the store cannot be written"): store
       failures fail the run; a function output that cannot be stored is a row failure;
       async logs row failures at DEBUG and ignores `fail_fast` (ITL-879), unchanged here.
-- [ ] `DESIGN_ISSUES.md` SW1: the same rule.
-- [ ] Decline finding (1) with a signed top-level PR comment.
+- [x] `DESIGN_ISSUES.md` SW1: the same rule.
+- [x] Decline finding (1) with a signed top-level PR comment (issuecomment-6791981712).
+- [x] Merged origin/main b197544e (DESIGN_ISSUES conflict: both appended sections kept);
+      added the `[0.3.0] — unreleased` CHANGELOG section with this PR's entries.
 - [ ] Merge origin/main (b197544e; CHANGELOG entries under `[0.3.0] — unreleased`), full
       suite on 3.11/3.12/3.13, golden unchanged, ruff, format, basedpyright, push, CI,
       CodeRabbit round (bodies too). Reconcile with #290 if it merged first.

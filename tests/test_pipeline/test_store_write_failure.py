@@ -710,7 +710,10 @@ class CrashRecorder(NoOpObserver):
 
 # The per-row handlers' log messages: sync ``FunctionNode.execute`` and async
 # ``process_one`` (DEBUG there, ITL-879).
-ROW_FAILURE_LOGS = ("Data execution failed in %s: %s", "Data processing failed, skipping: %s")
+ROW_FAILURE_LOGS = (
+    "Data execution failed in %s: %s",
+    "Data processing failed, skipping: %s",
+)
 
 
 def row_failure_outcome(
