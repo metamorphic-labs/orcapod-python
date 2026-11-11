@@ -12,6 +12,7 @@ from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
+from orcapod.errors import StoreWriteError
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
@@ -28,6 +29,26 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
+
+
+def _flush_best_effort(*databases: "ArrowDatabaseProtocol") -> None:
+    """Flush each database, logging instead of raising if a flush fails.
+
+    Used when a run has already failed: the run's own error is the one to report,
+    and a second failure while committing the writes that did succeed must not
+    replace it.
+
+    Args:
+        *databases: The databases to flush.
+    """
+    for database in databases:
+        try:
+            database.flush()
+        except Exception:
+            logger.exception(
+                "Could not flush pending writes after the run failed; "
+                "the rows they hold were not stored"
+            )
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -736,6 +757,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Raises:
             ValueError: If no store is set.
             RuntimeError: If no pipeline has been compiled.
+            StoreWriteError: If a node's results or records could not be written
+                to the store, whatever the orchestrator's ``error_policy``. The run
+                stops at the first failed write. Writes that succeeded before it
+                are flushed first, so rows stored before the failure are kept, and
+                re-running the job computes only the rows that are missing.
         """
         import hashlib
         import uuid
@@ -827,20 +853,30 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         snapshot_hash = hashlib.sha256("\n".join(leaf_hashes).encode()).hexdigest()[:16]
         pipeline_uri = "/".join(self._name) + "@" + snapshot_hash
 
-        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        effective_orchestrator.run(
-            exec_dag,
-            observer=effective_observer,
-            run_id=run_id,
-            pipeline_uri=pipeline_uri,
-            materialize_results=materialize_results,
-        )
-
-        # Flush databases.
         pipeline_db = self._store.at(*self._name)
         result_db = pipeline_db.at("_result")
-        pipeline_db.flush()
-        result_db.flush()
+
+        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+        try:
+            effective_orchestrator.run(
+                exec_dag,
+                observer=effective_observer,
+                run_id=run_id,
+                pipeline_uri=pipeline_uri,
+                materialize_results=materialize_results,
+            )
+        except Exception:
+            # Commit the writes that did succeed before the failure, so their rows
+            # do not look dropped, then report the failure itself.
+            _flush_best_effort(pipeline_db, result_db)
+            raise
+
+        # Flush databases.
+        try:
+            pipeline_db.flush()
+            result_db.flush()
+        except Exception as exc:
+            raise StoreWriteError(pipeline_db.base_path) from exc
 
         # Mutate self in place.
         self._has_run = True

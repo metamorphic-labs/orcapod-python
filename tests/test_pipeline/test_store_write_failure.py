@@ -17,6 +17,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import SelectDataColumns
+from orcapod.errors import StoreWriteError
 from orcapod.databases import (
     ConnectorArrowDatabase,
     InMemoryArrowDatabase,
@@ -131,7 +132,9 @@ def to_path(x: int) -> pathlib.Path:
     return pathlib.Path(f"/data/{x}.txt")
 
 
-def build_job(store: Any, rows: list[dict], *, pod=double, with_operator: bool = False):
+def build_job(
+    store: Any, rows: list[dict[str, Any]], *, pod=double, with_operator: bool = False
+):
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
         source = DictSource(data=rows, tag_columns=["k"], source_id="src")
@@ -158,14 +161,27 @@ def orchestrator_cls(request):
     ]
 
 
-def assert_store_error(err: BaseException, node_label: str | None, faults: Faults):
-    """The run's error is a single error (not a group) naming the node and the table."""
-    assert not isinstance(err, BaseExceptionGroup), f"{type(err).__name__}: {err}"
+def assert_store_error(
+    err: BaseException,
+    faults: Faults,
+    *,
+    node_label: str | None,
+    names_row: bool,
+) -> None:
+    """The run's error is a plain ``StoreWriteError`` naming node, row and table."""
+    assert isinstance(err, StoreWriteError), f"{type(err).__name__}: {err}"
     message = str(err)
     if node_label is not None:
-        assert repr(node_label) in message, message
+        assert err.node_label == node_label
+        assert f"node {node_label!r}" in message, message
+    if names_row:
+        assert err.tag is not None and err.tag["k"] in {row["k"] for row in ROWS}
+        assert f"for row {err.tag!r}" in message, message
     if faults.failed_paths:
+        assert "/".join(err.record_path) == faults.failed_paths[0]
         assert faults.failed_paths[0] in message, message
+    assert isinstance(err.__cause__, OSError)
+    assert "rows that are missing" in message
 
 
 def stored_rows(store: Any, label: str = "dbl") -> int:
@@ -185,10 +201,10 @@ class TestFunctionNodeWriteFailure:
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, "dbl", faults)
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
 
     def test_result_table_failure_on_later_row_keeps_earlier_rows(
         self, orchestrator_cls
@@ -197,10 +213,10 @@ class TestFunctionNodeWriteFailure:
         faults = Faults(write_marker=RESULT_TABLE, succeed_first=1)
         job = build_job(FaultyStore(inner, faults), ROWS)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, "dbl", faults)
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
         assert stored_rows(inner) == 1
 
         # A re-run on a healthy store computes only the rows that are missing.
@@ -215,17 +231,17 @@ class TestFunctionNodeWriteFailure:
         faults = Faults(write_marker=PIPELINE_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, "dbl", faults)
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
 
-        # The result that was computed is stored; a healthy re-run reuses it.
-        calls.clear()
+        # Every result computed before the failure was stored, so a healthy re-run
+        # reuses it: across both runs each row is computed exactly once.
         rerun = build_job(inner, ROWS)
         rerun.run(orchestrator=orchestrator_cls())
         assert rerun.nodes["dbl"].as_table().num_rows == 3
-        assert len(calls) == 2
+        assert sorted(calls) == [0, 1, 2]
 
     def test_failure_on_new_row_keeps_previously_stored_rows(self, orchestrator_cls):
         inner = InMemoryArrowDatabase()
@@ -234,10 +250,10 @@ class TestFunctionNodeWriteFailure:
 
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS)
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, "dbl", faults)
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
         assert stored_rows(inner) == 2
 
     @pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
@@ -247,19 +263,19 @@ class TestFunctionNodeWriteFailure:
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls(error_policy=error_policy))
 
-        assert_store_error(exc_info.value, "dbl", faults)
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
 
     def test_flush_failure_raises(self, orchestrator_cls):
         faults = Faults(on_flush=True)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, None, faults)
+        assert_store_error(exc_info.value, faults, node_label=None, names_row=False)
 
     def test_function_failure_is_still_skipped_under_continue(self, orchestrator_cls):
         """``error_policy="continue"`` keeps skipping rows whose function raised."""
@@ -284,10 +300,10 @@ class TestOperatorNodeWriteFailure:
         faults = Faults(write_marker=OPERATOR_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS, with_operator=True)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert_store_error(exc_info.value, "sel", faults)
+        assert_store_error(exc_info.value, faults, node_label="sel", names_row=False)
         # The upstream function node wrote all its rows before the operator failed;
         # none of them may look dropped.
         assert stored_rows(inner) == 3
@@ -303,9 +319,9 @@ class TestSQLiteTrigger:
         store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
         job = build_job(store, ROWS, pod=to_path)
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
-        assert not isinstance(exc_info.value, BaseExceptionGroup)
-        assert "'dbl'" in str(exc_info.value)
+        assert exc_info.value.node_label == "dbl"
+        assert "node 'dbl'" in str(exc_info.value)
         assert "does not preserve Arrow metadata" in str(exc_info.value)
