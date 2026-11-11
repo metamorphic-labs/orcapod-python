@@ -14,7 +14,8 @@ into an `int64` column, `large_binary` into `large_string`), or, when an extensi
 was involved, accepted rows the table could then no longer read. The comparison treats types the
 way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
 are the same type, an extension type is compared by its storage type, and nullability is not
-compared. New columns and missing columns are still accepted.
+compared. Struct fields are compared by name at any depth, including inside lists and maps.
+New and missing columns, and new and missing struct fields, are still accepted.
 
 `DeltaTableDatabase.flush()` (and `add_records(..., flush=True)`) now raises a
 `StoreReadError` or this `InputValidationError` as itself. Before, it wrapped every failure in a

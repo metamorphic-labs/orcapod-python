@@ -357,6 +357,26 @@ class TestChangedColumnTypeIsRefused:
         assert back is not None
         assert back.num_rows == 1
 
+    def test_nested_field_type_change(self, base: Path) -> None:
+        """A changed type of an existing struct field is refused."""
+        db = DeltaTableDatabase(base_path=base)
+        append(db, rows([b"a"], pa.array([{"a": 1}], pa.struct([("a", pa.int64())]))))
+
+        with pytest.raises(InputValidationError) as info:
+            append(
+                db,
+                rows([b"b"], pa.array([{"a": 2.0}], pa.struct([("a", pa.float64())]))),
+            )
+        message = str(info.value)
+        assert "'x'" in message
+        assert "struct<a: int64>" in message
+        assert "struct<a: double>" in message
+
+        back = DeltaTableDatabase(base_path=base).get_all_records(PATH)
+        assert back is not None
+        assert back.num_rows == 1
+        assert back.schema.field("x").type == pa.struct([("a", pa.int64())])
+
 
 class TestLegitimateAppendsStillPass:
     """Appends whose types match the stored table, as Delta stores them, succeed."""
@@ -401,6 +421,43 @@ class TestLegitimateAppendsStillPass:
         back = self.read_back(base)
         assert back.num_rows == 3
         assert "y" in back.column_names
+
+    def test_new_struct_field(self, base: Path) -> None:
+        """An append that adds a field to a stored struct column succeeds."""
+        db = DeltaTableDatabase(base_path=base)
+        append(db, rows([b"a"], pa.array([{"a": 1}], pa.struct([("a", pa.int64())]))))
+        evolved = pa.struct([("a", pa.int64()), ("b", pa.int64())])
+        append(db, rows([b"b"], pa.array([{"a": 2, "b": 3}], evolved)))
+
+        back = DeltaTableDatabase(base_path=base).get_all_records(
+            PATH, record_id_column="rid"
+        )
+        assert back is not None
+        back = back.sort_by("rid")
+        assert back.schema.field("x").type == evolved
+        assert back.column("x").to_pylist() == [
+            {"a": 1, "b": None},
+            {"a": 2, "b": 3},
+        ]
+
+    def test_new_struct_field_inside_a_list(self, base: Path) -> None:
+        """An append that adds a field to a struct inside a list column succeeds."""
+        db = DeltaTableDatabase(base_path=base)
+        stored_type = pa.large_list(pa.struct([("a", pa.int64())]))
+        append(db, rows([b"a"], pa.array([[{"a": 1}]], stored_type)))
+        evolved = pa.large_list(pa.struct([("a", pa.int64()), ("b", pa.int64())]))
+        append(db, rows([b"b"], pa.array([[{"a": 2, "b": 3}]], evolved)))
+
+        back = DeltaTableDatabase(base_path=base).get_all_records(
+            PATH, record_id_column="rid"
+        )
+        assert back is not None
+        back = back.sort_by("rid")
+        assert back.schema.field("x").type == evolved
+        assert back.column("x").to_pylist() == [
+            [{"a": 1, "b": None}],
+            [{"a": 2, "b": 3}],
+        ]
 
     def test_missing_column(self, base):
         """An append that omits a stored column succeeds."""

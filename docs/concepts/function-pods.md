@@ -231,6 +231,7 @@ print("function calls:", len(calls))
     `InputValidationError`, which names the table, the column and both types. They are not
     converted to the stored type. `string` and `large_string`, and the other large and
     non-large layouts of one type, count as the same type.
+    New columns and new struct fields are still accepted.
 
     Both errors reach you as themselves, also from `flush()` and from
     `add_records(..., flush=True)`. When several pending tables fail in one flush, the

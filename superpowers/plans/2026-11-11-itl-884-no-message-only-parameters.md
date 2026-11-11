@@ -44,3 +44,13 @@ behaviour and every `StoreReadError` / `InputValidationError` message stay exact
 - `_single_store_error` here is now `(group) -> StoreReadError | None`, picking
   `StoreReadError.in_group(group)[0]`. PR #287's version takes `topo_order` and ranks
   `StoreWriteError` by `node_label`; whichever PR merges second reconciles the two.
+
+## CodeRabbit round on 0369cfcc (thread 4537325251, Major)
+
+The append check compared whole struct types, so adding a nested struct field (which main accepts
+and Delta's merge adds) was refused: a regression from this PR. Fix (coordinator approved): the
+module function `_types_conflict(stored, incoming)` matches struct fields by name at every depth,
+through list and map types; a field on one side only is not a conflict, like a top-level column.
+`_incompatible_append_column` still returns what differs; `flush_batch` raises. New tests:
+`test_nested_field_type_change`, `test_new_struct_field`, `test_new_struct_field_inside_a_list`
+(stored schema and null back-fill asserted). Suite 6929 passed / 96 skipped / 15 xfailed on 3.11–3.13.

@@ -71,6 +71,45 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
+def _types_conflict(stored: pa.DataType, incoming: pa.DataType) -> bool:
+    """Return ``True`` if ``incoming`` changes a type that ``stored`` already has.
+
+    Both types must already be reduced by ``_comparable_storage_type``. Struct
+    fields are matched by name at every depth, through list and map types. A
+    field present on only one side is not a conflict, just as a top-level column
+    present on only one side is not: adding or omitting it is schema evolution,
+    which Delta's merge accepts or rejects itself. Any other difference is a
+    conflict.
+
+    Args:
+        stored: The type the stored table has.
+        incoming: The type the new rows have.
+
+    Returns:
+        Whether a type the stored table already has would change.
+    """
+    if pa.types.is_struct(stored) and pa.types.is_struct(incoming):
+        stored_fields = {f.name: f.type for f in stored}
+        return any(
+            _types_conflict(stored_fields[f.name], f.type)
+            for f in incoming
+            if f.name in stored_fields
+        )
+    if (pa.types.is_large_list(stored) and pa.types.is_large_list(incoming)) or (
+        pa.types.is_list(stored) and pa.types.is_list(incoming)
+    ):
+        return _types_conflict(stored.value_type, incoming.value_type)
+    if pa.types.is_fixed_size_list(stored) and pa.types.is_fixed_size_list(incoming):
+        return stored.list_size != incoming.list_size or _types_conflict(
+            stored.value_type, incoming.value_type
+        )
+    if pa.types.is_map(stored) and pa.types.is_map(incoming):
+        return _types_conflict(stored.key_type, incoming.key_type) or _types_conflict(
+            stored.item_type, incoming.item_type
+        )
+    return stored != incoming
+
+
 def _store_error_to_raise(errors: list[Exception]) -> Exception | None:
     """Pick the store error a failed flush raises as itself.
 
@@ -1180,9 +1219,10 @@ class DeltaTableDatabase:
         involved, writes data files the table can no longer read. Both sides are
         compared through Delta's own type mapping, with extension types reduced to
         storage, large-normalized and nullability ignored, so a type Delta stores
-        differently (``uint64`` as ``int64``) is not reported. Columns present on
-        only one side are allowed (schema evolution). The stored schema comes from
-        the loaded log; no data is read.
+        differently (``uint64`` as ``int64``) is not reported. Columns and nested
+        struct fields present on only one side are allowed (schema evolution);
+        see ``_types_conflict``. The stored schema comes from the loaded log; no
+        data is read.
 
         Args:
             delta_table: The loaded stored table.
@@ -1215,7 +1255,7 @@ class DeltaTableDatabase:
             incoming_type = _comparable_storage_type(
                 arrow_utils.normalize_to_large_types(field.type, keep_null=True)
             )
-            if stored_type != incoming_type:
+            if _types_conflict(stored_type, incoming_type):
                 return field.name, stored_type, incoming_type
         return None
 
