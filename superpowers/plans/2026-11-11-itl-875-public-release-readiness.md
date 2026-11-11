@@ -91,3 +91,8 @@ No library code, no `release.yml` behaviour change, no repository setting change
 ## Progress notes
 
 - 2026-11-11: plan written; branch renamed and based on `origin/main` `b197544e`.
+- 2026-11-11: Tasks 1-6 done. Secret scan (gitleaks 8.30.1, trufflehog 3.99.8, pattern search,
+  GitHub text): no secrets, all hits triaged as false positives. Inventory written to
+  `superpowers/specs/2026-11-11-public-release-readiness.md`. `_license-check.yml` entry
+  removed after a local run of the exact command passed (commit `542344da`). No `nauticalab`
+  URL needed changing. Remaining: full test suite, PR, CodeRabbit, worker_done.
