@@ -55,6 +55,8 @@ class StreamTableIdentity:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, StreamTableIdentity):
             return NotImplemented
-        return self._table.equals(other._table)
+        return bool(self._table.equals(other._table))
 
-    __hash__ = None  # type: ignore[assignment]  # equal by table content, like pa.Table
+    def __hash__(self) -> int:
+        """Unhashable, like ``pa.Table``: equality is by table content."""
+        raise TypeError("StreamTableIdentity is unhashable")

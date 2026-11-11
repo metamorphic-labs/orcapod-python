@@ -95,11 +95,11 @@ class TestTableValueLabel:
         """Semantic preprocessing applies to table values: a ``File`` column by its content."""
         from orcapod.logical_types.file_type import File
 
-        ctx = get_default_context()
-        arrow_type = ctx.type_converter.register_python_class(File)
+        converter: Any = get_default_context().type_converter
+        arrow_type = converter.register_python_class(File)
 
         def file_table(path: Any) -> pa.Table:
-            storage = ctx.type_converter.python_to_storage(File(path), File)
+            storage = converter.python_to_storage(File(path), File)
             column = pa.ExtensionArray.from_storage(
                 arrow_type, pa.array([storage], arrow_type.storage_type)
             )
