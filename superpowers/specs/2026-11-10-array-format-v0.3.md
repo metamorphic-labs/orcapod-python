@@ -43,28 +43,35 @@ definition and the hash label below are public commitments once v0.3 is tagged.
 
 ## A. Storage layout
 
-### A1. Arrow storage type (CONFIRMED: candidate 4c, developer's decision)
+### A1. Arrow storage type (CONFIRMED: candidate 4c, developer's decision; nullability per F1)
 
 ```
 extension<orcapod.ndarray> over
 struct<
-  dtype: large_string   not null,
-  shape: large_list<item: int64 not null>   not null,
-  data:  large_binary   not null
+  dtype: large_string,
+  shape: large_list<item: int64>,
+  data:  large_binary
 >
 ```
 
 - Field order is `dtype, shape, data`. The field names are part of the format.
-- The children are non-null: every array has a dtype, a shape (possibly empty) and a buffer
-  (possibly empty). Nullability of the **column** follows the annotation, as for every other
-  logical type: `np.ndarray` gives a non-null column, `np.ndarray | None` a nullable one, and a
-  `None` value is a null struct. Justification: nullability is never changed (CLAUDE.md "Arrow
-  types"), and a null child would have no meaning.
+- **The children are nullable at the Arrow level (finding F1, approved November 10).** The first
+  draft made them non-null. The risk prototype showed that Polars drops nested non-null flags
+  when it converts back to Arrow (the nested-nullability gap, ITL-842). The extension type then
+  no longer matches, and Orcapod's strict extension deserializer rejects it inside
+  `PolarsFilter`, `Join` and `MergeJoin`. So non-null is enforced by the logical type instead:
+  writing never produces a null child, and reading a row with a null child raises an error
+  naming the column. This can be tightened later under a new storage version, once nested
+  nullability survives Polars.
+- Nullability of the **column** follows the annotation, as for every other logical type:
+  `np.ndarray` gives a non-null column, `np.ndarray | None` a nullable one, and a `None` value is
+  a null struct.
 - `large_*` variants throughout, so `normalize_to_large_types` is the identity on this type and
   operators never rebuild it.
 - `shape` holds one `int64` per dimension, outermost first, every value `>= 0`.
 - `data` holds the array's elements in C order, little-endian, packed (no padding):
   exactly `itemsize(dtype) * prod(shape)` bytes.
+- The Polars extension type carries the same `ARROW:extension:metadata` as the Arrow one.
 
 ### A2. The dtype tag (PENDING: names below)
 
@@ -293,18 +300,29 @@ reference implementation of C1 in the test (plain `hashlib` + `struct`, no Orcap
 
 ---
 
+## Operator findings from the risk prototype (November 10)
+
+A scratch prototype of the struct format (no `src/` change) was run against `tests/test_arrays`:
+
+- **F1** (approved): nullable struct children, see A1.
+- **F2** (moved out of this PR): `SemiJoin` uses pyarrow's Acero hash join, which refuses any
+  nested non-key column. It already fails on main for `list[int]` and dataclass columns; today's
+  arrays only escape it because `.npy` is `large_binary`. The fix, moving SemiJoin to Polars
+  (`how="semi"`, `maintain_order="left"`, input types restored), is ITL-847 and has its own PR.
+  Until it merges, the SemiJoin-with-array test is a strict `xfail` citing ITL-847.
+- **F3** (approved): `MergeJoin` sorts colliding values as Python storage values, and struct
+  storage values (dicts) cannot be ordered (the ITL-839 limitation). For the array logical type
+  only, the ordering key is the stored `(dtype tag, shape, data)` tuple. That order is
+  deterministic and defined on the stored value. General struct ordering stays in ITL-839.
+
 ## H. Risks and cuts
 
 Risks:
 
-1. **Polars and struct-backed extension types.** Operators round-trip through Polars and restore
-   column types. b2 showed this works for the 4c prototype, but the real polars extension type
-   over a struct is new here. Test early, on every operator.
-2. **MergeJoin sorting a struct column.** MergeJoin sorts colliding values; how it orders struct
-   values (dtype, shape, data) must be deterministic and type-strict (two different dtypes in one
-   column should still be accepted, as the column type is one logical type). Test early.
-3. **Delta with non-null children and nested non-null list items.** Verify write, read, schema
-   equality on reopen and a cached re-run in a fresh process.
+1. **Polars and struct-backed extension types.** Prototyped: works with nullable children (F1).
+2. **MergeJoin sorting a struct column.** Prototyped: needs the array ordering key (F3).
+3. **Delta with the struct column.** Prototyped: in-memory and Delta, sync and async pass;
+   the cached re-run in a fresh process is still to be verified with the real type.
 4. **Golden churn if #284 lands late.** Mechanical, but must be listed in the PR.
 5. **D-PATH is a table path change for array nodes.** Needs the developer's explicit yes.
 

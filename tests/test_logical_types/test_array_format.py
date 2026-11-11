@@ -74,14 +74,12 @@ def test_digest_rejects_negative_dimension() -> None:
 
 
 def test_storage_type() -> None:
+    # Children are nullable at the Arrow level: Polars drops nested non-null flags
+    # (ITL-842), so non-null is enforced by the logical type instead.
     assert ARRAY_STORAGE_TYPE == pa.struct(
         [
-            pa.field("dtype", pa.large_string(), nullable=False),
-            pa.field(
-                "shape",
-                pa.large_list(pa.field("item", pa.int64(), nullable=False)),
-                nullable=False,
-            ),
-            pa.field("data", pa.large_binary(), nullable=False),
+            pa.field("dtype", pa.large_string()),
+            pa.field("shape", pa.large_list(pa.int64())),
+            pa.field("data", pa.large_binary()),
         ]
     )

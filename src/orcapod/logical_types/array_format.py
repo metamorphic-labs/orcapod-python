@@ -9,10 +9,15 @@ today (``numpy_type.LogicalNumpyArray``); other array types (such as
 Storage struct (one value per row)::
 
     struct<
-      dtype: large_string not null,                  # Orcapod dtype tag
-      shape: large_list<item: int64 not null> not null,
-      data:  large_binary not null,                  # element bytes, C order
+      dtype: large_string,              # Orcapod dtype tag
+      shape: large_list<item: int64>,   # dimensions, outermost first
+      data:  large_binary,              # element bytes, C order
     >
+
+The children are nullable at the Arrow level only because Polars drops nested
+non-null flags when it converts back to Arrow (ITL-842), and the extension type
+would then no longer match. A stored array value never has a null child: the
+logical type refuses one on write and on read. A null array is a null struct.
 
 Value digest, version 1. For a row with dtype tag ``T``, shape
 ``(d0, ..., d{n-1})`` and data bytes ``D``::
@@ -44,13 +49,9 @@ ARRAY_FORMAT_VERSION = 1
 
 ARRAY_STORAGE_TYPE: pa.StructType = pa.struct(
     [
-        pa.field("dtype", pa.large_string(), nullable=False),
-        pa.field(
-            "shape",
-            pa.large_list(pa.field("item", pa.int64(), nullable=False)),
-            nullable=False,
-        ),
-        pa.field("data", pa.large_binary(), nullable=False),
+        pa.field("dtype", pa.large_string()),
+        pa.field("shape", pa.large_list(pa.int64())),
+        pa.field("data", pa.large_binary()),
     ]
 )
 """The Arrow struct one array value is stored as (see the module docstring)."""

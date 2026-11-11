@@ -2171,3 +2171,28 @@ equals the materialized one. Hashes of pipelines that already worked are unchang
 Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
 barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
 xfail.
+
+---
+
+## `src/orcapod/logical_types/numpy_type.py`, `src/orcapod/logical_types/array_format.py` — array format
+
+### AR1 — `numpy.ndarray` stored as a `.npy` file and hashed by file bytes
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-888 (absorbs ITL-883; design ITL-874)
+
+Arrays were stored as the exact `np.save` file in a `large_binary` column under extension name
+`numpy.ndarray`, and hashed as SHA-256 of that file under the bare label `sha256`. The hash
+followed the file, not the value: equal arrays in C and Fortran order, in little- and big-endian
+byte order, or with structured fields in another order hashed differently. Masked arrays lost
+their mask silently. `StringDType` failed with a misleading pickle error. A pod declared
+`-> np.ndarray` could return a NumPy scalar unchecked.
+
+v0.3 moves to the value-based format of `superpowers/specs/2026-11-10-array-format-v0.3.md`:
+extension `orcapod.ndarray` over `struct<dtype, shape, data>` (little-endian, C order), hashed
+by value under a versioned label, with old data neither detected nor migrated (deferred by the
+developer).
+
+Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
+nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
+instead. Tighten under a new storage version once nested nullability survives Polars.
