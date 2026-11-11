@@ -87,8 +87,9 @@ written into a struct field declared non-null is accepted. So:
   no nulls;
 * Orcapod sources on these tables still show every column as `T | None`. Showing the
   declared nullability needs a record of it in each table's metadata and Orcapod support
-  for reading it, which is under discussion. `annotate` writes such a record (table
-  metadata only, never data) once its key and format are decided.
+  for reading and enforcing it: ITL-936 (developer's choice, November 11, 2026). `annotate`
+  writes that record (table metadata only, never data) once ITL-936 fixes its key and
+  format; until then do not run it.
 
 Print the full per-column table with:
 

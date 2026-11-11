@@ -1369,8 +1369,10 @@ def nullability_record(spec: TableSpec) -> dict[str, Any]:
     """Return the declared nullability of one table, for its metadata.
 
     SpiralDB stores every top-level column nullable, so a reader learns which
-    columns are required only from a record like this one. Its key and format belong
-    to the Orcapod design that will read it; this is the single place to adapt.
+    columns are required only from a record like this one. The key and the format
+    are designed in ITL-936 (Orcapod's Spiral connector reads the record and enforces
+    it); until then this is a placeholder carrying the map's content, nested fields
+    included, and ``annotate`` is not to be run. Adapt this function to that format.
     """
     return {
         "columns": {name: c.nullable for name, c in spec.columns.items()},
