@@ -58,8 +58,8 @@ class DeltaTableDatabase:
         _shared_pending_batches: "dict[str, pa.Table] | None" = None,
         _shared_pending_record_ids: "defaultdict[str, set[bytes]] | None" = None,
         _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
-        _shared_existing_ids_cache: "defaultdict[str, set[str]] | None" = None,
-        _shared_cache_dirty: "defaultdict[str, bool] | None" = None,
+        _shared_existing_ids_cache: "dict[str, set[bytes]] | None" = None,
+        _shared_cache_dirty: "dict[str, bool] | None" = None,
     ):
         self._root_uri, self._storage_options = parse_base_path(
             base_path, storage_options
@@ -102,7 +102,7 @@ class DeltaTableDatabase:
             self._pending_record_ids = _shared_pending_record_ids
         else:
             self._pending_record_ids: dict[str, set[bytes]] = defaultdict(set)
-        self._existing_ids_cache: dict[str, set[str]] = (
+        self._existing_ids_cache: dict[str, set[bytes]] = (
             _shared_existing_ids_cache
             if _shared_existing_ids_cache is not None
             else defaultdict(set)
@@ -343,7 +343,7 @@ class DeltaTableDatabase:
                 self._existing_ids_cache[record_key] = set()
             else:
                 existing_ids = cast(
-                    set[str], set(arrow_table[self.RECORD_ID_COLUMN].to_pylist())
+                    set[bytes], set(arrow_table[self.RECORD_ID_COLUMN].to_pylist())
                 )
                 self._existing_ids_cache[record_key] = existing_ids
 
@@ -358,7 +358,7 @@ class DeltaTableDatabase:
             self._cache_dirty[record_key] = False
             raise
 
-    def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[str]:
+    def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[bytes]:
         """Get the set of existing IDs in the Delta table, using cache when possible."""
         record_key = self._get_record_key(record_path)
         if (

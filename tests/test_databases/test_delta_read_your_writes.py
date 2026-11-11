@@ -9,6 +9,7 @@ overlap the stored row is the one returned.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 from pathlib import Path
 
 import pyarrow as pa
@@ -39,7 +40,7 @@ def _values(table: pa.Table | None) -> list[int] | None:
     """Return the sorted ``v`` values of ``table``, or ``None`` when there is no table."""
     if table is None:
         return None
-    return sorted(table.column("v").to_pylist())
+    return sorted(cast(list[int], table.column("v").to_pylist()))
 
 
 Read = Callable[[DeltaTableDatabase, tuple[str, ...]], "pa.Table | None"]
@@ -163,7 +164,7 @@ def test_record_id_column_names_the_merged_ids(
     table = read(stored_and_pending)
     assert table is not None
     assert "__record_id" not in table.column_names
-    assert sorted(table.column("rid").to_pylist()) == expected_ids
+    assert sorted(cast(list[bytes], table.column("rid").to_pylist())) == expected_ids
 
 
 @pytest.mark.parametrize("skip_duplicates", [False, True])
