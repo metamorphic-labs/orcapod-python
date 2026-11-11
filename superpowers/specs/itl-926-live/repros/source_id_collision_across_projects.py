@@ -34,14 +34,27 @@ def to_kg(weight_g: float) -> float:
 
 
 schema = pa.schema(
-    [pa.field("subject_id", pa.string(), False), pa.field("weight_g", pa.float64(), False)]
+    [
+        pa.field("subject_id", pa.string(), False),
+        pa.field("weight_g", pa.float64(), False),
+    ]
 )
 with fake_pyspiral.install(work / "spiral"):
-    for project, weights in (("edi-sample-a", [1000.0, 2000.0]), ("edi-sample-b", [3000.0, 4000.0])):
-        table = fake_pyspiral.FakeSpiral().project(project).create_table(
-            "default.subject", key_schema=pa.schema([pa.field("subject_id", pa.string(), False)])
+    for project, weights in (
+        ("edi-sample-a", [1000.0, 2000.0]),
+        ("edi-sample-b", [3000.0, 4000.0]),
+    ):
+        table = (
+            fake_pyspiral.FakeSpiral()
+            .project(project)
+            .create_table(
+                "default.subject",
+                key_schema=pa.schema([pa.field("subject_id", pa.string(), False)]),
+            )
         )
-        table.write(pa.table({"subject_id": ["m1", "m2"], "weight_g": weights}, schema=schema))
+        table.write(
+            pa.table({"subject_id": ["m1", "m2"], "weight_g": weights}, schema=schema)
+        )
 
     for project in ("edi-sample-a", "edi-sample-b"):
         calls.clear()
@@ -60,4 +73,7 @@ with fake_pyspiral.install(work / "spiral"):
     with later:
         to_kg.pod(SpiralDBTableSource("edi-sample-b", "subject"), label="kg")
     records = later.nodes["kg"].get_all_records()
-    print("project B job, get_all_records():", None if records is None else records.to_pylist())
+    print(
+        "project B job, get_all_records():",
+        None if records is None else records.to_pylist(),
+    )
