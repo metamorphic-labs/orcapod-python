@@ -35,6 +35,7 @@ from orcapod.errors import (
     EphemeralResultMissingError,
     PipelineJobRequiredError,
     SchemaVersionError,
+    StoreReadError,
 )
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
@@ -1294,6 +1295,12 @@ class FunctionJobNode(FunctionNodeBase):
                     tag_out, result = self._process_data_internal(
                         tag, data, logger=pkt_logger, run_id=run_id
                     )
+                except StoreReadError as exc:
+                    # A failed store read fails the run whatever the error policy:
+                    # error_policy only decides about rows whose function raised.
+                    ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    ctx_obs.on_node_end(node_label, node_hash)
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Data execution failed in %s: %s",

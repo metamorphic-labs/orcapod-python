@@ -17,8 +17,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.function_pod import FunctionPod
+from orcapod import function_pod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import StoreReadError
@@ -29,6 +28,7 @@ from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 _CALLS: list[int] = []
 
 
+@function_pod(output_keys="y")
 def double(x: int) -> int:
     _CALLS.append(x)
     return 2 * x
@@ -60,7 +60,7 @@ def build_job(store_path: Path) -> PipelineJob:
     )
     job = PipelineJob(name="itl884", store=DeltaTableDatabase(base_path=store_path))
     with job:
-        FunctionPod(PythonDataFunction(double, output_keys="y"))(source, label="dbl")
+        _ = double.pod(source, label="dbl")
     return job
 
 

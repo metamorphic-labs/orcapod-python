@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.channels import BroadcastChannel, Channel
+from orcapod.errors import StoreReadError
 from orcapod.pipeline.result import OrchestratorResult
 from orcapod.protocols.node_protocols import (
     is_function_node,
@@ -250,6 +251,10 @@ class AsyncPipelineOrchestrator:
             return OrchestratorResult(
                 node_outputs=collectors if materialize_results else {}
             )
+        except* StoreReadError as group:
+            # A failed store read stops the run. Raise it on its own, as the sync
+            # orchestrator does, rather than inside the TaskGroup's exception group.
+            raise StoreReadError.in_group(group)[0]
         finally:
             effective_observer.on_run_end(run_id)
 

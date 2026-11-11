@@ -14,6 +14,7 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
+from orcapod.errors import StoreReadError
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
     FunctionPodProtocol,
@@ -587,6 +588,11 @@ class _FunctionPodBase(TraceableBase):
                     out_tag, result_data = await self._async_invoke_with_hooks(
                         tag, data, logger=pkt_logger, run_id=run_id
                     )
+                except StoreReadError as exc:
+                    # A failed store read fails the run; only rows whose
+                    # function raised are skipped.
+                    obs.on_data_crash(pod_label, tag, data, exc)
+                    raise
                 except Exception as exc:
                     logger.debug(
                         "Data processing failed, skipping: %s", exc, exc_info=True

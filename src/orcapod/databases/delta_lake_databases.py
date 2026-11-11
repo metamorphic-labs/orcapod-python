@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod.databases.utils import coerce_record_id
+from orcapod.errors import InputValidationError, StoreReadError
 from orcapod.databases.storage_utils import is_cloud_uri, parse_base_path
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -25,6 +26,49 @@ else:
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+
+def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
+    """Return ``arrow_type`` reduced to what the append check compares.
+
+    Extension types are replaced by their storage type and every nested field is
+    made nullable, at every depth. The result is used only to compare a batch
+    with a stored table (ITL-884); it is never stored, so dropping nested
+    non-null flags here changes no schema or hash.
+
+    Args:
+        arrow_type: The Arrow type to reduce.
+
+    Returns:
+        The storage type with all nested fields nullable.
+    """
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _comparable_storage_type(arrow_type.storage_type)
+    if pa.types.is_struct(arrow_type):
+        return pa.struct(
+            [pa.field(f.name, _comparable_storage_type(f.type)) for f in arrow_type]
+        )
+    if pa.types.is_large_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.large_list(pa.field(field.name, _comparable_storage_type(field.type)))
+    if pa.types.is_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.list_(pa.field(field.name, _comparable_storage_type(field.type)))
+    if pa.types.is_fixed_size_list(arrow_type):
+        field = arrow_type.value_field
+        return pa.list_(
+            pa.field(field.name, _comparable_storage_type(field.type)),
+            arrow_type.list_size,
+        )
+    if pa.types.is_map(arrow_type):
+        key, item = arrow_type.key_field, arrow_type.item_field
+        # pyarrow accepts key and item Fields here; its stubs only list types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
+            pa.field(key.name, _comparable_storage_type(key.type), nullable=False),
+            pa.field(item.name, _comparable_storage_type(item.type)),
+            keys_sorted=arrow_type.keys_sorted,
+        )
+    return arrow_type
 
 
 class DeltaTableDatabase:
@@ -213,11 +257,23 @@ class DeltaTableDatabase:
             # Table doesn't exist
             return None
         except Exception as e:
-            logger.error(f"Error loading Delta table for {record_key}: {e}")
-            # Try to clear any corrupted cache
-            if record_key in self._delta_table_cache:
-                self._delta_table_cache.pop(record_key)
-            raise
+            # The table exists but could not be loaded: never report it as absent.
+            self._delta_table_cache.pop(record_key, None)
+            raise self._read_failed(record_path) from e
+
+    def _read_failed(self, record_path: tuple[str, ...]) -> StoreReadError:
+        """Build the error for a table at ``record_path`` that exists but cannot be read.
+
+        Args:
+            record_path: Path components relative to this database view.
+
+        Returns:
+            A ``StoreReadError`` naming the table; the caller raises it from the
+            backend's exception.
+        """
+        return StoreReadError(
+            self._get_table_uri(record_path), self._path_prefix + record_path
+        )
 
     def table_exists(self, record_path: tuple[str, ...]) -> bool:
         """Return ``True`` if a Delta table exists at ``record_path``.
@@ -317,28 +373,26 @@ class DeltaTableDatabase:
             # Get all existing IDs from Delta table using standard RECORD_ID_COLUMN
             # TODO: replace this with more targetted loading of only the target column and in batches
             arrow_table = delta_table.to_pyarrow_table()
-            if arrow_table.num_rows == 0:
-                self._existing_ids_cache[record_key] = set()
-            elif self.RECORD_ID_COLUMN not in arrow_table.column_names:
-                # TODO: replace this with proper checking of the table schema first!
-                logger.warning(f"Delta table missing {self.RECORD_ID_COLUMN} column")
-                self._existing_ids_cache[record_key] = set()
-            else:
-                existing_ids = cast(
-                    set[str], set(arrow_table[self.RECORD_ID_COLUMN].to_pylist())
-                )
-                self._existing_ids_cache[record_key] = existing_ids
-
-            self._cache_dirty[record_key] = False
-            logger.debug(
-                f"Refreshed existing IDs cache: {len(self._existing_ids_cache)} IDs"
-            )
-
         except Exception as e:
-            logger.error(f"Failed to refresh existing IDs cache: {e}")
+            # Leave the cache dirty so the next call reads the table again.
+            raise self._read_failed(record_path) from e
+
+        if arrow_table.num_rows == 0:
             self._existing_ids_cache[record_key] = set()
-            self._cache_dirty[record_key] = False
-            raise
+        elif self.RECORD_ID_COLUMN not in arrow_table.column_names:
+            # TODO: replace this with proper checking of the table schema first!
+            logger.warning(f"Delta table missing {self.RECORD_ID_COLUMN} column")
+            self._existing_ids_cache[record_key] = set()
+        else:
+            existing_ids = cast(
+                set[str], set(arrow_table[self.RECORD_ID_COLUMN].to_pylist())
+            )
+            self._existing_ids_cache[record_key] = existing_ids
+
+        self._cache_dirty[record_key] = False
+        logger.debug(
+            f"Refreshed existing IDs cache: {len(self._existing_ids_cache)} IDs"
+        )
 
     def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[str]:
         """Get the set of existing IDs in the Delta table, using cache when possible."""
@@ -631,6 +685,9 @@ class DeltaTableDatabase:
 
         Returns:
             Combined Arrow table with all records, or None if no records exist
+
+        Raises:
+            StoreReadError: If the Delta table exists but could not be read.
         """
         record_key = self._get_record_key(record_path)
 
@@ -642,10 +699,10 @@ class DeltaTableDatabase:
                 delta_table_data = delta_table.to_pyarrow_dataset(
                     as_large_types=True
                 ).to_table()
-                if delta_table_data.num_rows > 0:
-                    tables_to_combine.append(delta_table_data)
             except Exception as e:
-                logger.warning(f"Error reading Delta table: {e}")
+                raise self._read_failed(record_path) from e
+            if delta_table_data.num_rows > 0:
+                tables_to_combine.append(delta_table_data)
 
         # Add pending batch data
         if (
@@ -700,21 +757,16 @@ class DeltaTableDatabase:
         if delta_table is None:
             return None
 
-        try:
-            # Use schema-preserving read
-            result = self._read_delta_table(delta_table, expression=combined_expression)
+        # Use schema-preserving read
+        result = self._read_delta_table(
+            delta_table, record_path, expression=combined_expression
+        )
 
-            if len(result) == 0:
-                return None
+        if len(result) == 0:
+            return None
 
-            # Handle (remove/rename) the record id column before returning
-            return self._handle_record_id_column(result, record_id_column)
-
-        except Exception as e:
-            logger.error(
-                f"Error getting record with {column_values} from {'/'.join(record_path)}: {e}"
-            )
-            raise e
+        # Handle (remove/rename) the record id column before returning
+        return self._handle_record_id_column(result, record_id_column)
 
     def get_record_by_id(
         self,
@@ -758,22 +810,15 @@ class DeltaTableDatabase:
         if delta_table is None:
             return None
 
-        try:
-            # Use schema-preserving read
-            filter_expr = self._create_record_id_filter(record_id)
-            result = self._read_delta_table(delta_table, filters=filter_expr)
+        # Use schema-preserving read
+        filter_expr = self._create_record_id_filter(record_id)
+        result = self._read_delta_table(delta_table, record_path, filters=filter_expr)
 
-            if len(result) == 0:
-                return None
+        if len(result) == 0:
+            return None
 
-            # Handle (remove/rename) the record id column before returning
-            return self._handle_record_id_column(result, record_id_column)
-
-        except Exception as e:
-            logger.error(
-                f"Error getting record {record_id} from {'/'.join(record_path)}: {e}"
-            )
-            raise e
+        # Handle (remove/rename) the record id column before returning
+        return self._handle_record_id_column(result, record_id_column)
 
     def get_records_by_ids(
         self,
@@ -815,26 +860,20 @@ class DeltaTableDatabase:
         delta_table = self._get_delta_table(record_path)
         if delta_table is None:
             return None
-        try:
-            # Use schema-preserving read with filters
-            filter_expr = self._create_record_ids_filter(record_ids_list)
-            result = self._read_delta_table(delta_table, filters=filter_expr)
+        # Use schema-preserving read with filters
+        filter_expr = self._create_record_ids_filter(record_ids_list)
+        result = self._read_delta_table(delta_table, record_path, filters=filter_expr)
 
-            if len(result) == 0:
-                return None
-
-            # Handle record_id column based on parameter
-            return self._handle_record_id_column(result, record_id_column)
-
-        except Exception as e:
-            logger.error(
-                f"Error getting records by IDs from {'/'.join(record_path)}: {e}"
-            )
+        if len(result) == 0:
             return None
+
+        # Handle record_id column based on parameter
+        return self._handle_record_id_column(result, record_id_column)
 
     def _read_delta_table(
         self,
         delta_table: deltalake.DeltaTable,
+        record_path: tuple[str, ...],
         filters: list | None = None,
         expression: pc.Expression | None = None,
     ) -> pa.Table:
@@ -843,14 +882,23 @@ class DeltaTableDatabase:
 
         Args:
             delta_table: The Delta table to read from
+            record_path: Path of the table relative to this view, for errors
             filters: Optional filters to apply
+            expression: Optional filter expression, used instead of ``filters``
 
         Returns:
             Arrow table with preserved schema
+
+        Raises:
+            StoreReadError: If the table's data could not be read. An error in
+                the filter itself (an unknown column, say) is raised as is.
         """
         filter_expr = None
         # Use to_pyarrow_dataset with as_large_types for Polars compatible arrow table loading
-        dataset = delta_table.to_pyarrow_dataset(as_large_types=True)
+        try:
+            dataset = delta_table.to_pyarrow_dataset(as_large_types=True)
+        except Exception as e:
+            raise self._read_failed(record_path) from e
         if filters and expression is None:
             for filt in filters:
                 if len(filt) == 3:
@@ -876,7 +924,11 @@ class DeltaTableDatabase:
         # Convert view types before filtering: PyArrow has no comparison/sort
         # kernels for string_view, so filtering the scan directly crashes
         # (ENG-601). Trades predicate pushdown for correctness.
-        table = arrow_utils.normalize_table_view_types(dataset.to_table())
+        try:
+            scanned = dataset.to_table()
+        except Exception as e:
+            raise self._read_failed(record_path) from e
+        table = arrow_utils.normalize_table_view_types(scanned)
         if filter_expr is not None:
             return table.filter(filter_expr)
         return table
@@ -991,18 +1043,19 @@ class DeltaTableDatabase:
 
                 os.makedirs(table_uri, exist_ok=True)
 
-            # Check if Delta table exists at this URI
-            try:
-                import deltalake as _dl
+            # Check if Delta table exists at this URI. Only TableNotFoundError
+            # means "absent": a table that exists but cannot be loaded must never
+            # be replaced by the mode="overwrite" write below (ITL-884).
+            from deltalake.exceptions import TableNotFoundError
 
-                delta_table = _dl.DeltaTable(
+            try:
+                delta_table = deltalake.DeltaTable(
                     table_uri, storage_options=self._storage_options or None
                 )
-            except (
-                _dl.exceptions.TableNotFoundError,
-                _dl.exceptions.DeltaProtocolError,
-            ):
+            except TableNotFoundError:
                 delta_table = None
+            except Exception as load_error:
+                raise StoreReadError(table_uri, abs_path_components) from load_error
 
             if delta_table is None:
                 # TODO: reconsider mode="overwrite" here
@@ -1017,6 +1070,7 @@ class DeltaTableDatabase:
                     f"Created new Delta table for {record_key} with {len(combined_table)} records"
                 )
             else:
+                self._require_compatible_append(table_uri, delta_table, combined_table)
                 delta_table.merge(
                     source=combined_table,
                     predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
@@ -1045,6 +1099,61 @@ class DeltaTableDatabase:
             self._pending_batches[record_key] = pending_batch
             self._pending_record_ids[record_key] = pending_ids
             raise
+
+    @staticmethod
+    def _require_compatible_append(
+        table_uri: str, delta_table: deltalake.DeltaTable, batch: pa.Table
+    ) -> None:
+        """Refuse a batch whose column types differ from the stored table's.
+
+        Delta's merge either casts such a batch to the stored type (``int32`` or
+        ``float64`` rows into an ``int64`` column) or, when an extension type is
+        involved, writes data files the table can no longer read. Both sides are
+        compared through Delta's own type mapping, with extension types reduced to
+        storage, large-normalized and nullability ignored, so a type Delta stores
+        differently (``uint64`` as ``int64``) is not refused. Columns present on
+        only one side are allowed (schema evolution). The stored schema comes from
+        the loaded log; no data is read.
+
+        Args:
+            table_uri: Location of the stored table, for the error message.
+            delta_table: The loaded stored table.
+            batch: The rows about to be merged into it.
+
+        Raises:
+            InputValidationError: If a column's type in ``batch`` differs from its
+                stored type. Nothing is written.
+        """
+        stored = pa.schema(delta_table.schema().to_arrow())  # pyright: ignore[reportArgumentType]  # arro3 schema; pyarrow reads it through the C data interface
+        incoming = pa.schema(
+            deltalake.Schema.from_arrow(
+                pa.schema(
+                    [
+                        pa.field(f.name, _comparable_storage_type(f.type))
+                        for f in batch.schema
+                    ]
+                )
+            ).to_arrow()  # pyright: ignore[reportArgumentType]  # arro3 schema, as above
+        )
+        for field in incoming:
+            index = stored.get_field_index(field.name)
+            if index < 0:
+                continue
+            stored_type = _comparable_storage_type(
+                arrow_utils.normalize_to_large_types(
+                    stored.field(index).type, keep_null=True
+                )
+            )
+            incoming_type = _comparable_storage_type(
+                arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            )
+            if stored_type != incoming_type:
+                raise InputValidationError(
+                    f"Cannot append to the stored table {table_uri!r}: column "
+                    f"{field.name!r} is stored as {stored_type} but the new rows have "
+                    f"{incoming_type} (input type {batch.schema.field(field.name).type}). "
+                    "The stored rows are unchanged and nothing was written."
+                )
 
     @property
     def base_path(self) -> tuple[str, ...]:

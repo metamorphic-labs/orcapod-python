@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import deltalake
 import pyarrow as pa
 import pytest
+from deltalake.exceptions import DeltaProtocolError
 
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import InputValidationError, StoreReadError
@@ -26,7 +28,7 @@ from orcapod.errors import InputValidationError, StoreReadError
 PATH = ("results", "t")
 
 
-def rows(ids: list[bytes], x: pa.Array, **extra: pa.Array) -> pa.Table:
+def rows(ids: list[bytes], x: pa.Array[Any], **extra: pa.Array[Any]) -> pa.Table:
     """Build a table keyed by ``rid`` with an ``x`` column and optional extras."""
     return pa.table({"rid": pa.array(ids, pa.large_binary()), "x": x, **extra})
 
@@ -60,7 +62,7 @@ class _Ext(pa.ExtensionType):
         return cls(storage_type)
 
 
-def ext_array(values: list, storage: pa.DataType) -> pa.ExtensionArray:
+def ext_array(values: list[Any], storage: pa.DataType) -> pa.ExtensionArray[Any]:
     return pa.ExtensionArray.from_storage(_Ext(storage), pa.array(values, storage))
 
 
@@ -149,6 +151,12 @@ class TestUnreadableTable:
         assert unreadable.table_exists(PATH)
 
 
+def test_bad_filter_is_not_reported_as_unreadable_table(stored):
+    # The table reads fine; the filter names a column it does not have.
+    with pytest.raises(pa.ArrowInvalid):
+        stored.get_records_with_column_value(PATH, {"no_such_column": 1})
+
+
 class TestAbsentTable:
     @pytest.mark.parametrize("read", READS.values(), ids=list(READS))
     def test_read_returns_none(self, base, read):
@@ -192,7 +200,7 @@ class TestUnloadableTableIsNeverOverwritten:
 
         def failing_load(table_uri, *args, **kwargs):
             if Path(str(table_uri)) == target:
-                raise deltalake.exceptions.DeltaProtocolError("simulated")
+                raise DeltaProtocolError("simulated")
             return real(table_uri, *args, **kwargs)
 
         before = snapshot(target)
