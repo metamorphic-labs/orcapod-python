@@ -190,22 +190,22 @@ class TestOperators:
         assert data_schema["df"] is pl.DataFrame
 
 
-def _ordered_frame(*, reverse: bool) -> pl.DataFrame:
-    """Columns ``a, b`` with struct fields ``u, v``, or both orders reversed."""
+def _ordered_frame(*, swap_columns: bool, swap_fields: bool) -> pl.DataFrame:
+    """Columns ``a, b`` with struct fields ``u, v``; each order can be reversed alone."""
     fields = {"u": pl.Int8, "v": pl.String}
-    struct = pl.Struct(dict(reversed(fields.items())) if reverse else fields)
+    struct = pl.Struct(dict(reversed(fields.items())) if swap_fields else fields)
     frame = pl.DataFrame(
         {
             "a": pl.Series([{"u": 1, "v": "x"}], dtype=struct),
             "b": pl.Series([2], dtype=pl.Int8),
         }
     )
-    return frame.select("b", "a") if reverse else frame
+    return frame.select("b", "a") if swap_columns else frame
 
 
 @function_pod(output_keys="df")
-def make_ordered_frame(reverse: bool) -> pl.DataFrame:
-    return _ordered_frame(reverse=reverse)
+def make_ordered_frame(swap_columns: bool, swap_fields: bool) -> pl.DataFrame:
+    return _ordered_frame(swap_columns=swap_columns, swap_fields=swap_fields)
 
 
 @function_pod(output_keys="names")
@@ -216,9 +216,21 @@ def leading_names(df: pl.DataFrame) -> str:
     return f"{df.columns[0]}/{first_field.fields[0].name}"
 
 
+# Tag -> (swap_columns, swap_fields): each order varied alone and both together.
+_ORDERS = {
+    "none": (False, False),
+    "columns": (True, False),
+    "fields": (False, True),
+    "both": (True, True),
+}
+
+
 def _order_source() -> DictSource:
     return DictSource(
-        [{"k": "fwd", "reverse": False}, {"k": "rev", "reverse": True}],
+        [
+            {"k": k, "swap_columns": columns, "swap_fields": fields}
+            for k, (columns, fields) in _ORDERS.items()
+        ],
         tag_columns=["k"],
     )
 
@@ -270,12 +282,19 @@ class TestPipelineStores:
         job.run(orchestrator=_ORCHESTRATORS[orchestrator_name]())
 
         got = {tag["k"]: data["df"] for tag, data in job.nodes["make"].iter_data()}
-        _assert_exact(got["fwd"], _ordered_frame(reverse=False))
-        _assert_exact(got["rev"], _ordered_frame(reverse=True))
+        for k, (columns, fields) in _ORDERS.items():
+            _assert_exact(
+                got[k], _ordered_frame(swap_columns=columns, swap_fields=fields)
+            )
         names = {
             tag["k"]: data["names"] for tag, data in job.nodes["names"].iter_data()
         }
-        assert names == {"fwd": "a/u", "rev": "b/v"}
+        assert names == {
+            "none": "a/u",
+            "columns": "b/u",
+            "fields": "a/v",
+            "both": "b/v",
+        }
 
     @pytest.mark.xfail(
         strict=True,

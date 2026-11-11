@@ -167,6 +167,29 @@ class TestDifferentFramesHashDifferent:
         )
         assert _data_hash(null_struct) != _data_hash(struct_of_nulls)
 
+    @pytest.mark.parametrize(
+        ("wrap", "dtype"),
+        [
+            pytest.param(lambda v: v, pl.Struct({}), id="top-level"),
+            pytest.param(lambda v: [v], pl.List(pl.Struct({})), id="in-list"),
+            pytest.param(
+                lambda v: {"outer": v},
+                pl.Struct({"outer": pl.Struct({})}),
+                id="in-struct",
+            ),
+        ],
+    )
+    def test_zero_field_struct(self, wrap: Any, dtype: Any) -> None:
+        """A struct with no fields hashes, and its nulls are still identity."""
+        frames = [
+            pl.DataFrame({"s": pl.Series([wrap({}), wrap({})], dtype=dtype)}),
+            pl.DataFrame({"s": pl.Series([wrap(None), wrap({})], dtype=dtype)}),
+            pl.DataFrame({"s": pl.Series([wrap({})], dtype=dtype)}),
+        ]
+        assert _all_distinct(frames)
+        series = [frame.to_series().alias("s") for frame in frames]
+        assert _all_distinct(series)
+
     def test_categorical_categories_are_identity(self) -> None:
         """A ``Categorical``'s ``Categories`` name, namespace and physical width."""
         values = ["a", "b"]

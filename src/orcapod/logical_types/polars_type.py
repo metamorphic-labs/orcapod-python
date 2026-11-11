@@ -347,15 +347,22 @@ def _with_struct_validity(array: pa.Array[Any]) -> pa.Array[Any]:
         )
     if isinstance(array, pa.StructArray):
         children = [_with_struct_validity(child) for child in array.flatten()]
-        fields = pa.StructArray.from_arrays(
-            children,
-            fields=[
-                field.with_type(child.type)
-                for field, child in zip(
-                    _struct_fields(array.type), children, strict=True
-                )
-            ],
-        )
+        if children:
+            fields = pa.StructArray.from_arrays(
+                children,
+                fields=[
+                    field.with_type(child.type)
+                    for field, child in zip(
+                        _struct_fields(array.type), children, strict=True
+                    )
+                ],
+            )
+        else:  # a zero-field struct: from_arrays would infer length 0
+            # A None validity buffer means "no nulls"; the stub types buffers as Buffer only.
+            no_validity: list[Any] = [None]
+            fields = pa.Array.from_buffers(
+                pa.struct([]), len(array), no_validity, children=[]
+            )
         wrapped_type = _struct_validity_type(array.type)
         assert isinstance(wrapped_type, pa.StructType)
         return pa.StructArray.from_arrays(

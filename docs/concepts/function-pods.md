@@ -257,11 +257,12 @@ Dtypes that cannot be stored and read back exactly (`Object`, `Int128`, `UInt128
 extension dtypes) raise `ValueError` naming the column when the value is stored, so convert
 such a column explicitly before returning the frame.
 
-A Polars value's content hash, which is its cache key, covers everything a pod can observe
-about the value: its row count, column names and their order, dtypes (struct fields and their
-order included) and values, but not its memory layout (chunking) or sortedness flags. So a
-pod that depends on column order, such as one returning `df.columns[0]`, gets a separate cache
-entry for each order. See
+A Polars value's content hash, which is its cache key, covers the value's logical content: its
+row count, column names and their order, dtypes (struct fields and their order included) and
+values. So a pod that depends on column order, such as one returning `df.columns[0]`, gets a
+separate cache entry for each order. Physical properties are not part of the hash: chunking
+(`n_chunks()`) and sortedness flags (`Series.flags`, which are not stored either). A pod must
+not depend on them, because equal frames that differ only there share a cache entry. See
 [Logical-typed values](../reference/hashing.md#1c-logical-typed-values-inside-a-data-column)
 for the exact scheme.
 
