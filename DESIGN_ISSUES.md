@@ -2293,3 +2293,50 @@ xfail. The async path checks key types on the first row of each input, because
 So when either input is empty (left or right), a key type mismatch that the sync path reports
 yields an empty result on the async path instead of an error. `Join`'s async key check
 (`_check_shared_key_types`) has the same limit.
+
+---
+
+## `src/orcapod/pipeline/job.py` — reading a loaded `PipelineJob`
+
+### PJ-LOAD1 — a loaded job could not read its nodes, and could not load a pod feeding an operator
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-904
+
+Saving a job and loading it with `PipelineJob.load` failed in four ways:
+
+- On a loaded function node, `as_table()` and `iter_data()` raised "no function pod and no
+  database attached", although the store was attached and `get_all_records()` read the rows.
+  The cause: `FunctionJobNode.from_descriptor` set `LoadStatus.UNAVAILABLE`, and attaching the
+  store never changed that status.
+- A loaded node's `output_schema()` returned the serialized type strings (`'int64'`), and its
+  `data_context` dereferenced the missing pod. Loading a job in which an operator (a `Join`)
+  consumes a function node therefore crashed with `InputValidationError`.
+- A `PipelineJob` never stores operator outputs, so a loaded operator node returned an empty
+  table, as if the operator had produced nothing.
+- Loading logged every source it could not rebuild, in-memory ones included, as "Could not
+  reconstruct source … — skipping", giving neither the consequence nor a remedy.
+
+**Fix:**
+
+- Attaching a store makes a loaded function node `READ_ONLY`. `iter_data()` yields the stored
+  rows: those whose `_node_content_hash` is the content hash saved in
+  `run.node_job_content_hashes`, the same set `get_all_records()` returns. `as_table()` is an
+  `ArrowTableStream` over the stored Arrow records, so stored types are kept and `all_info`
+  includes system tags, source info and the data context.
+- Without a store, reading names `PipelineJob.load(path, store=...)` and `job.bind(store=...)`.
+- `save()` records `run.node_has_stored_records`: whether each function node's pipeline table
+  existed. This is an additive, optional field, and the format version is unchanged. A node
+  saved with records raises, naming the store and the table, when the attached store lacks
+  that table, instead of reading zero rows. Files saved without the field read zero rows, as
+  before.
+- A loaded node's `output_schema()` returns Python types (`deserialize_output_schema`), and its
+  data context comes from the descriptor.
+- A loaded operator node with nothing stored raises and names its input nodes.
+- Loading logs in-memory sources at INFO, and any other source or store failure at WARNING
+  with the exception. Each message states the consequence and the remedy.
+- `PipelineJob.run()` still rejects a loaded job: function pods are not saved, so a loaded job
+  is read-only by design (developer, November 11, 2026).
+
+Regressions: `tests/test_pipeline/loaded_job/`, which saves in a separate process and loads
+in the test process, for each source kind.

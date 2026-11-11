@@ -274,6 +274,55 @@ at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these ro
 This is the contract for now. An opt-in mode that tolerates store failures may be added
 later.
 
+### Saving and loading a job
+
+`job.save(path)` writes the job to a JSON file: the graph, the store's location and how each
+source was configured. `PipelineJob.load(path)` reads it back, for example in a later Python
+session, so that you can read the results the job stored:
+
+```python
+import tempfile
+from pathlib import Path
+
+from orcapod.databases import DeltaTableDatabase
+
+workdir = Path(tempfile.mkdtemp())  # any directory you keep
+
+job = PipelineJob(name="bmi_demo", store=DeltaTableDatabase(workdir / "store"))
+with job:
+    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+job.run()
+job.save(workdir / "bmi_job.json")
+
+loaded = PipelineJob.load(workdir / "bmi_job.json")
+print(loaded.nodes["bmi"].as_table().sort_by("subject_id").to_pandas())
+#   subject_id          bmi
+# 0   mouse_01  1756.944444
+# 1   mouse_02  2210.000000
+# 2   mouse_03  2297.520661
+```
+
+A loaded job is for reading stored results. It cannot be run again: function pods are not
+saved with the job, so `loaded.run()` raises. To compute again, build the job from your code
+as before.
+
+- A function node's `as_table()`, `iter_data()` and `get_all_records()` return the rows the
+  saved run stored, with the types they were stored with. Rows come in the order the store
+  returns them; sort them if order matters.
+- A `PipelineJob` does not store operator outputs (a join, a filter), so reading an operator
+  node of a loaded job raises. Read its input nodes instead.
+- Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
+  paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
+  `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
+  this at INFO level. This does not affect reading the other nodes. To read such a source
+  node itself, bind a source to it: `loaded.bind(sources={"mice": source})`.
+- The results are read from the store recorded in the file. Pass
+  `PipelineJob.load(path, store=...)` if the store has moved. If the store you give lacks
+  results the saved run stored, reading the node raises an error naming the store, instead
+  of returning no rows.
+
 ## Multiple input streams
 
 If you pass multiple streams to a function pod, they are automatically joined (using

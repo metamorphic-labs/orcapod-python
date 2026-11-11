@@ -10,6 +10,20 @@
 
 ### Fixed
 
+- A job loaded with `PipelineJob.load` can read its results. A function node's `as_table()`
+  and `iter_data()` return the rows the saved run stored, with their stored types (they used
+  to raise "no function pod and no database attached" while `get_all_records()` worked).
+  Without a store, reading says to pass `PipelineJob.load(path, store=...)` or call
+  `job.bind(store=...)`. `save()` now records whether each function node had stored records
+  (`run.node_has_stored_records`, an optional field; the format version is unchanged). A
+  node saved with records raises, naming the store, when the attached store lacks them,
+  instead of returning no rows. Loading a job in which an operator consumes a function
+  node no longer crashes with `InputValidationError`, and a loaded node's
+  `output_schema()` reports Python types. A `PipelineJob` does not store operator outputs, so
+  reading a loaded operator node raises instead of returning an empty table. In-memory
+  sources (`DictSource`, `ListSource`, `ArrowTableSource`, `DataFrameSource`) are logged at
+  INFO with the remedy instead of a "skipping" warning. A loaded job stays read-only and
+  cannot be run again. See *Saving and loading a job* in the function-pods guide. (ITL-904)
 - A failed store write fails the run. `PipelineJob.run()` used to return normally when a
   node's result or record could not be written (the row was skipped like a crashed function
   under the default `error_policy="continue"`), so the node read back fewer rows than it
