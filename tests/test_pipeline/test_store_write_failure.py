@@ -50,6 +50,7 @@ class Faults:
     write_marker: str | None = None
     succeed_first: int = 0
     on_flush: bool = False
+    fail_flush_after_write_failure: bool = False
     matching_writes: int = 0
     failed_paths: list[str] = field(default_factory=list)
 
@@ -75,6 +76,8 @@ class FaultyStore:
         faults.matching_writes += 1
         if faults.matching_writes > faults.succeed_first:
             faults.failed_paths.append("/".join(record_path))
+            if faults.fail_flush_after_write_failure:
+                faults.on_flush = True
             raise OSError(f"disk unavailable while writing {full_path}")
 
     def add_record(
@@ -200,6 +203,19 @@ def assert_store_error(
     assert "rows that are missing" in message
 
 
+class FailFlushAtRunEnd(NoOpObserver):
+    """Make every flush fail once the orchestrator has finished, so the job's own
+    final flush is the one that fails (the result cache flushes after every row)."""
+
+    def __init__(self, faults: Faults) -> None:
+        """Arm ``faults`` at the end of the run."""
+        self._faults = faults
+
+    def on_run_end(self, run_id) -> None:
+        """Make the following flushes fail."""
+        self._faults.on_flush = True
+
+
 def stored_rows(store: Any, label: str = "dbl") -> int:
     """Rows a fresh job over ``store`` reads back for ``label`` without running."""
     records = build_job(store, ROWS).nodes[label].get_all_records()
@@ -297,15 +313,26 @@ class TestFunctionNodeWriteFailure:
 
         assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
 
-    def test_flush_failure_raises(self, orchestrator_cls):
-        """A failure of the job's final flush raises ``StoreWriteError``."""
+    def test_auto_flush_failure_raises_naming_the_node(self, orchestrator_cls):
+        """A failure of the result cache's flush after a row raises, naming the node."""
         faults = Faults(on_flush=True)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
         with pytest.raises(StoreWriteError) as exc_info:
             job.run(orchestrator=orchestrator_cls())
 
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
+
+    def test_final_flush_failure_raises(self, orchestrator_cls):
+        """A failure of the job's final flush raises ``StoreWriteError``."""
+        faults = Faults()
+        job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(orchestrator=orchestrator_cls(), observer=FailFlushAtRunEnd(faults))
+
         assert_store_error(exc_info.value, faults, node_label=None, names_row=False)
+        assert exc_info.value.record_path == (JOB_NAME,)
 
     def test_function_failure_is_still_skipped_under_continue(self, orchestrator_cls):
         """``error_policy="continue"`` keeps skipping rows whose function raised."""
@@ -340,6 +367,46 @@ class TestOperatorNodeWriteFailure:
         # The upstream function node wrote all its rows before the operator failed;
         # none of them may look dropped.
         assert stored_rows(inner) == 3
+
+    def test_failed_flush_after_write_failure_is_noted(self, orchestrator_cls):
+        """A failed best-effort flush is noted on the write error, which stays primary."""
+        inner = InMemoryArrowDatabase()
+        faults = Faults(
+            write_marker=OPERATOR_TABLE, fail_flush_after_write_failure=True
+        )
+        job = build_job(FaultyStore(inner, faults), ROWS, with_operator=True)
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(orchestrator=orchestrator_cls())
+
+        err = exc_info.value
+        assert_store_error(err, faults, node_label="sel", names_row=False)
+        notes = getattr(err, "__notes__", [])
+        assert any(
+            "disk unavailable while flushing" in note
+            and "may not have been stored" in note
+            for note in notes
+        ), notes
+
+    def test_final_flush_failure_warns_pending_output(self, orchestrator_cls):
+        """A failed final flush warns that output still pending may not be stored."""
+        faults = Faults()
+        job = build_job(
+            FaultyStore(InMemoryArrowDatabase(), faults), ROWS, with_operator=True
+        )
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(orchestrator=orchestrator_cls(), observer=FailFlushAtRunEnd(faults))
+
+        err = exc_info.value
+        assert_store_error(err, faults, node_label=None, names_row=False)
+        notes = getattr(err, "__notes__", [])
+        assert any(
+            "pending" in note
+            and "operator" in note
+            and "may not have been stored" in note
+            for note in notes
+        ), notes
 
 
 # ---------------------------------------------------------------------------

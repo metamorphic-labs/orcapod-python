@@ -31,23 +31,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _flush_best_effort(*databases: ArrowDatabaseProtocol) -> None:
-    """Flush each database, logging instead of raising if a flush fails.
+def _flush_best_effort(
+    run_error: BaseException, *databases: ArrowDatabaseProtocol
+) -> None:
+    """Flush each database, noting instead of raising if a flush fails.
 
     Used when a run has already failed: the run's own error is the one to report,
     and a second failure while committing the writes that did succeed must not
-    replace it.
+    replace it. A flush failure is logged and added as a note to ``run_error``,
+    so the caller learns that pending results may not have been stored.
 
     Args:
+        run_error: The error the run failed with, which the caller re-raises.
         *databases: The databases to flush.
     """
     for database in databases:
         try:
             database.flush()
-        except Exception:
+        except Exception as flush_error:
             logger.exception(
                 "Could not flush pending writes after the run failed; "
                 "the rows they hold were not stored"
+            )
+            run_error.add_note(
+                "Flushing pending writes after this failure also failed "
+                + f"({type(flush_error).__name__}: {flush_error}); results that were "
+                + "still pending may not have been stored."
             )
 
 
@@ -865,10 +874,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 pipeline_uri=pipeline_uri,
                 materialize_results=materialize_results,
             )
-        except Exception:
+        except Exception as run_error:
             # Commit the writes that did succeed before the failure, so their rows
             # do not look dropped, then report the failure itself.
-            _flush_best_effort(pipeline_db, result_db)
+            _flush_best_effort(run_error, pipeline_db, result_db)
             raise
 
         # Flush databases.
@@ -876,7 +885,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             pipeline_db.flush()
             result_db.flush()
         except Exception as exc:
-            raise StoreWriteError(pipeline_db.base_path) from exc
+            flush_error = StoreWriteError(pipeline_db.base_path)
+            # Every view of the store shares one set of pending batches, so a failed
+            # batch can leave the ones after it unwritten.
+            flush_error.add_note(
+                "Writes that were still pending when the flush failed, such as a "
+                + "cache_mode=LOG operator's output or a node's last records, may not "
+                + "have been stored."
+            )
+            raise flush_error from exc
 
         # Mutate self in place.
         self._has_run = True
