@@ -13,14 +13,13 @@ the DataFrame round-trip.
 
 from __future__ import annotations
 
-import io
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import polars as pl
 import pyarrow as pa
-import pyarrow.ipc
 
+from orcapod.logical_types.arrow_ipc import ipc_bytes_to_table, table_to_ipc_bytes
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
@@ -32,34 +31,6 @@ if TYPE_CHECKING:
 
 
 _SERIES_UNNAMED_SENTINEL = "__pandas_series_unnamed__"
-
-
-def _table_to_ipc_bytes(table: pa.Table) -> bytes:
-    """Serialise an Arrow Table to IPC stream bytes.
-
-    Args:
-        table: The Arrow Table to serialise.
-
-    Returns:
-        Raw bytes in Arrow IPC stream format.
-    """
-    buf = io.BytesIO()
-    with pa.ipc.new_stream(buf, table.schema) as writer:
-        writer.write_table(table)
-    return buf.getvalue()
-
-
-def _ipc_bytes_to_table(data: Any) -> pa.Table:
-    """Deserialise IPC stream bytes to an Arrow Table.
-
-    Args:
-        data: Raw bytes (or buffer) containing an Arrow IPC stream.
-
-    Returns:
-        The deserialised Arrow Table.
-    """
-    buf = io.BytesIO(bytes(data))
-    return pa.ipc.open_stream(buf).read_all()
 
 
 class LogicalPandasDataFrame(BaseLogicalType):
@@ -146,7 +117,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
                 f"Check for columns with mixed or non-Arrow-serialisable types. "
                 f"Original error: {exc}"
             ) from exc
-        return _table_to_ipc_bytes(table)
+        return table_to_ipc_bytes(table)
 
     def storage_to_python(
         self, storage_value: Any, converter: TypeConverterProtocol | None = None
@@ -160,7 +131,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
         Returns:
             A ``pd.DataFrame`` with columns, dtypes, and index as originally stored.
         """
-        return _ipc_bytes_to_table(storage_value).to_pandas()
+        return ipc_bytes_to_table(storage_value).to_pandas()
 
 
 class LogicalPandasSeries(BaseLogicalType):
@@ -249,7 +220,7 @@ class LogicalPandasSeries(BaseLogicalType):
                 f"Check for non-Arrow-serialisable values. "
                 f"Original error: {exc}"
             ) from exc
-        return _table_to_ipc_bytes(table)
+        return table_to_ipc_bytes(table)
 
     def storage_to_python(
         self, storage_value: Any, converter: TypeConverterProtocol | None = None
@@ -263,7 +234,7 @@ class LogicalPandasSeries(BaseLogicalType):
         Returns:
             A ``pd.Series`` with its original name and index restored.
         """
-        df = _ipc_bytes_to_table(storage_value).to_pandas()
+        df = ipc_bytes_to_table(storage_value).to_pandas()
         series = df.iloc[:, 0]
         if series.name == _SERIES_UNNAMED_SENTINEL:
             series = series.rename(None)
