@@ -62,8 +62,11 @@ required. Types are the sample's, exactly; only nullability changes. Three decis
   `lfp_location` rows (channels spread over 0–383) have `atlas_label_region_short` =
   `atlas_label_region_full` = `White Matter` for atlas `AFNI_D99v2`. `atlas_label` holds 198
   regions for that atlas (index -1 `Skull`, then 2–224) and none for white matter. `plan`
-  and `verify` report this reference as an accepted exception instead of failing. The
-  developer has raised it with the EDI owners.
+  and `verify` report this reference as an accepted exception instead of failing. It was
+  reported to the EDI owners on November 11, 2026, who confirmed it as a defect of the
+  sample and are adding the missing row to `atlas_label` in the source. Once the source
+  holds it, the reference resolves and nothing is reported; row counts always come from
+  the source at run time.
 
 Every required column holds no nulls in the source, key columns included. In the window,
 `lfp_voltage_uv` has one null element per row (a channel removed in preprocessing), which

@@ -1333,73 +1333,90 @@ def orcapod_check(
 # ------------------------------------------------------------------------ the probe
 
 
+def _probe_batch(
+    k: int, v: int | None, x: int | None, *, v_nullable: bool, x_nullable: bool
+) -> pa.RecordBatch:
+    """Return one probe row: key ``k``, top-level ``v`` and nested ``g.x``."""
+    group = pa.struct(
+        [pa.field("x", pa.int32(), x_nullable), pa.field("y", pa.int32(), True)]
+    )
+    items = pa.list_(pa.field("item", pa.float32(), False), 2)
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("v", pa.int32(), v_nullable),
+            pa.field("w", pa.int32(), True),
+            pa.field("g", group, False),
+            pa.field("l", items, False),
+        ]
+    )
+    g = pa.StructArray.from_arrays(
+        [pa.array([x], pa.int32()), pa.array([None], pa.int32())],
+        fields=list(group),
+    )
+    return pa.RecordBatch.from_arrays(
+        [
+            pa.array([k], pa.int64()),
+            pa.array([v], pa.int32()),
+            pa.array([None], pa.int32()),
+            g,
+            pa.FixedSizeListArray.from_arrays(
+                pa.array([1.0, 2.0], pa.float32()), type=items
+            ),
+        ],
+        schema=schema,
+    )
+
+
 def probe_nullability(
     client: Any, *, target_project: str, allow_writes: str | None, source_project: str
 ) -> dict[str, Any]:
     """Record how SpiralDB treats non-nullable columns, in a scratch table.
 
     Writes to ``meta.nullability_probe`` in the target (a project ``create`` made) and
-    drops it afterwards. Returns what was observed: the nullability SpiralDB reports
-    after a non-nullable write, and what a write of a null into a non-nullable column
-    and a write with a nullable field for a non-nullable column do.
+    drops it afterwards. The table has a non-null key ``k``, a non-null top-level
+    column ``v``, a nullable ``w``, a struct column ``g`` with a non-null field ``x``,
+    and a ``fixed_size_list`` ``l`` with non-null items. Reported: the schema SpiralDB
+    keeps (its own repr, where ``?`` marks nullable, and the Arrow form), and what each
+    write of a null does, declared non-nullable and declared nullable, at the top
+    level and in the struct.
     """
     project, _ = open_target(client, target_project, allow_writes, source_project)
     tables = {f"{r.dataset}.{r.table}" for r in project.list_tables()}
     if PROBE_TABLE in tables:
         project.drop_table(PROBE_TABLE)
-    keys = pa.schema([pa.field("k", pa.int64(), False)])
-    schema = pa.schema(
-        [
-            pa.field("k", pa.int64(), False),
-            pa.field("v", pa.int32(), False),
-            pa.field("w", pa.int32(), True),
-        ]
-    )
     out: dict[str, Any] = {}
-    t = project.create_table(PROBE_TABLE, key_schema=keys)
+    t = project.create_table(
+        PROBE_TABLE, key_schema=pa.schema([pa.field("k", pa.int64(), False)])
+    )
+
+    def state() -> dict[str, Any]:
+        return {
+            "spiral_schema": repr(t.schema()),
+            "arrow_schema": str(t.schema().to_arrow()),
+            "scan_schema": str(client.scan(t).to_table().schema),
+            "rows": client.scan(t).to_table().to_pylist(),
+        }
+
     try:
-        out["key_schema_after_create"] = str(t.key_schema.to_arrow())
+        out["key_schema_after_create"] = repr(t.key_schema)
         with t.txn() as txn:
-            txn.write(
-                pa.RecordBatch.from_arrays(
-                    [
-                        pa.array([1, 2], pa.int64()),
-                        pa.array([10, 20], pa.int32()),
-                        pa.array([None, 5], pa.int32()),
-                    ],
-                    schema=schema,
-                )
-            )
-        out["schema_after_non_null_write"] = str(t.schema().to_arrow())
-        scanned = client.scan(t).to_table()
-        out["scan_schema"] = str(scanned.schema)
-        for label, batch in {
-            "null_into_non_nullable": pa.RecordBatch.from_arrays(
-                [
-                    pa.array([3], pa.int64()),
-                    pa.array([None], pa.int32()),
-                    pa.array([1], pa.int32()),
-                ],
-                schema=schema,
-            ),
-            "nullable_field_no_nulls": pa.RecordBatch.from_arrays(
-                [
-                    pa.array([4], pa.int64()),
-                    pa.array([40], pa.int32()),
-                    pa.array([1], pa.int32()),
-                ],
-                names=["k", "v", "w"],
-            ),
-        }.items():
+            txn.write(_probe_batch(1, 10, 100, v_nullable=False, x_nullable=False))
+        out["after_non_null_write"] = state()
+        variants = {
+            "null_v_declared_non_null": (2, None, 200, False, False),
+            "null_v_declared_nullable": (3, None, 300, True, False),
+            "null_x_declared_non_null": (4, 40, None, False, False),
+            "null_x_declared_nullable": (5, 50, None, False, True),
+        }
+        for label, (k, v, x, v_nullable, x_nullable) in variants.items():
             try:
+                batch = _probe_batch(
+                    k, v, x, v_nullable=v_nullable, x_nullable=x_nullable
+                )
                 with t.txn() as txn:
                     txn.write(batch)
-                rows = client.scan(t).to_table().to_pylist()
-                out[label] = {
-                    "raised": None,
-                    "rows_after": rows,
-                    "schema_after": str(t.schema().to_arrow()),
-                }
+                out[label] = {"raised": None, **state()}
             except Exception as err:  # noqa: BLE001 - the probe records whatever SpiralDB raises
                 out[label] = {"raised": f"{type(err).__name__}: {err}"}
     finally:

@@ -874,6 +874,29 @@ class TestVerify:
         assert report.problems == []
         assert len(report.accepted) == 1 and "spike_event -> unit" in report.accepted[0]
 
+    def test_an_accepted_reference_that_now_resolves_is_not_reported(
+        self, client, nmap, subset
+    ):
+        # the source was fixed after the exception was recorded: nothing to report,
+        # and nothing fails because the accepted key is no longer missing
+        raw = decide(derived_map(client))
+        raw["tables"]["spike_event"]["foreign_keys"][0]["accepted_unresolved"] = [
+            ["Goliath", SST.isoformat(), 3]
+        ]
+        accepted_map = tool.parse_map(raw)
+        report = tool.plan(client, SOURCE, accepted_map, subset)
+        assert report.problems == [] and report.accepted == []
+        target = make_target(client)
+        run_copy(client, target, accepted_map, subset)
+        verified = tool.verify(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            nmap=accepted_map,
+            subset=subset,
+        )
+        assert verified.problems == [] and verified.accepted == []
+
     def test_detects_nullability_that_differs_from_the_map(self, client, nmap, subset):
         target = make_target(client)
         run_copy(client, target, nmap, subset)
@@ -959,3 +982,34 @@ class TestOrcapodCheck:
         assert problems == [
             "session: nullability differs from the map: ['subject_id: str | None']"
         ]
+
+
+class TestProbe:
+    def test_probe_writes_only_a_scratch_table_and_drops_it(self, client):
+        target = make_target(client)
+        result = tool.probe_nullability(
+            client, target_project=target, allow_writes=target, source_project=SOURCE
+        )
+        assert {r.table for r in client.project(target).list_tables()} == {
+            "edi_tutorial_build"
+        }
+        assert {
+            e[2] for e in writes_to(client, target) if e[1] != "create_project"
+        } <= {
+            tool.PROBE_TABLE,
+            tool.MARKER_TABLE,
+        }
+        assert (
+            result["null_v_declared_non_null"]["raised"] is None
+            or "v" in (result["null_v_declared_non_null"]["raised"])
+        )
+        assert "after_non_null_write" in result
+
+    def test_probe_refuses_a_target_without_marker(self, client):
+        with pytest.raises(tool.TargetRefusedError):
+            tool.probe_nullability(
+                client,
+                target_project="test-orcapod-885785",
+                allow_writes="test-orcapod-885785",
+                source_project=SOURCE,
+            )
