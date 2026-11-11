@@ -125,3 +125,53 @@ Recommendation: move the lock to 0.16.33. Keep the floor at `>=0.14.0`, or raise
 timestamp keys, or large tables. The `spiral-integration` job needs the `SPIRAL_WORKLOAD_ID`
 secret (GitHub OIDC), `vars.SPIRAL_PROJECT_ID` and `vars.SPIRAL_SERVER_URL`
 (default `http://api.spiraldb.dev`), and runs on push and `workflow_dispatch` only.
+
+## Live read-only run (coordinator, November 11, 2026, pyspiral 0.16.33)
+
+* `inspect_tables.py`: all 27 tables. The scan types are `string` (non-large), `timestamp[us]`
+  with **no timezone**, `date32`, `uint32`/`uint64`, `int16`/`int32`, `float`, `list<...>`,
+  `fixed_size_list<...>[n]`, structs with nested lists (`unit`), and `large_binary`
+  (`frame_jpeg`). Every field is nullable, key fields included. A 3-row scan takes 0.7–1.7 s;
+  `experiment_display_params` takes 9.2 s and `unit` 14.5 s.
+* `live_verify.py` read-only on `session,experiment`: all 7 checks pass. Every tag and data
+  column is `T | None` (C1 confirmed live), and `content_hash` and `pipeline_hash` are
+  identical in a fresh process. Both tables have 1 row in this sample.
+* The protobuf `UserWarning` lines on import came from the locked `substrait` 0.26.0
+  (protobuf 5 generated code under the protobuf 6 runtime). A fresh
+  `pip install orcapod[spiraldb]` resolves substrait 0.30.0 and shows no warning, so attendees
+  do not see it. The lock now pins 0.30.0 too.
+
+## The attendee path: Orcapod only, after one `spiral login`
+
+1. **Eager read.** Construction reads the whole table (`DBTableSource.__init__`). For
+   spike_event-shaped data, 200k rows take 0.9 s and +210 MB of peak RSS (+115 MB with C3b),
+   so `spike_event` (8,087,906 rows) needs roughly 8.5 GB (about 4.6 GB with C3b) and minutes.
+   That is not usable on a laptop. `size_probe.py` gives per-table row counts from the
+   manifests (no scan) and measured build costs for tables under a cap.
+2. **Restricting rows or columns.** Nothing is pushed down to Spiral today: no projection,
+   filter, key range or limit. The design for this is
+   `superpowers/specs/2026-11-11-itl-186-spiral-streaming-source-design.md` (ITL-186). Any
+   restriction that becomes part of the source must be part of its identity.
+3. **Nullability.** `db_table_source.py:133` infers nullability from data only when the
+   connector returns no column info. SpiralDB always returns column info, so nullability is
+   taken from the Spiral schema (all nullable), as the rule requires.
+4. **Dataframe methods.** `as_table`, `as_df`, `as_polars_df`, `as_pandas_df` and
+   `as_lazy_frame` all work on a Spiral source (fake, same code path), with tags and data and
+   no system columns in the default view.
+   * Polars types: `Datetime(us, no tz)`, `Date`, `UInt32`/`UInt64`, `List(Float32)`,
+     `Binary`, `Struct`.
+   * pandas turns `date32` into `datetime64[ms]`.
+   * `fixed_size_list` tables fail before any of these methods can run (C2).
+5. **Discovery.** There is no source-level helper.
+   `SpiralDBConnector(project).get_table_names()` and `.get_pk_columns(table)` are public
+   today (`orcapod.databases`) and are what the docs will show. A
+   `SpiralDBTableSource.list_tables(project)` helper is a new-API decision.
+6. **Setup.** `pip install "orcapod[spiraldb]"` installs the `spiral` CLI (pyspiral console
+   script), then `spiral login` once. Nothing else needs Spiral directly.
+7. **Errors.**
+   * A wrong table, dataset or project all used to say `Table 'x' not found in database.`.
+     Now fixed: the message names the project and dataset.
+   * Messages for a non-existent project and for no access come from the server and are
+     unverified: run `error_messages.py`.
+   * Not logged in: pyspiral starts a device-code login and **blocks** until it completes (seen
+     with 0.14.9). In a notebook the cell waits on a URL. The docs must say to log in first.
