@@ -175,3 +175,9 @@ columns by file content, extension identity kept); only the order options differ
       pandas entries plus new cases, the 2 basedpyright `ordered_*` errors clear); #286 merged
       (merge `main`; docs §1c subsection; Polars may move onto `hash_table_ordered`).
 
+- [x] Label rule (developer, Nov 11): a label is bumped whenever any value's hash can change,
+      including an Arrow hasher change; documented, and `test_labels_are_pinned_to_the_arrow_hasher`
+      pins the labels to `arrow_v0.1` (update to `arrow_v0.2` in the merge with the starfix bump:
+      the labels are unreleased, so the pin may move without a label bump then).
+- [ ] When starfix 0.5.0 is installable: delete `superpowers/scripts/itl_897/starfix05_shim.py`
+      (it refuses to run then) and the plan/spec references to it, before opening either PR.

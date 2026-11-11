@@ -10,7 +10,9 @@ descriptor carries what the Arrow values cannot express (label types, library dt
 values digest is the data context's Arrow hasher's ``hash_table_ordered`` of the value's Arrow
 form (order included, the same semantic preprocessing as every Orcapod Arrow hash). The label
 names the whole definition and is its only version marker: the bytes produced under a label
-never change, and a new definition gets a new label.
+never change, and a new definition gets a new label. A label is bumped whenever the hash of any
+value can change (developer's rule, November 11, 2026), which includes a change of the Arrow
+hasher whose digest the label embeds.
 """
 
 from __future__ import annotations
