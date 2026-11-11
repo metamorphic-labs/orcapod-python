@@ -23,10 +23,14 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 from pandas.testing import assert_frame_equal, assert_series_equal
 
 from orcapod.contexts import get_default_context
-from orcapod.logical_types.pandas_type import LogicalPandasDataFrame, LogicalPandasSeries
+from orcapod.logical_types.pandas_type import (
+    LogicalPandasDataFrame,
+    LogicalPandasSeries,
+)
 
 warnings.simplefilter("ignore")
 HASHER = get_default_context().semantic_hasher
@@ -48,6 +52,13 @@ def _with_columns_name(df: pd.DataFrame, name: str) -> pd.DataFrame:
     out = df.copy()
     out.columns = out.columns.rename(name)
     return out
+
+
+def _arrow_struct_frame(order: list[str]) -> pd.DataFrame:
+    types = {"u": pa.int64(), "v": pa.large_string()}
+    struct = pa.struct([(name, types[name]) for name in order])
+    array = pa.array([{"u": 1, "v": "x"}], struct)
+    return pd.DataFrame({"s": pd.Series(array, dtype=pd.ArrowDtype(struct))})
 
 
 def _no_dup_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -121,7 +132,9 @@ FRAME_CASES: list[tuple[str, pd.DataFrame, pd.DataFrame, Keeps]] = [
     ),
     (
         "MultiIndex columns vs flat tuple-ish labels",
-        pd.DataFrame([[1, 2]], columns=pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])),
+        pd.DataFrame(
+            [[1, 2]], columns=pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
+        ),
         pd.DataFrame([[1, 2]], columns=["('a', 'x')", "('a', 'y')"]),
         lambda r: not isinstance(r.columns, pd.MultiIndex),
     ),
@@ -204,6 +217,18 @@ FRAME_CASES: list[tuple[str, pd.DataFrame, pd.DataFrame, Keeps]] = [
         lambda r: bool(np.signbit(r["a"].iloc[0])),
     ),
     (
+        "struct field order (ArrowDtype struct column)",
+        _arrow_struct_frame(["u", "v"]),
+        _arrow_struct_frame(["v", "u"]),
+        lambda r: [f.name for f in r["s"].dtype.pyarrow_dtype] == ["v", "u"],
+    ),
+    (
+        "dict key order (object column of dicts)",
+        pd.DataFrame({"s": [{"u": 1, "v": "x"}]}),
+        pd.DataFrame({"s": [{"v": "x", "u": 1}]}),
+        lambda r: list(r["s"].iloc[0]) == ["v", "u"],
+    ),
+    (
         "attrs",
         _df(),
         _with_attrs(_df(), {"unit": "mV"}),
@@ -235,6 +260,20 @@ SERIES_CASES: list[tuple[str, pd.Series, pd.Series, Keeps]] = [
         pd.Series([1, 2], name=0),
         pd.Series([1, 2], name="0"),
         lambda r: r.name == "0" and isinstance(r.name, str),
+    ),
+    (
+        "Series MultiIndex level order (swaplevel)",
+        pd.Series(
+            [1, 2],
+            index=pd.MultiIndex.from_tuples([(0, "p"), (1, "q")], names=["i", "j"]),
+            name="v",
+        ),
+        pd.Series(
+            [1, 2],
+            index=pd.MultiIndex.from_tuples([(0, "p"), (1, "q")], names=["i", "j"]),
+            name="v",
+        ).swaplevel(),
+        lambda r: list(r.index.names) == ["j", "i"],
     ),
     (
         "Series index name",
@@ -293,7 +332,9 @@ def _report(
     lt: Any,
 ) -> None:
     print(f"\n## {kind}\n")
-    print("| property | equals | assert (defaults) | hash equal | stored keeps it | verdict |")
+    print(
+        "| property | equals | assert (defaults) | hash equal | stored keeps it | verdict |"
+    )
     print("|---|---|---|---|---|---|")
     for name, v1, v2, keeps in cases:
         eq = bool(v1.equals(v2))

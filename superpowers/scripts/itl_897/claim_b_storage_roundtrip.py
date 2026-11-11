@@ -114,8 +114,43 @@ def _envelope() -> None:
     print(f"  index_columns     : {meta['index_columns']}")
 
 
+def _prototype_hash_survives_storage() -> None:
+    """Under the prototype hash, a value and its stored round trip hash the same."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import prototype_v1
+    from claim_a_equality_vs_hash import FRAME_CASES, SERIES_CASES
+
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
+    prototype_v1.install()
+    hasher = get_default_context().semantic_hasher
+    lt_df, lt_s = LogicalPandasDataFrame(), LogicalPandasSeries()
+    bad: list[str] = []
+    unstorable: list[str] = []
+    values = [(n, v, lt_df) for n, a, b, _ in FRAME_CASES for v in (a, b)]
+    values += [(n, v, lt_s) for n, a, b, _ in SERIES_CASES for v in (a, b)]
+    for name, value, lt in values:
+        try:
+            back = lt.storage_to_python(lt.python_to_storage(value))
+        except Exception as exc:  # noqa: BLE001 - a storage failure is reported, not a hash
+            unstorable.append(f"{name}: {type(exc).__name__}")
+            continue
+        if hasher.hash_object(value) != hasher.hash_object(back):
+            bad.append(name)
+    print(
+        f"\nPrototype hash equal before and after storage: {len(values) - len(unstorable) - len(bad)}"
+        f" of {len(values) - len(unstorable)} storable values; differ: {bad or 'none'};"
+        f" not storable on main: {unstorable or 'none'}"
+    )
+
+
 if __name__ == "__main__":
-    print("| store | orchestrator | stored column order | order kept | first column | cache correct |")
+    print(
+        "| store | orchestrator | stored column order | order kept | first column | cache correct |"
+    )
     print("|---|---|---|---|---|---|")
     with tempfile.TemporaryDirectory() as tmp:
         for store_name in ("in_memory", "delta"):
@@ -128,3 +163,4 @@ if __name__ == "__main__":
             for orchestrator_name in ("sync", "async"):
                 _run_sequential(store_name, orchestrator_name, Path(tmp))
     _envelope()
+    _prototype_hash_survives_storage()
