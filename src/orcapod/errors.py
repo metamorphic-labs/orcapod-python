@@ -240,7 +240,7 @@ class StoreReadError(RuntimeError):
         Returns:
             The ``StoreReadError`` leaves in the order the group holds them.
         """
-        found: "list[StoreReadError]" = []
+        found: list[StoreReadError] = []
         for exc in group.exceptions:
             if isinstance(exc, BaseExceptionGroup):
                 found.extend(cls.in_group(exc))
