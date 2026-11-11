@@ -1,0 +1,189 @@
+# ITL-878: a failed store write fails the run — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:executing-plans to implement this
+> plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** When any node's write to the store fails, `PipelineJob.run()` (and the orchestrators
+under it) raises a `StoreWriteError` naming the node and table, on both orchestrators and
+independent of `error_policy`, instead of returning normally with the rows silently missing.
+
+**Status:** Option A proposed to the coordinator on 2026-11-10; the coordinator is taking it to
+the developer (new public exception + documented behaviour change). Tasks 1 (failing tests)
+may proceed now; Tasks 2+ wait for approval.
+
+**Architecture:** Every node-owned store write site converts a backend exception into
+`orcapod.errors.StoreWriteError` (chained `from` the backend error). The per-row
+"skip failed rows" handlers (sync `FunctionNode.execute`, async
+`_FunctionPodBase.async_execute.process_one`, side-effect delivery with `on_error="log"`)
+re-raise `StoreWriteError` ahead of their generic `except Exception`, so `error_policy` keeps
+meaning "skip rows whose *function* failed". The async orchestrator unwraps the
+`TaskGroup` `ExceptionGroup` so async callers get the same `StoreWriteError` as sync callers.
+`PipelineJob.run()` flushes pending writes best-effort before re-raising any run failure, so
+rows that did write are committed and do not look dropped.
+
+**Tech Stack:** Python 3.11+, PyArrow, asyncio TaskGroup, pytest.
+
+---
+
+## Investigation summary (Step 1, reproduced on main c438d4d1)
+
+- Sync swallow: `core/nodes/function_node.py` `FunctionNode.execute` per-row
+  `except Exception` (error_policy "continue") wraps `_process_data_internal`, which does
+  compute AND both writes (result table via `ResultCache.store`, pipeline table via
+  `add_pipeline_record`). WARNING log per row, run returns normally.
+- Async swallow: `core/function_pod.py` `_FunctionPodBase.async_execute.process_one` catches
+  every per-row exception, logs at DEBUG (invisible), drops the row.
+- Async pipeline-table write (`record_and_forward`) and operator LOG writes already raise, but
+  async callers get an `ExceptionGroup`.
+- Operator-LOG failure aborts the run before `job.run`'s final flush, so pending pipeline rows
+  of upstream function nodes are never committed while their result rows are: the node reads
+  back fewer rows than were stored.
+- Read failures raise on both orchestrators (not swallowed). Observer status/log writes are
+  deliberately best-effort and stay so.
+- Re-run on a healthy store recovers in every case (missing rows recomputed; orphan results
+  hit the result cache).
+
+## Contract (Option A)
+
+1. A failed write of a node's results or records raises `StoreWriteError` and stops the run at
+   the first failure, regardless of `error_policy`, on both orchestrators.
+2. `str(err)` names the node label and the table path (`"/".join(record_path)`), says rows
+   stored before the failure are kept and that re-running computes only what is missing.
+   `err.node_label`, `err.record_path` are attributes; `err.__cause__` is the backend error.
+3. Before re-raising, `PipelineJob.run()` flushes pending writes best-effort; a flush failure
+   during that is logged and does not mask the original error. Nothing already stored is
+   rewritten; no hash, path or stored-schema change.
+4. A failure of `PipelineJob.run()`'s final flush raises `StoreWriteError` (no node label).
+5. `error_policy="continue"` still skips rows whose function raised (unchanged).
+
+## Files
+
+- Modify: `src/orcapod/errors.py` — add `StoreWriteError(RuntimeError)`.
+- Modify: `src/orcapod/core/result_cache.py` — wrap `add_record` + auto-flush in `store`.
+- Modify: `src/orcapod/core/nodes/function_node.py` — wrap `add_pipeline_record`'s write;
+  re-raise `StoreWriteError` in `execute`; tag node label in `async_execute`.
+- Modify: `src/orcapod/core/function_pod.py` — `process_one` re-raises `StoreWriteError`.
+- Modify: `src/orcapod/core/nodes/operator_node.py` — wrap `_store_output_stream`'s write.
+- Modify: `src/orcapod/side_effects.py` — wrap `_write_invocation_row`; re-raise before the
+  `on_error="log"` handler.
+- Modify: `src/orcapod/pipeline/async_orchestrator.py` — unwrap `StoreWriteError` from the
+  `ExceptionGroup`.
+- Modify: `src/orcapod/pipeline/job.py` — best-effort flush on failure; wrap final flush.
+- Create: `tests/test_pipeline/test_store_write_failure.py`.
+- Modify: `docs/concepts/function-pods.md` (PipelineJob section), `README.md` execution
+  walkthrough, `DESIGN_ISSUES.md` (one entry appended at the end).
+
+## Task 1: Failing regression tests (public interface)
+
+**Files:** Create `tests/test_pipeline/test_store_write_failure.py`.
+
+Test double `FaultyStore`: wraps an `InMemoryArrowDatabase`; `at()` returns a wrapper sharing
+one `Faults` config; fails `add_record`/`add_records` whose full path contains a marker
+(`"rdb_v1"` result table, `"pdb_v1"` pipeline table, operator class name), optionally after N
+successful matching writes, or fails `flush`. Records the failing relative record path so the
+test can assert the message names it. `__getattr__` delegates everything else.
+
+All tests parametrized over `SyncPipelineOrchestrator` / `AsyncPipelineOrchestrator`. Until
+the exception class is approved, assert with `pytest.raises(Exception)` plus
+`not isinstance(err, BaseExceptionGroup)`, node label in `str(err)` and failing path in
+`str(err)`; tighten to `StoreWriteError` in Task 2.
+
+- result-table write fails on the first row → run raises, names node + table.
+- result-table write fails from the 2nd row → raises; a fresh job over the healthy store
+  recomputes only the missing rows (function call counter) and returns all rows.
+- pipeline-table write fails → raises; fresh healthy re-run makes zero function calls.
+- store primed with 2 rows, 3rd (new) row's write fails → raises; the 2 primed rows are still
+  read back by a fresh job (zero calls for them).
+- `error_policy="fail_fast"` and `"continue"` both raise for a store failure.
+- operator node with `cache_mode=LOG` whose write fails → raises naming the operator node;
+  upstream function node's pipeline rows are committed (read through a fresh job's
+  `nodes[label].get_all_records()` before running it).
+- flush failure (`Faults(on_flush=True)`) → raises.
+- SQLite trigger: function pod returning `pathlib.Path` on
+  `ConnectorArrowDatabase(SQLiteConnector(tmp_path / "x.db"))` → raises naming the node.
+- Guard (should pass before and after): a function that raises for one row with
+  `error_policy="continue"` still returns normally and stores the other rows.
+
+- [ ] Write the tests; run `uv run pytest tests/test_pipeline/test_store_write_failure.py -v`;
+      confirm the store-failure tests FAIL (run returns normally / ExceptionGroup) and the
+      guard passes. Commit `test(pipeline): failing regression tests for swallowed store write
+      failures (ITL-878)`.
+
+## Task 2: `StoreWriteError` (after approval)
+
+```python
+class StoreWriteError(RuntimeError):
+    """Raised when a node's results or records could not be written to the store. ..."""
+
+    def __init__(self, record_path: tuple[str, ...], node_label: str | None = None) -> None:
+        self.record_path = tuple(record_path)
+        self.node_label = node_label
+        super().__init__(record_path, node_label)
+
+    def __str__(self) -> str:
+        where = f"node {self.node_label!r}" if self.node_label else "the pipeline"
+        cause = self.__cause__
+        reason = f": {type(cause).__name__}: {cause}" if cause is not None else ""
+        return (
+            f"Could not write to the store for {where} (table "
+            f"{'/'.join(self.record_path)!r}){reason}. Rows stored before this failure are "
+            "kept; re-running computes only the rows that are missing."
+        )
+```
+
+`node_label` is filled in by the node that owns the write when the write site does not know
+it (`ResultCache`): `if exc.node_label is None: exc.node_label = self.label`.
+Tighten Task 1 assertions to `pytest.raises(StoreWriteError)`.
+
+## Task 3: Write sites raise `StoreWriteError`
+
+- `ResultCache.store`: `try: add_record(...); if auto_flush: flush()` /
+  `except StoreWriteError: raise` / `except Exception as exc: raise
+  StoreWriteError(self._versioned_record_path) from exc`.
+- `FunctionNode.add_pipeline_record`: same around `self._pipeline_database.add_record`, with
+  `node_label=self.label`, path `self._versioned_pipeline_path`.
+- `OperatorNode._store_output_stream`: same around `add_records`, path
+  `self.node_identity_path`.
+- `side_effects._write_invocation_row`: same, path `table_path` (label filled by caller).
+
+## Task 4: Per-row handlers re-raise
+
+- `FunctionNode.execute`: before `except Exception`, add
+  `except StoreWriteError as exc:` → set label, `ctx_obs.on_data_crash(...)`,
+  `ctx_obs.on_node_end(...)`, `raise`.
+- `_FunctionPodBase.async_execute.process_one`: `except StoreWriteError as exc:`
+  → `obs.on_data_crash(...)`; `raise`. (Only this; no error_policy threading or log-level
+  change — those are the separately filed async error_policy issue.)
+- `FunctionNode.async_execute`: wrap the DB-path `TaskGroup` with `except* StoreWriteError`
+  setting `node_label` on each leaf whose label is `None`, then re-raise the group.
+- `side_effects` delivery: `except StoreWriteError: raise` before the `on_error` handler.
+
+## Task 5: Orchestrator and job
+
+- `AsyncPipelineOrchestrator._run_async`: `except* StoreWriteError as eg: raise
+  _first_leaf(eg)` where `_first_leaf` walks nested groups to the first `StoreWriteError`.
+- `PipelineJob.run()`: wrap `effective_orchestrator.run(...)` in `try/except Exception:`
+  → `_flush_best_effort(pipeline_db, result_db)` (logs flush errors with `logger.exception`)
+  → `raise`. Final flush: `except Exception as exc: raise
+  StoreWriteError(pipeline_db.base_path) from exc`.
+
+- [ ] Run new tests (pass), then `uv run pytest tests/` (full), ruff check/format,
+      basedpyright exit code. Commit `fix(pipeline): a failed store write fails the run
+      (ITL-878)`.
+
+## Task 6: Docs and design log
+
+- `docs/concepts/function-pods.md` PipelineJob section: subsection "When the store cannot be
+  written" stating the contract (prose; no executed sample needs infrastructure).
+- `README.md` execution walkthrough: note store errors are not skipped by `error_policy`.
+- `DESIGN_ISSUES.md`: append one entry (resolved, Fix note, ITL-878).
+- [ ] `uv run pytest tests/test_docs/`; commit `docs: state the store-write failure contract
+      (ITL-878)`.
+
+## Out of scope (reported, not fixed)
+
+- Async orchestrator ignores `error_policy`; async per-row function errors logged at DEBUG
+  (coordinator is filing). This plan touches `process_one` only to re-raise
+  `StoreWriteError`.
+- Connector/Delta `flush` pop the pending batch before writing (coordinator is filing).
+- ITL-877 (SQLite logical types).
