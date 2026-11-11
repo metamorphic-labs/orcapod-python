@@ -176,10 +176,12 @@ class _Unsupported(Exception):
 
 
 def _fail(reason: str) -> _Unsupported:
+    """Build the internal exception for a construct outside the grammar."""
     return _Unsupported(reason)
 
 
 def _single_key(obj: Any) -> tuple[str, Any]:
+    """Split a one-key JSON object (or a bare string tag) into its key and value."""
     if isinstance(obj, str):
         return obj, None
     if not isinstance(obj, dict) or len(obj) != 1:
@@ -189,29 +191,34 @@ def _single_key(obj: Any) -> tuple[str, Any]:
 
 
 def _short(obj: Any) -> str:
+    """Render a serialization fragment as compact JSON, truncated for messages."""
     text = json.dumps(obj, sort_keys=True)
     return text if len(text) <= 120 else text[:117] + "..."
 
 
 def _require_keys(obj: Any, keys: set[str]) -> dict[str, Any]:
+    """Return ``obj`` if it is a JSON object with exactly ``keys``."""
     if not isinstance(obj, dict) or set(obj) != keys:
         raise _fail(f"unexpected serialization layout {_short(obj)}")
     return obj
 
 
 def _require_int(value: Any) -> int:
+    """Return ``value`` if it is an integer (not a bool)."""
     if not isinstance(value, int) or isinstance(value, bool):
         raise _fail(f"expected an integer, got {_short(value)}")
     return value
 
 
 def _require_bool(value: Any) -> bool:
+    """Return ``value`` if it is a bool."""
     if not isinstance(value, bool):
         raise _fail(f"expected a boolean, got {_short(value)}")
     return value
 
 
 def _float_hex(value: Any, *, float32: bool = False) -> str:
+    """Encode a finite float as ``float.hex()``, rounded to 32 bits when ``float32``."""
     if value is None:
         # Polars' JSON writes NaN, inf and -inf all as null, so they cannot be told apart.
         raise _fail("non-finite float literals (NaN, inf, -inf) are not supported")
@@ -226,12 +233,14 @@ def _float_hex(value: Any, *, float32: bool = False) -> str:
 
 
 def _time_unit(value: Any) -> str:
+    """Map a Polars time unit name to ``ns``, ``us`` or ``ms``."""
     if not isinstance(value, str) or value not in _TIME_UNITS:
         raise _fail(f"unexpected time unit {_short(value)}")
     return _TIME_UNITS[value]
 
 
 def _time_zone(value: Any) -> str | None:
+    """Return the time zone name of a serialized datetime dtype, or ``None``."""
     if value is None:
         return None
     zone = _require_keys(value, {"inner"})["inner"]
@@ -295,6 +304,7 @@ def _polars_dtype(dtype: Any) -> Any:
 
 
 def _list_literal(value: Any) -> Any:
+    """Encode a Python-list literal (Arrow IPC bytes in the serialization) as a list literal."""
     if not isinstance(value, list) or not all(
         isinstance(b, int) and not isinstance(b, bool) and 0 <= b < 256 for b in value
     ):
@@ -319,6 +329,7 @@ def _list_literal(value: Any) -> Any:
 
 
 def _scalar_literal(obj: Any) -> Any:
+    """Encode a typed scalar literal."""
     key, value = _single_key(obj)
     if key == "Null":
         if value != "Null":
@@ -383,6 +394,7 @@ def _scalar_literal(obj: Any) -> Any:
 
 
 def _literal(obj: Any) -> Any:
+    """Encode a literal node (dynamic Python number or typed scalar)."""
     key, value = _single_key(obj)
     if key == "Dyn":
         dyn_key, dyn_value = _single_key(value)
@@ -401,6 +413,7 @@ def _literal(obj: Any) -> Any:
 
 
 def _function(obj: Any) -> Any:
+    """Encode a function node (``is_in``, ``is_null``, ``str.contains``, ...)."""
     body = _require_keys(obj, {"input", "function"})
     inputs = body["input"]
     if not isinstance(inputs, list):
@@ -449,6 +462,7 @@ def _function(obj: Any) -> Any:
 
 
 def _node(obj: Any) -> Any:
+    """Encode one serialized expression node in the canonical grammar."""
     key, value = _single_key(obj)
     if key in _PYTHON_FUNCTION_NODES:
         raise _fail(
