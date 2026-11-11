@@ -19,7 +19,10 @@ Coordinator task `task_25c74f4198f0`, dispatch `ctx_4af6270358e5`.
       `tests/test_hashing/test_pandas_value_identity.py`,
       `tests/test_core/function_pod/test_pandas_dataframe_order.py`,
       `tests/test_hashing/test_arrow_table_value_identity.py`.
-- [ ] Wait for the developer's decisions and #286 to merge.
+- [x] Grammar extended to every label/dtype that hashes and stores today (f31ab59c).
+- [x] Developer decision (Nov 11): orders come from a starfix ordered mode (ITL-898). Spec section
+      "Mechanism" says what the option replaces and what stays in the descriptor.
+- [ ] Wait for: developer decisions 1, 2, 4; #286 merged; the starfix ordered-mode release.
 
 ## Step 2: implementation (only after approval)
 

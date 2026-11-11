@@ -1,6 +1,9 @@
 # ITL-897: pandas DataFrame hash ignores column order (step 1: investigation and proposal)
 
-Status: proposal, awaiting the coordinator's decision. No library code is changed.
+Status: proposal; decisions 1, 2 and 4 are with the developer. No library code is changed.
+Mechanism decided (developer, Nov 11): orders come from starfix's ordered mode (ITL-898), not from
+the descriptor. Sections (c) and (h) describe the descriptor-only design they were written with;
+"Mechanism: starfix ordered mode" says which parts the option replaces and which remain.
 Base: `main` at `b197544e` (v0.2.0 + #291), pandas 2.2.3, pyarrow 23.0.1, Python 3.12.
 
 Developer decision (November 11, 2026): order is identity wherever the type's own equality
@@ -420,11 +423,53 @@ v0.2.0, so no value that works today starts raising. The label grammar adds
 The last three hash on `main` but cannot be stored (see "Out of scope findings"), so they never
 reach a stored key. `v1` still hashes them.
 
-**If ITL-898 adds an order option to starfix.** The option would cover column order, MultiIndex
-level order (index levels are table fields) and struct field order. It would not cover the
-non-order rows: pandas dtypes, label types, `columns.name` and categories are not in the Arrow
-values starfix sees. A descriptor is still needed for those, so the order option would shorten
-the descriptor, not replace it.
+## Mechanism: starfix ordered mode (ITL-898)
+
+Developer decision, November 11, 2026: starfix (and starfix-python) gets an option to turn off
+order independence for columns and for struct fields. Every Orcapod type that needs order
+dependence uses it once released. pandas and `pa.Table` values wait for that release and for
+#286. The labelled-hash convention still applies: a new definition gets a new label.
+
+**What the ordered mode replaces, and what stays in the descriptor.**
+
+| Part of the identity | pandas `v1` | `pa.Table` value |
+|---|---|---|
+| Column order | ordered mode (data fields of `from_pandas`, in frame order) | ordered mode |
+| MultiIndex level order | ordered mode (index levels are fields after the data columns) | n/a |
+| Struct field order, every depth (`ArrowDtype` struct columns; Arrow structs) | ordered mode | ordered mode |
+| Column label types (`0` vs `"0"`), MultiIndex column tuples | descriptor: Arrow field names are stringified labels | n/a (Arrow names are strings) |
+| `columns.names` | descriptor | n/a |
+| Index level names (typed; unnamed vs a level literally named `__index_level_0__`) | descriptor | n/a |
+| pandas dtypes: masked (`Int64`, `boolean`) vs numpy, `string` storage, period, interval | descriptor: same Arrow type and values either way | n/a |
+| Categorical categories (incl. unused), their order, `ordered` | descriptor: starfix hashes a dictionary column by its values | n/a |
+| Series name (typed) and `kind` (frame vs Series) | descriptor | open: Table vs `RecordBatch` |
+| Values, row order, row count, Arrow types | ordered-mode digest | ordered-mode digest |
+
+So for pandas, `pandas_dataframe_v1 = sha256(descriptor + b"\x00" + ordered_digest)`. The
+descriptor drops the order-carrying parts: the column list keeps typed labels and pandas dtypes,
+but it no longer has to be the source of order, and the Arrow struct grammar inside
+`{"arrow": ...}` can go, because the ordered digest sees field order. The descriptor still
+carries everything pandas' `assert_frame_equal` checks that the Arrow values do not show. For
+`pa.Table` values, the ordered-mode digest alone is the identity, under its own label
+(`arrow_table_v1`), and no descriptor is needed beyond the open Table vs `RecordBatch` choice.
+
+**Constraints for the starfix option (to pass to ITL-898):**
+
+* Orcapod uses both modes in one process: unordered for stream, datagram and row identities
+  (record IDs, data hashes, `source_id`), ordered for values. The option must be a per-call
+  argument, not a global setting.
+* Ordered mode must cover struct fields at every depth (inside lists, large lists, fixed-size
+  lists, structs, maps), not only top-level columns.
+* Object columns of dicts must stay order independent (dict is unordered by decision). pyarrow
+  23.0.1 sorts the keys of an inferred struct (`{"z": 1, "a": 2}` gives `struct<a, z>`), so
+  ordered mode does not make dict key order identity today. That rests on pyarrow's inference,
+  so the pandas implementation should pin it with a test, or sort inferred struct fields for
+  `object` columns itself.
+* The separation in (f) is still needed: `Datagram` and producer-less `ArrowTableStream`
+  identities must keep calling the unordered digest when `ArrowTableHandler` switches to ordered.
+
+The failing tests stand unchanged: they assert distinctness only, so they hold under the
+ordered mode as under the descriptor prototype.
 
 ## Failing tests on the branch (red on `main` by design, no PR yet)
 
@@ -447,7 +492,8 @@ on purpose.
    hash moves) over the sorted-order variant.
 2. Scope of `v1`: the full descriptor in (i), which agrees with `assert_frame_equal` defaults,
    settles ITL-887 and covers every value that hashes and stores today (recommended), or order
-   only. Also the mechanism (descriptor vs a starfix option, ITL-898).
+   only. Mechanism decided: orders come from starfix's ordered mode (ITL-898); the descriptor
+   keeps the non-order parts (see "Mechanism").
 3. Base: decided by the coordinator. Wait for #286 to merge, then build from `main` on a shared
    helper.
 4. `pa.Table` values: approve the separation and `arrow_table_v1`; one PR or two; `Table` vs
