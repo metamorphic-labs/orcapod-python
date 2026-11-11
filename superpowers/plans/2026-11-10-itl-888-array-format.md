@@ -95,15 +95,13 @@ def test_digest_separates_fields():
 
 
 def test_storage_type():
+    # Children are nullable at the Arrow level (spec A1, finding F1): Polars drops
+    # nested non-null flags, so the logical type enforces non-null instead.
     assert ARRAY_STORAGE_TYPE == pa.struct(
         [
-            pa.field("dtype", pa.large_string(), nullable=False),
-            pa.field(
-                "shape",
-                pa.large_list(pa.field("item", pa.int64(), nullable=False)),
-                nullable=False,
-            ),
-            pa.field("data", pa.large_binary(), nullable=False),
+            pa.field("dtype", pa.large_string()),
+            pa.field("shape", pa.large_list(pa.int64())),
+            pa.field("data", pa.large_binary()),
         ]
     )
 ```
