@@ -157,3 +157,21 @@ columns by file content, extension identity kept); only the order options differ
 - [ ] Second PR (`eywalker/itl-897-arrow-table-value-order-identity`): `ArrowTableHandler` ->
       `arrow_table_v1` via `hash_table_ordered`; `Datagram` / `ArrowTableStream` identities call
       `hash_table` explicitly.
+
+## Progress (Nov 11, end of day)
+
+- [x] Tasks 1-4 done on this branch, revised to option A: `StarfixArrowHasher._digest` is the one
+      starfix table call (`hash_table` / `hash_table_ordered`); pandas routes through
+      `hash_table_ordered`; `labelled_hash` keeps `canonical_json` / `labelled_content_hash`.
+- [x] Verified with `superpowers/scripts/itl_897/starfix05_shim.py` (stand-in for 0.5's ordered
+      keywords, also in child processes via a temporary `.pth` hook): full suite passes except the
+      3 approved pandas golden entries and the cross-process golden check reporting the same 3.
+- [x] Second PR branch `eywalker/itl-897-arrow-table-value-order-identity`: `arrow_table_v1`
+      (`ArrowTableHandler` -> `hash_table_ordered`), `StreamTableIdentity` for `Datagram` and
+      producer-less `ArrowTableStream` identities (lazy; `==` is `pa.Table.equals`, so MergeJoin's
+      stream comparison still hashes nothing). Full suite under the stand-in: only the pandas golden
+      entries. No golden entry of its own moves.
+- [ ] Waits: starfix 0.5.0 on PyPI and the bump on `main` (then: real run, regenerate golden for the
+      pandas entries plus new cases, the 2 basedpyright `ordered_*` errors clear); #286 merged
+      (merge `main`; docs §1c subsection; Polars may move onto `hash_table_ordered`).
+
