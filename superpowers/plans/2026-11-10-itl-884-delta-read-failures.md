@@ -39,8 +39,9 @@ No hash, path or stored-schema changes.
 - `src/orcapod/core/nodes/function_node.py` (`execute` per-row handler) and
   `src/orcapod/core/function_pod.py` (async `process_one`) both get
   `except StoreReadError: ...; raise`.
-- `src/orcapod/pipeline/async_orchestrator.py` gets `except* StoreReadError` and raises the
-  first leaf.
+- `src/orcapod/pipeline/async_orchestrator.py` catches the `TaskGroup`'s `ExceptionGroup`
+  with a plain `except`, selects one `StoreReadError` with `_single_store_error`, and raises
+  it on its own, noting the other failures on it.
 - Tests: `tests/test_databases/test_delta_read_failures.py` and
   `tests/test_pipeline/test_store_read_failure.py`.
 - Docs: `docs/concepts/function-pods.md` gets an admonition, `CHANGELOG.md` gets Fixed and
@@ -69,8 +70,10 @@ No hash, path or stored-schema changes.
   1.0.2 does not raise naturally from a local table). Flush raises and the stored files are
   untouched. The comment explains the monkeypatch.
 - Append refusal:
-  - `test_castable_type_change_is_refused`: int64 stored, float64 appended. Raises (flush
-    wraps it in `RuntimeError`, so assert that `InputValidationError` is the `__cause__`).
+  - `test_castable_type_change_is_refused` (implemented as the `int64->float64` case of
+    `test_plain_type_change`): int64 stored, float64 appended. `flush` raises
+    `InputValidationError` itself (Task 2 of `2026-11-10-itl-884-coderabbit-flush-and-async-group.md`); assert it
+    directly.
     The message names the column `x`, `int64` and `double`. A re-read gives the original row
     only, with type int64.
   - `test_narrowing_change_is_refused`: int64 stored, int32 appended.
@@ -123,7 +126,7 @@ class StoreReadError(RuntimeError):
         reason = f": {type(cause).__name__}: {cause}" if cause is not None else ""
         return (
             f"Could not read the stored table at {self.table!r}{reason}. The table exists, "
-            "so its rows are not treated as missing: nothing was recomputed or overwritten."
+            "so its rows are not treated as missing and the table was not overwritten."
         )
 
     @classmethod
@@ -169,8 +172,11 @@ Run the Task 1 and Task 2 tests and expect PASS.
   then `raise`.
 - `FunctionPod` async `process_one`: put `except StoreReadError as exc:` before
   `except Exception`. It calls `obs.on_data_crash(...)` and then `raise`.
-- `AsyncPipelineOrchestrator._run_async`: add `except* StoreReadError as group: raise
-  StoreReadError.in_group(group)[0]`.
+- `AsyncPipelineOrchestrator._run_async`: add `except ExceptionGroup as group:` and pick
+  the error with `_single_store_error(group, topo_order)` (the `StoreReadError` of the
+  earliest node in topological order, the other failures noted on it); raise it on its own,
+  or re-raise the group unchanged when it holds no `StoreReadError`. A leaf raised inside
+  `except*` would be wrapped in a new group whenever another task failed concurrently.
 
 Run the Task 2 tests and expect PASS.
 

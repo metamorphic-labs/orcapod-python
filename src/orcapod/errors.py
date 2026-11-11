@@ -203,8 +203,8 @@ class StoreReadError(RuntimeError):
     A table that does not exist reads as empty. A table that exists but cannot be
     read (a missing or damaged data file, a log the backend cannot load, columns
     whose stored data no longer matches the table schema) raises this error
-    instead, so stored results never look dropped. Nothing is recomputed or
-    overwritten. A failed store read always fails the run, whatever the
+    instead, so stored results never look dropped. Its rows are not recomputed
+    and the table is not overwritten. A failed store read always fails the run, whatever the
     orchestrator's ``error_policy``.
 
     The backend's own exception is chained as ``__cause__``.
@@ -225,8 +225,8 @@ class StoreReadError(RuntimeError):
         reason = f": {type(cause).__name__}: {cause}" if cause is not None else ""
         return (
             f"Could not read the stored table at {self.table!r}{reason}. The table "
-            "exists, so its rows are not treated as missing: nothing was recomputed "
-            "or overwritten."
+            "exists, so its rows are not treated as missing and the table was not "
+            "overwritten."
         )
 
     @classmethod

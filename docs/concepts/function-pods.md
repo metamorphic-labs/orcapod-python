@@ -222,8 +222,9 @@ print("function calls:", len(calls))
     A table that does not exist yet reads as empty, and its rows are computed. A table that
     exists but cannot be read (for example, a data file was deleted or damaged) is never
     treated as empty: the run stops with `orcapod.errors.StoreReadError`, which names the
-    table and the underlying error, whatever the orchestrator's `error_policy`. Nothing is
-    recomputed or overwritten, so you can repair the table or restore the file and run again.
+    table and the underlying error, whatever the orchestrator's `error_policy`. Its stored rows
+    are not recomputed and the table is not overwritten, so you can repair the table or restore
+    the file and run again.
 
     In a `DeltaTableDatabase`, rows whose column types differ from the stored table's
     (`float64` values for a column stored as `int64`, say) are refused with
