@@ -187,3 +187,38 @@ Tighten Task 1 assertions to `pytest.raises(StoreWriteError)`.
   `StoreWriteError`.
 - Connector/Delta `flush` pop the pending batch before writing (coordinator is filing).
 - ITL-877 (SQLite logical types).
+
+---
+
+## Follow-up: CodeRabbit round 1 (approved by the coordinator if each finding reproduces)
+
+**Finding 1 (comment 4534032564): a failing hook or observer callback replaces a
+`StoreWriteError`.** A node's own `CachedFunctionPod` never carries hooks, so the reachable
+case is a node function that runs another cached pod (`@function_pod(pod_cache_database=...,
+post_run_hooks=[...])`) whose store write fails: the ERROR-status hook fires inside
+`_invoke_with_hooks`'s `except`, a fail-loud hook raises, its exception replaces the store
+error, and the outer node skips the row under `error_policy="continue"`. The same applies to
+an observer's `on_data_crash` / `on_node_end` raised on the store-error branch.
+
+- Test first (public interface): standalone `pod.pod(stream).as_table()` and
+  `pod.pod.async_execute(...)` with a raising hook raise `StoreWriteError`; a pipeline whose
+  node function runs such a pod raises `StoreWriteError` on both orchestrators under
+  `continue`; a pipeline observer whose `on_data_crash` raises does not hide it.
+- Fix: `_fire_post_run_hooks(payload, store_error=...)`: when a store error is propagating,
+  a raising hook is logged at WARNING and recorded with `add_note` on the store error, which
+  then propagates. Observer callbacks on the store-error branches go through one helper that
+  does the same. Hook failures without a store error are unchanged.
+
+**Finding 2 (comment 4534032576): mixed exception groups from the async orchestrator.**
+`except* StoreWriteError` re-raises the unmatched rest as an `ExceptionGroup` together with
+the store error, and drops further store errors silently.
+
+- Test first: two sibling nodes failing concurrently (store write + another exception; two
+  store writes) → the async caller gets one plain `StoreWriteError`.
+- Fix: catch `ExceptionGroup`; if it holds any `StoreWriteError`, raise the one whose node
+  comes first in topological order (ties: group order), the order the sync orchestrator meets
+  them; log every other `StoreWriteError` at WARNING; add a note per other exception; the
+  whole group stays reachable as `__context__` (`__cause__` stays the backend error). A
+  group with no store error propagates unchanged.
+
+No hash, schema or other behaviour change.

@@ -9,6 +9,7 @@ report (a logical-type output on ``SQLiteConnector``).
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.channels import Channel
 from orcapod.core.operators import SelectDataColumns
 from orcapod.errors import StoreWriteError
 from orcapod.databases import (
@@ -24,6 +26,7 @@ from orcapod.databases import (
     SQLiteConnector,
 )
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode
 
@@ -236,12 +239,18 @@ class TestFunctionNodeWriteFailure:
 
         assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
 
-        # Every result computed before the failure was stored, so a healthy re-run
-        # reuses it: across both runs each row is computed exactly once.
+        # The failing row's result was stored before its pipeline record failed, so a
+        # healthy re-run reuses it instead of computing it again. (On the async
+        # orchestrator a row still computing when the run stopped was never stored
+        # and is computed again, so the total call count is not fixed.)
+        failed_tag = exc_info.value.tag
+        assert failed_tag is not None
+        failed_x = next(row["x"] for row in ROWS if row["k"] == failed_tag["k"])
+        calls.clear()
         rerun = build_job(inner, ROWS)
         rerun.run(orchestrator=orchestrator_cls())
         assert rerun.nodes["dbl"].as_table().num_rows == 3
-        assert sorted(calls) == [0, 1, 2]
+        assert failed_x not in calls
 
     def test_failure_on_new_row_keeps_previously_stored_rows(self, orchestrator_cls):
         inner = InMemoryArrowDatabase()
@@ -325,3 +334,206 @@ class TestSQLiteTrigger:
         assert exc_info.value.node_label == "dbl"
         assert "node 'dbl'" in str(exc_info.value)
         assert "does not preserve Arrow metadata" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# A failing hook or observer callback never replaces a store error
+# ---------------------------------------------------------------------------
+
+
+def failing_hook(payload: Any) -> None:
+    raise ValueError("post-run hook failed")
+
+
+def make_hooked_triple(store: Any):
+    """A cached pod with a fail-loud post-run hook, writing its results to ``store``."""
+
+    @function_pod(
+        output_keys="tripled", pod_cache_database=store, post_run_hooks=[failing_hook]
+    )
+    def triple(x: int) -> int:
+        return x * 3
+
+    return triple
+
+
+def make_outer(inner: Any):
+    """A function pod whose function runs ``inner`` through its stream."""
+
+    @function_pod(output_keys="double")
+    def via_inner(x: int) -> int:
+        stream = DictSource(data=[{"i": "i", "x": x}], tag_columns=["i"])
+        return inner.pod(stream).as_table()["tripled"][0].as_py() - x
+
+    return via_inner
+
+
+def assert_hook_failure_noted(err: BaseException) -> None:
+    assert isinstance(err, StoreWriteError), f"{type(err).__name__}: {err}"
+    assert isinstance(err.__cause__, OSError)
+    notes = getattr(err, "__notes__", [])
+    assert any("post-run hook failed" in note for note in notes), notes
+
+
+class CrashingObserver(NoOpObserver):
+    """An observer whose crash and end callbacks raise once a row has crashed."""
+
+    def __init__(self) -> None:
+        self.crashed = False
+
+    def on_data_crash(self, node_label, tag, data, error) -> None:
+        self.crashed = True
+        raise RuntimeError("observer failed in on_data_crash")
+
+    def on_node_end(self, node_label, node_hash) -> None:
+        if self.crashed:
+            raise RuntimeError("observer failed in on_node_end")
+
+    def on_run_end(self, run_id) -> None:
+        if self.crashed:
+            raise RuntimeError("observer failed in on_run_end")
+
+
+class TestCallbackFailureKeepsStoreError:
+    def test_failing_hook_keeps_store_error_standalone(self):
+        faults = Faults(write_marker="")
+        triple = make_hooked_triple(FaultyStore(InMemoryArrowDatabase(), faults))
+        stream = DictSource(data=ROWS, tag_columns=["k"])
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            triple.pod(stream).as_table()
+
+        assert_hook_failure_noted(exc_info.value)
+
+    def test_failing_hook_keeps_store_error_standalone_async(self):
+        faults = Faults(write_marker="")
+        triple = make_hooked_triple(FaultyStore(InMemoryArrowDatabase(), faults))
+        stream = DictSource(data=ROWS, tag_columns=["k"])
+        input_ch: Channel[Any] = Channel(buffer_size=16)
+        output_ch: Channel[Any] = Channel(buffer_size=16)
+
+        async def feed() -> None:
+            for tag, data in stream.iter_data():
+                await input_ch.writer.send((tag, data))
+            await input_ch.writer.close()
+
+        async def run() -> None:
+            await asyncio.gather(
+                feed(), triple.pod.async_execute([input_ch.reader], output_ch.writer)
+            )
+
+        with pytest.raises(ExceptionGroup) as exc_info:
+            asyncio.run(run())
+
+        leaves = exc_info.value.exceptions
+        assert all(isinstance(leaf, StoreWriteError) for leaf in leaves), leaves
+        for leaf in leaves:
+            assert_hook_failure_noted(leaf)
+
+    @pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+    def test_failing_hook_in_nested_pod_fails_the_run(
+        self, orchestrator_cls, error_policy
+    ):
+        """A node function running a cached pod whose write fails cannot skip the row."""
+        faults = Faults(write_marker="")
+        inner = make_hooked_triple(FaultyStore(InMemoryArrowDatabase(), faults))
+        job = build_job(InMemoryArrowDatabase(), ROWS, pod=make_outer(inner))
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(orchestrator=orchestrator_cls(error_policy=error_policy))
+
+        assert_hook_failure_noted(exc_info.value)
+
+    def test_failing_observer_keeps_store_error(self, orchestrator_cls):
+        faults = Faults(write_marker=RESULT_TABLE)
+        job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(orchestrator=orchestrator_cls(), observer=CrashingObserver())
+
+        err = exc_info.value
+        assert_store_error(err, faults, node_label="dbl", names_row=True)
+        notes = getattr(err, "__notes__", [])
+        assert any("observer failed in on_data_crash" in note for note in notes), notes
+        assert any("observer failed in on_run_end" in note for note in notes), notes
+
+
+# ---------------------------------------------------------------------------
+# Concurrent failures in the async orchestrator
+# ---------------------------------------------------------------------------
+
+# ``async def`` functions run on the event loop rather than in worker threads, so
+# the order in which concurrent node tasks fail is the same on every run.
+
+
+@function_pod(output_keys="double")
+async def double_async(x: int) -> int:
+    return x * 2
+
+
+@function_pod(output_keys="tripled")
+async def triple_async(x: int) -> int:
+    return x * 3
+
+
+@function_pod(output_keys="tripled")
+async def fail_async(x: int) -> int:
+    raise RuntimeError("function failed")
+
+
+class FailingCrashObserver(NoOpObserver):
+    """An observer whose ``on_data_crash`` raises for one node, failing that node."""
+
+    def on_data_crash(self, node_label, tag, data, error) -> None:
+        if node_label == "other":
+            raise KeyError("observer failed for node 'other'")
+
+
+def build_siblings(store: Any, other_pod: Any):
+    """Two function nodes reading the same source: ``dbl`` and ``other``."""
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
+        double_async.pod(source, label="dbl")
+        other_pod.pod(source, label="other")
+    return job
+
+
+class TestConcurrentFailures:
+    def test_store_error_and_other_failure_raise_one_store_error(self):
+        faults = Faults(write_marker=RESULT_TABLE)
+        job = build_siblings(FaultyStore(InMemoryArrowDatabase(), faults), fail_async)
+
+        with pytest.raises(StoreWriteError) as exc_info:
+            job.run(
+                orchestrator=AsyncPipelineOrchestrator(),
+                observer=FailingCrashObserver(),
+            )
+
+        err = exc_info.value
+        assert_store_error(err, faults, node_label="dbl", names_row=True)
+        notes = getattr(err, "__notes__", [])
+        assert any("observer failed for node 'other'" in note for note in notes), notes
+        # The whole group stays reachable for diagnosis.
+        assert isinstance(err.__context__, ExceptionGroup)
+
+    def test_several_store_errors_raise_the_first_in_node_order(
+        self, orchestrator_cls, caplog
+    ):
+        faults = Faults(write_marker=RESULT_TABLE)
+        job = build_siblings(FaultyStore(InMemoryArrowDatabase(), faults), triple_async)
+
+        with caplog.at_level("WARNING"):
+            with pytest.raises(StoreWriteError) as exc_info:
+                job.run(orchestrator=orchestrator_cls())
+
+        # The sync orchestrator meets ``dbl`` first; the async one raises the same.
+        assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
+        if orchestrator_cls is AsyncPipelineOrchestrator:
+            others = [
+                record
+                for record in caplog.records
+                if record.levelname == "WARNING"
+                and "Another store write failed" in record.getMessage()
+            ]
+            assert any("node 'other'" in r.getMessage() for r in others), others

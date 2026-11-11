@@ -37,6 +37,7 @@ from orcapod.errors import (
     SchemaVersionError,
     StoreWriteError,
 )
+from orcapod.utils.store_errors import keep_store_error
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
     DataFunctionExecutorProtocol,
@@ -1306,8 +1307,10 @@ class FunctionJobNode(FunctionNodeBase):
                     # A failed store write fails the run whatever the error policy:
                     # error_policy only decides about rows whose function raised.
                     exc.add_context(node_label=node_label, tag=tag.as_dict())
-                    ctx_obs.on_data_crash(node_label, tag, data, exc)
-                    ctx_obs.on_node_end(node_label, node_hash)
+                    with keep_store_error(exc, "Observer on_data_crash"):
+                        ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    with keep_store_error(exc, "Observer on_node_end"):
+                        ctx_obs.on_node_end(node_label, node_hash)
                     raise
                 except Exception as exc:
                     logger.warning(

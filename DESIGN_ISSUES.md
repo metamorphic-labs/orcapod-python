@@ -2201,7 +2201,12 @@ raised. `AsyncPipelineOrchestrator` unwraps it from the `TaskGroup` exception gr
 orchestrators raise the same error. `PipelineJob.run()` flushes the writes that succeeded
 before re-raising (a flush failure there is logged, not raised over the original), and wraps a
 failure of its final flush. Nothing stored is rewritten; no hash, path or schema change. An
-opt-in mode that tolerates store failures is a possible later option. Regressions:
-`tests/test_pipeline/test_store_write_failure.py`. Related, not fixed here: the async
+opt-in mode that tolerates store failures is a possible later option. A fail-loud post-run
+hook or an observer callback that raises while the store error propagates is logged and noted
+on it (`orcapod.utils.store_errors`), not raised in its place, so a node function that runs
+another cached pod cannot turn that pod's store failure into a skipped row. When concurrent
+node tasks fail together, the async orchestrator raises the store error of the node first in
+topological order, notes the other failures on it and logs other store errors at WARNING.
+Regressions: `tests/test_pipeline/test_store_write_failure.py`. Related, not fixed here: the async
 orchestrator ignores `error_policy` (ITL-879); connector and Delta `flush` drop a batch whose
 write fails (ITL-880).

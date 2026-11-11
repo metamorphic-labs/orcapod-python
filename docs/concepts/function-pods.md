@@ -241,6 +241,13 @@ This holds whatever `error_policy` the orchestrator was given. `error_policy="co
 default) skips rows whose *function* raised and keeps going; it never skips a row because it
 could not be stored.
 
+The error you get is always one plain `StoreWriteError`, never an exception group and never
+another exception raised in its place. A post-run hook or observer callback that fails while
+the store error is on its way out is logged and recorded as a note on the error
+(`err.__notes__`). When several nodes fail at once on the asynchronous orchestrator, you get
+the store error of the node that comes first in the pipeline, the one the synchronous
+orchestrator would have stopped at; the other failures are logged and noted on it.
+
 After the failure, rows stored before it are kept: `job.run()` commits the writes that
 succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
 fixed, run the job again; only the rows that are missing are computed.
