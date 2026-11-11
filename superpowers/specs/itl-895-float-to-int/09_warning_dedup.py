@@ -49,6 +49,7 @@ def run(scenario: str, always: bool) -> None:
     source = DictSource(
         data=[{"k": f"r{x}", "x": x} for x in range(rows)], tag_columns=["k"]
     )
+    stored = 0
     if scenario.startswith("standalone"):
         for _ in range(2 if scenario == "standalone-twice" else 1):
             stored = near_miss.pod(source).as_table().num_rows
@@ -76,4 +77,6 @@ if __name__ == "__main__":
     else:
         for name in SCENARIOS:
             for filters in ("default", "always"):
-                subprocess.run([sys.executable, __file__, name, filters], check=True)
+                _ = subprocess.run(
+                    [sys.executable, __file__, name, filters], check=True
+                )
