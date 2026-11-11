@@ -23,6 +23,8 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
 from orcapod.contexts import DataContext, resolve_context
+from orcapod.errors import InvalidDictKeysError
+from orcapod.semantic_types.dict_order import is_dict_arrow_type, sort_dict_entries
 from orcapod.semantic_types.type_inference import infer_python_schema_from_pylist_data
 from orcapod.types import DataType, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -1006,7 +1008,12 @@ class UniversalTypeConverter:
             converted_record = {}
             for field_name, converter in converters.items():
                 if field_name in record:
-                    converted_record[field_name] = converter(record[field_name])
+                    try:
+                        converted_record[field_name] = converter(record[field_name])
+                    except InvalidDictKeysError as exc:
+                        raise InvalidDictKeysError(
+                            f"Column {field_name!r}: {exc}"
+                        ) from exc
                 else:
                     converted_record[field_name] = None
             converted_data.append(converted_record)
@@ -1388,17 +1395,14 @@ class UniversalTypeConverter:
             element_type = arrow_type.value_type
 
             # Check if this is a dict representation: list<struct<key, value>>
-            if pa.types.is_struct(element_type):
-                field_names = [field.name for field in element_type]
-                if set(field_names) == {"key", "value"}:
-                    # This is a dict
-                    key_field = next(f for f in element_type if f.name == "key")
-                    value_field = next(f for f in element_type if f.name == "value")
+            if is_dict_arrow_type(arrow_type):
+                key_field = element_type.field("key")
+                value_field = element_type.field("value")
 
-                    key_python_type = self.arrow_type_to_python_type(key_field.type)
-                    value_python_type = self.arrow_type_to_python_type(value_field.type)
+                key_python_type = self.arrow_type_to_python_type(key_field.type)
+                value_python_type = self.arrow_type_to_python_type(value_field.type)
 
-                    return dict[key_python_type, value_python_type]
+                return dict[key_python_type, value_python_type]
 
             # Regular list
             element_python_type = self.arrow_type_to_python_type(element_type)
@@ -1596,11 +1600,15 @@ class UniversalTypeConverter:
         elif origin is dict:
             key_converter = self.get_python_to_arrow_converter(args[0])
             value_converter = self.get_python_to_arrow_converter(args[1])
+            # A dict is order independent: entries are stored in canonical key order
+            # so equal dicts store and hash identically (ITL-905).
             return lambda value: (
-                [
-                    {"key": key_converter(k), "value": value_converter(v)}
-                    for k, v in value.items()
-                ]
+                sort_dict_entries(
+                    [
+                        {"key": key_converter(k), "value": value_converter(v)}
+                        for k, v in value.items()
+                    ]
+                )
                 if value is not None
                 else []
             )
@@ -1679,27 +1687,22 @@ class UniversalTypeConverter:
             element_type = arrow_type.value_type
 
             # Check if this is a dict representation
-            if pa.types.is_struct(element_type):
-                field_names = [field.name for field in element_type]
-                if set(field_names) == {"key", "value"}:
-                    # Dict representation
-                    key_field = next(f for f in element_type if f.name == "key")
-                    value_field = next(f for f in element_type if f.name == "value")
+            if is_dict_arrow_type(arrow_type):
+                key_field = element_type.field("key")
+                value_field = element_type.field("value")
 
-                    key_converter = self.get_arrow_to_python_converter(key_field.type)
-                    value_converter = self.get_arrow_to_python_converter(
-                        value_field.type
-                    )
+                key_converter = self.get_arrow_to_python_converter(key_field.type)
+                value_converter = self.get_arrow_to_python_converter(value_field.type)
 
-                    return lambda value: (
-                        {
-                            key_converter(item["key"]): value_converter(item["value"])
-                            for item in value
-                            if item is not None
-                        }
-                        if value
-                        else {}
-                    )
+                return lambda value: (
+                    {
+                        key_converter(item["key"]): value_converter(item["value"])
+                        for item in value
+                        if item is not None
+                    }
+                    if value
+                    else {}
+                )
 
             # Regular list
             element_converter = self.get_arrow_to_python_converter(element_type)

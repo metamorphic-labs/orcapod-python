@@ -26,6 +26,15 @@ class DuplicateTagError(ValueError):
     pass
 
 
+class InvalidDictKeysError(ValueError):
+    """Raised when a dict value's keys have no canonical order.
+
+    A dict is stored with its entries in canonical key order (ITL-905), so its keys must
+    be totally ordered and unique. Raised for a NaN key, keys that cannot be compared,
+    two keys with the same stored value, or a null entry in a stored key/value list.
+    """
+
+
 class DataFunctionUnavailableError(RuntimeError):
     """Raised when a data function proxy is invoked without a bound function.
 
