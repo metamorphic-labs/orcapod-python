@@ -23,6 +23,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 SAMPLES = HERE / "samples"
@@ -49,7 +50,7 @@ def _sample_stack(pid: int, label: str) -> str | None:
     return str(out.relative_to(HERE))
 
 
-def _run_one(cmd: list[str], timeout: float, env: dict[str, str]) -> dict:
+def _run_one(cmd: list[str], timeout: float, env: dict[str, str]) -> dict[str, Any]:
     t0 = time.monotonic()
     proc = subprocess.Popen(
         cmd,
@@ -84,7 +85,7 @@ def main() -> int:
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     env = dict(os.environ)
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
     sampled: str | None = None
     with ThreadPoolExecutor(max_workers=args.j) as ex:
         for r in ex.map(lambda _: _run_one(cmd, args.t, env), range(args.n)):
