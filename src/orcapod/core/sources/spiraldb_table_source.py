@@ -122,17 +122,23 @@ class SpiralDBTableSource(DBTableSource):
 
             # DBTableSource handles PK resolution and raises ValueError when
             # the table has no key schema and no explicit tag_columns are given.
-            super().__init__(
-                connector,
-                table_name,
-                tag_columns=resolved_tags,
-                system_tag_columns=system_tag_columns,
-                record_id_column=record_id_column,
-                source_id=source_id,
-                label=label,
-                data_context=data_context,
-                config=config,
-            )
+            try:
+                super().__init__(
+                    connector,
+                    table_name,
+                    tag_columns=resolved_tags,
+                    system_tag_columns=system_tag_columns,
+                    record_id_column=record_id_column,
+                    source_id=source_id,
+                    label=label,
+                    data_context=data_context,
+                    config=config,
+                )
+            except ValueError as exc:
+                # DBTableSource knows only the table name; say where it looked.
+                raise ValueError(
+                    f"SpiralDB project {project_id!r}, dataset {dataset!r}: {exc}"
+                ) from exc
         finally:
             try:
                 connector.close()
