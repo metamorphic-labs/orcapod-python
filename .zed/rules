@@ -218,6 +218,10 @@ checked by `tests/test_hashing/golden/test_golden_hashes.py`.
   approved together with a migration assessment.
 - Never move or rename the fixtures in `tests/test_hashing/golden/cases.py`: function pods,
   dataclasses and pydantic models hash with their module path.
+- A per-type value hash carries a `ContentHash` method label `<type>_v<N>` (e.g.
+  `polars_dataframe_v1`) naming its whole definition. The bytes produced under an existing
+  label never change; a new definition gets a new label, so old and new hashes can be told
+  apart by inspection.
 
 ## Testing conventions
 

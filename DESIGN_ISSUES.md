@@ -2229,8 +2229,9 @@ with `compat_level=oldest` as one record batch, so every supported dtype reads b
 the column. `pl.from_arrow` renames a column called `""` to `column_0`, so the reader restores
 the stored names. The IPC bytes are not canonical (bytes under null slots, `_PL_*` metadata),
 so `PolarsDataFrameHandler` / `PolarsSeriesHandler` hash
-`sha256(versioned Orcapod dtype descriptor + starfix digest of the values)` instead
-(developer's decision, November 10, 2026): column order and struct field order are not
+`sha256(Orcapod dtype descriptor + starfix digest of the values)` instead, under the
+versioned method labels `polars_dataframe_v1` / `polars_series_v1`, the only version marker
+(developer's decisions, November 10, 2026): column order and struct field order are not
 identity, every dtype parameter is. Golden values (value and data hashes, type and `Schema`
 hashes, source identities) are pinned in the shared golden suite, `tests/test_hashing/golden`
 (the `polars_*` cases). Existing hashes are unchanged: every pre-existing golden entry passes.

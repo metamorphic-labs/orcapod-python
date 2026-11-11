@@ -246,9 +246,16 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 When `StarfixArrowHasher` hashes a table, a column whose logical type has a registered
 semantic handler is replaced, value by value, by the token
-`<extension name with "." as ":">::<method>:<digest>` (for example `polars:dataframe::sha256:…`),
-where the digest is the handler's hash of the Python value. Other extension columns are hashed
-as their storage with the extension name kept in the field metadata.
+`<extension name with "." as ":">::<method>:<digest>` (for example
+`polars:dataframe::polars_dataframe_v1:…`), where the digest is the handler's hash of the
+Python value. Other extension columns are hashed as their storage with the extension name kept
+in the field metadata.
+
+**Versioned labels.** A per-type value hash carries a method label `<type>_v<N>` (for example
+`polars_dataframe_v1`). The label names the whole definition: what is hashed and how the digest
+is computed. The bytes produced under an existing label never change. A new definition gets a
+new label (`<type>_v<N+1>`), so a hash made under the old definition and one made under the
+new one can be told apart by inspection.
 
 **`polars.DataFrame` and `polars.Series`** (`PolarsDataFrameHandler`, `PolarsSeriesHandler`,
 defined in `orcapod.logical_types.polars_type`). The stored Arrow IPC bytes are not hashed:
@@ -259,6 +266,8 @@ is
 sha256(descriptor + b"\x00" + starfix.ArrowDigester.hash_table(values))
 ```
 
+under the label `polars_dataframe_v1` for a frame and `polars_series_v1` for a Series.
+
 `values` is the frame exported with `compat_level=oldest`, with top-level `Null` columns left
 out, `Array` cast to `large_list`, nested `Null` cast to an all-null `bool` and dictionaries
 decoded, for hashing only. Like every Orcapod table hash it ignores column order and struct
@@ -266,9 +275,9 @@ field order. `descriptor` is canonical JSON (keys sorted, compact separators, UT
 grammar Orcapod owns, never Polars' `repr`:
 
 ```text
-frame:  {"v": 1, "kind": "polars.dataframe", "height": <rows>,
+frame:  {"kind": "polars.dataframe", "height": <rows>,
          "columns": {<name>: <dtype>, ...}}
-series: {"v": 1, "kind": "polars.series", "name": <name>, "height": <rows>,
+series: {"kind": "polars.series", "name": <name>, "height": <rows>,
          "dtype": <dtype>}
 
 <dtype> := "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
@@ -289,9 +298,10 @@ Datetime unit and time zone, Duration unit and Array shape included) and the sam
 An Enum's full enumeration of choices is part of its dtype: all its declared categories in
 declared order, including categories no row holds, so `Enum(["a", "b"])`, `Enum(["b", "a"])`
 and `Enum(["a", "b", "z"])` hash differently over the same values. Chunking, slice offsets,
-the bytes under null slots, column order and struct field order do not matter. `"v"` versions the grammar: changing the grammar bumps it and changes every
-Polars value hash on purpose. A dtype outside the grammar raises `ValueError` naming the
-column.
+the bytes under null slots, column order and struct field order do not matter. The labels are
+the only version marker: a change to the grammar or the digest is a new definition under new
+labels (`polars_dataframe_v2`, `polars_series_v2`). A dtype outside the grammar raises
+`ValueError` naming the column.
 
 ---
 
