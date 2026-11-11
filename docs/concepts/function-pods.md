@@ -222,9 +222,11 @@ print("function calls:", len(calls))
     A table that does not exist yet reads as empty, and its rows are computed. A table that
     exists but cannot be read (for example, a data file was deleted or damaged) is never
     treated as empty: the run stops with `orcapod.errors.StoreReadError`, which names the
-    table and the underlying error, whatever the orchestrator's `error_policy`. Its stored rows
-    are not recomputed and the table is not overwritten, so you can repair the table or restore
-    the file and run again.
+    table, the node and row being processed when they are known, and the underlying error,
+    whatever the orchestrator's `error_policy`. Its stored rows are not recomputed and the
+    table is not overwritten, so you can repair the table or restore the file and run again.
+    A write that fails because the stored table cannot be read raises `StoreReadError` too,
+    not `StoreWriteError` (see *When the store cannot be written* below).
 
     In a `DeltaTableDatabase`, rows whose column types differ from the stored table's
     (`float64` values for a column stored as `int64`, say) are refused with
@@ -249,6 +251,55 @@ A node from a job that has run also provides:
   `source_id`, are not included
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
   of another pipeline
+
+### When the store cannot be written
+
+A failed write to the store always fails the run. If a node's results or records cannot be
+stored -- the disk is full, the connection drops, or the database cannot hold one of the
+output types -- `job.run()` raises `StoreWriteError` (from `orcapod.errors`) at the first
+failed write, on both the synchronous and the asynchronous orchestrator. The error names the
+node, the row being stored and the table, and the database's own exception is chained as its
+cause. When committing pending writes fails, the error has `flush=True` and names the store
+instead of a row and table: every view of a store shares its pending writes, so the write
+that failed may belong to an earlier row or another table. A run that returns normally has
+stored every result that could be turned into a record; a result rejected before that is a
+row failure (see below).
+
+This holds whatever `error_policy` the orchestrator was given. `error_policy="continue"` (the
+default) skips rows whose *function* raised and keeps going; it never skips a row because it
+could not be stored.
+
+`StoreWriteError` and `StoreReadError` both derive from `orcapod.errors.StoreError`, so
+`except StoreError` handles either. The error you get is always one plain store error, never
+an exception group and never another exception raised in its place. A post-run hook or
+observer callback that fails while the store error is on its way out is logged and recorded
+as a note on the error (`err.__notes__`). When several nodes fail at once on the asynchronous
+orchestrator, read and write failures alike, you get the store error of the node that comes
+first in the pipeline, the one the synchronous orchestrator would have stopped at; the other
+failures are logged and noted on it. A node whose failure the asynchronous orchestrator
+cancelled before it happened is not reported.
+
+After the failure, rows stored before it are kept: `job.run()` commits the writes that
+succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
+fixed, run the job again: stored function results are not recomputed, only the missing ones
+are. An operator with `cache_mode=LOG` recomputes its output on every run, as it always does.
+A side effect is different: if its delivery completed but the write to its invocation log
+failed, there is no record that it completed, and `track_completion` delivers it again on the
+re-run. Before re-running, check which side effects already completed, or make the side
+effect safe to repeat.
+
+A value your function returned for one row that cannot be turned into a record at all is a
+different case: a naive `datetime`, a `str` from a function declared to return `int`, or an
+`int` where a dataclass is declared. Such a value is rejected while the row's record is being
+prepared, before anything is written, and it is a *row failure*: it is handled exactly like a
+function that raised on that row. The observer gets `on_data_crash`, the failure is logged,
+and `error_policy` decides -- `"continue"` skips the row, `"fail_fast"` raises the error
+the conversion raised. It is not a `StoreWriteError`, because the store is healthy and every
+re-run would fail at the same row. The asynchronous orchestrator currently logs row failures
+at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these rows too.
+
+This is the contract for now. An opt-in mode that tolerates store failures may be added
+later.
 
 ## Multiple input streams
 

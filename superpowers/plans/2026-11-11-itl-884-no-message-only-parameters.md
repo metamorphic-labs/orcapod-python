@@ -54,3 +54,19 @@ through list and map types; a field on one side only is not a conflict, like a t
 `_incompatible_append_column` still returns what differs; `flush_batch` raises. New tests:
 `test_nested_field_type_change`, `test_new_struct_field`, `test_new_struct_field_inside_a_list`
 (stored schema and null back-fill asserted). Suite 6929 passed / 96 skipped / 15 xfailed on 3.11–3.13.
+
+## Merge of main (#287, StoreWriteError) — approved design D1–D8 (coordinator, November 11, 2026)
+
+- D1 `StoreError(RuntimeError)` base (public, exported, documented; name may be renamed by the
+  developer), `in_group` on the base; all handlers type `StoreError`.
+- D2 write sites let `StoreReadError` pass through; everything else still wrapped as
+  `StoreWriteError`. Test: refused append is a `StoreWriteError` (cause `InputValidationError`);
+  read failure during a write is a `StoreReadError` with its cause.
+- D3 `node_label`/`tag` + `add_context` on the base; orchestrators annotate a `StoreError`
+  escaping a node with its label. Nothing threaded into databases or `ResultCache`.
+- D4 `StoreReadError` message names node and row when known.
+- D5 `_single_store_error(group, topo_order)` ranks every `StoreError` by node order.
+- D6 sync orchestrator catches `StoreError`.
+- D7 CHANGELOG / DESIGN_ISSUES / function-pods concept page.
+- D8 `tests/test_pipeline/test_store_errors_together.py` (sync/async × both orders, async
+  order independence).

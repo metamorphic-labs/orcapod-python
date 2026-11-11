@@ -24,6 +24,17 @@ first `InputValidationError`, with each other failure attached as a note and log
 stay queued for the next flush. A flush that fails only for other reasons still raises
 `RuntimeError`, with the first failure as its cause.
 
+### Added
+
+- **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
+  written to the store. It names the node, the row's tag and the table, and chains the
+  database's own exception as its cause. (ITL-878 #287)
+- **`orcapod.errors.StoreReadError`** — raised when a stored table exists but cannot be read.
+  It names the table, and the node and row being processed when they are known, and chains
+  the backend's exception as its cause. (ITL-884 #290)
+- **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
+  `except StoreError` handles both. (ITL-884 #290)
+
 ### Fixed
 
 #### A Delta table that cannot be read is no longer reported as having no rows (ITL-884)
@@ -42,6 +53,23 @@ empty.
 A flush that could not load an existing table no longer treats it as absent. Before this fix a
 `DeltaProtocolError` while loading the table made the flush write the batch with
 `mode="overwrite"`, replacing the stored rows. The flush now raises and writes nothing.
+
+A write that fails because the stored table cannot be read raises `StoreReadError`, not
+`StoreWriteError`. When read and write failures happen in the same run, both orchestrators
+raise the error of the node that comes first in the pipeline (ITL-884 #290).
+
+#### A failed store write fails the run (ITL-878)
+
+A failed store write fails the run. `PipelineJob.run()` used to return normally when a node's
+result or record could not be written (the row was skipped like a crashed function under the
+default `error_policy="continue"`), so the node read back fewer rows than it computed. It now
+raises `StoreWriteError` at the first failed write, whatever `error_policy` is, on both
+orchestrators (the async one no longer raises an exception group). Rows stored before the
+failure are committed and kept; re-running does not recompute stored function results. A failed
+flush of pending writes raises `StoreWriteError` with `flush=True` and names the store, not a
+row. A function output that cannot be turned into a record (a naive `datetime`, a value not
+matching the declared type) is still a row failure governed by `error_policy`, like a function
+that raised. See *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
 
 ## [0.2.0] — 2026-11-10
 
