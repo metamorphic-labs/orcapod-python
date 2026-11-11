@@ -1,0 +1,79 @@
+# ITL-896: operator node reads back empty after an async job run — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** After `PipelineJob.run(orchestrator=AsyncPipelineOrchestrator())`, `job.nodes[<operator label>]`
+returns the same rows from `as_table()` / `iter_data()` as after a sync run.
+
+**Architecture:** `OperatorJobNode` keeps its result only in memory (`_cached_output_stream`).
+`execute()` (sync orchestrator) always keeps it; `async_execute()` keeps it only in
+`CacheMode.LOG`, and inside a job every operator is `CacheMode.OFF`. Fix (option A, approved by
+the coordinator 2026-11-11): `async_execute` collects the rows it forwards in every mode
+(OFF, LOG, and the no-database branch) and stores them on the node with the same
+`StaticOutputOperatorPod._materialize_to_stream` the sync path uses, regardless of
+`materialize_results`. Nothing new is written to any store; no hash, path or schema changes.
+
+**Tech Stack:** Python, PyArrow, asyncio, pytest.
+
+## Root cause (STEP 1, done)
+
+- Reproduced through the public interface on `cf4f67c7` for select/drop/select-tag/map-data/
+  map-tags/polars_filter(constraint)/Join/MergeJoin/SemiJoin/Batch/GroupBy and an
+  operator→function-pod chain, in-memory and Delta: sync gives the rows, async gives 0 rows,
+  no error. `get_all_records()` is `None` on both paths (operators in a job are
+  `CacheMode.OFF`, nothing is stored).
+- Script: scratchpad `repro.py` (not committed).
+- `get_all_records()` stays `None` for an operator node that stored nothing (approved);
+  document that operator nodes in a job keep results in memory only and correct the
+  `PipelineJob.run` `materialize_results` docstring.
+
+## Open question to coordinator
+
+After `clear_cache()` an operator node returns a zero-row table on both paths today (the same
+"not yet run" state as before `run()`). Coordinator asked to be told before changing it.
+
+## Files
+
+- Modify: `src/orcapod/core/nodes/operator_node.py` (`OperatorJobNode.async_execute`)
+- Modify: `src/orcapod/pipeline/job.py` (`run` docstring)
+- Create: `tests/test_pipeline/test_operator_node_async_readback.py`
+- Modify: `docs/concepts/function-pods.md` (node read-back / `get_all_records` for operators)
+- Modify: `CHANGELOG.md` (`[0.3.0] — unreleased`, Fixed)
+- Modify: `DESIGN_ISSUES.md` (one entry appended at the end, resolved)
+
+### Task 1: failing tests
+
+- [ ] Write `tests/test_pipeline/test_operator_node_async_readback.py`: parametrize over every
+  operator (built with the stream convenience methods / operator call, labelled `"op"`),
+  store in {in-memory, Delta}, `materialize_results` in {True, False}. Run the same job twice
+  (fresh store each) with sync and async orchestrators. Assert:
+  - async `as_table(all_info=True)` sorted by tag columns equals sync (schema incl. nullability
+    and column order, values, system tags);
+  - `iter_data()` row count equal and per-row tag/data `content_hash()` multisets equal;
+  - row count > 0 (guard against both being empty);
+  - `get_all_records()` is `None` on both.
+- [ ] Run, confirm async cases FAIL (0 rows) and sync cases pass.
+- [ ] Commit WIP.
+
+### Task 2: fix
+
+- [ ] In `OperatorJobNode.async_execute`, no-DB branch: wrap the output writer to collect rows,
+  then set `_cached_output_stream` + `_update_modified_time()`.
+- [ ] DB branch OFF/LOG: always collect; after the TaskGroup, if rows were collected set
+  `_cached_output_stream = _materialize_to_stream(collected)`; store only in LOG.
+  `_update_modified_time()` as today.
+- [ ] Run new tests + `tests/test_core/operators tests/test_pipeline tests/test_channels`.
+- [ ] Commit.
+
+### Task 3: docs, CHANGELOG, DESIGN_ISSUES
+
+- [ ] function-pods.md: operator nodes keep their output in memory for the life of the job
+  object, on both orchestrators; nothing is stored, so `get_all_records()` returns `None`.
+- [ ] job.py `run` docstring: correct the `get_all_records()` claim.
+- [ ] CHANGELOG Fixed entry; DESIGN_ISSUES entry (resolved, Fix note).
+- [ ] `uv run pytest tests/test_docs` + mkdocs strict.
+
+### Task 4: verify & ship
+
+- [ ] ruff check/format, basedpyright exit code, full `uv run pytest tests/`, golden hashes unchanged.
+- [ ] Merge origin/main, push, PR (Fixes ITL-896), link, CI, CodeRabbit (inline + review bodies).
