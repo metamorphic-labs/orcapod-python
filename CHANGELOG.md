@@ -419,6 +419,18 @@ not on PyPI at the time of writing; install it from its repository.
   path keeps the inputs' Arrow types, and it drops its inputs' meta (`__`) columns on both
   paths. See *Breaking changes and migration*. (ITL-837, ITL-854, ITL-857 #280)
 - The license is MIT (`license = "MIT"`, the MIT text in `LICENSE`). (ITL-875 #283)
+- **Hash values are pinned by a golden regression suite.** `tests/test_hashing/golden/`
+  pins 608 hash values that Orcapod stores, uses as a cache or database key, or embeds in a
+  column name or table path: semantic hashes of Python values and type objects, `Schema`
+  hashes and stored Arrow types, Arrow table and schema hashes, datagram hashes, and the
+  content hashes, pipeline hashes, system-tag column names, record IDs, row data hashes and
+  database table paths of pipelines through every operator and a `PipelineJob`. Each value
+  has its own test, so a failure names the value that moved, and the values are identical
+  on Python 3.11, 3.12 and 3.13. A failing golden entry means a hash changed: it is treated
+  as a bug in the change, and the files are regenerated only to add entries or for a hash
+  change the developer has approved with a migration assessment, never to make a test pass.
+  The values that differ from `0.1.4` are listed in the table at the top of *Breaking changes
+  and migration*. (ITL-626 #284)
 - Packaging: the `LICENSE` file ships in the wheel and the sdist; `pymongo` and `pyyaml` are removed from
   the runtime dependencies; `basedpyright` and `typing_extensions` move to the `dev` group;
   the sdist contains only the package source, `README.md`, `LICENSE` and the package
@@ -500,9 +512,10 @@ not on PyPI at the time of writing; install it from its repository.
   Python API in `orcapod.migrations`.
 - **Migration does not rescue caches invalidated by ITL-638.** Pods annotated with
   orcapod logical types recompute once regardless.
-- **Hash-stability regression checks are incomplete.** Golden-value tests cover schema
-  hashes and type-annotation hashing; broader coverage is tracked in ITL-626 and may land
-  after this release.
+- **Some hash values are not pinned by the golden suite.** Values that are new on every run
+  by design (function result record IDs and the per-row token in a function output's source
+  info, both UUIDv7, and `__pod_ts`) are left out, and so are the types the Arrow hasher
+  cannot hash yet (ITL-848). (ITL-626 #284)
 - **`dict[str, list[T]]` with a logical-type `T`** (a list nested inside a dict value)
   does not round-trip; two tests are marked expected-failure. (PLT-1732)
 - **`set[T]` round-trips only for logical-type elements**, not primitives such as

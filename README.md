@@ -44,6 +44,11 @@ comes from the tag via `hatch-vcs`, so there is no version number to bump in the
 tree. See [RELEASING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md)
 for the full workflow.
 
+## License
+
+Orcapod is released under the
+[MIT License](https://github.com/metamorphic-labs/orcapod-python/blob/main/LICENSE).
+
 ## Continuous Integration
 
 This project uses GitHub Actions for continuous integration:
