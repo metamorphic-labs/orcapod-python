@@ -20,6 +20,7 @@ _MOD = fx.__name__
 
 
 def _registry(requires: str = "polars") -> LogicalTypeRegistry:
+    """A logical type registry with ``Thing`` deferred; ``requires`` names the needed module."""
     return LogicalTypeRegistry(
         deferred_logical_types=[
             {
@@ -33,6 +34,7 @@ def _registry(requires: str = "polars") -> LogicalTypeRegistry:
 
 
 def _handlers() -> PythonTypeHandlerRegistry:
+    """A handler registry with ``ThingHandler`` deferred."""
     return PythonTypeHandlerRegistry(
         deferred_handlers=[
             {"python_type": f"{_MOD}.Thing", "handler": f"{_MOD}.ThingHandler"}
@@ -41,6 +43,7 @@ def _handlers() -> PythonTypeHandlerRegistry:
 
 
 def test_python_type_lookup_loads_the_deferred_type_once() -> None:
+    """Looking up ``Thing`` loads and registers its logical type once."""
     registry = _registry()
     before = fx.LogicalThing.instances
     first = registry.get_by_python_type(fx.Thing)
@@ -52,10 +55,12 @@ def test_python_type_lookup_loads_the_deferred_type_once() -> None:
 
 
 def test_subclass_resolves_through_the_mro() -> None:
+    """A subclass of a deferred class resolves to the deferred logical type."""
     assert isinstance(_registry().get_by_python_type(fx.SubThing), fx.LogicalThing)
 
 
 def test_extension_name_lookup_loads_the_deferred_type() -> None:
+    """Looking up the extension name loads the type and binds the Python type too."""
     registry = _registry()
     lt = registry.get_by_arrow_extension_name(fx.THING_EXTENSION_NAME)
     assert isinstance(lt, fx.LogicalThing)
@@ -63,6 +68,7 @@ def test_extension_name_lookup_loads_the_deferred_type() -> None:
 
 
 def test_unrelated_lookups_load_nothing() -> None:
+    """Lookups of unrelated types and names return ``None`` without loading anything."""
     registry = _registry()
     before = fx.LogicalThing.instances
     assert registry.get_by_python_type(complex) is None
@@ -71,6 +77,7 @@ def test_unrelated_lookups_load_nothing() -> None:
 
 
 def test_missing_dependency_names_extension_and_module() -> None:
+    """A deferred type whose module is missing raises an error naming both."""
     registry = _registry(requires="orcapod_test_no_such_module")
     with pytest.raises(MissingOptionalDependencyError) as exc_info:
         registry.get_by_arrow_extension_name(fx.THING_EXTENSION_NAME)
@@ -81,6 +88,7 @@ def test_missing_dependency_names_extension_and_module() -> None:
 
 
 def test_handler_lookup_loads_the_deferred_handler_once() -> None:
+    """Looking up a ``Thing`` instance or type loads its handler once."""
     handlers = _handlers()
     before = fx.ThingHandler.instances
     first = handlers.get_handler(fx.Thing("a"))
@@ -91,8 +99,31 @@ def test_handler_lookup_loads_the_deferred_handler_once() -> None:
 
 
 def test_handler_lookup_for_unrelated_type_loads_nothing() -> None:
+    """Unrelated handler lookups return ``None`` without loading anything."""
     handlers = _handlers()
     before = fx.ThingHandler.instances
     assert handlers.get_handler(1.5) is None
     assert handlers.get_handler_for_type(complex) is None
     assert fx.ThingHandler.instances == before
+
+
+def test_concurrent_first_lookups_load_the_type_once() -> None:
+    """Threads resolving a deferred type at the same time all get one registered instance."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    registry = LogicalTypeRegistry(
+        deferred_logical_types=[
+            {
+                "python_type": f"{_MOD}.SlowThing",
+                "extension_name": fx.SLOW_EXTENSION_NAME,
+                "logical_type": f"{_MOD}.LogicalSlowThing",
+                "requires": "polars",
+            }
+        ]
+    )
+    with ThreadPoolExecutor(8) as pool:
+        found = list(
+            pool.map(lambda _: registry.get_by_python_type(fx.SlowThing), range(8))
+        )
+    assert all(isinstance(lt, fx.LogicalSlowThing) for lt in found)
+    assert len({id(lt) for lt in found}) == 1

@@ -296,6 +296,7 @@ TORCH_PINNED_ROWS: dict[str, tuple[str, tuple[int, ...], bytes]] = {
 @pytest.mark.parametrize("name", sorted(TORCH_PINNED_ROWS))
 def test_pinned_tensor_digests_match_an_independent_reference(name: str) -> None:
     # Runs without torch: the pinned torch_tensor_v1 values are the v1 digest of the row.
+    """Pinned tensor hashes equal the v1 digest computed from the stored row by hand."""
     tag, shape, data = TORCH_PINNED_ROWS[name]
     assert GOLDEN["torch"][f"value.{name}"] == (
         "torch_tensor_v1:" + _reference_array_digest(tag, shape, data)
@@ -304,6 +305,7 @@ def test_pinned_tensor_digests_match_an_independent_reference(name: str) -> None
 
 @pytest.mark.parametrize("name", ["int32", "int64", "float64", "empty"])
 def test_tensor_and_ndarray_pins_share_the_digest_body(name: str) -> None:
+    """Pinned tensor and ndarray hashes of equal values share the digest body."""
     tensor_label, tensor_body = GOLDEN["torch"][f"value.{name}"].split(":")
     array_label, array_body = GOLDEN["semantic"][f"value.ndarray.{name}"].split(":")
     assert (tensor_label, array_label) == ("torch_tensor_v1", "ndarray_v1")

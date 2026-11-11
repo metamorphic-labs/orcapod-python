@@ -81,6 +81,7 @@ SCRIPT = textwrap.dedent(
 
 
 def _run(store: Path, counter: Path, mode: str) -> dict[str, Any]:
+    """Run the pipeline script in a fresh process and return its JSON report."""
     repo_root = Path(__file__).resolve().parents[2]
     env = {**os.environ, "PYTHONPATH": str(repo_root), "RUST_LOG": "error"}
     proc = subprocess.run(
@@ -98,6 +99,7 @@ def _run(store: Path, counter: Path, mode: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_cached_rerun_in_fresh_process(tmp_path: Path, mode: str) -> None:
+    """A second run in a new process recomputes nothing and reads every tensor back exactly."""
     from tests.test_torch.tensor_cases import NUMERIC, TENSORS, value_bytes
 
     store, counter = tmp_path / "store", tmp_path / "calls.txt"

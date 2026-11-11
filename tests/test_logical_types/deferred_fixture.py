@@ -27,6 +27,7 @@ class Thing:
     """A value type registered lazily."""
 
     def __init__(self, text: str) -> None:
+        """Hold the text."""
         self.text = text
 
 
@@ -48,18 +49,23 @@ class LogicalThing(BaseLogicalType):
     python_type: type = Thing
 
     def __init__(self) -> None:
+        """Count the instance."""
         LogicalThing.instances += 1
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
+        """Return the Arrow extension type over ``large_string``."""
         return self._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # the generated class takes no arguments
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
+        """Return the Polars extension type over ``large_string``."""
         return self._polars_ext_class()  # pyright: ignore[reportCallIssue]  # the generated class takes no arguments
 
     def python_to_storage(self, value: Any, converter: Any = None) -> str:
+        """Store a ``Thing`` as its text."""
         return value.text
 
     def storage_to_python(self, storage_value: Any, converter: Any = None) -> Thing:
+        """Rebuild a ``Thing`` from its text."""
         return Thing(storage_value)
 
 
@@ -69,7 +75,34 @@ class ThingHandler:
     instances: ClassVar[int] = 0
 
     def __init__(self) -> None:
+        """Count the instance."""
         ThingHandler.instances += 1
 
     def handle(self, obj: Any, hasher: Any) -> ContentHash:
+        """Hash a ``Thing`` by its text."""
         return ContentHash(method="thing_v1", digest=obj.text.encode())
+
+
+SLOW_EXTENSION_NAME = "orcapod_test.deferred_slow_thing"
+
+
+class SlowThing:
+    """A value type whose logical type is slow to construct (widens race windows)."""
+
+
+class LogicalSlowThing(LogicalThing):
+    """Logical type for ``SlowThing``; its constructor sleeps."""
+
+    _arrow_ext_class = make_arrow_extension_type(SLOW_EXTENSION_NAME, pa.large_string())
+    _polars_ext_class = make_polars_extension_type(
+        SLOW_EXTENSION_NAME, pa.large_string()
+    )
+    logical_type_name: str = SLOW_EXTENSION_NAME
+    python_type: type = SlowThing
+
+    def __init__(self) -> None:
+        """Sleep, so that concurrent first lookups overlap."""
+        import time
+
+        time.sleep(0.05)
+        super().__init__()

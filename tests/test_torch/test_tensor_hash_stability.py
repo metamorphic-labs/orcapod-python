@@ -41,6 +41,7 @@ SCRIPT = textwrap.dedent(
 
 
 def _run(seed: str) -> dict[str, object]:
+    """Hash the shared tensors in a fresh process with ``PYTHONHASHSEED=seed``."""
     repo_root = Path(__file__).resolve().parents[2]
     env = {**os.environ, "PYTHONPATH": str(repo_root), "PYTHONHASHSEED": seed}
     proc = subprocess.run(
@@ -56,11 +57,13 @@ def _run(seed: str) -> dict[str, object]:
 
 
 def test_tensor_hashes_stable_across_processes_and_hash_seeds() -> None:
+    """Fresh processes with different hash seeds compute identical hashes."""
     results = [_run(seed) for seed in ("0", "1", "4242", "random")]
     assert all(r == results[0] for r in results[1:])
 
 
 def test_tensor_hashes_match_this_process() -> None:
+    """A fresh process computes the same semantic hashes as this one."""
     from orcapod.contexts import get_default_context
     from tests.test_torch.tensor_cases import TENSORS
 

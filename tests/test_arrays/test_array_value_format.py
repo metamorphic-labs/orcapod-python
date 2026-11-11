@@ -512,3 +512,19 @@ def test_declared_ndarray_check_recognizes_parameterized_aliases() -> None:
     assert required(npt_.NDArray[np.float32]) is np.ndarray
     assert required(npt_.NDArray[np.float32] | None) is np.ndarray
     assert required(float) is None
+
+
+class _UnregisteredArray(np.ndarray):  # pyright: ignore[reportMissingTypeArgument]  # a plain subclass, as users write it
+    """An ndarray subclass without its own logical type: stored as a plain array."""
+
+
+def test_declared_ndarray_subclass_accepts_a_plain_array() -> None:
+    """A pod declared with an unregistered ndarray subclass may return the plain array it reads."""
+
+    @function_pod(output_keys="y")
+    def identity(x: np.ndarray) -> _UnregisteredArray:  # pyright: ignore[reportMissingTypeArgument]  # the bare np.ndarray annotation is under test
+        return x  # pyright: ignore[reportReturnType]  # a plain ndarray where the subclass is declared is under test
+
+    source = DictSource(data=[{"k": "a", "x": np.arange(3.0)}], tag_columns=["k"])
+    got = [d.as_dict()["y"] for _, d in identity.pod(source).iter_data()]
+    assert_arrays_identical(got[0], np.arange(3.0))

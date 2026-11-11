@@ -46,6 +46,7 @@ SCRIPT = textwrap.dedent(
 
 
 def test_orcapod_never_imports_torch() -> None:
+    """Importing Orcapod and running a pipeline leaves torch unimported."""
     repo_root = Path(__file__).resolve().parents[2]
     proc = subprocess.run(
         [sys.executable, "-c", SCRIPT],
@@ -63,20 +64,24 @@ class _StoredTensorType(pa.ExtensionType):
     """A stand-in for a column written by Orcapod with PyTorch installed."""
 
     def __init__(self) -> None:
+        """Build the stand-in over the array struct."""
         super().__init__(ARRAY_STORAGE_TYPE, "orcapod.torch_tensor")
 
     def __arrow_ext_serialize__(self) -> bytes:
+        """Return the array format's extension metadata."""
         return ARRAY_FORMAT_METADATA
 
     @classmethod
     def __arrow_ext_deserialize__(
         cls, storage_type: pa.DataType, serialized: bytes
     ) -> "_StoredTensorType":
+        """Rebuild the stand-in type."""
         return cls()
 
 
 @pytest.mark.skipif(TORCH_INSTALLED, reason="needs an environment without torch")
 def test_reading_a_tensor_column_without_torch_names_the_missing_dependency() -> None:
+    """Reading a tensor column without torch raises naming the type and the package."""
     storage = pa.array(
         [{"dtype": "float32", "shape": [1], "data": b"\x00\x00\x80?"}],
         type=ARRAY_STORAGE_TYPE,

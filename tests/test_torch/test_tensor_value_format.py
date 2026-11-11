@@ -41,15 +41,18 @@ def stored(value: Any) -> dict[str, Any]:
 
 
 def read_back(value: Any) -> Any:
+    """The value of a one-row ``x`` column, read back from its source."""
     source = DictSource(data=[{"k": "r", "x": value}], tag_columns=["k"])
     return next(iter(source.iter_data()))[1].as_dict()["x"]
 
 
 def semantic_hash(value: Any) -> Any:
+    """The default context's semantic hash of ``value``."""
     return get_default_context().semantic_hasher.hash_object(value)
 
 
 def data_hash(value: Any) -> Any:
+    """The content hash of a one-row data holding ``value``."""
     source = DictSource(data=[{"k": "r", "x": value}], tag_columns=["k"])
     return next(iter(source.iter_data()))[1].content_hash()
 
@@ -60,6 +63,7 @@ def data_hash(value: Any) -> Any:
 
 
 def test_column_type_is_orcapod_torch_tensor_over_the_array_struct() -> None:
+    """A tensor column is ``orcapod.torch_tensor`` over the array struct, version 1."""
     table = DictSource(
         data=[{"k": "r", "x": torch.arange(3.0)}], tag_columns=["k"]
     ).as_table()
@@ -78,6 +82,7 @@ def test_column_type_is_orcapod_torch_tensor_over_the_array_struct() -> None:
 
 @pytest.mark.parametrize("name", sorted(TENSORS))
 def test_stored_row_holds_tag_shape_and_c_order_little_endian_data(name: str) -> None:
+    """The stored row is the dtype tag, the shape and the C-order little-endian bytes."""
     t = TENSORS[name]
     assert stored(t) == {
         "dtype": tag_of(t),
@@ -88,10 +93,12 @@ def test_stored_row_holds_tag_shape_and_c_order_little_endian_data(name: str) ->
 
 @pytest.mark.parametrize("name", sorted(TENSORS))
 def test_round_trip_is_exact(name: str) -> None:
+    """Each tensor reads back with its dtype, shape and bits."""
     assert_tensors_identical(read_back(TENSORS[name]), TENSORS[name])
 
 
 def test_shared_dtypes_store_the_same_row_as_the_equal_ndarray() -> None:
+    """Dtypes shared with NumPy store the same row as the equal ndarray."""
     for name, t in TENSORS.items():
         if t.dtype == torch.bfloat16:
             continue
@@ -105,12 +112,14 @@ def test_shared_dtypes_store_the_same_row_as_the_equal_ndarray() -> None:
 
 @pytest.mark.parametrize("name", sorted(TENSORS))
 def test_semantic_hash_is_the_v1_digest_under_the_tensor_label(name: str) -> None:
+    """The hash is the reference v1 digest under ``torch_tensor_v1``."""
     h = semantic_hash(TENSORS[name])
     assert h.method == LABEL
     assert h.digest == expected_digest(TENSORS[name])
 
 
 def test_tensor_and_equal_ndarray_differ_in_hash_but_share_the_digest_body() -> None:
+    """A tensor and its equal ndarray differ in hash but share the digest body."""
     for name, t in TENSORS.items():
         if t.dtype == torch.bfloat16:
             continue
@@ -122,6 +131,7 @@ def test_tensor_and_equal_ndarray_differ_in_hash_but_share_the_digest_body() -> 
 
 def test_table_token_carries_extension_name_and_label() -> None:
     # The Arrow hasher folds the extension name in front of the handler's label.
+    """A stored cell hashes as the extension name, the label and the digest."""
     hasher = get_default_context().arrow_hasher
     t = torch.arange(3.0)
     table = DictSource(data=[{"k": "r", "x": t}], tag_columns=["k"]).as_table()
@@ -132,10 +142,12 @@ def test_table_token_carries_extension_name_and_label() -> None:
 
 
 def _base() -> Any:
+    """A 2x3x4 float32 tensor."""
     return torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
 
 
 def _same_value_variants() -> list[tuple[str, Any, Any]]:
+    """Pairs of tensors that differ only in what is not identity."""
     base = _base()
     four_d = torch.arange(2 * 3 * 4 * 5, dtype=torch.float32).reshape(2, 3, 4, 5)
     complex_t = torch.tensor([1 + 2j, 3 - 4j], dtype=torch.complex64)
@@ -168,6 +180,7 @@ def _same_value_variants() -> list[tuple[str, Any, Any]]:
 def test_layout_device_grad_and_subclass_do_not_change_the_value(
     a: Any, b: Any
 ) -> None:
+    """Layout, device, gradients and subclass change neither hash nor stored row."""
     assert semantic_hash(a) == semantic_hash(b)
     assert data_hash(a) == data_hash(b)
     assert stored(a) == stored(b)
@@ -192,6 +205,7 @@ DIFFERENT: list[tuple[str, Any, Any]] = [
     ("a", "b"), [d[1:] for d in DIFFERENT], ids=[d[0] for d in DIFFERENT]
 )
 def test_dtype_shape_and_bits_change_the_hash(a: Any, b: Any) -> None:
+    """Dtype, shape and element bits each change the hash."""
     assert semantic_hash(a) != semantic_hash(b)
     assert data_hash(a) != data_hash(b)
 
@@ -202,6 +216,7 @@ def test_dtype_shape_and_bits_change_the_hash(a: Any, b: Any) -> None:
 
 
 def _snapshot(t: Any) -> tuple[Any, ...]:
+    """Everything storing or hashing could change about ``t``."""
     return (
         t.requires_grad,
         t.grad_fn is None,
@@ -224,6 +239,7 @@ def _snapshot(t: Any) -> tuple[Any, ...]:
     ids=[v[0] for v in _same_value_variants()],
 )
 def test_storing_and_hashing_never_modify_the_tensor(a: Any) -> None:
+    """Storing and hashing leave the caller's tensor exactly as it was."""
     before = _snapshot(a)
     stored(a)
     semantic_hash(a)
@@ -237,6 +253,7 @@ def test_storing_and_hashing_never_modify_the_tensor(a: Any) -> None:
 
 
 def _refused() -> list[tuple[str, Any, str]]:
+    """Tensors that cannot be stored, with a word the refusal must contain."""
     cases: list[tuple[str, Any, str]] = [
         ("sparse_coo", torch.eye(3).to_sparse(), "sparse"),
         ("sparse_csr", torch.eye(3).to_sparse_csr(), "sparse"),
@@ -266,6 +283,7 @@ def _refused() -> list[tuple[str, Any, str]]:
 def test_unsupported_tensors_are_refused_naming_column_and_reason(
     value: Any, reason: str
 ) -> None:
+    """Storing an unsupported tensor raises naming the column and the reason."""
     with pytest.raises(UnsupportedValueError, match="'payload'") as info:
         DictSource(data=[{"k": "r", "payload": value}], tag_columns=["k"]).as_table()
     assert reason.lower() in str(info.value).lower()
@@ -275,6 +293,7 @@ def test_unsupported_tensors_are_refused_naming_column_and_reason(
     ("value", "reason"), [c[1:] for c in _refused()], ids=[c[0] for c in _refused()]
 )
 def test_unsupported_tensors_are_refused_by_the_hasher(value: Any, reason: str) -> None:
+    """Hashing an unsupported tensor raises naming the reason."""
     with pytest.raises(UnsupportedValueError) as info:
         semantic_hash(value)
     assert reason.lower() in str(info.value).lower()
@@ -293,8 +312,11 @@ def test_unsupported_tensors_are_refused_by_the_hasher(value: Any, reason: str) 
 def test_non_tensor_returned_for_declared_tensor_is_refused_at_the_pod(
     returned: Any, type_name: str
 ) -> None:
+    """A non-tensor returned for ``-> torch.Tensor`` raises naming the output."""
+
     @function_pod(output_keys="y")
     def bad(x: torch.Tensor) -> torch.Tensor:
+        """Return the value under test instead of a tensor."""
         return returned
 
     source = DictSource(data=[{"k": "a", "x": torch.zeros(2)}], tag_columns=["k"])
@@ -303,8 +325,11 @@ def test_non_tensor_returned_for_declared_tensor_is_refused_at_the_pod(
 
 
 def test_none_returned_for_optional_tensor_is_accepted() -> None:
+    """``None`` is accepted for ``-> torch.Tensor | None``."""
+
     @function_pod(output_keys="y")
     def maybe(x: torch.Tensor) -> torch.Tensor | None:
+        """Return ``None`` for an empty tensor, else the input."""
         return None if x.numel() == 0 else x
 
     source = DictSource(
@@ -314,3 +339,16 @@ def test_none_returned_for_optional_tensor_is_accepted() -> None:
     got = {t.as_dict()["k"]: d.as_dict()["y"] for t, d in maybe.pod(source).iter_data()}
     assert got["a"] is None
     assert_tensors_identical(got["b"], torch.ones(2))
+
+
+def test_declared_tensor_subclass_accepts_a_plain_tensor() -> None:
+    """A pod declared ``-> nn.Parameter`` stores through the tensor type, so a plain tensor is accepted."""
+
+    @function_pod(output_keys="y")
+    def as_parameter(x: torch.Tensor) -> torch.nn.Parameter:
+        """Return a plain tensor where ``nn.Parameter`` is declared."""
+        return x * 2  # a plain tensor; the column type is orcapod.torch_tensor
+
+    source = DictSource(data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"])
+    got = [d.as_dict()["y"] for _, d in as_parameter.pod(source).iter_data()]
+    assert_tensors_identical(got[0], torch.ones(2) * 2)

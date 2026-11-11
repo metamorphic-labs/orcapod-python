@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import TYPE_CHECKING, Iterable
 
 from orcapod.errors import MissingOptionalDependencyError
@@ -271,6 +272,8 @@ class LogicalTypeRegistry:
         factories: list[dict] | None = None,
         deferred_logical_types: list[dict[str, str]] | None = None,
     ) -> None:
+        # Serialises loading a deferred type, so concurrent first lookups load it once.
+        self._deferred_lock = threading.Lock()
         self._deferred_by_python_name: dict[str, dict[str, str]] = {}
         self._deferred_by_arrow_name: dict[str, dict[str, str]] = {}
         for entry in deferred_logical_types or []:
@@ -421,17 +424,24 @@ class LogicalTypeRegistry:
     def _load_deferred(self, entry: dict[str, str]) -> LogicalTypeProtocol:
         """Instantiate and register a deferred logical type.
 
+        Holds a lock and checks again whether another thread has already loaded
+        the type, so concurrent first lookups instantiate and register it once.
+
         Args:
             entry: The deferred entry (see the class docstring).
 
         Returns:
             The registered logical type.
         """
-        logical_type = load_object(entry["logical_type"])()
-        self.register_logical_type(logical_type)
-        self._deferred_by_python_name.pop(entry["python_type"], None)
-        self._deferred_by_arrow_name.pop(entry["extension_name"], None)
-        return logical_type
+        with self._deferred_lock:
+            existing = self._by_arrow_name.get(entry["extension_name"])
+            if existing is not None:
+                return existing
+            logical_type = load_object(entry["logical_type"])()
+            self.register_logical_type(logical_type)
+            self._deferred_by_python_name.pop(entry["python_type"], None)
+            self._deferred_by_arrow_name.pop(entry["extension_name"], None)
+            return logical_type
 
     def register_logical_type_factory(
         self,

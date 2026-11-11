@@ -53,14 +53,17 @@ def tensors_source(source_id: str = "tensors", shift: int = 0) -> DictSource:
 
 
 def expected_x(name: str, shift: int = 0) -> Any:
+    """The tensor the row ``name`` holds in a source rotated by ``shift``."""
     return TENSORS[NAMES[(NAMES.index(name) + shift) % len(NAMES)]]
 
 
 def fields(datagram: Any) -> dict[str, Any]:
+    """A tag's or data's values as a plain dict."""
     return dict(datagram.as_dict())
 
 
 def rows(stream: Any) -> dict[str, dict[str, Any]]:
+    """Map each row's ``k`` tag to its tag and data values."""
     out: dict[str, dict[str, Any]] = {}
     for tag, data in stream.iter_data():
         out[str(tag.as_dict()["k"])] = {**tag.as_dict(), **data.as_dict()}
@@ -68,6 +71,7 @@ def rows(stream: Any) -> dict[str, dict[str, Any]]:
 
 
 def other_source() -> DictSource:
+    """A tensor-free source keyed by the same ``k`` tags."""
     return DictSource(
         data=[{"k": name, "y": i} for i, name in enumerate(NAMES)],
         tag_columns=["k"],
@@ -76,6 +80,7 @@ def other_source() -> DictSource:
 
 
 def test_join() -> None:
+    """Join keeps every tensor exact."""
     got = rows(Join()(tensors_source(), other_source()))
     assert sorted(got) == NAMES
     for name in NAMES:
@@ -83,6 +88,7 @@ def test_join() -> None:
 
 
 def test_semijoin() -> None:
+    """SemiJoin keeps the matching rows' tensors exact."""
     keep = NAMES[::2]
     right = DictSource(
         data=[{"k": name, "y": 0} for name in keep], tag_columns=["k"], source_id="r"
@@ -94,6 +100,7 @@ def test_semijoin() -> None:
 
 
 def test_map_data() -> None:
+    """Renaming the tensor column keeps its values."""
     got = rows(MapData({"x": "z"})(tensors_source()))
     for name in NAMES:
         assert "x" not in got[name]
@@ -101,6 +108,7 @@ def test_map_data() -> None:
 
 
 def test_select_and_drop_data_columns() -> None:
+    """Selecting and dropping columns keeps the tensors exact."""
     selected = rows(SelectDataColumns(["x"])(tensors_source()))
     dropped = rows(DropDataColumns(["n"])(tensors_source()))
     for got in (selected, dropped):
@@ -110,6 +118,7 @@ def test_select_and_drop_data_columns() -> None:
 
 
 def test_polars_filter_on_tag() -> None:
+    """Filtering on a tag keeps the remaining tensors exact."""
     got = rows(PolarsFilter(constraints={"g": "g1"})(tensors_source()))
     expected = [n for n in NAMES if GROUP[n] == "g1"]
     assert sorted(got) == expected
@@ -118,6 +127,7 @@ def test_polars_filter_on_tag() -> None:
 
 
 def test_batch() -> None:
+    """Batch collects tensors into lists, each exact."""
     out = list(Batch(batch_size=4)(tensors_source()).iter_data())
     seen: list[str] = []
     for tag, data in out:
@@ -131,6 +141,7 @@ def test_batch() -> None:
 
 
 def test_group_by() -> None:
+    """GroupBy collects each group's tensors into a list, each exact."""
     out = list(GroupBy(by=["g"])(tensors_source()).iter_data())
     assert sorted(fields(t)["g"] for t, _ in out) == ["g0", "g1", "g2"]
     for tag, data in out:
@@ -143,6 +154,7 @@ def test_group_by() -> None:
 
 @pytest.mark.parametrize("shift", [0, 1])
 def test_merge_join_colliding_tensor_column(shift: int) -> None:
+    """MergeJoin merges a colliding tensor column into a list of both tensors."""
     left = tensors_source("left")
     right = tensors_source("right", shift=shift)
     got = rows(MergeJoin()(left, right))
@@ -154,6 +166,7 @@ def test_merge_join_colliding_tensor_column(shift: int) -> None:
 
 
 def test_merge_join_order_does_not_depend_on_input_order() -> None:
+    """MergeJoin orders merged tensors the same whichever input comes first."""
     forward = rows(MergeJoin()(tensors_source("a"), tensors_source("b", shift=1)))
     backward = rows(MergeJoin()(tensors_source("b", shift=1), tensors_source("a")))
     for name in NAMES:

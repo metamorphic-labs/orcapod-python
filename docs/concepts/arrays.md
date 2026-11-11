@@ -154,7 +154,11 @@ different hashes.
 
 A `torch.Tensor` can be a data value too. PyTorch is an optional dependency: install it
 yourself, with the build that suits your hardware (see pytorch.org), next to Orcapod. Orcapod
-is tested with PyTorch 2.3 and later. Importing Orcapod never imports PyTorch. The tensor type
+is tested with PyTorch 2.15. Orcapod converts tensors through NumPy (`Tensor.numpy()` and
+`torch.from_numpy`), so your PyTorch build must support the NumPy version you have installed:
+some older builds cannot use NumPy 2 and fail with "Numpy is not available". If you see that
+error, upgrade PyTorch or install a NumPy version your PyTorch build supports. Importing
+Orcapod never imports PyTorch. The tensor type
 is set up the first time Orcapod meets a tensor or a `torch.Tensor` annotation, or reads a
 stored tensor column. Reading a stored tensor column without PyTorch installed raises
 `orcapod.errors.MissingOptionalDependencyError`, which names the missing package.

@@ -127,9 +127,15 @@ def _declared_array_type(declared: Any) -> tuple[type, str] | None:
     either. Neither NumPy nor torch is imported here: a class counts as an array
     class when its MRO contains ``numpy.ndarray`` or ``torch.Tensor``.
 
+    The required class is that base class, not a declared subclass: the column
+    is stored through the base class's logical type, which reads values back as
+    the base class, so a pod declared ``-> MySubclass`` may return the plain
+    array or tensor it received. A subclass with its own registered logical type
+    is still checked by that type when the value is stored.
+
     Returns:
-        ``(class, hint)`` where ``hint`` tells the user how to return one, or
-        ``None`` when the declared type is not an array class.
+        ``(base_class, hint)`` where ``hint`` tells the user how to return one,
+        or ``None`` when the declared type is not an array class.
     """
     candidates = [declared]
     if typing.get_origin(declared) in (typing.Union, types.UnionType):
@@ -142,7 +148,7 @@ def _declared_array_type(declared: Any) -> tuple[type, str] | None:
         for base in candidate.__mro__:
             hint = _ARRAY_CLASSES.get((base.__module__, base.__qualname__))
             if hint is not None:
-                return candidate, hint
+                return base, hint
     return None
 
 

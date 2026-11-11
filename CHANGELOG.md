@@ -46,7 +46,8 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
 
 - **`torch.Tensor` is a value type**: a source column, a function pod parameter or return value,
   stored, cached and re-run like an ndarray, sync and async, in memory and in Delta stores.
-  PyTorch is an optional peer dependency (install it yourself; tested with 2.3 and later).
+  PyTorch is an optional peer dependency (install it yourself; tested with PyTorch 2.15). The
+  PyTorch build must support the installed NumPy, because tensors convert through NumPy.
   `import orcapod` never imports PyTorch: the type is set up on first use, and reading a
   stored tensor column without PyTorch raises `orcapod.errors.MissingOptionalDependencyError`.
 - **Storage.** Extension type `orcapod.torch_tensor` (metadata `{"version":1}`) over the same

@@ -27,32 +27,38 @@ from tests.test_torch.tensor_cases import (  # noqa: E402
 
 @function_pod(output_keys="y")
 def identity(x: torch.Tensor) -> torch.Tensor:
+    """Return a copy of the input."""
     return x.clone()
 
 
 @function_pod(output_keys="d")
 def double(y: torch.Tensor) -> torch.Tensor:
+    """Return twice the input."""
     return y * 2
 
 
 @function_pod(output_keys="total")
 def total(d: torch.Tensor) -> float:
+    """Return the sum of the real parts as a float."""
     return float(d.to(torch.complex128).real.sum())
 
 
 @function_pod(output_keys="count")
 def count(k: list[str], x: list[torch.Tensor]) -> int:
     # GroupBy moves the non-key tag ``k`` into the data as a list.
+    """Return the number of tensors in the group."""
     assert len(k) == len(x)
     return len(x)
 
 
 @function_pod(output_keys="pair")
 def pair(x: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Return the merged tensors as a list."""
     return list(x)
 
 
 def _build(store: Any) -> PipelineJob:
+    """Build a job with pods, GroupBy and MergeJoin over tensor sources on ``store``."""
     numeric = DictSource(
         data=[{"k": k, "x": TENSORS[k]} for k in NUMERIC],
         tag_columns=["k"],
@@ -88,10 +94,12 @@ def _build(store: Any) -> PipelineJob:
 
 
 def _run_sync(job: PipelineJob) -> None:
+    """Run the job synchronously."""
     job.run()
 
 
 def _run_async(job: PipelineJob) -> None:
+    """Run the job with the async orchestrator."""
     AsyncPipelineOrchestrator().run(job.dag)
 
 
@@ -106,6 +114,7 @@ RUNNERS: dict[str, Callable[[PipelineJob], None]] = {
 
 
 def _node(job: PipelineJob, label: str, column: str, key: str = "k") -> dict[str, Any]:
+    """Map each row's ``key`` tag to ``column`` of the node labelled ``label``."""
     return {
         str(t.as_dict()[key]): d.as_dict()[column]
         for t, d in job.nodes[label].iter_data()
@@ -135,6 +144,7 @@ _STALE_DELTA_VIEW = pytest.mark.xfail(
     ],
 )
 def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -> None:
+    """Every node of the job keeps tensors exact on each store and runner."""
     job = _build(STORES[store](tmp_path))
     RUNNERS[runner](job)
 

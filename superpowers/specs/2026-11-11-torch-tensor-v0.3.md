@@ -186,7 +186,7 @@ wheel pulls the CUDA stack, about 2 GB). Options:
 - **P1 (my pick): no extra; torch is a peer dependency.** `pip install orcapod torch` (or the
   wheel pytorch.org recommends for the user's CUDA version). PyTorch's own install matrix is
   the usual reason ML libraries do not pin torch. No `pyproject.toml` or `uv.lock` change, no
-  required-workflow change. Docs state the tested range (torch >= 2.3; tested on 2.15).
+  required-workflow change. Docs state the tested version (PyTorch 2.15) and that the PyTorch build must support the installed NumPy (CodeRabbit, PR #300: some builds cannot use NumPy 2).
 - **P2: extra `orcapod[torch] = ["torch>=2.3"]`**, plus a change to the required workflow:
   `uv sync --locked --all-extras --no-extra torch`. Needs your approval (required workflow), and
   adds torch for every platform to `uv.lock`.

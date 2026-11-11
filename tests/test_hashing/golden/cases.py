@@ -886,6 +886,7 @@ def pipeline_job() -> dict[str, Any]:
 
 
 def _torch_values() -> dict[str, Any]:
+    """Tensors whose hashes are pinned: the ndarray cases' values plus torch-only cases."""
     import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
 
     base = torch.arange(6, dtype=torch.float32).reshape(2, 3)
@@ -904,12 +905,14 @@ def _torch_values() -> dict[str, Any]:
 
 @case("torch", "value")
 def torch_values() -> dict[str, Any]:
+    """Semantic hashes of the pinned tensors."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(v).to_string() for k, v in _torch_values().items()}
 
 
 @case("torch", "type")
 def torch_type() -> dict[str, Any]:
+    """Semantic hash of the ``torch.Tensor`` type."""
     import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
 
     return {
@@ -919,6 +922,7 @@ def torch_type() -> dict[str, Any]:
 
 @case("torch", "single_field")
 def torch_single_field() -> dict[str, Any]:
+    """Arrow type and schema hash of a one-field ``torch.Tensor`` schema."""
     import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
 
     from orcapod.types import Schema
@@ -936,6 +940,7 @@ def torch_single_field() -> dict[str, Any]:
 
 @case("torch", "datagram")
 def torch_datagram() -> dict[str, Any]:
+    """Identity of a two-row tensor source."""
     import torch  # pyright: ignore[reportMissingImports]  # optional peer dependency
 
     from orcapod.sources import DictSource
