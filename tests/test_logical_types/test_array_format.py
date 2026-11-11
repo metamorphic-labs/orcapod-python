@@ -70,7 +70,7 @@ def test_digest_separates_every_field() -> None:
 
 def test_digest_rejects_negative_dimension() -> None:
     with pytest.raises(ValueError, match="dimension"):
-        array_digest_v1("int8", (-1,), b"")
+        _ = array_digest_v1("int8", (-1,), b"")
 
 
 def test_storage_type() -> None:
