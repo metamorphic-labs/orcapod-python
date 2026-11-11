@@ -4,8 +4,9 @@ Wraps a SpiralDB table as an OrcaPod Source. The table's primary-key
 (key-schema) columns are used as tag columns by default.
 
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
-Authentication is handled externally — run ``spiral login`` once to store
-credentials in ``~/.config/pyspiral/auth.json``.
+Authentication is handled externally — run ``spiral login`` once; pyspiral keeps
+the credentials in its per-user application directory
+(``~/Library/Application Support/pyspiral/`` on macOS, ``~/.config/pyspiral/`` on Linux).
 
 Example::
 

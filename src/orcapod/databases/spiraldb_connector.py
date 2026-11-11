@@ -2,7 +2,8 @@
 
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is handled externally via the ``spiral login`` CLI command,
-which stores credentials in ``~/.config/pyspiral/auth.json``.
+which stores credentials in pyspiral's per-user application directory (``~/Library/Application Support/pyspiral/`` on
+macOS, ``~/.config/pyspiral/`` on Linux).
 
 The connector is dataset-scoped: all tables are read from and written to
 a single ``(project_id, dataset)`` pair.
@@ -300,8 +301,9 @@ class SpiralDBConnector:
     """DBConnectorProtocol implementation backed by SpiralDB (pyspiral).
 
     Scoped to a single dataset within a SpiralDB project. Auth is handled
-    externally — run ``spiral login`` once to store credentials in
-    ``~/.config/pyspiral/auth.json``.
+    externally — run ``spiral login`` once; pyspiral keeps the credentials in its
+    per-user application directory (``~/Library/Application Support/pyspiral/`` on
+    macOS, ``~/.config/pyspiral/`` on Linux).
 
     Args:
         project_id: SpiralDB project identifier (e.g. ``"my-project-123456"``).
