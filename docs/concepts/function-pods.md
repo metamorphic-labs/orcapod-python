@@ -247,13 +247,20 @@ type.
 | `pandas.DataFrame` | `pandas.dataframe` | `large_binary` (Arrow IPC stream) |
 | `pandas.Series` | `pandas.series` | `large_binary` (Arrow IPC stream) |
 | `polars.DataFrame` | `polars.dataframe` | `large_binary` (Arrow IPC stream) |
+| `polars.Series` | `polars.series` | `large_binary` (Arrow IPC stream) |
 
 A `polars.DataFrame` comes back with exactly the schema it was stored with: column order and
 names, integer and float widths, `Categorical`, `Enum` with its category order, `Decimal`
 precision and scale, `Datetime` unit and time zone, `Duration` unit, `List`, `Array` shape,
-`Struct` fields and `Null`. Dtypes that cannot be stored and read back exactly (`Object`,
-`Int128`, `UInt128`, and Polars extension dtypes) raise `ValueError` naming the column when
-the value is stored, so convert such a column explicitly before returning the frame.
+`Struct` fields and `Null`. A `polars.Series` keeps its name, dtype and values the same way.
+Dtypes that cannot be stored and read back exactly (`Object`, `Int128`, `UInt128`, and Polars
+extension dtypes) raise `ValueError` naming the column when the value is stored, so convert
+such a column explicitly before returning the frame.
+
+A Polars value's content hash, which is its cache key, covers its row count, column names,
+dtypes and values, but not its column order or memory layout. See
+[Logical-typed values](../reference/hashing.md#1c-logical-typed-values-inside-a-data-column)
+for the exact scheme.
 
 ```python
 import polars as pl

@@ -242,6 +242,57 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 ---
 
+### 1c. Logical-typed values inside a data column
+
+When `StarfixArrowHasher` hashes a table, a column whose logical type has a registered
+semantic handler is replaced, value by value, by the token
+`<extension name with "." as ":">::<method>:<digest>` (for example `polars:dataframe::sha256:…`),
+where the digest is the handler's hash of the Python value. Other extension columns are hashed
+as their storage with the extension name kept in the field metadata.
+
+**`polars.DataFrame` and `polars.Series`** (`PolarsDataFrameHandler`, `PolarsSeriesHandler`,
+defined in `orcapod.logical_types.polars_type`). The stored Arrow IPC bytes are not hashed:
+they vary for equal frames (the bytes under null slots, Polars' own field metadata). The hash
+is
+
+```text
+sha256(descriptor + b"\x00" + starfix.ArrowDigester.hash_table(values))
+```
+
+`values` is the frame exported with `compat_level=oldest`, with top-level `Null` columns left
+out, `Array` cast to `large_list`, nested `Null` cast to an all-null `bool` and dictionaries
+decoded, for hashing only. Like every Orcapod table hash it ignores column order and struct
+field order. `descriptor` is canonical JSON (keys sorted, compact separators, UTF-8) in a
+grammar Orcapod owns, never Polars' `repr`:
+
+```text
+frame:  {"v": 1, "kind": "polars.dataframe", "height": <rows>,
+         "columns": {<name>: <dtype>, ...}}
+series: {"v": 1, "kind": "polars.series", "name": <name>, "height": <rows>,
+         "dtype": <dtype>}
+
+<dtype> := "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
+         | "float16" | "float32" | "float64" | "boolean" | "string" | "binary"
+         | "date" | "time" | "null" | "categorical"
+         | {"enum": [<category>, ...]}               categories in their order
+         | {"decimal": [<precision>, <scale>]}
+         | {"datetime": [<unit>, <time zone or null>]}
+         | {"duration": <unit>}
+         | {"list": <dtype>}
+         | {"array": [<dtype>, <size>]}              a multi-dimensional array nests
+         | {"struct": {<field>: <dtype>, ...}}
+```
+
+So two frames hash equal exactly when they have the same row count, the same column names,
+the same dtype for each name (Enum categories and their order, Decimal precision and scale,
+Datetime unit and time zone, Duration unit and Array shape included) and the same values.
+Chunking, slice offsets, the bytes under null slots, column order and struct field order do
+not matter. `"v"` versions the grammar: changing the grammar bumps it and changes every
+Polars value hash on purpose. A dtype outside the grammar raises `ValueError` naming the
+column.
+
+---
+
 ## 2. Source Provenance & System Tags
 
 When a source is built by `SourceStreamBuilder`, four hash-related operations happen in

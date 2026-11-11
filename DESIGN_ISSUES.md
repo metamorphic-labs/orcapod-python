@@ -2109,3 +2109,30 @@ equals the materialized one. Hashes of pipelines that already worked are unchang
 Regressions: `tests/test_core/operators/test_chained_aggregation.py`. Open: on the async
 barrier path, per-row source info is still row 0's (ITL-845); that assertion is a strict
 xfail.
+
+---
+
+## `src/orcapod/logical_types/polars_type.py` — Polars values
+
+### PL1 — `pl.DataFrame` had no logical type, so a pod could not take or return one
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-578
+
+`@function_pod(output_keys="df") def f(n: int) -> pl.DataFrame` raised at decoration:
+`TypeError: No LogicalType or LogicalTypeFactory registered for <class 'polars.dataframe.frame.DataFrame'>`.
+
+**Fix:** `LogicalPolarsDataFrame` (`polars.dataframe`) and `LogicalPolarsSeries`
+(`polars.series`, a one-column frame) store the value as an Arrow IPC stream in
+`large_binary`, the pandas envelope (helpers shared in `logical_types/arrow_ipc.py`), exported
+with `compat_level=oldest` as one record batch, so every supported dtype reads back exactly.
+`Object`, `Int128`, `UInt128` and Polars extension dtypes are rejected at write time, naming
+the column. `pl.from_arrow` renames a column called `""` to `column_0`, so the reader restores
+the stored names. The IPC bytes are not canonical (bytes under null slots, `_PL_*` metadata),
+so `PolarsDataFrameHandler` / `PolarsSeriesHandler` hash
+`sha256(versioned Orcapod dtype descriptor + starfix digest of the values)` instead
+(developer's decision, November 10, 2026): column order and struct field order are not
+identity, every dtype parameter is. Golden values are pinned in
+`tests/test_hashing/test_polars_dataframe_hashing.py`. Existing hashes are unchanged. Open:
+SQLite stores reject every logical-typed column (ITL-877); the pandas handler collides on
+column order, Categorical vs String and struct field order (follow-up to decide).
