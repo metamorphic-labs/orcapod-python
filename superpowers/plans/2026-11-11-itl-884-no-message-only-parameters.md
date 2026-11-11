@@ -88,3 +88,11 @@ writer's own conversion, `_stored_arrow_schema` reads the stored schema without 
 Guard: `tests/test_databases/test_delta_append_types.py` (every Arrow/logical type, identical
 schema, same view and reopened; 40 cases failed before the fix). Deferred: ExceptionGroup-wrapped
 store errors -> ITL-918; fixed_size_list merge failure (also on main) -> ITL-916 (strict xfail).
+
+## CodeRabbit round on ffe44481
+
+Regression: rows whose column (or nested field / list item) is `null`-typed could not be appended
+to a typed column; `main` accepts them. Fix: `_without_null_types` leaves `null` parts out of the
+comparison (a `null` struct field is dropped; a column holding `null` list items or map entries is
+not compared). Tests in `test_delta_append_types.py` (three null cases, all passing on `main`;
+a `null` field does not hide a changed sibling).

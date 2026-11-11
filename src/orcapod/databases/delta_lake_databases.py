@@ -71,6 +71,47 @@ def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
+def _without_null_types(arrow_type: pa.DataType) -> pa.DataType | None:
+    """Return ``arrow_type`` without the parts typed ``null``, or ``None`` if none is left.
+
+    A ``null``-typed value fits a column of any type, and Delta has no ``null``
+    type to compare it with, so the append check leaves it out: a ``null`` struct
+    field is dropped, and a type that is ``null`` or holds ``null`` list items or
+    map keys or values is not compared at all.
+
+    Args:
+        arrow_type: A type already reduced by ``_comparable_storage_type``.
+
+    Returns:
+        The type to compare, or ``None`` when it should not be compared.
+    """
+    if pa.types.is_null(arrow_type):
+        return None
+    if pa.types.is_struct(arrow_type):
+        kept = [
+            pa.field(f.name, t)
+            for f in arrow_type
+            if (t := _without_null_types(f.type)) is not None
+        ]
+        return pa.struct(kept) if kept else None
+    if (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        if _without_null_types(arrow_type.value_type) != arrow_type.value_type:
+            return None
+        return arrow_type
+    if pa.types.is_map(arrow_type):
+        if (
+            _without_null_types(arrow_type.key_type) != arrow_type.key_type
+            or _without_null_types(arrow_type.item_type) != arrow_type.item_type
+        ):
+            return None
+        return arrow_type
+    return arrow_type
+
+
 def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
     """Return ``schema`` with the types the Delta writer would store it as.
 
@@ -1302,7 +1343,9 @@ class DeltaTableDatabase:
 
         Delta's merge either casts such a batch to the stored type (``int32`` or
         ``float64`` rows into an ``int64`` column) or, when an extension type is
-        involved, writes data files the table can no longer read. The batch's types
+        involved, writes data files the table can no longer read. ``null``-typed
+        parts of the batch fit any stored type and are not compared (see
+        ``_without_null_types``). The batch's types
         are first converted exactly as the Delta writer converts them (see
         ``_as_delta_writer_stores``), then both sides are compared with extension
         types reduced to storage, large-normalized and nullability ignored, so a
@@ -1321,13 +1364,12 @@ class DeltaTableDatabase:
             compared types differ, or ``None`` when the batch can be appended.
         """
         stored = _stored_arrow_schema(delta_table)
+        compared = [
+            (f.name, _without_null_types(_comparable_storage_type(f.type)))
+            for f in batch.schema
+        ]
         incoming = _as_delta_writer_stores(
-            pa.schema(
-                [
-                    pa.field(f.name, _comparable_storage_type(f.type))
-                    for f in batch.schema
-                ]
-            )
+            pa.schema([pa.field(name, t) for name, t in compared if t is not None])
         )
         for field in incoming:
             index = stored.get_field_index(field.name)

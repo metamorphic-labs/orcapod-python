@@ -28,6 +28,7 @@ from upath import UPath
 
 from orcapod.contexts import get_default_context
 from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import InputValidationError
 from orcapod.logical_types.directory_type import Directory
 from orcapod.logical_types.file_type import File
 
@@ -258,3 +259,52 @@ def test_identical_schema_appends(
     assert back is not None
     assert back.num_rows == 2
     assert set(back.column("rid").to_pylist()) == {b"a", b"b"}
+
+
+@pytest.mark.parametrize(
+    ("stored_type", "incoming_type"),
+    [
+        (pa.int64(), pa.null()),
+        (pa.struct([("a", pa.int64())]), pa.struct([("a", pa.null())])),
+        (pa.large_list(pa.int64()), pa.large_list(pa.null())),
+    ],
+    ids=["int64<-null", "struct-field<-null", "list-element<-null"],
+)
+def test_null_typed_values_append_to_a_typed_column(
+    tmp_path: Path, stored_type: pa.DataType, incoming_type: pa.DataType
+) -> None:
+    """Rows whose column (or nested field) is ``null``-typed append to a typed column."""
+    db = DeltaTableDatabase(base_path=tmp_path)
+    write(db, table(stored_type, b"a", nullable=True))
+    nulls = pa.Table.from_arrays(
+        [pa.array([b"b"], pa.large_binary()), pa.array([None], incoming_type)],
+        names=["rid", "x"],
+    )
+    write(db, nulls)
+
+    back = DeltaTableDatabase(base_path=tmp_path).get_all_records(
+        PATH, record_id_column="rid"
+    )
+    assert back is not None
+    assert back.num_rows == 2
+
+
+def test_null_field_does_not_hide_a_changed_sibling(tmp_path: Path) -> None:
+    """A ``null`` struct field is skipped, but a changed sibling field is refused."""
+    db = DeltaTableDatabase(base_path=tmp_path)
+    write(
+        db,
+        table(pa.struct([("a", pa.int64()), ("b", pa.int64())]), b"a", nullable=True),
+    )
+    changed = pa.Table.from_arrays(
+        [
+            pa.array([b"b"], pa.large_binary()),
+            pa.array(
+                [{"a": None, "b": 2.5}],
+                pa.struct([("a", pa.null()), ("b", pa.float64())]),
+            ),
+        ],
+        names=["rid", "x"],
+    )
+    with pytest.raises(InputValidationError, match="'x'"):
+        write(db, changed)
