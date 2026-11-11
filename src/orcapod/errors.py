@@ -57,6 +57,21 @@ class DataFunctionUnavailableError(RuntimeError):
     """
 
 
+class ValueConversionWarning(UserWarning):
+    """Orcapod accepted a value and stored a converted form of it.
+
+    Examples: a function pod returned a near miss for its declared output type, or a
+    torch tensor on a GPU or tracking gradients, which is stored from a detached CPU
+    copy. The message names who gave the value (a function pod's output, a source's
+    column), what was converted and how to avoid the conversion. A value passed in by
+    the caller is never modified. The code that issues the warning issues it once per
+    (function or source, output or column, conversion), however many rows a run has,
+    and does not rely on Python's warning registry to do so. To make it an error, run
+    with ``-W error::orcapod.errors.ValueConversionWarning``: every conversion then
+    raises, on every row, and in a pipeline that row fails.
+    """
+
+
 class FieldNotResolvableError(LookupError):
     """
     Raised when a source cannot resolve a field value for a given record ID.
