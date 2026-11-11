@@ -27,7 +27,7 @@ Preferred: PEP 639, `license = "MIT"` (SPDX expression), no license classifier (
 forbids combining an expression with license classifiers), `LICENSE` picked up by hatchling's
 default `license-files`. Metadata then carries `License-Expression: MIT` and
 `License-File: LICENSE`. The build floor is `hatchling>=1.27.0` (see the revision note
-below); Task 2 also builds with that floor, `hatchling==1.27.0`, to confirm it emits
+below); Task 2 also builds pinned to that floor (constraints file `hatchling==1.27.0`) to confirm it emits
 Metadata-Version 2.4 with the declaration.
 
 **Revised after review (CodeRabbit on #283, approved by the coordinator):** hatchling 1.21.0
@@ -54,7 +54,8 @@ Verified empirically in Task 2 before committing.
 ### Task 2: apply the license
 - `LICENSE`: standard MIT text (SPDX `MIT` template), copyright line exactly once.
 - `pyproject.toml`: `license = "MIT"`; build floor `hatchling>=1.27.0`.
-- Verify: `uv build` (latest hatchling and `--build-constraint hatchling==1.27.0`), inspect wheel METADATA and sdist PKG-INFO, confirm LICENSE in both;
+- Verify: `uv build` twice, once with the latest hatchling and once at the floor (write
+  `hatchling==1.27.0` to a constraints file, then `uv build --build-constraint <file>`); inspect wheel METADATA and sdist PKG-INFO, confirm LICENSE in both;
   `uv sync --locked --dev` then the `_license-check.yml` command verbatim, plus
   `pip-licenses --packages orcapod` showing `MIT`.
 - Run the packaging tests; green.
