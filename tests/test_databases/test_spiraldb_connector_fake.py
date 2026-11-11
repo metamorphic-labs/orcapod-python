@@ -13,6 +13,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import (
+    ConnectorArrowDatabase,
     SpiralDBConnector,
     read_nullability_record,
     spiraldb_connector,
@@ -335,3 +336,89 @@ class TestNullabilityRecord:
         SpiralDBConnector("p").upsert_records("r", _rows(), id_column="k")
         batches = list(SpiralDBConnector("p").iter_batches('SELECT * FROM "r"'))
         assert calls == [b.num_rows for b in batches]
+
+
+# Orcapod's own results are large-typed (CLAUDE.md, Arrow types).
+_RESULT = pa.schema(
+    [
+        pa.field("score", pa.float64(), False),
+        pa.field("note", pa.large_string(), True),
+        pa.field(
+            "quality",
+            pa.struct(
+                [
+                    pa.field("snr", pa.float32(), False),
+                    pa.field("tag", pa.large_string()),
+                ]
+            ),
+            False,
+        ),
+        pa.field("spikes", pa.large_list(pa.field("item", pa.float32(), False)), False),
+    ]
+)
+_FLAT_RESULT = pa.schema([_RESULT.field("score"), _RESULT.field("note")])
+_PATH = ("results", "fn")
+
+
+def _result(i: int, schema: pa.Schema = _RESULT) -> pa.Table:
+    """Return one result row of ``schema``."""
+    row = {
+        "score": [float(i)],
+        "note": [None if i % 2 else f"n{i}"],
+        "quality": [{"snr": float(i), "tag": None}],
+        "spikes": [[float(i)] * i],
+    }
+    return pa.table({n: row[n] for n in schema.names}, schema=schema)
+
+
+class TestResultStoreOnSpiral:
+    """ConnectorArrowDatabase on SpiralDB keeps result nullability (ITL-936)."""
+
+    @pytest.fixture()
+    def db(self, tmp_path: Path):
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            yield ConnectorArrowDatabase(SpiralDBConnector("p"))
+
+    def test_results_read_back_with_the_written_schema(self, db):
+        db.add_record(_PATH, "r1", _result(1))
+        db.flush()
+        db.add_record(_PATH, "r2", _result(2))
+        db.flush()
+        records = db.get_all_records(_PATH)
+        assert records is not None
+        assert records.num_rows == 2
+        assert records.schema == _RESULT
+
+    def test_result_table_written_before_the_record_keeps_todays_behaviour(
+        self, db, monkeypatch
+    ):
+        # A result table written by an Orcapod without the record (simulated by
+        # skipping it on the first flush) gets none later and reads back as SpiralDB
+        # reports it: every column nullable.
+        with monkeypatch.context() as m:
+            m.setattr(
+                spiraldb_connector, "write_nullability_record", lambda t, s: False
+            )
+            db.add_record(_PATH, "r1", _result(1, _FLAT_RESULT))
+            db.flush()
+        db.add_record(_PATH, "r2", _result(2, _FLAT_RESULT))
+        db.flush()
+        records = db.get_all_records(_PATH)
+        assert records is not None
+        assert records.num_rows == 2
+        assert all(f.nullable for f in records.schema)
+
+    def test_unrecorded_struct_result_table_cannot_take_a_second_flush(
+        self, db, monkeypatch
+    ):
+        # Today's behaviour on a result table without the record: SpiralDB reports the
+        # struct field nullable, so the flush-time type comparison fails.
+        with monkeypatch.context() as m:
+            m.setattr(
+                spiraldb_connector, "write_nullability_record", lambda t, s: False
+            )
+            db.add_record(_PATH, "r1", _result(1))
+            db.flush()
+        db.add_record(_PATH, "r2", _result(2))
+        with pytest.raises(ValueError, match="Schema mismatch"):
+            db.flush()
