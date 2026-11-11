@@ -265,251 +265,250 @@ _PLAIN_TYPES: dict[object, type] = {
 }
 
 
+_Result: typing.TypeAlias = tuple[Nonconformance | None, tuple[Conversion, ...]]
+_CONFORMS: _Result = (None, ())
+
+
+def _mismatch(value: object, declared: object, hint: str | None = None) -> _Result:
+    return Nonconformance("", declared, value, hint), ()
+
+
+def _at(result: _Result, path: str, location: str) -> _Result:
+    """Place a nested result inside its container.
+
+    Args:
+        result: The result of checking one element, field, key or value.
+        path: Where that part is in this value (``[3]``, ``['a']``, ``.count``).
+        location: The same place by structure only (``[*]``, ``.count``).
+
+    Returns:
+        The result with ``path`` prefixed to the mismatch and ``location`` to every
+        conversion.
+    """
+    mismatch, conversions = result
+    if mismatch is not None:
+        return dataclasses.replace(mismatch, path=path + mismatch.path), ()
+    if not conversions:
+        return _CONFORMS
+    return None, tuple(
+        dataclasses.replace(c, location=location + c.location) for c in conversions
+    )
+
+
+def _merge(results: Iterable[_Result]) -> _Result:
+    """Combine the results of a value's parts: the first mismatch, or each conversion once."""
+    merged: dict[tuple[NearMiss, str], Conversion] = {}
+    for mismatch, conversions in results:
+        if mismatch is not None:
+            return mismatch, ()
+        for conversion in conversions:
+            _ = merged.setdefault(
+                (conversion.near_miss, conversion.location), conversion
+            )
+    return (None, tuple(merged.values())) if merged else _CONFORMS
+
+
 class _Checker:
-    """Walks one returned value, collecting conversions until the first mismatch."""
+    """Checks returned values against declared types under one conformance table."""
 
     def __init__(self, rule: Mapping[NearMiss, Treatment]) -> None:
         self._rule: Mapping[NearMiss, Treatment] = rule
-        self.conversions: dict[tuple[NearMiss, str], Conversion] = {}
 
-    def near(
-        self,
-        near_miss: NearMiss,
-        value: object,
-        declared: object,
-        path: str,
-        location: str,
-    ) -> Nonconformance | None:
-        """Apply the table to a near miss: accept, record a conversion, or reject."""
+    def near(self, near_miss: NearMiss, value: object, declared: object) -> _Result:
+        """Apply the table to a near miss: accept, convert with a warning, or reject."""
         treatment = self._rule[near_miss]
         if treatment is Treatment.REJECT:
-            return Nonconformance(
-                path, declared, value, _reject_hint(near_miss, value, declared)
-            )
+            return _mismatch(value, declared, _reject_hint(near_miss, value, declared))
         if treatment is Treatment.CONVERT_WITH_WARNING:
-            key = (near_miss, location)
-            if key not in self.conversions:
-                self.conversions[key] = Conversion(
-                    location, declared, type(value), near_miss
-                )
-        return None
+            return None, (Conversion("", declared, type(value), near_miss),)
+        return _CONFORMS
 
-    def check(
-        self, value: object, declared: object, path: str, location: str
-    ) -> Nonconformance | None:
-        """Return the first mismatch in ``value`` against ``declared``, or ``None``."""
-        mismatch = Nonconformance(path, declared, value)
+    def check(self, value: object, declared: object) -> _Result:
+        """Check ``value`` against ``declared``; paths in the result are relative to it."""
         origin = typing.get_origin(declared)
         args: tuple[object, ...] = typing.get_args(declared)
 
         if origin is typing.Union or origin is types.UnionType:
             non_none = [a for a in args if a is not type(None)]
             if value is None and len(non_none) < len(args):
-                return None
+                return _CONFORMS
             if len(non_none) == 1:
-                return self.check(value, non_none[0], path, location)
-            return None  # complex unions are rejected by the type converter itself
+                return self.check(value, non_none[0])
+            return _CONFORMS  # complex unions are rejected by the type converter itself
 
         if value is None:
-            return self.near(
-                NearMiss.NONE_FOR_NON_OPTIONAL, value, declared, path, location
-            )
+            return self.near(NearMiss.NONE_FOR_NON_OPTIONAL, value, declared)
 
         if declared is bool:
-            return self.check_bool(value, declared, path, location)
+            return self.check_bool(value, declared)
         if declared is int:
-            return self.check_integer(value, declared, path, location)
+            return self.check_integer(value, declared)
         if declared is float:
-            return self.check_float(value, declared, path, location)
+            return self.check_float(value, declared)
         if declared is dt.date:
             if isinstance(value, dt.datetime):
-                return self.near(
-                    NearMiss.DATETIME_FOR_DATE, value, declared, path, location
-                )
-            return None if isinstance(value, dt.date) else mismatch
+                return self.near(NearMiss.DATETIME_FOR_DATE, value, declared)
+            return (
+                _CONFORMS if isinstance(value, dt.date) else _mismatch(value, declared)
+            )
         plain = _PLAIN_TYPES.get(declared)
         if plain is not None:
-            return None if isinstance(value, plain) else mismatch
+            return _CONFORMS if isinstance(value, plain) else _mismatch(value, declared)
 
         numpy_type = _numpy_type(declared)
         if numpy_type is not None:
             kind, itemsize = numpy_type
             if kind in ("i", "u"):
-                return self.check_integer(value, declared, path, location)
+                return self.check_integer(value, declared)
             if kind == "f" and itemsize == 8:
-                return self.check_float(value, declared, path, location)
+                return self.check_float(value, declared)
             if kind == "f" and itemsize == 4:
-                return self.check_float32(value, declared, path, location)
+                return self.check_float32(value, declared)
             if kind == "b":
-                return self.check_bool(value, declared, path, location)
-            return None
+                return self.check_bool(value, declared)
+            return _CONFORMS
 
         if origin is list:
             element_type = args[0] if args else object
-            return self.check_list(value, declared, element_type, path, location)
+            return self.check_list(value, declared, element_type)
 
         if origin is dict:
             if not isinstance(value, Mapping):
-                return mismatch
+                return _mismatch(value, declared)
             key_type, value_type = args if len(args) == 2 else (object, object)
             mapping = typing.cast("Mapping[object, object]", value)
-            for key, item in mapping.items():
-                found = self.check(
-                    key, key_type, f"{path}[{key!r}] key", f"{location}.keys()"
-                )
-                if found is None:
-                    found = self.check(
-                        item, value_type, f"{path}[{key!r}]", f"{location}[*]"
-                    )
-                if found is not None:
-                    return found
-            return None
+            return _merge(self.check_items(mapping, key_type, value_type))
 
         if isinstance(declared, type) and dataclasses.is_dataclass(declared):
             if not isinstance(value, declared):
-                return None  # left to the dataclass logical type's converter, as before
+                return _CONFORMS  # left to the dataclass logical type's converter
             try:
                 hints = typing.get_type_hints(declared)
             except Exception:  # noqa: BLE001 - unresolvable annotations: nothing to check against
-                return None
-            for field in dataclasses.fields(declared):
-                found = self.check(
-                    typing.cast(object, getattr(value, field.name)),
-                    typing.cast(object, hints.get(field.name, object)),
-                    f"{path}.{field.name}",
-                    f"{location}.{field.name}",
+                return _CONFORMS
+            return _merge(
+                _at(
+                    self.check(
+                        typing.cast(object, getattr(value, field.name)),
+                        typing.cast(object, hints.get(field.name, object)),
+                    ),
+                    f".{field.name}",
+                    f".{field.name}",
                 )
-                if found is not None:
-                    return found
-            return None
+                for field in dataclasses.fields(declared)
+            )
 
-        return None
+        return _CONFORMS
 
-    def check_bool(
-        self, value: object, declared: object, path: str, location: str
-    ) -> Nonconformance | None:
+    def check_bool(self, value: object, declared: object) -> _Result:
         if isinstance(value, bool):
-            return None
+            return _CONFORMS
         scalar = _numpy_scalar(value)
         if scalar is not None and scalar[0] == "b":
             if isinstance(declared, type) and isinstance(value, declared):
-                return None
-            return self.near(
-                NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared, path, location
-            )
-        return Nonconformance(path, declared, value)
+                return _CONFORMS
+            return self.near(NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared)
+        return _mismatch(value, declared)
 
-    def check_integer(
-        self, value: object, declared: object, path: str, location: str
-    ) -> Nonconformance | None:
+    def check_integer(self, value: object, declared: object) -> _Result:
         """``int`` or a NumPy integer type; the range is checked by the conversion."""
         if isinstance(value, bool):
-            return Nonconformance(path, declared, value)
+            return _mismatch(value, declared)
         if isinstance(value, int) or (
             isinstance(declared, type) and isinstance(value, declared)
         ):
-            return None  # an int subclass such as IntEnum keeps its value
+            return _CONFORMS  # an int subclass such as IntEnum keeps its value
         scalar = _numpy_scalar(value)
         if scalar is not None and scalar[0] in ("i", "u"):
-            return self.near(
-                NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared, path, location
-            )
+            return self.near(NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared)
         if isinstance(value, float) or (scalar is not None and scalar[0] == "f"):
-            return Nonconformance(path, declared, value, _FLOAT_FOR_INT_HINT)
+            return _mismatch(value, declared, _FLOAT_FOR_INT_HINT)
         from decimal import Decimal
         from fractions import Fraction
 
         if isinstance(value, (Decimal, Fraction)):
-            return Nonconformance(path, declared, value, _FLOAT_FOR_INT_HINT)
-        return Nonconformance(path, declared, value)
+            return _mismatch(value, declared, _FLOAT_FOR_INT_HINT)
+        return _mismatch(value, declared)
 
-    def _check_not_float(
-        self, value: object, declared: object, path: str, location: str
-    ) -> Nonconformance | None:
+    def _check_not_float(self, value: object, declared: object) -> _Result:
         """Shared tail of the float checks: a bool, an integer or anything else."""
         scalar = _numpy_scalar(value)
         if isinstance(value, bool) or (scalar is not None and scalar[0] == "b"):
-            return self.near(NearMiss.BOOL_FOR_FLOAT, value, declared, path, location)
+            return self.near(NearMiss.BOOL_FOR_FLOAT, value, declared)
         if isinstance(value, int) or (scalar is not None and scalar[0] in ("i", "u")):
-            return self.near(NearMiss.INT_FOR_FLOAT, value, declared, path, location)
-        return Nonconformance(path, declared, value)
+            return self.near(NearMiss.INT_FOR_FLOAT, value, declared)
+        return _mismatch(value, declared)
 
-    def check_float(
-        self, value: object, declared: object, path: str, location: str
-    ) -> Nonconformance | None:
+    def check_float(self, value: object, declared: object) -> _Result:
         """``float`` or ``numpy.float64``."""
         if isinstance(value, float):  # numpy.float64 is a float subclass
-            return None
+            return _CONFORMS
         scalar = _numpy_scalar(value)
         if scalar is not None and scalar[0] == "f":
             # A narrower NumPy float widens exactly.
-            return self.near(
-                NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared, path, location
-            )
-        return self._check_not_float(value, declared, path, location)
+            return self.near(NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared)
+        return self._check_not_float(value, declared)
 
-    def check_float32(
-        self, value: object, declared: object, path: str, location: str
-    ) -> Nonconformance | None:
+    def check_float32(self, value: object, declared: object) -> _Result:
         """``numpy.float32``."""
         scalar = _numpy_scalar(value)
         if scalar == ("f", 4):
-            return None
+            return _CONFORMS
         if scalar is not None and scalar[0] == "f" and scalar[1] < 4:
-            return self.near(
-                NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared, path, location
-            )
+            return self.near(NearMiss.NUMPY_SCALAR_SAME_KIND, value, declared)
         if isinstance(value, float) or (scalar is not None and scalar[0] == "f"):
-            return self.near(
-                NearMiss.FLOAT_FOR_FLOAT32, value, declared, path, location
-            )
-        return self._check_not_float(value, declared, path, location)
+            return self.near(NearMiss.FLOAT_FOR_FLOAT32, value, declared)
+        return self._check_not_float(value, declared)
 
     def check_list(
-        self,
-        value: object,
-        declared: object,
-        element_type: object,
-        path: str,
-        location: str,
-    ) -> Nonconformance | None:
+        self, value: object, declared: object, element_type: object
+    ) -> _Result:
         item: object = value  # the isinstance checks below must not narrow this one
         if isinstance(value, list):
-            return self.check_elements(
-                typing.cast("list[object]", value), element_type, path, location
-            )
+            return self.check_elements(typing.cast("list[object]", value), element_type)
         if isinstance(value, (str, bytes, Mapping)):
-            return Nonconformance(path, declared, item)
+            return _mismatch(item, declared)
         if isinstance(value, Set) and not isinstance(value, (KeysView, ItemsView)):
             near_miss = NearMiss.SET_FOR_LIST  # unordered: dict views keep their order
         elif isinstance(value, tuple):
             near_miss = NearMiss.TUPLE_FOR_LIST
         elif isinstance(value, Iterator):
-            return Nonconformance(path, declared, item, _ITERATOR_HINT)
+            return _mismatch(item, declared, _ITERATOR_HINT)
         elif isinstance(value, Iterable):
             near_miss = NearMiss.ITERABLE_FOR_LIST
         else:
-            return Nonconformance(path, declared, item)
-        found = self.near(near_miss, item, declared, path, location)
-        if found is not None:
-            return found
+            return _mismatch(item, declared)
+        container = self.near(near_miss, item, declared)
+        if container[0] is not None:
+            return container
         array = _numpy_array(item)
         if array is not None and array.ndim == 1 and array.dtype.kind != "O":
             # Every element has the array's dtype: checking one checks them all.
-            elements: list[object] = list(array[:1])
-            return self.check_elements(elements, element_type, path, location)
-        return self.check_elements(
-            typing.cast("Iterable[object]", item), element_type, path, location
+            elements: Iterable[object] = typing.cast("list[object]", list(array[:1]))
+        else:
+            elements = typing.cast(
+                "Iterable[object]", item
+            )  # re-iterable, not consumed
+        return _merge((container, self.check_elements(elements, element_type)))
+
+    def check_elements(self, values: Iterable[object], element_type: object) -> _Result:
+        # The path is only built for an element that does not simply conform.
+        return _merge(
+            _at(result, f"[{i}]", "[*]")
+            for i, item in enumerate(values)
+            if (result := self.check(item, element_type)) is not _CONFORMS
         )
 
-    def check_elements(
-        self, values: Iterable[object], element_type: object, path: str, location: str
-    ) -> Nonconformance | None:
-        for i, item in enumerate(values):
-            found = self.check(item, element_type, f"{path}[{i}]", f"{location}[*]")
-            if found is not None:
-                return found
-        return None
+    def check_items(
+        self, mapping: Mapping[object, object], key_type: object, value_type: object
+    ) -> Iterator[_Result]:
+        for key, item in mapping.items():
+            result = self.check(key, key_type)
+            if result is not _CONFORMS:
+                yield _at(result, f"[{key!r}] key", ".keys()")
+            result = self.check(item, value_type)
+            if result is not _CONFORMS:
+                yield _at(result, f"[{key!r}]", "[*]")
 
 
 def check_conformance(
@@ -525,11 +524,8 @@ def check_conformance(
         rule: How each near miss is treated.
 
     Returns:
-        The first mismatch, or, when the value conforms, the conversions it needs. A
-        declared type this module leaves to its own converter conforms.
+        The first mismatch, or, when the value conforms, the conversions it needs, each
+        once. A declared type this module leaves to its own converter conforms.
     """
-    checker = _Checker(rule)
-    mismatch = checker.check(value, declared, "", "")
-    if mismatch is not None:
-        return ConformanceReport(mismatch, ())
-    return ConformanceReport(None, tuple(checker.conversions.values()))
+    mismatch, conversions = _Checker(rule).check(value, declared)
+    return ConformanceReport(mismatch, conversions)
