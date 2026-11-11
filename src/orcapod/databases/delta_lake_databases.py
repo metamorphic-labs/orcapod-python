@@ -363,9 +363,12 @@ class DeltaTableDatabase:
     def _get_existing_ids(self, record_path: tuple[str, ...]) -> set[bytes]:
         """Get the set of existing IDs in the Delta table, using cache when possible."""
         record_key = self._get_record_key(record_path)
+        # A table loaded by a read is cached before any ids are, so a missing
+        # id entry needs a refresh as much as a dirty one does.
         if (
             self._cache_dirty.get(record_key)
             or record_key not in self._delta_table_cache
+            or record_key not in self._existing_ids_cache
         ):
             self._refresh_existing_ids_cache(record_path)
         return self._existing_ids_cache.get(record_key) or set()
@@ -675,6 +678,14 @@ class DeltaTableDatabase:
     ) -> pa.Table | None:
         """Combine stored rows with pending rows into one read result.
 
+        Combined rows have the schema a flush would give them: both parts take
+        their large layouts (a stored table reads back large), a column missing
+        on one side is null-filled, a ``null``-typed column takes the other
+        side's type, nullability is merged (nullable if either side is), and
+        struct children are merged, as Delta's merge evolves the stored schema.
+        A column whose types still differ raises ``pyarrow.ArrowTypeError``;
+        nothing is widened. A single part is returned as it is.
+
         Args:
             stored: Rows read from the Delta table, or ``None``.
             pending: Pending rows that are not stored (see ``_pending_not_stored``),
@@ -688,8 +699,37 @@ class DeltaTableDatabase:
         parts = [t for t in (stored, pending) if t is not None and t.num_rows > 0]
         if not parts:
             return None
-        table = parts[0] if len(parts) == 1 else pa.concat_tables(parts)
+        if len(parts) == 1:
+            table = parts[0]
+        else:
+            table = pa.concat_tables(
+                [self._large_layout(t) for t in parts], promote_options="default"
+            )
         return self._handle_record_id_column(table, record_id_column)
+
+    @staticmethod
+    def _large_layout(table: pa.Table) -> pa.Table:
+        """Return ``table`` with every column in its large layout.
+
+        Only layouts change (``string`` to ``large_string``, ``list`` to
+        ``large_list``, recursively); ``null`` stays ``null``, and names,
+        nullability and metadata are kept.
+
+        Args:
+            table: The table to normalize.
+
+        Returns:
+            The table with large-normalized column types.
+        """
+        schema = table.schema
+        for index, field in enumerate(table.schema):
+            schema = schema.set(
+                index,
+                field.with_type(
+                    arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+                ),
+            )
+        return table if schema.equals(table.schema) else table.cast(schema)
 
     def get_all_records(
         self,

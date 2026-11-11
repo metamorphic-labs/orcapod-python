@@ -9,7 +9,7 @@ overlap the stored row is the one returned.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 from pathlib import Path
 
 import deltalake
@@ -101,12 +101,14 @@ def stored_and_pending(tmp_path: Path) -> DeltaTableDatabase:
 def test_get_all_records_returns_stored_and_pending(
     stored_and_pending: DeltaTableDatabase,
 ) -> None:
+    """``get_all_records`` returns the stored rows and the pending row together."""
     assert _values(stored_and_pending.get_all_records(PATH)) == [1, 2, 3]
 
 
 def test_get_record_by_id_finds_stored_and_pending(
     stored_and_pending: DeltaTableDatabase,
 ) -> None:
+    """``get_record_by_id`` finds a stored row and a pending row alike."""
     assert _values(stored_and_pending.get_record_by_id(PATH, b"a")) == [1]
     assert _values(stored_and_pending.get_record_by_id(PATH, b"c")) == [3]
 
@@ -114,12 +116,14 @@ def test_get_record_by_id_finds_stored_and_pending(
 def test_get_records_by_ids_returns_stored_and_pending(
     stored_and_pending: DeltaTableDatabase,
 ) -> None:
+    """``get_records_by_ids`` returns the requested stored and pending rows together."""
     assert _values(stored_and_pending.get_records_by_ids(PATH, [b"a", b"c"])) == [1, 3]
 
 
 def test_get_records_with_column_value_returns_stored_and_pending(
     stored_and_pending: DeltaTableDatabase,
 ) -> None:
+    """``get_records_with_column_value`` matches stored and pending rows alike."""
     db = stored_and_pending
     assert _values(db.get_records_with_column_value(PATH, {"g": 1})) == [2, 3]
     assert _values(db.get_records_with_column_value(PATH, {"g": 0})) == [1]
@@ -128,6 +132,7 @@ def test_get_records_with_column_value_returns_stored_and_pending(
 def test_reads_with_no_match_return_none(
     stored_and_pending: DeltaTableDatabase,
 ) -> None:
+    """A read that matches no stored or pending row returns ``None``."""
     db = stored_and_pending
     assert db.get_records_with_column_value(PATH, {"g": 9}) is None
     assert db.get_records_by_ids(PATH, [b"zz"]) is None
@@ -196,6 +201,7 @@ def fail_id_refresh_once(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
 
     def to_pyarrow_table(self: deltalake.DeltaTable) -> pa.Table:
+        """Raise on the first call, then read the table as the backend does."""
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("transient storage error")
@@ -229,3 +235,156 @@ def test_get_records_by_ids_handles_failed_id_refresh_like_a_failed_read(
 
     assert db.get_records_by_ids(PATH, [b"a", b"c"]) is None
     assert _values(db.get_records_by_ids(PATH, [b"a", b"c"])) == [1, 3]
+
+
+@pytest.mark.parametrize("method", list(READS))
+def test_fresh_handle_drops_pending_rows_with_stored_ids(
+    tmp_path: Path, method: str
+) -> None:
+    """A handle that loaded a table written by another root still drops pending rows with stored ids."""
+    DeltaTableDatabase(tmp_path).add_records(PATH, _rows(["b"], [2]), flush=True)
+    db = DeltaTableDatabase(tmp_path)
+    assert _values(db.get_all_records(PATH)) == [2]  # loads the table, no ids yet
+
+    db.add_records(PATH, _rows(["a", "b"], [1, 20]))
+
+    assert _values(READS[method](db, PATH)) == EXPECTED[method]
+
+
+def _table(record_id: str, x: pa.Array[Any], x_nullable: bool = True) -> pa.Table:
+    """Build one row keyed by ``record_id`` with ``v=0`` and the column ``x``."""
+    schema = pa.schema(
+        [
+            pa.field("__record_id", pa.large_binary()),
+            pa.field("v", pa.int64()),
+            pa.field("x", x.type, nullable=x_nullable),
+        ]
+    )
+    return pa.table(
+        [
+            pa.array([record_id.encode()], type=pa.large_binary()),
+            pa.array([0], type=pa.int64()),
+            x,
+        ],
+        schema=schema,
+    )
+
+
+def _without_x(table: pa.Table) -> pa.Table:
+    """Return ``table`` without its ``x`` column."""
+    return table.drop_columns(["x"])
+
+
+# (stored row, pending row) pairs whose schemas differ in a way a flush accepts.
+SCHEMA_CHANGES: dict[str, tuple[pa.Table, pa.Table]] = {
+    "pending_adds_column": (
+        _without_x(_table("a", pa.array([1], pa.int64()))),
+        _table("c", pa.array([3], pa.int64())),
+    ),
+    "pending_lacks_column": (
+        _table("a", pa.array([1], pa.int64())),
+        _without_x(_table("c", pa.array([3], pa.int64()))),
+    ),
+    "non_null_pending_into_nullable": (
+        _table("a", pa.array([1], pa.int64())),
+        _table("c", pa.array([3], pa.int64()), x_nullable=False),
+    ),
+    "struct_child_added": (
+        _table("a", pa.array([{"p": 1}])),
+        _table("c", pa.array([{"p": 3, "q": 4}])),
+    ),
+    "non_large_string": (
+        _table("a", pa.array(["s"], pa.string())),
+        _table("c", pa.array(["t"], pa.string())),
+    ),
+    "non_large_list": (
+        _table("a", pa.array([[1]], pa.list_(pa.int64()))),
+        _table("c", pa.array([[3]], pa.list_(pa.int64()))),
+    ),
+}
+
+ReadAc = Callable[[DeltaTableDatabase], "pa.Table | None"]
+
+# Each read method that can return rows ``a`` and ``c`` together, with the record id kept.
+READS_AC: dict[str, ReadAc] = {
+    "get_all_records": lambda db: db.get_all_records(PATH, record_id_column="rid"),
+    "get_records_by_ids": lambda db: db.get_records_by_ids(
+        PATH, [b"a", b"c"], record_id_column="rid"
+    ),
+    "get_records_with_column_value": lambda db: db.get_records_with_column_value(
+        PATH, {"v": 0}, record_id_column="rid"
+    ),
+}
+
+
+def _read_sorted(db: DeltaTableDatabase, method: str) -> pa.Table:
+    """Read rows ``a`` and ``c`` with ``method`` and sort them by record id."""
+    table = READS_AC[method](db)
+    assert table is not None
+    return table.sort_by("rid")
+
+
+@pytest.mark.parametrize("method", list(READS_AC))
+@pytest.mark.parametrize("change", list(SCHEMA_CHANGES))
+def test_read_before_flush_matches_read_after_flush_across_schema_change(
+    tmp_path: Path, change: str, method: str
+) -> None:
+    """Stored and pending rows whose schemas differ read back as the flushed table does."""
+    stored, pending = SCHEMA_CHANGES[change]
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, stored, flush=True)
+    db.add_records(PATH, pending)
+
+    before = _read_sorted(db, method)
+    db.flush()
+    after = _read_sorted(db, method)
+
+    assert before.num_rows == 2
+    assert before.schema == after.schema
+    assert before.to_pylist() == after.to_pylist()
+
+
+@pytest.mark.parametrize(
+    ("stored_x", "pending_x"),
+    [
+        (pa.array([1], pa.int64()), pa.array([3], pa.int32())),
+        (pa.array([1], pa.int64()), pa.array(["t"], pa.large_string())),
+        (pa.array([1], pa.timestamp("us")), pa.array([3], pa.timestamp("ms"))),
+        (
+            pa.array([1], pa.decimal128(10, 2)),
+            pa.array([3], pa.decimal128(12, 2)),
+        ),
+    ],
+    ids=["int64_vs_int32", "int64_vs_string", "timestamp_unit", "decimal_precision"],
+)
+@pytest.mark.parametrize("method", list(READS_AC))
+def test_read_of_stored_and_pending_rows_with_different_types_raises(
+    tmp_path: Path, method: str, stored_x: pa.Array[Any], pending_x: pa.Array[Any]
+) -> None:
+    """A column whose stored and pending types differ is never widened: the read raises."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _table("a", stored_x), flush=True)
+    db.add_records(PATH, _table("c", pending_x))
+
+    with pytest.raises(pa.ArrowTypeError, match="Field x has incompatible types"):
+        _ = READS_AC[method](db)
+
+
+def test_pending_null_typed_column_reads_back_but_does_not_flush(
+    tmp_path: Path,
+) -> None:
+    """A new all-null ``null``-typed column reads back as ``null``; Delta cannot store it.
+
+    The flush fails and the batch stays pending, so the read is unchanged after it.
+    """
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _without_x(_table("a", pa.array([1]))), flush=True)
+    db.add_records(PATH, _table("c", pa.nulls(1)))
+
+    before = _read_sorted(db, "get_all_records")
+    assert before.schema.field("x").type == pa.null()
+    assert before.column("x").to_pylist() == [None, None]
+
+    with pytest.raises(RuntimeError, match="Failed to flush"):
+        db.flush()
+    assert _read_sorted(db, "get_all_records").equals(before)

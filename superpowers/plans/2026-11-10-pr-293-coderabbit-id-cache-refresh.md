@@ -43,3 +43,17 @@ clean when the refresh ran only because the table was not cached yet, so keep an
 `self._cache_dirty[record_key] = True` there. Change the test of finding 2 to expect
 `StoreReadError` and extend it to every read method. Rerun the full suite (3.11, 3.12,
 3.13), golden tests unchanged.
+
+## Round 2 (CodeRabbit review of 8f9adf8b; coordinator approved both behaviour fixes)
+
+- **Outside-diff (Major), `_get_existing_ids`:** a handle that loaded the table before any
+  stored ids were read (a fresh root over an existing table) never refreshed them, so pending
+  duplicates were served. Refresh also when the record key has no id entry. Test:
+  `test_fresh_handle_drops_pending_rows_with_stored_ids` (four read methods).
+- **4535100450 (Major), `_combine_stored_and_pending`:** stored and pending rows with any
+  schema difference raised `ArrowInvalid`. Large-normalize both parts (`keep_null=True`),
+  then `pa.concat_tables(promote_options="default")`. Contract tests assert the read before
+  flush equals the read after flush (missing column either way, nullability merge, struct
+  child added, `string`/`list` layouts); type differences keep raising `ArrowTypeError`; a
+  `null`-typed new column is pinned (reads back, flush fails).
+- **4535100459 (nit):** Google docstrings on the five tests and the wrapper.

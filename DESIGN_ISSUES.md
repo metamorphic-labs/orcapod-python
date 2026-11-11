@@ -2239,7 +2239,25 @@ pipeline; the async orchestrator runs only user functions in worker threads. Reg
 `tests/test_pipeline/test_delta_node_records_after_run.py`. A failed stored-id refresh leaves
 the cache dirty, so the next read retries it instead of treating every stored id as unstored
 and returning duplicates; in `get_records_by_ids` the refresh shares the stored read's error
-handling.
+handling. A handle that loaded the table before it had any stored ids (a fresh root over an
+existing table) refreshes them on its first read with pending rows.
+
+When stored and pending rows are read together, the result has the schema a flush would give:
+both parts are large-normalized (`null` kept), then combined with
+`pa.concat_tables(promote_options="default")`. A column missing on one side is null-filled, and a
+`null`-typed column takes the other side's type. Columns whose types differ (`int64` vs `int32`,
+a string vs an int, a timestamp unit, a decimal precision) raise `pyarrow.ArrowTypeError`; nothing
+is widened. Before this, a read of stored rows next to pending rows with any schema difference,
+including a pending `string` column next to the stored `large_string`, raised `ArrowInvalid`;
+`get_all_records` already did so on `main`.
+
+Recorded for the nullability audit (ITL-842) and ITL-890: Delta's merge relaxes nullability (a
+non-null pending column into a nullable stored one stays nullable) and evolves struct children
+(`struct<p>` stored + `struct<p, q>` pending becomes `struct<p, q>`, stored rows `q = null`). The
+read path now mirrors both. Whether Orcapod should allow either at all is for those issues. A
+pending all-null `null`-typed column reads back as `null`, but Delta cannot store it: the flush
+fails and the batch stays pending (unchanged, pinned by
+`test_pending_null_typed_column_reads_back_but_does_not_flush`).
 
 Still open: a handle does not see writes made by another process, or by a separate
 `DeltaTableDatabase` root on the same path, until it reloads the table; this is unchanged.
