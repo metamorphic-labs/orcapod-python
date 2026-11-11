@@ -58,13 +58,16 @@ class FaultyStore:
     """An ``InMemoryArrowDatabase`` that raises on chosen writes or on flush."""
 
     def __init__(self, inner: Any, faults: Faults) -> None:
+        """Wrap ``inner``, failing the writes ``faults`` selects."""
         self._inner = inner
         self._faults = faults
 
     def at(self, *path_components: str) -> FaultyStore:
+        """Return a view at ``path_components`` that shares this store's faults."""
         return FaultyStore(self._inner.at(*path_components), self._faults)
 
     def _check_write(self, record_path: tuple[str, ...]) -> None:
+        """Raise ``OSError`` if the write to ``record_path`` is one to fail."""
         faults = self._faults
         full_path = "/".join(self._inner.base_path + tuple(record_path))
         if faults.write_marker is None or faults.write_marker not in full_path:
@@ -77,6 +80,7 @@ class FaultyStore:
     def add_record(
         self, record_path, record_id, record, skip_duplicates=False, flush=False
     ):
+        """Write one record unless the faults select this table."""
         self._check_write(record_path)
         self._inner.add_record(
             record_path, record_id, record, skip_duplicates=skip_duplicates, flush=flush
@@ -90,6 +94,7 @@ class FaultyStore:
         skip_duplicates=False,
         flush=False,
     ):
+        """Write a batch of records unless the faults select this table."""
         self._check_write(record_path)
         self._inner.add_records(
             record_path,
@@ -100,11 +105,13 @@ class FaultyStore:
         )
 
     def flush(self) -> None:
+        """Flush the wrapped store, or raise ``OSError`` if flushes fail."""
         if self._faults.on_flush:
             raise OSError("disk unavailable while flushing")
         self._inner.flush()
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate everything else to the wrapped store."""
         return getattr(self._inner, name)
 
 
@@ -119,12 +126,14 @@ calls: list[int] = []
 
 @function_pod(output_keys="double")
 def double(x: int) -> int:
+    """Double ``x``, recording the call."""
     calls.append(x)
     return x * 2
 
 
 @function_pod(output_keys="double")
 def double_or_fail(x: int) -> int:
+    """Double ``x``, raising for ``x == 1``."""
     if x == 1:
         raise RuntimeError("function failed for x == 1")
     return x * 2
@@ -132,12 +141,14 @@ def double_or_fail(x: int) -> int:
 
 @function_pod(output_keys="where")
 def to_path(x: int) -> pathlib.Path:
+    """Return a ``pathlib.Path`` output, a logical type SQLite cannot store."""
     return pathlib.Path(f"/data/{x}.txt")
 
 
 def build_job(
     store: Any, rows: list[dict[str, Any]], *, pod=double, with_operator: bool = False
 ):
+    """Build a job with one function node ``dbl`` and optionally an operator ``sel``."""
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
         source = DictSource(data=rows, tag_columns=["k"], source_id="src")
@@ -154,11 +165,13 @@ def build_job(
 
 @pytest.fixture(autouse=True)
 def _reset_calls():
+    """Clear the call log before each test."""
     calls.clear()
 
 
 @pytest.fixture(params=["sync", "async"])
 def orchestrator_cls(request):
+    """Run each test on the sync and the async orchestrator."""
     return {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}[
         request.param
     ]
@@ -199,7 +212,10 @@ def stored_rows(store: Any, label: str = "dbl") -> int:
 
 
 class TestFunctionNodeWriteFailure:
+    """A function node's failed result or pipeline write fails the run."""
+
     def test_result_table_failure_on_first_row_raises(self, orchestrator_cls):
+        """A result write failing on the first row raises, naming node, row and table."""
         inner = InMemoryArrowDatabase()
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS)
@@ -212,6 +228,7 @@ class TestFunctionNodeWriteFailure:
     def test_result_table_failure_on_later_row_keeps_earlier_rows(
         self, orchestrator_cls
     ):
+        """Rows stored before the failure are kept and are not recomputed on a re-run."""
         inner = InMemoryArrowDatabase()
         faults = Faults(write_marker=RESULT_TABLE, succeed_first=1)
         job = build_job(FaultyStore(inner, faults), ROWS)
@@ -230,6 +247,7 @@ class TestFunctionNodeWriteFailure:
         assert len(calls) == 2
 
     def test_pipeline_table_failure_raises(self, orchestrator_cls):
+        """A pipeline-record write failure raises; the failing row's stored result is reused."""
         inner = InMemoryArrowDatabase()
         faults = Faults(write_marker=PIPELINE_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS)
@@ -253,6 +271,7 @@ class TestFunctionNodeWriteFailure:
         assert failed_x not in calls
 
     def test_failure_on_new_row_keeps_previously_stored_rows(self, orchestrator_cls):
+        """A failure on a new row keeps the rows a previous run stored."""
         inner = InMemoryArrowDatabase()
         build_job(inner, ROWS[:2]).run(orchestrator=orchestrator_cls())
         assert stored_rows(inner) == 2
@@ -269,6 +288,7 @@ class TestFunctionNodeWriteFailure:
     def test_store_failure_raises_under_any_error_policy(
         self, orchestrator_cls, error_policy
     ):
+        """A store failure raises under both error policies."""
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
@@ -278,6 +298,7 @@ class TestFunctionNodeWriteFailure:
         assert_store_error(exc_info.value, faults, node_label="dbl", names_row=True)
 
     def test_flush_failure_raises(self, orchestrator_cls):
+        """A failure of the job's final flush raises ``StoreWriteError``."""
         faults = Faults(on_flush=True)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
@@ -302,9 +323,12 @@ class TestFunctionNodeWriteFailure:
 
 
 class TestOperatorNodeWriteFailure:
+    """An operator node's failed LOG write fails the run."""
+
     def test_operator_log_failure_raises_and_commits_upstream_rows(
         self, orchestrator_cls
     ):
+        """The operator's failure raises and the upstream node's rows stay committed."""
         inner = InMemoryArrowDatabase()
         faults = Faults(write_marker=OPERATOR_TABLE)
         job = build_job(FaultyStore(inner, faults), ROWS, with_operator=True)
@@ -324,7 +348,10 @@ class TestOperatorNodeWriteFailure:
 
 
 class TestSQLiteTrigger:
+    """The reported trigger: a logical-type output on SQLite."""
+
     def test_logical_type_output_on_sqlite_raises(self, orchestrator_cls, tmp_path):
+        """A ``pathlib.Path`` output on SQLite raises, naming the node."""
         store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
         job = build_job(store, ROWS, pod=to_path)
 
@@ -342,6 +369,7 @@ class TestSQLiteTrigger:
 
 
 def failing_hook(payload: Any) -> None:
+    """A fail-loud post-run hook that always raises."""
     raise ValueError("post-run hook failed")
 
 
@@ -352,6 +380,7 @@ def make_hooked_triple(store: Any):
         output_keys="tripled", pod_cache_database=store, post_run_hooks=[failing_hook]
     )
     def triple(x: int) -> int:
+        """Triple ``x``."""
         return x * 3
 
     return triple
@@ -362,6 +391,7 @@ def make_outer(inner: Any):
 
     @function_pod(output_keys="double")
     def via_inner(x: int) -> int:
+        """Run ``inner`` on ``x`` through a one-row stream and return ``3x - x``."""
         stream = DictSource(data=[{"i": "i", "x": x}], tag_columns=["i"])
         return inner.pod(stream).as_table()["tripled"][0].as_py() - x
 
@@ -369,6 +399,7 @@ def make_outer(inner: Any):
 
 
 def assert_hook_failure_noted(err: BaseException) -> None:
+    """The error is the store error, with the hook failure recorded as a note."""
     assert isinstance(err, StoreWriteError), f"{type(err).__name__}: {err}"
     assert isinstance(err.__cause__, OSError)
     notes = getattr(err, "__notes__", [])
@@ -379,23 +410,30 @@ class CrashingObserver(NoOpObserver):
     """An observer whose crash and end callbacks raise once a row has crashed."""
 
     def __init__(self) -> None:
+        """Start with no crashed row."""
         self.crashed = False
 
     def on_data_crash(self, node_label, tag, data, error) -> None:
+        """Record the crash, then fail."""
         self.crashed = True
         raise RuntimeError("observer failed in on_data_crash")
 
     def on_node_end(self, node_label, node_hash) -> None:
+        """Fail if a row has crashed."""
         if self.crashed:
             raise RuntimeError("observer failed in on_node_end")
 
     def on_run_end(self, run_id) -> None:
+        """Fail if a row has crashed."""
         if self.crashed:
             raise RuntimeError("observer failed in on_run_end")
 
 
 class TestCallbackFailureKeepsStoreError:
+    """A hook or observer that raises never replaces a store error."""
+
     def test_failing_hook_keeps_store_error_standalone(self):
+        """A standalone cached pod raises its store error, not the hook's."""
         faults = Faults(write_marker="")
         triple = make_hooked_triple(FaultyStore(InMemoryArrowDatabase(), faults))
         stream = DictSource(data=ROWS, tag_columns=["k"])
@@ -406,6 +444,7 @@ class TestCallbackFailureKeepsStoreError:
         assert_hook_failure_noted(exc_info.value)
 
     def test_failing_hook_keeps_store_error_standalone_async(self):
+        """The async path raises the store error too, rather than skipping the row."""
         faults = Faults(write_marker="")
         triple = make_hooked_triple(FaultyStore(InMemoryArrowDatabase(), faults))
         stream = DictSource(data=ROWS, tag_columns=["k"])
@@ -413,11 +452,13 @@ class TestCallbackFailureKeepsStoreError:
         output_ch: Channel[Any] = Channel(buffer_size=16)
 
         async def feed() -> None:
+            """Send the stream's rows into the input channel, then close it."""
             for tag, data in stream.iter_data():
                 await input_ch.writer.send((tag, data))
             await input_ch.writer.close()
 
         async def run() -> None:
+            """Feed the pod and run it concurrently."""
             await asyncio.gather(
                 feed(), triple.pod.async_execute([input_ch.reader], output_ch.writer)
             )
@@ -445,6 +486,7 @@ class TestCallbackFailureKeepsStoreError:
         assert_hook_failure_noted(exc_info.value)
 
     def test_failing_observer_keeps_store_error(self, orchestrator_cls):
+        """Observer failures on the way out are noted on the store error."""
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_job(FaultyStore(InMemoryArrowDatabase(), faults), ROWS)
 
@@ -468,16 +510,19 @@ class TestCallbackFailureKeepsStoreError:
 
 @function_pod(output_keys="double")
 async def double_async(x: int) -> int:
+    """Double ``x`` on the event loop."""
     return x * 2
 
 
 @function_pod(output_keys="tripled")
 async def triple_async(x: int) -> int:
+    """Triple ``x`` on the event loop."""
     return x * 3
 
 
 @function_pod(output_keys="tripled")
 async def fail_async(x: int) -> int:
+    """Always raise, on the event loop."""
     raise RuntimeError("function failed")
 
 
@@ -485,6 +530,7 @@ class FailingCrashObserver(NoOpObserver):
     """An observer whose ``on_data_crash`` raises for one node, failing that node."""
 
     def on_data_crash(self, node_label, tag, data, error) -> None:
+        """Fail for crashes of node ``other`` only."""
         if node_label == "other":
             raise KeyError("observer failed for node 'other'")
 
@@ -500,7 +546,10 @@ def build_siblings(store: Any, other_pod: Any):
 
 
 class TestConcurrentFailures:
+    """Concurrent node failures still give one plain ``StoreWriteError``."""
+
     def test_store_error_and_other_failure_raise_one_store_error(self):
+        """A store error mixed with another failure raises the store error alone."""
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_siblings(FaultyStore(InMemoryArrowDatabase(), faults), fail_async)
 
@@ -520,6 +569,7 @@ class TestConcurrentFailures:
     def test_several_store_errors_raise_the_first_in_node_order(
         self, orchestrator_cls, caplog
     ):
+        """Several store errors raise the first node's, the same on both orchestrators."""
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_siblings(FaultyStore(InMemoryArrowDatabase(), faults), triple_async)
 

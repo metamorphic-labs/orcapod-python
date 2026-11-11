@@ -227,6 +227,13 @@ class StoreWriteError(RuntimeError):
         node_label: str | None = None,
         tag: Mapping[str, Any] | None = None,
     ) -> None:
+        """Create the error for one failed write.
+
+        Args:
+            record_path: Path of the table the write was for.
+            node_label: Label of the node whose write failed, if the write site knows it.
+            tag: Tag values of the row being stored, if the write covered one row.
+        """
         self.record_path = tuple(record_path)
         self.node_label = node_label
         self.tag = dict(tag) if tag is not None else None
@@ -266,6 +273,7 @@ class StoreWriteError(RuntimeError):
             self.tag = dict(tag)
 
     def __str__(self) -> str:
+        """Describe the failed write: node, row, table and the backend's reason."""
         where = f"node {self.node_label!r}" if self.node_label else "the pipeline"
         row = f" for row {self.tag!r}" if self.tag else ""
         cause = self.__cause__
