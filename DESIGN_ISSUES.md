@@ -2518,3 +2518,37 @@ source row.
 2026). A filtered row's data hash now equals its source row's. The pinned
 `pipeline:polars_filter` row data hashes moved (approved); they are the cache keys of any
 function pod downstream of a filter, so a 0.2 store recomputes those results once.
+
+---
+
+## `src/orcapod/databases/` — PipelineJob run time quadratic in rows
+
+### PQ1 — Every row a function node processes scans the rows already stored
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-919
+
+A function node in a `PipelineJob` does, per row: `ResultCache.lookup` (lookup by input data
+hash in the result table), `ResultCache.store` with a flush of the whole store (both
+tables), and `add_pipeline_record` (lookup by base entry id for the recomputation index,
+then `add_record(skip_duplicates=True)`). Sync and async orchestrators share that path;
+operator nodes write with one `add_records` and are not affected. Measured on `c8efc092`,
+in-memory store, sync: 7.2 / 20.9 / 64 ms per row at 100 / 400 / 1,000 rows (standalone
+pod: 0.09 ms).
+
+- `InMemoryArrowDatabase`: each lookup filtered the whole table, the duplicate check built
+  the set of every committed id, and each flush ran `is_in` over all ids, filtered and
+  concatenated, adding one chunk per row, so every later Arrow operation cost O(rows).
+  **Fix:** lazily built hash indexes over committed rows (binary and string columns, record
+  ids), extended on append and rebuilt only after a flush overwrites an id; flush keeps the
+  committed table at O(log N) record batches by binary-counter compaction. Stored rows, row
+  order, ids and schemas are unchanged (differential check against `main` on a joined
+  multi-node pipeline, both orchestrators). Store work per row is now independent of rows
+  stored (tests count Arrow bytes allocated per row).
+- `DeltaTableDatabase`: **open.** One Delta MERGE commit per row per table (cost grows with
+  the table and leaves one file per row), lookups re-open and read every file, the
+  existing-id cache is refreshed after every flush, and the pending batch is scanned per
+  lookup. Making it fast changes when rows are committed; awaiting the developer's decision.
+  Related: `get_records_with_column_value` searches only the pending batch when one exists
+  (ignores committed rows) and `get_records_by_ids` ignores pending rows; reported to the
+  coordinator and filed as ITL-923, not fixed here.

@@ -135,6 +135,16 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
 - `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
   have the same hashes (`predicates` is stored as a tuple).
 
+#### A `PipelineJob` on an in-memory store runs in time linear in its rows (ITL-919)
+
+A `PipelineJob` on an `InMemoryArrowDatabase` runs in time linear in its rows. Every row a
+function node processed used to filter, copy or rebuild the whole stored table (the
+result lookup, the recomputation-index lookup, the duplicate check and the flush, each
+over a table that gained one chunk per row), so 1,000 rows took about a minute. Lookups
+now use hash indexes over the stored rows and a flush appends without copying them;
+stored rows, ids and hashes are unchanged. A `DeltaTableDatabase` store is still slow
+(one Delta commit per row) and is tracked separately (ITL-919).
+
 ## [0.2.0] — 2026-11-10
 
 **Distribution:** Orcapod is MIT licensed starting with `0.2.0` (it was proprietary on
