@@ -52,6 +52,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
@@ -1317,6 +1318,57 @@ def verify(
     return report
 
 
+_FLOAT_BITS = {16: np.uint16, 32: np.uint32, 64: np.uint64}
+
+
+def _float_bits(arr: pa.Array[Any]) -> Any:
+    """Return the raw bit patterns of a float array's slots, as unsigned integers."""
+    dtype = _FLOAT_BITS[arr.type.bit_width]
+    data = arr.buffers()[1]
+    assert data is not None
+    # to_pybytes copies; compared slices hold at most COMPARE_SLICE_ROWS rows
+    return np.frombuffer(data.to_pybytes(), dtype=dtype)[
+        arr.offset : arr.offset + len(arr)
+    ]
+
+
+def identical(a: pa.Array[Any], b: pa.Array[Any]) -> bool:
+    """Return whether two arrays hold the same values, comparing floats bit for bit.
+
+    Arrow's ``equals`` treats NaN as unequal to itself, so a column holding NaN
+    (gaze positions during blinks, some unit quality metrics) never equals its own
+    copy. Here a float slot equals another when their bit patterns are identical: NaN
+    equals NaN with the same payload, and -0.0 differs from 0.0. Bit-exact is the
+    right test for a copy, which must not change a single value. Struct fields and
+    list items are compared the same way, recursively; other types use ``equals``.
+    """
+    if a.type != b.type or len(a) != len(b):
+        return False
+    if a.equals(b):
+        return True
+    if a.null_count != b.null_count or not a.is_null().equals(b.is_null()):
+        return False
+    t = a.type
+    if pa.types.is_floating(t):
+        valid = np.asarray(a.is_valid().to_numpy(zero_copy_only=False), dtype=bool)
+        return bool(np.array_equal(_float_bits(a)[valid], _float_bits(b)[valid]))
+    if pa.types.is_struct(t):
+        sa, sb = a, b
+        assert isinstance(sa, pa.StructArray) and isinstance(sb, pa.StructArray)
+        return all(
+            identical(x, y) for x, y in zip(sa.flatten(), sb.flatten(), strict=True)
+        )
+    if (
+        pa.types.is_list(t)
+        or pa.types.is_large_list(t)
+        or pa.types.is_fixed_size_list(t)
+    ):
+        if not pc.list_value_length(a).equals(pc.list_value_length(b)):
+            return False
+        return identical(pc.list_flatten(a), pc.list_flatten(b))
+    return False
+
+
 def _compare_streams(
     expected: Iterable[pa.RecordBatch],
     actual: Iterable[pa.RecordBatch],
@@ -1357,7 +1409,7 @@ def _compare_streams(
                 return str(err)
             if want_col.type != got_col.type:
                 want_col = want_col.cast(got_col.type)
-            if not got_col.equals(want_col):
+            if not identical(got_col.combine_chunks(), want_col.combine_chunks()):
                 return f"column {name!r} differs from the source in rows {offset}..{offset + e.num_rows - 1}"
         offset += e.num_rows
 

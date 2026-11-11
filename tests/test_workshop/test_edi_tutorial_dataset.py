@@ -18,6 +18,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
@@ -1152,3 +1153,85 @@ class TestAnnotate:
         )
         assert all(line.endswith("unchanged") for line in again)
         assert len(client.log) == after
+
+
+class TestFloatComparison:
+    """verify compares floats bit for bit: NaN equals itself, -0.0 differs from 0.0.
+
+    Live, eye_x_deg (gaze) and unit quality metrics hold NaN, and Arrow's
+    ``equals`` treats NaN as unequal to itself (ITL-933 verify run, November 11, 2026).
+    """
+
+    def _with_nans(self, client: FakeSpiral) -> None:
+        data = client.rows(SOURCE, "default.spike_event")
+        i = data.schema.get_field_index("spike_amplitude_uv")
+        values = [
+            float("nan") if n % 2 else v
+            for n, v in enumerate(data.column(i).to_pylist())
+        ]
+        client.add_table(
+            SOURCE,
+            "default.spike_event",
+            data.set_column(i, data.schema.field(i), pa.array(values, pa.float32())),
+            ["subject_id", "session_start_datetime", "timestamp", "unit_id"],
+        )
+        lfp = client.rows(SOURCE, "default.lfp_timeseries")
+        j = lfp.schema.get_field_index("lfp_voltage_uv")
+        rows = [[float("nan"), None, -0.0, 1.0] for _ in range(lfp.num_rows)]
+        client.add_table(
+            SOURCE,
+            "default.lfp_timeseries",
+            lfp.set_column(
+                j, lfp.schema.field(j), pa.array(rows, lfp.schema.field(j).type)
+            ),
+            ["subject_id", "session_start_datetime", "timestamp"],
+        )
+
+    def _verify(self, client: FakeSpiral, target: str, nmap: Any, subset: Any):
+        return tool.verify(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            nmap=nmap,
+            subset=subset,
+        )
+
+    def test_nan_values_copied_unchanged_verify(self, client, nmap, subset):
+        self._with_nans(client)
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        assert self._verify(client, target, nmap, subset).problems == []
+
+    def test_a_different_nan_payload_is_detected(self, client, nmap, subset):
+        self._with_nans(client)
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.spike_event"]
+        assert stored.data is not None
+        i = stored.data.schema.get_field_index("spike_amplitude_uv")
+        col = stored.data.column(i).combine_chunks()
+        buffer = col.buffers()[1]
+        assert buffer is not None
+        raw = np.frombuffer(buffer.to_pybytes(), dtype=np.uint32)[: len(col)].copy()
+        raw[np.isnan(col.to_numpy(zero_copy_only=False))] = (
+            0x7FC00001  # another quiet NaN
+        )
+        stored.data = stored.data.set_column(
+            i, stored.data.schema.field(i), pa.array(raw.view(np.float32), pa.float32())
+        )
+        with pytest.raises(tool.VerificationError, match="spike_amplitude_uv"):
+            self._verify(client, target, nmap, subset)
+
+    def test_negative_zero_is_not_zero(self, client, nmap, subset):
+        self._with_nans(client)
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        stored = client._projects[target]["default.lfp_timeseries"]
+        assert stored.data is not None
+        j = stored.data.schema.get_field_index("lfp_voltage_uv")
+        field = stored.data.schema.field(j)
+        rows = stored.data.column(j).to_pylist()
+        rows[0] = [rows[0][0], None, 0.0, rows[0][3]]
+        stored.data = stored.data.set_column(j, field, pa.array(rows, field.type))
+        with pytest.raises(tool.VerificationError, match="lfp_voltage_uv"):
+            self._verify(client, target, nmap, subset)
