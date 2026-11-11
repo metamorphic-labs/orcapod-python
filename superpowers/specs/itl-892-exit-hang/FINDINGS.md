@@ -494,9 +494,14 @@ Each cell is one `harness.py` run (`results.jsonl`, `linux/*/results.jsonl`). "h
 > #54467.
 >
 > Passing a native filesystem avoids it completely (0/100 on macOS and Linux, identical
-> results, partitioned tables included):
-> `dt.to_pyarrow_dataset(filesystem=pyarrow.fs.SubTreeFileSystem(dt.table_uri,
-> pyarrow.fs.LocalFileSystem()))`.
+> results, partitioned tables included). `table_uri` is percent-encoded (a bare path on 1.0.2
+> and 1.2.1, a `file://` URI on 1.6.6), so it has to be decoded first:
+>
+> ```python
+> uri = dt.table_uri if "://" in dt.table_uri else "file://" + dt.table_uri
+> fs, root = pyarrow.fs.FileSystem.from_uri(uri)
+> dt.to_pyarrow_dataset(filesystem=pyarrow.fs.SubTreeFileSystem(root, fs))
+> ```
 >
 > Suggestion: default to a native pyarrow filesystem for local tables (and possibly the native
 > object-store filesystems), or document the issue and the workaround in `to_pyarrow_dataset`
