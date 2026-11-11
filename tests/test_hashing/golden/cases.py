@@ -853,6 +853,7 @@ def pipeline_job() -> dict[str, Any]:
 
 
 def _polars_exprs() -> dict[str, Any]:
+    """Build representative Polars expression predicates, keyed by name."""
     from datetime import date, datetime, timezone
 
     import polars as pl
@@ -875,12 +876,14 @@ def _polars_exprs() -> dict[str, Any]:
 
 @case("semantic", "polars_expr")
 def semantic_polars_exprs() -> dict[str, Any]:
+    """Record the ``polars_expr_v1`` semantic hash of each representative expression."""
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(e).to_string() for k, e in _polars_exprs().items()}
 
 
 @case("pipeline", "polars_filter_expr")
 def pipeline_polars_filter_expr() -> dict[str, Any]:
+    """Record expression-only and expression-plus-keyword filter streams."""
     import polars as pl
 
     from orcapod.operators import PolarsFilter
@@ -904,6 +907,7 @@ def pipeline_polars_filter_expr() -> dict[str, Any]:
 
 @case("pipeline", "polars_filter_expr_job")
 def pipeline_polars_filter_expr_job() -> dict[str, Any]:
+    """Record a job with an expression filter upstream of a join and a function pod."""
     import polars as pl
 
     from orcapod import PipelineJob

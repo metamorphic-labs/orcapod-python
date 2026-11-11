@@ -1,6 +1,7 @@
 # ITL-828: identity of a Polars expression predicate (design proposal)
 
-Status: **proposal, awaiting coordinator / developer decision** (STEP 1 of the brief).
+Status: **approved** — the coordinator approved Option C provisionally and the developer
+confirmed it (November 11, 2026).
 
 ## Defect (reproduced on main b197544e)
 
@@ -135,6 +136,6 @@ mechanism as `ndarray`/`polars_dataframe_v1`). Keyword constraints are untouched
 golden `pipeline/polars_filter` entries (keyword-only) do not move. Predicate order is kept
 (`filter(a, b)` and `filter(b, a)` hash differently).
 
-Open sub-question: normalize `predicates` to a `tuple` in `__init__`, so
-`PolarsFilter(predicates=[e])` and `stream.polars_filter(e)` hash the same (today a list and a
+Decided: `predicates` is normalized to a `tuple` in `__init__`, so
+`PolarsFilter(predicates=[e])` and `stream.polars_filter(e)` hash the same (a list and a
 tuple expand differently). This moves no golden value (default is `()`).

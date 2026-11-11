@@ -6,8 +6,8 @@
 works upstream of a join and inside a `PipelineJob`.
 
 **Architecture:** Design in `superpowers/specs/2026-11-11-itl-828-polars-expr-identity-design.md`
-(Option C, coordinator-approved PROVISIONALLY on 2026-11-11; the developer must still confirm,
-so the PR is a DRAFT). A strict parser turns `expr.meta.serialize(format="json")` into an
+(Option C, approved by the coordinator and confirmed by the developer on 2026-11-11; the PR
+is ready for review). A strict parser turns `expr.meta.serialize(format="json")` into an
 Orcapod-owned canonical tree; the hash is `ContentHash("polars_expr_v1", sha256(canonical
 JSON))`. A `PolarsExprHandler` registered for `pl.Expr` returns it, so `PolarsFilter`'s
 identity structure keeps its shape. `PolarsFilter.predicates` is normalized to a tuple.
@@ -80,7 +80,7 @@ expression filter that is never hashed keeps working exactly as today.
 - Docs: docs/reference/hashing.md section "1c. Polars expression predicates"; PR #286 also adds
   a "1c" section there, so on merging #286 renumber ours to 1d and fix the anchor in
   docs/concepts/operators.md.
-- PR must be a DRAFT: identity design awaits the developer's confirmation.
+- (Superseded) The PR was a draft until the developer confirmed the identity design.
 - 2026-11-11 (later): developer approved polars_expr_v1 as final and the FULL nullability fix
   (option A). PolarsFilter restores every column's nullability; versus main the golden diff
   changes exactly the two pipeline:polars_filter row data_hash lines (new value = source row

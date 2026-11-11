@@ -274,7 +274,7 @@ literal := {"dyn_int": "<decimal>"} | {"dyn_float": "<float.hex()>"}
          | {"decimal": ["<unscaled>", precision, scale]} | {"binary": "<hex>"}
          | {"date": days} | {"time": ns}
          | {"datetime": [value, unit, time zone or null]} | {"duration": [value, unit]}
-         | {"list": [<dtype>, [<value or null>, ...]]}
+         | {"list": [<dtype>, [<value or null>, ...]]}   (no lists of decimals or bytes)
 dtype   := the dtype names of the Polars value descriptor ("int64", "string",
            {"datetime": [unit, tz]}, {"list": <dtype>}, ...)
 ```

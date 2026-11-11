@@ -11,6 +11,7 @@ import polars.selectors as cs
 
 
 def exprs():
+    """Return the expressions the experiment serializes, keyed by name."""
     return {
         "cols_multi": pl.col("x", "y") > 0,
         "all": pl.all() > 0,
@@ -49,6 +50,7 @@ def exprs():
 
 
 def main():
+    """Serialize each expression in several ways and print the results as JSON."""
     out: dict[str, Any] = {"version": pl.__version__}
     for name, e in exprs().items():
         rec: dict[str, Any] = {"str": str(e)}

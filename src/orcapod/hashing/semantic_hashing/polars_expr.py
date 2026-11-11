@@ -33,18 +33,20 @@ literal := {"dyn_int": "<decimal>"}          a Python int (Polars adapts its typ
          | {"date": <days since epoch>} | {"time": <ns since midnight>}
          | {"datetime": [<value>, <unit>, <time zone or null>]}
          | {"duration": [<value>, <unit>]}
-         | {"list": [<dtype>, [<value or null>, ...]]}   a Python list, as in is_in([...])
+         | {"list": [<elem>, [<value or null>, ...]]}    a Python list, as in is_in([...])
 unit    := "ns" | "us" | "ms"
 dtype   := "int8" | ... | "uint64" | "float32" | "float64" | "boolean" | "string" | "binary"
          | "date" | "time" | "null" | {"decimal": [<precision>, <scale>]}
          | {"datetime": [<unit>, <time zone or null>]} | {"duration": <unit>}
          | {"list": <dtype>}
+elem    := "int8" | ... | "uint64" | "float32" | "float64" | "boolean" | "string" | "date"
+         | "time" | "null" | {"datetime": [<unit>, <time zone or null>]} | {"duration": <unit>}
 ```
 
 A list value is the payload of the element literal: a decimal string for an integer, a
 ``float.hex()`` string for a float, the string or bool itself, the integer physical value for a
-temporal element, ``None`` for a null. The dtype names are those of the Polars dtype
-descriptor grammar (``polars_dataframe_v1``).
+temporal element, ``None`` for a null. Lists of decimals or bytes are not supported. The
+dtype names are those of the Polars dtype descriptor grammar (``polars_dataframe_v1``).
 
 The parser is strict: a node, key or value shape it does not know raises ``ValueError`` naming
 the expression, so a Polars release that changes its serialization fails loudly instead of
@@ -77,7 +79,8 @@ POLARS_EXPR_HASH_LABEL = "polars_expr_v1"
 
 _SUPPORTED_TEXT = (
     "Orcapod can hash column references, literals (numbers, strings, booleans, null, "
-    "dates, times, datetimes, durations, decimals, bytes and Python lists of those), "
+    "dates, times, datetimes, durations, decimals, bytes, and Python lists of numbers, "
+    "strings, booleans, dates, times, datetimes or durations), "
     "comparisons, arithmetic, &, |, ^, ~, is_null, is_not_null, is_nan, is_not_nan, "
     "is_in, is_between, all_horizontal, any_horizontal, str.contains, str.starts_with, "
     "str.ends_with and cast."

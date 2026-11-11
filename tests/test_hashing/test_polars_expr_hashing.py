@@ -477,6 +477,16 @@ class TestRejected:
                 id="series_literal",
             ),
             pytest.param(
+                lambda: pl.col("x").is_in([b"a", b"b"]),
+                "list literals of dtype Binary",
+                id="bytes_list",
+            ),
+            pytest.param(
+                lambda: pl.col("x").is_in([Decimal("1.5")]),
+                "list literals of dtype Decimal",
+                id="decimal_list",
+            ),
+            pytest.param(
                 lambda: pl.col("x").dt.year() == 2024, "not supported", id="dt_year"
             ),
             pytest.param(
