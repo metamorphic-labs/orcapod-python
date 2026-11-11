@@ -163,7 +163,9 @@ class ArrowTableHandler:
     (developer's decision, November 11, 2026): the hash is the Arrow hasher's
     ``hash_table_ordered`` digest (the same semantic preprocessing as every Orcapod Arrow hash,
     with column order and struct field order at every depth included) under the label
-    ``arrow_table_v1``. A ``RecordBatch`` hashes like the one-batch ``Table`` with the same
+    ``arrow_table_v1``. The label's definition includes that Arrow hasher (``arrow_v0.1``): a
+    label is bumped whenever the hash of any value can change (developer's rule, November 11,
+    2026), so a new Arrow hasher means ``arrow_table_v2``; a test pins the pair. A ``RecordBatch`` hashes like the one-batch ``Table`` with the same
     content; chunking is not part of the hash.
 
     Orcapod's own tables (stream and datagram identities) do not come here: they ignore order

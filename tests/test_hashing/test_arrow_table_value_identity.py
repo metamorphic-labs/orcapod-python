@@ -85,6 +85,23 @@ class TestTableValueLabel:
             "arrow_table_v1"
         )
 
+    def test_label_is_pinned_to_the_arrow_hasher(self) -> None:
+        """A label is bumped whenever the hash of any value can change (developer, Nov 11, 2026).
+
+        ``arrow_table_v1`` embeds the Arrow hasher's digest, so a new Arrow hasher (a new
+        ``hasher_id``) needs a new label. When this fails, bump the label and then the pin;
+        update the pin alone only while the label is still unreleased.
+        """
+        from orcapod.hashing.semantic_hashing.builtin_handlers import (
+            ARROW_TABLE_HASH_METHOD,
+        )
+
+        pinned = {"arrow_v0.1": "arrow_table_v1"}
+        hasher_id = get_default_context().arrow_hasher.hasher_id
+        assert pinned.get(hasher_id) == ARROW_TABLE_HASH_METHOD, (
+            f"Arrow hasher is {hasher_id!r}: bump arrow_table_v1, then this pin"
+        )
+
     def test_record_batch_shares_the_table_label_and_hash(self) -> None:
         hasher = get_default_context().semantic_hasher
         batch = _table().to_batches()[0]
