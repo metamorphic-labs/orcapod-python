@@ -46,7 +46,7 @@ Verified empirically in Task 2 before committing.
 - `tests/test_packaging.py`: replace `test_license_is_metamorphic_proprietary` with
   `test_license_is_mit`: `project.license == "MIT"`, no `License ::` classifier, and `LICENSE`
   is the standard MIT text with the single copyright line
-  `Copyright (c) 2025-2026 Nauticalab` (holder decided by the developer, November 10, 2026). Add `test_built_metadata_declares_mit` over the
+  `Copyright (c) 2025-2026 NauticaLab` (holder decided by the developer, November 10, 2026; spelled `NauticaLab` per review comment 4534040178). Add `test_built_metadata_declares_mit` over the
   existing `built_dists` fixture: wheel METADATA has `License-Expression: MIT` and no
   `License:` field or license classifier; sdist PKG-INFO the same.
 - Run; show both fail.
@@ -77,3 +77,12 @@ Verified empirically in Task 2 before committing.
   extras), non-MIT-compatible ones; scan of the tree for internal-only material (internal URLs,
   hostnames, tokens, customer/dataset names); PR #269 sentences needing change.
 - Merge origin/main if moved, push, open PR (`Refs ITL-875`), link via orca.
+
+### Task 5: review fix, holder spelling (comment 4534040178)
+- The developer asked for the holder to be spelled `NauticaLab` (capital L).
+- Failing test first: `COPYRIGHT_LINE` in `tests/test_packaging.py` becomes
+  `Copyright (c) 2025-2026 NauticaLab`; run `test_license_is_mit`, show it fails.
+- `LICENSE` line 3 becomes `Copyright (c) 2025-2026 NauticaLab`; test green.
+- Lower-case `nauticalab` in URLs and repository slugs is an identifier and stays unchanged.
+- Rebuild wheel and sdist; the shipped LICENSE carries the new spelling and METADATA still
+  says `License-Expression: MIT`. Four CI commands, one commit, reply on the thread.

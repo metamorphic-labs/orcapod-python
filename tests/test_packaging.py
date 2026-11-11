@@ -18,7 +18,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
-COPYRIGHT_LINE = "Copyright (c) 2025-2026 Nauticalab"
+COPYRIGHT_LINE = "Copyright (c) 2025-2026 NauticaLab"
 MIT_LICENSE_TEXT = f"""MIT License
 
 {COPYRIGHT_LINE}
