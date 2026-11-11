@@ -228,6 +228,68 @@ A node from a job that has run also provides:
 - **`as_source()`** -- a `DerivedSource` backed by those stored records, usable as the input
   of another pipeline
 
+## Value types
+
+A function pod's parameters and return values can be plain Python scalars (`int`, `float`,
+`str`, `bool`, `bytes`), lists, dataclasses, pydantic models, and the built-in logical types
+below. A logical type is stored as an Arrow extension type: the extension name is recorded
+in the stored schema, so a value read back from a database comes back as the same Python
+type.
+
+| Python type | Extension name | Arrow storage |
+|---|---|---|
+| `pathlib.Path` | `orcapod.path` | `large_string` |
+| `upath.UPath` | `orcapod.upath` | `large_string` |
+| `uuid.UUID` | `orcapod.uuid` | `large_binary` |
+| `orcapod.File` | `orcapod.file` | `large_string` |
+| `orcapod.Directory` | `orcapod.directory` | `large_string` |
+| `numpy.ndarray` | `numpy.ndarray` | `large_binary` (`.npy` bytes) |
+| `pandas.DataFrame` | `pandas.dataframe` | `large_binary` (Arrow IPC stream) |
+| `pandas.Series` | `pandas.series` | `large_binary` (Arrow IPC stream) |
+| `polars.DataFrame` | `polars.dataframe` | `large_binary` (Arrow IPC stream) |
+
+A `polars.DataFrame` comes back with exactly the schema it was stored with: column order and
+names, integer and float widths, `Categorical`, `Enum` with its category order, `Decimal`
+precision and scale, `Datetime` unit and time zone, `Duration` unit, `List`, `Array` shape,
+`Struct` fields and `Null`. Dtypes that cannot be stored and read back exactly (`Object`,
+`Int128`, `UInt128`, and Polars extension dtypes) raise `ValueError` naming the column when
+the value is stored, so convert such a column explicitly before returning the frame.
+
+```python
+import polars as pl
+
+from orcapod import function_pod
+from orcapod.sources import DictSource
+
+@function_pod(output_keys="readings")
+def load_readings(n_samples: int) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "sample": pl.Series(range(n_samples), dtype=pl.UInt16),
+            "voltage": pl.Series([0.5] * n_samples, dtype=pl.Float32),
+        }
+    )
+
+@function_pod(output_keys="n_rows")
+def count_rows(readings: pl.DataFrame) -> int:
+    return readings.height
+
+recordings = DictSource(
+    data=[{"session": "s1", "n_samples": 2}, {"session": "s2", "n_samples": 3}],
+    tag_columns=["session"],
+)
+readings = load_readings.pod(recordings)
+for tag, data in readings.iter_data():
+    print(tag["session"], data["readings"].schema)
+# s1 Schema({'sample': UInt16, 'voltage': Float32})
+# s2 Schema({'sample': UInt16, 'voltage': Float32})
+
+for tag, data in count_rows.pod(readings).iter_data():
+    print(tag["session"], data["n_rows"])
+# s1 2
+# s2 3
+```
+
 ## Multiple input streams
 
 If you pass multiple streams to a function pod, they are automatically joined (using
