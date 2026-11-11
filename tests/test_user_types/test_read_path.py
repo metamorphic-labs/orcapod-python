@@ -97,6 +97,7 @@ def test_stored_values_read_after_delta_compaction(tmp_path: Path) -> None:
     ),
 )
 def test_ipc_read_of_non_large_nested_storage_is_valid() -> None:
+    """A user-class column with non-large nested storage reads correctly over IPC."""
     import io
 
     narrow = pa.struct([pa.field("label", pa.string()), pa.field("n", pa.int64())])
@@ -120,3 +121,7 @@ def test_ipc_read_of_non_large_nested_storage_is_valid() -> None:
         writer.write_table(table)
     read = pa.ipc.open_stream(sink.getvalue()).read_all()
     read.validate(full=True)
+    read_type = read.schema.field("p").type
+    assert read_type.extension_name == ext.extension_name
+    assert read_type.__arrow_ext_serialize__() == ext.__arrow_ext_serialize__()
+    assert read.column("p").to_pylist() == [{"label": "hello", "n": 1}]
