@@ -39,8 +39,6 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
 - `LogicalTypeRegistry.get_by_python_type` now picks the most specific registered class along
   the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
   subclasses, whatever the registration order.
-- Known gap: `SemiJoin` with an array column fails until ITL-847 lands (SemiJoin already failed
-  for list and dataclass columns).
 
 ## [0.2.0] — 2026-11-10
 

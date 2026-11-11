@@ -81,11 +81,6 @@ def test_join() -> None:
         assert_arrays_identical(got[name]["x"], expected_x(name))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-847: SemiJoin's Acero hash join refuses nested non-key columns, and the "
-    "array format is a struct",
-)
 def test_semijoin() -> None:
     keep = NAMES[::2]
     right = DictSource(

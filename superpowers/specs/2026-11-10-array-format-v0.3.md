@@ -318,7 +318,7 @@ A scratch prototype of the struct format (no `src/` change) was run against `tes
   nested non-key column. It already fails on main for `list[int]` and dataclass columns; today's
   arrays only escape it because `.npy` is `large_binary`. The fix, moving SemiJoin to Polars
   (`how="semi"`, `maintain_order="left"`, input types restored), is ITL-847 and has its own PR.
-  Until it merges, the SemiJoin-with-array test is a strict `xfail` citing ITL-847.
+  It merged in #291; the SemiJoin-with-array test now passes without an `xfail`.
 - **F3** (approved): `MergeJoin` sorts colliding values as Python storage values, and struct
   storage values (dicts) cannot be ordered (the ITL-839 limitation). For the array logical type
   only, the ordering key is the stored `(dtype tag, shape, data)` tuple. That order is
