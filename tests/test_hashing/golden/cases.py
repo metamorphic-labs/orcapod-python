@@ -552,9 +552,11 @@ def arrow_schema_hashes() -> dict[str, Any]:
 
 @case("arrow", "dict_order")
 def arrow_dict_order_hashes() -> dict[str, Any]:
-    # ITL-905: an Arrow table is hashed exactly as stored. A key/value list that
-    # arrives in Arrow form keeps its order as identity (sorted and unsorted pin
-    # different values), like any other list of structs.
+    """Pin that an Arrow table is hashed exactly as stored (ITL-905).
+
+    A key/value list that arrives in Arrow form keeps its order as identity (sorted and
+    unsorted pin different values), like any other list of structs.
+    """
     hasher = _ctx().arrow_hasher
     kv = pa.large_list(
         pa.struct([pa.field("key", pa.large_string()), pa.field("value", pa.int64())])
@@ -648,7 +650,7 @@ def _arrow_source(column: pa.Array[Any], nullable: bool = False) -> Any:
 
 @case("datagram", "dict_order")
 def datagram_dict_order() -> dict[str, Any]:
-    # ITL-905: rows holding equal dicts in different insertion orders pin equal hashes.
+    """Pin equal hashes for rows holding equal dicts in different insertion orders (ITL-905)."""
     from orcapod.sources import DictSource
 
     rows: dict[str, tuple[Any, list[Any]]] = {

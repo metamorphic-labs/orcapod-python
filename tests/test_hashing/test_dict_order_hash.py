@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import tarfile
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,7 @@ KV_TYPE = pa.large_list(
 
 
 def _source(value: Any, value_type: Any = None) -> DictSource:
+    """Return a one-row ``DictSource`` whose ``m`` column holds ``value``."""
     schema = None if value_type is None else {"k": str, "m": value_type}
     return DictSource(
         data=[{"k": "r", "m": value}], tag_columns=["k"], data_schema=schema
@@ -45,15 +46,18 @@ def _source(value: Any, value_type: Any = None) -> DictSource:
 
 
 def _data(value: Any, value_type: Any = None) -> Any:
+    """Return the ``Data`` of the one row of ``_source(value, value_type)``."""
     _, data = next(iter(_source(value, value_type).iter_data()))
     return data
 
 
 def _row_hash(value: Any, value_type: Any = None) -> str:
+    """Return the row data hash of ``value`` stored in a one-row source."""
     return _data(value, value_type).content_hash().to_string()
 
 
 def _arrow_source(entries: list[dict[str, Any]]) -> ArrowTableSource:
+    """Return a one-row ``ArrowTableSource`` holding ``entries`` as a key/value list."""
     # Non-nullable like a DictSource column declared ``dict[str, int]``.
     table = pa.table(
         {
@@ -71,19 +75,23 @@ def _arrow_source(entries: list[dict[str, Any]]) -> ArrowTableSource:
 
 
 def _arrow_row_hash(entries: list[dict[str, Any]]) -> str:
+    """Return the row data hash of a key/value list given in Arrow form."""
     _, data = next(iter(_arrow_source(entries).iter_data()))
     return data.content_hash().to_string()
 
 
 def total(m: dict[str, int]) -> int:
+    """Return the sum of the dict's values (the pod cached in the v0.2.0 store)."""
     return sum(m.values())
 
 
 def tally(n: int) -> dict[str, int]:
+    """Return a dict built out of key order (the pod cached in the v0.2.0 store)."""
     return {"z": n, "a": n}
 
 
 def echo(m: dict[str, int]) -> dict[str, int]:
+    """Return the input dict unchanged."""
     return m
 
 
@@ -93,6 +101,7 @@ def reorder(m: dict[str, int]) -> dict[str, int]:
 
 
 def _pod(fn: Any, output_key: str) -> Any:
+    """Return the function pod of ``fn`` with one output key."""
     return function_pod(output_keys=output_key)(fn).pod
 
 
@@ -121,22 +130,29 @@ class Holder:
 
 
 class TestPythonDictValues:
+    """Python dicts reach Arrow in canonical key order."""
+
     def test_inferred_schema_reordered_dicts_hash_equal(self):
+        """Reordered dicts hash equal with an inferred schema."""
         assert _row_hash({"a": 1, "b": 2}) == _row_hash({"b": 2, "a": 1})
 
     def test_declared_schema_reordered_dicts_hash_equal(self):
+        """Reordered dicts hash equal with a declared ``dict[str, int]``."""
         t = dict[str, int]
         assert _row_hash({"a": 1, "b": 2}, t) == _row_hash({"b": 2, "a": 1}, t)
 
     def test_stored_entries_are_in_key_order(self):
+        """The stored key/value list is sorted by key."""
         entries = _stored(_source({"b": 2, "a": 1}), "m")
         assert [e["key"] for e in entries] == ["a", "b"]
 
     def test_str_keys_order_by_code_point_not_locale(self):
+        """``str`` keys sort by code point."""
         entries = _stored(_source({"é": 1, "z": 2, "A": 3}), "m")
         assert [e["key"] for e in entries] == ["A", "z", "é"]
 
     def test_different_values_still_hash_differently(self):
+        """Sorting does not merge dicts with different values."""
         assert _row_hash({"a": 1, "b": 2}) != _row_hash({"a": 2, "b": 1})
 
     @pytest.mark.parametrize(
@@ -154,20 +170,22 @@ class TestPythonDictValues:
             (
                 dict[datetime, int],
                 {
-                    datetime(2026, 1, 2, tzinfo=timezone.utc): 1,
-                    datetime(2025, 5, 1, tzinfo=timezone.utc): 2,
+                    datetime(2026, 1, 2, tzinfo=UTC): 1,
+                    datetime(2025, 5, 1, tzinfo=UTC): 2,
                 },
                 {
-                    datetime(2025, 5, 1, tzinfo=timezone.utc): 2,
-                    datetime(2026, 1, 2, tzinfo=timezone.utc): 1,
+                    datetime(2025, 5, 1, tzinfo=UTC): 2,
+                    datetime(2026, 1, 2, tzinfo=UTC): 1,
                 },
             ),
         ],
     )
     def test_key_types_reordered_hash_equal(self, value_type, first, second):
+        """Every supported key type orders deterministically."""
         assert _row_hash(first, value_type) == _row_hash(second, value_type)
 
     def test_nan_key_is_rejected_naming_the_column(self):
+        """A NaN key has no order and raises, naming the column."""
         with pytest.raises(ValueError, match="'m'.*NaN|NaN.*'m'"):
             _row_hash({float("nan"): 1, 1.0: 2}, dict[float, int])
 
@@ -178,29 +196,36 @@ class TestPythonDictValues:
 
 
 class TestNestedDicts:
+    """Dicts nested in dicts, lists and dataclass fields are ordered at every depth."""
+
     def test_dict_of_dicts_inner_and_outer_reordered(self):
+        """Inner and outer dicts are both ordered."""
         t = dict[str, dict[str, int]]
         first = {"x": {"a": 1, "b": 2}, "y": {"c": 3}}
         second = {"y": {"c": 3}, "x": {"b": 2, "a": 1}}
         assert _row_hash(first, t) == _row_hash(second, t)
 
     def test_list_of_dicts_reordered_inside(self):
+        """Dicts inside a list are ordered."""
         t = list[dict[str, int]]
         assert _row_hash([{"a": 1, "b": 2}, {"c": 3}], t) == _row_hash(
             [{"b": 2, "a": 1}, {"c": 3}], t
         )
 
     def test_list_of_dicts_keeps_list_order(self):
+        """The list itself keeps its order."""
         t = list[dict[str, int]]
         assert _row_hash([{"a": 1}, {"c": 3}], t) != _row_hash([{"c": 3}, {"a": 1}], t)
 
     def test_dict_of_list_of_dicts_reordered(self):
+        """Dicts inside a list inside a dict are ordered."""
         t = dict[str, list[dict[str, int]]]
         first = {"x": [{"a": 1, "b": 2}], "w": []}
         second = {"w": [], "x": [{"b": 2, "a": 1}]}
         assert _row_hash(first, t) == _row_hash(second, t)
 
     def test_dict_inside_dataclass_field_reordered(self):
+        """A dict in a dataclass field is ordered when stored."""
         first = Holder("h", {"a": 1, "b": 2})
         second = Holder("h", {"b": 2, "a": 1})
         assert _row_hash(first, Holder) == _row_hash(second, Holder)
@@ -220,17 +245,20 @@ class TestArrowNativeKeyValueLists:
     """
 
     def test_unsorted_entries_hash_as_stored(self):
+        """An unsorted Arrow key/value list keeps its order in the hash."""
         sorted_entries = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
         unsorted_entries = [{"key": "b", "value": 2}, {"key": "a", "value": 1}]
         assert _arrow_row_hash(sorted_entries) != _arrow_row_hash(unsorted_entries)
 
     def test_key_sorted_entries_match_python_dicts_in_any_order(self):
+        """A key-sorted Arrow list hashes like the Python dict."""
         sorted_entries = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
         t = dict[str, int]
         assert _arrow_row_hash(sorted_entries) == _row_hash({"b": 2, "a": 1}, t)
         assert _arrow_row_hash(sorted_entries) == _row_hash({"a": 1, "b": 2}, t)
 
     def test_user_table_is_not_rewritten(self):
+        """Hashing leaves the user's Arrow table as given."""
         unsorted_entries = [{"key": "b", "value": 2}, {"key": "a", "value": 1}]
         source = _arrow_source(unsorted_entries)
         _, data = next(iter(source.iter_data()))
@@ -238,11 +266,13 @@ class TestArrowNativeKeyValueLists:
         assert source.as_table().column("m").to_pylist()[0] == unsorted_entries
 
     def test_ordered_struct_pairs_are_not_sorted(self):
+        """A list of ``f0``/``f1`` pairs is an ordered list, never sorted."""
         pair_type = pa.large_list(
             pa.struct([pa.field("f0", pa.large_string()), pa.field("f1", pa.int64())])
         )
 
         def pair_hash(entries: list[dict[str, Any]]) -> str:
+            """Return the row hash of ``entries`` stored as a list of ordered pairs."""
             table = pa.table(
                 {
                     "k": pa.array(["r"], pa.large_string()),
@@ -264,21 +294,27 @@ class TestArrowNativeKeyValueLists:
 
 
 class TestFunctionPodDictOutputs:
+    """Dicts returned by a function pod, sync and async, are ordered."""
+
     def test_pod_output_reordered_dicts_hash_equal(self):
+        """Equal pod outputs built in different orders hash equal."""
         source = _source({"a": 1, "b": 2}, dict[str, int])
         [(_, plain)] = list(_pod(echo, "out").process(source).iter_data())
         [(_, flipped)] = list(_pod(reorder, "out").process(source).iter_data())
         assert plain.content_hash() == flipped.content_hash()
 
     def test_fresh_pod_output_iterates_in_key_order(self):
+        """A fresh pod output dict iterates in key order."""
         source = _source({"b": 2, "a": 1}, dict[str, int])
         [(_, out)] = list(_pod(echo, "out").process(source).iter_data())
         assert _keys(out.as_dict()["out"]) == ["a", "b"]
 
     def test_pod_does_not_mutate_the_returned_dict(self):
+        """The dict the pod returned keeps its own order."""
         returned: list[dict[str, int]] = []
 
         def keep(m: dict[str, int]) -> dict[str, int]:
+            """Return a new dict out of key order and remember it."""
             result = {"b": m["b"], "a": m["a"]}
             returned.append(result)
             return result
@@ -289,6 +325,7 @@ class TestFunctionPodDictOutputs:
 
     @pytest.mark.asyncio
     async def test_async_output_matches_sync_and_is_order_independent(self):
+        """The async path stores and hashes like the sync path."""
         source = _source({"a": 1, "b": 2}, dict[str, int])
         tag, data = next(iter(source.iter_data()))
         _, sync_out = _pod(echo, "out").process_data(tag, data)
@@ -334,19 +371,43 @@ class TestDatagramColumnUpdates:
         assert list(given) == ["b", "a"]
 
 
+def _extract_data_only(archive: tarfile.TarFile, target: Path) -> None:
+    """Extract ``archive`` under ``target``, allowing only plain files and directories.
+
+    ``extractall(filter="data")`` exists from Python 3.11.4; on older 3.11 releases the
+    same guarantee is checked by hand: no links or devices, no absolute or ``..`` paths.
+    """
+    if hasattr(tarfile, "data_filter"):
+        archive.extractall(target, filter="data")
+        return
+    root = target.resolve()
+    for member in archive.getmembers():
+        destination = (target / member.name).resolve()
+        if not (member.isfile() or member.isdir()) or not destination.is_relative_to(
+            root
+        ):
+            raise ValueError(f"unsafe archive member: {member.name!r}")
+    archive.extractall(target)  # noqa: S202 -- every member was checked above
+
+
 def _delta_db(tmp_path: Path) -> DeltaTableDatabase:
+    """Return a Delta result store under ``tmp_path``."""
     return DeltaTableDatabase(tmp_path / "store")
 
 
 @pytest.fixture(params=["in_memory", "delta"])
 def result_db(request, tmp_path):
+    """Yield an in-memory or a Delta result store."""
     if request.param == "in_memory":
         return InMemoryArrowDatabase()
     return _delta_db(tmp_path)
 
 
 class TestCachedPodHit:
+    """Equal dicts built in different orders share one cache entry."""
+
     def test_reordered_equal_dict_is_a_cache_hit(self, result_db):
+        """An equal input dict in another order is a cache hit."""
         pod = CachedFunctionPod(_pod(total, "total"), result_database=result_db)
         first = _source({"b": 2, "a": 1}, dict[str, int])
         second = _source({"a": 1, "b": 2}, dict[str, int])
@@ -363,6 +424,7 @@ class TestCachedPodHit:
 
     @pytest.mark.asyncio
     async def test_reordered_equal_dict_is_an_async_cache_hit(self, result_db):
+        """The same holds on the async path."""
         pod = CachedFunctionPod(_pod(total, "total"), result_database=result_db)
         tag1, data1 = next(iter(_source({"b": 2, "a": 1}, dict[str, int]).iter_data()))
         tag2, data2 = next(iter(_source({"a": 1, "b": 2}, dict[str, int]).iter_data()))
@@ -377,6 +439,7 @@ class TestCachedPodHit:
         assert out2.get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
 
     def test_fresh_and_cached_dict_outputs_iterate_identically(self, result_db):
+        """Fresh and cached outputs iterate in the same order."""
         pod = CachedFunctionPod(_pod(reorder, "out"), result_database=result_db)
         source = _source({"a": 1, "b": 2, "c": 3}, dict[str, int])
 
@@ -403,13 +466,15 @@ class TestV020Store:
 
     @pytest.fixture
     def store(self, tmp_path):
+        """Return the v0.2.0 Delta store, extracted under ``tmp_path``."""
         # The store is shipped as a tarball: its directory names contain ":".
         target = tmp_path / "v020_store"
         with tarfile.open(V020_STORE) as archive:
-            archive.extractall(target, filter="data")
+            _extract_data_only(archive, target)
         return DeltaTableDatabase(target)
 
     def _inputs(self) -> DictSource:
+        """Return the two inputs the v0.2.0 store was built from."""
         return DictSource(
             data=[
                 {"k": "unsorted", "m": {"b": 2, "a": 1}},
@@ -421,6 +486,7 @@ class TestV020Store:
         )
 
     def test_unsorted_row_recomputes_once_and_old_rows_stay(self, store):
+        """An out-of-order v0.2.0 input recomputes once; its old row stays."""
         pod = CachedFunctionPod(_pod(total, "total"), result_database=store)
         before = store.get_all_records(pod.record_path)
         assert before is not None
@@ -449,8 +515,11 @@ class TestV020Store:
         )
 
     def test_cached_unsorted_dict_output_is_served_as_stored(self, store):
-        # A v0.2.0 row is read back as stored: an Arrow table is never re-sorted, so a
-        # cache hit returns the old insertion order and hash until it is recomputed.
+        """A cached v0.2.0 dict output is served in its stored order.
+
+        An Arrow table is never re-sorted, so a cache hit returns the old insertion order
+        and hash until the entry is recomputed.
+        """
         inputs = DictSource(
             data=[{"k": "r", "n": 5}],
             tag_columns=["k"],

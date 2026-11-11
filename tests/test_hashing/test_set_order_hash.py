@@ -34,6 +34,7 @@ _ROW_HASH_SCRIPT = textwrap.dedent(
 
 
 def _row_hash_in_subprocess(seed: str) -> str:
+    """Return the row hash of a fixed ``set[str]`` computed under ``PYTHONHASHSEED=seed``."""
     env = {**os.environ, "PYTHONHASHSEED": seed}
     result = subprocess.run(
         [sys.executable, "-c", _ROW_HASH_SCRIPT],
@@ -46,6 +47,7 @@ def _row_hash_in_subprocess(seed: str) -> str:
 
 
 def _source(value: set[str]) -> DictSource:
+    """Return a one-row ``DictSource`` whose ``s`` column holds ``value``."""
     return DictSource(
         data=[{"k": "r", "s": value}],
         tag_columns=["k"],
@@ -55,14 +57,19 @@ def _source(value: set[str]) -> DictSource:
 
 
 class TestPlainSetOrder:
+    """A plain ``set[T]`` is stored sorted, never in iteration order."""
+
     def test_row_hash_is_independent_of_hash_seed(self):
+        """Two processes with different hash seeds give one row hash."""
         assert _row_hash_in_subprocess("1") == _row_hash_in_subprocess("2")
 
     def test_stored_elements_are_sorted(self):
+        """``str`` elements are stored sorted."""
         table = _source({"cherry", "apple", "banana"}).as_table()
         assert table.column("s").to_pylist() == [["apple", "banana", "cherry"]]
 
     def test_int_set_elements_are_sorted(self):
+        """``int`` elements are stored in numeric order."""
         source = DictSource(
             data=[{"k": "r", "s": {300, -1, 7}}],
             tag_columns=["k"],

@@ -26,10 +26,12 @@ from orcapod.sources import DictSource
 
 
 def total(m: dict[str, int]) -> int:
+    """Return the sum of the dict's values."""
     return sum(m.values())
 
 
 def tally(n: int) -> dict[str, int]:
+    """Return a dict built out of key order."""
     return {"z": n, "a": n}
 
 

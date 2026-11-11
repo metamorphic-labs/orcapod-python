@@ -14,8 +14,9 @@ Orcapod now stores dict entries sorted by key and set elements sorted, wherever 
 value becomes Arrow; see the hashing reference, section 1c, for the order. A NaN key or
 element, values that cannot be compared, and two keys that convert to the same stored
 value raise `CanonicalOrderError` (a `ValueError`) naming the column. A datagram built from
-Python values holds its dicts in the same order, so fresh and cached pod outputs iterate
-alike. An Arrow table is still hashed exactly as stored: a key/value list that arrives in
+Python values (and values set with `update` or `with_columns`) holds its dicts in the same
+order, so a newly computed pod output and one served from a `0.3.0` cache iterate alike (an
+output served from a `0.2.0` cache keeps its stored order, see below). An Arrow table is still hashed exactly as stored: a key/value list that arrives in
 Arrow form is never re-sorted.
 
 Which released hashes move: only those of values holding a dict whose insertion order was

@@ -272,9 +272,12 @@ print(dict_row_hash({"a": 1, "b": 2}) == dict_row_hash({"b": 2, "a": 1}))
 which every Python-to-Arrow path uses: sources built from Python values, datagrams, function
 pod outputs (sync and async), and dicts nested in lists, dicts or dataclass and pydantic
 fields. A datagram built from Python values also holds its dict values (including dicts
-inside lists, dicts and `Optional`) as key-ordered copies, so a fresh pod output and the
-same output read back from a cache iterate in the same order. The caller's dict is never
-modified; dicts inside dataclass or pydantic objects keep their own order in memory.
+inside lists, dicts and `Optional`) as key-ordered copies, including values set later with
+`update` or `with_columns`, so a newly computed pod output and the same output read back
+from a cache written by `0.3.0` iterate in the same order. An output served from a cache
+written by `0.2.0` keeps the order it was stored in until it is recomputed (see the `0.3.0`
+changelog). The caller's dict is never modified; dicts inside dataclass or pydantic objects
+keep their own order in memory.
 
 **The order** is defined on the converted (storage) key or element, in
 `semantic_types/canonical_order.py`:
@@ -288,10 +291,18 @@ modified; dicts inside dataclass or pydantic objects keep their own order in mem
 | `bytes` | unsigned bytewise |
 | `date`, `datetime`, `time`, `timedelta` | natural order; datetimes by instant (they are timezone aware after conversion) |
 
-A NaN key or element has no order and raises `CanonicalOrderError` (a `ValueError`) naming
-the column, as do keys or elements that cannot be compared and two keys or elements that
-convert to the same stored value. A dict or set already built in this order is stored
-byte-for-byte as before this rule existed, so its hash did not change.
+A NaN key or element (a Python `float`, a NumPy floating scalar or a `Decimal`) has no order
+and raises `CanonicalOrderError` (a `ValueError`) naming the column, as do keys or elements
+that cannot be compared and two keys or elements that convert to the same stored value. A
+dict or set already built in this order is stored byte-for-byte as before this rule existed,
+so its hash did not change.
+
+**Signed zero.** A float is hashed by its stored bytes, and `0.0` and `-0.0` have different
+bytes, so they hash differently wherever they appear: in a plain `float` column and as a
+dict key or set element alike, although Python compares them equal (`{0.0: 1} == {-0.0: 1}`).
+Orcapod does not rewrite `-0.0` to `0.0`: pod code can tell them apart (`math.copysign`,
+`repr`, division), so the finer identity can cost a recompute but never serves a wrong
+result. Within one dict or set the two compare equal, so they cannot both be present.
 
 **Arrow tables are hashed exactly as stored.** `StarfixArrowHasher` never sorts list
 contents. A `list<struct<key, value>>` column that arrives already in Arrow form (an
