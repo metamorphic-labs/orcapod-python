@@ -2,7 +2,11 @@
 
 Status: proposal; decisions 1, 2 and 4 are with the developer. No library code is changed.
 Mechanism decided (developer, Nov 11): orders come from starfix's ordered mode (ITL-898), not from
-the descriptor. Sections (c) and (h) describe the descriptor-only design they were written with;
+the descriptor. Implementation (coordinator, option A): the Arrow hasher gains `hash_table_ordered`,
+sharing one private starfix call and the semantic preprocessing with `hash_table`; pandas digests
+its values table with it, and `pa.Table` values hash as `arrow_table_v1` with it, while
+`Datagram` and `ArrowTableStream` identities wrap their table in `StreamTableIdentity` (order
+independent, lazy, `==` by `pa.Table.equals`). Sections (c) and (h) describe the descriptor-only design they were written with;
 "Mechanism: starfix ordered mode" says which parts the option replaces and which remain.
 Base: `main` at `b197544e` (v0.2.0 + #291), pandas 2.2.3, pyarrow 23.0.1, Python 3.12.
 
