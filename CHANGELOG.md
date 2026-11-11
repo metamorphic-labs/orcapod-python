@@ -14,8 +14,10 @@
   `Join`, `MergeJoin`, `SemiJoin`, `Batch`, `GroupBy`, `MapTags`, `MapData`, `PolarsFilter` and
   the column-selection operators) returned no rows from `as_table()` and `iter_data()`, without
   an error. It now returns the same rows as after a sync run, whatever `materialize_results`
-  is. An operator node in a job keeps its output in memory and stores nothing, so
-  `get_all_records()` returns `None` for it on both orchestrators. (ITL-896)
+  is, and a later run replaces those rows even when it produces none. With the default
+  `cache_mode=OFF` (the only mode a job sets) an operator node keeps its output in memory and
+  stores nothing, so `get_all_records()` returns `None` for it on both orchestrators.
+  (ITL-896)
 
 - A failed store write fails the run. `PipelineJob.run()` used to return normally when a
   node's result or record could not be written (the row was skipped like a crashed function

@@ -758,8 +758,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 result access: DB records are written regardless, and
                 ``job.nodes["label"]`` returns the same rows from
                 ``as_table()`` and ``iter_data()`` in either case, on either
-                orchestrator. An operator node keeps its output in memory and
-                stores nothing, so its ``get_all_records()`` returns ``None``.
+                orchestrator. An operator node with the default
+                ``cache_mode=OFF`` (the only mode a job sets) keeps its output
+                in memory and stores nothing, so its ``get_all_records()``
+                returns ``None``.
 
         Returns:
             ``self`` — the same ``PipelineJob`` instance, with

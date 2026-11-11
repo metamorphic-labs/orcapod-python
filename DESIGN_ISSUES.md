@@ -2349,8 +2349,10 @@ fell back to the database, which they read only in `REPLAY`, and returned the ze
 **Fix:** `async_execute` collects the rows it forwards in every mode except `REPLAY` and keeps
 them on the node with `StaticOutputOperatorPod._materialize_to_stream`, as the sync path does,
 whatever `materialize_results` is; `LOG` still stores them. Nothing new is stored, and no hash,
-path or stored schema changes. `get_all_records()` still returns `None` for an operator node in a
-job, since it stores nothing. `clear_cache()` still returns the node to its zero-row "not yet run"
+path or stored schema changes. A run with no rows clears the previous run's output, so a node
+never serves stale rows (CodeRabbit on PR #302). `get_all_records()` still returns `None` for an
+operator node in a job, since with the default `cache_mode=OFF` (the only mode a job sets) it
+stores nothing. `clear_cache()` still returns the node to its zero-row "not yet run"
 state on both paths (a function node instead reloads from its store).
 Regressions: `tests/test_pipeline/test_operator_node_async_readback.py`, which compares the sync
 and async reads of every operator. Open, pinned by strict xfails there: a zero-row async result

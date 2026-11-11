@@ -1254,7 +1254,10 @@ class OperatorJobNode(OperatorNodeBase):
                 tg.create_task(forward())
 
             # TaskGroup has completed. Keep the output on the node, as execute()
-            # does, and store it in LOG mode (sync DB write, post-hoc).
+            # does, and store it in LOG mode (sync DB write, post-hoc). A run
+            # with no rows replaces an earlier run's output too: the node then
+            # reads as a zero-row table.
+            self._cached_output_stream = None
             if collected:
                 stream = StaticOutputOperatorPod._materialize_to_stream(collected)
                 self._cached_output_stream = stream
