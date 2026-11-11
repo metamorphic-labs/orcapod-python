@@ -54,7 +54,7 @@ false positives:
 | Tool | Hits | File(s) and first commit | What it is |
 |---|---|---|---|
 | gitleaks `generic-api-key` | 1 | `src/orcabridge/dj/pod.py` (`7b3b37e5`, 2025-04-30) | Code: `entry.fetch(*outer_self.fp.output_keys, as_dict=True)` |
-| trufflehog `Postgres` | 36 | `src/orcapod/databases/postgresql_connector.py`, `core/sources/postgresql_table_source.py`, `hashing/postgres_hash_cacher.py`, `contexts/__init__.py`, `docs/concepts/file-hash-caching.md`, `docs/plans/…`, `docs/superpowers/plans/…`, `superpowers/plans|specs/…` (2026-03-25 to 2026-07-11) | Placeholder DSNs in docstrings and docs (`postgresql://user:<placeholder>@host:5432/dbname`) |
+| trufflehog `Postgres` | 36 | `src/orcapod/databases/postgresql_connector.py`, `core/sources/postgresql_table_source.py`, `hashing/postgres_hash_cacher.py`, `contexts/__init__.py`, `docs/concepts/file-hash-caching.md`, `docs/plans/…`, `docs/superpowers/plans/…`, `superpowers/plans/…`, `superpowers/specs/…` (2026-03-25 to 2026-07-11) | Placeholder DSNs in docstrings and docs (`postgresql://user:<placeholder>@host:5432/dbname`) |
 | trufflehog `Postgres` | 2 | `tests/test_hashing/test_postgres_hash_cacher.py` (`5637a661`, `b02e0600`) | Test fixture for password masking, host `db.example.com` |
 | trufflehog `Postgres` | 2 | One PR review comment | Placeholder DSN (`…@host`) |
 | trufflehog `Box`, `Fmfw` | 3 | `pipeline_creation_playground.ipynb` (`211a81e3`), `pipeline.ipynb` (`f0f50fc1`), both deleted | Base64 PNG notebook output |
@@ -156,7 +156,7 @@ tracker.
 
 | Item | Where on `main` | Notes |
 |---|---|---|
-| `at-database3.stanford.edu` with user `eywalker` (MySQL, port 3306) | `notebooks/old_tutorials/05_orcabridge_dj_integration.ipynb` lines 160-161 (cell output) | Internal university database host name and a user name. History: 6 commits (2025-04-28 to 2025-05-05) in deleted notebooks too |
+| `at-database3.stanford.edu` with user `eywalker` (MySQL, port 3306) | `notebooks/old_tutorials/05_orcabridge_dj_integration.ipynb` lines 160-161 (cell output) | Internal university database host name and a username. History: 6 commits (2025-04-28 to 2025-05-05) in deleted notebooks too |
 | `ray://op-pipe-kuberay-head-svc.ray.svc.cluster.local:10001` | `notebooks/tutorials/02_parallel_execution_on_ray.ipynb` line 38 | Internal Kubernetes service name. History also has `raycluster-op-test-kuberay-head-svc…` |
 | `api.spiraldb.dev` | `.github/workflows/run-tests.yml:59`, two `src/` docstrings, tests, plans | SpiralDB's development API endpoint (vendor host, not ours) |
 | SpiralDB project ID `test-orcapod-362211` | `.github/workflows/run-tests.yml:58`, `tests/test_databases/test_spiraldb_connector_integration.py:48`, one plan | Our SpiralDB test project. Not a credential (the workload ID is a secret), but an internal identifier |
@@ -415,9 +415,10 @@ Before the day:
        `gitpython` floor); merge any resulting PR before the cut.
 4. [ ] Decide whether to rehearse (5.3, item 1). If yes: dispatch `0.3.0rc1`, check TestPyPI,
        download `orcapod-0.3.0rc1-py3-none-any.whl` from its TestPyPI page into a new empty
-       directory, run `uv venv && uv pip install ./orcapod-0.3.0rc1-py3-none-any.whl` there
+       directory, run `uv venv && uv pip install --python .venv ./orcapod-0.3.0rc1-py3-none-any.whl` there
        (dependencies come from PyPI; an `--extra-index-url` install would not reach TestPyPI,
-       because uv stops at the first index that has `orcapod`), import it, then approve or
+       because uv stops at the first index that has `orcapod`; `--python .venv` keeps an already
+       active environment from being used), check `.venv/bin/python -c "import orcapod"`, then approve or
        reject the `pypi` deployment.
 5. [ ] Merge the release-prep PR: `CHANGELOG.md` `[0.3.0] — 2026-11-16`, README / docs
        install text (remove "`0.2.0` is not on PyPI, where the latest release is `0.1.4`").
@@ -445,7 +446,7 @@ On the day:
 1. [ ] Decide the option of 2.10 per category (A, B, C or C') and, for B, where plans and
        specs go from now on (that changes `CLAUDE.md`, `.zed/rules` and the Sensei plan
        locations).
-2. [ ] At minimum consider clearing the two notebook outputs (Stanford host and user name,
+2. [ ] At minimum consider clearing the two notebook outputs (Stanford host and username,
        KubeRay service name) and the SpiralDB project ID default in `run-tests.yml` and the
        integration test (B, or C/C' to also clear history).
 3. [ ] Review the GitHub text that becomes public: 244 PRs, 51 issues and their comments
@@ -456,7 +457,7 @@ On the day:
 5. [ ] Check the organization allows `internal` → `public` for this repository (an
        enterprise policy may require an owner).
 6. [ ] Flip visibility: *Settings → General → Danger Zone → Change visibility → Public*.
-7. [ ] Afterwards: confirm the README and docs links (PR numbers in `CHANGELOG.md`, the
+7. [ ] Afterward: confirm the README and docs links (PR numbers in `CHANGELOG.md`, the
        PyPI project URLs) resolve for a logged-out user; add `CONTRIBUTING.md` /
        `SECURITY.md` if wanted (not present today).
 
