@@ -628,10 +628,10 @@ class InMemoryArrowDatabase:
     ) -> "pa.Table":
         """Return the committed rows matching ``expression``, in table order.
 
-        When every equality pair can use a hash index, the matching rows are the
-        intersection of the indexes' positions and no row is filtered. When some can,
-        only the rows the first indexed pair gives are filtered; otherwise the whole
-        table is.
+        The pairs that can use a hash index select the rows at the intersection of
+        their indexes' positions. When every pair can, those rows are the result;
+        when only some can, just those rows are filtered by ``expression``; when none
+        can, the whole table is.
         """
         indexed = [
             (column, value)

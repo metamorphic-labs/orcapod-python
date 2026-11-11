@@ -114,3 +114,10 @@ then `_compact_tail`; overwrite path (rare) filters then `combine_chunks()`.
 
 - 2026-11-11: cause established, coordinator approved in-memory fix; Delta pending developer.
 - Main 5000-row timings running in background (scratchpad before_mem.txt / before_delta.txt).
+- 2026-11-11: in-memory fix implemented (commit "perf(databases): ..."). Scaling tests pass;
+  equivalence tests pass on main and on the fix; differential check vs main identical
+  (scratchpad diff/ scripts: dump_store.py + compare.py). Lookup uses zero-copy row slices
+  (``take`` on a multi-chunk table copies every chunk) and skips the Arrow filter when every
+  pair is indexed (acero filter has ~0.35 ms fixed overhead).
+- Delta repro of pending-shadow bug reported to coordinator (msg_01ac95ae10d6).
+- PR wording: part 1 of ITL-919 (Delta follows) — confirm Fixes vs Part of with coordinator.
