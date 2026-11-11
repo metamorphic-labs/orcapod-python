@@ -219,3 +219,61 @@ Full default suite, torch suite on 3.11/3.12/3.13, ruff, basedpyright; merge `or
 (no rebase); push; draft PR (`Fixes ITL-871`, stacked on #289, items a-d await the developer,
 torch results pasted); `orca linear attach`, `orca worktree set --pr`; CodeRabbit rounds;
 worker_done.
+
+---
+
+# Phase 2: developer decisions of 2026-11-11 (dispatch task_3ef74b556455)
+
+Decisions: 2a name/label confirmed; 2b add complex32 + float8 family (raw bits, torch names
+as tags; a tag the installed torch lacks fails clearly at use, never at import; quantized,
+sparse, nested, sub-byte still refused); 2c GPU/grad accepted with a warning (plan below,
+needs coordinator OK); 2d `orcapod[torch]` extra, support driven by importability, lazy
+registration kept; 2e torch tests run in the REQUIRED CI on every PR (plan below, needs OK).
+Also: no-debug-only-parameters over the whole diff; list[torch.Tensor] MergeJoin test after
+#289 merges into main; ITL-864 xfail removal after #293 is on main.
+
+## CI facts (checked 2026-11-11)
+
+- Org-required `python-required-ci.yml` -> `ci-pytest.yml`: shared `setup-uv` action (installs
+  uv, Python, uv cache keyed on uv.lock), then `uv run pytest tests/`. No `uv sync`, no
+  `--all-extras`: `uv run` syncs the project + the default `dev` group only. **An extra alone
+  is NOT installed there.**
+- `ci-typecheck.yml`: `uv run --with basedpyright basedpyright` -> same default sync (dev group).
+- `ci-license-check.yml`: `uv run --no-dev --with pip-licenses` -> project deps only, no extras.
+- Repo `run-tests.yml` / `release.yml`: `uv sync --locked --all-extras --dev` -> extras installed.
+- Repo `_license-check.yml`: `uv sync --locked --dev` -> dev group (so whatever dev pulls).
+
+## 2e plan
+
+1. `[project.optional-dependencies] torch = ["torch>=2.3"]`; `all` gains `orcapod[torch]`.
+2. `dev` group gains `"orcapod[torch]"` (uv self-reference with an extra): the default
+   `uv run` sync, i.e. the org-required pytest and typecheck jobs, installs torch; one source of
+   truth for the version bound. Users never get torch unless they ask for the extra.
+3. CPU wheels: `[[tool.uv.index]] name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu",
+   explicit = true` and `[tool.uv.sources] torch = [{ index = "pytorch-cpu", marker =
+   "sys_platform == 'linux'" }]`; macOS/Windows use PyPI. `tool.uv.sources` is not in the
+   published metadata, so `pip install orcapod[torch]` is unaffected.
+4. `uv lock`; check no `nvidia-*`/`triton` in the Linux resolution.
+5. CI guard: `tests/test_torch/test_ci_has_torch.py` (no importorskip): fails when
+   `CI` env var is set (GitHub sets `CI=true`) and torch is not importable.
+6. No-torch path keeps running although dev envs now have torch: subprocess tests with a
+   `sys.meta_path` blocker for `torch` (not a sys.modules hack): `import orcapod` + run never
+   imports torch; reading an `orcapod.torch_tensor` column raises
+   `MissingOptionalDependencyError`. The current skipif-torch-installed test is converted.
+7. basedpyright now sees torch: fix new errors; drop the now-unneeded
+   `reportMissingImports` ignores.
+8. Measure: wheel download size and `uv sync` time added per job (cold cache), licenses of
+   everything the extra pulls (`pip-licenses` on the torch closure).
+
+## 2c plan (warning)
+
+- Category `orcapod.errors.ValueConversionWarning(UserWarning)` (name to confirm; #299 has no
+  warning category as of 2026-11-11).
+- Emitted by the callers that have the context (no-debug-only-parameters): a pure helper in
+  `torch_type` returns what a store converts (`device 'cuda:0'`, `requires_grad=True`), and
+  (a) `PythonDataFunction._build_output_data` warns naming the function and the output key;
+  (b) `DictSource`/`ListSource` (Python-value sources) warn naming the source and column.
+  Tensors nested in lists/dicts of an output are included.
+- Once per (function instance, output key, conversion kinds); one per (source, column) with the
+  row count. A 10,000-row run where every row returns a CUDA grad tensor: 1 warning.
+- Never for plain CPU tensors without grad. Tests with `pytest.warns` / `warnings.catch_warnings`.
