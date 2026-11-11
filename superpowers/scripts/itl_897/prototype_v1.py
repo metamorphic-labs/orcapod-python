@@ -50,3 +50,42 @@ def install() -> None:
 
     bh.PandasDataFrameHandler.handle = df_handle  # type: ignore[method-assign]
     bh.PandasSeriesHandler.handle = series_handle  # type: ignore[method-assign]
+
+
+def install_arrow_table(*, separated: bool) -> None:
+    """Patch ``ArrowTableHandler`` with an order-dependent ``arrow_table_v1`` prototype.
+
+    The descriptor lists the table's top-level field names in order; the values digest is
+    today's Arrow hasher digest. With ``separated=True``, ``Datagram`` and producer-less
+    ``ArrowTableStream`` identities no longer route their table through the type-dispatched
+    handler: they return ``arrow_hasher.hash_table(table)`` (a terminal ``ContentHash``),
+    which is what the handler returns today, so stream and datagram hashes stay put.
+    """
+    from orcapod.core.datagrams.datagram import Datagram
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+    from orcapod.hashing.semantic_hashing import builtin_handlers as bh
+
+    def table_handle(self: Any, obj: Any, hasher: Any) -> Any:
+        if isinstance(obj, pa.RecordBatch):
+            obj = pa.Table.from_batches([obj])
+        values = self._get_arrow_hasher().hash_table(obj).digest
+        return _labelled("arrow_table_v1", obj, values)
+
+    bh.ArrowTableHandler.handle = table_handle  # type: ignore[method-assign]
+    if not separated:
+        return
+
+    def datagram_identity(self: Any) -> Any:
+        return self.data_context.arrow_hasher.hash_table(self._ensure_data_table())
+
+    original_stream_identity = ArrowTableStream.identity_structure
+
+    def stream_identity(self: Any) -> Any:
+        structure = original_stream_identity(self)
+        if self._producer is not None:
+            return structure
+        name, table, tag_columns = structure
+        return (name, self.data_context.arrow_hasher.hash_table(table), tag_columns)
+
+    Datagram.identity_structure = datagram_identity  # type: ignore[method-assign]
+    ArrowTableStream.identity_structure = stream_identity  # type: ignore[method-assign]
