@@ -96,3 +96,10 @@ to a typed column; `main` accepts them. Fix: `_without_null_types` leaves `null`
 comparison (a `null` struct field is dropped; a column holding `null` list items or map entries is
 not compared). Tests in `test_delta_append_types.py` (three null cases, all passing on `main`;
 a `null` field does not hide a changed sibling).
+- Round on 51dc9050: `_without_null_types` keeps a list or map whose items still have comparable
+  fields (a changed sibling of a `null` field inside `list<struct>` is refused); the nested-null
+  tests now build `{"a": None}` / `[None]` and assert the stored value. A `null` field inside
+  `list<struct>` cannot be appended by Delta's merge itself (also on main), so it is not a case
+  of the append test. CI's "Run Tests" / "Objective" / "PostgreSQL" / license-check workflows fail
+  on every branch since ~14:25Z: the runners cannot resolve security.ubuntu.com (apt install of
+  graphviz); "Python — Required CI" passes.

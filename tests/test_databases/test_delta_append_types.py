@@ -262,22 +262,28 @@ def test_identical_schema_appends(
 
 
 @pytest.mark.parametrize(
-    ("stored_type", "incoming_type"),
+    ("stored_type", "incoming_type", "value"),
     [
-        (pa.int64(), pa.null()),
-        (pa.struct([("a", pa.int64())]), pa.struct([("a", pa.null())])),
-        (pa.large_list(pa.int64()), pa.large_list(pa.null())),
+        (pa.int64(), pa.null(), None),
+        (pa.struct([("a", pa.int64())]), pa.struct([("a", pa.null())]), {"a": None}),
+        (pa.large_list(pa.int64()), pa.large_list(pa.null()), [None]),
+        # A null field inside list<struct> is not here: Delta's own merge cannot
+        # coerce it (also on main), whatever the append check decides.
     ],
-    ids=["int64<-null", "struct-field<-null", "list-element<-null"],
+    ids=[
+        "int64<-null",
+        "struct-field<-null",
+        "list-item<-null",
+    ],
 )
 def test_null_typed_values_append_to_a_typed_column(
-    tmp_path: Path, stored_type: pa.DataType, incoming_type: pa.DataType
+    tmp_path: Path, stored_type: pa.DataType, incoming_type: pa.DataType, value: Any
 ) -> None:
     """Rows whose column (or nested field) is ``null``-typed append to a typed column."""
     db = DeltaTableDatabase(base_path=tmp_path)
     write(db, table(stored_type, b"a", nullable=True))
     nulls = pa.Table.from_arrays(
-        [pa.array([b"b"], pa.large_binary()), pa.array([None], incoming_type)],
+        [pa.array([b"b"], pa.large_binary()), pa.array([value], incoming_type)],
         names=["rid", "x"],
     )
     write(db, nulls)
@@ -287,24 +293,37 @@ def test_null_typed_values_append_to_a_typed_column(
     )
     assert back is not None
     assert back.num_rows == 2
+    rows = dict(zip(back.column("rid").to_pylist(), back.column("x").to_pylist()))
+    assert rows[b"b"] == value
 
 
-def test_null_field_does_not_hide_a_changed_sibling(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("stored_type", "incoming_type", "value"),
+    [
+        (
+            pa.struct([("a", pa.int64()), ("b", pa.int64())]),
+            pa.struct([("a", pa.null()), ("b", pa.float64())]),
+            {"a": None, "b": 2.5},
+        ),
+        (
+            pa.large_list(pa.struct([("a", pa.int64()), ("b", pa.int64())])),
+            pa.large_list(pa.struct([("a", pa.null()), ("b", pa.float64())])),
+            [{"a": None, "b": 2.5}],
+        ),
+    ],
+    ids=["struct", "list<struct>"],
+)
+def test_null_field_does_not_hide_a_changed_sibling(
+    tmp_path: Path, stored_type: pa.DataType, incoming_type: pa.DataType, value: Any
+) -> None:
     """A ``null`` struct field is skipped, but a changed sibling field is refused."""
     db = DeltaTableDatabase(base_path=tmp_path)
-    write(
-        db,
-        table(pa.struct([("a", pa.int64()), ("b", pa.int64())]), b"a", nullable=True),
-    )
+    write(db, table(stored_type, b"a", nullable=True))
     changed = pa.Table.from_arrays(
-        [
-            pa.array([b"b"], pa.large_binary()),
-            pa.array(
-                [{"a": None, "b": 2.5}],
-                pa.struct([("a", pa.null()), ("b", pa.float64())]),
-            ),
-        ],
+        [pa.array([b"b"], pa.large_binary()), pa.array([value], incoming_type)],
         names=["rid", "x"],
     )
-    with pytest.raises(InputValidationError, match="'x'"):
+    with pytest.raises(InputValidationError, match="'x'") as info:
         write(db, changed)
+    assert "int64" in str(info.value)
+    assert "double" in str(info.value)

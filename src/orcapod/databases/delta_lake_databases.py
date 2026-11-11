@@ -75,9 +75,10 @@ def _without_null_types(arrow_type: pa.DataType) -> pa.DataType | None:
     """Return ``arrow_type`` without the parts typed ``null``, or ``None`` if none is left.
 
     A ``null``-typed value fits a column of any type, and Delta has no ``null``
-    type to compare it with, so the append check leaves it out: a ``null`` struct
-    field is dropped, and a type that is ``null`` or holds ``null`` list items or
-    map keys or values is not compared at all.
+    type to compare it with, so the append check leaves it out at every depth: a
+    ``null`` struct field is dropped (its siblings are still compared, inside lists
+    and maps too), and a type that is ``null``, or whose list items or map keys or
+    values are entirely ``null``, is not compared.
 
     Args:
         arrow_type: A type already reduced by ``_comparable_storage_type``.
@@ -94,21 +95,34 @@ def _without_null_types(arrow_type: pa.DataType) -> pa.DataType | None:
             if (t := _without_null_types(f.type)) is not None
         ]
         return pa.struct(kept) if kept else None
-    if (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    ):
-        if _without_null_types(arrow_type.value_type) != arrow_type.value_type:
+    if pa.types.is_large_list(arrow_type) or pa.types.is_list(arrow_type):
+        item = _without_null_types(arrow_type.value_type)
+        if item is None:
             return None
-        return arrow_type
+        field = pa.field(arrow_type.value_field.name, item)
+        return (
+            pa.large_list(field)
+            if pa.types.is_large_list(arrow_type)
+            else pa.list_(field)
+        )
+    if pa.types.is_fixed_size_list(arrow_type):
+        item = _without_null_types(arrow_type.value_type)
+        if item is None:
+            return None
+        return pa.list_(
+            pa.field(arrow_type.value_field.name, item), arrow_type.list_size
+        )
     if pa.types.is_map(arrow_type):
-        if (
-            _without_null_types(arrow_type.key_type) != arrow_type.key_type
-            or _without_null_types(arrow_type.item_type) != arrow_type.item_type
-        ):
+        key = _without_null_types(arrow_type.key_type)
+        value = _without_null_types(arrow_type.item_type)
+        if key is None or value is None:
             return None
-        return arrow_type
+        # pyarrow accepts key and item Fields here; its stubs only list types.
+        return pa.map_(  # pyright: ignore[reportCallIssue]
+            pa.field(arrow_type.key_field.name, key, nullable=False),
+            pa.field(arrow_type.item_field.name, value),
+            keys_sorted=arrow_type.keys_sorted,
+        )
     return arrow_type
 
 
