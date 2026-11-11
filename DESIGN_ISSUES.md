@@ -2319,8 +2319,8 @@ the one ordering rule in `semantic_types/canonical_order.py` (None first; numeri
 code point; `bytes` bytewise; dates and times naturally). NaN, incomparable values and two
 keys or elements with the same storage value raise `CanonicalOrderError`, wrapped with the
 column name by the caller. `Datagram` built from Python values holds key-ordered copies of
-its dict values (inside `list`, `dict`, `Optional`; also after `update` and `with_columns`),
-so a newly computed output and one served from a `0.3.0` cache iterate alike (one served
+its dict values (inside `list`, `dict`, `Optional`), and `update` and `with_columns` do the
+same, so a newly computed output and one served from a `0.3.0` cache iterate alike (one served
 from a `0.2.0` cache keeps its stored order until recomputed); the caller's dict is never
 mutated. Released hashes move only for values not already
 in canonical order (two golden entries, `pipeline:index_pick.index` row data hashes); see
