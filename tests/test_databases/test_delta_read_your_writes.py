@@ -219,8 +219,12 @@ def test_failed_id_refresh_is_retried_by_the_next_read(
     tmp_path: Path, method: str
 ) -> None:
     """After a failed stored-ID refresh, a pending row with a stored id is still not returned."""
+    # Another root stores ``b``: this handle has to read the stored ids. (A handle's
+    # own commit tells it which ids it stored, so it reads none afterwards, ITL-919.)
+    DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
+        PATH, _rows(["b"], [2]), flush=True
+    )
     db = DeltaTableDatabase(tmp_path).at(SCOPE)
-    db.add_records(PATH, _rows(["b"], [2]), flush=True)
     db.add_records(PATH, _rows(["a", "b"], [1, 20]))
 
     # The failed refresh is a failed stored read (ITL-884): never "no stored ids".
@@ -232,11 +236,14 @@ def test_failed_id_refresh_is_retried_by_the_next_read(
 
 
 @pytest.mark.usefixtures("fail_id_refresh_once")
-def test_get_records_by_ids_raises_on_failed_id_refresh(
-    stored_and_pending: DeltaTableDatabase,
-) -> None:
+def test_get_records_by_ids_raises_on_failed_id_refresh(tmp_path: Path) -> None:
     """A failed stored-ID refresh raises ``StoreReadError``, never "no records" (ITL-884)."""
-    db = stored_and_pending
+    # Another root stores ``a`` and ``b``: this handle has to read the stored ids (ITL-919).
+    DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
+        PATH, _rows(["a", "b"], [1, 2], [0, 1]), flush=True
+    )
+    db = DeltaTableDatabase(tmp_path).at(SCOPE)
+    db.add_records(PATH, _rows(["c"], [3], [1]))
 
     with pytest.raises(StoreReadError) as info:
         _ = db.get_records_by_ids(PATH, [b"a", b"c"])
@@ -274,9 +281,15 @@ def test_unreadable_table_with_sibling_pending_rows_raises_and_drops_nothing(
     with monkeypatch.context() as patch:
         patch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", unreadable)
         patch.setattr(deltalake.DeltaTable, "to_pyarrow_table", unreadable)
-        with pytest.raises(StoreReadError) as info:
-            _ = READS[method](reader, PATH)
-        assert isinstance(info.value.__cause__, OSError)
+        if cache == "warm" and method == "get_record_by_id":
+            # ``b`` is stored, and the warm family already holds the rows of the
+            # version it loaded: it answers from them without reading storage
+            # (ITL-919). Every read that needs storage still raises.
+            assert _values(READS[method](reader, PATH)) == EXPECTED[method]
+        else:
+            with pytest.raises(StoreReadError) as info:
+                _ = READS[method](reader, PATH)
+            assert isinstance(info.value.__cause__, OSError)
 
     assert _values(READS[method](reader, PATH)) == EXPECTED[method]
     root.flush()
