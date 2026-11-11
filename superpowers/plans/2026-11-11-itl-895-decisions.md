@@ -8,7 +8,14 @@ mechanism; this one applies the developer's decisions of 2026-11-11.
 ## Status log (for a successor)
 
 - 2026-11-11: Plan written. The warning mechanism (section "Design") and the open question
-  Q2 went to the coordinator through `ask`. **Do not code Tasks 2-5 before the reply.**
+  Q2 went to the coordinator through `ask`.
+- 2026-11-11: Coordinator: Q1 approved as designed (the name `OutputConversionWarning` is a
+  new public name it confirms with the developer; keep a rename one line). Q2: (a),
+  provisionally, structured so (b) is a small switch (`iterable_for_list` in the table). PR #300
+  (tensors) will import `orcapod.errors.OutputConversionWarning` too; whichever PR merges
+  second reconciles. Finding: `tuple[...]` is not a supported output annotation at all
+  ("Unsupported annotation"), so the reverse-of-D5 case cannot occur; the checker's
+  `tuple[...]` branch is dead code and is removed.
 
 **Goal:** `OUTPUT_CONFORMANCE` applies the developer's decisions: each near-miss value is
 either accepted silently, accepted and converted with an `OutputConversionWarning`, or rejected
