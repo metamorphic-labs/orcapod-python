@@ -5,12 +5,34 @@
 **Basis:** the v0.3 array format (`superpowers/specs/2026-11-10-array-format-v0.3.md`,
 `src/orcapod/logical_types/array_format.py`, `numpy_type.py`) and the ITL-874 storage review
 (`superpowers/specs/2026-11-10-array-tensor-storage.md`, section B4, `b6_torch_mapping.py`).
-**Status:** Implementing on provisional picks (coordinator, November 11, 2026); items (a) to (d)
-await the developer's confirmation. Each pick is a single constant or switch, so a change is
-cheap. Items are marked CONFIRMED (decided by the developer, relayed in the task brief),
-PENDING (proposal as first written) or superseded by the picks below.
+**Status:** Decided (developer, November 11, 2026). The decisions below override the
+provisional picks and the body.
 
-**Provisional picks (coordinator, November 11, 2026)**
+**Developer decisions (November 11, 2026)**
+
+- (a) Name `orcapod.torch_tensor`, label `torch_tensor_v1`: CONFIRMED.
+- (b) Dtypes: the NumPy-shared ones plus `bfloat16`, `complex32` and the float8 family
+  (`float8_e4m3fn`, `float8_e5m2`, `float8_e4m3fnuz`, `float8_e5m2fnuz`, `float8_e8m0fnu`),
+  stored as raw bits under the torch dtype name (the table in section (b)). A dtype the
+  installed torch lacks fails when a stored value of it is read, naming the dtype and the
+  torch version, never at import. Quantized, sparse, nested and sub-byte types stay refused.
+- (c) GPU and grad tensors accepted, stored from a detached CPU copy, never modified, with
+  `orcapod.errors.ValueConversionWarning` (shared with PR #299): issued by the function pod
+  output path (function, output) and by `DictSource` / `ListSource` (source, column, count),
+  once per (function or source, output or column, conversion), explicitly deduplicated; a
+  conversion is recorded only after `warnings.warn` returns, so under an error filter every
+  row raises. Never raised for plain CPU tensors.
+- (d) Packaging: the convenience extra `orcapod[torch] = ["torch>=2.3"]` (also in `all`).
+  Support is driven by `torch` being importable, however installed; `import orcapod` never
+  imports torch.
+- (e) CI: the dev dependency group includes `orcapod[torch]`, so the org-required
+  `uv run pytest tests/` (which syncs the dev group, not extras) installs torch. uv resolves
+  torch from the PyTorch CPU index on Linux (`[tool.uv.sources]`, explicit index) and from
+  PyPI elsewhere; `uv.lock` holds no CUDA package. `tests/test_torch/test_ci_has_torch.py`
+  fails when `CI` is set and torch is missing. The no-torch path is tested in subprocesses
+  with a `sys.meta_path` import blocker.
+
+**Provisional picks (coordinator, November 11, 2026; superseded by the decisions above)**
 
 - (a) Name **`orcapod.torch_tensor`**, label **`torch_tensor_v1`** (over `orcapod.tensor` /
   `tensor_v1`: other tensor libraries may come later and each library's array is a distinct
