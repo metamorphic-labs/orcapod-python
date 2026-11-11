@@ -68,3 +68,16 @@ expression filter that is never hashed keeps working exactly as today.
 ## Progress notes (for a successor)
 
 - 2026-11-11: spec + experiments committed; coordinator approved provisionally.
+- 2026-11-11: implemented polars_expr_v1 (parser, handler, registry + v0.1.json), tuple
+  predicates; corpus + golden additions (109 lines added, none changed); parser tests pass on
+  Polars 1.36.1, 1.41.2, 1.44.2.
+- Found: any PolarsFilter inside a PipelineJob upstream of a Join failed (Polars makes every
+  column nullable; tag str vs str|None). Coordinator chose option C: restore nullability for
+  every column except data columns (no golden move). Option A (all columns, moves the pinned
+  pipeline:polars_filter row data hashes) is with the developer; DESIGN_ISSUES PF1b open.
+- Found (coordinator filing separately): after an async job.run(), operator nodes read back
+  empty; job tests assert through a function pod.
+- Docs: docs/reference/hashing.md section "1c. Polars expression predicates"; PR #286 also adds
+  a "1c" section there, so on merging #286 renumber ours to 1d and fix the anchor in
+  docs/concepts/operators.md.
+- PR must be a DRAFT: identity design awaits the developer's confirmation.
