@@ -27,7 +27,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
-from orcapod.operators import Batch, GroupBy, Join
+from orcapod.operators import Batch, GroupBy, Join, SemiJoin
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
@@ -174,6 +174,20 @@ class TestOperators:
         _assert_exact(got["1"][0], _frame(1))
         _assert_exact(got["3"][0], _frame(3))
         assert (got["1"][1], got["3"][1]) == (10, 30)
+
+    def test_semi_join_keeps_frames_of_matching_rows(self) -> None:
+        """SemiJoin (a Polars semi join since ITL-847) returns the left frames exactly."""
+        keys = DictSource(
+            [{"g": "a", "k": "2", "w": 1}, {"g": "b", "k": "3", "w": 2}],
+            tag_columns=["g", "k"],
+        )
+        stream = SemiJoin()(_frame_source(), keys)
+        got = {str(tag["k"]): data["df"] for tag, data in stream.iter_data()}
+        assert sorted(got) == ["2", "3"]
+        _assert_exact(got["2"], _frame(2))
+        _assert_exact(got["3"], _frame(3))
+        _, data_schema = stream.output_schema()
+        assert data_schema["df"] is pl.DataFrame
 
 
 _STORES: dict[str, Callable[[Path], ArrowDatabaseProtocol]] = {
