@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -240,3 +242,59 @@ class TestProvenanceTokensMatchRowValues:
             for i, row in enumerate(rows)
         ]
         assert tokens == expected
+
+
+class TestUnhashableColumnTypes:
+    """A column type the Arrow hasher cannot hash is named in the error (ITL-926).
+
+    starfix 0.4.0 cannot hash ``fixed_size_list`` or ``map`` values; the source used to fail
+    with the hasher's bare ``NotImplementedError: Unsupported leaf type: ...``.
+    """
+
+    _FSL = pa.list_(pa.uint8(), 3)
+    _MAP = pa.map_(pa.string(), pa.int64())
+
+    def _table(self, **extra: pa.Array[Any]) -> pa.Table:
+        return pa.table({"k": ["a", "b"], "v": [1.0, 2.0], **extra})
+
+    def test_fixed_size_list_column_is_named(self):
+        table = self._table(rgb=pa.array([[1, 2, 3], [4, 5, 6]], self._FSL))
+        with pytest.raises(NotImplementedError) as info:
+            ArrowTableSource(table, tag_columns=["k"])
+        message = str(info.value)
+        assert "'rgb'" in message
+        assert str(self._FSL) in message
+        assert "'v'" not in message
+        assert isinstance(info.value.__cause__, NotImplementedError)
+
+    def test_map_column_is_named(self):
+        table = self._table(tags=pa.array([[("x", 1)], []], self._MAP))
+        with pytest.raises(NotImplementedError, match="'tags'"):
+            ArrowTableSource(table, tag_columns=["k"])
+
+    def test_every_unhashable_column_is_named(self):
+        table = self._table(
+            rgb=pa.array([[1, 2, 3], [4, 5, 6]], self._FSL),
+            tags=pa.array([[("x", 1)], []], self._MAP),
+        )
+        with pytest.raises(NotImplementedError) as info:
+            ArrowTableSource(table, tag_columns=["k"])
+        assert "'rgb'" in str(info.value)
+        assert "'tags'" in str(info.value)
+
+    def test_hashable_table_is_hashed_once(self, monkeypatch):
+        # Counts calls on the data context's hasher: the per-column probe must run only
+        # after the whole-table hash has failed, never on the success path.
+        from orcapod.contexts import resolve_context
+
+        hasher = resolve_context(None).arrow_hasher
+        calls: list[int] = []
+        original = hasher.hash_table
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(hasher, "hash_table", counting)
+        ArrowTableSource(self._table(), tag_columns=["k"])
+        assert len(calls) == 1

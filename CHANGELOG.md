@@ -189,6 +189,10 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
   hashes are byte-identical.
 - A non-nullable Spiral column arrives as `T`, and a nullable one as `T | None`, at every
   nesting level, through `Join`, function pods and save/load (tested against a pyspiral fake).
+- A source whose table has a column the Arrow hasher cannot hash (`fixed_size_list` or `map`
+  with starfix 0.4.0) raises `NotImplementedError` naming every such column and its Arrow
+  type, chained to the hasher's error. Before, it raised the hasher's bare
+  `Unsupported leaf type: ...`, which named no column.
 - `SpiralDBTableSource` errors name the project and dataset searched. Before, a wrong
   project, dataset or table all gave `Table 'x' not found in database.`
 - The docstrings give the real location of the saved `spiral login`
