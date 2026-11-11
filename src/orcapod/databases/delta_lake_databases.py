@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod.databases.utils import coerce_record_id
-from orcapod.databases.storage_utils import is_cloud_uri, parse_base_path
+from orcapod.databases.storage_utils import (
+    delta_to_pyarrow_dataset,
+    is_cloud_uri,
+    parse_base_path,
+)
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -316,7 +320,7 @@ class DeltaTableDatabase:
         try:
             # Get all existing IDs from Delta table using standard RECORD_ID_COLUMN
             # TODO: replace this with more targetted loading of only the target column and in batches
-            arrow_table = delta_table.to_pyarrow_table()
+            arrow_table = delta_to_pyarrow_dataset(delta_table).to_table()
             if arrow_table.num_rows == 0:
                 self._existing_ids_cache[record_key] = set()
             elif self.RECORD_ID_COLUMN not in arrow_table.column_names:
@@ -639,8 +643,8 @@ class DeltaTableDatabase:
         # Add Delta table data
         if (delta_table := self._get_delta_table(record_path)) is not None:
             try:
-                delta_table_data = delta_table.to_pyarrow_dataset(
-                    as_large_types=True
+                delta_table_data = delta_to_pyarrow_dataset(
+                    delta_table, as_large_types=True
                 ).to_table()
                 if delta_table_data.num_rows > 0:
                     tables_to_combine.append(delta_table_data)
@@ -850,7 +854,7 @@ class DeltaTableDatabase:
         """
         filter_expr = None
         # Use to_pyarrow_dataset with as_large_types for Polars compatible arrow table loading
-        dataset = delta_table.to_pyarrow_dataset(as_large_types=True)
+        dataset = delta_to_pyarrow_dataset(delta_table, as_large_types=True)
         if filters and expression is None:
             for filt in filters:
                 if len(filt) == 3:
