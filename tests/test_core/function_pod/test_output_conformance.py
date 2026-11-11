@@ -306,3 +306,31 @@ class TestConformingOutputsUnchanged:
         pod = make_pod(declared, returned)
         [(_tag, data)] = list(pod.pod(make_source()).iter_data())
         assert data.as_dict()["y"] == returned
+
+
+class TestConversionFailuresNameTheOutput:
+    """A value of the right type that cannot be stored is reported the same way."""
+
+    @pytest.mark.parametrize(
+        ("declared", "returned"),
+        [
+            pytest.param(np.int8, 300, id="out-of-range-for-int8"),
+            pytest.param(dt.datetime, dt.datetime(2020, 1, 1), id="naive-datetime"),
+        ],
+    )
+    def test_raises_output_type_error_that_is_a_value_error(
+        self, declared: Any, returned: Any
+    ) -> None:
+        pod = make_pod(declared, returned, name="unstorable")
+        with pytest.raises(errors.OutputTypeError, match="'unstorable'") as info:
+            list(pod.pod(make_source()).iter_data())
+        assert isinstance(info.value, ValueError)
+        assert info.value.output_key == "y"
+
+    def test_error_survives_pickling(self) -> None:
+        import pickle
+
+        error = errors.OutputTypeError("f", "y", int, 1.5)
+        restored = pickle.loads(pickle.dumps(error))
+        assert str(restored) == str(error)
+        assert restored.declared_type is int

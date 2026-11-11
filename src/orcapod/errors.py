@@ -95,20 +95,20 @@ class OutputTypeError(TypeError, ValueError):
             detail: Where inside the value the mismatch is, or why the conversion
                 failed, when that is not the value as a whole.
         """
-        self.function_name = function_name
-        self.output_key = output_key
-        self.declared_type = declared_type
-        self.value = value
-        self.detail = detail
+        self.function_name: str = function_name
+        self.output_key: str = output_key
+        self.declared_type: object = declared_type
+        self.value: object = value
+        self.detail: str | None = detail
         where = f": {detail}" if detail else ""
         value_repr = repr(value)
         if len(value_repr) > 80:
             value_repr = value_repr[:77] + "..."
         super().__init__(
             f"Function {function_name!r} returned {type_text(type(value))} "
-            f"({value_repr}) for output {output_key!r}, which is declared "
-            f"{type_text(declared_type)}{where}. Orcapod does not convert types "
-            "implicitly; convert the value in the function."
+            + f"({value_repr}) for output {output_key!r}, which is declared "
+            + f"{type_text(declared_type)}{where}. Orcapod does not convert types "
+            + "implicitly; convert the value in the function."
         )
 
     def __reduce__(self) -> tuple[object, ...]:

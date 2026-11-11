@@ -23,7 +23,6 @@ import types
 import typing
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from orcapod.errors import type_text
 
@@ -83,8 +82,8 @@ class Nonconformance:
     """
 
     path: str
-    expected: Any
-    value: Any
+    expected: object
+    value: object
 
     def describe(self) -> str | None:
         """Describe a nested mismatch for an error message; ``None`` at the top level."""
@@ -96,8 +95,8 @@ class Nonconformance:
         )
 
 
-def _numpy_kind(value: Any) -> str | None:
-    """Return the NumPy dtype kind of a NumPy scalar, or ``None`` for anything else.
+def _numpy_scalar(value: object) -> tuple[str, int] | None:
+    """Return ``(dtype kind, item size)`` of a NumPy scalar, or ``None`` for anything else.
 
     NumPy is only imported when the value's type comes from NumPy, so it is already loaded.
     """
@@ -106,22 +105,30 @@ def _numpy_kind(value: Any) -> str | None:
     import numpy as np
 
     if isinstance(value, np.generic):
-        return value.dtype.kind
+        return value.dtype.kind, value.dtype.itemsize
     return None
 
 
-def _numpy_type_kind(declared: Any) -> str | None:
-    """Return the dtype kind of a declared NumPy scalar type such as ``numpy.int8``."""
+def _numpy_kind(value: object) -> str | None:
+    scalar = _numpy_scalar(value)
+    return scalar[0] if scalar is not None else None
+
+
+def _numpy_type(declared: object) -> tuple[str, int] | None:
+    """Return ``(dtype kind, item size)`` of a declared NumPy scalar type (``numpy.int8``)."""
     if not isinstance(declared, type) or not declared.__module__.startswith("numpy"):
         return None
     import numpy as np
 
     if issubclass(declared, np.generic):
-        return np.dtype(declared).kind
+        dtype = np.dtype(declared)
+        return dtype.kind, dtype.itemsize
     return None
 
 
-def _check_integer(value: Any, rule: ConformanceRule, exact: Any = None) -> bool:
+def _check_integer(
+    value: object, rule: ConformanceRule, exact: type | None = None
+) -> bool:
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
@@ -131,12 +138,13 @@ def _check_integer(value: Any, rule: ConformanceRule, exact: Any = None) -> bool
     return rule.numpy_scalar_same_kind and _numpy_kind(value) in ("i", "u")
 
 
-def _check_float(value: Any, rule: ConformanceRule, float32: bool = False) -> bool:
-    kind = _numpy_kind(value)
+def _check_float(value: object, rule: ConformanceRule, float32: bool = False) -> bool:
+    scalar = _numpy_scalar(value)
+    kind = scalar[0] if scalar is not None else None
     if isinstance(value, bool) or kind == "b":
         return rule.bool_for_float and isinstance(value, bool)
     if float32:
-        if kind == "f" and value.dtype.itemsize == 4:
+        if scalar == ("f", 4):
             return True
         if isinstance(value, float) or kind == "f":
             return rule.float_for_float32 and (
@@ -154,14 +162,14 @@ def _check_float(value: Any, rule: ConformanceRule, float32: bool = False) -> bo
     return False
 
 
-def _check_bool(value: Any, rule: ConformanceRule) -> bool:
+def _check_bool(value: object, rule: ConformanceRule) -> bool:
     if isinstance(value, bool):
         return True
     return rule.numpy_scalar_same_kind and _numpy_kind(value) == "b"
 
 
 def _check_elements(
-    values: Iterable[Any], element_type: Any, rule: ConformanceRule, path: str
+    values: Iterable[object], element_type: object, rule: ConformanceRule, path: str
 ) -> Nonconformance | None:
     for i, item in enumerate(values):
         found = find_nonconformance(item, element_type, rule, f"{path}[{i}]")
@@ -170,9 +178,18 @@ def _check_elements(
     return None
 
 
+_PLAIN_TYPES: dict[object, type | tuple[type, ...]] = {
+    str: str,
+    bytes: bytes,
+    dt.datetime: dt.datetime,
+    dt.time: dt.time,
+    dt.timedelta: dt.timedelta,
+}
+
+
 def find_nonconformance(
-    value: Any,
-    declared: Any,
+    value: object,
+    declared: object,
     rule: ConformanceRule = OUTPUT_CONFORMANCE,
     path: str = "",
 ) -> Nonconformance | None:
@@ -190,7 +207,7 @@ def find_nonconformance(
     """
     mismatch = Nonconformance(path, declared, value)
     origin = typing.get_origin(declared)
-    args = typing.get_args(declared)
+    args: tuple[object, ...] = typing.get_args(declared)
 
     if origin is typing.Union or origin is types.UnionType:
         non_none = [a for a in args if a is not type(None)]
@@ -209,46 +226,41 @@ def find_nonconformance(
         return None if _check_integer(value, rule) else mismatch
     if declared is float:
         return None if _check_float(value, rule) else mismatch
-    if declared is str:
-        return None if isinstance(value, str) else mismatch
-    if declared is bytes:
-        return None if isinstance(value, bytes) else mismatch
-    if declared is dt.datetime:
-        return None if isinstance(value, dt.datetime) else mismatch
     if declared is dt.date:
         if isinstance(value, dt.datetime):
             return None if rule.datetime_for_date else mismatch
         return None if isinstance(value, dt.date) else mismatch
-    if declared is dt.time:
-        return None if isinstance(value, dt.time) else mismatch
-    if declared is dt.timedelta:
-        return None if isinstance(value, dt.timedelta) else mismatch
+    plain = _PLAIN_TYPES.get(declared)
+    if plain is not None:
+        return None if isinstance(value, plain) else mismatch
 
-    numpy_kind = _numpy_type_kind(declared)
-    if numpy_kind in ("i", "u"):
-        return None if _check_integer(value, rule, exact=declared) else mismatch
-    if numpy_kind == "f":
-        import numpy as np
-
-        is_float32 = np.dtype(declared).itemsize == 4
-        return None if _check_float(value, rule, float32=is_float32) else mismatch
-    if numpy_kind == "b":
-        return None if _check_bool(value, rule) else mismatch
+    numpy_type = _numpy_type(declared)
+    if numpy_type is not None and isinstance(declared, type):
+        kind, itemsize = numpy_type
+        if kind in ("i", "u"):
+            return None if _check_integer(value, rule, exact=declared) else mismatch
+        if kind == "f":
+            float32 = itemsize == 4
+            return None if _check_float(value, rule, float32=float32) else mismatch
+        if kind == "b":
+            return None if _check_bool(value, rule) else mismatch
+        return None
 
     if origin is list:
-        element_type = args[0] if args else Any
+        element_type = args[0] if args else object
         if isinstance(value, list) or (
             rule.sequence_for_list and isinstance(value, tuple)
         ):
-            return _check_elements(value, element_type, rule, path)
+            return _check_elements(
+                typing.cast("Iterable[object]", value), element_type, rule, path
+            )
         if (
             rule.sequence_for_list
             and isinstance(value, Iterable)
             and not isinstance(value, (str, bytes, Mapping))
         ):
-            return (
-                None  # other iterables pass unchecked (consuming them would empty them)
-            )
+            # Other iterables pass unchecked: checking would consume a generator.
+            return None
         return mismatch
 
     if origin is tuple:
@@ -257,11 +269,12 @@ def find_nonconformance(
             or (rule.sequence_for_list and isinstance(value, list))
         ):
             return mismatch
+        items = list(typing.cast("Iterable[object]", value))
         if len(args) == 2 and args[1] is Ellipsis:
-            return _check_elements(value, args[0], rule, path)
-        if len(value) != len(args):
+            return _check_elements(items, args[0], rule, path)
+        if len(items) != len(args):
             return mismatch
-        for i, (item, item_type) in enumerate(zip(value, args)):
+        for i, (item, item_type) in enumerate(zip(items, args)):
             found = find_nonconformance(item, item_type, rule, f"{path}[{i}]")
             if found is not None:
                 return found
@@ -270,8 +283,9 @@ def find_nonconformance(
     if origin is dict:
         if not isinstance(value, Mapping):
             return mismatch
-        key_type, value_type = args if len(args) == 2 else (Any, Any)
-        for key, item in value.items():
+        key_type, value_type = args if len(args) == 2 else (object, object)
+        mapping = typing.cast("Mapping[object, object]", value)
+        for key, item in mapping.items():
             found = find_nonconformance(key, key_type, rule, f"{path}[{key!r}] key")
             if found is None:
                 found = find_nonconformance(item, value_type, rule, f"{path}[{key!r}]")
@@ -288,8 +302,8 @@ def find_nonconformance(
             return None
         for field in dataclasses.fields(declared):
             found = find_nonconformance(
-                getattr(value, field.name),
-                hints.get(field.name, Any),
+                typing.cast(object, getattr(value, field.name)),
+                typing.cast(object, hints.get(field.name, object)),
                 rule,
                 f"{path}.{field.name}",
             )

@@ -648,7 +648,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             # Find the output that fails on its own, so the error can name it.
             for key, value in output_data.items():
                 try:
-                    converter.python_dicts_to_arrow_table(
+                    _ = converter.python_dicts_to_arrow_table(
                         [{key: value}], python_schema={key: output_schema[key]}
                     )
                 except Exception:
