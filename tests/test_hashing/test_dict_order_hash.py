@@ -53,11 +53,18 @@ def _row_hash(value: Any, value_type: Any = None) -> str:
 
 
 def _arrow_source(entries: list[dict[str, Any]]) -> ArrowTableSource:
+    # Non-nullable like a DictSource column declared ``dict[str, int]``.
     table = pa.table(
         {
             "k": pa.array(["r"], pa.large_string()),
             "m": pa.array([entries], KV_TYPE),
-        }
+        },
+        schema=pa.schema(
+            [
+                pa.field("k", pa.large_string(), nullable=False),
+                pa.field("m", KV_TYPE, nullable=False),
+            ]
+        ),
     )
     return ArrowTableSource(table, tag_columns=["k"], source_id="itl905")
 

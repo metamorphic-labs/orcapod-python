@@ -22,6 +22,7 @@ Keys that cannot be ordered against each other, duplicate keys and null entries 
 
 from __future__ import annotations
 
+import functools
 import math
 import types
 import typing
@@ -50,11 +51,7 @@ def is_dict_arrow_type(arrow_type: pa.DataType) -> bool:
     Returns:
         True for a dict-encoded list type.
     """
-    if not (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    ):
+    if not _is_list_type(arrow_type):
         return False
     element = arrow_type.value_type
     return (
@@ -62,6 +59,87 @@ def is_dict_arrow_type(arrow_type: pa.DataType) -> bool:
         and element.num_fields == 2
         and {element.field(0).name, element.field(1).name} == {"key", "value"}
     )
+
+
+def _is_list_type(arrow_type: pa.DataType) -> bool:
+    return (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    )
+
+
+def contains_dict_arrow_type(arrow_type: pa.DataType) -> bool:
+    """Return whether a dict-encoded list occurs anywhere in ``arrow_type``.
+
+    Looks through list elements, struct fields and extension storage.
+
+    Args:
+        arrow_type: The Arrow type to search.
+
+    Returns:
+        True if ``arrow_type`` is or contains a dict-encoded list.
+    """
+    try:
+        return _contains_dict_cached(arrow_type)
+    except TypeError:  # an extension type that does not implement __hash__
+        return _contains_dict(arrow_type)
+
+
+@functools.lru_cache(maxsize=1024)
+def _contains_dict_cached(arrow_type: pa.DataType) -> bool:
+    return _contains_dict(arrow_type)
+
+
+def _contains_dict(arrow_type: pa.DataType) -> bool:
+    if isinstance(arrow_type, pa.ExtensionType):
+        return contains_dict_arrow_type(arrow_type.storage_type)
+    if _is_list_type(arrow_type):
+        return is_dict_arrow_type(arrow_type) or contains_dict_arrow_type(
+            arrow_type.value_type
+        )
+    if pa.types.is_struct(arrow_type):
+        return any(
+            contains_dict_arrow_type(arrow_type.field(i).type)
+            for i in range(arrow_type.num_fields)
+        )
+    return False
+
+
+def canonical_storage_value(arrow_type: pa.DataType, value: Any) -> Any:
+    """Return a storage value with the entries of every dict in canonical key order.
+
+    ``value`` is one value of an Arrow column of type ``arrow_type`` as ``to_pylist``
+    reads it. Dicts at any depth (inside lists, struct fields and extension storage)
+    are sorted innermost first; every other list keeps its order. The input is not
+    mutated.
+
+    Args:
+        arrow_type: The Arrow type of ``value``.
+        value: The storage value.
+
+    Returns:
+        ``value`` itself when ``arrow_type`` holds no dict, otherwise a canonical copy.
+
+    Raises:
+        InvalidDictKeysError: For a dict with a null entry, a NaN key, keys that cannot
+            be ordered against each other, or a duplicate key.
+    """
+    if value is None or not contains_dict_arrow_type(arrow_type):
+        return value
+    if isinstance(arrow_type, pa.ExtensionType):
+        return canonical_storage_value(arrow_type.storage_type, value)
+    if _is_list_type(arrow_type):
+        element_type = arrow_type.value_type
+        elements = [canonical_storage_value(element_type, v) for v in value]
+        if is_dict_arrow_type(arrow_type):
+            return sort_dict_entries(elements)
+        return elements
+    # A struct holding a dict somewhere in its fields.
+    return {
+        field.name: canonical_storage_value(field.type, value.get(field.name))
+        for field in arrow_type
+    }
 
 
 def _key_rank(key: Any) -> tuple[Any, ...]:
