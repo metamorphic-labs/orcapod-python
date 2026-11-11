@@ -398,13 +398,27 @@ Where `equals` and `assert` disagree (index name and dtype, MultiIndex names, `c
 category order, Series name), `v1` follows `assert`. Today's hash already does that for index
 name, index dtype, MultiIndex names and Series name, so following `assert` keeps them.
 
-**Grammar coverage is a decision.** Values that hash and store on `main` but fall outside the
-prototype grammar raise `ValueError` under it: Timestamp column labels, `period[M]` columns and
-`interval[int64, right]` columns. A `v1` that raises for them would break values that work in
-v0.2.0. Recommended: the grammar covers every label and dtype that stores today, adding
-Timestamp / Timedelta / Period labels and `{"period": <freq>}` / `{"interval": [<subtype>,
-<closed>]}` dtypes. Anything else raises `ValueError` naming the column, as the Polars grammar
-does. Sparse columns already fail today (`TypeError`).
+**Grammar coverage.** The grammar covers every label and dtype that hashes and stores on
+v0.2.0, so no value that works today starts raising. The label grammar adds
+`{"timestamp": [<epoch value>, <unit>, <tz or null>]}`, `{"date": <iso>}`,
+`{"timedelta": [<value>, <unit>]}` and `{"period": [<ordinal>, <freq>]}`. The dtype grammar adds
+`{"period": <freq>}` and `{"interval": [<subtype dtype>, <closed>]}`. Anything else raises
+`ValueError` naming the column, as the Polars grammar does. Sparse columns already fail today
+(`TypeError`). Measured (`claim_i_v1_descriptor.py`, "Grammar coverage"):
+
+| Pair (pandas distinguishes each, except where noted) | Hashes today | `v1` hashes | `v1` | Kept through storage |
+|---|---|---|---|---|
+| Timestamp column labels, naive vs UTC | yes | yes | differ | yes |
+| Timestamp vs str column labels | yes | yes | differ | yes |
+| `period[M]` vs `period[Q]` column | yes | yes | differ | yes |
+| interval column, closed right vs left | yes | yes | differ | yes |
+| DatetimeIndex vs Index[int64] | yes | yes | differ | yes |
+| Timedelta column labels | yes | yes | differ | store fails on `main` |
+| Period column labels, freq M vs D | yes | yes | differ | store fails on `main` |
+| `date` vs Timestamp column labels (`equals`: equal) | yes | yes | differ | store fails on `main` |
+
+The last three hash on `main` but cannot be stored (see "Out of scope findings"), so they never
+reach a stored key. `v1` still hashes them.
 
 **If ITL-898 adds an order option to starfix.** The option would cover column order, MultiIndex
 level order (index levels are table fields) and struct field order. It would not cover the
@@ -431,9 +445,9 @@ on purpose.
 
 1. Approve the labelled design (`pandas_dataframe_v1` / `pandas_series_v1`, every pandas value
    hash moves) over the sorted-order variant.
-2. Scope of `v1`: the full descriptor in (i), which agrees with `assert_frame_equal` defaults
-   and settles ITL-887 (recommended), or order only. Also: grammar coverage (Timestamp labels,
-   Period, Interval) and the mechanism (descriptor vs a starfix option, ITL-898).
+2. Scope of `v1`: the full descriptor in (i), which agrees with `assert_frame_equal` defaults,
+   settles ITL-887 and covers every value that hashes and stores today (recommended), or order
+   only. Also the mechanism (descriptor vs a starfix option, ITL-898).
 3. Base: decided by the coordinator. Wait for #286 to merge, then build from `main` on a shared
    helper.
 4. `pa.Table` values: approve the separation and `arrow_table_v1`; one PR or two; `Table` vs
@@ -445,6 +459,8 @@ on purpose.
   `["1", "1"]`: the stored value differs from the hashed one.
 * An `ArrowDtype` struct column hashes but cannot be stored (`to_pandas` raises `ValueError`).
 * `flags.allows_duplicate_labels` is lost in storage.
+* Frames with `datetime.date`, Timedelta or Period column labels hash but cannot be stored
+  (`ValueError` / `TypeError` from the storage round trip).
 * In the ephemeral run, `make`'s pipeline table grows by 1 row per session although 2 rows
   recompute (seen with the old hash too, so it predates this change).
 * `CLAUDE.md` says `FunctionNode.iter_data()` Phase 1 returns all records in the shared table;

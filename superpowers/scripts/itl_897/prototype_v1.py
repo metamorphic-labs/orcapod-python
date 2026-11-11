@@ -111,8 +111,15 @@ _MASKED_DTYPES = {
 
 
 def pandas_label(label: Any) -> Any:
-    """Typed JSON for a pandas label, so ``0`` and ``"0"`` differ."""
+    """Typed JSON for a pandas label, so ``0`` and ``"0"`` differ.
+
+    Covers every label kind that hashes and stores on v0.2.0: str, None, bool, int, float,
+    tuples (MultiIndex columns), Timestamp / datetime, date, Timedelta / timedelta, Period.
+    """
+    import datetime as dt
+
     import numpy as np
+    import pandas as pd
 
     if label is None or isinstance(label, str):
         return label
@@ -124,6 +131,16 @@ def pandas_label(label: Any) -> Any:
         return {"float": float(label).hex()}
     if isinstance(label, tuple):
         return {"tuple": [pandas_label(part) for part in label]}
+    if isinstance(label, (pd.Timestamp, dt.datetime, np.datetime64)):
+        ts = pd.Timestamp(label)
+        return {"timestamp": [ts.value, ts.unit, None if ts.tz is None else str(ts.tz)]}
+    if isinstance(label, dt.date):
+        return {"date": label.isoformat()}
+    if isinstance(label, (pd.Timedelta, dt.timedelta, np.timedelta64)):
+        td = pd.Timedelta(label)
+        return {"timedelta": [td.value, td.unit]}
+    if isinstance(label, pd.Period):
+        return {"period": [label.ordinal, label.freqstr]}
     raise ValueError(
         f"label {label!r} of type {type(label).__name__} is outside the grammar"
     )
@@ -166,6 +183,10 @@ def pandas_dtype_descriptor(dtype: Any) -> Any:
         return {"string": dtype.storage}
     if isinstance(dtype, pd.DatetimeTZDtype):
         return {"datetimetz": [dtype.unit, str(dtype.tz)]}
+    if isinstance(dtype, pd.PeriodDtype):
+        return {"period": dtype.freq.freqstr}
+    if isinstance(dtype, pd.IntervalDtype):
+        return {"interval": [pandas_dtype_descriptor(dtype.subtype), dtype.closed]}
     if isinstance(dtype, pd.api.extensions.ExtensionDtype):
         if dtype.name in _MASKED_DTYPES:
             return {"masked": dtype.name}

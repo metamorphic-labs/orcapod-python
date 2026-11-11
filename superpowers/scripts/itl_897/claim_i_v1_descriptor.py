@@ -10,6 +10,7 @@ Run: ``uv run python superpowers/scripts/itl_897/claim_i_v1_descriptor.py``
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 import warnings
 from pathlib import Path
@@ -26,6 +27,8 @@ from claim_a_equality_vs_hash import (  # noqa: E402
     _passes,
 )
 from pandas.testing import assert_frame_equal, assert_series_equal  # noqa: E402
+
+import pandas as pd  # noqa: E402
 
 from orcapod.contexts import get_default_context  # noqa: E402
 
@@ -46,7 +49,99 @@ def _same(a: str, b: str) -> str:
     return "equal" if a == b else "differ"
 
 
+def _ts_labels(tz: str | None) -> pd.DataFrame:
+    labels = pd.to_datetime(["2020-01-01", "2020-01-02"])
+    return pd.DataFrame(
+        [[1, 2]], columns=labels if tz is None else labels.tz_localize(tz)
+    )
+
+
+# Values that hash and store on v0.2.0 and are outside the minimal grammar, in pairs that
+# pandas distinguishes: v1 must hash every value and tell each pair apart.
+COVERAGE: list[tuple[str, pd.DataFrame, pd.DataFrame]] = [
+    ("Timestamp column labels: naive vs UTC", _ts_labels(None), _ts_labels("UTC")),
+    (
+        "Timestamp vs str column labels",
+        _ts_labels(None),
+        pd.DataFrame([[1, 2]], columns=["2020-01-01 00:00:00", "2020-01-02 00:00:00"]),
+    ),
+    (
+        "date vs Timestamp column labels",
+        pd.DataFrame([[1]], columns=[dt.date(2020, 1, 1)]),
+        pd.DataFrame([[1]], columns=[pd.Timestamp("2020-01-01")]),
+    ),
+    (
+        "Timedelta column labels",
+        pd.DataFrame([[1]], columns=[pd.Timedelta(seconds=1)]),
+        pd.DataFrame([[1]], columns=[pd.Timedelta(seconds=2)]),
+    ),
+    (
+        "Period column labels: freq M vs D",
+        pd.DataFrame([[1]], columns=[pd.Period("2020-01", freq="M")]),
+        pd.DataFrame([[1]], columns=[pd.Period("2020-01-01", freq="D")]),
+    ),
+    (
+        "period column: freq M vs Q",
+        pd.DataFrame({"p": pd.period_range("2020-01", periods=2, freq="M")}),
+        pd.DataFrame({"p": pd.period_range("2020Q1", periods=2, freq="Q")}),
+    ),
+    (
+        "interval column: closed right vs left",
+        pd.DataFrame({"i": pd.interval_range(0, 2, closed="right")}),
+        pd.DataFrame({"i": pd.interval_range(0, 2, closed="left")}),
+    ),
+    (
+        "DatetimeIndex vs Index[int64]",
+        pd.DataFrame({"a": [1, 2]}, index=pd.date_range("2020-01-01", periods=2)),
+        pd.DataFrame({"a": [1, 2]}, index=[0, 1]),
+    ),
+]
+
+
+def _coverage() -> None:
+    print("\n## Grammar coverage: values that work on v0.2.0\n")
+    print("| pair | today hashes | equals | v1 hashes | v1 | v1 kept through storage |")
+    print("|---|---|---|---|---|---|")
+    for name, a, b in COVERAGE:
+        today_ok = not any(_h(v).startswith("ERROR") for v in (a, b))
+        prototype_v1.install_full_descriptor()
+        v1a, v1b = _h(a), _h(b)
+        v1_ok = not (v1a.startswith("ERROR") or v1b.startswith("ERROR"))
+        try:
+            kept: object = all(
+                _h(LT_DF.storage_to_python(LT_DF.python_to_storage(v))) == _h(v)
+                for v in (a, b)
+            )
+        except Exception as exc:  # noqa: BLE001 - storage fails on main too
+            kept = f"store fails on main ({type(exc).__name__})"
+        eq = "equal" if a.equals(b) else "differ"
+        print(
+            f"| {name} | {today_ok} | {eq} | {v1_ok if v1_ok else v1a[:60]} | "
+            f"{_same(v1a, v1b)} | {kept} |"
+        )
+        _restore()
+
+
+_RELEASED: dict[str, Any] = {}
+
+
+def _restore() -> None:
+    from orcapod.hashing.semantic_hashing import builtin_handlers as bh
+
+    bh.PandasDataFrameHandler.handle = _RELEASED["df"]  # type: ignore[method-assign]
+    bh.PandasSeriesHandler.handle = _RELEASED["series"]  # type: ignore[method-assign]
+
+
+def _remember() -> None:
+    from orcapod.hashing.semantic_hashing import builtin_handlers as bh
+
+    _RELEASED["df"] = bh.PandasDataFrameHandler.handle
+    _RELEASED["series"] = bh.PandasSeriesHandler.handle
+
+
 def main() -> None:
+    _remember()
+    _coverage()
     groups = [
         ("DataFrame", FRAME_CASES, assert_frame_equal, LT_DF),
         ("Series", SERIES_CASES, assert_series_equal, LT_S),
