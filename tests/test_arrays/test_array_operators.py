@@ -176,20 +176,24 @@ def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
     for group, merged in got.items():
         names = [n for n in NAMES if GROUP[n] == group]
         assert len(merged) == 2
-        expected = [
+        remaining = [
             [expected_x(n) for n in names],
             [expected_x(n, shift) for n in names],
         ]
+        # Each merged list matches a distinct expected list, so a lost input fails.
         for members in merged:
-            assert any(
-                len(members) == len(e)
-                and all(_same_array(g, x) for g, x in zip(members, e, strict=True))
-                for e in expected
+            match = next(
+                (
+                    i
+                    for i, e in enumerate(remaining)
+                    if len(members) == len(e)
+                    and all(_same_array(g, x) for g, x in zip(members, e, strict=True))
+                ),
+                None,
             )
-        if shift:
-            assert not all(
-                _same_array(a, b) for a, b in zip(merged[0], merged[1], strict=True)
-            )
+            assert match is not None, f"unexpected member list in {group}"
+            del remaining[match]
+        assert not remaining
 
 
 def _same_array(got: Any, expected: Any) -> bool:
