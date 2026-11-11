@@ -45,7 +45,7 @@ Verified empirically in Task 2 before committing.
 - `tests/test_packaging.py`: replace `test_license_is_metamorphic_proprietary` with
   `test_license_is_mit`: `project.license == "MIT"`, no `License ::` classifier, and `LICENSE`
   is the standard MIT text with the single copyright line
-  `Copyright (c) 2026 Metamorphic Labs, Inc.`. Add `test_built_metadata_declares_mit` over the
+  `Copyright (c) 2025-2026 Nauticalab` (holder decided by the developer, November 10, 2026). Add `test_built_metadata_declares_mit` over the
   existing `built_dists` fixture: wheel METADATA has `License-Expression: MIT` and no
   `License:` field or license classifier; sdist PKG-INFO the same.
 - Run; show both fail.
