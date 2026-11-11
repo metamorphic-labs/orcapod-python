@@ -195,20 +195,22 @@ def test_pending_row_with_stored_id_reads_as_flush_keeps_it(
 def fail_id_refresh_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the next stored-ID refresh fail once, as a transient storage error would.
 
-    ``DeltaTable.to_pyarrow_table`` is the backend call the stored-ID refresh makes; the
-    read methods scan through ``to_pyarrow_dataset``, so only the refresh fails.
+    Every scan opens the table with ``DeltaTable.to_pyarrow_dataset`` (through
+    ``delta_to_pyarrow_dataset``, ITL-892). The read methods pass ``as_large_types=True``
+    and the stored-ID refresh does not, so only the refresh fails.
     """
-    original = deltalake.DeltaTable.to_pyarrow_table
+    original = deltalake.DeltaTable.to_pyarrow_dataset
     calls = {"n": 0}
 
-    def to_pyarrow_table(self: deltalake.DeltaTable) -> pa.Table:
-        """Raise on the first call, then read the table as the backend does."""
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise OSError("transient storage error")
-        return original(self)
+    def to_pyarrow_dataset(self: deltalake.DeltaTable, **kwargs: Any) -> Any:
+        """Raise on the refresh's first open, then open the table as the backend does."""
+        if "as_large_types" not in kwargs:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient storage error")
+        return original(self, **kwargs)
 
-    monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_table", to_pyarrow_table)
+    monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", to_pyarrow_dataset)
 
 
 @pytest.mark.usefixtures("fail_id_refresh_once")
