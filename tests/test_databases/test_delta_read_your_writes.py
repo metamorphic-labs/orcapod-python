@@ -485,3 +485,26 @@ def test_query_on_column_neither_side_has_raises(tmp_path: Path, flushed: bool) 
 
     with pytest.raises(pa.ArrowInvalid, match="No match for FieldRef"):
         _ = db.get_records_with_column_value(PATH, {"y": 1})
+
+
+def test_pending_row_with_null_id_reads_back_like_after_flush(tmp_path: Path) -> None:
+    """A pending row with a null record id is returned when a stored row also has one.
+
+    Delta's merge matches ids with ``=``, and ``null = null`` is not true, so a flush
+    inserts a pending row whose id is null even when a stored row's id is null too.
+    """
+    null_id = pa.table(
+        {
+            "__record_id": pa.array([None], type=pa.large_binary()),
+            "v": pa.array([5], type=pa.int64()),
+            "g": pa.array([0], type=pa.int64()),
+        }
+    )
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, pa.concat_tables([_rows(["a"], [1]), null_id]), flush=True)
+    db.add_records(PATH, null_id.set_column(1, "v", pa.array([6], type=pa.int64())))
+
+    before = _values(db.get_all_records(PATH))
+    db.flush()
+
+    assert before == _values(db.get_all_records(PATH)) == [1, 5, 6]

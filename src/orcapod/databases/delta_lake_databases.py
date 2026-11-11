@@ -926,12 +926,15 @@ class DeltaTableDatabase:
             return None
         stored_ids = self._get_existing_ids(record_path)
         if stored_ids:
-            id_type = pending.schema.field(self.RECORD_ID_COLUMN).type
-            is_stored = pc.is_in(
-                pending[self.RECORD_ID_COLUMN],
-                value_set=pa.array(list(stored_ids), type=id_type),
-            )
-            pending = pending.filter(pc.invert(is_stored))
+            # The mask is built from the pending ids against the cached set, so its
+            # cost follows the pending batch, not the stored table. A null id is
+            # never matched by the merge (``null = null`` is not true), so its row
+            # is kept.
+            keep = [
+                record_id is None or record_id not in stored_ids
+                for record_id in pending[self.RECORD_ID_COLUMN].to_pylist()
+            ]
+            pending = pending.filter(pa.array(keep, type=pa.bool_()))
         return pending if pending.num_rows > 0 else None
 
     def _combine_stored_and_pending(
