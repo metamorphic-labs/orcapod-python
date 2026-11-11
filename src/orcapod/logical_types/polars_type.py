@@ -47,7 +47,7 @@ carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``re
              | "float16" | "float32" | "float64"
              | "boolean" | "string" | "binary" | "date" | "time" | "null"
              | "categorical"
-             | {"enum": [<category>, ...]}          categories in their order
+             | {"enum": [<category>, ...]}          every declared category, in order
              | {"decimal": [<precision>, <scale>]}
              | {"datetime": [<unit>, <time zone or null>]}
              | {"duration": <unit>}
@@ -55,8 +55,10 @@ carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``re
              | {"array": [<dtype>, <size>]}         a multi-dimensional array nests
              | {"struct": {<field>: <dtype>, ...}}
 
-Keys are sorted, so column order and struct field order are not part of the identity; Enum
-category order is. ``"v"`` versions the grammar: any change to it must bump ``"v"``, which
+Keys are sorted, so column order and struct field order are not part of the identity. An
+Enum's full enumeration of choices is part of its dtype: its categories in declared order,
+including categories no row holds, so ``Enum(["a", "b"])``, ``Enum(["b", "a"])`` and
+``Enum(["a", "b", "z"])`` hash differently over the same values. ``"v"`` versions the grammar: any change to it must bump ``"v"``, which
 changes every frame hash on purpose. A dtype outside the grammar raises ``ValueError`` naming
 the column.
 """

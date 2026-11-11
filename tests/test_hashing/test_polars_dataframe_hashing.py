@@ -147,6 +147,28 @@ class TestDifferentFramesHashDifferent:
         ]
         assert _all_distinct(frames)
 
+    def test_enum_category_order_is_identity(self) -> None:
+        values = ["a", "b"]
+        ab = pl.DataFrame({"e": pl.Series(values, dtype=pl.Enum(["a", "b"]))})
+        ba = pl.DataFrame({"e": pl.Series(values, dtype=pl.Enum(["b", "a"]))})
+        assert _data_hash(ab) != _data_hash(ba)
+
+    def test_enum_unused_categories_are_identity(self) -> None:
+        """No row holds ``z``, yet ``Enum(a, b)`` and ``Enum(a, b, z)`` are different types."""
+        values = ["a", "b"]
+        ab = pl.DataFrame({"e": pl.Series(values, dtype=pl.Enum(["a", "b"]))})
+        abz = pl.DataFrame({"e": pl.Series(values, dtype=pl.Enum(["a", "b", "z"]))})
+        assert _data_hash(ab) != _data_hash(abz)
+
+    def test_enum_series_categories_are_identity(self) -> None:
+        values = ["a"]
+        series = [
+            pl.Series("e", values, dtype=pl.Enum(["a", "b"])),
+            pl.Series("e", values, dtype=pl.Enum(["b", "a"])),
+            pl.Series("e", values, dtype=pl.Enum(["a", "b", "z"])),
+        ]
+        assert _all_distinct(series)
+
     def test_string_categorical_and_enums_all_differ(self) -> None:
         values = ["a", "b"]
         frames = [

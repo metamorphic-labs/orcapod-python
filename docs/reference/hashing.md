@@ -274,7 +274,7 @@ series: {"v": 1, "kind": "polars.series", "name": <name>, "height": <rows>,
 <dtype> := "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
          | "float16" | "float32" | "float64" | "boolean" | "string" | "binary"
          | "date" | "time" | "null" | "categorical"
-         | {"enum": [<category>, ...]}               categories in their order
+         | {"enum": [<category>, ...]}               every declared category, in order
          | {"decimal": [<precision>, <scale>]}
          | {"datetime": [<unit>, <time zone or null>]}
          | {"duration": <unit>}
@@ -286,8 +286,10 @@ series: {"v": 1, "kind": "polars.series", "name": <name>, "height": <rows>,
 So two frames hash equal exactly when they have the same row count, the same column names,
 the same dtype for each name (Enum categories and their order, Decimal precision and scale,
 Datetime unit and time zone, Duration unit and Array shape included) and the same values.
-Chunking, slice offsets, the bytes under null slots, column order and struct field order do
-not matter. `"v"` versions the grammar: changing the grammar bumps it and changes every
+An Enum's full enumeration of choices is part of its dtype: all its declared categories in
+declared order, including categories no row holds, so `Enum(["a", "b"])`, `Enum(["b", "a"])`
+and `Enum(["a", "b", "z"])` hash differently over the same values. Chunking, slice offsets,
+the bytes under null slots, column order and struct field order do not matter. `"v"` versions the grammar: changing the grammar bumps it and changes every
 Polars value hash on purpose. A dtype outside the grammar raises `ValueError` naming the
 column.
 
