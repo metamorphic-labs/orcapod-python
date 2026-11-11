@@ -276,6 +276,7 @@ def _run_pipeline_process(store_path: Path, marker: Path) -> dict[str, Any]:
         [sys.executable, "-c", _CROSS_PROCESS_SCRIPT, str(store_path), str(marker)],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])

@@ -271,6 +271,20 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
 
 
 def _content_hash(descriptor: dict[str, Any], df: pl.DataFrame) -> ContentHash:
+    """Combine a descriptor and a frame's values into the content hash.
+
+    The digest is ``sha256(descriptor_json + b"\x00" + starfix_digest)``, where
+    ``descriptor_json`` is ``descriptor`` as canonical JSON (keys sorted, separators ``","``
+    and ``":"``, UTF-8, non-ASCII kept) and ``starfix_digest`` is
+    ``ArrowDigester.hash_table`` of ``_hash_projection(df)``.
+
+    Args:
+        descriptor: The frame or Series descriptor in the module's grammar.
+        df: The frame whose values are hashed (a Series is passed as its one-column frame).
+
+    Returns:
+        A ``ContentHash`` with method ``"sha256"``.
+    """
     descriptor_bytes = json.dumps(
         descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -327,16 +341,42 @@ def polars_series_content_hash(series: pl.Series) -> ContentHash:
 
 
 def _frame_to_ipc_bytes(df: pl.DataFrame) -> bytes:
+    """Serialise a frame to the storage envelope after checking its dtypes.
+
+    Args:
+        df: The frame to store.
+
+    Returns:
+        Arrow IPC stream bytes holding the frame, exported with
+        ``compat_level=pl.CompatLevel.oldest()``, as one record batch.
+
+    Raises:
+        ValueError: If a column's dtype cannot round-trip exactly (see
+            ``check_polars_schema_storable``).
+    """
     check_polars_schema_storable(df.schema)
     table = df.to_arrow(compat_level=pl.CompatLevel.oldest()).combine_chunks()
     return table_to_ipc_bytes(table)
 
 
 def _ipc_bytes_to_frame(storage_value: Any) -> pl.DataFrame:
+    """Read the storage envelope back into a frame with its stored column names.
+
+    ``pl.from_arrow`` renames a column called ``""`` to ``"column_0"`` (and then fails if a
+    ``"column_0"`` exists too), so the table is read under positional names and the stored
+    names are restored afterwards.
+
+    Args:
+        storage_value: Arrow IPC stream bytes (or a buffer) as stored in ``large_binary``.
+
+    Returns:
+        The frame, with the schema it was stored with.
+
+    Raises:
+        TypeError: If the stream does not decode to a ``pl.DataFrame``.
+    """
     table = ipc_bytes_to_table(storage_value)
     names = table.column_names
-    # ``pl.from_arrow`` renames a column called "" to "column_0" (and then fails if a
-    # "column_0" exists too), so read under positional names and restore the stored ones.
     frame = pl.from_arrow(table.rename_columns([str(i) for i in range(len(names))]))
     if not isinstance(frame, pl.DataFrame):
         raise TypeError(

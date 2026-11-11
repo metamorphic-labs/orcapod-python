@@ -329,6 +329,7 @@ def test_hash_is_identical_across_processes(seed: str) -> None:
             [sys.executable, "-c", _CROSS_PROCESS_SCRIPT],
             capture_output=True,
             text=True,
+            check=False,
             env=env,
         )
         for _ in range(2)
