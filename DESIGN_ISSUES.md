@@ -2524,7 +2524,7 @@ function pod downstream of a filter, so a 0.2 store recomputes those results onc
 ## `src/orcapod/databases/` — PipelineJob run time quadratic in rows
 
 ### PQ1 — Every row a function node processes scans the rows already stored
-**Status:** in progress
+**Status:** resolved
 **Severity:** high
 **Issue:** ITL-919
 
@@ -2545,10 +2545,21 @@ pod: 0.09 ms).
   order, ids and schemas are unchanged (differential check against `main` on a joined
   multi-node pipeline, both orchestrators). Store work per row is now independent of rows
   stored (tests count Arrow bytes allocated per row).
-- `DeltaTableDatabase`: **open.** One Delta MERGE commit per row per table (cost grows with
-  the table and leaves one file per row), lookups re-open and read every file, the
-  existing-id cache is refreshed after every flush, and the pending batch is scanned per
-  lookup. Making it fast changes when rows are committed; awaiting the developer's decision.
-  Related: `get_records_with_column_value` searches only the pending batch when one exists
-  (ignores committed rows) and `get_records_by_ids` ignores pending rows; reported to the
-  coordinator and filed as ITL-923, not fixed here.
+- `DeltaTableDatabase`: one Delta MERGE commit per row per table (cost grows with the
+  table and leaves one file per row), lookups re-opened and read every file, the
+  existing-id cache was re-read after every flush, and the pending batch was scanned per
+  lookup (main: 80 / 198 / 509 ms per row at 100 / 400 / 1,000 rows, sync). **Fix:** function
+  nodes inside `PipelineJob.run` commit every `commit_every_rows` rows (default 100), at node
+  end, best-effort on failure and at job end, results before pipeline records; a node used
+  on its own still commits per row. The store keeps, per loaded table version, the stored
+  ids and rows in memory (indexed), extended after its own commits from the new data files
+  only; the pending batch is compacted and indexed; a commit appends when every pending id is
+  new in the version loaded for that commit, and MERGEs otherwise. Stored rows, ids, hashes,
+  paths and schemas are unchanged (differential against `main`). Store failures that only a
+  commit reveals now surface at the next commit point and name no row (developer decision,
+  November 11, 2026). Found on the way: an async run hung on any node failure with more rows
+  in flight than the channel buffers (ITL-932, fixed: closing a channel never blocks), and an
+  async rerun of an ephemeral-result node skipped its rows (ITL-923, fixed). Remaining
+  (ITL-923 item 3): a pending row written with `skip_duplicates=False` whose id is already
+  stored is still dropped by the commit (Delta keeps the stored row; the in-memory store
+  overwrites it).
