@@ -56,6 +56,12 @@ A name must be non-empty, must not contain `@` or whitespace, and must not start
 or `"pydantic"` (`pydantic.BaseModel` subclass). A dataclass and a pydantic model with the
 same name and fields have different identity records, so they are different types.
 
+**Subclasses.** Each class has its own identity; a subclass never borrows its parent's.
+Today the registry matches an unregistered class to a registered *parent* by
+`issubclass`, so `class P3(Point)` with an extra field `z` is stored as `Point` and `z` is
+silently dropped (reproduced on `main`, November 10, 2026). v0.3 matches dataclass and
+pydantic logical types by exact class only.
+
 ### Field component — CONFIRMED (decision 2; nested classes: P1)
 
 `fields` maps each **stored field's name** to its **type token**. It is a JSON object
