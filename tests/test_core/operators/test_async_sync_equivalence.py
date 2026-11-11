@@ -362,18 +362,18 @@ def test_semijoin_with_nested_columns() -> None:
     assert_equivalent(sync_rows(SemiJoin(), *sources), async_rows(SemiJoin(), *sources))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "ITL-846: ArrowHasher.hash_schema passes live extension types to starfix, "
-        "which cannot hash them (hash_table normalizes them first)."
-    ),
-)
 def test_arrow_hasher_hash_schema_with_extension_type() -> None:
-    """``hash_schema`` hashes a schema with a logical (extension) column."""
-    schema = pa.schema([pa.field("p", _logical_column([Path("/a")], Path).type)])
-    _ = get_default_context().arrow_hasher.hash_schema(schema)  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+    """``hash_schema`` hashes a logical (extension) column with its identity (ITL-846).
+
+    The extension name and metadata are part of the hash, so the schema does not hash like
+    one holding the extension's storage type.
+    """
+    ext_type = _logical_column([Path("/a")], Path).type
+    assert isinstance(ext_type, pa.ExtensionType)
+    hasher = get_default_context().arrow_hasher
+    ext_hash = hasher.hash_schema(pa.schema([pa.field("p", ext_type)]))  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+    storage_hash = hasher.hash_schema(pa.schema([pa.field("p", ext_type.storage_type)]))  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+    assert ext_hash != storage_hash
 
 
 # ── Data meta columns (ITL-854) ─────────────────────────────────────────────
