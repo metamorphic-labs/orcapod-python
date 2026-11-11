@@ -85,3 +85,38 @@ def test_stored_values_read_after_delta_compaction(tmp_path: Path) -> None:
     for log in tmp_path.rglob("_delta_log"):
         deltalake.DeltaTable(str(log.parent)).optimize.compact()
     assert _run_labelled(tmp_path) == (0, expected)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=pa.ArrowInvalid,
+    reason=(
+        "ITL-894: _deserialize accepts a non-large storage variant but returns the "
+        "large storage type, so IPC reinterprets 32-bit offsets as 64-bit. Parquet "
+        "and Delta reads convert the data and are correct."
+    ),
+)
+def test_ipc_read_of_non_large_nested_storage_is_valid() -> None:
+    import io
+
+    narrow = pa.struct([pa.field("label", pa.string()), pa.field("n", pa.int64())])
+    value: Any = Labelled("x1", 1)
+    ext = (
+        DictSource(data=[{"k": "a", "p": value}], tag_columns=["k"])
+        .as_table()
+        .schema.field("p")
+        .type
+    )
+    metadata: dict[bytes | str, bytes | str] = {
+        b"ARROW:extension:name": ext.extension_name.encode(),
+        b"ARROW:extension:metadata": ext.__arrow_ext_serialize__(),
+    }
+    table = pa.table(
+        {"p": pa.array([{"label": "hello", "n": 1}], type=narrow)},
+        schema=pa.schema([pa.field("p", narrow).with_metadata(metadata)]),
+    )
+    sink = io.BytesIO()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    read = pa.ipc.open_stream(sink.getvalue()).read_all()
+    read.validate(full=True)

@@ -2237,3 +2237,13 @@ checks the identity, and raises `ImportError` or `TypeIdentityError` naming the 
 the same issue. Not covered: computed fields (deferred by the developer), local classes,
 Enum/NamedTuple/TypedDict.
 
+**Known limitation (ITL-894):** reading a stored column whose storage differs from the
+registered one only by layout (`string` vs `large_string`) is accepted at any depth, so
+Delta-compacted tables stay readable. `__arrow_ext_deserialize__` then returns the
+registered large storage type, which is correct for Parquet and Delta reads (the decoder
+converts the data) but not over Arrow IPC or the C stream interface, where Arrow reads
+32-bit offsets as 64-bit and the arrays are invalid. Top-level columns had this since
+ITL-602; nested struct fields since this fix. Orcapod's own writers and Polars round trips
+never produce non-large storage. Pinned by a strict xfail in
+`tests/test_user_types/test_read_path.py`.
+
