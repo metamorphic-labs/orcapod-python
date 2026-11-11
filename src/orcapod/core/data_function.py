@@ -33,6 +33,7 @@ from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_once
 
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 
@@ -503,6 +504,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         assert function_name is not None
         self._function_name = function_name
+        # (output key, conversion) pairs already reported with ValueConversionWarning.
+        self._reported_conversions: set[tuple[str, str]] = set()
 
         super().__init__(
             label=label,
@@ -646,6 +649,18 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         """
         output_data = parse_function_outputs(self._output_keys, values)
         _check_declared_array_outputs(output_data, self.output_data_schema)
+        for key, value in output_data.items():
+            conversions = tensor_conversions(value)
+            if conversions:
+                warn_once(
+                    self._reported_conversions,
+                    key,
+                    conversions,
+                    f"Function {self._function_name!r} output {key!r} returned a "
+                    f"torch tensor {describe(conversions)}; Orcapod stored a detached "
+                    "CPU copy, and the returned tensor is unchanged. Return "
+                    "value.detach().cpu() to avoid this warning.",
+                )
 
         def combine(*components: tuple[str, ...]) -> str:
             inner_parsed = [":".join(component) for component in components]

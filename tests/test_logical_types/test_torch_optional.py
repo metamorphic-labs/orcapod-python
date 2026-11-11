@@ -43,6 +43,7 @@ def _run(script: str) -> subprocess.CompletedProcess[str]:
         timeout=300,
     )
 
+
 SCRIPT = textwrap.dedent(
     """
     import sys

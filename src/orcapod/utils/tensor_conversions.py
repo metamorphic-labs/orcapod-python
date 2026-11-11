@@ -1,0 +1,128 @@
+"""What storing a torch tensor converts, and the warnings that report it (ITL-871).
+
+A tensor on a GPU (or another non-CPU device), or one that tracks gradients, is
+stored from a detached CPU copy; the caller's tensor is never modified. The code
+that knows where a value came from (a function pod's output, a source's column)
+reports the conversion with ``orcapod.errors.ValueConversionWarning``, once per
+(function or source, output or column, conversion).
+
+This module never imports torch: a value is a tensor when a class in its MRO is
+``torch.Tensor`` by qualified name, and such a value can only exist once torch has
+been imported.
+"""
+
+from __future__ import annotations
+
+import functools
+import warnings
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+from orcapod.errors import ValueConversionWarning
+from orcapod.utils.deferred_types import qualified_name
+
+_TENSOR_CLASS = "torch.Tensor"
+
+_TRACKS_GRADIENTS = "that tracks gradients (requires_grad=True)"
+
+
+@functools.cache
+def _is_tensor_type(cls: type) -> bool:
+    """Whether ``cls`` is ``torch.Tensor`` or a subclass, by qualified name."""
+    return any(qualified_name(base) == _TENSOR_CLASS for base in cls.__mro__)
+
+
+def tensor_conversions(value: Any) -> tuple[str, ...]:
+    """Describe what storing ``value`` converts in the torch tensors it holds.
+
+    Looks at ``value`` itself and, recursively, at the items of lists and tuples
+    and the values of dicts.
+
+    Args:
+        value: Any value about to be stored.
+
+    Returns:
+        The conversions, in first-seen order without repeats:
+        ``"on device 'cuda:0'"`` for a tensor that is not on the CPU, and
+        ``"that tracks gradients (requires_grad=True)"`` for one that tracks
+        gradients. Empty when storing converts nothing. A ``meta`` tensor is not
+        listed: it holds no data and storing it is refused.
+    """
+    found: dict[str, None] = {}
+    _collect(value, found)
+    return tuple(found)
+
+
+def _collect(value: Any, found: dict[str, None]) -> None:
+    """Add the conversions of ``value`` and the values it contains to ``found``."""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _collect(item, found)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _collect(item, found)
+    elif _is_tensor_type(type(value)):
+        device = value.device
+        if device.type not in ("cpu", "meta"):
+            found[f"on device '{device}'"] = None
+        if value.requires_grad:
+            found[_TRACKS_GRADIENTS] = None
+
+
+def describe(conversions: Iterable[str]) -> str:
+    """Join conversions into one phrase (``"on device 'cuda:0' that tracks ..."``)."""
+    return " ".join(conversions)
+
+
+def warn_once(
+    issued: set[tuple[str, str]],
+    scope: str,
+    conversions: tuple[str, ...],
+    message: str,
+) -> None:
+    """Issue ``ValueConversionWarning`` unless every conversion was already reported.
+
+    The record is updated only after ``warnings.warn`` returns, so when the warning
+    is escalated to an error every conversion raises, on every row.
+
+    Args:
+        issued: The ``(scope, conversion)`` pairs already reported; updated in place.
+            Its owner (a function, a source) decides how long it lives.
+        scope: What the value belongs to within the owner, such as an output key.
+        conversions: The conversions of the value (``tensor_conversions``).
+        message: The warning text.
+    """
+    if all((scope, c) in issued for c in conversions):
+        return
+    warnings.warn(message, ValueConversionWarning, stacklevel=3)
+    issued.update((scope, c) for c in conversions)
+
+
+def warn_source_tensor_conversions(
+    source_id: str, rows: Iterable[Mapping[str, Any]]
+) -> None:
+    """Warn once per column of a Python-value source whose tensors are converted.
+
+    Args:
+        source_id: The source's id, named in the warning.
+        rows: The rows the source was built from.
+    """
+    total = 0
+    counts: dict[str, int] = {}
+    kinds: dict[str, dict[str, None]] = {}
+    for row in rows:
+        total += 1
+        for column, value in row.items():
+            conversions = tensor_conversions(value)
+            if conversions:
+                counts[column] = counts.get(column, 0) + 1
+                kinds.setdefault(column, {}).update(dict.fromkeys(conversions))
+    for column, count in counts.items():
+        warnings.warn(
+            f"Source {source_id!r} column {column!r}: {count} of {total} values hold "
+            f"a torch tensor {describe(kinds[column])}; Orcapod stored detached CPU "
+            "copies, and the given tensors are unchanged. Pass value.detach().cpu() "
+            "to avoid this warning.",
+            ValueConversionWarning,
+            stacklevel=3,
+        )

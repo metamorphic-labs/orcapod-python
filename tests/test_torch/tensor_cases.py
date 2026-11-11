@@ -67,6 +67,7 @@ def shares_numpy_dtype(t: Any) -> bool:
     """Whether ``t``'s dtype is one NumPy has (so ``t.numpy()`` is the equal ndarray)."""
     return tag_of(t) in NUMPY_DTYPES
 
+
 NUMERIC = (
     "int8",
     "float32",
