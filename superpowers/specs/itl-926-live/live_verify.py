@@ -1,14 +1,33 @@
 """ITL-926 live verification of ``SpiralDBTableSource`` against a real SpiralDB project.
 
 Run after ``spiral login`` (or with ``SPIRAL_WORKLOAD_ID`` set in CI), from the repository
-root, with the ``spiraldb`` extra installed (``uv sync --all-extras``)::
+root, with the ``spiraldb`` extra installed (``uv sync --all-extras``).
+
+Two modes.
+
+**Read-only (default)** -- for an existing project such as the workshop's EDI sample
+(``edi-sample-v1-855632``). Nothing is written to the project: no table creation, no writes,
+no maintenance. Results go to a local Delta store in a temporary directory::
 
     uv run python superpowers/specs/itl-926-live/live_verify.py \
-        --project <project-id> [--dataset default] [--server-url http://api.spiraldb.dev] \
-        [--keep] [--report report.json]
+        --project edi-sample-v1-855632 --tables session,experiment \
+        --value-column total_trials [--report ro.json]
 
-What it does, in scratch tables named ``itl926_<run>_*`` in ``--dataset`` (all dropped at the
-end unless ``--keep``):
+It builds ``SpiralDBTableSource`` on each of ``--tables`` (keep them small: the source reads
+the whole table into memory), records schemas, row counts and hashes, then joins the first
+two on their shared keys, feeds ``--value-column`` to a function pod, runs twice (the second
+run must make no function calls), saves the job, and in a fresh process checks that both
+sources' ``content_hash`` / ``pipeline_hash`` are unchanged and that the loaded job's
+``get_all_records()`` returns every row.
+
+**Write mode** -- only for a dedicated test project, never an ``edi-*`` project. It must be
+asked for by repeating the project id::
+
+    uv run python superpowers/specs/itl-926-live/live_verify.py \
+        --project <test-project> --allow-writes <test-project> [--keep]
+
+It works in scratch tables named ``itl926_<run>_*`` in ``--dataset`` (dropped at the end
+unless ``--keep``):
 
 1. **Storage behaviour.** Writes one table per awkward column type straight through pyspiral
    (the way a workshop table is written: not through Orcapod) and records, per column, the
@@ -413,43 +432,228 @@ def _load_phase(args: argparse.Namespace) -> None:
     print(json.dumps(out))
 
 
+# ---------------------------------------------------------------------------------------
+# Read-only mode: an existing project (the workshop's EDI sample). No writes of any kind.
+# ---------------------------------------------------------------------------------------
+
+
+def _ro_job(args: argparse.Namespace, workdir: Path) -> tuple[Any, Any, Any, list[int]]:
+    """Build the read-only workshop job: Join(table A, table B) -> one-column function pod."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.operators import Join, MapData, SelectDataColumns
+    from orcapod.sources import SpiralDBTableSource
+
+    overrides = {"server.url": args.server_url} if args.server_url else None
+    left_name, right_name = args.tables.split(",")[:2]
+    left = SpiralDBTableSource(
+        args.project, left_name, args.dataset, overrides=overrides
+    )
+    right = SpiralDBTableSource(
+        args.project, right_name, args.dataset, overrides=overrides
+    )
+    value_type = right.output_schema()[1][args.value_column]
+    calls: list[int] = []
+
+    def touch(value: Any) -> Any:
+        calls.append(1)
+        return value
+
+    # The parameter and return type must equal the column's Python type exactly (a column
+    # every value of which may be null arrives as ``T | None``).
+    touch.__annotations__ = {"value": value_type, "return": value_type}
+    pod = function_pod(output_keys="echoed")(touch)
+    job = PipelineJob(
+        name="itl926_readonly", store=DeltaTableDatabase(workdir / "store")
+    )
+    with job:
+        joined = Join()(left, right, label="joined")
+        only = SelectDataColumns([args.value_column])(joined, label="selected")
+        renamed = MapData({args.value_column: "value"})(only, label="renamed")
+        pod.pod(renamed, label="echo")
+    return left, right, job, calls
+
+
+def read_only(args: argparse.Namespace) -> dict[str, Any]:
+    """Inspect ``--tables`` and run the workshop path on the first two; writes nothing remote."""
+    import time
+
+    from orcapod.sources import SpiralDBTableSource
+
+    overrides = {"server.url": args.server_url} if args.server_url else None
+    report: dict[str, Any] = {"tables": {}, "checks": {}}
+
+    def check(name: str, ok: bool, detail: Any) -> None:
+        report["checks"][name] = {"ok": bool(ok), "detail": detail}
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+
+    for name in args.tables.split(","):
+        entry: dict[str, Any] = {}
+        report["tables"][name] = entry
+        t0 = time.time()
+        try:
+            src = SpiralDBTableSource(
+                args.project, name, args.dataset, overrides=overrides
+            )
+            entry["seconds"] = round(time.time() - t0, 2)
+            table = src.as_table()
+            entry["rows"] = table.num_rows
+            entry["arrow"] = {f.name: _field_desc(f) for f in table.schema}
+            tag, data = src.output_schema()
+            entry["tag_schema"] = {k: str(v) for k, v in tag.items()}
+            entry["data_schema"] = {k: str(v) for k, v in data.items()}
+            entry["content_hash"] = src.content_hash().to_string()
+            entry["pipeline_hash"] = src.pipeline_hash().to_string()
+        except Exception as exc:  # noqa: BLE001 - every outcome is recorded
+            entry["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  {name}: {entry}")
+
+    workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp())
+    left, right, job, calls = _ro_job(args, workdir)
+    job.run()
+    first_calls = len(calls)
+    echoed = job.nodes["echo"].as_table()
+    rows = echoed.num_rows
+    # The function cache is keyed on the input value, so equal values compute once.
+    distinct = len(set(echoed.column("echoed").to_pylist()))
+    check(
+        "run 1 computes each distinct value once",
+        first_calls == distinct and rows > 0,
+        {"calls": first_calls, "distinct_values": distinct, "rows": rows},
+    )
+    _, _, job2, calls2 = _ro_job(args, workdir)
+    job2.run()
+    check("run 2 makes no function calls", len(calls2) == 0, len(calls2))
+    job2.save(workdir / "job.json")
+    cmd = [
+        sys.executable,
+        __file__,
+        "--phase",
+        "ro-load",
+        "--project",
+        args.project,
+        "--dataset",
+        args.dataset,
+        "--tables",
+        args.tables,
+        "--value-column",
+        args.value_column,
+        "--workdir",
+        str(workdir),
+    ]
+    if args.server_url:
+        cmd += ["--server-url", args.server_url]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        second = json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001
+        second = {"error": proc.stdout[-2000:] + proc.stderr[-4000:]}
+    report["fresh_process"] = second
+    for label, src in (("left", left), ("right", right)):
+        check(
+            f"fresh process: same content_hash ({label})",
+            second.get(f"{label}_content_hash") == src.content_hash().to_string(),
+            second.get(f"{label}_content_hash"),
+        )
+        check(
+            f"fresh process: same pipeline_hash ({label})",
+            second.get(f"{label}_pipeline_hash") == src.pipeline_hash().to_string(),
+            second.get(f"{label}_pipeline_hash"),
+        )
+    check(
+        "loaded job: get_all_records returns every row",
+        second.get("echo_rows") == rows,
+        [rows, second.get("echo_rows")],
+    )
+    report["workdir"] = str(workdir)
+    return report
+
+
+def _ro_load_phase(args: argparse.Namespace) -> None:
+    from orcapod import PipelineJob
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.sources import SpiralDBTableSource
+
+    overrides = {"server.url": args.server_url} if args.server_url else None
+    workdir = Path(args.workdir)
+    out: dict[str, Any] = {}
+    for label, name in zip(("left", "right"), args.tables.split(",")[:2], strict=True):
+        src = SpiralDBTableSource(args.project, name, args.dataset, overrides=overrides)
+        out[f"{label}_content_hash"] = src.content_hash().to_string()
+        out[f"{label}_pipeline_hash"] = src.pipeline_hash().to_string()
+    loaded = PipelineJob.load(
+        workdir / "job.json", store=DeltaTableDatabase(workdir / "store")
+    )
+    records = loaded.nodes["echo"].get_all_records()
+    out["echo_rows"] = None if records is None else records.num_rows
+    print(json.dumps(out))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ITL-926 live SpiralDB source check")
     parser.add_argument("--project", required=True)
     parser.add_argument("--dataset", default="default")
     parser.add_argument("--server-url", default=os.environ.get("SPIRAL_SERVER_URL"))
     parser.add_argument(
-        "--keep", action="store_true", help="do not drop the scratch tables"
+        "--allow-writes",
+        default=None,
+        metavar="PROJECT",
+        help="write mode: create, write and drop scratch tables in PROJECT, which must "
+        "equal --project and must not be an edi-* project. Without it nothing is written.",
+    )
+    parser.add_argument(
+        "--tables",
+        default="session,experiment",
+        help="read-only mode: tables to inspect; the first two are joined",
+    )
+    parser.add_argument(
+        "--value-column",
+        default="total_trials",
+        help="read-only mode: data column of the second table fed to the pod",
+    )
+    parser.add_argument(
+        "--keep", action="store_true", help="write mode: keep scratch tables"
     )
     parser.add_argument("--report", default=None, help="write the JSON report here")
-    parser.add_argument("--phase", default="all", choices=["all", "load"])
+    parser.add_argument("--phase", default="all", choices=["all", "load", "ro-load"])
     parser.add_argument("--run-id", default=uuid.uuid4().hex[:8])
     parser.add_argument("--table", default=None)
     parser.add_argument("--workdir", default=None)
     args = parser.parse_args()
 
+    if args.phase == "ro-load":
+        _ro_load_phase(args)
+        return 0
     if args.phase == "load":
         _load_phase(args)
         return 0
 
-    run = Run(args)
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            try:
-                run.storage_matrix()
-            except Exception:  # noqa: BLE001
-                run.check("storage matrix", False, traceback.format_exc())
-            try:
-                run.workshop_path(Path(tmp))
-            except Exception:  # noqa: BLE001
-                run.check("workshop path", False, traceback.format_exc())
-    finally:
-        run.cleanup()
-    text = json.dumps(run.report, indent=2, default=str)
+    if args.allow_writes is None:
+        report = read_only(args)
+    else:
+        if args.allow_writes != args.project:
+            parser.error("--allow-writes must name the same project as --project")
+        if args.project.startswith("edi-"):
+            parser.error("refusing to write to an edi-* project; they are read-only")
+        run = Run(args)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                try:
+                    run.storage_matrix()
+                except Exception:  # noqa: BLE001
+                    run.check("storage matrix", False, traceback.format_exc())
+                try:
+                    run.workshop_path(Path(tmp))
+                except Exception:  # noqa: BLE001
+                    run.check("workshop path", False, traceback.format_exc())
+        finally:
+            run.cleanup()
+        report = run.report
+    text = json.dumps(report, indent=2, default=str)
     if args.report:
         Path(args.report).write_text(text)
     print(text)
-    return 0 if all(c["ok"] for c in run.report["checks"].values()) else 1
+    return 0 if all(c["ok"] for c in report["checks"].values()) else 1
 
 
 if __name__ == "__main__":

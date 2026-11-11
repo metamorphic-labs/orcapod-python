@@ -31,7 +31,10 @@ connector's docstrings, pyspiral's own documentation) or is an assumption to con
 * ``drop_arrow_metadata`` (observed, ITL-471): schema and field metadata are dropped; the
   table's key-value store (``set_metadata``) round-trips.
 * ``decode_dictionaries`` (assumed): dictionary columns come back as their value type.
-* ``value_columns_nullable`` (assumed): every non-key column is reported nullable.
+* ``value_columns_nullable``: every non-key column is reported nullable. Every column,
+  key columns included, is nullable in the EDI sample tables (live schema dump, November 11,
+  2026); whether SpiralDB keeps a non-null flag that was written is still to confirm. Key
+  columns keep the nullability given at ``create_table`` (nullable for the tuple form).
 * ``reject_struct_nulls`` (documented by pyspiral ``Table.write``): a null struct value is
   refused unless written with ``push_down_nulls=True``.
 * Rows come back sorted by key and writes upsert by key (SpiralDB is a key-sorted store).
@@ -229,9 +232,7 @@ class FakeTable:
         stored = self._store.read(self._project_id, self._identifier)
         keys = self.key_schema
         if stored is None:
-            return FakeSchema(
-                pa.schema([pa.field(f.name, f.type, False) for f in keys])
-            )
+            return FakeSchema(keys)
         return FakeSchema(stored.schema)
 
     def select(self, *paths: str, exclude: list[str] | None = None) -> FakeExpr:
@@ -265,9 +266,9 @@ class FakeTable:
         for f in table.schema:
             is_key = f.name in keys.names
             sf = _stored_field(f, b)
-            nullable = (
-                False if is_key else (True if b.value_columns_nullable else f.nullable)
-            )
+            # Key columns keep the nullability they were written with: the EDI sample
+            # tables (live, November 11, 2026) report every key column nullable.
+            nullable = f.nullable if is_key or not b.value_columns_nullable else True
             sf = pa.field(sf.name, sf.type, nullable, sf.metadata)
             col = table.column(f.name)
             if isinstance(f.type, pa.ExtensionType):
@@ -298,9 +299,7 @@ class FakeTable:
         stored = self._store.read(self._project_id, self._identifier)
         if stored is None:
             keys = self.key_schema
-            return pa.schema(
-                [pa.field(f.name, f.type, False) for f in keys]
-            ).empty_table()
+            return keys.empty_table()
         return stored
 
 
@@ -358,10 +357,13 @@ class FakeProject:
         if isinstance(key_schema, pa.Schema):
             schema = key_schema
         else:
-            schema = pa.schema([pa.field(n, t, False) for n, t in key_schema])
+            # SpiralDB reports key columns nullable (EDI sample schema, live, Nov 11 2026)
+            schema = pa.schema([pa.field(n, t, True) for n, t in key_schema])
         schema = pa.schema(
             [
-                pa.field(f.name, _stored_type(f.type, self._store.behaviour), False)
+                pa.field(
+                    f.name, _stored_type(f.type, self._store.behaviour), f.nullable
+                )
                 for f in schema
             ]
         )
