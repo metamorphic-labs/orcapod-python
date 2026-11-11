@@ -1,0 +1,265 @@
+"""Tests for ``LogicalPolarsDataFrame`` (ITL-578).
+
+The round trip is type strict: every case asserts that the Polars schema read back equals
+the one written, not only that the values compare equal.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import decimal
+from collections.abc import Callable
+
+import pandas as pd
+import polars as pl
+import pyarrow as pa
+import pytest
+from polars.testing import assert_frame_equal
+
+from orcapod.logical_types import LogicalNumpyArray, LogicalPolarsDataFrame
+from orcapod.logical_types.protocols import LogicalTypeProtocol
+
+
+def _round_trip(df: pl.DataFrame) -> pl.DataFrame:
+    lt = LogicalPolarsDataFrame()
+    return lt.storage_to_python(lt.python_to_storage(df))
+
+
+def _assert_exact(back: pl.DataFrame, df: pl.DataFrame) -> None:
+    assert back.schema == df.schema
+    assert_frame_equal(back, df)
+
+
+# One column per case. Each builder returns a Series whose dtype is the one under test.
+_COLUMN_CASES: dict[str, Callable[[], pl.Series]] = {
+    "int8_null": lambda: pl.Series([1, None, -3], dtype=pl.Int8),
+    "int16": lambda: pl.Series([1, 2, 3], dtype=pl.Int16),
+    "int32": lambda: pl.Series([1, 2, 3], dtype=pl.Int32),
+    "int64": lambda: pl.Series([1, 2, 3], dtype=pl.Int64),
+    "uint8": lambda: pl.Series([1, 2, 255], dtype=pl.UInt8),
+    "uint16": lambda: pl.Series([1, 2, 3], dtype=pl.UInt16),
+    "uint32": lambda: pl.Series([1, 2, 3], dtype=pl.UInt32),
+    "uint64": lambda: pl.Series([1, 2, 2**64 - 1], dtype=pl.UInt64),
+    "float16": lambda: pl.Series([1.0, 2.5, None], dtype=pl.Float16),
+    "float32": lambda: pl.Series([1.0, None, 3.5], dtype=pl.Float32),
+    "float64": lambda: pl.Series([1.0, float("nan"), None], dtype=pl.Float64),
+    "string_null": lambda: pl.Series(["a", None, ""], dtype=pl.String),
+    "binary_null": lambda: pl.Series([b"x", None, b""], dtype=pl.Binary),
+    "boolean": lambda: pl.Series([True, None, False], dtype=pl.Boolean),
+    "categorical": lambda: pl.Series(["b", "a", None], dtype=pl.Categorical),
+    "enum": lambda: pl.Series(["x", "y", None], dtype=pl.Enum(["y", "x", "z"])),
+    "decimal_10_2": lambda: pl.Series(
+        [decimal.Decimal("1.23"), None, decimal.Decimal("-9.99")],
+        dtype=pl.Decimal(10, 2),
+    ),
+    "decimal_38_2": lambda: pl.Series(
+        [decimal.Decimal("1.23"), None, decimal.Decimal("0.01")],
+        dtype=pl.Decimal(38, 2),
+    ),
+    "datetime_ms_tz": lambda: pl.Series(
+        [dt.datetime(2020, 1, 1, 12), None, dt.datetime(2021, 6, 1)],
+        dtype=pl.Datetime("ms", "America/New_York"),
+    ),
+    "datetime_ns": lambda: pl.Series(
+        [dt.datetime(2020, 1, 1), None, dt.datetime(1970, 1, 1)],
+        dtype=pl.Datetime("ns"),
+    ),
+    "datetime_us_utc": lambda: pl.Series(
+        [dt.datetime(2020, 1, 1), None, dt.datetime(1999, 12, 31)],
+        dtype=pl.Datetime("us", "UTC"),
+    ),
+    "date": lambda: pl.Series([dt.date(2020, 1, 1), None, dt.date(1900, 1, 1)]),
+    "time": lambda: pl.Series([dt.time(1, 2, 3), None, dt.time(23, 59)]),
+    "duration_ms": lambda: pl.Series(
+        [dt.timedelta(seconds=1), None, dt.timedelta(days=-1)],
+        dtype=pl.Duration("ms"),
+    ),
+    "duration_ns": lambda: pl.Series(
+        [dt.timedelta(microseconds=1), None, dt.timedelta(0)],
+        dtype=pl.Duration("ns"),
+    ),
+    "list_int_null": lambda: pl.Series([[1, 2], None, []], dtype=pl.List(pl.Int64)),
+    "list_string": lambda: pl.Series([["a"], [], [None]], dtype=pl.List(pl.String)),
+    "list_categorical": lambda: pl.Series(
+        [["a"], [], ["b", "a"]], dtype=pl.List(pl.Categorical)
+    ),
+    "list_list_uint8": lambda: pl.Series(
+        [[[1], []], None, [[2, 3]]], dtype=pl.List(pl.List(pl.UInt8))
+    ),
+    "array_int16": lambda: pl.Series(
+        [[1, 2], [3, 4], None], dtype=pl.Array(pl.Int16, 2)
+    ),
+    "array_2d": lambda: pl.Series(
+        [[[1, 2]], [[3, 4]], [[5, 6]]], dtype=pl.Array(pl.Int16, (1, 2))
+    ),
+    "struct_null": lambda: pl.Series(
+        [{"a": 1, "b": "x"}, None, {"a": None, "b": "z"}],
+        dtype=pl.Struct({"a": pl.Int64, "b": pl.String}),
+    ),
+    "struct_field_order": lambda: pl.Series(
+        [{"z": 1, "a": 2}, {"z": 3, "a": 4}, None],
+        dtype=pl.Struct({"z": pl.Int32, "a": pl.Int32}),
+    ),
+    "struct_enum": lambda: pl.Series(
+        [{"e": "x"}, None, {"e": "y"}],
+        dtype=pl.Struct({"e": pl.Enum(["x", "y"])}),
+    ),
+    "struct_list_datetime": lambda: pl.Series(
+        [{"t": [dt.datetime(2020, 1, 1)]}, {"t": []}, None],
+        dtype=pl.Struct({"t": pl.List(pl.Datetime("us", "Europe/Berlin"))}),
+    ),
+    "null": lambda: pl.Series([None, None, None], dtype=pl.Null),
+}
+
+
+class TestLogicalPolarsDataFrameProtocol:
+    def test_satisfies_protocol(self) -> None:
+        assert isinstance(LogicalPolarsDataFrame(), LogicalTypeProtocol)
+
+    def test_logical_type_name(self) -> None:
+        assert LogicalPolarsDataFrame().logical_type_name == "polars.dataframe"
+
+    def test_python_type(self) -> None:
+        assert LogicalPolarsDataFrame().python_type is pl.DataFrame
+
+    def test_arrow_extension_name(self) -> None:
+        ext = LogicalPolarsDataFrame().get_arrow_extension_type()
+        assert ext.extension_name == "polars.dataframe"
+
+    def test_arrow_storage_type_is_large_binary(self) -> None:
+        ext = LogicalPolarsDataFrame().get_arrow_extension_type()
+        assert ext.storage_type == pa.large_binary()
+
+    def test_polars_extension_name(self) -> None:
+        ext = LogicalPolarsDataFrame().get_polars_extension_type()
+        assert ext.ext_name() == "polars.dataframe"
+
+    def test_extension_types_are_cached(self) -> None:
+        a, b = LogicalPolarsDataFrame(), LogicalPolarsDataFrame()
+        assert a.get_arrow_extension_type() is b.get_arrow_extension_type()
+        assert a.get_polars_extension_type() is b.get_polars_extension_type()
+
+
+class TestLogicalPolarsDataFrameStorage:
+    def test_storage_is_arrow_ipc_stream_bytes(self) -> None:
+        df = pl.DataFrame({"x": [1, 2]})
+        stored = LogicalPolarsDataFrame().python_to_storage(df)
+        assert isinstance(stored, bytes)
+        table = pa.ipc.open_stream(stored).read_all()
+        assert table.column_names == ["x"]
+
+    def test_strings_are_stored_as_large_string(self) -> None:
+        """The storage pins ``compat_level=oldest``: no ``string_view`` on disk."""
+        df = pl.DataFrame({"s": ["a"], "b": [b"x"], "l": [["a"]]})
+        stored = LogicalPolarsDataFrame().python_to_storage(df)
+        schema = pa.ipc.open_stream(stored).schema
+        assert schema.field("s").type == pa.large_string()
+        assert schema.field("b").type == pa.large_binary()
+        assert schema.field("l").type == pa.large_list(pa.large_string())
+
+    def test_chunked_frame_is_stored_as_one_batch(self) -> None:
+        df = pl.concat(
+            [pl.DataFrame({"x": [1]}), pl.DataFrame({"x": [2]})], rechunk=False
+        )
+        assert df.n_chunks() == 2
+        stored = LogicalPolarsDataFrame().python_to_storage(df)
+        batches = list(pa.ipc.open_stream(stored))
+        assert len(batches) == 1
+
+    def test_non_dataframe_raises_type_error(self) -> None:
+        lt = LogicalPolarsDataFrame()
+        with pytest.raises(TypeError, match="pl.DataFrame"):
+            lt.python_to_storage(pl.Series("x", [1]))
+        with pytest.raises(TypeError, match="pl.DataFrame"):
+            lt.python_to_storage(pd.DataFrame({"x": [1]}))
+
+
+class TestLogicalPolarsDataFrameRoundTrip:
+    @pytest.mark.parametrize("name", list(_COLUMN_CASES))
+    def test_single_column_round_trip_is_exact(self, name: str) -> None:
+        df = pl.DataFrame({name: _COLUMN_CASES[name]()})
+        _assert_exact(_round_trip(df), df)
+
+    def test_wide_frame_keeps_column_order_and_names(self) -> None:
+        # Column names are deliberately not in sorted order.
+        names = list(reversed(_COLUMN_CASES))
+        df = pl.DataFrame({name: _COLUMN_CASES[name]() for name in names})
+        back = _round_trip(df)
+        assert back.columns == names
+        _assert_exact(back, df)
+
+    def test_enum_category_order_is_kept(self) -> None:
+        df = pl.DataFrame({"e": pl.Series(["a"], dtype=pl.Enum(["c", "a", "b"]))})
+        back = _round_trip(df)
+        assert back.schema["e"] == pl.Enum(["c", "a", "b"])
+        assert back.schema["e"].categories.to_list() == ["c", "a", "b"]  # pyright: ignore[reportAttributeAccessIssue] # Enum dtype has categories
+
+    def test_empty_frame_keeps_schema(self) -> None:
+        df = pl.DataFrame(
+            schema={
+                "i": pl.Int8,
+                "s": pl.Struct({"e": pl.Enum(["p", "q"])}),
+                "a": pl.Array(pl.Float32, 3),
+                "t": pl.Datetime("ms", "Asia/Tokyo"),
+            }
+        )
+        back = _round_trip(df)
+        assert back.height == 0
+        _assert_exact(back, df)
+
+    def test_zero_column_frame(self) -> None:
+        df = pl.DataFrame()
+        back = _round_trip(df)
+        assert back.shape == (0, 0)
+
+    def test_chunked_frame_round_trips(self) -> None:
+        df = pl.concat(
+            [pl.DataFrame({"x": [1, None]}), pl.DataFrame({"x": [3]})], rechunk=False
+        )
+        _assert_exact(_round_trip(df), df)
+
+    def test_sliced_frame_round_trips(self) -> None:
+        df = pl.DataFrame({"s": ["a", "b", "c", "d"], "l": [[1], [2], [3], [4]]})
+        sliced = df.slice(1, 2)
+        _assert_exact(_round_trip(sliced), sliced)
+
+
+class TestLogicalPolarsDataFrameRejectsLossyDtypes:
+    """Dtypes that cannot round-trip exactly are rejected at write time."""
+
+    @pytest.mark.parametrize(
+        ("series", "dtype_text"),
+        [
+            (pl.Series("col", [object(), object()], dtype=pl.Object), "Object"),
+            (pl.Series("col", [1, 2], dtype=pl.Int128), "Int128"),
+            (pl.Series("col", [1, 2], dtype=pl.UInt128), "UInt128"),
+        ],
+    )
+    def test_top_level_unsupported_dtype(
+        self, series: pl.Series, dtype_text: str
+    ) -> None:
+        df = pl.DataFrame([pl.Series("ok", [1, 2]), series])
+        with pytest.raises(ValueError, match=rf"'col'.*{dtype_text}"):
+            LogicalPolarsDataFrame().python_to_storage(df)
+
+    # Polars 1.41 cannot build an Object nested in a List or Struct, so nested rejection is
+    # exercised with Int128, which it can nest.
+    def test_int128_nested_in_list(self) -> None:
+        df = pl.DataFrame(
+            [pl.Series("nested", [[[1]]], dtype=pl.List(pl.Array(pl.Int128, 1)))]
+        )
+        with pytest.raises(ValueError, match=r"'nested'.*contains Int128"):
+            LogicalPolarsDataFrame().python_to_storage(df)
+
+    def test_int128_nested_in_struct(self) -> None:
+        df = pl.DataFrame(
+            [pl.Series("st", [{"v": 1}], dtype=pl.Struct({"v": pl.Int128}))]
+        )
+        with pytest.raises(ValueError, match=r"'st'.*Int128"):
+            LogicalPolarsDataFrame().python_to_storage(df)
+
+    def test_polars_extension_dtype(self) -> None:
+        ext = LogicalNumpyArray().get_polars_extension_type()
+        df = pl.DataFrame([pl.Series("arr", [b"x"], dtype=pl.Binary).ext.to(ext)])
+        with pytest.raises(ValueError, match=r"'arr'.*numpy\.ndarray"):
+            LogicalPolarsDataFrame().python_to_storage(df)
