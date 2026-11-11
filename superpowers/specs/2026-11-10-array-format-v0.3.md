@@ -140,8 +140,9 @@ width spelled out, fields sorted by name and offsets/padding dropped (fields are
 3. Copy field by field into a C-contiguous array of that dtype. Field-by-field assignment is
    required: NumPy assigns between structured dtypes *by position*, so a plain `astype` would
    pair fields wrongly once they are sorted. Unstructured arrays use one
-   `astype(canonical, order="C")`, which is a no-op copy-free view when the input already is
-   little-endian C-contiguous.
+   `astype(canonical, order="C", copy=False)`, which returns the input itself, without
+   allocating, when it already is little-endian and C-contiguous. Either way the result is
+   little-endian and C-contiguous.
 4. Store `(tag, list(shape), canonical.tobytes())`.
 
 `storage_to_python` builds the canonical NumPy dtype from the tag and returns
