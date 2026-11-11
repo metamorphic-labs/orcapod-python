@@ -1,0 +1,70 @@
+# ITL-828 Polars expression identity Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** `stream.polars_filter(<pl.Expr>)` gets a stable `pipeline_hash()`/`content_hash()`, so it
+works upstream of a join and inside a `PipelineJob`.
+
+**Architecture:** Design in `superpowers/specs/2026-11-11-itl-828-polars-expr-identity-design.md`
+(Option C, coordinator-approved PROVISIONALLY on 2026-11-11; the developer must still confirm,
+so the PR is a DRAFT). A strict parser turns `expr.meta.serialize(format="json")` into an
+Orcapod-owned canonical tree; the hash is `ContentHash("polars_expr_v1", sha256(canonical
+JSON))`. A `PolarsExprHandler` registered for `pl.Expr` returns it, so `PolarsFilter`'s
+identity structure keeps its shape. `PolarsFilter.predicates` is normalized to a tuple.
+
+**Tech Stack:** Polars (>=1.36, locked 1.41.2), the semantic hasher handler registry.
+
+Coordinator decisions (2026-11-11): (a) normalize predicates to a tuple, confirm no golden
+moves; (b) keep the subset exactly as proposed, do not grow it (so `pl.Series` literals in
+`is_in` are rejected: the proposal only has Python-list literals); (c) pin canonical JSON for
+a corpus + golden hash entries (additions only); test the parser against Polars 1.36.1 and
+1.41.2; docs state the supported subset and what the error tells the user to do; PR DRAFT
+saying the identity design awaits developer confirmation.
+
+Small deviation from the proposal text, recorded in the spec: the typed boolean literal is
+spelled `{"boolean": ...}` to match the PR #286 dtype name.
+
+Unsupported expressions raise lazily (when the identity is needed), so an in-memory
+expression filter that is never hashed keeps working exactly as today.
+
+---
+
+## Files
+
+- Create `src/orcapod/hashing/semantic_hashing/polars_expr.py`: `polars_expr_canonical(expr)`,
+  `polars_expr_content_hash(expr)`, the strict JSON parser, error message.
+- Modify `src/orcapod/hashing/semantic_hashing/builtin_handlers.py`: `PolarsExprHandler`,
+  registration in `register_builtin_python_type_handlers`.
+- Modify `src/orcapod/contexts/data/v0.1.json`: registry entry + changelog line.
+- Modify `src/orcapod/core/operators/filters.py`: `self.predicates = tuple(predicates)`.
+- Tests:
+  - `tests/test_hashing/test_polars_expr_hashing.py`: canonical-JSON corpus (pinned),
+    equalities/inequalities, rejections (UDF, selectors, alias, ...), message content,
+    cross-PYTHONHASHSEED subprocess equality.
+  - `tests/test_core/operators/test_polars_filter_expression.py`: public interface —
+    expression filter upstream of `Join`; inside `PipelineJob` sync and async; two runs
+    against one `DeltaTableDatabase` in fresh processes, second run all cached; list vs tuple
+    predicates hash equal; keyword + expression mix.
+  - `tests/test_hashing/golden/cases.py`: add `semantic/polars_expr` and
+    `pipeline/polars_filter_expr` cases; regenerate, check diff adds lines only.
+- Docs: `docs/reference/hashing.md` (label + grammar), operator docs for `polars_filter`
+  (supported subset, the error), `CHANGELOG.md` `[0.3.0]`, `DESIGN_ISSUES.md` entry.
+
+## Tasks
+
+- [ ] 1. Failing tests: write both test files; run; confirm failures are the TypeError /
+      missing module. Commit (WIP).
+- [ ] 2. Implement `polars_expr.py` + handler + registration + tuple normalization. Run new
+      tests to green.
+- [ ] 3. Run the parser tests under `uv run --with polars==1.36.1` and locked 1.41.2 (and
+      1.44.2 for information).
+- [ ] 4. Golden: add cases, regenerate, verify `git diff` only adds lines; run golden tests.
+- [ ] 5. Docs + CHANGELOG + DESIGN_ISSUES; docs tests (`tests/test_docs`).
+- [ ] 6. Full suite, ruff, ruff format, basedpyright (exit code).
+- [ ] 7. Merge origin/main (and PR #286 when it lands: align handler placement/docs), rerun.
+- [ ] 8. Push, open DRAFT PR "Fixes ITL-828", link (`orca linear attach`,
+      `orca worktree set --pr`), CodeRabbit rounds, worker_done.
+
+## Progress notes (for a successor)
+
+- 2026-11-11: spec + experiments committed; coordinator approved provisionally.
