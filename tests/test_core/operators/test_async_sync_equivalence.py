@@ -327,26 +327,11 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
 
 # Pre-existing provenance defects, not type re-inference: out of scope for
 # ITL-837 and tracked elsewhere. Strict, so a fix flags them.
-_FIRST_ROW_SOURCE_INFO = (
-    "ITL-845 (DESIGN_ISSUES O3): _materialize_to_stream gives every row the first row's "
-    "source info; it backs barrier-mode async_execute"
-)
-_FIRST_ROW_SOURCE_INFO_SYNC = (
-    "ITL-845 (DESIGN_ISSUES O3): _materialize_to_stream gives every row the first row's "
-    "source info; it backs the sync unary_static_process of Index and Pick"
-)
 _DROPPED_SOURCE_INFO = (
     "ITL-838: Data.select / Data.drop keep the dropped columns' source info, so the "
     "async row's source-info schema lists columns it no longer has"
 )
 PROVENANCE_XFAIL = {
-    "merge_join": _FIRST_ROW_SOURCE_INFO,
-    "batch_2": _FIRST_ROW_SOURCE_INFO,
-    "batch_all": _FIRST_ROW_SOURCE_INFO,
-    "group_by": _FIRST_ROW_SOURCE_INFO,
-    "polars_filter": _FIRST_ROW_SOURCE_INFO,
-    "index": _FIRST_ROW_SOURCE_INFO_SYNC,
-    "pick": _FIRST_ROW_SOURCE_INFO_SYNC,
     "select_data_columns": _DROPPED_SOURCE_INFO,
     "drop_data_columns": _DROPPED_SOURCE_INFO,
 }

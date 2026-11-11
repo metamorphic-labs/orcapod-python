@@ -2123,9 +2123,9 @@ of async `Index`/`Pick` rows; ITL-859).
 `tests/test_core/operators/test_async_sync_equivalence.py` runs every operator with its own
 async path through both paths and compares types, nullability, column order, system tags,
 content and schema hashes; differences that are not type re-inference are strict xfails:
-ITL-845 (O3, row-0 source info), ITL-838 (`Data.select`/`drop` keep dropped columns' source
-info), ITL-846 (sync `SemiJoin` over nested columns; `ArrowHasher.hash_schema` on extension
-types). The developer's principle behind the shared-key error: Orcapod is type strict and
+ITL-838 (`Data.select`/`drop` keep dropped columns' source info), ITL-846 (sync `SemiJoin`
+over nested columns; `ArrowHasher.hash_schema` on extension types). The ITL-845 (O3, row-0
+source info) xfails were removed once that fix merged; those provenance cases now pass. The developer's principle behind the shared-key error: Orcapod is type strict and
 performs no implicit type expansion or conversion, except normalization to large variants.
 The async merge also carries each input's `Data` meta (`__`) columns, which it used to drop,
 renaming collisions through `Join._collision_renames`, the helper `static_process` now shares
