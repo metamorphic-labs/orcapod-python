@@ -19,6 +19,11 @@ path re-raises it.
 **Tech Stack:** Python 3.11–3.13, pyarrow, polars, pydantic v2, deltalake, IPython (dev, for
 the notebook scenarios), pytest via `uv run`.
 
+**Changes after the plan was written (developer decisions, November 10, 2026):**
+`set_type_naming` was dropped (fixed location rule plus `register_type(qualified=False)`),
+the identity string uses the full 64-hex digest, and stored structs list fields in name
+order. The spec is authoritative where this plan differs.
+
 ---
 
 ## File map

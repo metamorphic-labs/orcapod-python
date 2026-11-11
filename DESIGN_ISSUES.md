@@ -2208,3 +2208,32 @@ subprocesses with different `PYTHONHASHSEED` values and were verified identical 
 3.11, 3.12 and 3.13. The generator's header says when regeneration is legitimate: a changed
 value needs a migration assessment and the developer's approval. Not pinned yet: the
 `StarfixArrowHasher` gaps tracked in ITL-848.
+
+---
+
+## `src/orcapod/logical_types/` — identity of user classes (dataclasses, pydantic models)
+
+### UCI1 — A user class was identified by `module.qualname` only, without its fields
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-881
+
+A dataclass or pydantic model was identified by `f"{module}.{qualname}"`. The same class
+defined in a notebook (`__main__`) and in a module were different types; two classes with
+the same name and different fields shared pipeline hashes and tables, so a changed class
+read the old table, failed, and the run returned 0 rows with only log warnings; re-running
+the notebook cell that defines a class raised `ValueError: … already bound` until a kernel
+restart; a subclass was stored as its parent, dropping its extra fields.
+
+**Fix:** a user class is identified by `{kind, name, fields}` (spec
+`superpowers/specs/2026-11-10-user-class-identity-v0.3.md`). The identity string
+`Name@<full SHA-256 of the canonical record>` is the logical type name and Arrow extension
+name, with the record in the extension metadata; stored structs list fields in name order.
+`op.register_type` declares names without modifying the class; `__main__` classes default
+to their class name. The registry rebinds an unchanged identity to a re-defined class and
+matches user classes by exact class only. The read path finds the class by kind and name,
+checks the identity, and raises `ImportError` or `TypeIdentityError` naming the column;
+`DeltaTableDatabase` re-raises `TypeIdentityError`. Resolves the entry PR #288 proposes for
+the same issue. Not covered: computed fields (deferred by the developer), local classes,
+Enum/NamedTuple/TypedDict.
+

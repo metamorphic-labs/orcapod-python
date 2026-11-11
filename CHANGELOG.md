@@ -4,6 +4,18 @@
 
 ### New
 
+#### `op.register_type` — declare the name of your own data types (ITL-881)
+
+`@op.register_type(name="Point")` declares the name a dataclass or pydantic model is
+identified by, wherever the class is defined. `@op.register_type(qualified=False)` names a
+module class by its class name alone. Registration never modifies the class; declaring the
+same class under a second name raises `ValueError`. See
+[Your Own Data Types](docs/concepts/your-own-data-types.md).
+
+Re-running a notebook cell that defines a dataclass or pydantic model, or reloading its
+module, no longer breaks later pods with `ValueError: … already bound`: a class with the
+same name and fields is the same type, and its stored results are found again.
+
 #### `orcapod.File` — content-identified file type (ITL-450)
 
 `orcapod.File` is a new first-class type for materialized files. It subclasses
@@ -114,6 +126,38 @@ table by joining the path components with `__`, each with non-alphanumeric chara
 replaced by `_`. Correcting stored values is tracked in ITL-853.
 
 ### Breaking Changes
+
+#### Dataclasses and pydantic models are identified by name, kind and fields (ITL-881)
+
+Orcapod 0.3 identifies a dataclass or pydantic model by its name, its kind (dataclass or
+pydantic) and its fields' names and types, in any order. The name is the class name for a
+class defined in a notebook or script (`__main__`), the module path and class name for a
+class defined in a module, or the name declared with `op.register_type`.
+
+- **Hashes change for every pipeline that uses such a class.** The class's logical type
+  name and Arrow extension name become `Name@<SHA-256 of name, kind and fields>`, and the
+  stored struct lists fields in name order. Every schema hash, pipeline hash, table path,
+  system-tag column name and data hash that involves a dataclass or pydantic value moves.
+  The first run under 0.3 computes those pod and operator results again, into new tables.
+  Tables written by earlier versions are left untouched and are not read by 0.3 pipelines;
+  reading such a column directly raises `TypeIdentityError`. There is no migration tool.
+  Results that involve no dataclass or pydantic value are unaffected.
+- **Changing a class's fields makes a new type.** Its pods get new tables; the results of
+  the old definition stay where they are. Before, a changed class shared the old tables and
+  a run returned 0 rows with only log warnings.
+- **A stored shape that disagrees with the registered class raises.** `DeltaTableDatabase`
+  re-raises the new `orcapod.errors.TypeIdentityError` instead of logging the read failure
+  and returning no records. Reading a column whose class cannot be found raises
+  `ImportError` naming the column, the type and the `op.register_type` call to declare it.
+- **A subclass is its own type.** A dataclass or pydantic subclass was stored as its
+  registered parent, silently dropping its extra fields; it now has its own identity.
+- **Recursive classes** raise `RecursiveTypeError` (a `TypeError`) naming the field path,
+  for example `Node.next -> Node`.
+- Pinned golden hash entries changed (approved): `semantic.json` `type.dataclass`,
+  `type.pydantic`; `schema.json` `multi_field.logical_mix`,
+  `single_field.{dataclass,pydantic}.{arrow_type,schema_hash}`; `datagram.json`
+  `{dataclass,pydantic}.{content_hash,pipeline_hash,system_tag_columns}` and the per-row
+  `data_hash`, `_tag_record_id::…` and `_tag_source_id::…` entries of both cases.
 
 #### Operator outputs keep their inputs' Arrow types, normalized to large variants (ITL-832, ITL-813)
 
