@@ -31,12 +31,13 @@ connector's docstrings, pyspiral's own documentation) or is an assumption to con
 * ``drop_arrow_metadata`` (observed, ITL-471): schema and field metadata are dropped; the
   table's key-value store (``set_metadata``) round-trips.
 * ``decode_dictionaries`` (assumed): dictionary columns come back as their value type.
-* ``value_columns_nullable`` (off by default): report every non-key column nullable whatever
-  was written. Every column, keys included, is nullable in the EDI sample tables (live
-  schema dump, November 11, 2026), but those columns were written nullable; whether SpiralDB
-  keeps a non-null flag that was written is to confirm in write mode. By default the fake
-  keeps the nullability each column was written with, keys included (the tuple form of
-  ``create_table`` makes key columns nullable).
+* ``server_nullability`` (observed, pyspiral 0.16.33, ITL-936): SpiralDB reports every
+  top-level column nullable, key columns included, and every struct field nullable, whatever
+  was written; only list and fixed-size-list items keep a non-null flag. A null in a
+  top-level column declared non-null is refused on write (Arrow validates the outgoing batch
+  on the client). A null in a struct field declared non-null is accepted and stored as the
+  type's zero value (a null written to an ``int32`` field read back as ``0``). Switch it off
+  only to model a store that keeps nullability.
 * ``reject_struct_nulls`` (documented by pyspiral ``Table.write``): a null struct value is
   refused unless written with ``push_down_nulls=True``.
 * Rows come back sorted by key and writes upsert by key (SpiralDB is a key-sorted store).
@@ -69,7 +70,7 @@ class StorageBehaviour:
     drop_timezone: bool = True
     drop_arrow_metadata: bool = True
     decode_dictionaries: bool = True
-    value_columns_nullable: bool = False
+    server_nullability: bool = True
     reject_struct_nulls: bool = True
 
 
@@ -81,7 +82,8 @@ def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
         b: The storage behaviour to apply.
 
     Returns:
-        The stored type, with the same nesting, field names and nullability.
+        The stored type, with the same nesting and field names. Struct fields become
+        nullable under ``server_nullability``; list items keep their nullability.
     """
     if isinstance(t, pa.ExtensionType):
         # Vortex stores the storage type; the extension name lives in field metadata,
@@ -96,7 +98,12 @@ def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
     if pa.types.is_timestamp(t) and t.tz is not None and b.drop_timezone:
         return pa.timestamp(t.unit)
     if pa.types.is_struct(t):
-        return pa.struct([_stored_field(t.field(i), b) for i in range(t.num_fields)])
+        return pa.struct(
+            [
+                _stored_field(t.field(i), b, nullable=b.server_nullability or None)
+                for i in range(t.num_fields)
+            ]
+        )
     if pa.types.is_map(t):
         # pyarrow accepts key/item fields here; its stubs list only types.
         return pa.map_(  # pyright: ignore[reportCallIssue]
@@ -113,10 +120,55 @@ def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
     return t
 
 
-def _stored_field(f: pa.Field[Any], b: StorageBehaviour) -> pa.Field[Any]:
-    """Return the field SpiralDB hands back for a field written as ``f``."""
+def _stored_field(
+    f: pa.Field[Any], b: StorageBehaviour, nullable: bool | None = None
+) -> pa.Field[Any]:
+    """Return the field SpiralDB hands back for a field written as ``f``.
+
+    Args:
+        f: The field that was written.
+        b: The storage behaviour to apply.
+        nullable: ``True`` to report the field nullable whatever was written; ``None``
+            keeps the written flag.
+    """
     metadata = None if b.drop_arrow_metadata else f.metadata
-    return pa.field(f.name, _stored_type(f.type, b), f.nullable, metadata)
+    flag = f.nullable if nullable is None else nullable
+    return pa.field(f.name, _stored_type(f.type, b), flag, metadata)
+
+
+def _zero_struct_field_nulls(
+    col: pa.ChunkedArray[Any], written: pa.DataType
+) -> pa.ChunkedArray[Any]:
+    """Store a null in a struct field declared non-null as the type's zero (seen live).
+
+    Only top-level struct columns with primitive fields are modelled; other nulls are kept.
+    """
+    if not pa.types.is_struct(written):
+        return col
+    chunks = []
+    for chunk in col.chunks:
+        struct = cast("pa.StructArray", chunk)
+        children = []
+        for i in range(written.num_fields):
+            child = struct.field(i)
+            field = written.field(i)
+            if not field.nullable and child.null_count:
+                try:
+                    child = pc.fill_null(child, pa.scalar(0).cast(field.type))
+                except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                    pass
+            children.append(child)
+        chunks.append(
+            pa.StructArray.from_arrays(
+                children,
+                fields=[
+                    pa.field(written.field(i).name, children[i].type, True)
+                    for i in range(written.num_fields)
+                ],
+                mask=struct.is_null(),
+            )
+        )
+    return pa.chunked_array(chunks)
 
 
 def _has_struct_nulls(arr: pa.ChunkedArray[Any]) -> bool:
@@ -317,13 +369,16 @@ class FakeTable:
         fields = []
         arrays = []
         for f in table.schema:
-            is_key = f.name in keys.names
-            sf = _stored_field(f, b)
-            # Key columns keep the nullability they were written with: the EDI sample
-            # tables (live, November 11, 2026) report every key column nullable.
-            nullable = f.nullable if is_key or not b.value_columns_nullable else True
-            sf = pa.field(sf.name, sf.type, nullable, sf.metadata)
             col = table.column(f.name)
+            if b.server_nullability:
+                # Arrow validates the outgoing batch on the client (live, ITL-936).
+                if not f.nullable and col.null_count:
+                    raise ValueError(
+                        f"Column {f.name!r} is declared as non-nullable but contains "
+                        "null values"
+                    )
+                col = _zero_struct_field_nulls(col, f.type)
+            sf = _stored_field(f, b, nullable=b.server_nullability or None)
             if isinstance(f.type, pa.ExtensionType):
                 col = pa.chunked_array(
                     [cast("pa.ExtensionArray[Any]", c).storage for c in col.chunks]
@@ -415,12 +470,15 @@ class FakeProject:
         if isinstance(key_schema, pa.Schema):
             schema = key_schema
         else:
-            # SpiralDB reports key columns nullable (EDI sample schema, live, Nov 11 2026)
             schema = pa.schema([pa.field(n, t, True) for n, t in key_schema])
+        b = self._store.behaviour
+        # SpiralDB reports key columns nullable however they were declared (ITL-936).
         schema = pa.schema(
             [
                 pa.field(
-                    f.name, _stored_type(f.type, self._store.behaviour), f.nullable
+                    f.name,
+                    _stored_type(f.type, b),
+                    True if b.server_nullability else f.nullable,
                 )
                 for f in schema
             ]
