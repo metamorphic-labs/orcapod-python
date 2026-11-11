@@ -222,3 +222,39 @@ the store error, and drops further store errors silently.
   group with no store error propagates unchanged.
 
 No hash, schema or other behaviour change.
+
+---
+
+## Follow-up: CodeRabbit round 2, out-of-diff findings (review of 0940f995)
+
+Three findings sat in the review body ("Outside diff range comments"), not in threads.
+
+**Finding A (job.py final flush, approved if it reproduces): the final-flush `StoreWriteError`
+does not warn that pending output may not be stored.** All views of one store share the
+pending batches, so `pipeline_db.flush()` commits every table; a batch that fails stops the
+flush and the batches after it (a `cache_mode=LOG` operator's output, other nodes' rows)
+stay pending, and `result_db.flush()` never runs.
+
+- Test first: `Faults(on_flush=True)` with the LOG operator; the raised `StoreWriteError`
+  carries a note saying writes still pending may not have been stored.
+- Fix: build the error, `add_note(...)`, `raise err from exc`. Same error class, same
+  `record_path`, same `__cause__`.
+
+**Finding B (job.py `_flush_best_effort`, approved if it reproduces): a failed best-effort
+flush shows only in the log.**
+
+- Test first: an operator LOG write fails and the best-effort flush fails too; the raised
+  `StoreWriteError` is still the operator's, and carries a note that the flush failed and
+  pending results may not have been stored (upstream rows read back: 0).
+- Fix: `_flush_best_effort(run_error, *databases)` keeps logging and adds a note naming the
+  flush failure to the propagating run error. The raised error is unchanged.
+
+**Finding C (`ResultCache.store` record preparation): REPRODUCE AND REPORT ONLY.** Establish
+on both orchestrators and both error policies which function outputs fail in record
+preparation (naive datetime, value not matching the declared type, unsupported type, a
+logical type whose `python_to_storage` raises), what the caller sees (row skipped? WARNING
+log? observer `on_data_crash`? run returns? anything stored?), and what CodeRabbit's
+proposal would change. Ask the coordinator to choose (a) row failure under `error_policy`
+reported exactly like a function failure, or (b) `StoreWriteError`. No fix before the reply.
+
+No hash, schema or stored-data change.
