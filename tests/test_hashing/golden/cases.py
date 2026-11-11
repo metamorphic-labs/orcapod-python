@@ -858,8 +858,9 @@ def pipeline_job() -> dict[str, Any]:
 #
 # Each Polars case is separate from the groups' general cases, so running the generator
 # against a release without the Polars logical types (``--allow-errors``) loses only these
-# entries. The hash of a Polars value is a cache key; an intended change to it comes with a
-# bump of ``POLARS_HASH_GRAMMAR_VERSION`` (``orcapod.logical_types.polars_type``).
+# entries. The hash of a Polars value is a cache key carrying the label
+# ``polars_dataframe_v1`` / ``polars_series_v1`` (``orcapod.logical_types.polars_type``); an
+# intended change to it is a new definition under new labels, never new bytes under these.
 
 
 def _polars_values() -> dict[str, Any]:

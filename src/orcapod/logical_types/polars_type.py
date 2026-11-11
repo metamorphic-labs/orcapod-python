@@ -29,6 +29,11 @@ metadata, vary for equal frames), so the content hash is computed from the frame
 
     sha256(descriptor + b"\\x00" + starfix_digest)
 
+under the ``ContentHash`` method label ``"polars_dataframe_v1"`` (a frame) or
+``"polars_series_v1"`` (a Series). The label names this whole definition (descriptor grammar
+plus digest) and is its only version marker: the bytes produced under a label never change,
+and a new definition gets a new label, so old and new hashes can be told apart by inspection.
+
 ``starfix_digest`` is ``starfix.ArrowDigester.hash_table`` of a hash-only Arrow projection of
 the values (see ``_hash_projection``). Like every Orcapod table hash it ignores column order
 and struct field order, and hashes a dictionary-encoded column by its values.
@@ -37,9 +42,9 @@ and struct field order, and hashes a dictionary-encoded column by its values.
 carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``repr`` or its
 ``_PL_*`` metadata)::
 
-    frame:  {"v": 1, "kind": "polars.dataframe", "height": <rows>,
+    frame:  {"kind": "polars.dataframe", "height": <rows>,
              "columns": {<name>: <dtype>, ...}}
-    series: {"v": 1, "kind": "polars.series", "name": <name>, "height": <rows>,
+    series: {"kind": "polars.series", "name": <name>, "height": <rows>,
              "dtype": <dtype>}
 
     <dtype> := "int8" | "int16" | "int32" | "int64"
@@ -58,9 +63,9 @@ carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``re
 Keys are sorted, so column order and struct field order are not part of the identity. An
 Enum's full enumeration of choices is part of its dtype: its categories in declared order,
 including categories no row holds, so ``Enum(["a", "b"])``, ``Enum(["b", "a"])`` and
-``Enum(["a", "b", "z"])`` hash differently over the same values. ``"v"`` versions the grammar: any change to it must bump ``"v"``, which
-changes every frame hash on purpose. A dtype outside the grammar raises ``ValueError`` naming
-the column.
+``Enum(["a", "b", "z"])`` hash differently over the same values. Any change to the grammar or
+the digest is a new definition under new labels (``polars_dataframe_v2``,
+``polars_series_v2``). A dtype outside the grammar raises ``ValueError`` naming the column.
 """
 
 from __future__ import annotations
@@ -87,8 +92,11 @@ if TYPE_CHECKING:
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
-POLARS_HASH_GRAMMAR_VERSION = 1
-"""Version of the hash descriptor grammar (the ``"v"`` key). Bump on any grammar change."""
+POLARS_DATAFRAME_HASH_METHOD = "polars_dataframe_v1"
+"""``ContentHash`` method label of a ``pl.DataFrame`` hash; names the whole definition."""
+
+POLARS_SERIES_HASH_METHOD = "polars_series_v1"
+"""``ContentHash`` method label of a ``pl.Series`` hash; names the whole definition."""
 
 _UNSTORABLE_DTYPES: tuple[type[pl.DataType], ...] = (pl.Object, pl.Int128, pl.UInt128)
 
@@ -270,7 +278,9 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
     return table.cast(target)
 
 
-def _content_hash(descriptor: dict[str, Any], df: pl.DataFrame) -> ContentHash:
+def _content_hash(
+    descriptor: dict[str, Any], df: pl.DataFrame, method: str
+) -> ContentHash:
     """Combine a descriptor and a frame's values into the content hash.
 
     The digest is ``sha256(descriptor_json + b"\x00" + starfix_digest)``, where
@@ -281,16 +291,17 @@ def _content_hash(descriptor: dict[str, Any], df: pl.DataFrame) -> ContentHash:
     Args:
         descriptor: The frame or Series descriptor in the module's grammar.
         df: The frame whose values are hashed (a Series is passed as its one-column frame).
+        method: The ``ContentHash`` method label naming the hash definition.
 
     Returns:
-        A ``ContentHash`` with method ``"sha256"``.
+        A ``ContentHash`` with method ``method``.
     """
     descriptor_bytes = json.dumps(
         descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     values_digest = ArrowDigester.hash_table(_hash_projection(df))
     digest = hashlib.sha256(descriptor_bytes + b"\x00" + values_digest).digest()
-    return ContentHash(method="sha256", digest=digest)
+    return ContentHash(method=method, digest=digest)
 
 
 def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
@@ -300,13 +311,12 @@ def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
         df: The frame to hash.
 
     Returns:
-        A ``ContentHash`` with method ``"sha256"``.
+        A ``ContentHash`` with method ``"polars_dataframe_v1"``.
 
     Raises:
         ValueError: If a column's dtype is outside the descriptor grammar.
     """
     descriptor = {
-        "v": POLARS_HASH_GRAMMAR_VERSION,
         "kind": "polars.dataframe",
         "height": df.height,
         "columns": {
@@ -314,7 +324,7 @@ def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
             for name, dtype in df.schema.items()
         },
     }
-    return _content_hash(descriptor, df)
+    return _content_hash(descriptor, df, POLARS_DATAFRAME_HASH_METHOD)
 
 
 def polars_series_content_hash(series: pl.Series) -> ContentHash:
@@ -324,20 +334,20 @@ def polars_series_content_hash(series: pl.Series) -> ContentHash:
         series: The Series to hash.
 
     Returns:
-        A ``ContentHash`` with method ``"sha256"``; never equal to the hash of the one-column
-        frame holding the same Series (the descriptors differ in ``"kind"``).
+        A ``ContentHash`` with method ``"polars_series_v1"``; never equal to the hash of
+        the one-column frame holding the same Series (the labels and the descriptors'
+        ``"kind"`` differ).
 
     Raises:
         ValueError: If the dtype is outside the descriptor grammar.
     """
     descriptor = {
-        "v": POLARS_HASH_GRAMMAR_VERSION,
         "kind": "polars.series",
         "name": series.name,
         "height": series.len(),
         "dtype": polars_dtype_descriptor(series.dtype, series.name),
     }
-    return _content_hash(descriptor, series.to_frame())
+    return _content_hash(descriptor, series.to_frame(), POLARS_SERIES_HASH_METHOD)
 
 
 def _frame_to_ipc_bytes(df: pl.DataFrame) -> bytes:

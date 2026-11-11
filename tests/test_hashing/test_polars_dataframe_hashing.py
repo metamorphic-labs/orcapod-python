@@ -293,6 +293,20 @@ class TestSeriesHashing:
         assert _data_hash(s) != _data_hash(s.to_frame())
 
 
+class TestHashLabel:
+    """The method label names the hash definition and is its only version marker."""
+
+    def test_dataframe_hash_label(self) -> None:
+        hasher = get_default_context().semantic_hasher
+        frame_hash = hasher.hash_object(pl.DataFrame({"a": [1]}))
+        assert frame_hash.method == "polars_dataframe_v1"
+
+    def test_series_hash_label(self) -> None:
+        hasher = get_default_context().semantic_hasher
+        series_hash = hasher.hash_object(pl.Series("a", [1]))
+        assert series_hash.method == "polars_series_v1"
+
+
 class TestHashTimeRejection:
     def test_object_column_is_rejected_naming_the_column(self) -> None:
         df = pl.DataFrame(

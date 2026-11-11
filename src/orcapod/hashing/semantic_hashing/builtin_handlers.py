@@ -512,7 +512,7 @@ class PolarsDataFrameHandler:
             hasher: Ignored. Present for protocol conformance.
 
         Returns:
-            A ``ContentHash`` with method ``"sha256"``.
+            A ``ContentHash`` with method ``"polars_dataframe_v1"``.
 
         Raises:
             TypeError: If ``obj`` is not a ``pl.DataFrame``.
@@ -543,7 +543,7 @@ class PolarsSeriesHandler:
             hasher: Ignored. Present for protocol conformance.
 
         Returns:
-            A ``ContentHash`` with method ``"sha256"``.
+            A ``ContentHash`` with method ``"polars_series_v1"``.
 
         Raises:
             TypeError: If ``obj`` is not a ``pl.Series``.
