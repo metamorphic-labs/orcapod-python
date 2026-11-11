@@ -64,6 +64,11 @@ def delta_to_pyarrow_dataset(
     table, which returns the same schema and values without Python file objects. Any other
     URI, a cloud store or a ``filesystem`` passed by the caller, keeps deltalake's reader.
 
+    ``table_uri`` is percent-encoded: deltalake 1.0.2 and 1.2.1 return a bare path such as
+    ``/data/a%20b/``, and 1.6.6 returns ``file:///data/a%20b/``. pyarrow's own URI parser
+    decodes it to the native path. A root that is neither a ``file://`` URI nor an absolute
+    POSIX path (a Windows drive path, untested) keeps deltalake's reader.
+
     Args:
         delta_table: The Delta table to open.
         **kwargs: Passed to ``DeltaTable.to_pyarrow_dataset`` unchanged.
@@ -72,11 +77,10 @@ def delta_to_pyarrow_dataset(
         The pyarrow dataset over the table's current version.
     """
     uri = delta_table.table_uri
-    local_path = uri[len("file://") :] if uri.startswith("file://") else uri
-    if kwargs.get("filesystem") is None and "://" not in local_path:
-        kwargs["filesystem"] = pa_fs.SubTreeFileSystem(
-            local_path, pa_fs.LocalFileSystem()
-        )
+    file_uri = f"file://{uri}" if uri.startswith("/") else uri
+    if kwargs.get("filesystem") is None and file_uri.startswith("file://"):
+        filesystem, root = pa_fs.FileSystem.from_uri(file_uri)
+        kwargs["filesystem"] = pa_fs.SubTreeFileSystem(root, filesystem)
     return delta_table.to_pyarrow_dataset(**kwargs)
 
 

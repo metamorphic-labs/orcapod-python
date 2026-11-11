@@ -218,3 +218,68 @@ def test_local_tables_open_on_a_native_filesystem(tmp_path: Path) -> None:
     opened = delta_to_pyarrow_dataset(table, filesystem=pa_fs.LocalFileSystem())
     assert isinstance(opened, pa_ds.FileSystemDataset)
     assert isinstance(opened.filesystem, pa_fs.LocalFileSystem)
+
+
+# deltalake percent-encodes ``DeltaTable.table_uri`` (``/x/a%20b/t/`` on 1.0.2 and 1.2.1,
+# ``file:///x/a%20b/`` on 1.6.6), so the native filesystem must decode the table root.
+_SPECIAL_ROOTS = ["a b", "pct%", "p%20q", "é ü", "x#y", "q?r", "semi;c", "plus+"]
+
+
+def _write_or_skip(table_dir: Path, table: pa.Table) -> None:
+    """Write ``table`` with deltalake, skipping a root name deltalake itself cannot write.
+
+    Args:
+        table_dir: Directory of the new Delta table.
+        table: Rows to write.
+    """
+    try:
+        deltalake.write_deltalake(str(table_dir), table)
+        deltalake.DeltaTable(str(table_dir))
+    except Exception as exc:  # noqa: BLE001 - deltalake's own limit, not Orcapod's
+        pytest.skip(
+            f"deltalake cannot write a table at {table_dir.parent.name!r}: {exc}"
+        )
+
+
+@pytest.mark.parametrize("root_name", _SPECIAL_ROOTS)
+def test_database_reads_a_store_under_a_special_character_root(
+    tmp_path: Path, root_name: str
+) -> None:
+    """A store whose directory needs percent-encoding is read in full, not as empty."""
+    store_dir = tmp_path / root_name / "store"
+    _write_or_skip(tmp_path / root_name / "probe", _typed_table(0))
+    table = pa.table(
+        {
+            "__record_id": pa.array(["a", "b", "c"], pa.large_string()),
+            "v": pa.array([1, 2, 3], pa.int64()),
+        }
+    )
+    db = DeltaTableDatabase(store_dir)
+    db.add_records(("t",), table, record_id_column="__record_id")
+    db.flush()
+
+    actual = DeltaTableDatabase(store_dir).get_all_records(
+        ("t",), record_id_column=DeltaTableDatabase.RECORD_ID_COLUMN
+    )
+
+    (table_dir,) = _delta_table_dirs(store_dir)
+    expected = _default_reader(table_dir)
+    assert expected.num_rows == 3
+    assert actual is not None, f"the store under {root_name!r} read as empty"
+    _assert_identical(actual, expected, sort_by=DeltaTableDatabase.RECORD_ID_COLUMN)
+
+
+@pytest.mark.parametrize("root_name", _SPECIAL_ROOTS)
+def test_delta_table_source_reads_a_table_under_a_special_character_root(
+    tmp_path: Path, root_name: str
+) -> None:
+    """A table whose directory needs percent-encoding reads like the default reader."""
+    table_dir = tmp_path / root_name / "table"
+    _write_or_skip(table_dir, _typed_table(0))
+
+    source = op.sources.DeltaTableSource(table_dir, tag_columns=["id"])
+    reference = _default_reader(table_dir)
+
+    stored = source.as_table().select(reference.column_names)
+    assert stored.schema.equals(reference.schema, check_metadata=True)
+    assert stored.sort_by("id").equals(reference.sort_by("id"))
