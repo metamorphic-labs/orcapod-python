@@ -388,3 +388,56 @@ def test_pending_null_typed_column_reads_back_but_does_not_flush(
     with pytest.raises(RuntimeError, match="Failed to flush"):
         db.flush()
     assert _read_sorted(db, "get_all_records").equals(before)
+
+
+@pytest.mark.parametrize(
+    ("stored", "pending", "query", "expected_ids"),
+    [
+        (
+            _without_x(_table("a", pa.array([1], pa.int64()))),
+            _table("c", pa.array([3], pa.int64())),
+            {"x": 3},
+            [b"c"],
+        ),
+        (
+            _table("a", pa.array([1], pa.int64())),
+            _without_x(_table("c", pa.array([3], pa.int64()))),
+            {"x": 1},
+            [b"a"],
+        ),
+    ],
+    ids=["column_only_pending", "column_only_stored"],
+)
+def test_query_on_column_one_side_lacks_matches_read_after_flush(
+    tmp_path: Path,
+    stored: pa.Table,
+    pending: pa.Table,
+    query: dict[str, int],
+    expected_ids: list[bytes],
+) -> None:
+    """A query on a column only one side has returns before flush what it returns after."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, stored, flush=True)
+    db.add_records(PATH, pending)
+
+    before = db.get_records_with_column_value(PATH, query, record_id_column="rid")
+    db.flush()
+    after = db.get_records_with_column_value(PATH, query, record_id_column="rid")
+
+    assert before is not None and after is not None
+    assert before.column("rid").to_pylist() == expected_ids
+    assert before.schema == after.schema
+    assert before.to_pylist() == after.to_pylist()
+
+
+@pytest.mark.parametrize("flushed", [False, True])
+def test_query_on_column_neither_side_has_raises(tmp_path: Path, flushed: bool) -> None:
+    """A query on a column neither the stored nor the pending rows have raises, flushed or not."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows(["a"], [1]), flush=True)
+    db.add_records(PATH, _rows(["c"], [3]))
+    if flushed:
+        db.flush()
+
+    with pytest.raises(pa.ArrowInvalid, match="No match for FieldRef"):
+        _ = db.get_records_with_column_value(PATH, {"y": 1})

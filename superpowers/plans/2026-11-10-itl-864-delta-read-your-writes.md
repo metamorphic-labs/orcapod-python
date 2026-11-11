@@ -156,3 +156,19 @@ def _combine_stored_and_pending(self, stored, pending, record_id_column):
 - [ ] Append one `DESIGN_ISSUES.md` entry (resolved, with **Fix:**; note that writes from other processes are still not seen until a handle reloads the table — follow-up for the coordinator to file).
 - [ ] `uv run --with ruff ruff check .`, `ruff format --check .`, `uv run --with basedpyright basedpyright` (exit code), `uv run pytest tests/` (golden hashes unchanged).
 - [ ] Merge `origin/main`, rerun if it moved, push, PR "Fixes ITL-864", `orca linear attach`, `orca worktree set --pr`.
+
+---
+
+## Review rounds and continuation notes (successor-readable)
+
+Done and pushed (verify, do not redo):
+- Round 1 (e9c78b5c): a failed ID refresh keeps the cache dirty; `get_records_by_ids` refresh shares the stored-read handler (8f9adf8b).
+- Round 2 (8f9adf8b): refresh when the record key has no ID-cache entry; stored + pending combined with `normalize_table_to_large_types` + `pa.concat_tables(promote_options="default")` (b8bcc817). Tests: `test_fresh_handle_drops_pending_rows_with_stored_ids`, evolved-schema tests.
+
+Round 3 (CodeRabbit review of b8bcc817, outside-diff, `get_records_with_column_value`), approved fix:
+- A side (stored schema, read without loading data; pending column names) that lacks a queried column contributes no rows; after a flush its rows hold null there and `col == value` never matches null. A column on neither side keeps today's `ArrowInvalid` ("No match for FieldRef").
+- Tests: `test_query_on_column_one_side_lacks_matches_read_after_flush[column_only_pending|column_only_stored]`, `test_query_on_column_neither_side_has_raises[flushed]`.
+- Also the round-1 outside-diff trivial: `_add_to_pending_batch` cast `list[str]` -> `list[bytes]`.
+- Reply: signed top-level PR comment (no thread for outside-diff findings), and one for the round-1 trivial.
+
+Then: merge origin/main (b197544e); wait for PR #290 (ITL-884, StoreReadError) to merge; merge main again, take #290's error handling around `_pending_not_stored` / `_combine_stored_and_pending`; a failed ID refresh must raise `StoreReadError` on every read method; full suite; worker_done only after the post-#290 merge is green.

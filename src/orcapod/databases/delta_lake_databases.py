@@ -632,7 +632,7 @@ class DeltaTableDatabase:
         else:
             self._pending_batches[record_key] = pa.concat_tables([pending_batch, table])
 
-        pending_ids = cast(list[str], table[self.RECORD_ID_COLUMN].to_pylist())
+        pending_ids = cast(list[bytes], table[self.RECORD_ID_COLUMN].to_pylist())
         self._pending_record_ids[record_key].update(pending_ids)
 
     def _should_auto_flush(self, record_path: tuple[str, ...]) -> bool:
@@ -788,11 +788,27 @@ class DeltaTableDatabase:
             combined_expression = combined_expression & next_expression
 
         pending = self._pending_not_stored(record_path)
+        delta_table = self._get_delta_table(record_path)
+
+        # A side without a queried column holds null there once flushed, and
+        # ``column == value`` never matches null, so it contributes no rows. A
+        # column neither side has is unknown: the filter raises as before.
+        queried = {c for c, _ in pair_list}
+        stored_columns = (
+            set()
+            if delta_table is None
+            else {field.name for field in delta_table.schema().fields}
+        )
+        pending_columns = set() if pending is None else set(pending.column_names)
+        if queried <= stored_columns | pending_columns:
+            if not queried <= pending_columns:
+                pending = None
+            if not queried <= stored_columns:
+                delta_table = None
+
         if pending is not None:
             pending = pending.filter(combined_expression)
 
-        # Now check the Delta table
-        delta_table = self._get_delta_table(record_path)
         if delta_table is None:
             return self._combine_stored_and_pending(None, pending, record_id_column)
 
