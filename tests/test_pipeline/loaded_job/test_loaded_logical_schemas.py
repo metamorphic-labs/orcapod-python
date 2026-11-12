@@ -212,3 +212,59 @@ job.save(root / "job.json")
     assert "payload" in caplog.text
     with pytest.raises(ValueError, match="producer.*payload"):
         loaded.nodes["producer"].output_schema()
+
+
+@pytest.mark.parametrize("fallback_schema", [False, True])
+def test_source_schema_uses_saved_context_converter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback_schema: bool
+) -> None:
+    """Source schema restoration uses the resolved context, including fallback schemas."""
+    from orcapod.contexts import create_registry
+    from orcapod.core.nodes import SourceNode
+    from orcapod.pipeline import Pipeline
+    from orcapod.types import Schema
+
+    @op.dataclass
+    class ContextOnly:
+        """A type registered only in this isolated data context."""
+
+        value: int
+
+    context = create_registry().get_context()
+    from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+
+    assert isinstance(context.type_converter, UniversalTypeConverter)
+    context.type_converter.register_python_class(ContextOnly)
+    left = SourceNode(
+        "left",
+        tag_schema=Schema({"key": ContextOnly}),
+        data_schema=Schema({"payload": ContextOnly}),
+        data_context=context,
+    )
+    right = SourceNode(
+        "right",
+        tag_schema=Schema({"key": ContextOnly}),
+        data_schema=Schema({"other": int}),
+        data_context=context,
+    )
+    pipeline = Pipeline(name="context_source")
+    with pipeline:
+        Join()(left, right, label="joined")
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    if fallback_schema:
+        saved = json.loads(path.read_text())
+        for descriptor in saved["nodes"].values():
+            if descriptor["node_type"] == "source":
+                descriptor["source_config"].pop("tag_schema", None)
+                descriptor["source_config"].pop("data_schema", None)
+        path.write_text(json.dumps(saved))
+    # This test targets routing from the saved-context resolver into schema restoration.
+    monkeypatch.setattr(
+        "orcapod.pipeline.graph.resolve_saved_context", lambda key: context
+    )
+    loaded = Pipeline.load(path)
+    tag_schema, data_schema = loaded.nodes["left"].output_schema()
+    assert tag_schema["key"] is ContextOnly
+    assert data_schema["payload"] is ContextOnly
+    assert loaded.nodes["joined"].load_status == LoadStatus.FULL

@@ -325,17 +325,27 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         node_name = descriptor.get("label") or "unknown"
                     if "tag_schema" in source_config and "data_schema" in source_config:
                         tag_schema = Schema(
-                            deserialize_schema(source_config["tag_schema"])
+                            deserialize_schema(
+                                source_config["tag_schema"], context.type_converter
+                            )
                         )
                         data_schema = Schema(
-                            deserialize_schema(source_config["data_schema"])
+                            deserialize_schema(
+                                source_config["data_schema"], context.type_converter
+                            )
                         )
                     else:
                         tag_schema = Schema(
-                            deserialize_schema(descriptor["output_schema"]["tag"])
+                            deserialize_schema(
+                                descriptor["output_schema"]["tag"],
+                                context.type_converter,
+                            )
                         )
                         data_schema = Schema(
-                            deserialize_schema(descriptor["output_schema"]["data"])
+                            deserialize_schema(
+                                descriptor["output_schema"]["data"],
+                                context.type_converter,
+                            )
                         )
                     node = SourceNodeClass(
                         name=node_name,

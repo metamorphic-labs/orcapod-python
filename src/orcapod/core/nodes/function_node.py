@@ -2637,15 +2637,11 @@ class FunctionJobNode(FunctionNodeBase):
                 empty_taginfo_rows[base_eid] = row
 
         # ------------------------------------------------------------------
-        # Merge with persistent priority (anti-join + concat)
+        # Keep both stores' rows until latest-recomputation selection. Persistent
+        # rows come last so they retain priority when recomputation indices tie.
         # ------------------------------------------------------------------
         if ephemeral_df.height > 0 and persistent_df.height > 0:
-            ephemeral_only_df = ephemeral_df.join(
-                persistent_df.select([_PIPELINE_BASE_ENTRY_ID_COL]),
-                on=_PIPELINE_BASE_ENTRY_ID_COL,
-                how="anti",
-            )
-            merged_df = pl.concat([persistent_df, ephemeral_only_df], how="diagonal")
+            merged_df = pl.concat([ephemeral_df, persistent_df], how="diagonal")
         elif ephemeral_df.height > 0:
             merged_df = ephemeral_df
         elif persistent_df.height > 0:
@@ -2956,10 +2952,13 @@ class FunctionJobNode(FunctionNodeBase):
         """Eagerly compute all input data, filling pipeline and result databases.
 
         Raises:
-            RuntimeError: If ``load_status`` is UNAVAILABLE (no pod, no DB).
+            RuntimeError: If the node was loaded without a function pod, or
+                ``load_status`` is UNAVAILABLE (no pod, no DB).
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        if self._function_pod is None:
+            raise self._cannot_compute_error()
         self._begin_run()
         if self._load_status == LoadStatus.UNAVAILABLE:
             raise self._no_store_error()

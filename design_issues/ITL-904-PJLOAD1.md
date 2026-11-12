@@ -83,3 +83,9 @@ the definition content hash rather than the run's hash. The combined hash-step r
 still injects those values from the live node. The developer deferred this change to ITL-977;
 the recommended approach is additive runtime descriptors in `run.node_descriptors`, preserving
 blueprint identities and edges. The separate full logical-identifier gap is resolved here.
+
+Review follow-ups: readable persistent and ephemeral records now both reach the
+latest-index selection (persistent wins equal indices). Loaded REPLAY operators raise
+when their cache table is absent; loaded function `run()` rejects computation, and
+loaded jobs report `is_runnable()` as false even after binding sources. Source-schema
+restoration uses the saved context converter in both normal and fallback branches.

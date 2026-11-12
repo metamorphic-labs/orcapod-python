@@ -717,7 +717,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         return self._store is not None and not self.unbound_sources
 
     def is_runnable(self, node_label: str) -> bool:
-        """Return ``True`` if all upstream inputs of *node_label* are resolved.
+        """Return whether a live job has all upstream inputs of *node_label* resolved.
+
+        A loaded job is read-only and always returns ``False``.
 
         Uses hash-based traversal of ``_hash_graph`` combined with
         ``_persistent_node_map`` to check whether every upstream source slot
@@ -731,7 +733,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Returns:
             ``True`` if the node can be executed with current bindings.
         """
-        if not self._compiled:
+        if self._loaded or not self._compiled:
             return False
 
         target = self._nodes.get(node_label)
@@ -793,9 +795,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 the duration of the run. When ``False`` each node's buffer is
                 released as soon as the node completes, reducing peak memory.
                 This setting does not affect database persistence or post-run
-                result access — DB records are written regardless, and
-                ``job.nodes["label"].get_all_records()`` works the same in
-                either case.
+                result access: DB records are written regardless, and
+                ``job.nodes["label"]`` returns the same rows from
+                ``as_table()`` and ``iter_data()`` in either case, on either
+                orchestrator. An operator node with the default
+                ``cache_mode=OFF`` (the only mode a job sets) keeps its output
+                in memory and stores nothing. Its ``get_all_records()`` returns
+                ``None`` when no matching records exist; records from an earlier
+                LOG run remain readable after switching to OFF.
             commit_every_rows: How many rows a function node processes between
                 commits of its results and pipeline records to the store
                 (default 100). Each node also commits when it finishes, before a

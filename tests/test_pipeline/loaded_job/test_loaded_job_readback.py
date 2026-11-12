@@ -864,3 +864,67 @@ def test_in_memory_source_node_is_readable_after_bind(saved: pathlib.Path) -> No
     job = _load(saved)
     job.bind(sources={"dsrc": _dict_source()})
     assert job.nodes["dsrc"].as_table().num_rows == 2
+
+
+@pytest.mark.parametrize("method", ["as_table", "iter_data"])
+def test_loaded_replay_operator_reports_absent_cache_table(
+    tmp_path: pathlib.Path, method: str
+) -> None:
+    """A missing REPLAY table must not look like a successful zero-row result."""
+    from orcapod.types import CacheMode
+
+    node = _loaded_operator_only_job(tmp_path).nodes["joined"]
+    node.attach_databases(InMemoryArrowDatabase(), cache_mode=CacheMode.REPLAY)
+    with pytest.raises(RuntimeError, match="joined.*cache table is absent"):
+        result = getattr(node, method)()
+        if method == "iter_data":
+            list(result)
+
+
+def test_loaded_job_is_never_runnable(tmp_path: pathlib.Path) -> None:
+    """Bound file sources cannot make a loaded read-only job executable."""
+    job = _loaded_operator_only_job(tmp_path)
+    assert not job.is_runnable("joined")
+
+
+def test_loaded_function_run_rejects_computation(saved: pathlib.Path) -> None:
+    """A loaded function's run entry point rejects before setting up a run."""
+    with pytest.raises(RuntimeError, match="loaded.*cannot compute"):
+        _load(saved).nodes["dbl"].run()
+
+
+@pytest.mark.parametrize(
+    "ephemeral_modes", [(False,), (True,), (False, True), (True, False)]
+)
+def test_latest_readable_result_wins_across_both_stores(
+    ephemeral_modes: tuple[bool, ...],
+) -> None:
+    """Readback picks the newest recomputation regardless of its result store."""
+    import time
+    from orcapod.core.nodes.function_node import FunctionJobNode
+    from orcapod.protocols.core_protocols import FunctionPodProtocol
+
+    def timestamp(x: int) -> int:
+        """Produce a distinct result for each explicitly requested computation."""
+        return time.monotonic_ns() + x
+
+    source = _dict_source()
+    pod = function_pod(output_keys="value")(timestamp).pod
+    assert isinstance(pod, FunctionPodProtocol)
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=InMemoryArrowDatabase(),
+    )
+    node.set_ephemeral_store(InMemoryArrowDatabase())
+    tag, data = next(source.iter_data())
+    expected = None
+    for ephemeral in ephemeral_modes:
+        node.node_config = NodeConfig(is_result_ephemeral=ephemeral)
+        _, result = node.execute_data(tag, data)
+        assert result is not None
+        expected = result["value"]
+    node.clear_cache()
+    assert node.as_table().column("value").to_pylist() == [expected]
+    assert [result["value"] for _, result in node.iter_data()] == [expected]
