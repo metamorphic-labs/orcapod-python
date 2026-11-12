@@ -1329,6 +1329,42 @@ class TestInputOfAnotherDataContext:
         _assert_names_both_contexts(info.value)
         assert reopened(store).list_sources() == []
 
+    @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {},
+            {"skip_cache_lookup": True},
+            {"skip_cache_lookup": True, "skip_cache_insert": True},
+        ],
+        ids=["default", "no_lookup", "no_lookup_no_insert"],
+    )
+    def test_cached_function_refuses_an_input_of_another_data_context(
+        self,
+        store: Store,
+        other_context: contexts.DataContext,
+        flags: dict[str, bool],
+        asynchronous: bool,
+    ):
+        """The input's data context is checked before the function is called (ITL-975).
+
+        Also when the cache lookup, which checks it too, is skipped.
+        """
+        import asyncio
+
+        cached = CachedDataFunction(double.pod.data_function, result_database=store)
+        data = Data({"x": 1}, data_context=other_context)
+
+        with pytest.raises(InputValidationError) as info:
+            if asynchronous:
+                _ = asyncio.run(cached.async_call(data, **flags))
+            else:
+                _ = cached.call(data, **flags)
+
+        _assert_names_both_contexts(info.value)
+        assert calls == []
+        assert reopened(store).list_sources() == []
+
     def test_cached_source_keeps_its_data_context_on_cached_rows(self, store: Store):
         """Rows read back from the cache carry the source's data context, not the default."""
         table = pa.table({"k": ["a", "b"], "x": [1, 2]})
