@@ -25,7 +25,7 @@ import torch  # noqa: E402
 
 from orcapod import function_pod  # noqa: E402
 from orcapod.contexts import create_registry, get_default_context  # noqa: E402
-from orcapod.errors import UnsupportedValueError  # noqa: E402
+from orcapod.errors import OutputTypeError, UnsupportedValueError  # noqa: E402
 from orcapod.logical_types.base_logical_type import BaseLogicalType  # noqa: E402
 from orcapod.logical_types.registry import (  # noqa: E402
     make_arrow_extension_type,
@@ -356,7 +356,10 @@ def test_non_tensor_returned_for_declared_tensor_is_refused_at_the_pod(
         return returned
 
     source = DictSource(data=[{"k": "a", "x": torch.zeros(2)}], tag_columns=["k"])
-    with pytest.raises(TypeError, match=f"'y'.*Tensor.*{type_name}"):
+    with pytest.raises(
+        OutputTypeError,
+        match=f"'bad' returned .*{type_name} for output 'y'.*declared torch.Tensor",
+    ):
         list(bad.pod(source).iter_data())
 
 
@@ -386,7 +389,10 @@ def test_declared_tensor_subclass_refuses_a_plain_tensor() -> None:
         return x * 2  # pyright: ignore[reportReturnType]  # deliberately the base class
 
     source = DictSource(data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"])
-    with pytest.raises(TypeError, match="'y'.*Parameter.*Tensor"):
+    with pytest.raises(
+        OutputTypeError,
+        match="returned torch.Tensor for output 'y'.*declared torch.nn.parameter.Parameter",
+    ):
         list(as_parameter.pod(source).iter_data())
 
 
@@ -526,7 +532,10 @@ def test_declared_subclass_with_its_own_logical_type_requires_that_subclass() ->
     source = DictSource(
         data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"], data_context=ctx
     )
-    with pytest.raises(TypeError, match="'y'.*LabeledTensor.*Tensor"):
+    with pytest.raises(
+        OutputTypeError,
+        match="returned torch.Tensor for output 'y'.*declared .*LabeledTensor",
+    ):
         list(plain.pod(source).iter_data())
     got = [d.as_dict()["y"] for _, d in labeled.pod(source).iter_data()]
     assert type(got[0]) is LabeledTensor

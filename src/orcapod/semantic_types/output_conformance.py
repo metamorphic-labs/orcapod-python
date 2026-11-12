@@ -232,6 +232,16 @@ class _Checker:
                 mismatch = self.check(getattr(value, name), hints[name])
                 if mismatch:
                     return _at(mismatch, f".{name}")
+        elif (
+            logical_type is not None
+            and isinstance(declared, type)
+            and not isinstance(value, declared)
+        ):
+            # Any other class with a registered logical type (torch.Tensor,
+            # nn.Parameter, File, ...): the returned value must be an instance of
+            # the declared class. A subclass instance conforms; what is stored for
+            # it is decided by the logical type.
+            return Nonconformance("", declared, value)
         return None
 
     def check_number(
