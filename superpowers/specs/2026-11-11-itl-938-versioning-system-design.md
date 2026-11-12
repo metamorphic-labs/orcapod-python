@@ -1004,6 +1004,35 @@ developer's "additive changes do not change the number" a test, not a judgement.
 | Data context key (`std:v0.1:default`) | `_context_key` in result rows, `__input_data_context_key` in pipeline rows, per node in saved jobs; not in the operator cache, cached-source or side-effect tables | never changed: its file was edited in place 20 times |
 | Registry of what each version means | the context file `contexts/data/v0.1.json` lists the classes and has a changelog | it is not frozen per version, and it names classes whose behaviour changed underneath, not definitions |
 
+### 5.5 The model: core hash version, logical types, labels (developer's model, November 11, 2026)
+
+```
+ To reproduce a hash you need:
+
+   H  (global hash version)              +   the logical types that took part in THAT hash
+   the core machinery: hashers,              each identified by its own identifier, owned by
+   recipes, identity compositions,           whoever implements the type; Orcapod treats the
+   naming grammar, conversion rules          identifier as opaque
+
+   recorded: one value per row               recorded: in the metadata of the column that
+   (the data context key)                    stores a value of that type (table schema, so path)
+
+ A label in front of a hash names the algorithm that produced that value. Informational only.
+```
+
+| Point | Decision or status |
+|---|---|
+| Logical types are not part of `H` | Registering a type cannot change `H`. A change to one type's layout or hashing changes that type's identifier, not `H`. Tables and rows that do not involve the type are untouched |
+| What a hash depends on | `H` plus the logical types that appear in the hashed data, never the whole set registered in the process. Today a dataclass subclass hashes as its base once the base is registered (`logical_types/registry.py`): a leak to close |
+| How a logical type is versioned | "Can be entirely left up to the logical type extension implementer -- namely they should have some version/identifier but exactly how that is used/matched is left to them." Orcapod requires only that the identifier changes whenever the type's stored layout or its hashing changes |
+| Where the identifier is recorded | In the column's type metadata (Arrow extension name and extension metadata), which the stores preserve. By the data-type decision this is part of the schema, so a changed identifier gives a new path. Today only arrays write a version (`{"version":1}`); other types write empty metadata (ITL-935) |
+| The identifier in the schema hash | Today the schema hash covers the type's name only. For a changed identifier to move the path, the whole identifier (name and metadata) must be hashed |
+| The function result table | **Does not record how its input hash was computed.** "As far as result table is concerned, we do NOT concern ourselves on the very way by which the input data has led to the hash computation per se." The input hash is an opaque key there |
+| Where the input's types are found instead | Where the input values are stored: the column metadata of the upstream table. Fact check: a function's pipeline table has **no column per input field**; it has tags, system tags, and one source-info column per input field (`_source_doubled` = `double:…::<uuid7>::doubled`), which points at the upstream result row whose column carries the type metadata. For an input that comes straight from a source, the source's own schema is the record (source contract) |
+| Labels | "The label on any hash value (if at all present) should purely reflect the very algorithm that was just used to compute that hash and nothing else." Not tied to `H`. Supersedes "bump the label whenever any hash can change" |
+| Consequence for lookups | With labels naming only algorithms, an entry whose hash is unaffected by a change keeps its key and is simply found. A fix for a hash that could collide is the case where the algorithm's label changes, so old keys cannot match |
+| Open | which rows a read of a whole table returns when versions are mixed; the format of the `H1` context key |
+
 ---
 
 ## Part 6. Generation names in paths (decided: none)
@@ -1073,6 +1102,9 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **Old results looking absent without migration is accepted; additive changes do not change the hash version.** "I think old values looking absent without explicit migration is something we have to accept. Generally, as long as what we do is simply additive in features, such that previous hash value should NOT have changed under new version, then we don't need to actually alter the hash version number and thus we won't run into suddenly empty table under the new hash version." |
 | Nov 11, 2026 | **One global hash version, stored per row, with a registry.** "Anytime anything really that could alter previously computed hash changes between versions, we need information inside the row that would allow us to precisely tell what must have changed. Since summarizing everything that actually changed is not really sensible, the way to do is to have a single number that keeps on varying so that every unique different combo of hashing mechanism would yield different number such that we know for sure that if two rows share this number, they were computed using exactly identical set of algorithms/definitions/libraries such that same entry would have yielded same hash. ... we should have a look up somewhere (possibly as part of orcapod-sanctuary) that maps every exact number to actual combination of specific tools. This way, when given two such numbers (e.g. v15 vs v1), we can look up what is actually different between the two versions ... and consequently decide if we can cheaply migrate ... or minimally we can just rerun all hashing under v1 and v15, and if v1 version exist, take it and create a new entry with v15 hash." Whether this is what `arrow_v0.1` / `arrow_v0.2` should mean, or belongs in the data context, is open (5.4). |
 | Nov 11, 2026 | **Numbering of the hash version.** "I'd rather that H0 is what the current nauticalab/orcapod-python exactly points to, forget about v0.2.0 as we just had released it but with no real users anywhere yet and we are about to move to v0.3.0. So let H1 be what v0.3.0 going to be. ... This way we only have to backfill one manifest from H0 and the updated ongoing one as H1." |
+| Nov 11, 2026 | **Absorb the hash version into the data context version: agreed in principle**; the key format is deferred "till we completely plan out and nail how to ensure we have enough info to reproduce hash exactly". |
+| Nov 11, 2026 | **Labels name the algorithm only.** "I don't think H0 vs H1 should be directly tied to arrow_v0.1 vs arrow_v0.2 etc. In fact, the label on any hash value (if at all present) should purely reflect the very algorithm that was just used to compute that hash and nothing else. It is purely for informational purpose ... we should be able to reproduce the hash values without any reliance on the label value PER SE." |
+| Nov 11, 2026 | **The result table does not record how the input hash was computed; logical type versioning is left to the type's implementer.** "We could just decide that as far as result table is concerned, we do NOT concern ourselves on the very way by which the input data has led to the hash computation per se. Consequently, this would mean that how exactly logical data type is versioned can be entirely left up to the logical type extension implementer -- namely they should have some version/identifier but exactly how that is used/matched is left to them." Input-side type information belongs to the tables that store the input columns, through their column metadata. |
 | Nov 11, 2026 | Operator-behaviour marker: deferred until the global hash versioning strategy is confirmed. |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
