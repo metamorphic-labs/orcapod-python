@@ -503,8 +503,11 @@ class SideEffectLogDataContextError(StoreError):
     with the same name in the same job, or of another node of the same function,
     therefore raises this error too; ``record_paths`` names every table found.
 
-    Use a fresh store for the node, or keep using the Orcapod version that wrote the
-    tables; migrating stored rows to the current data context is planned.
+    A fresh store is not a safe way around this error: it holds no completions, so on
+    it the node performs every side effect again. Run the node on a fresh store only
+    when a repeated delivery is acceptable; otherwise keep using the Orcapod version
+    that wrote the tables. Migrating stored rows to the current data context is
+    planned.
 
     Attributes:
         record_paths: Paths, from the root of the store, of the tables holding such
@@ -549,7 +552,9 @@ class SideEffectLogDataContextError(StoreError):
             f"under the data context {self.found_context!r} (in {tables}), but the "
             f"node runs under {self.current_context!r}. They cannot be matched with "
             "current inputs, so running the node would perform every side effect "
-            "again; nothing was delivered or written. Use a fresh store for this "
-            "node, or keep using the Orcapod version that wrote these tables; they "
-            "are left in place and can be migrated to the current data context later."
+            "again; nothing was delivered or written. Keep using the Orcapod "
+            "version that wrote these tables; they are left in place and can be "
+            "migrated to the current data context later. A fresh store holds no "
+            "completions, so on it the node performs every side effect again: use "
+            "one only when a repeated delivery is acceptable."
         )

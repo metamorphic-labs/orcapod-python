@@ -244,7 +244,7 @@ class TestTypeHandlers:
             ),
             (
                 P.Path,
-                "semantic_v1:02a12969616ecd278958ffca715be2865fe4a32c27523059df37245c5048a880",
+                "semantic_v1:7f0da67eaf9d048c9d1791fbe223333cfcc8018c66878647c8b7ae8571c72bd3",
             ),
         ],
     )
@@ -298,7 +298,7 @@ class TestFunctionSignatureGolden:
     def test_function_object_hash(self):
         hasher = get_default_context().semantic_hasher
         assert hasher.hash_object(golden_fn).to_string() == (
-            "semantic_v1:d42b58c4bbd2396e5464de32a2b3d4c3966ec91ed950157cb019969657f0ede0"
+            "semantic_v1:79e6590be1c9177a9b564559bd9dea14dd09968593da57174daae80dcfbfb4d0"
         )
 
 
@@ -327,7 +327,7 @@ class TestFunctionPodGolden:
     def test_uri(self, data_function: PythonDataFunction):
         assert data_function.uri == (
             "golden_pod_fn",
-            "e25ab1ffe8b41c7e6a226983a213cc0d47a0da78459fb5e20b288ed4482c7ad8",
+            "7323b2a60208dd00f290ea4a14aac02285017eedc669ea4eb0bb6aa66b94b700",
             "v0",
             "python.function.v0",
         )
