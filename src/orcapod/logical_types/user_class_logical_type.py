@@ -119,7 +119,7 @@ class UserClassLogicalType(BaseLogicalType):
         if identity_record is not None:
             metadata["identity"] = identity_record
         metadata_json = uci.canonical_json(metadata)
-        # ``storage_type`` never contains nested extension types (ET1 in DESIGN_ISSUES.md):
+        # ``storage_type`` never contains nested extension types (ET1 in design_issues/):
         # the factory strips each field's top-level extension type before building it.
         self._arrow_ext_class, self._polars_ext_class = _extension_classes(
             logical_name, storage_type, metadata_json
@@ -321,7 +321,7 @@ class UserClassLogicalTypeFactory:
                         f"{python_type.__qualname__}.{field_name} -> {exc}"
                     ) from exc
                 raise
-            # Struct fields cannot hold extension types (ET1; see DESIGN_ISSUES.md).
+            # Struct fields cannot hold extension types (ET1; see design_issues/).
             if isinstance(arrow_type, pa.ExtensionType):
                 arrow_type = arrow_type.storage_type
             arrow_fields.append(pa.field(field_name, arrow_type))
