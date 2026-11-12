@@ -911,6 +911,60 @@ differ in the Arrow-hashed key values and are told apart by the label inside tho
 | Neither S nor M changes, path moves | any change to how a structure hash is computed for an unchanged structure: the table is the same table under a new name | F2 |
 | M changes, path does not | two unordered inputs with the same `source_id` collapse | A.9 E |
 
+### 5.4 One global hash version (direction set by the developer; details proposed)
+
+**Requirement (developer, November 11, 2026).** Every row must carry enough to tell exactly
+which version of the computation of hashes produced it. Summarising everything that changed is
+not sensible, so there is **one number** that changes whenever anything that could alter a
+previously computed hash changes. If two rows share the number, they were computed with
+exactly the same algorithms, definitions and libraries, and the same entry would have got the
+same hash. A lookup, possibly in `orcapod-sanctuary`, maps each number to the actual
+combination of tools, so that two numbers can be compared (what differs between them) and a
+migration can be planned: cheap where nothing relevant to an entry changed, or at least "hash
+under both; if the old entry exists, create the new entry from it". A purely additive change,
+under which no previously computed hash changes, does not change the number.
+
+Working name here: **hash version**, written `H1`, `H2`, … (the name is open).
+
+```mermaid
+flowchart LR
+    subgraph REG["Registry: one frozen manifest per hash version"]
+        M1["H1 (= what v0.2.0 computes)<br/>structure: canonical JSON, rules s1<br/>arrow: starfix format 1<br/>array: sha256 of .npy bytes<br/>record id: positional uuid5<br/>fold: sha256, no separator<br/>…"]
+        M2["H2 (= what v0.3.0 computes)<br/>structure: s1 + fixes<br/>arrow: starfix format 2<br/>array: array_digest_v1<br/>record id: positional uuid5<br/>fold: sha256 with separator<br/>…"]
+    end
+    ROW["a stored row<br/>hash version = H1"] -->|"look up"| M1
+    CUR["current Orcapod<br/>hash version = H2"] --> M2
+    M1 -->|"diff"| D["what differs between H1 and H2:<br/>arrow, array, fold, …"]
+    M2 --> D
+    D --> PLAN["per entry: unaffected -> relabel;<br/>affected -> hash under both, link old to new"]
+```
+
+**What the number covers** (anything that can change a previously computed hash; Appendix A
+is the list of sites): structure hashing rules; the Arrow hasher, including Orcapod's
+preparation step and the starfix format; every value hasher (file, directory, array,
+expression, types, schemas); what each identity is composed of (source, function, operator,
+node); the record-id, entry-id and fold recipes; the type conversion rules and logical type
+names, since stored Arrow types and type names are hashed; the grammar of system-tag column
+names, since they are hashed into entry ids; and third-party libraries wherever their
+behaviour enters a hashed value (starfix; pyarrow's conversion of pandas data; Polars'
+serialisation of expressions).
+
+**How "anything changed" is detected.** The golden hash files are the operational definition
+of a hash version: about 685 pinned values today. Proposed rule: a change to any existing
+golden value requires a new hash version; adding golden values does not. That makes the
+developer's "additive changes do not change the number" a test, not a judgement.
+
+**What exists today, measured against the requirement.**
+
+| Candidate | Stored per row? | Changes with every hash-affecting change? |
+|---|---|---|
+| Arrow label (`arrow_v0.1` -> `arrow_v0.2`) | in the labelled key values of function tables; not in the operator cache, cached-source or (bare) system-tag values | by the rule accepted for ITL-910 ("bump whenever any hash can change"), yes for Arrow-derived hashes; says nothing about structure hashes |
+| Structure label (`semantic_v0.1`) | in paths and labelled columns | never changed, although structure hashes did |
+| Data context key (`std:v0.1:default`) | `_context_key` in result rows, `__input_data_context_key` in pipeline rows, per node in saved jobs; not in the operator cache, cached-source or side-effect tables | never changed: its file was edited in place 20 times |
+| Registry of what each version means | the context file `contexts/data/v0.1.json` lists the classes and has a changelog | it is not frozen per version, and it names classes whose behaviour changed underneath, not definitions |
+
+---
+
 ## Part 6. Generation names in paths (decided: none)
 
 No generation name is added to paths. The developer's question of November 11 ("Should we
@@ -973,6 +1027,11 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **The logical type is part of the data type.** "Logical data type is absolutely part of the data type -- even if underlying representation technically didn't change, if extension type changed, it should generally be considered to have migrated in data type. Change in logical / extension metadata should be seen as changing schema just as much as actually changing the data type in arrow." |
 | Nov 11, 2026 | **What a label is for.** "I'm generally not convinced yet of the need for all hashes to be prefixed with operator/data type specific prefix. I think what's critical is that we have confidence that hash would change if what it identifies had changed. Label may help to make WHY something changed more obvious OR sometime label change is necessary to ensure we don't accidentally collide in hash when we don't have a guarantee that hash would be of different values when it ought to be ... its need heavily depends on what we want to be able to 'easily' identify as the source of change just by looking at the hash string and to much lesser extent, whether we need to further guarantee that hash would change." |
 | Nov 11, 2026 | Operator behaviour changes: leaning to record nothing (treat like upstream data changing); to be confirmed with concrete examples. Which value tells generations apart: leaning to labels plus a per-row rules name; to be confirmed with concrete examples. |
+| Nov 11, 2026 | **Side-effect logs fail on rows under another label; other tables do not.** "Let's do fail for side-effect log only although I want to separately step into this later and discuss more of what's present." |
+| Nov 11, 2026 | **Report skipped older rows as a total count.** "Yes but just total counts I think would be sufficient (eventually we want to detect old entries and suggest to perform migration)." |
+| Nov 11, 2026 | **Old results looking absent without migration is accepted; additive changes do not change the hash version.** "I think old values looking absent without explicit migration is something we have to accept. Generally, as long as what we do is simply additive in features, such that previous hash value should NOT have changed under new version, then we don't need to actually alter the hash version number and thus we won't run into suddenly empty table under the new hash version." |
+| Nov 11, 2026 | **One global hash version, stored per row, with a registry.** "Anytime anything really that could alter previously computed hash changes between versions, we need information inside the row that would allow us to precisely tell what must have changed. Since summarizing everything that actually changed is not really sensible, the way to do is to have a single number that keeps on varying so that every unique different combo of hashing mechanism would yield different number such that we know for sure that if two rows share this number, they were computed using exactly identical set of algorithms/definitions/libraries such that same entry would have yielded same hash. ... we should have a look up somewhere (possibly as part of orcapod-sanctuary) that maps every exact number to actual combination of specific tools. This way, when given two such numbers (e.g. v15 vs v1), we can look up what is actually different between the two versions ... and consequently decide if we can cheaply migrate ... or minimally we can just rerun all hashing under v1 and v15, and if v1 version exist, take it and create a new entry with v15 hash." Whether this is what `arrow_v0.1` / `arrow_v0.2` should mean, or belongs in the data context, is open (5.4). |
+| Nov 11, 2026 | Operator-behaviour marker: deferred until the global hash versioning strategy is confirmed. |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
 Open questions for the developer:
