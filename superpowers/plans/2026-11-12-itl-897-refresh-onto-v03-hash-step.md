@@ -106,3 +106,12 @@ Shown red on pure `origin/main` in the dry run (34 failures) and green on the me
 ## Progress notes
 
 (appended while working)
+
+- Nov 12: Tasks 1-4 done and committed locally (merge 18303b44, conformance, equal-frame
+  cache test, golden: exactly the 3 approved entries moved and 5 added, docs section 10,
+  changelog fragment, design issue PV1). ruff, format, basedpyright exit 0. NOT pushed.
+- Nov 12 20:11Z: coordinator HOLD (developer reconsidering how numpy, torch, pandas and
+  polars values are stored and hashed): no push, no golden regeneration, no GitHub posts
+  until the coordinator writes again. Remaining when released: Task 5 (full suite on 3.12,
+  3.11, 3.13; one push; PR; readiness). PR body draft is in this session's temp dir only;
+  its content follows the coordinator decisions at the top of this plan.
