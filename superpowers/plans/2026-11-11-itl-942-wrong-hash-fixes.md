@@ -17,7 +17,7 @@ listed per finding.
 **Base:** branch `eywalker/itl-942-fix-the-wrong-hash-findings-of-the-hash`, created at the head
 of PR #309 (`5363bfb8`, ITL-910). Stacked on #309.
 
-**Status:** STEP 1 (analysis, decisions) sent to the coordinator; implementation waits for the
+**Status:** STEP 1 sent to the coordinator (msg_a54556d4b8ab); merged #309 at b88f7eb3 (old-label rows are now ignored on whole-table reads, not refused); G re-checked: Delta stores one binary type, so G1 changes no on-disk schema; implementation waits for the
 developer's choices. Repro scripts: run on `5363bfb8`, Python 3.12, starfix 0.5.0.
 
 ---
@@ -190,6 +190,15 @@ operators, `function_pod`, `FunctionPod.from_fn`, the context's `semantic_hasher
   bites only stores written by v0.3 pre-releases.
 - Golden: none expected (golden pods use `@function_pod`).
 - Size: small (two defaults, docstrings, CHANGELOG).
+
+### R. A subclass's type hash depends on logical-type registration order (added by the coordinator)
+
+- Repro (two processes, dataclasses `Base(a: int)`, `Sub(Base)(b: str)`): building a `-> Base` pod
+  before a `-> Sub` pod makes `Sub` hash equal to `Base`, moves the `-> Sub` pod's output-schema hash
+  (uri, so path), and stores the output as `rtypes.Base` with field `b` silently dropped.
+- Cause: `LogicalTypeRegistry.get_by_python_type` falls back along the MRO to a registered base.
+- #292 fixes it (user-class logical types are `exact_python_type_only`); verified by running the same
+  repro against #292's source, and #292 has a regression test. **Not duplicated here.**
 
 ## Proposed order (most valuable and safest first)
 
