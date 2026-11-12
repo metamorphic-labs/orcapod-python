@@ -48,10 +48,12 @@ ARROW_DIGEST_BYTES = 35
 
 @function_pod(output_keys="doubled")
 def label_rule_double(x: int, y: int) -> int:
+    """Function pod used by the tests of names and stored values."""
     return (x + y) * 2
 
 
 def _source() -> DictSource:
+    """Return a two-row source with tag ``id`` and data column ``x``."""
     return DictSource(
         data=[{"id": "a", "x": 1}, {"id": "b", "x": 2}],
         tag_columns=["id"],
@@ -60,6 +62,7 @@ def _source() -> DictSource:
 
 
 def _other_source() -> DictSource:
+    """Return a two-row source with tag ``id`` and data column ``y``."""
     return DictSource(
         data=[{"id": "a", "y": 10}, {"id": "b", "y": 20}],
         tag_columns=["id"],
@@ -73,17 +76,22 @@ def _other_source() -> DictSource:
 
 
 class TestLabelFormat:
+    """Rule 2: every label is ``<algorithm>_v<N>``; the file hash keeps ``sha256``."""
+
     def test_structure_hash_label(self) -> None:
+        """The structure hasher labels its hashes ``semantic_v1``."""
         hasher = get_default_context().semantic_hasher
         assert hasher.hasher_id == "semantic_v1"
         assert hasher.hash_object({"a": 1}).method == "semantic_v1"
 
     def test_arrow_hash_label(self) -> None:
+        """The Arrow hasher labels its hashes ``arrow_v1``."""
         hasher = get_default_context().arrow_hasher
         assert hasher.hasher_id == "arrow_v1"
         assert hasher.hash_table(pa.table({"x": [1]})).method == "arrow_v1"
 
     def test_value_hash_labels(self, tmp_path: Path) -> None:
+        """Array, Polars expression and directory values carry their own ``_v1`` label."""
         hasher = get_default_context().semantic_hasher
         (tmp_path / "f.txt").write_text("hello")
         assert hasher.hash_object(np.arange(3)).method == "ndarray_v1"
@@ -91,6 +99,7 @@ class TestLabelFormat:
         assert hasher.hash_object(op.Directory(tmp_path)).method == "directory_v1"
 
     def test_file_hash_keeps_the_digest_function_name(self, tmp_path: Path) -> None:
+        """A file hash is labelled ``sha256``."""
         # The one stated exception to the format.
         path = tmp_path / "f.txt"
         path.write_text("hello")
@@ -100,6 +109,7 @@ class TestLabelFormat:
     def test_every_label_but_the_file_hash_follows_the_format(
         self, tmp_path: Path
     ) -> None:
+        """Every label except the file hash matches ``<algorithm>_v<N>``."""
         context = get_default_context()
         (tmp_path / "f.txt").write_text("hello")
         labels = {
@@ -112,6 +122,7 @@ class TestLabelFormat:
         assert all(LABEL_FORMAT.fullmatch(label) for label in labels), labels
 
     def test_directory_label_names_the_sha256_procedure_only(self) -> None:
+        """The directory hasher refuses any algorithm but SHA-256."""
         with pytest.raises(ValueError, match="sha256"):
             directory_hashers.BasicDirectoryHasher(
                 file_hasher=FileHasher(), algorithm="md5"
@@ -124,7 +135,10 @@ class TestLabelFormat:
 
 
 class TestNestedHashForm:
+    """Rule 6 in the structure hasher: a nested hash contributes its digest only."""
+
     def test_nested_hash_contributes_its_digest_only(self) -> None:
+        """Two nested hashes that differ only in label give the same enclosing hash."""
         hasher = get_default_context().semantic_hasher
         digest = bytes(range(32))
         one = hasher.hash_object(["x", ContentHash("one_v1", digest)])
@@ -132,6 +146,7 @@ class TestNestedHashForm:
         assert one == other
 
     def test_nested_hash_differs_from_its_hex_string(self) -> None:
+        """A nested hash and a string equal to its hex digest hash differently."""
         hasher = get_default_context().semantic_hasher
         digest = bytes(range(32))
         as_hash = hasher.hash_object(["x", ContentHash("one_v1", digest)])
@@ -139,6 +154,7 @@ class TestNestedHashForm:
         assert as_hash != as_text
 
     def test_nested_hashes_with_different_digests_differ(self) -> None:
+        """Different nested digests give different enclosing hashes."""
         hasher = get_default_context().semantic_hasher
         one = hasher.hash_object([ContentHash("one_v1", bytes(32))])
         other = hasher.hash_object([ContentHash("one_v1", bytes([1] * 32))])
@@ -189,9 +205,12 @@ def _fresh_golden_values() -> str:
 
 
 class TestRenamingALabelChangesNoDigest:
+    """Rule 6 end to end: renamed labels leave every digest and name unchanged."""
+
     def test_every_pinned_value_keeps_its_digest(
         self, request: pytest.FixtureRequest
     ) -> None:
+        """Every golden value, recomputed under renamed labels, differs in label text only."""
         before = _fresh_golden_values()
         renamed: dict[str, str] = request.getfixturevalue("renamed_labels")
         after = _fresh_golden_values()
@@ -213,9 +232,30 @@ class TestRenamingALabelChangesNoDigest:
         ]
         assert not moved, f"{len(moved)} values depend on a label: {moved[:10]}"
 
+    def test_directory_hash_keeps_its_digest(
+        self, tmp_path: Path, request: pytest.FixtureRequest
+    ) -> None:
+        """No golden case reaches ``directory_v1``, so it is checked here."""
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "a.txt").write_text("alpha")
+        (tmp_path / "sub" / "b.txt").write_text("beta")
+        hasher = get_default_context().semantic_hasher
+
+        before = hasher.hash_object(op.Directory(tmp_path))
+        nested_before = hasher.hash_object(["tree", op.Directory(tmp_path)])
+        renamed: dict[str, str] = request.getfixturevalue("renamed_labels")
+        after = hasher.hash_object(op.Directory(tmp_path))
+        nested_after = hasher.hash_object(["tree", op.Directory(tmp_path)])
+
+        assert before.method == "directory_v1"
+        assert after.method == renamed["directory_v1"]
+        assert after.digest == before.digest
+        assert nested_after.digest == nested_before.digest
+
     def test_operator_cache_and_cached_source_keys_keep_their_digest(
         self, request: pytest.FixtureRequest
     ) -> None:
+        """Row keys of the two cache tables keep their digest under a renamed Arrow label."""
         before = _stored_row_keys()
         renamed: dict[str, str] = request.getfixturevalue("renamed_labels")
         after = _stored_row_keys()
@@ -245,6 +285,7 @@ def _run_cached_join() -> tuple[OperatorJobNode, InMemoryArrowDatabase]:
 
 
 def _run_job() -> tuple[PipelineJob, InMemoryArrowDatabase]:
+    """Run a job with a join and a function pod on an in-memory store."""
     store = InMemoryArrowDatabase()
     job = PipelineJob(name="label_rule_job", store=store)
     with job:
@@ -255,12 +296,16 @@ def _run_job() -> tuple[PipelineJob, InMemoryArrowDatabase]:
 
 
 class TestNamesHoldBareDigests:
+    """Rule 5: a hash inside a name is the bare hex digest."""
+
     def test_function_uri_holds_the_bare_output_schema_digest(self) -> None:
+        """The second component of a function ``uri`` is 64 hex characters."""
         uri = label_rule_double.pod.uri
         assert uri[0] == "label_rule_double"
         assert BARE_SHA256.fullmatch(uri[1]), uri
 
     def test_function_table_paths_hold_bare_digests(self) -> None:
+        """Function table paths hold the bare output-schema and pipeline digests."""
         _, store = _run_job()
         paths = ["/".join(path) for path in store.list_sources()]
         function_paths = [p for p in paths if "label_rule_double" in p]
@@ -274,6 +319,7 @@ class TestNamesHoldBareDigests:
         assert BARE_SHA256.fullmatch(schema_component.removeprefix("schema:"))
 
     def test_operator_table_path_holds_bare_digests(self) -> None:
+        """An operator-cache table path holds bare digests."""
         node, store = _run_cached_join()
         (path,) = store.list_sources()
         assert path == node.node_identity_path
@@ -283,6 +329,7 @@ class TestNamesHoldBareDigests:
         assert BARE_SHA256.fullmatch(path[2].removeprefix("schema:")), path
 
     def test_no_stored_table_path_holds_a_label(self) -> None:
+        """No component of a stored table path contains a hash label."""
         _, store = _run_job()
         for path in store.list_sources():
             for component in path:
@@ -290,6 +337,7 @@ class TestNamesHoldBareDigests:
                 assert "arrow_v" not in component, path
 
     def test_cached_source_path_holds_the_bare_content_digest(self) -> None:
+        """The cached-source path ends with ``node:<bare content digest>``."""
         cached = CachedSource(_source(), cache_database=InMemoryArrowDatabase())
         component = cached.cache_path[-1]
         assert component.startswith("node:")
@@ -297,6 +345,7 @@ class TestNamesHoldBareDigests:
         assert component.removeprefix("node:") == cached.content_hash().to_hex()
 
     def test_derived_source_id_holds_the_bare_content_digest(self) -> None:
+        """A derived source id ends with the node's bare content digest."""
         job, _ = _run_job()
         node = job.nodes["double"]
         derived = node.as_source()
@@ -304,6 +353,7 @@ class TestNamesHoldBareDigests:
         assert derived.source_id.endswith(":" + node.content_hash().to_hex())
 
     def test_source_info_token_of_a_function_output_holds_no_label(self) -> None:
+        """A function output's source-info token starts with the bare function ``uri``."""
         stream = label_rule_double.pod(Join()(_source(), _other_source()))
         table = stream.as_table(columns={"source": True})
         tokens = cast("list[str]", table.column("_source_doubled").to_pylist())
@@ -341,7 +391,10 @@ def _stored_row_keys() -> list[bytes]:
 
 
 class TestStoredHashValuesCarryTheirLabel:
+    """Rule 4: a hash stored as a value carries its label."""
+
     def test_operator_cache_and_cached_source_row_keys_are_labelled(self) -> None:
+        """The row keys of the two cache tables are ``b"arrow_v1:" + digest``."""
         keys = _stored_row_keys()
         assert len(keys) == 4
         for key in keys:
@@ -350,6 +403,7 @@ class TestStoredHashValuesCarryTheirLabel:
             assert len(parsed.digest) == ARROW_DIGEST_BYTES
 
     def test_function_tables_keep_labelled_hash_columns(self) -> None:
+        """The hash columns of a function pipeline table stay labelled."""
         _, store = _run_job()
         path = next(
             p
@@ -384,6 +438,7 @@ def _bare_stream(
     meta: str = "m",
     context_key: str | None = None,
 ) -> ArrowTableStream:
+    """Build a one-row stream with no producer; each argument sets one value."""
     names = ["id", "x", "__note", "_tag::origin"]
     arrays: list[pa.Array[Any]] = [
         pa.array([tag], pa.large_string()),
@@ -402,7 +457,10 @@ def _bare_stream(
 
 
 class TestProducerlessStreamIdentity:
+    """The identity of a stream with no producer covers every value but the derived row hash."""
+
     def test_equal_streams_have_equal_content_hashes(self) -> None:
+        """Two streams built from equal values have equal content hashes."""
         assert _bare_stream().content_hash() == _bare_stream().content_hash()
 
     @pytest.mark.parametrize(
@@ -420,9 +478,11 @@ class TestProducerlessStreamIdentity:
     def test_any_changed_value_changes_the_content_hash(
         self, changed: dict[str, Any]
     ) -> None:
+        """Changing any one value changes the content hash."""
         assert _bare_stream().content_hash() != _bare_stream(**changed).content_hash()
 
     def test_identity_does_not_cover_the_derived_content_hash_column(self) -> None:
+        """The identity table leaves out the ``_content_hash`` column and nothing else."""
         stream = _bare_stream()
         with_hashes = stream.as_table(all_info=True)
         row_hashes = cast("list[str]", with_hashes.column("_content_hash").to_pylist())
@@ -464,16 +524,45 @@ def _string_literals_equal_to(label: str) -> list[str]:
     return found
 
 
+def _json_string_values(node: Any) -> set[str]:
+    """Return every string value in a parsed JSON document, at any depth.
+
+    Args:
+        node: A parsed JSON value.
+
+    Returns:
+        The string values of all objects and arrays in ``node``. Object keys are
+        not included.
+    """
+    if isinstance(node, str):
+        return {node}
+    if isinstance(node, dict):
+        children = cast("dict[str, Any]", node).values()
+    elif isinstance(node, list):
+        children = cast("list[Any]", node)
+    else:
+        return set()
+    found: set[str] = set()
+    for child in children:
+        found |= _json_string_values(child)
+    return found
+
+
 class TestEachLabelIsDefinedOnce:
+    """Rule 9: one definition per label, in code beside its algorithm."""
+
     @pytest.mark.parametrize("label", sorted(LABEL_DEFINITIONS))
     def test_label_is_spelled_once_in_code(self, label: str) -> None:
+        """Each label literal appears in exactly one source file."""
         assert _string_literals_equal_to(label) == [LABEL_DEFINITIONS[label]]
 
     def test_no_data_context_file_spells_a_hasher_label(self) -> None:
+        """No data context file has a ``hasher_id`` key or a label as a value."""
         offenders: list[str] = []
         for path in sorted((SOURCE_ROOT / "contexts").rglob("*.json")):
             text = path.read_text(encoding="utf-8")
-            if '"hasher_id"' in text:
+            values = _json_string_values(json.loads(text))
+            if '"hasher_id"' in text or values & set(LABEL_DEFINITIONS):
                 offenders.append(path.relative_to(SOURCE_ROOT).as_posix())
         assert not offenders, (
             "A data context file names the hasher class and must not repeat its "
@@ -481,6 +570,7 @@ class TestEachLabelIsDefinedOnce:
         )
 
     def test_hashers_take_their_label_from_the_definition(self) -> None:
+        """Hashers and factories default to the label constants."""
         from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
         from orcapod.hashing.semantic_hashing.semantic_hasher import (
             SEMANTIC_HASH_LABEL,
@@ -497,3 +587,30 @@ class TestEachLabelIsDefinedOnce:
         assert SemanticAwarePythonHasher().hasher_id == SEMANTIC_HASH_LABEL
         assert get_versioned_semantic_hasher().hasher_id == SEMANTIC_HASH_LABEL
         assert get_versioned_semantic_arrow_hasher().hasher_id == ARROW_HASH_LABEL
+
+
+def _two_row_stream(order: tuple[str, str]) -> ArrowTableStream:
+    """Build a producer-less stream of rows ``a`` and ``b`` in the given row order.
+
+    Args:
+        order: The tag values, in the order the rows are stored.
+
+    Returns:
+        A stream with tag column ``id`` and data column ``x``.
+    """
+    values = {"a": 1, "b": 2}
+    table = pa.Table.from_arrays(
+        [
+            pa.array(list(order), pa.large_string()),
+            pa.array([values[tag] for tag in order], pa.int64()),
+        ],
+        names=["id", "x"],
+    )
+    return ArrowTableStream(table, tag_columns=["id"])
+
+
+def test_producerless_stream_identity_does_not_depend_on_row_order() -> None:
+    """The identity table stays sorted by tags, as it was with ``all_info=True``."""
+    forward = _two_row_stream(("a", "b"))
+    backward = _two_row_stream(("b", "a"))
+    assert forward.content_hash() == backward.content_hash()

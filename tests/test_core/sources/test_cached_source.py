@@ -91,8 +91,8 @@ class TestCachedSourceCachePath:
     def test_cache_path_contains_content_hash(self, simple_source, db):
         ps = CachedSource(simple_source, cache_database=db)
         path = ps.cache_path
-        content_hash_str = simple_source.content_hash().to_hex()
-        assert any(content_hash_str in segment for segment in path)
+        # The whole component: a labelled hash ("node:semantic_v1:...") must fail.
+        assert path[-1] == f"node:{simple_source.content_hash().to_hex()}"
 
     def test_cache_path_prefix(self, simple_source, db):
         prefix = ("my_project", "v1")

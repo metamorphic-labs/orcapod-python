@@ -753,9 +753,17 @@ in, so one table can hold rows of several labels. Orcapod writes and uses rows o
 current label only. Key lookups cannot match a row of another label, and every read of a
 whole table (a node's `as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, a
 cached function's `get_all_cached_outputs()`, a stored operator node, a `CachedSource`) leaves
-the rows of another label out. Those rows are never changed or deleted: a store written by
-Orcapod v0.2 keeps its `arrow_v0.1` rows, v0.3 computes every input again and adds
-`arrow_v1` rows next to them, and a later migration can convert the old ones.
+the rows of another label out. Those rows are never changed or deleted.
+
+**A store written by Orcapod v0.2.** Every table path of v0.3 differs from the path v0.2
+used for the same node, because the hashes inside the path changed
+([The hash label rule](#the-hash-label-rule): the pipeline, schema and content digests moved,
+and names hold bare digests). v0.3 therefore computes every input again and writes new tables;
+the tables written by v0.2 keep their `arrow_v0.1` rows untouched, and a later migration can
+convert them. Nothing in v0.3 that looks for older rows at its own table path can find a
+table written by v0.2. This includes the side-effect check below: a side-effect log written by
+v0.2 is not at the v0.3 path, is not detected, and its side effects are delivered again on the
+first v0.3 run.
 
 How a stored row names its label:
 

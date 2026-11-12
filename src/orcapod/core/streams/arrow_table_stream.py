@@ -147,7 +147,11 @@ class ArrowTableStream(StreamBase):
             self.__class__.__name__,
             self.as_table(
                 columns=ColumnConfig(
-                    meta=True, context=True, source=True, system_tags=True
+                    meta=True,
+                    context=True,
+                    source=True,
+                    system_tags=True,
+                    sort_by_tags=True,
                 )
             ),
             self._tag_columns,

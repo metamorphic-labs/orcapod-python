@@ -71,9 +71,10 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   `Batch` orders members by `record_id`, the order of members can change too.
 - **Results stored by 0.2.0 are ignored and computed again; they are not reused, changed or
   deleted.** Rows a v0.2 store holds are keyed under `arrow_v0.1` and can never match v0.3
-  inputs. v0.3 does not refuse such a store. A value-only change does not move a table, so a
-  v0.3 job writes its `arrow_v1` rows into the same tables, next to the `arrow_v0.1` rows,
-  and uses rows of its own label only:
+  inputs. v0.3 does not refuse such a store. A value-only change does not move a table, and v0.3
+  uses rows of its own label only. (With the hash label rule, ITL-945 below, every v0.3 table
+  is in fact at a new path, so the rows v0.3 writes are in new tables and the v0.2 tables are
+  left as they are; the points below describe what a read at a v0.3 path returns.)
   - The first v0.3 run on a v0.2 store **computes every input again**. Nothing stored by v0.2
     counts as a cached result, also for functions and data that did not change.
   - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, also on a
@@ -166,6 +167,16 @@ label rule"):
   file and directory values (their label text changes, their digest does not);
   `InvocationContext.invocation_hash`, which keeps its `<label>:<hex>::<label>:<hex>` shape
   with the new label names; record ids.
+- **Every v0.3 table path differs from v0.2's.** For the same node, v0.2 and v0.3 agree on
+  the job name, the function or operator name, the major version, the wrapper kind and the
+  table layout suffix, and differ in every hash inside the path: the output-schema hash of a
+  function (`semantic_v0.1:<hex>` became another, bare, digest), `schema:<pipeline hash>`,
+  `instance:<content hash>` and `node:<content hash>`. Nothing in v0.3 that looks for older
+  data at its own table path can find a table written by v0.2. In particular the label filter
+  and `SideEffectLogHashLabelError` (ITL-910, above) act on rows at a v0.3 path only: a
+  side-effect log written by v0.2 is at another path, is **not detected**, and its side effects
+  are delivered again on the first v0.3 run. Detecting tables of an older layout is part of
+  ITL-944.
 - **Migration.** None is needed beyond the v0.3 step already described: a store written by
   v0.2 is an older generation whose rows v0.3 does not use. Function, operator and
   cached-source tables are at new paths, so their v0.2 tables are left untouched. Code that

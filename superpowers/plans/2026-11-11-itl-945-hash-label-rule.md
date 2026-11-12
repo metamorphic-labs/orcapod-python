@@ -237,3 +237,22 @@ Coordinator, November 11, 2026 (reply to the step 1 question):
 ## Notes
 
 - Tracer plugin: scratchpad `plug/chtrace.py`; not committed.
+
+## Status (November 11, 2026)
+
+Implemented and pushed; PR #314 against `main`, stacked on #309.
+
+- Decision 5 (developer, via coordinator): each label is defined once in code; the data
+  context file names the hasher and does not repeat the label. Implemented as in (b).
+- Sites found during implementation, beyond section (a): the identity of a producer-less
+  `ArrowTableStream` hashed its derived `_content_hash` column (labelled strings); a loaded
+  job rebuilt its table path from stored labelled hash strings (`function_node.py`,
+  `_bare_digest`); `migrations/pipeline_db.py` mirrors the entry-id recipe.
+- Golden files regenerated on this branch: 225 label text only, 195 digest or name moved, 250
+  entries renamed, 36 unchanged (706 entries).
+- CodeRabbit round 1: tag sorting restored in the producer-less stream identity (a regression
+  of this branch, no golden value affected); test and doc wording fixes; declined findings
+  answered on the PR.
+- Consequence raised with the coordinator: every v0.3 table path differs from v0.2's, so a
+  v0.2 side-effect log is not found at the v0.3 path and the explicit failure of ITL-910 does
+  not trigger for a v0.2 store. Documented; detection belongs to ITL-944.

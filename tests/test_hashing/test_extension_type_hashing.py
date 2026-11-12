@@ -198,10 +198,10 @@ class TestCrossPathConsistency:
     structural guarantee explicit and regression-proof.
 
     Hash encoding:
-    - Arrow path produces: b"<type_name>::<method>:<raw_digest>"
-    - Python path produces: ContentHash with to_prefixed_digest() → b"<method>:<raw_digest>"
-    Stripping the type-name prefix from the Arrow encoding yields an identical
-    b"<method>:<raw_digest>" byte string.
+    - Arrow path produces: b"<type_name>::<raw_digest>" (no hash label)
+    - Python path produces: ContentHash, whose ``digest`` is the same raw digest
+    Stripping the type-name prefix from the Arrow encoding yields the digest of the
+    Python path's ContentHash.
     """
 
     def test_arrow_and_semantic_hash_same_file_content(self, ctx, tmp_path):

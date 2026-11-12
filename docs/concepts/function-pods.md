@@ -315,8 +315,10 @@ scheme that produced it: `arrow_v0.1` up to Orcapod v0.2, `arrow_v1` since v0.3 
 another label can never match current inputs, so Orcapod **ignores** them: it does not refuse
 the store, and it does not reuse those rows.
 
-- The first run of v0.3 on a store written by v0.2 computes every input again and stores the
-  new rows in the same tables, next to the old ones.
+- The first run of v0.3 on a store written by v0.2 computes every input again. Every v0.3
+  table is at a path that differs from v0.2's (the hashes inside the path changed, see
+  [The hash label rule](../reference/hashing.md#the-hash-label-rule)), so the new rows go
+  into new tables and the tables written by v0.2 are left as they are.
 - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
   current label only: nothing before that first run, one row per input after it.
 - The old rows are never changed or deleted. They stay readable with the version that wrote
