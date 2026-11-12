@@ -13,19 +13,22 @@ import dataclasses
 import datetime
 import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.function_node import _build_record_id_preimage
 from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
-    SideEffectLogDataContextError,
     StoreError,
     StoreReadError,
     StoreWriteError,
 )
-from orcapod.contexts.stored import PRE_V1_DATA_CONTEXT_KEY, with_data_context
+from orcapod.contexts.stored import (
+    account_for_stale_tables,
+    find_stale_tables,
+    with_data_context,
+)
 from orcapod.invocation import (
     InvocationContext,
     InvocationHashConfig,
@@ -33,7 +36,6 @@ from orcapod.invocation import (
 from orcapod.system_constants import (
     OLD_TRACKING_DB_SCHEMA_VERSIONS,
     TRACKING_DB_SCHEMA_VERSION,
-    constants,
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -829,28 +831,21 @@ class SideEffectJobNode(SideEffectNode):
         ):
             return
         current = self._pod.data_context_key
-        for layout in OLD_TRACKING_DB_SCHEMA_VERSIONS:
-            old_path = self._table_path[:-1] + (layout,)
-            if self._pipeline_database.table_exists(old_path):
-                raise SideEffectLogDataContextError(
-                    self._pipeline_database.base_path + old_path,
-                    PRE_V1_DATA_CONTEXT_KEY,
-                    current,
-                    node_label=self.label,
-                )
-        stored = self._pipeline_database.get_all_records(self._table_path)
-        if stored is not None:
-            logged = cast(
-                "list[str]", stored.column(constants.DATA_CONTEXT_COL).to_pylist()
+        found = find_stale_tables(
+            self._pipeline_database,
+            tuple(
+                self._table_path[:-1] + (layout,)
+                for layout in OLD_TRACKING_DB_SCHEMA_VERSIONS
+            ),
+            current=(self._table_path, current),
+        )
+        try:
+            account_for_stale_tables(
+                found, delivers_side_effects=True, current_context=current
             )
-            found = sorted(key for key in set(logged) if key != current)
-            if found:
-                raise SideEffectLogDataContextError(
-                    self._pipeline_database.base_path + self._table_path,
-                    found[0],
-                    current,
-                    node_label=self.label,
-                )
+        except StoreError as exc:
+            exc.add_context(node_label=self.label)
+            raise
         self._log_contexts_checked = True
 
     # ------------------------------------------------------------------

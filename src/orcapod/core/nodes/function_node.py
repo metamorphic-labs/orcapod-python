@@ -41,7 +41,8 @@ from orcapod.errors import (
 )
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
-    report_old_layout_tables,
+    account_for_stale_tables,
+    find_stale_tables,
     report_rows_of_other_data_contexts,
 )
 from orcapod.utils.store_errors import keep_store_error
@@ -790,8 +791,8 @@ class FunctionJobNode(FunctionNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
-    # Set once the pipeline tables found at an older layout have been reported.
-    _old_layout_reported: bool = False
+    # Set once stored rows of other generations have been accounted for.
+    _stale_tables_checked: bool = False
 
     def __init__(
         self,
@@ -878,23 +879,56 @@ class FunctionJobNode(FunctionNodeBase):
         )
         return context.context_key
 
-    def _report_old_layout(self) -> None:
-        """Report, once per node object, pipeline tables found at an older layout.
+    @property
+    def _delivers_side_effects(self) -> bool:
+        """Whether running this node is an external action.
 
-        A table written by an earlier version of Orcapod (``pdb_v1``) holds no
-        ``__data_context`` column. Its rows are not read as results and are left
-        unchanged; their number is reported (ITL-944).
+        True for a function pod that takes the invocation context (``ctx_arg``):
+        its call is a side effect, and its completions are its function tables.
         """
-        if self._old_layout_reported or self._pipeline_database is None:
+        return (
+            self._function_pod is not None
+            and self._function_pod.ctx_arg_name is not None
+        )
+
+    def _account_for_stale_tables(self) -> None:
+        """Report or refuse, once per node object, stored rows of other generations.
+
+        A pipeline table written by an earlier version of Orcapod (``pdb_v1``) holds
+        no ``__data_context`` column: its rows are not read as results and are left
+        unchanged, and their number is reported (ITL-944). A node that delivers side
+        effects fails instead, and for it the result tables and rows of another data
+        context in the current tables count too: none of them can be matched with
+        current inputs, so every side effect would be delivered again.
+
+        Raises:
+            SideEffectLogDataContextError: If this node delivers side effects and
+                such rows exist; nothing has been delivered or written then.
+        """
+        if self._stale_tables_checked or self._pipeline_database is None:
             return
-        self._old_layout_reported = True
-        report_old_layout_tables(
+        context_key = self._stored_data_context_key
+        delivers = self._delivers_side_effects
+        found = find_stale_tables(
             self._pipeline_database,
             tuple(
                 self.node_identity_path + (layout,)
                 for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
             ),
+            current=(self._versioned_pipeline_path, context_key) if delivers else None,
         )
+        if delivers:
+            for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
+                if cached_pod is not None:
+                    found.extend(cached_pod.stale_result_tables())
+        try:
+            account_for_stale_tables(
+                found, delivers_side_effects=delivers, current_context=context_key
+            )
+        except StoreError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+        self._stale_tables_checked = True
 
     def _ensure_pdb_schema(self) -> None:
         """Check once per versioned path that no legacy v0 schema table is present.
@@ -914,7 +948,7 @@ class FunctionJobNode(FunctionNodeBase):
                 does not include ``"v0"``.
         """
         global _checked_pdb_paths
-        self._report_old_layout()
+        self._account_for_stale_tables()
         versioned_path = self._versioned_pipeline_path
         if versioned_path in _checked_pdb_paths:
             return
@@ -1419,6 +1453,8 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             A ``(tag, output_data)`` 2-tuple.
         """
+        # A node that delivers side effects must not run on completions it cannot match.
+        self._account_for_stale_tables()
         # Guard: EmptyData inputs skip all computation and go straight to cache lookup.
         # EmptyData.content_hash() returns the cached_content_hash, so
         # result_cache.lookup(data) works transparently — it finds the downstream
@@ -1562,6 +1598,8 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             A ``(tag, output_data)`` 2-tuple.
         """
+        # A node that delivers side effects must not run on completions it cannot match.
+        self._account_for_stale_tables()
         # Guard: same logic as sync _process_data_internal — see inline comment there.
         if isinstance(data, EmptyData):
             if self._cached_function_pod is not None:

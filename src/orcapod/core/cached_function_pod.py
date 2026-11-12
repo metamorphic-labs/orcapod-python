@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import WrappedFunctionPod
+from orcapod.contexts.stored import StaleTable
 from orcapod.core.result_cache import ResultCache
 from orcapod.hooks import InvocationStatus
 from orcapod.protocols.core_protocols import (
@@ -54,6 +55,8 @@ class CachedFunctionPod(WrappedFunctionPod):
             result_database=result_database,
             record_path=self.uri,  # no prefix; db is pre-scoped
             auto_flush=auto_flush,
+            # A pod that takes the invocation context performs an external action.
+            delivers_side_effects=function_pod.ctx_arg_name is not None,
         )
 
     @property
@@ -75,6 +78,16 @@ class CachedFunctionPod(WrappedFunctionPod):
                 old schema).
         """
         self._cache.set_ignore_schema(ignore_schema)
+
+    def stale_result_tables(self) -> list[StaleTable]:
+        """Find stored results of other generations that this pod will not use.
+
+        Returns:
+            Result tables at an older layout, and, for a pod that takes the
+            invocation context, rows of another data context in the current
+            result table. Empty when there is nothing.
+        """
+        return self._cache.stale_tables(self.data_context_key)
 
     def lookup_cached_data(self, data: DataProtocol) -> DataProtocol | None:
         """Look up a cached result for ``data`` without triggering computation.

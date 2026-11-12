@@ -423,9 +423,12 @@ current data context are the current entries.
 - Every new stored table kind writes `__data_context` (`contexts/stored.with_data_context`),
   and every read or lookup keeps rows of the current data context only
   (`keep_rows_of_data_context`, or a lookup constraint on the column).
-- A table at an older layout is counted and reported (`report_old_layout_tables`), never read
-  as current and never modified. Side-effect logs raise `SideEffectLogDataContextError`
-  before any delivery instead.
+- A table at an older layout is never read as current and never modified. What a node does
+  about such tables, and about rows of another data context, is decided in one place,
+  `contexts/stored.account_for_stale_tables`: count and report, or, for a node that delivers
+  side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
+  context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
+  of node goes through that function; never decide it locally.
 - A released data context manifest (`contexts/data/<version>.json`) is frozen: its sha256 is
   pinned in `contexts/released_manifests.json`. A change that moves an existing golden hash
   value for a reason other than a logical type's own change needs a new data context version

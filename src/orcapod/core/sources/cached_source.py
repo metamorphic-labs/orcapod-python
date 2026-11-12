@@ -10,7 +10,8 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
-    report_old_layout_tables,
+    account_for_stale_tables,
+    find_stale_tables,
     report_rows_of_other_data_contexts,
     with_data_context,
 )
@@ -59,8 +60,8 @@ class CachedSource(RootSource):
 
     # Set once a read has reported the cached rows it skipped.
     _skipped_rows_reported: bool = False
-    # Set once a cache table found at the older layout has been reported.
-    _old_layout_reported: bool = False
+    # Set once a cache table found at the older layout has been accounted for.
+    _stale_tables_checked: bool = False
 
     def __init__(
         self,
@@ -214,17 +215,21 @@ class CachedSource(RootSource):
         """
         return self._unversioned_cache_path + (SOURCE_DB_SCHEMA_VERSION,)
 
-    def _report_old_layout(self) -> None:
+    def _account_for_stale_tables(self) -> None:
         """Report, once per source object, a cache table found at the older layout.
 
         A cache written by an earlier version of Orcapod holds no ``__data_context``
         column. Its rows are not read and are left unchanged; their number is
         reported (ITL-944).
         """
-        if self._old_layout_reported:
+        if self._stale_tables_checked:
             return
-        self._old_layout_reported = True
-        report_old_layout_tables(self._cache_database, (self._unversioned_cache_path,))
+        self._stale_tables_checked = True
+        account_for_stale_tables(
+            find_stale_tables(self._cache_database, (self._unversioned_cache_path,)),
+            delivers_side_effects=False,
+            current_context=self.data_context_key,
+        )
 
     # -------------------------------------------------------------------------
     # Stream interface — delegate schema, materialize with cache
@@ -277,7 +282,7 @@ class CachedSource(RootSource):
         )
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
-        self._report_old_layout()
+        self._account_for_stale_tables()
         self._cache_database.add_records(
             self.cache_path,
             with_data_context(live_with_hash, self.data_context_key),
@@ -297,7 +302,7 @@ class CachedSource(RootSource):
             The cached rows without the record hash and ``__data_context`` columns,
             or ``None`` when the cache table does not exist.
         """
-        self._report_old_layout()
+        self._account_for_stale_tables()
         records = self._cache_database.get_all_records(
             self.cache_path, record_id_column=self.HASH_COLUMN_NAME
         )

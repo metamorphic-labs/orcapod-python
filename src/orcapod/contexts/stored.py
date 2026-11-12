@@ -25,8 +25,9 @@ To list the data contexts a stored table holds::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, NamedTuple, Protocol, cast
 
+from orcapod.errors import SideEffectLogDataContextError
 from orcapod.system_constants import constants
 from orcapod.utils.lazy_module import LazyModule
 
@@ -141,31 +142,98 @@ class _RecordStore(Protocol):
     ) -> "pa.Table | None": ...
 
 
-def report_old_layout_tables(
-    database: _RecordStore, old_paths: tuple[tuple[str, ...], ...]
-) -> dict[tuple[str, ...], int]:
-    """Count and report the old-layout tables that exist among ``old_paths``.
+class StaleTable(NamedTuple):
+    """Stored rows a node will not use: an old-layout table, or rows of another data context.
 
-    The tables are only read: nothing is written to them. One warning is logged per
-    table found.
+    Attributes:
+        record_path: Path of the table from the root of the store.
+        data_context: Key of the data context that wrote the rows.
+        rows: Number of such rows in the table.
+        old_layout: True for a table at an older layout, False for rows of another
+            data context in a table at the current layout.
+    """
+
+    record_path: tuple[str, ...]
+    data_context: str
+    rows: int
+    old_layout: bool
+
+
+def find_stale_tables(
+    database: _RecordStore,
+    old_paths: tuple[tuple[str, ...], ...],
+    current: tuple[tuple[str, ...], str] | None = None,
+) -> list[StaleTable]:
+    """Find the stored rows of other generations that belong to one table of a node.
+
+    The tables are only read: nothing is written to them.
 
     Args:
         database: The store the paths belong to.
         old_paths: Paths at which an earlier version of Orcapod stored this table.
+        current: The table's current path and the current data context key, to also
+            look for rows of another data context in the current table (this reads
+            the whole table). ``None`` looks at the old layouts only.
 
     Returns:
-        The number of rows of each path that holds a table, keyed by the path from
-        the root of the store. Empty when no old-layout table exists.
+        One entry per old-layout table that exists, then one per other data context
+        found in the current table (in key order). Empty when there is none.
     """
-    found: dict[tuple[str, ...], int] = {}
+    found: list[StaleTable] = []
     for path in old_paths:
         if not database.table_exists(path):
             continue
         records = database.get_all_records(path)
         rows = 0 if records is None else records.num_rows
-        found[database.base_path + path] = rows
-        report_old_layout_rows(database.base_path + path, rows)
+        found.append(
+            StaleTable(database.base_path + path, PRE_V1_DATA_CONTEXT_KEY, rows, True)
+        )
+    if current is not None:
+        current_path, current_context = current
+        for key, rows in sorted(stored_data_contexts(database, current_path).items()):
+            if key != current_context:
+                found.append(
+                    StaleTable(database.base_path + current_path, key, rows, False)
+                )
     return found
+
+
+def account_for_stale_tables(
+    found: list[StaleTable], *, delivers_side_effects: bool, current_context: str
+) -> None:
+    """Decide what a node does about stored rows of other generations it will not use.
+
+    This is the one place where that is decided, for every kind of node:
+
+    - A node whose results can be computed again (function, operator and source
+      nodes) reports each table with its number of rows and moves on.
+    - A node whose run is an external action (a side-effect pod, or a function pod
+      that takes the invocation context) must not act again for inputs it already
+      handled, and those completions cannot be matched under the current data
+      context. It fails before doing anything.
+
+    Args:
+        found: What ``find_stale_tables`` found for the node's tables.
+        delivers_side_effects: Whether running the node is an external action.
+        current_context: Key of the node's data context.
+
+    Raises:
+        SideEffectLogDataContextError: If ``delivers_side_effects`` and ``found`` is
+            not empty. The caller adds the node label.
+    """
+    if not found:
+        return
+    if delivers_side_effects:
+        raise SideEffectLogDataContextError(
+            tuple(table.record_path for table in found),
+            found[0].data_context,
+            current_context,
+        )
+    for table in found:
+        if table.old_layout:
+            report_old_layout_rows(table.record_path, table.rows)
+        else:
+            report_rows_of_other_data_contexts(table.record_path, table.rows)
 
 
 def stored_data_contexts(

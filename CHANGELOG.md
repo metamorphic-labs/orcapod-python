@@ -115,13 +115,18 @@ read its tables as results, and computes every input again into its own tables.
     `Found 3 rows in stored table 'my_job/.../pdb_v1' written by an earlier version of
     Orcapod (older table layout, data context std:v0.1:default). They are not used and are
     left unchanged; they can be migrated later.`
-  - **Side-effect nodes fail instead of delivering again.** A side effect is an external
-    action, and a delivery logged by v0.2 cannot be matched with current inputs. A
-    side-effect node that finds an invocation log at an old layout (or logged deliveries of
-    another data context) raises `orcapod.errors.SideEffectLogDataContextError` (a
+  - **Side-effecting nodes fail instead of delivering again.** A side effect is an external
+    action, and a completion stored by v0.2 cannot be matched with current inputs. Both
+    kinds of side-effecting node are covered: a side-effect pod (`@side_effect_pod`,
+    `@sink_pod`, `@tap_pod`), whose completions are in its invocation log, and a function
+    pod that takes the invocation context (`@function_pod(ctx_arg=...)`,
+    `@side_effect_function_pod`), whose completions are in its function tables. Such a
+    node that finds its tables at an old layout (or completions of another data context in
+    its current tables) raises `orcapod.errors.SideEffectLogDataContextError` (a
     `StoreError`, so it fails the run whatever the `error_policy`) before it delivers or
-    writes anything. Function, operator and source nodes of the same job are not refused.
-    Use a fresh store for the side-effect node, or keep using v0.2 for it.
+    writes anything. The error names the tables. Other function, operator and source nodes
+    of the same job are not refused. Use a fresh store for the node, or keep using v0.2
+    for it.
   - `orcapod.contexts.stored_data_contexts(store, record_path)` counts the rows of a table
     by data context, for example `{"std:v1:default": 3}`; a table without the column reports
     its rows under `std:v0.1:default`.
@@ -208,9 +213,10 @@ stay queued for the next flush. A flush that fails only for other reasons still 
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
 - **`orcapod.errors.SideEffectLogDataContextError`** — a `StoreError` raised by a
-  side-effect node whose invocation log is at an older table layout or holds deliveries of
-  another data context, before anything is delivered. It has `record_path`,
-  `found_context`, `current_context` and `node_label`. (ITL-944)
+  side-effecting node (a side-effect pod, or a function pod that takes the invocation
+  context) whose stored completions are at an older table layout or belong to another data
+  context, before anything is delivered. It has `record_paths` (every table found),
+  `record_path` (the first), `found_context`, `current_context` and `node_label`. (ITL-944)
 - **`orcapod.contexts.stored_data_contexts(database, record_path)`** — counts the rows of a
   stored table by the data context that wrote them. (ITL-944)
 

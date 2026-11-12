@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import SchemaVersionError, StoreReadError, StoreWriteError
 from orcapod.contexts.stored import (
+    StaleTable,
     keep_rows_of_data_context,
-    report_old_layout_tables,
+    account_for_stale_tables,
+    find_stale_tables,
     report_rows_of_other_data_contexts,
     with_data_context,
 )
@@ -70,15 +72,28 @@ class ResultCache:
         result_database: ArrowDatabaseProtocol,
         record_path: tuple[str, ...],
         auto_flush: bool = True,
+        delivers_side_effects: bool = False,
     ) -> None:
+        """Create a result cache over one result table.
+
+        Args:
+            result_database: The store holding the result table.
+            record_path: Path of the result table without its layout component.
+            auto_flush: Whether to flush the store after each stored result.
+            delivers_side_effects: Whether computing a result is an external action
+                (a function pod that takes the invocation context). Such a cache
+                fails, instead of computing again, when it finds results stored
+                under another data context or at an older table layout.
+        """
         self._result_database = result_database
         self._record_path = record_path
         self._auto_flush = auto_flush
+        self._delivers_side_effects = delivers_side_effects
         self._ignore_schema: tuple[str, ...] | None = None
         # Set once a read has reported the stored rows it skipped.
         self._skipped_rows_reported = False
-        # Set once the tables found at an older layout have been reported.
-        self._old_layout_reported = False
+        # Set once stored results of other generations have been accounted for.
+        self._stale_tables_checked = False
 
     @property
     def result_database(self) -> ArrowDatabaseProtocol:
@@ -123,25 +138,47 @@ class ResultCache:
         """
         self._ignore_schema = ignore_schema
 
-    def _report_old_layout(self) -> None:
-        """Report, once per cache object, result tables found at an older layout.
+    def stale_tables(self, data_context_key: str) -> list[StaleTable]:
+        """Find stored results of other generations: rows this cache will not use.
 
-        A table written by an earlier version of Orcapod (``rdb_v1``) holds no
-        ``__data_context`` column. Its rows are not read as results and are left
-        unchanged; their number is reported (ITL-944).
+        Result tables at an older layout (``rdb_v1``), and, for a cache whose
+        function delivers side effects, rows of another data context in the current
+        table (ITL-944). The tables are only read.
+
+        Args:
+            data_context_key: Key of the caller's data context.
+
+        Returns:
+            What ``find_stale_tables`` found; empty when there is nothing.
         """
-        if self._old_layout_reported:
-            return
-        self._old_layout_reported = True
-        report_old_layout_tables(
+        return find_stale_tables(
             self._result_database,
             tuple(
                 self._record_path + (layout,)
                 for layout in OLD_RESULT_DB_SCHEMA_VERSIONS
             ),
+            current=(self._versioned_record_path, data_context_key)
+            if self._delivers_side_effects
+            else None,
         )
 
-    def _ensure_rdb_schema(self) -> None:
+    def _account_for_stale_tables(self, data_context_key: str) -> None:
+        """Report or refuse, once per cache object, stored results of other generations.
+
+        Raises:
+            SideEffectLogDataContextError: If this cache's function delivers side
+                effects and such results exist; nothing has been computed then.
+        """
+        if self._stale_tables_checked:
+            return
+        account_for_stale_tables(
+            self.stale_tables(data_context_key),
+            delivers_side_effects=self._delivers_side_effects,
+            current_context=data_context_key,
+        )
+        self._stale_tables_checked = True
+
+    def _ensure_rdb_schema(self, data_context_key: str) -> None:
         """Check for a legacy v0 result DB on first access per path.
 
         Detection flow (runs at most once per v1 path per process):
@@ -154,10 +191,15 @@ class ResultCache:
         4. Neither path exists → fresh database, continue.
         5. Mark v1 path as checked.
 
+        Args:
+            data_context_key: Key of the caller's data context.
+
         Raises:
             SchemaVersionError: If a v0 table is detected and not ignored.
+            SideEffectLogDataContextError: If this cache's function delivers side
+                effects and results of another generation exist.
         """
-        self._report_old_layout()
+        self._account_for_stale_tables(data_context_key)
         v1_path = self._versioned_record_path
         if v1_path in _checked_rdb_paths:
             return
@@ -217,7 +259,7 @@ class ResultCache:
         """
         from orcapod.core.datagrams import Data
 
-        self._ensure_rdb_schema()
+        self._ensure_rdb_schema(data_context_key)
 
         RECORD_ID_COL = "_record_id"
 
@@ -293,7 +335,7 @@ class ResultCache:
                 same ID already exists.
             data_context_key: Key of the caller's data context, stored on the row.
         """
-        self._ensure_rdb_schema()
+        self._ensure_rdb_schema(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})
 
@@ -375,7 +417,7 @@ class ResultCache:
         Returns:
             A PyArrow table of cached results, or ``None`` if empty.
         """
-        self._ensure_rdb_schema()
+        self._ensure_rdb_schema(data_context_key)
 
         record_id_column = constants.DATA_RECORD_ID if include_system_columns else None
         result_table = self._result_database.get_all_records(

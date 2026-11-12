@@ -699,11 +699,14 @@ layout, data context std:v0.1:default). They are not used and are left unchanged
 be migrated later.
 ```
 
-A side-effect invocation log is the exception. A delivery is looked up by its key, so
-deliveries logged under another data context would not be found and every side effect would
-be delivered again. A side-effect node therefore raises `SideEffectLogDataContextError`
-before delivering anything when it finds a log at an older layout or logged deliveries of
-another data context.
+Nodes that perform side effects are the exception. A completion is looked up by its key, so
+completions stored under another data context would not be found and every side effect would
+be performed again. There are two kinds: a side-effect pod (`@side_effect_pod`, `@sink_pod`,
+`@tap_pod`), whose completions are in its invocation log, and a function pod that takes the
+invocation context (`@function_pod(ctx_arg=...)`), whose completions are in its pipeline and
+result tables. Either raises `SideEffectLogDataContextError`, naming the tables, before
+doing anything when it finds its tables at an older layout or completions of another data
+context in its current tables.
 
 `stored_data_contexts(database, record_path)` reads a stored table and counts its rows by
 data context. A table without the column reports all its rows under `std:v0.1:default`.

@@ -409,60 +409,67 @@ class StoreReadError(StoreError):
 
 
 class SideEffectLogDataContextError(StoreError):
-    """Raised when a side-effect invocation log holds deliveries of another data context.
+    """Raised when a side-effecting node finds completions logged under another data context.
 
-    A side-effect node finds a delivery it already made by a record id hashed under
-    its data context. Deliveries logged under another data context cannot be matched
-    with current inputs: a log written by Orcapod up to v0.2 (an older table layout,
-    data context ``std:v0.1:default``), or rows of another data context in the
-    current log (ITL-944). Running the node would deliver every side effect again.
-    Unlike a computed result, a side effect is an external action, so the node raises
-    this error before it delivers anything and leaves the log as it is. Function,
+    A node whose run is an external action finds what it already did by keys hashed
+    under its data context: a side-effect pod in its invocation log, a function pod
+    that takes the invocation context (``ctx_arg``) in its function tables.
+    Completions stored under another data context cannot be matched with current
+    inputs: tables written by Orcapod up to v0.2 (an older table layout, data context
+    ``std:v0.1:default``), or rows of another data context in the current tables
+    (ITL-944). Running the node would perform every side effect again. Unlike a
+    computed result, a side effect cannot be taken back, so the node raises this
+    error before it does anything and leaves the tables as they are. Other function,
     operator and source tables do not fail this way: there, such rows are reported,
     skipped and computed again.
 
-    Use a fresh store for the side-effect node, or keep using the Orcapod version
-    that wrote the log; migrating stored rows to the current data context is planned.
+    Use a fresh store for the node, or keep using the Orcapod version that wrote the
+    tables; migrating stored rows to the current data context is planned.
 
     Attributes:
-        record_path: Path of the invocation log from the root of the store.
-        found_context: Data context key of logged deliveries that do not match.
-        current_context: Data context key of the side-effect node.
-        node_label: Label of the side-effect node.
+        record_paths: Paths, from the root of the store, of the tables holding such
+            completions.
+        record_path: The first of ``record_paths``.
+        found_context: Data context key of the completions that do not match.
+        current_context: Data context key of the node.
+        node_label: Label of the node.
     """
 
     def __init__(
         self,
-        record_path: tuple[str, ...],
+        record_paths: tuple[tuple[str, ...], ...],
         found_context: str,
         current_context: str,
         node_label: str | None = None,
     ) -> None:
-        """Create the error for one invocation log.
+        """Create the error for the tables of one node.
 
         Args:
-            record_path: Path of the invocation log.
-            found_context: Data context key of logged deliveries that do not match.
-            current_context: Data context key of the side-effect node.
-            node_label: Label of the side-effect node, if known.
+            record_paths: Paths of the tables holding completions that do not match.
+            found_context: Data context key of those completions.
+            current_context: Data context key of the node.
+            node_label: Label of the node, if known.
         """
-        self.record_path: tuple[str, ...] = tuple(record_path)
+        self.record_paths: tuple[tuple[str, ...], ...] = tuple(
+            tuple(path) for path in record_paths
+        )
+        self.record_path: tuple[str, ...] = self.record_paths[0]
         self.found_context: str = found_context
         self.current_context: str = current_context
         super().__init__(
-            self.record_path, found_context, current_context, node_label=node_label
+            self.record_paths, found_context, current_context, node_label=node_label
         )
 
     def __str__(self) -> str:
-        """Describe the log, both data contexts and the remedy."""
-        node = f" of node {self.node_label!r}" if self.node_label else ""
+        """Describe the tables, both data contexts and the remedy."""
+        node = f"Node {self.node_label!r}" if self.node_label else "This node"
+        tables = ", ".join(repr("/".join(path)) for path in self.record_paths)
         return (
-            f"The side-effect invocation log {'/'.join(self.record_path)!r}{node} holds "
-            f"deliveries logged under the data context {self.found_context!r}, but this "
+            f"{node} performs side effects, and its stored completions were logged "
+            f"under the data context {self.found_context!r} (in {tables}), but the "
             f"node runs under {self.current_context!r}. They cannot be matched with "
-            "current inputs, so running this node would deliver every side effect "
-            "again; nothing was delivered or written. Use a fresh store for this node, "
-            "or keep using the Orcapod version that wrote this log; the logged "
-            "deliveries are left in place and can be migrated to the current data "
-            "context later."
+            "current inputs, so running the node would perform every side effect "
+            "again; nothing was delivered or written. Use a fresh store for this "
+            "node, or keep using the Orcapod version that wrote these tables; they "
+            "are left in place and can be migrated to the current data context later."
         )

@@ -328,11 +328,13 @@ store, and it does not reuse those rows.
   rows: `Found 3 rows in stored table '...' written by an earlier version of Orcapod (older
   table layout, data context std:v0.1:default). They are not used and are left unchanged;
   they can be migrated later.`
-- Side-effect pods are the exception. A side effect is an external action, and deliveries
-  logged by v0.2 cannot be matched with current inputs, so running the node would deliver
-  everything a second time. Instead the node raises `SideEffectLogDataContextError` (from
-  `orcapod.errors`, a `StoreError`) before it delivers anything. Use a fresh store for that
-  node, or keep using the version that wrote the log.
+- Nodes that perform side effects are the exception: side-effect pods, and function pods
+  that take the invocation context (`ctx_arg`). A side effect is an external action, and
+  completions stored by v0.2 cannot be matched with current inputs, so running the node
+  would do everything a second time. Instead the node raises
+  `SideEffectLogDataContextError` (from `orcapod.errors`, a `StoreError`), naming the
+  tables, before it does anything. Use a fresh store for that node, or keep using the
+  version that wrote them.
 
 Each result row also records the full version string of the function that produced it, in
 the column `__pf_var_function_version` (for example `v3.7`); only the major part is in the

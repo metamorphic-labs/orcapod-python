@@ -710,6 +710,7 @@ class TestSideEffects:
         assert error.current_context == CURRENT
         assert error.node_label == "sink"
         assert error.record_path[-1] == "tdb_v1"
+        assert error.record_paths == (error.record_path,)
         message = str(error)
         assert "/".join(error.record_path) in message
         assert repr(PRE_V1) in message
@@ -764,6 +765,116 @@ class TestSideEffects:
         delivered.clear()
         _ = _sink_job(store).run(orchestrator=orchestrator)
         assert delivered == []
+
+
+# ---------------------------------------------------------------------------
+# Function pods that take the invocation context deliver side effects too
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="sent", ctx_arg="ctx")
+def notify(double: int, ctx: Any) -> int:
+    """A function pod whose call is an external action (it takes the invocation context)."""
+    delivered.append(double)
+    return double
+
+
+def _notify_job(store: Store) -> PipelineJob:
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        source = DictSource(
+            data=[{"k": "a", "double": 2}, {"k": "b", "double": 4}],
+            tag_columns=["k"],
+            source_id="src",
+        )
+        notify.pod(source, label="notify")
+    return job
+
+
+def _notify_store(
+    new_store: Callable[[], Store], copy: Callable[[Store, Store], None]
+) -> Store:
+    written = new_store()
+    _ = _notify_job(written).run()
+    assert sorted(delivered) == [2, 4]
+    delivered.clear()
+    target = new_store()
+    copy(written, target)
+    return target
+
+
+class TestSideEffectFunctionNodes:
+    """Their completions are in function tables; an older store must not deliver again."""
+
+    def test_old_layout_tables_raise_and_nothing_is_delivered(
+        self, new_store: Callable[[], Store], orchestrator: Orchestrator
+    ):
+        store = _notify_store(new_store, copy_as_v02)
+        before = snapshot(store)
+
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            _ = _notify_job(store).run(orchestrator=orchestrator)
+
+        assert delivered == []
+        assert snapshot(store) == before
+        error = info.value
+        assert error.found_context == PRE_V1
+        assert error.current_context == CURRENT
+        assert error.node_label == "notify"
+        assert sorted(path[-1] for path in error.record_paths) == ["pdb_v1", "rdb_v1"]
+        for path in error.record_paths:
+            assert "/".join(path) in str(error)
+
+    def test_rows_of_another_data_context_raise(
+        self, new_store: Callable[[], Store], orchestrator: Orchestrator
+    ):
+        store = _notify_store(new_store, copy_as_other_context)
+        before = snapshot(store)
+
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            _ = _notify_job(store).run(orchestrator=orchestrator)
+
+        assert delivered == []
+        assert snapshot(store) == before
+        assert info.value.found_context == OTHER
+        assert sorted(path[-1] for path in info.value.record_paths) == [
+            "pdb_v2",
+            "rdb_v2",
+        ]
+
+    def test_only_an_old_result_table_raises(self, new_store: Callable[[], Store]):
+        """The result table is shared by every node of the function: it alone is enough."""
+        store = _notify_store(new_store, copy_as_v02)
+        only_results = new_store()
+        source = reopened(store)
+        for path in source.list_sources():
+            if path[-1] == "rdb_v1":
+                rows = source.get_all_records(path, record_id_column=RID)
+                assert rows is not None
+                only_results.add_records(path, rows, record_id_column=RID)
+        only_results.flush()
+
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            _ = _notify_job(only_results).run()
+
+        assert delivered == []
+        assert [path[-1] for path in info.value.record_paths] == ["rdb_v1"]
+
+    def test_store_of_this_version_is_reused_without_delivering(
+        self, store: Store, orchestrator: Orchestrator
+    ):
+        _ = _notify_job(store).run(orchestrator=orchestrator)
+        delivered.clear()
+        _ = _notify_job(store).run(orchestrator=orchestrator)
+        assert delivered == []
+
+    def test_plain_function_node_in_the_same_store_is_only_reported(
+        self, new_store: Callable[[], Store]
+    ):
+        """Count and skip stays the rule for nodes whose call is not an external action."""
+        store = v02_store(new_store)
+        _ = build_job(store).run()
+        assert sorted(calls) == [1, 2]
 
 
 # ---------------------------------------------------------------------------

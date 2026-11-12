@@ -36,7 +36,8 @@ from orcapod.errors import (
 )
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
-    report_old_layout_tables,
+    account_for_stale_tables,
+    find_stale_tables,
     report_rows_of_other_data_contexts,
     with_data_context,
 )
@@ -545,8 +546,8 @@ class OperatorJobNode(OperatorNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
-    # Set once a table found at the older layout has been reported.
-    _old_layout_reported: bool = False
+    # Set once a table found at the older layout has been accounted for.
+    _stale_tables_checked: bool = False
 
     @property
     def _stored_table_path(self) -> tuple[str, ...]:
@@ -557,17 +558,21 @@ class OperatorJobNode(OperatorNodeBase):
         """
         return self.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
 
-    def _report_old_layout(self) -> None:
+    def _account_for_stale_tables(self) -> None:
         """Report, once per node object, a table found at the older layout.
 
         A table written by an earlier version of Orcapod holds no ``__data_context``
         column. Its rows are not read as results and are left unchanged; their number
         is reported (ITL-944).
         """
-        if self._old_layout_reported or self._pipeline_database is None:
+        if self._stale_tables_checked or self._pipeline_database is None:
             return
-        self._old_layout_reported = True
-        report_old_layout_tables(self._pipeline_database, (self.node_identity_path,))
+        self._stale_tables_checked = True
+        account_for_stale_tables(
+            find_stale_tables(self._pipeline_database, (self.node_identity_path,)),
+            delivers_side_effects=False,
+            current_context=self.data_context_key,
+        )
 
     def __init__(
         self,
@@ -883,7 +888,7 @@ class OperatorJobNode(OperatorNodeBase):
         # deduplicates exact re-runs of the same node within a single run.
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
-        self._report_old_layout()
+        self._account_for_stale_tables()
         try:
             pipeline_database.add_records(
                 self._stored_table_path,
@@ -917,7 +922,7 @@ class OperatorJobNode(OperatorNodeBase):
             when the table does not exist.
         """
         assert self._pipeline_database is not None
-        self._report_old_layout()
+        self._account_for_stale_tables()
         records = self._pipeline_database.get_all_records(
             self._stored_table_path, record_id_column=self.HASH_COLUMN_NAME
         )

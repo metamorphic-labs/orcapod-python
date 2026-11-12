@@ -2541,7 +2541,13 @@ not a generation, and is missing from operator-cache and cached-source record id
 - Reads and lookups keep rows of the current data context only, through
   `contexts/stored.keep_rows_of_data_context` or a lookup constraint on the column. A table
   at an old layout is counted and reported once per reader object, never read as current,
-  never written. Side-effect nodes raise `SideEffectLogDataContextError` before delivering.
+  never written.
+- What a node does about stored rows of other generations is decided in one place,
+  `contexts/stored.account_for_stale_tables`: report and skip, or, for a node that delivers
+  side effects, raise `SideEffectLogDataContextError` before anything is delivered. Both
+  kinds of side-effecting node are covered (developer, November 11, 2026): `SideEffectPod`
+  nodes (invocation log) and function nodes whose pod takes the invocation context
+  (`ctx_arg`; pipeline and result tables).
 - `orcapod.contexts.stored_data_contexts(database, record_path)` lists the data contexts a
   table holds. The label filtering of PR #309 (`hashing/stored_hash_labels.py`) is removed.
 - The result table also stores `__pf_var_function_version`, the full function version.
