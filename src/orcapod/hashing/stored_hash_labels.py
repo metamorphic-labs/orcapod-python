@@ -1,14 +1,14 @@
 """Tell stored rows hashed under one Arrow hash label from another (ITL-910).
 
 Orcapod keys stored rows by Arrow-derived hashes, and a change of the Arrow hash label
-(``arrow_v0.1`` up to Orcapod v0.2, ``arrow_v0.2`` since v0.3) changes those values but not
+(``arrow_v0.1`` up to Orcapod v0.2, ``arrow_v1`` since v0.3) changes those values but not
 the table they are stored in. A table can therefore hold rows of several labels side by
 side. Orcapod writes and uses rows of its current label only; rows of another label stay
 where they are, unchanged, until they are migrated.
 
 Two stored forms carry the label:
 
-- prefixed digests, ``b"<label>:<digest>"`` (for example ``b"arrow_v0.2:\\x00\\x00\\x02..."``),
+- prefixed digests, ``b"<label>:<digest>"`` (for example ``b"arrow_v1:\\x00\\x00\\x02..."``),
   in function-node pipeline and result tables and side-effect invocation logs;
 - hex digests without a label (``b"000002..."``), the record ids of operator-node and
   cached-source tables. Every starfix digest starts with its 3-byte hash format number, so
@@ -19,7 +19,7 @@ To list the labels a stored table holds::
 
     from orcapod.hashing.stored_hash_labels import stored_hash_labels
 
-    stored_hash_labels(store, record_path)  # {"arrow_v0.1": 3, "arrow_v0.2": 3}
+    stored_hash_labels(store, record_path)  # {"arrow_v0.1": 3, "arrow_v1": 3}
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _HEX_DIGEST_PATTERN = "^[0-9a-f]{70}$"
 # The Arrow hash label that used each starfix hash format. Labels move more often than
 # formats (any change to a table hash moves the label), so this maps only the formats
 # whose label is known.
-_LABEL_OF_FORMAT = {"000001": "arrow_v0.1", "000002": "arrow_v0.2"}
+_LABEL_OF_FORMAT = {"000001": "arrow_v0.1", "000002": "arrow_v1"}
 
 # Columns holding an Arrow-derived key, in the order they are looked for: the base entry
 # id of function-node pipeline tables, the input data hash of function result tables and
@@ -68,7 +68,7 @@ def hash_labels_of(
 
     Returns:
         A ``large_string`` array as long as ``values``: the Arrow hash label of a
-        prefixed digest (``b"arrow_v0.2:..."`` gives ``"arrow_v0.2"``), the starfix hash
+        prefixed digest (``b"arrow_v1:..."`` gives ``"arrow_v1"``), the starfix hash
         format of a full hex digest (``b"000002..."``, 70 lowercase hex characters,
         gives ``"000002"``), and null for every other value (nulls, labels of other
         hashers, hand-made ids).
@@ -105,7 +105,7 @@ def keep_rows_hashed_under(table: "pa.Table", column: str, current: str) -> "pa.
         table: Rows read from a stored table.
         column: The column of ``table`` holding the Arrow-derived key.
         current: What ``hash_labels_of`` gives for a key written by the current Arrow
-            hasher: its label (``"arrow_v0.2"``) for prefixed digests, its starfix hash
+            hasher: its label (``"arrow_v1"``) for prefixed digests, its starfix hash
             format (``current_hash_format``) for hex digests.
 
     Returns:
@@ -213,7 +213,7 @@ def stored_hash_labels(
 
     Returns:
         A mapping from label to number of rows, for example
-        ``{"arrow_v0.1": 3, "arrow_v0.2": 3}``. A starfix hash format whose label is
+        ``{"arrow_v0.1": 3, "arrow_v1": 3}``. A starfix hash format whose label is
         not known appears as ``"starfix hash format <hex>"``, rows whose key names no
         label appear under ``None``, and a missing or empty table gives ``{}``.
     """

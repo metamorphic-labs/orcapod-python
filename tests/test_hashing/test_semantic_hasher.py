@@ -1010,7 +1010,7 @@ class TestGlobalSingletons:
         assert isinstance(get_default_semantic_hasher(), SemanticAwarePythonHasher)
 
     def test_get_default_semantic_hasher_has_versioned_id(self):
-        assert get_default_semantic_hasher().hasher_id == "semantic_v0.1"
+        assert get_default_semantic_hasher().hasher_id == "semantic_v1"
 
     def test_get_default_type_handler_registry_is_singleton(self):
         r1 = get_default_python_type_handler_registry()

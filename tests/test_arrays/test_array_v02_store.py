@@ -1,9 +1,9 @@
 """A v0.2 store under v0.3: its rows are ignored, recomputed and kept (ITL-888, ITL-910).
 
 The array format changed in v0.3 without a migration (ITL-888), and so did every Arrow-derived
-hash (starfix hash format 2, label ``arrow_v0.2``, ITL-910). Rows a v0.2 store holds are keyed
+hash (starfix hash format 2, label ``arrow_v1``, ITL-910). Rows a v0.2 store holds are keyed
 under ``arrow_v0.1`` and can never match v0.3 inputs. v0.3 does not refuse the store and does
-not reuse those rows: it ignores them, computes every input again under ``arrow_v0.2`` (into
+not reuse those rows: it ignores them, computes every input again under ``arrow_v1`` (into
 new tables where a pipeline hash moved, next to the old rows where it did not), and leaves
 what v0.2 wrote byte-for-byte in place for a later migration (ITL-913, ITL-914).
 """
@@ -125,7 +125,7 @@ def test_v02_rows_are_ignored_recomputed_and_kept(
     for table in tables_before:
         labels = stored_hash_labels(database, _table_path(table))
         assert labels.get("arrow_v0.1") == len(ARRAYS), table
-        assert set(labels) <= {"arrow_v0.1", "arrow_v0.2"}, table
+        assert set(labels) <= {"arrow_v0.1", "arrow_v1"}, table
 
 
 @pytest.mark.parametrize("label", ["plus_one", "after_drop", "total"])

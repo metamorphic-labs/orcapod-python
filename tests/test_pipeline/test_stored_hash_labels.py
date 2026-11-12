@@ -1,8 +1,8 @@
 """Rows hashed under another Arrow hash label are ignored, never used or changed (ITL-910).
 
-v0.3 hashes Arrow data with starfix hash format 2 under the label ``arrow_v0.2``. Rows a
+v0.3 hashes Arrow data with starfix hash format 2 under the label ``arrow_v1``. Rows a
 v0.2 store holds were keyed under ``arrow_v0.1`` (format 1). Table paths do not move for a
-value-only change, so v0.3 writes its ``arrow_v0.2`` rows into the same tables, next to the
+value-only change, so v0.3 writes its ``arrow_v1`` rows into the same tables, next to the
 old ones. It must then use rows of the current label only: key lookups cannot match an old
 row (the labelled bytes differ), and every read of a whole table drops the rows of another
 label. The old rows stay on disk unchanged, and ``stored_hash_labels`` lists which labels a
@@ -352,7 +352,7 @@ class TestResultCacheReads:
         assert sorted(calls) == [1, 2]
         assert rows_of(cached.get_all_cached_outputs()) == [2, 4]
         (path,) = reopened(store).list_sources()
-        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v0.2": 2}
+        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v1": 2}
 
 
 class TestOperatorNodeReads:
@@ -418,7 +418,7 @@ class TestCachedSource:
         assert len(after[path]) == 4
         for row in before[path]:
             assert row in after[path]
-        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v0.2": 2}
+        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v1": 2}
 
     def test_cache_written_by_this_version_is_read(self, store: Store):
         _ = _cached_source(store).as_table()
@@ -465,13 +465,13 @@ class TestSideEffects:
         error = info.value
         assert isinstance(error, StoreError)
         assert error.found_label == "arrow_v0.1"
-        assert error.current_label == "arrow_v0.2"
+        assert error.current_label == "arrow_v1"
         assert error.node_label == "sink"
         assert error.record_path[-1] == "tdb_v1"
         message = str(error)
         assert "/".join(error.record_path) in message
         assert "'arrow_v0.1'" in message
-        assert "'arrow_v0.2'" in message
+        assert "'arrow_v1'" in message
         assert "delivered" in message
         assert "migrat" in message
 
@@ -525,7 +525,7 @@ class TestStoredHashLabels:
         assert labels_in(store, path) == {"arrow_v0.1": 2}
 
         _ = build_job(store, with_operator=True).run()
-        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v0.2": 2}
+        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v1": 2}
 
     def test_lists_the_label_of_a_v02_side_effect_log(self, store: Store):
         write_v02_store(store, with_sink=True)
@@ -533,7 +533,7 @@ class TestStoredHashLabels:
 
     def test_fresh_table_holds_the_current_label_only(self, store: Store):
         _ = build_job(store).run()
-        assert labels_in(store, table_path(store, "pipeline")) == {"arrow_v0.2": 2}
+        assert labels_in(store, table_path(store, "pipeline")) == {"arrow_v1": 2}
 
     def test_missing_table_holds_nothing(self, store: Store):
         assert labels_in(store, ("no", "such", "table")) == {}

@@ -413,7 +413,7 @@ class SideEffectLogHashLabelError(StoreError):
 
     A side-effect node finds a delivery it already made by an Arrow-derived record id,
     and each id carries the label of the hashing scheme that produced it
-    (``arrow_v0.1`` up to v0.2, ``arrow_v0.2`` since v0.3, ITL-910). Deliveries logged
+    (``arrow_v0.1`` up to v0.2, ``arrow_v1`` since v0.3, ITL-910). Deliveries logged
     under another label cannot be matched with current inputs, so running the node
     would deliver every side effect again. Unlike a computed result, a side effect is
     an external action, so the node raises this error before it delivers anything and

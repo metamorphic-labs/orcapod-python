@@ -19,7 +19,7 @@ from orcapod.hashing.stored_hash_labels import (
 )
 
 OLD_KEY = b"arrow_v0.1:\x00\x00\x01y"
-NEW_KEY = b"arrow_v0.2:\x00\x00\x02x"
+NEW_KEY = b"arrow_v1:\x00\x00\x02x"
 OLD_DIGEST = "000001" + "ab" * 32
 NEW_DIGEST = "000002" + "cd" * 32
 
@@ -27,7 +27,7 @@ NEW_DIGEST = "000002" + "cd" * 32
 class TestHashLabelsOf:
     def test_prefixed_digests_give_their_arrow_label(self):
         values = pa.array([NEW_KEY, OLD_KEY, None], pa.large_binary())
-        assert hash_labels_of(values).to_pylist() == ["arrow_v0.2", "arrow_v0.1", None]
+        assert hash_labels_of(values).to_pylist() == ["arrow_v1", "arrow_v0.1", None]
 
     def test_hex_digests_give_their_starfix_format(self):
         values = pa.array([NEW_DIGEST.encode(), OLD_DIGEST.encode()], pa.large_binary())
@@ -40,7 +40,7 @@ class TestHashLabelsOf:
     def test_other_values_carry_no_label(self):
         values = pa.array(
             [
-                b"semantic_v0.1:abc",  # another hasher's label
+                b"semantic_v1:abc",  # another hasher's label
                 b"hand-made-id",
                 b"arrow_v0.1",  # no digest after the label
                 b"000001abcd",  # not a full starfix digest
@@ -55,7 +55,7 @@ class TestHashLabelsOf:
         chunked = pa.chunked_array(
             [pa.array([NEW_KEY], pa.binary()), pa.array([OLD_KEY], pa.binary())]
         )
-        assert hash_labels_of(chunked).to_pylist() == ["arrow_v0.2", "arrow_v0.1"]
+        assert hash_labels_of(chunked).to_pylist() == ["arrow_v1", "arrow_v0.1"]
         assert hash_labels_of(pa.array([], pa.large_binary())).to_pylist() == []
 
 
@@ -64,7 +64,7 @@ class TestKeepRowsHashedUnder:
         table = pa.table(
             {"key": pa.array([OLD_KEY, NEW_KEY], pa.large_binary()), "v": [1, 2]}
         )
-        kept = keep_rows_hashed_under(table, "key", "arrow_v0.2")
+        kept = keep_rows_hashed_under(table, "key", "arrow_v1")
         assert kept.to_pylist() == [{"key": NEW_KEY, "v": 2}]
         assert kept.schema == table.schema
 
@@ -81,31 +81,31 @@ class TestKeepRowsHashedUnder:
         table = pa.table(
             {"key": pa.array([b"hand-made", None, OLD_KEY]), "v": [1, 2, 3]}
         )
-        assert keep_rows_hashed_under(table, "key", "arrow_v0.2")["v"].to_pylist() == [
+        assert keep_rows_hashed_under(table, "key", "arrow_v1")["v"].to_pylist() == [
             1,
             2,
         ]
 
     def test_table_of_the_current_label_is_returned_unchanged(self):
         table = pa.table({"key": pa.array([NEW_KEY, NEW_KEY]), "v": [1, 2]})
-        assert keep_rows_hashed_under(table, "key", "arrow_v0.2") is table
+        assert keep_rows_hashed_under(table, "key", "arrow_v1") is table
 
     def test_empty_table(self):
         table = pa.table({"key": pa.array([], pa.large_binary())})
-        assert keep_rows_hashed_under(table, "key", "arrow_v0.2").num_rows == 0
+        assert keep_rows_hashed_under(table, "key", "arrow_v1").num_rows == 0
 
 
 class TestOtherArrowLabel:
     def test_none_when_every_label_is_current(self):
         values = pa.array([NEW_KEY, None, b"hand-made"], pa.large_binary())
-        assert other_arrow_label(values, "arrow_v0.2") is None
+        assert other_arrow_label(values, "arrow_v1") is None
 
     def test_another_label_is_found(self):
         values = pa.array([NEW_KEY, OLD_KEY], pa.large_binary())
-        assert other_arrow_label(values, "arrow_v0.2") == "arrow_v0.1"
+        assert other_arrow_label(values, "arrow_v1") == "arrow_v0.1"
 
     def test_empty_column(self):
-        assert other_arrow_label(pa.array([], pa.large_binary()), "arrow_v0.2") is None
+        assert other_arrow_label(pa.array([], pa.large_binary()), "arrow_v1") is None
 
 
 class TestReportSkippedRows:
@@ -144,11 +144,11 @@ class TestStoredHashLabels:
 
     def test_counts_rows_per_label(self):
         store = self._store("__input_data_hash", [OLD_KEY, NEW_KEY, NEW_KEY])
-        assert stored_hash_labels(store, ("t",)) == {"arrow_v0.1": 1, "arrow_v0.2": 2}
+        assert stored_hash_labels(store, ("t",)) == {"arrow_v0.1": 1, "arrow_v1": 2}
 
     def test_rows_without_a_label_are_counted_under_none(self):
         store = self._store("__input_data_hash", [b"hand-made", NEW_KEY])
-        assert stored_hash_labels(store, ("t",)) == {None: 1, "arrow_v0.2": 1}
+        assert stored_hash_labels(store, ("t",)) == {None: 1, "arrow_v1": 1}
 
     def test_record_ids_are_read_when_no_key_column_is_stored(self):
         """Operator-node and cached-source tables keep their hash as the record id."""
@@ -162,7 +162,7 @@ class TestStoredHashLabels:
             }
         )
         store.add_records(("t",), table, record_id_column="_record_hash", flush=True)
-        assert stored_hash_labels(store, ("t",)) == {"arrow_v0.1": 1, "arrow_v0.2": 1}
+        assert stored_hash_labels(store, ("t",)) == {"arrow_v0.1": 1, "arrow_v1": 1}
 
     def test_unknown_starfix_format_is_named(self):
         store = InMemoryArrowDatabase()

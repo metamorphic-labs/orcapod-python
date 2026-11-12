@@ -175,7 +175,7 @@
             "arrow_hasher": {
                 "_class": "orcapod.hashing.arrow_hashers.StarfixArrowHasher",
                 "_config": {
-                    "hasher_id": "arrow_v0.2",
+                    "hasher_id": "arrow_v1",
                     "type_converter": {"_ref": "type_converter"},
                     "semantic_hasher": {"_ref": "semantic_hasher"}
                 }
@@ -183,7 +183,7 @@
             "semantic_hasher": {
                 "_class": "orcapod.hashing.semantic_hashing.semantic_hasher.SemanticAwarePythonHasher",
                 "_config": {
-                    "hasher_id": "semantic_v0.1",
+                    "hasher_id": "semantic_v1",
                     "type_handler_registry": {"_ref": "python_type_handler_registry"}
                 }
             },

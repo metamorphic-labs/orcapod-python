@@ -38,7 +38,7 @@ from orcapod.types import ContentHash
 # Helpers
 # ---------------------------------------------------------------------------
 
-HASHER_ID = "arrow_v0.2"
+HASHER_ID = "arrow_v1"
 
 _DIGEST_LEN = 35  # 3 version bytes + 32 SHA-256 bytes
 
@@ -308,7 +308,7 @@ class TestVersionedHashersFactory:
 
     def test_current_hasher_id_is_arrow_v0_2(self):
         """Pin the current version constant to detect accidental version drifts."""
-        assert _CURRENT_ARROW_HASHER_ID == "arrow_v0.2"
+        assert _CURRENT_ARROW_HASHER_ID == "arrow_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ class TestContextIntegration:
         from orcapod.contexts import resolve_context
 
         ctx = resolve_context("v0.1")
-        assert ctx.arrow_hasher.hasher_id == "arrow_v0.2"
+        assert ctx.arrow_hasher.hasher_id == "arrow_v1"
 
     def test_context_hash_table_functional(self):
         from orcapod.contexts import resolve_context
@@ -350,7 +350,7 @@ _COMMENT_KEY = b"comment"
 class TestHashSchemaExtensionAware:
     def test_extension_free_golden_value_unchanged(self):
         """Stability invariant: extension-free schema hash is byte-identical to
-        the starfix format-2 (arrow_v0.2) golden value (include_metadata=False is the default)."""
+        the starfix format-2 (arrow_v1) golden value (include_metadata=False is the default)."""
         schema = pa.schema(
             [
                 pa.field("id", pa.int32(), nullable=False),
@@ -442,7 +442,7 @@ class TestHashSchemaExtensionAware:
 class TestHashTableExtensionAware:
     def test_extension_free_table_golden_value_unchanged(self):
         """Stability invariant: extension-free table hash is byte-identical to
-        the starfix format-2 (arrow_v0.2) golden value."""
+        the starfix format-2 (arrow_v1) golden value."""
         table = pa.table(
             {
                 "id": pa.array([1, 2, 3], type=pa.int32()),

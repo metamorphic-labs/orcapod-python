@@ -27,8 +27,8 @@ class TestSourceNodeHashStability:
 
     For tag_schema=Schema({"id": int}), data_schema=Schema({"value": float}),
     name="slot_a":
-      content_hash  = semantic_v0.1:df0cba56fd880f86584ef89b35ef850bd813c95c114ac3bc84818e195b2175cb
-      pipeline_hash = semantic_v0.1:3e32b07447e313318744ce498086c21ad136a40596f833c05162088e840ad16e
+      content_hash  = semantic_v1:df0cba56fd880f86584ef89b35ef850bd813c95c114ac3bc84818e195b2175cb
+      pipeline_hash = semantic_v1:3e32b07447e313318744ce498086c21ad136a40596f833c05162088e840ad16e
     """
 
     def test_content_hash_is_deterministic(self, tag_schema, data_schema):
@@ -55,7 +55,7 @@ class TestSourceNodeHashStability:
 
         node = SourceNode(name="slot_a", tag_schema=tag_schema, data_schema=data_schema)
         expected = ContentHash(
-            method="semantic_v0.1",
+            method="semantic_v1",
             digest=bytes.fromhex(
                 "b2779d890c22b601f0ed71eb2817138205cc509581b9d7e23186c2f0ec815695"
             ),
@@ -83,7 +83,7 @@ class TestSourceNodeHashStability:
 
         node = SourceNode(name="slot_a", tag_schema=tag_schema, data_schema=data_schema)
         expected = ContentHash(
-            method="semantic_v0.1",
+            method="semantic_v1",
             digest=bytes.fromhex(
                 "3e32b07447e313318744ce498086c21ad136a40596f833c05162088e840ad16e"
             ),

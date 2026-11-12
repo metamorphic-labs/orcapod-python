@@ -564,7 +564,7 @@ def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
 class TestIdentityPinned:
     """Values recorded on ``main`` at ab544982, before the fix.
 
-    Re-recorded under starfix hash format 2 (``arrow_v0.2``, ITL-910): the node content
+    Re-recorded under starfix hash format 2 (``arrow_v1``, ITL-910): the node content
     hash and the record hashes are Arrow-derived; the pipeline hash is not.
 
     The node's identity, the output data and the row-0 record hash (whose
@@ -584,10 +584,10 @@ class TestIdentityPinned:
         _ = node.execute(src)
 
         assert node.pipeline_hash().to_string() == (
-            "semantic_v0.1:1f533cfa7293bad96debd5cda622e04bc39d72970ce6827dcd6e890a7428823c"
+            "semantic_v1:1f533cfa7293bad96debd5cda622e04bc39d72970ce6827dcd6e890a7428823c"
         )
         assert node.content_hash().to_string() == (
-            "semantic_v0.1:36a4b61a5ed690ffa95ff31ba0c19a43e31b5b2ac51e1e5848d4b184e4b9ccf7"
+            "semantic_v1:36a4b61a5ed690ffa95ff31ba0c19a43e31b5b2ac51e1e5848d4b184e4b9ccf7"
         )
         ids = _record_ids(node)
         assert ids["a"] == ROW_ZERO_RECORD_ID

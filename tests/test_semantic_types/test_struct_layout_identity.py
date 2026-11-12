@@ -61,7 +61,7 @@ _FLAT_HASHES: dict[str, object] = {
 }
 
 # Hashes on main (365a5f74), before the converter change; the stream content and per-row
-# data hashes re-recorded in starfix hash format 2 (arrow_v0.2, ITL-910).
+# data hashes re-recorded in starfix hash format 2 (arrow_v1, ITL-910).
 MAIN_HASHES: dict[str, dict[str, object]] = {
     "small": _FLAT_HASHES,
     "large": _FLAT_HASHES,
