@@ -867,11 +867,17 @@ the stream. The recipe still cannot be reloaded.
 
 What answers 5 to 7 change in 8.3:
 
-* **Default `source_id`** is the content hash that an operator node doing this derivation over
-  the origin would have: the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`,
-  with the origin entering through its own content hash. It is used in bare hex form, without
-  a method prefix. It changes when the origin's identity changes or the mapping changes, and
-  with nothing else. An explicit `source_id=` replaces it.
+* **Default `source_id`** is `tags_as_data:<algorithm label>:<hex>`. Label and digest are the
+  content hash that an operator node doing this derivation over the origin would have: the
+  hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, with the origin entering
+  through its own content hash (a `record_id_column`, when set, is one more parameter). It
+  changes when the origin's identity or a parameter changes, and with nothing else. An
+  explicit `source_id=` replaces it. Later decisions by the developer that shaped the format:
+  a source id is the source's name and should identify the source easily, so a hash used as a
+  default id carries its algorithm label and a kind prefix; the one string is used as-is in
+  system-tag values and source-info tokens; the kind names the operation (`tags_as_data`),
+  while a plain node-backed derived source keeps `derived:`; the origin's source id is not
+  part of it, because a derived source may later combine several sources.
 * **`content_hash`** follows the rule of every root source: class name, output schema and
   `source_id`. The origin and the mapping enter through the default `source_id`.
 * **`pipeline_hash`** stays schema only.
@@ -884,5 +890,9 @@ it, `source.cached(database)`, which writes `source/node:<content hash>`. A deri
 a root source, so `derived.cached(database)` works the same way. Whether more is wanted is
 with the developer.
 
-Implementation: branch `eywalker/itl-939-derived-source-tags-as-data`, a separate pull request.
+Implementation: branch `eywalker/itl-939-derived-source-tags-as-data`, pull request #317. A
+read-only check against the live SpiralDB tutorial project passed there. It also showed that
+`experiment_start_timestamp` in that dataset is a relative clock, not microseconds since the
+epoch, so the elapsed-time formula in sections 6.1 and 8.3 is an illustration of the
+mechanism, not a correct computation on the EDI tables.
 This document and its experiments stay in the design pull request (#310).
