@@ -200,7 +200,10 @@ class RootSource(StreamBase):
         slice of it. A source that reads its table later overrides this with a bounded
         read. See ``StreamBase.head``.
         """
-        return self._stream.head(n, columns=columns, all_info=all_info).for_stream(self)
+        # _stream is set by each concrete subclass (see the class docstring), as for
+        # the other delegating methods here.
+        stream = self._stream  # pyright: ignore[reportAttributeAccessIssue]
+        return stream.head(n, columns=columns, all_info=all_info).for_stream(self)
 
     # -------------------------------------------------------------------------
     # Convenience — caching

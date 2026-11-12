@@ -23,7 +23,7 @@ from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.streams import HeadStatus
-from orcapod.types import CacheMode
+from orcapod.types import CacheMode, Schema
 
 CALLS: list[int] = []
 
@@ -149,10 +149,14 @@ def test_blueprint_nodes_are_unavailable() -> None:
 
 
 def test_source_nodes() -> None:
-    slot = SourceNode(name="nums", tag_schema={"id": int}, data_schema={"x": int})
+    slot = SourceNode(
+        name="nums", tag_schema=Schema({"id": int}), data_schema=Schema({"x": int})
+    )
     assert slot.head().status is HeadStatus.UNAVAILABLE
     assert "input slot" in slot._repr_html_()
-    unbound = SourceJobNode(name="nums", tag_schema={"id": int}, data_schema={"x": int})
+    unbound = SourceJobNode(
+        name="nums", tag_schema=Schema({"id": int}), data_schema=Schema({"x": int})
+    )
     assert unbound.head().status is HeadStatus.UNAVAILABLE
     assert "no source bound" in unbound.head().header()
     source = _source()

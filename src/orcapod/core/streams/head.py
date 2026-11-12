@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import dataclasses
 import html
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from orcapod.types import ColumnConfig
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -52,6 +50,7 @@ class HeadStatus(str, Enum):
 NOT_COMPUTED_NOTE = "not computed; as_table(), iter_data() or a job run computes it"
 STALE_NOTE = "not computed: inputs changed since the last computation"
 NOTHING_STORED_NOTE = "nothing stored; run the job"
+BLUEPRINT_NOTE = "pipeline blueprint; run it in a PipelineJob"
 SIDE_EFFECTS_NOTE = (
     "not run; iterating it or a job run delivers its side effects; "
     "displaying never delivers side effects"
@@ -74,45 +73,6 @@ _ORIGIN_NOUNS = {
 # Display limits of the preview.
 _MAX_TEXT = 80
 _MAX_LIST_ITEMS = 5
-
-
-def check_head_size(n: int) -> None:
-    """Check the row count given to ``head``.
-
-    Raises:
-        TypeError: If ``n`` is not an ``int``.
-        ValueError: If ``n`` is negative.
-    """
-    if isinstance(n, bool) or not isinstance(n, int):
-        raise TypeError(f"head() takes an int number of rows, got {type(n).__name__}")
-    if n < 0:
-        raise ValueError(f"head() takes a non-negative number of rows n, got {n}")
-
-
-def head_column_config(
-    columns: ColumnConfig | dict[str, Any] | None, all_info: bool
-) -> ColumnConfig:
-    """Return the column configuration ``head`` uses for ``columns`` and ``all_info``.
-
-    The column groups mean what they mean for ``as_table``. ``head`` returns rows in
-    stream order, so ``all_info`` does not sort, and asking for ``sort_by_tags`` raises.
-
-    Raises:
-        ValueError: If ``columns`` asks for ``sort_by_tags``.
-    """
-    if isinstance(columns, ColumnConfig):
-        asked_to_sort = bool(columns.sort_by_tags)
-    elif isinstance(columns, Mapping):
-        asked_to_sort = bool(columns.get("sort_by_tags", False))
-    else:
-        asked_to_sort = False
-    if asked_to_sort:
-        raise ValueError(
-            "head() returns the first rows in stream order and cannot sort them by "
-            "tags; sort the result of as_table() instead"
-        )
-    config = ColumnConfig.handle_config(columns, all_info=all_info)
-    return dataclasses.replace(config, sort_by_tags=False)
 
 
 @dataclass(frozen=True)
@@ -325,7 +285,7 @@ def _size(count: int) -> str:
     return f"{count} B"  # pragma: no cover
 
 
-def _summarise(column: pa.ChunkedArray) -> list[str | None] | None:
+def _summarise(column: pa.ChunkedArray[Any]) -> list[str | None] | None:
     """Return display strings for a column whose cells are too large to show as they are,
     or ``None`` to show the column as it is."""
     arrow_type = column.type
@@ -354,7 +314,7 @@ def _summarise(column: pa.ChunkedArray) -> list[str | None] | None:
 
 
 def _summarise_extension(
-    column: pa.ChunkedArray, arrow_type: pa.ExtensionType
+    column: pa.ChunkedArray[Any], arrow_type: pa.ExtensionType
 ) -> list[str | None] | None:
     storage_type = arrow_type.storage_type
     short_name = arrow_type.extension_name.rsplit(".", 1)[-1]
@@ -363,7 +323,12 @@ def _summarise_extension(
         # Only the small fields are read; an ndarray's ``data`` is never decoded.
         wanted = [n for n in ("dtype", "shape") if n in names]
         values = [
-            v for array in column.chunks for v in _struct_fields(array.storage, wanted)
+            v
+            for array in column.chunks
+            for v in _struct_fields(
+                cast(pa.StructArray, cast("pa.ExtensionArray[Any]", array).storage),
+                wanted,
+            )
         ]
         if {"dtype", "shape"} <= names:
             return [
@@ -377,12 +342,14 @@ def _summarise_extension(
         return [
             None if v is None else f"{short_name} ({_size(len(v))})"
             for array in column.chunks
-            for v in array.storage.to_pylist()
+            for v in cast("pa.ExtensionArray[Any]", array).storage.to_pylist()
         ]
     return None
 
 
-def _struct_fields(array: pa.StructArray, names: list[str]) -> list[dict | None]:
+def _struct_fields(
+    array: pa.StructArray, names: list[str]
+) -> list[dict[str, Any] | None]:
     """Return each row of ``array`` as a dict of the named fields (``None`` for a null row)."""
     fields = {name: array.field(name).to_pylist() for name in names}
     valid = array.is_valid().to_pylist()
@@ -400,7 +367,7 @@ def _shape_text(shape: Any) -> str:
 
 
 def _summarise_list(
-    column: pa.ChunkedArray, value_type: pa.DataType
+    column: pa.ChunkedArray[Any], value_type: pa.DataType
 ) -> list[str | None] | None:
     simple_items = not (
         isinstance(value_type, pa.ExtensionType)

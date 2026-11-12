@@ -15,12 +15,14 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from orcapod import function_pod, side_effect_pod
+from orcapod import function_pod
+from orcapod.core.function_pod import FunctionPodStream
 from orcapod.core.operators import GroupBy, Join, PolarsFilter, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource, CachedSource, DictSource, ListSource
 from orcapod.core.sources.polling_source import PollingSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.streams import HeadStatus, StreamHead
+from orcapod.side_effects import SideEffectPod
 from orcapod.types import ColumnConfig, Cursor
 
 ALL_COLUMNS = ColumnConfig(
@@ -268,6 +270,7 @@ def test_an_empty_operator_result_is_not_not_computed() -> None:
 def test_operator_stream_with_changed_inputs_is_not_computed() -> None:
     calls: list[int] = []
     fn_stream = _counting_pod(calls).pod(_source())
+    assert isinstance(fn_stream, FunctionPodStream)
     out = SelectDataColumns(["y"])(fn_stream)
     _ = out.as_table()
     fn_stream.clear_cache()
@@ -284,11 +287,10 @@ def test_operator_stream_with_changed_inputs_is_not_computed() -> None:
 def test_side_effect_stream_preview_never_delivers() -> None:
     delivered: list[int] = []
 
-    @side_effect_pod
     def deliver(x: int) -> None:
         delivered.append(x)
 
-    stream = deliver(_source())
+    stream = SideEffectPod(deliver)(_source())
     head = stream.head()
     html = stream._repr_html_()
     assert delivered == []

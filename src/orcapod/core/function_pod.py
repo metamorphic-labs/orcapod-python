@@ -13,13 +13,15 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
-from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.base import (
+    StreamBase,
+    check_head_size,
+    head_column_config,
+)
 from orcapod.core.streams.head import (
     STALE_NOTE,
     HeadStatus,
     StreamHead,
-    check_head_size,
-    head_column_config,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import StoreError, TypeIdentityError
@@ -1118,7 +1120,7 @@ class FunctionPodStream(StreamBase):
 
         column_config = ColumnConfig.handle_config(columns, all_info=all_info)
 
-        def all_content_hashes() -> pa.Array:
+        def all_content_hashes() -> pa.Array[Any]:
             if self._cached_content_hash_column is None:
                 # TODO: verify that order will be preserved
                 self._cached_content_hash_column = pa.array(
@@ -1161,7 +1163,7 @@ class FunctionPodStream(StreamBase):
         computed = self._computed_prefix()
         shown = computed[:n]
 
-        def shown_content_hashes() -> pa.Array:
+        def shown_content_hashes() -> pa.Array[Any]:
             return pa.array(
                 [data.content_hash().to_string() for _, data in shown],
                 type=pa.large_string(),
@@ -1257,7 +1259,7 @@ class FunctionPodStream(StreamBase):
         self,
         table: pa.Table,
         column_config: ColumnConfig,
-        content_hashes: Callable[[], pa.Array],
+        content_hashes: Callable[[], pa.Array[Any]],
     ) -> pa.Table:
         """Return ``table`` with the column groups of ``column_config``.
 

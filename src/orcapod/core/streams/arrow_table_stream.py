@@ -7,8 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
-from orcapod.core.streams.base import StreamBase
-from orcapod.core.streams.head import StreamHead, check_head_size, head_column_config
+from orcapod.core.streams.base import (
+    StreamBase,
+    check_head_size,
+    head_column_config,
+)
+from orcapod.core.streams.head import StreamHead
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants

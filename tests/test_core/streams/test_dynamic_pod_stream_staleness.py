@@ -11,6 +11,7 @@ from unittest import mock
 import pyarrow as pa
 
 from orcapod import function_pod
+from orcapod.core.function_pod import FunctionPodStream
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
 
@@ -36,6 +37,7 @@ def _source() -> ArrowTableSource:
 
 def test_operator_stream_reruns_after_upstream_is_modified() -> None:
     fn_stream = double.pod(_source())
+    assert isinstance(fn_stream, FunctionPodStream)
     out = SelectDataColumns(["y"])(fn_stream)
     original = SelectDataColumns.static_process
     # A spy on the non-public static_process: the test is about whether it runs again.

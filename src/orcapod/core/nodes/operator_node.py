@@ -27,7 +27,16 @@ from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.base import (
+    StreamBase,
+    check_head_size,
+    head_column_config,
+)
+from orcapod.core.streams.head import (
+    BLUEPRINT_NOTE,
+    HeadStatus,
+    StreamHead,
+)
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
     PipelineJobRequiredError,
@@ -380,6 +389,21 @@ class OperatorNode(OperatorNodeBase):
         # the expected ``Iterator`` return-type contract.
         return  # pragma: no cover
         yield  # pragma: no cover
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return no rows: a blueprint node holds no data."""
+        check_head_size(n)
+        return self._head_without_rows(
+            head_column_config(columns, all_info),
+            HeadStatus.UNAVAILABLE,
+            note=BLUEPRINT_NOTE,
+        )
 
     def as_table(
         self,
@@ -1290,6 +1314,67 @@ class OperatorJobNode(OperatorNodeBase):
         tag_keys = self.keys()[0]
         empty_stream = ArrowTableStream(empty_records, tag_columns=tag_keys)
         return empty_stream.as_table(columns=columns, all_info=all_info)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first rows the node holds or has stored; never runs the operator.
+
+        After a run (or ``execute``) the rows are the node's output in memory. Before
+        that, a node in ``CacheMode.REPLAY`` shows the first of its stored rows, read
+        from its whole stored table; in ``LOG`` and ``OFF`` it shows none, as
+        ``as_table`` does. A loaded node never raises here. See ``StreamBase.head``.
+        """
+        check_head_size(n)
+        config = head_column_config(columns, all_info)
+        if self._cached_output_stream is not None:
+            return self._cached_output_stream.head(n, columns=config).for_stream(self)
+        if self._cache_mode == CacheMode.REPLAY and self._pipeline_database is not None:
+            return self._head_from_store(n, config)
+        if self._loaded:
+            return self._head_without_rows(
+                config,
+                HeadStatus.UNAVAILABLE,
+                note=(
+                    "loaded node whose results are not stored (cache mode OFF)"
+                    if self._cache_mode == CacheMode.OFF
+                    else "loaded node whose stored results are not replayed "
+                    f"(cache mode {self._cache_mode.value.upper()})"
+                ),
+            )
+        if self._cache_mode == CacheMode.LOG and self._pipeline_database is not None:
+            note = (
+                "not run in this session; rows of earlier runs are stored but not "
+                "replayed (cache mode LOG)"
+            )
+        else:
+            note = "not run; cache mode OFF stores nothing"
+        return self._head_without_rows(config, HeadStatus.NOT_COMPUTED, note=note)
+
+    def _head_from_store(self, n: int, config: ColumnConfig) -> StreamHead:
+        """Return the first ``n`` of this node's stored rows.
+
+        Reads the node's whole stored slice (no bounded read exists yet) and keeps
+        nothing on the node.
+        """
+        records = self._read_stored_records()
+        if records is None or records.num_rows == 0:
+            return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
+        records = records.drop(
+            [
+                c
+                for c in (constants.NODE_CONTENT_HASH_COL, self.HASH_COLUMN_NAME)
+                if c in records.column_names
+            ]
+        )
+        stream = ArrowTableStream(
+            records, tag_columns=self.keys()[0], data_context=self.data_context
+        )
+        return stream.head(n, columns=config).for_stream(self, origin="stored")
 
     # ------------------------------------------------------------------
     # DB retrieval

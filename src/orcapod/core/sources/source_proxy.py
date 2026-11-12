@@ -16,6 +16,8 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
+)
+from orcapod.core.streams.base import (
     check_head_size,
     head_column_config,
 )

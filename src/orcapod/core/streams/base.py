@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
@@ -10,8 +11,6 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
-    check_head_size,
-    head_column_config,
     render_error_html,
 )
 from orcapod.protocols.core_protocols import (
@@ -38,6 +37,45 @@ else:
 # from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
+
+
+def check_head_size(n: int) -> None:
+    """Check the row count given to ``head``.
+
+    Raises:
+        TypeError: If ``n`` is not an ``int``.
+        ValueError: If ``n`` is negative.
+    """
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError(f"head() takes an int number of rows, got {type(n).__name__}")
+    if n < 0:
+        raise ValueError(f"head() takes a non-negative number of rows n, got {n}")
+
+
+def head_column_config(
+    columns: ColumnConfig | dict[str, Any] | None, all_info: bool
+) -> ColumnConfig:
+    """Return the column configuration ``head`` uses for ``columns`` and ``all_info``.
+
+    The column groups mean what they mean for ``as_table``. ``head`` returns rows in
+    stream order, so ``all_info`` does not sort, and asking for ``sort_by_tags`` raises.
+
+    Raises:
+        ValueError: If ``columns`` asks for ``sort_by_tags``.
+    """
+    if isinstance(columns, ColumnConfig):
+        asked_to_sort = bool(columns.sort_by_tags)
+    elif isinstance(columns, Mapping):
+        asked_to_sort = bool(columns.get("sort_by_tags", False))
+    else:
+        asked_to_sort = False
+    if asked_to_sort:
+        raise ValueError(
+            "head() returns the first rows in stream order and cannot sort them by "
+            "tags; sort the result of as_table() instead"
+        )
+    config = ColumnConfig.handle_config(columns, all_info=all_info)
+    return dataclasses.replace(config, sort_by_tags=False)
 
 
 class StreamBase(TraceableBase):

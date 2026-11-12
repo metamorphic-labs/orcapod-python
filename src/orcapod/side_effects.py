@@ -17,13 +17,15 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.function_node import _build_record_id_preimage
-from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.base import (
+    StreamBase,
+    check_head_size,
+    head_column_config,
+)
 from orcapod.core.streams.head import (
     SIDE_EFFECTS_NOTE,
     HeadStatus,
     StreamHead,
-    check_head_size,
-    head_column_config,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (

@@ -23,6 +23,8 @@ from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
+)
+from orcapod.core.streams.base import (
     check_head_size,
     head_column_config,
 )
