@@ -2540,7 +2540,9 @@ of operator-node and cached-source tables were bare hex text.
   longer hashed). The last four were found by tracing and by the test below, not by the
   design's site table.
 - Names hold bare digests: function `uri`, `schema:` / `instance:` / `node:` path components,
-  default derived source ids, source-node slot names.
+  source-node slot names. Exception (developer, November 11, 2026): a source id is the
+  source's name, so a default source id built from a hash keeps a source-kind prefix and the
+  hash's label (`derived:semantic_v1:<hex>`, `<node path>:semantic_v1:<hex>`).
 - Stored hash values are labelled, now including `_record_hash` of operator-node and
   cached-source tables.
 - `tests/test_hashing/test_hash_label_rule.py` recomputes every golden value under renamed
@@ -2552,6 +2554,10 @@ Known limits, follow-ups:
   `{"__type__": "tuple", "items": [...]}` hash alike); ITL-942 closes that for every tag.
 - A dict key that is itself hashed (a non-primitive key) becomes the `str()` of the tagged
   object. Dict keys are ITL-942's subject.
+- Because a default derived source id holds a label and is used as it is in system-tag and
+  source-info values, which are hashed as cell data, renaming the structure label would move
+  the entry ids of rows that come from a `DerivedSource` with a default id. The rename test
+  does not cover this (no golden case uses a derived source).
 - `InvocationContext.invocation_hash` keeps `<label>:<hex>::<label>:<hex>` (developer: the
   side-effect topic is deferred to after the v0.3 tag). The library feeds it into no hash.
 - `migrations/pipeline_db.py` (v0 to v1 pipeline tables) follows the new entry-id recipe; its

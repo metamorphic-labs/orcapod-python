@@ -417,8 +417,8 @@ class TestDerivedSourceId:
     def test_source_id_contains_full_content_hash(self):
         node = _make_node(n=3)
         src = node.as_source()
-        full_hash = node.content_hash().to_hex()
-        # The source id ends with ":<bare digest>": a labelled hash must fail.
+        full_hash = node.content_hash().to_string()
+        # A default source id built from a hash keeps the hash's label.
         path_str = "/".join(node.node_identity_path)
         assert src.source_id == f"{path_str}:{full_hash}"
 

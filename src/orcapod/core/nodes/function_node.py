@@ -1930,7 +1930,9 @@ class FunctionJobNode(FunctionNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         path_str = "/".join(self.node_identity_path)
-        source_id = f"{path_str}:{self.content_hash().to_hex()}"
+        # A source id is the source's name: a default built from a hash keeps the
+        # hash's label (developer, November 11, 2026).
+        source_id = f"{path_str}:{self.content_hash().to_string()}"
         return DerivedSource(
             origin=self,
             source_id=source_id,

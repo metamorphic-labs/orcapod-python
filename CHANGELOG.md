@@ -149,9 +149,10 @@ label rule"):
   (types, schemas, pods, streams), every schema hash and so every system-tag column name,
   every Arrow hash over a logical-type cell, every pipeline base and entry id, and the run URI.
 - **Hashes inside names are bare hex digests.** The function `uri` (its second component), the
-  path components `schema:`, `instance:` and `node:`, the default `source_id` of a
-  `DerivedSource` and the slot name of a `SourceNode` built from a stream no longer hold a
-  label. A v0.3 function table is at
+  path components `schema:`, `instance:` and `node:`, and the slot name of a `SourceNode`
+  built from a stream no longer hold a label. A source id is the exception: it is the
+  source's name, so the default `source_id` of a `DerivedSource` (`derived:<label>:<hex>`)
+  and of `node.as_source()` keeps the hash's label, now `semantic_v1`. A v0.3 function table is at
   `<job>/<function>/<64 hex>/v<major>/python.function.v0/schema:<64 hex>/pdb_v1`.
   `data_function.uri[1]` and `output_data_schema_hash` return the bare digest.
 - **Hashes stored as values carry their label**, now including the record id (`_record_hash`)

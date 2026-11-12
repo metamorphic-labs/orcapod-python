@@ -43,7 +43,7 @@ hash Orcapod computes (decided November 11, 2026; ITL-945).
 | 2 | The format is `<algorithm>_v<N>` with an integer `N`. In v0.3 every label is `_v1`. The file content hash keeps `sha256`, the name of the digest function applied to the file's bytes: the one exception. |
 | 3 | A label changes only when its algorithm would give an existing input a different digest. A change that leaves existing digests alone keeps the label. |
 | 4 | A hash stored as a value in its own column or field carries its label: `"<label>:<hex>"` as text, `b"<label>:" + digest` in a binary column. |
-| 5 | A hash inside a name is the bare hex digest, without a label: path components, column names, the function `uri`, operator identity, source ids and source-info tokens. |
+| 5 | A hash inside a name is the bare hex digest, without a label: path components, column names, the function `uri`, operator identity and the function `uri` inside a source-info token. One stated exception: a source id is the source's name, and a default source id built from a hash keeps a source-kind prefix and the hash's label (`derived:semantic_v1:<hex>`); that string is used as it is in the `source_id` system tag and in source-info values. |
 | 6 | A label never enters a hash computation. A nested hash contributes its digest only, so renaming a label changes no digest. |
 | 7 | A record id is an identifier built by a recipe (`uuid5`, `uuid7`), not a hash, and carries no label. |
 | 8 | The implementer of a logical type chooses the label of its value hash, in the same format. |
@@ -65,7 +65,8 @@ Where a hash appears, and in which form:
 | Form | Where |
 |---|---|
 | Labelled value | `__input_data_hash`, `__output_data_hash`, `__node_content_hash`, `__pipeline_base_entry_id`, the pipeline table's record id, the side-effect log's `record_id` and `record_id_hash`, the record id (`_record_hash`) of operator-node and cached-source tables, the `_content_hash` column, the hashes in a saved job file, `InvocationContext.invocation_hash` |
-| Bare digest in a name | the function `uri` (its second component), the path components `schema:<pipeline digest>`, `instance:<content digest>` and `node:<content digest>`, system-tag column names, the operator `uri`, default source ids (table hash, `derived:<content digest>`), source-info tokens |
+| Bare digest in a name | the function `uri` (its second component), the path components `schema:<pipeline digest>`, `instance:<content digest>` and `node:<content digest>`, system-tag column names, the operator `uri`, the default source id built from a table hash, the function `uri` at the start of a function output's source-info token |
+| Labelled hash inside a source id | the default source id of a `DerivedSource` (`derived:<label>:<hex>`) and of `node.as_source()` (`<node path>:<label>:<hex>`) |
 | Digest only, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "digest": "<hex>"}`; an extension-typed cell in a table: `b"<extension name>::" + digest`; the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the leaf digests of the run snapshot hash (site 13) |
 
 A function node's table in v0.3, with the values it stores:

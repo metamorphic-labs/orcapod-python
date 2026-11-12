@@ -29,6 +29,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.sources import CachedSource
+from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.hashing import directory_hashers
@@ -344,13 +345,23 @@ class TestNamesHoldBareDigests:
         assert BARE_SHA256.fullmatch(component.removeprefix("node:")), component
         assert component.removeprefix("node:") == cached.content_hash().to_hex()
 
-    def test_derived_source_id_holds_the_bare_content_digest(self) -> None:
-        """A derived source id ends with the node's bare content digest."""
+    def test_default_derived_source_ids_keep_the_hash_label(self) -> None:
+        """A source id is the source's name: a default built from a hash keeps its label.
+
+        This is the stated exception to bare digests inside names (developer,
+        November 11, 2026): a source-kind prefix, then the labelled hash.
+        """
         job, _ = _run_job()
         node = job.nodes["double"]
-        derived = node.as_source()
-        assert "semantic_v" not in derived.source_id
-        assert derived.source_id.endswith(":" + node.content_hash().to_hex())
+        labelled = node.content_hash().to_string()
+        assert labelled.startswith("semantic_v1:")
+
+        from_node = node.as_source()
+        path = "/".join(node.node_identity_path)
+        assert from_node.source_id == f"{path}:{labelled}"
+
+        plain = DerivedSource(origin=node)
+        assert plain.source_id == f"derived:{labelled}"
 
     def test_source_info_token_of_a_function_output_holds_no_label(self) -> None:
         """A function output's source-info token starts with the bare function ``uri``."""

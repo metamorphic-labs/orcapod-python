@@ -245,8 +245,11 @@ examples in `docs/reference/hashing.md`, "The hash label rule").
   `to_string()`, `str(hash)` or `to_prefixed_digest()` into an identity structure, a preimage
   table or a digest input. Inside a structure, return the `ContentHash` object and let the
   structure hasher embed it.
-- A hash inside a name (path component, column name, `uri`, source id, source-info token) is
-  the bare hex digest: `to_hex()`.
+- A hash inside a name (path component, column name, `uri`) is the bare hex digest:
+  `to_hex()`. Exception (developer, November 11, 2026): a source id is the source's name. A
+  default source id built from a hash keeps a source-kind prefix and the hash's label
+  (`derived:<label>:<hex>`, via `to_string()`, never a label literal) and is used as it is in
+  the `source_id` system tag and in source-info values.
 - A hash stored as a value in its own column or field carries its label: `to_string()` as
   text, `to_prefixed_digest()` in a binary column.
 - A record id is an identifier built by a recipe, not a hash, and carries no label.

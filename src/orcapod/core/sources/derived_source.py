@@ -48,7 +48,10 @@ class DerivedSource(RootSource):
         **kwargs: Any,
     ) -> None:
         if source_id is None:
-            source_id = f"derived:{origin.content_hash().to_hex()}"
+            # A source id is the source's name, used as-is in system tags and
+            # source-info values. A default built from a hash keeps a source-kind
+            # prefix and the hash's label (developer, November 11, 2026).
+            source_id = f"derived:{origin.content_hash().to_string()}"
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._cached_table: pa.Table | None = None
