@@ -280,3 +280,87 @@ Opt-in live tests (skipped unless `ORCAPOD_SPIRAL_LIVE_PROJECT` is set), read-on
 * `head(n)` is replaced by `limit=`; the dataframe methods work under the cap instead of
   always raising.
 * No Join or orchestrator change: measured to be ineffective while nodes keep their rows.
+
+---
+
+# Addendum, November 12, 2026: decisions, the D3 definition, and D2 measured
+
+Developer decisions: **D1 option A**, **D5 cap approved for now** (default 100,000, `None`
+removes it), **D6 one class, no mode**. D4, D7, D8, D9, D10 approved by the coordinator.
+D3 changed (below). D2 is open; its facts are below.
+
+## D3: the row token is a digest of the primary key
+
+**Does Spiral have its own per-row id?** No. Read from pyspiral 0.16.33: a row is addressed
+only by its key (`Table.key(*parts)`, `KeyRange`, `key_table`). The one row-index name in the
+package, `__row_idx__`, is a key column the Hugging Face import helper adds when a dataset
+has no key. There is no row uuid, row version or hidden row id in scan output.
+
+**Definition.**
+
+* Input: the row's key columns, in key-schema order, as a one-row Arrow table. Each field has
+  the key column's name and its Arrow type normalized to the large variant. Each field is
+  declared **non-nullable**, whatever Spiral or a nullability record reports (a Spiral key is
+  never null). This matters: the Arrow hasher gives a different digest for a nullable and a
+  non-nullable field (measured), so without this rule a nullability record written later
+  would move every token.
+* Hasher: the source's data context's `arrow_hasher.hash_table(...)`, so the algorithm is
+  covered by the data context version. `string` and `large_string` input give the same
+  digest (measured), and a row gives the same digest in any batch or slice (measured).
+* Written form: `ContentHash.to_string()`, the labelled full digest, for example
+  `arrow_v1:000002069471f502581c53b8f4efb4400ae7d8a1edf280582bdc8923c6b95acbcd9bfd`
+  (79 characters, no `::`). No truncation.
+* Source-info value: `<source id>::<token>::<column>`. Record id:
+  `uuid5(<source id> + "::" + <token>)`, unchanged recipe.
+* A null in a key column raises, naming the table and the column.
+
+**Cost, and one deviation from "in Arrow per batch".** The data context's hasher has no
+per-row entry point: its unit is a table. The token therefore needs one `hash_table` call
+per row on a one-row slice of the batch. The values never become Python objects, but the
+loop is in Python. Measured: 183 µs per row (8,192 rows in 1.5 s), on top of about 110 µs
+per row for building the row. 100,000 rows: about 18 s of hashing. A vectorized per-row
+digest would need a new hasher entry point (a data context matter); not proposed now.
+
+**One point to confirm.** The labelled token goes into the `uuid5` recipe, so a future
+change of the `arrow_v1` label would move record ids. That is the same position the labelled
+default source id (`dict:arrow_v1:<hex>`) already has in the recipe.
+
+## D2 measured: two jobs, one store, the restriction in or out of the content hash
+
+Script and full output: `superpowers/specs/itl-186-experiments/d2_restriction_identity.py`,
+`d2_output.txt`. A stand-in source over one 10-row table with key-based record ids; pipeline
+`source -> double(v)`; job A runs first, then job B, same job name, same Delta store.
+
+**Limit case: A reads k=0..4, B reads k=0..1.**
+
+| | OUT, sync | OUT, async | IN, sync and async |
+|---|---|---|---|
+| B's function calls | 0 | 0 | 0 |
+| B `node.as_table()` / `iter_data()` after `run()` | 0,1 | **0,1,2,3,4** | 0,1 |
+| B `node.get_all_records()` | **0,1,2,3,4** | **0,1,2,3,4** | 0,1 |
+| B saved and loaded, `get_all_records()` | **0,1,2,3,4** | **0,1,2,3,4** | 0,1 |
+| node content hash, A vs B | same | same | different |
+| table paths (pipeline hash) | same | same | same |
+| stored result rows / pipeline-record rows | 5 / 5 | 5 / 5 | 5 / 7 |
+
+**Where case: A reads even k, B reads k<3.** B computes only k=1 in every variant. OUT: B's
+`get_all_records()` returns 0,1,2,4,6,8 (the union), and so does `as_table()` after an async
+run; after a sync run `as_table()` returns 0,1,2. IN: 0,1,2 everywhere; 6 result rows,
+8 pipeline-record rows.
+
+What this says:
+
+* **OUT.** Nothing is wrong in a value: every row returned is a real row of the table with
+  its correct result, and nothing is computed twice. The read-back is larger than what job B
+  asked for: it is every row any job with that pipeline has read from that table. Rows sent
+  downstream during the run are only B's rows, on both orchestrators.
+* **OUT is what happens today.** Two `DictSource`s with the same schema and source id and
+  different rows give exactly the OUT columns above, including the difference between
+  `as_table()` after a sync run (B's rows) and after an async run (all rows). That
+  sync/async difference exists on `main` today and is not caused by this design.
+* **IN.** Each job reads back exactly its rows. Results are not recomputed (the result table
+  is shared, found by row content). B's pipeline records are written again under B's node
+  hash (2 more rows in the limit case), in the same table. Node content hashes differ, so
+  the two jobs are different node instances, which is the developer's objection.
+* In the code the choice is one function, `SpiralDBTableSource._restriction_identity()`,
+  returning nothing (OUT) or the canonical restriction (IN).
