@@ -853,6 +853,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     self._persistent_node_map[v_hash],
                 )
 
+        # --- Refuse stored rows hashed under another Arrow hash label ---
+        # Checked for every node before the first one runs, so a refused store is
+        # left exactly as it was (ITL-910).
+        for node in exec_dag.nodes():
+            if isinstance(node, (FunctionJobNode, OperatorJobNode, SideEffectJobNode)):
+                node.check_stored_hash_labels()
+
         # --- Execute ---
         effective_observer = observer or NoOpObserver()
         run_id = uuid.uuid4().hex[:16]

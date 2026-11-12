@@ -423,8 +423,7 @@ class StoreHashLabelError(StoreError):
     the store. A migration tool for stores written by v0.2 is planned.
 
     Attributes:
-        record_path: Path of the stored table, relative to the database view
-            that holds it.
+        record_path: Path of the stored table from the root of the store.
         found_label: Hash label of the stored rows that do not match, or a
             description of their hash format when the rows carry no label.
         current_label: Arrow hash label of this version of Orcapod.

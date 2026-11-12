@@ -31,9 +31,11 @@ from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
     PipelineJobRequiredError,
+    StoreHashLabelError,
     StoreReadError,
     StoreWriteError,
 )
+from orcapod.hashing.stored_hash_labels import current_hash_format, foreign_hash_format
 from orcapod.protocols.core_protocols import (
     DataProtocol,
     StreamProtocol,
@@ -536,6 +538,10 @@ class OperatorJobNode(OperatorNodeBase):
         - **REPLAY**: skip computation, flow cached results downstream.
     """
 
+    # Set by ``check_stored_hash_labels`` once the stored table passed; a class
+    # default so nodes rebuilt from a saved descriptor start unchecked.
+    _stored_hash_labels_checked: bool = False
+
     def __init__(
         self,
         operator: OperatorPodProtocol,
@@ -621,12 +627,46 @@ class OperatorJobNode(OperatorNodeBase):
         """
         self._pipeline_database = pipeline_database
         self._cache_mode = cache_mode
+        self._stored_hash_labels_checked = False
 
         # Clear caches
         self._node_identity_path_cache = None
         self.clear_cache()
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()
+
+    def check_stored_hash_labels(self) -> None:
+        """Refuse a stored table holding rows hashed under another Arrow hash format.
+
+        Reads the stored record hashes once per node instance (again after
+        ``attach_databases``). They are hex digests without a label, so the check
+        compares their starfix hash format (their first three bytes) with the one the
+        current Arrow hasher writes: a row written by Orcapod v0.2 (format 1,
+        ``arrow_v0.1``) is found, but a future label change that keeps the starfix
+        format would not be (ITL-910).
+
+        Raises:
+            StoreHashLabelError: If a stored record hash has another hash format.
+        """
+        if self._stored_hash_labels_checked or self._pipeline_database is None:
+            return
+        path = self.node_identity_path
+        stored = self._pipeline_database.get_all_records(
+            path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if stored is not None and self.HASH_COLUMN_NAME in stored.column_names:
+            hasher = self.data_context.arrow_hasher
+            found = foreign_hash_format(
+                stored.column(self.HASH_COLUMN_NAME), current_hash_format(hasher)
+            )
+            if found is not None:
+                raise StoreHashLabelError(
+                    self._pipeline_database.base_path + path,
+                    found,
+                    hasher.hasher_id,
+                    node_label=self.label,
+                )
+        self._stored_hash_labels_checked = True
 
     # ------------------------------------------------------------------
     # from_descriptor — reconstruct from a serialized pipeline descriptor
@@ -904,6 +944,7 @@ class OperatorJobNode(OperatorNodeBase):
             return None
         if self._cache_mode != CacheMode.REPLAY:
             return None
+        self.check_stored_hash_labels()
         records = self._pipeline_database.get_all_records(self.node_identity_path)
         if records is None:
             if self._operator is None:
@@ -961,6 +1002,8 @@ class OperatorJobNode(OperatorNodeBase):
         obs = observer if observer is not None else NoOpObserver()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
+        if self._cache_mode != CacheMode.OFF:
+            self.check_stored_hash_labels()
         ctx_obs.on_node_start(node_label, node_hash)
 
         # Check REPLAY cache first
@@ -1016,6 +1059,7 @@ class OperatorJobNode(OperatorNodeBase):
         If no cached records exist yet, produces an empty stream with
         the correct schema (zero rows, correct columns).
         """
+        self.check_stored_hash_labels()
         records = self._pipeline_database.get_all_records(self.node_identity_path)
         if records is None:
             records = self._make_empty_table()
@@ -1123,6 +1167,7 @@ class OperatorJobNode(OperatorNodeBase):
         if self._pipeline_database is None:
             return None
 
+        self.check_stored_hash_labels()
         results = self._pipeline_database.get_all_records(self.node_identity_path)
         if results is None:
             return None
@@ -1230,6 +1275,8 @@ class OperatorJobNode(OperatorNodeBase):
             return
 
         try:
+            if self._cache_mode != CacheMode.OFF:
+                self.check_stored_hash_labels()
             ctx_obs.on_node_start(node_label, node_hash)
 
             if self._cache_mode == CacheMode.REPLAY:

@@ -8,6 +8,8 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.errors import StoreHashLabelError
+from orcapod.hashing.stored_hash_labels import current_hash_format, foreign_hash_format
 from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.types import ColumnConfig, Schema
@@ -49,6 +51,9 @@ class CachedSource(RootSource):
     """
 
     HASH_COLUMN_NAME = "_record_hash"
+
+    # Set by ``check_stored_hash_labels`` once the cache table passed.
+    _stored_hash_labels_checked: bool = False
 
     def __init__(
         self,
@@ -246,6 +251,35 @@ class CachedSource(RootSource):
         )
         self._cache_database.flush()
 
+    def check_stored_hash_labels(self) -> None:
+        """Refuse a cache table holding rows hashed under another Arrow hash format.
+
+        The stored record hashes are hex digests without a label, so the check
+        compares their starfix hash format (their first three bytes) with the one the
+        current Arrow hasher writes: rows cached by Orcapod v0.2 (format 1,
+        ``arrow_v0.1``) are found (ITL-910). Checked once per instance.
+
+        Raises:
+            StoreHashLabelError: If a cached record hash has another hash format.
+        """
+        if self._stored_hash_labels_checked:
+            return
+        stored = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if stored is not None and self.HASH_COLUMN_NAME in stored.column_names:
+            hasher = self.data_context.arrow_hasher
+            found = foreign_hash_format(
+                stored.column(self.HASH_COLUMN_NAME), current_hash_format(hasher)
+            )
+            if found is not None:
+                raise StoreHashLabelError(
+                    self._cache_database.base_path + self.cache_path,
+                    found,
+                    hasher.hasher_id,
+                )
+        self._stored_hash_labels_checked = True
+
     def _build_merged_stream(self) -> ArrowTableStream:
         """Ingest live data (if available), then return all cached records.
 
@@ -253,7 +287,12 @@ class CachedSource(RootSource):
         ``SourceProxy``), the method falls back to returning whatever is
         already stored in the cache database.  If the cache is empty, an
         empty stream is returned.
+
+        Raises:
+            StoreHashLabelError: If the cache table holds rows hashed under another
+                Arrow hash format; nothing is ingested then.
         """
+        self.check_stored_hash_labels()
         try:
             self._ingest_live_data()
         except NotImplementedError:
