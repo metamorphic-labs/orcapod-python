@@ -12,7 +12,9 @@ does not have (`getattr(y, "extra", ...)` on a `Reading` parameter that received
 `ExtendedReading`) therefore gets results that depend on the execution path, and results that
 are reused across values:
 
-- standalone and the async orchestrator hand the function the in-memory subclass object;
+- standalone and the async orchestrator hand the function the in-memory subclass object
+  (within one async run a row may instead be served the result another row of the same
+  row hash stored first; which happens depends on timing, seen on Python 3.13 in CI);
 - the sync orchestrator hands it the stored base value, without the extra field;
 - two values that differ only in subclass-only fields have the same row hash, so a later row
   is served the result computed for the earlier one, without a call.

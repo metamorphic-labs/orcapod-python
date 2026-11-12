@@ -999,10 +999,13 @@ class TestSubclassOnlyFieldsDownstream:
         rows = self._run(InMemoryArrowDatabase(), (20, 99), SyncPipelineOrchestrator)
         assert rows == {"r20": -1, "r99": -1}
 
-    def test_async_orchestrator_passes_the_subclass_object(self) -> None:
-        """The async orchestrator hands on the in-memory subclass object."""
+    def test_async_orchestrator_result_depends_on_timing(self) -> None:
+        """The async orchestrator hands on the in-memory subclass object, and the two
+        rows share one row hash: each gets its own extra field, or the result the other
+        row stored first. Which one is a matter of timing, so only the set is pinned."""
         rows = self._run(InMemoryArrowDatabase(), (20, 99), AsyncPipelineOrchestrator)
-        assert rows == {"r20": 20, "r99": 99}
+        assert set(rows) == {"r20", "r99"}
+        assert set(rows.values()) <= {20, 99}
 
     @pytest.mark.parametrize("second_cls", ORCHESTRATORS)
     def test_second_run_reuses_the_result_of_another_value(

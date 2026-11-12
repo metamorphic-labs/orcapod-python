@@ -25,3 +25,13 @@ subclass instances as plain list / dict in memory (`.untracked/r2/repro7.py`).
 3. Merge origin/main if moved; full suite 3.12, 3.11, 3.13; ruff, format, basedpyright; golden
    check (no movement expected: conforming values are untouched).
 4. One commit, one push, signed replies on all six threads; wait for CI and CodeRabbit on the new head.
+
+## Outcome notes
+
+- F3 decided by the developer (Nov 12): keep the rule, document, follow-up ITL-978. F7 is a known gap in ITL-978's scope.
+- Pushed 0bc9cc1b; CI failed on Python 3.13 only: the async baseline test asserted `{r20: 20, r99: 99}`
+  but got `{r20: 20, r99: 20}`. Within one async run the second row can be served the first
+  row's stored result (same row hash), depending on timing. The test now pins only the set of
+  possible values. Second push for this test fix.
+- CodeRabbit on 0bc9cc1b: one finding, PYI061 on `Literal["yes", None]` test fixtures; PYI is not
+  in the project's ruff selection (`ruff check .` passes), answered without a code change.
