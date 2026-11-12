@@ -1117,6 +1117,42 @@ table untouched, to be migrated.
 | 2 | **Two table kinds carry no Orcapod label in their rows**: the operator cache and the cached-source table. Their row key `_record_hash` is bare hex; `__node_content_hash` is the same under both labels when `source_id` is given | 1.2: hashes stored bare | the branch filters by starfix's own prefix (`000001` / `000002`). A future Arrow label that keeps starfix format 2 would be indistinguishable there unless a label is stored, which changes those tables' layout |
 | 3 | **Old results look absent until v0.3 writes.** Reading a node on a v0.2 store before any v0.3 run returns no rows; a job saved by v0.2 and loaded by v0.3 shows no rows | reads use current-label rows only | report, once per table, how many rows of another label were skipped |
 
+### 6.2 Side-effect logs: what exists (measured on main, November 11, 2026)
+
+A side-effect pod calls a user function for its effect (an upload, a notification) and
+records each successful delivery so that it is not repeated.
+
+```
+table   j/side_effects/notify/schema:semantic_v0.1:26aa830d…/tdb_v1
+        └ job ┘ └ fixed ┘ └ name ┘ └ pipeline hash of the node ┘ └ layout ┘
+
+columns __record_id       arrow_v0.1:0000018e78…   the key: Arrow hash of (user tags, system tags, input data hash, index 0)
+        record_id_hash    arrow_v0.1:0000018e78…   the same value again
+        pipeline_run_id   60db48d833df49eb
+        executed_at       2026-11-12 03:42:02 UTC
+```
+
+A delivery is skipped when a row with the same key exists. Nothing else is stored: no tags,
+no input hash column, no data context, no function version.
+
+| Second run after… | Delivered again? | Why |
+|---|---|---|
+| nothing changed | no | same key |
+| the function body changed, same name | no | the body is in no key |
+| one input value changed | that row only | its input data hash changed |
+| **the source rows were reordered** | **yes, all** | record ids are positional (`row_0`, `row_1`), so every key changed |
+| the source was renamed | yes, all | `source_id` is in the system tags |
+| the function was renamed | yes, all | a new table |
+
+Consequences for the design:
+
+| # | Consequence |
+|---|---|
+| 1 | A data context change alters every key, so every effect would be delivered again. v0.3 fails explicitly instead (decided) |
+| 2 | Unlike the function tables, the log holds no tags, so an old completion cannot be matched by tags. Recognising one requires recomputing its old key with the old algorithms (`orcapod-sanctuary`) |
+| 3 | The user's function receives `ctx.invocation_hash` (`semantic_v0.1:26aa830d…` + the key) to use as an idempotency key with the external system. It is built from hashes, so it changes with the data context too |
+| 4 | Positional record ids make a reordered or prepended source deliver everything again, today, within one version |
+
 ## Part 7. Before the v0.3 tag, and after (draft for the developer's review)
 
 ### 7.1 The system in one page
