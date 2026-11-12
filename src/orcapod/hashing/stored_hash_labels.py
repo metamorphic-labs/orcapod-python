@@ -14,15 +14,13 @@ node, raises ``StoreHashLabelError``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import pyarrow as pa
     import pyarrow.compute as pc
-
-    from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
 else:
     pa = LazyModule("pyarrow")
     pc = LazyModule("pyarrow.compute")
@@ -70,7 +68,18 @@ def foreign_arrow_label(
     return None
 
 
-def current_hash_format(hasher: "ArrowHasherProtocol") -> str:
+class _Digest(Protocol):
+    @property
+    def digest(self) -> bytes: ...
+
+
+class _TableHasher(Protocol):
+    """The part of ``ArrowHasherProtocol`` this module needs (no import cycle)."""
+
+    def hash_table(self, table: "pa.Table") -> _Digest: ...
+
+
+def current_hash_format(hasher: _TableHasher) -> str:
     """Return the starfix hash format ``hasher`` writes, as six hex characters.
 
     Args:

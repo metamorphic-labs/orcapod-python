@@ -34,6 +34,9 @@ from orcapod.side_effects import SideEffectPod, sink_pod
 from orcapod.sources import ArrowTableSource, DictSource
 from orcapod.types import CacheMode, ContentHash, NodeConfig
 
+Orchestrator = SyncPipelineOrchestrator | AsyncPipelineOrchestrator
+Store = InMemoryArrowDatabase | DeltaTableDatabase
+
 JOB_NAME = "itl910"
 ROWS = [{"k": "a", "x": 1}, {"k": "b", "x": 2}]
 
@@ -76,7 +79,10 @@ def writing_as_v02() -> Iterator[None]:
 
 
 def build_job(
-    store: Any, *, with_operator: bool = False, with_sink: bool = False
+    store: Store,
+    *,
+    with_operator: bool = False,
+    with_sink: bool = False,
 ) -> PipelineJob:
     """A job with function node ``dbl`` and optionally a LOG operator ``sel`` and a sink."""
     job = PipelineJob(name=JOB_NAME, store=store)
@@ -97,12 +103,13 @@ def build_job(
     return job
 
 
-def snapshot(store: Any) -> dict[tuple[str, ...], list[dict[str, Any]]]:
+def snapshot(store: Store) -> dict[tuple[str, ...], list[dict[str, Any]]]:
     """Every table of ``store`` with its rows, record ids included."""
-    return {
-        path: store.get_all_records(path, record_id_column="__rid").to_pylist()
-        for path in sorted(store.list_sources())
-    }
+    tables: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for path in sorted(store.list_sources()):
+        records = store.get_all_records(path, record_id_column="__rid")
+        tables[path] = [] if records is None else records.to_pylist()
+    return tables
 
 
 def delta_files(root: pathlib.Path) -> dict[str, bytes]:
@@ -112,22 +119,22 @@ def delta_files(root: pathlib.Path) -> dict[str, bytes]:
 
 
 @pytest.fixture(params=["in_memory", "delta"])
-def store(request: pytest.FixtureRequest, tmp_path: pathlib.Path) -> Any:
+def store(request: pytest.FixtureRequest, tmp_path: pathlib.Path) -> Store:
     if request.param == "in_memory":
         return InMemoryArrowDatabase()
     return DeltaTableDatabase(tmp_path / "store")
 
 
 @pytest.fixture(params=["sync", "async"])
-def orchestrator(request: pytest.FixtureRequest) -> Any:
+def orchestrator(request: pytest.FixtureRequest) -> Orchestrator:
     return {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}[
         request.param
     ]()
 
 
-def write_v02_store(store: Any, **kwargs: bool) -> None:
+def write_v02_store(store: Store, **kwargs: bool) -> None:
     with writing_as_v02():
-        build_job(store, **kwargs).run()
+        _ = build_job(store, **kwargs).run()
     calls.clear()
     delivered.clear()
 
@@ -139,14 +146,14 @@ def write_v02_store(store: Any, **kwargs: bool) -> None:
 
 class TestRun:
     def test_run_raises_before_computing_or_writing(
-        self, store: Any, orchestrator: Any
+        self, store: Store, orchestrator: Orchestrator
     ):
         write_v02_store(store, with_operator=True, with_sink=True)
         before = snapshot(store)
 
         job = build_job(store, with_operator=True, with_sink=True)
         with pytest.raises(StoreHashLabelError) as info:
-            job.run(orchestrator=orchestrator)
+            _ = job.run(orchestrator=orchestrator)
 
         assert calls == []
         assert delivered == []
@@ -168,10 +175,10 @@ class TestRun:
         assert delta_files(root) == before
         assert calls == []
 
-    def test_error_names_table_labels_and_remedy(self, store: Any):
+    def test_error_names_table_labels_and_remedy(self, store: Store):
         write_v02_store(store)
         with pytest.raises(StoreHashLabelError) as info:
-            build_job(store).run()
+            _ = build_job(store).run()
         message = str(info.value)
         assert JOB_NAME in "/".join(info.value.record_path)
         assert "/".join(info.value.record_path) in message
@@ -180,15 +187,15 @@ class TestRun:
         assert "fresh store" in message
         assert "migration" in message
 
-    def test_ignore_schema_does_not_disable_the_check(self, store: Any):
+    def test_ignore_schema_does_not_disable_the_check(self, store: Store):
         write_v02_store(store)
         job = build_job(store)
         job.nodes["dbl"].node_config = NodeConfig(ignore_schema=("v0",))
         with pytest.raises(StoreHashLabelError):
-            job.run()
+            _ = job.run()
         assert calls == []
 
-    def test_fresh_store_runs(self, store: Any, orchestrator: Any):
+    def test_fresh_store_runs(self, store: Store, orchestrator: Orchestrator):
         build_job(store, with_operator=True, with_sink=True).run(
             orchestrator=orchestrator
         )
@@ -196,7 +203,7 @@ class TestRun:
         assert sorted(delivered) == [2, 4]
 
     def test_store_written_by_this_version_is_reused(
-        self, store: Any, orchestrator: Any
+        self, store: Store, orchestrator: Orchestrator
     ):
         build_job(store, with_operator=True, with_sink=True).run(
             orchestrator=orchestrator
@@ -205,7 +212,7 @@ class TestRun:
         delivered.clear()
 
         job = build_job(store, with_operator=True, with_sink=True)
-        job.run(orchestrator=orchestrator)
+        _ = job.run(orchestrator=orchestrator)
 
         assert calls == []
         assert delivered == []
@@ -218,23 +225,23 @@ class TestRun:
 
 
 class TestRead:
-    def test_reading_a_function_node_raises(self, store: Any):
+    def test_reading_a_function_node_raises(self, store: Store):
         write_v02_store(store)
         node = build_job(store).nodes["dbl"]
         with pytest.raises(StoreHashLabelError):
-            node.as_table()
+            _ = node.as_table()
         with pytest.raises(StoreHashLabelError):
-            node.get_all_records()
+            _ = node.get_all_records()
         assert calls == []
 
-    def test_reading_a_logged_operator_node_raises(self, store: Any):
+    def test_reading_a_logged_operator_node_raises(self, store: Store):
         write_v02_store(store, with_operator=True)
         node = build_job(store, with_operator=True).nodes["sel"]
         with pytest.raises(StoreHashLabelError) as info:
-            node.get_all_records()
+            _ = node.get_all_records()
         assert info.value.found_label == "arrow_v0.1"
 
-    def test_reading_a_loaded_job_raises(self, store: Any, tmp_path: pathlib.Path):
+    def test_reading_a_loaded_job_raises(self, store: Store, tmp_path: pathlib.Path):
         """A job saved and stored by v0.2, loaded by this version, refuses its rows."""
         saved = tmp_path / "job.json"
         with writing_as_v02():
@@ -246,7 +253,7 @@ class TestRead:
             loaded.nodes["dbl"].get_all_records()
         assert info.value.node_label == "dbl"
 
-    def test_mixed_table_raises(self, store: Any):
+    def test_mixed_table_raises(self, store: Store):
         """A table holding rows under both labels (built by hand) is refused."""
         old_store = InMemoryArrowDatabase()
         write_v02_store(old_store)
@@ -269,9 +276,9 @@ class TestRead:
 
         node = build_job(store).nodes["dbl"]
         with pytest.raises(StoreHashLabelError):
-            node.as_table()
+            _ = node.as_table()
         with pytest.raises(StoreHashLabelError):
-            build_job(store).run()
+            _ = build_job(store).run()
         assert calls == []
 
 
@@ -280,7 +287,7 @@ class TestRead:
 # ---------------------------------------------------------------------------
 
 
-def _cached_source(store: Any) -> CachedSource:
+def _cached_source(store: Store) -> CachedSource:
     table = pa.table(
         {
             "k": pa.array(["a", "b"], pa.large_string()),
@@ -294,16 +301,16 @@ def _cached_source(store: Any) -> CachedSource:
 
 
 class TestCachedSource:
-    def test_cache_written_by_v02_raises(self, store: Any):
+    def test_cache_written_by_v02_raises(self, store: Store):
         with writing_as_v02():
             _ = _cached_source(store).as_table()
         before = snapshot(store)
         with pytest.raises(StoreHashLabelError) as info:
-            _cached_source(store).as_table()
+            _ = _cached_source(store).as_table()
         assert info.value.found_label == "arrow_v0.1"
         assert snapshot(store) == before
 
-    def test_cache_written_by_this_version_is_read(self, store: Any):
+    def test_cache_written_by_this_version_is_read(self, store: Store):
         _ = _cached_source(store).as_table()
         assert _cached_source(store).as_table().num_rows == 2
 
@@ -313,7 +320,7 @@ class TestCachedSource:
 # ---------------------------------------------------------------------------
 
 
-def _sink_job(store: Any) -> PipelineJob:
+def _sink_job(store: Store) -> PipelineJob:
     """A job whose only stored node is a sink reading the source directly."""
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
@@ -330,27 +337,27 @@ def _sink_job(store: Any) -> PipelineJob:
 
 class TestSideEffects:
     def test_completions_logged_by_v02_raise_instead_of_delivering_again(
-        self, store: Any, orchestrator: Any
+        self, store: Store, orchestrator: Orchestrator
     ):
         with writing_as_v02():
-            _sink_job(store).run()
+            _ = _sink_job(store).run()
         assert sorted(delivered) == [2, 4]
         delivered.clear()
         before = snapshot(store)
 
         with pytest.raises(StoreHashLabelError) as info:
-            _sink_job(store).run(orchestrator=orchestrator)
+            _ = _sink_job(store).run(orchestrator=orchestrator)
 
         assert delivered == []
         assert snapshot(store) == before
         assert info.value.found_label == "arrow_v0.1"
 
     def test_completions_logged_by_this_version_are_not_delivered_again(
-        self, store: Any, orchestrator: Any
+        self, store: Store, orchestrator: Orchestrator
     ):
-        _sink_job(store).run(orchestrator=orchestrator)
+        _ = _sink_job(store).run(orchestrator=orchestrator)
         delivered.clear()
-        _sink_job(store).run(orchestrator=orchestrator)
+        _ = _sink_job(store).run(orchestrator=orchestrator)
         assert delivered == []
 
 
@@ -367,7 +374,7 @@ def triple(x: int) -> int:
     return 3 * x
 
 
-def _two_node_job(store: Any, *, with_early: bool) -> PipelineJob:
+def _two_node_job(store: Store, *, with_early: bool) -> PipelineJob:
     """``early`` (fresh tables, recorded first) and ``dbl`` (v0.2 rows in the test)."""
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
@@ -383,16 +390,16 @@ def _two_node_job(store: Any, *, with_early: bool) -> PipelineJob:
 
 class TestPreflight:
     def test_no_node_runs_when_a_later_node_holds_v02_rows(
-        self, store: Any, orchestrator: Any
+        self, store: Store, orchestrator: Orchestrator
     ):
         with writing_as_v02():
-            _two_node_job(store, with_early=False).run()
+            _ = _two_node_job(store, with_early=False).run()
         calls.clear()
         early_calls.clear()
         before = snapshot(store)
 
         with pytest.raises(StoreHashLabelError):
-            _two_node_job(store, with_early=True).run(orchestrator=orchestrator)
+            _ = _two_node_job(store, with_early=True).run(orchestrator=orchestrator)
 
         assert early_calls == []
         assert calls == []
