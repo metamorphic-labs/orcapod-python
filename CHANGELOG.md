@@ -70,32 +70,6 @@ first `InputValidationError`, with each other failure attached as a note and log
 stay queued for the next flush. A flush that fails only for other reasons still raises
 `RuntimeError`, with the first failure as its cause.
 
-#### A Spiral source's default `source_id` is `<project id>/<dataset>/<table>` (ITL-926)
-
-`SpiralDBTableSource` used the bare table name as its default `source_id`. Tables with the
-same name in different projects (the EDI sample projects all share their table names) then
-had the same `content_hash`, record IDs and source-info tokens. In one store, a job on one
-project read back the other project's pipeline records along with its own (cached results
-were never mixed up: they are keyed on the row's data). The default is now the project id,
-the dataset and the table name, for example `edi-sample-v1-855632/default/session`.
-
-For a Spiral source built without `source_id`, the `content_hash`, every record ID and every
-source-info token change, so pipeline records stored by 0.2 for such a source are not found
-again. The rows are recorded once more and no result is recomputed, because function results
-are keyed on the data. For example, table `subject` (key `subject_id`, one row) in project
-`edi-sample-v1-855632`:
-
-- `source_id`: `subject` becomes `edi-sample-v1-855632/default/subject`.
-- `content_hash`: `semantic_v0.1:0380725acb90...e7f4f6` becomes
-  `semantic_v0.1:3a659ed610bb...29a93`.
-- Row 0's record ID: `18d1efa53fbc52b6a40f406eca35ca81` becomes
-  `096c4e22981c52daa2b088bffe729ee7`.
-
-`pipeline_hash` does not change (it depends only on the schema), nor does anything for a
-source given an explicit `source_id`. To keep 0.2 identities, pass the old value:
-`SpiralDBTableSource(project, "subject", source_id="subject")`. Jobs saved by 0.2 store
-their `source_id` explicitly and keep it when loaded.
-
 ### Added
 
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
@@ -173,31 +147,6 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
   against a `0.2.0` store.
 - `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
   have the same hashes (`predicates` is stored as a tuple).
-
-#### SpiralDB table source (ITL-926)
-
-- The `spiraldb` extra requires `pyspiral>=0.16.33` (was `>=0.14.0`). pyspiral 0.14.9 does not
-  use the login saved by a current `spiral login`; 0.16.33 does, and keeps every call
-  `SpiralDBConnector` makes.
-- `SpiralDBConnector.get_column_info` and `iter_batches` normalize every column to its large
-  Arrow variants at every nesting level (`list<string>` becomes `large_list<large_string>`),
-  so both report the same types (ITL-40). Before, only top-level `string` and `binary`
-  columns were converted. Widths, nullability and nested field names are unchanged, and so
-  are all hashes.
-- Building any source converts only its `record_id_column` to Python, not the whole table:
-  about half the peak memory (200,000 rows: +210 MB down to +115 MB). Tokens, record IDs and
-  hashes are byte-identical.
-- A non-nullable Spiral column arrives as `T`, and a nullable one as `T | None`, at every
-  nesting level, through `Join`, function pods and save/load (tested against a pyspiral fake).
-- A source whose table has a column the Arrow hasher cannot hash (`fixed_size_list` or `map`
-  with starfix 0.4.0) raises `NotImplementedError` naming every such column and its Arrow
-  type, chained to the hasher's error. Before, it raised the hasher's bare
-  `Unsupported leaf type: ...`, which named no column.
-- `SpiralDBTableSource` errors name the project and dataset searched. Before, a wrong
-  project, dataset or table all gave `Table 'x' not found in database.`
-- The docstrings give the real location of the saved `spiral login`
-  (`~/Library/Application Support/pyspiral/` on macOS). `docs/concepts/sources.md` has a
-  SpiralDB section: setup, discovery, nullable columns, and current limits.
 
 ## [0.2.0] — 2026-11-10
 
