@@ -388,3 +388,23 @@ def test_preview_summarises_large_cells_and_head_keeps_them() -> None:
 def test_text_form_has_the_header() -> None:
     text = str(_source().head(2))
     assert text.startswith("ArrowTableSource[readings] — first 2 of 25 rows")
+
+
+def test_cached_function_pod_stream_does_not_read_its_result_store() -> None:
+    from orcapod.core.cached_function_pod import CachedFunctionPod
+
+    calls: list[int] = []
+    store = InMemoryArrowDatabase()
+    pod = CachedFunctionPod(_counting_pod(calls).pod, result_database=store)
+    _ = pod.process(_source()).as_table()  # fills the result store
+    assert len(calls) == 25
+
+    stream = pod.process(_source())
+    head = stream.head()
+    assert head.status is HeadStatus.NOT_COMPUTED
+    table = stream.as_table()  # served from the result store
+    assert len(calls) == 25
+    after = stream.head(5)
+    assert after.status is HeadStatus.ROWS
+    assert after.table.equals(table.slice(0, 5))
+    assert len(calls) == 25

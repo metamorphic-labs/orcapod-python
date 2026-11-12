@@ -1158,15 +1158,7 @@ class FunctionPodStream(StreamBase):
             )
         tag_columns = self.keys(columns=config)[0]
 
-        # The contiguous run of computed inputs from the first; an input whose output
-        # is None (filtered out) is skipped, as iteration skips it.
-        computed: list[tuple[TagProtocol, DataProtocol]] = []
-        index = 0
-        while index in self._cached_output_datas:
-            tag, data = self._cached_output_datas[index]
-            if data is not None:
-                computed.append((tag, data))
-            index += 1
+        computed = self._computed_prefix()
         shown = computed[:n]
 
         def shown_content_hashes() -> pa.Array:
@@ -1207,6 +1199,21 @@ class FunctionPodStream(StreamBase):
             status=HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
             origin="computed",
         )
+
+    def _computed_prefix(self) -> list[tuple[TagProtocol, DataProtocol]]:
+        """Return the output rows computed so far, in order, as iteration yields them.
+
+        They are the contiguous run of computed inputs from the first; an input whose
+        output is ``None`` (filtered out) is skipped, as iteration skips it.
+        """
+        computed: list[tuple[TagProtocol, DataProtocol]] = []
+        index = 0
+        while index in self._cached_output_datas:
+            tag, data = self._cached_output_datas[index]
+            if data is not None:
+                computed.append((tag, data))
+            index += 1
+        return computed
 
     def _table_from_pairs(
         self, pairs: list[tuple[TagProtocol, DataProtocol]]
