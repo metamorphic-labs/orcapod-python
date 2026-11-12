@@ -134,6 +134,7 @@ DISTINCT: dict[str, tuple[Any, Any]] = {
         pd.DataFrame({"a": np.array([1, 2], dtype="int32")}),
     ),
     "row order": (_frame(), _frame().iloc[::-1]),
+    "index values": (_frame(), _frame().set_axis([10, 11], axis="index")),
     "values": (_frame(), pd.DataFrame({"a": [1, 3], "b": ["x", "y"]})),
     # labels outside str/int that work on v0.2.0
     "Timestamp labels naive vs UTC": (
@@ -192,6 +193,54 @@ EQUAL: dict[str, tuple[Any, Any]] = {
 }
 
 
+# Where the hash deliberately departs from pandas' assert functions: (pair, hashes equal).
+EXCEPTIONS: dict[str, tuple[tuple[Any, Any], bool]] = {
+    "flags": ((_frame(), _frame().set_flags(allows_duplicate_labels=False)), True),
+    "-0.0 vs 0.0": ((pd.DataFrame({"a": [0.0]}), pd.DataFrame({"a": [-0.0]})), False),
+}
+
+# The identity property (``PANDAS_IDENTITY_PROPERTIES``) each pair above exercises.
+PROPERTY_OF_PAIR: dict[str, str] = {
+    "column order": "column_order",
+    "MultiIndex level order": "index_level_order",
+    "struct field order": "struct_field_order",
+    "column label type 0 vs '0'": "label_type",
+    "MultiIndex columns vs flat labels": "label_type",
+    "columns.name": "columns_names",
+    "index name": "index_names",
+    "MultiIndex level names": "index_names",
+    "index dtype int64 vs float64": "index_dtype",
+    "categorical vs object string": "categorical_dtype",
+    "categorical category order": "categorical_categories",
+    "categorical unused category": "categorical_categories",
+    "categorical ordered flag": "categorical_ordered",
+    "Int64 vs int64": "pandas_dtype",
+    "boolean vs bool": "pandas_dtype",
+    "string vs object": "pandas_dtype",
+    "int64 vs int32": "arrow_type",
+    "row order": "values",
+    "values": "values",
+    "Timestamp labels naive vs UTC": "label_type",
+    "Timestamp vs str labels": "label_type",
+    "period column freq": "pandas_dtype",
+    "interval column closed": "pandas_dtype",
+    "Series MultiIndex level order": "index_level_order",
+    "Series name": "series_name",
+    "Series name None vs 'x'": "series_name",
+    "Series name 0 vs '0'": "series_name",
+    "Series dtype int64 vs Int64": "pandas_dtype",
+    "Series categorical vs object": "categorical_dtype",
+    "index values": "index_values",
+    "frame vs its one-column Series": "value_kind",
+    "RangeIndex vs Index[int64]": "index_kind",
+    "attrs": "attrs",
+    "Series attrs": "attrs",
+    "dict key order in an object column": "dict_key_order",
+    "flags": "flags",
+    "-0.0 vs 0.0": "signed_zero",
+}
+
+
 def _assert_fn(value: Any) -> Callable[[Any, Any], None]:
     return assert_series_equal if isinstance(value, pd.Series) else assert_frame_equal
 
@@ -218,6 +267,48 @@ class TestFollowsPandasEquality:
     def test_equal_values_hash_equal(self, name: str) -> None:
         first, second = EQUAL[name]
         assert _hash(first) == _hash(second)
+
+
+class TestIdentityProperties:
+    """``PANDAS_IDENTITY_PROPERTIES`` is the decision; every entry is checked on a pair."""
+
+    def _pairs(self) -> dict[str, tuple[Any, Any]]:
+        pairs = {**DISTINCT, **EQUAL}
+        pairs.update({name: pair for name, (pair, _) in EXCEPTIONS.items()})
+        pairs["frame vs its one-column Series"] = (
+            pd.DataFrame({"a": [1, 2]}),
+            pd.Series([1, 2], name="a"),
+        )
+        return pairs
+
+    def test_every_property_is_exercised_and_agrees(self) -> None:
+        from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
+
+        declared = {p.name: p.identity for p in PANDAS_IDENTITY_PROPERTIES}
+        assert len(declared) == len(PANDAS_IDENTITY_PROPERTIES)
+        assert set(PROPERTY_OF_PAIR.values()) == set(declared)
+        for name, (first, second) in self._pairs().items():
+            if name not in PROPERTY_OF_PAIR:  # "copy", "reordered back", "chunked copy"
+                continue
+            differs = _hash(first) != _hash(second)
+            assert differs == declared[PROPERTY_OF_PAIR[name]], name
+
+    @pytest.mark.parametrize("name", list(EXCEPTIONS))
+    def test_exceptions_to_pandas_equality(self, name: str) -> None:
+        """``flags`` hashes equal though pandas differs; ``-0.0`` the other way round."""
+        (first, second), hashes_equal = EXCEPTIONS[name]
+        assert (_hash(first) == _hash(second)) == hashes_equal
+        if hashes_equal:
+            with pytest.raises(AssertionError):
+                assert_frame_equal(first, second)
+        else:
+            assert_frame_equal(first, second)
+
+    def test_carrier_is_stated_exactly_for_identity_properties(self) -> None:
+        from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
+
+        for prop in PANDAS_IDENTITY_PROPERTIES:
+            assert bool(prop.carried_by) == prop.identity, prop.name
 
 
 class TestLabels:

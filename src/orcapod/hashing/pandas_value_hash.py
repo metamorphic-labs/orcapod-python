@@ -16,7 +16,8 @@ The identity is what pandas' own ``assert_frame_equal`` / ``assert_series_equal`
 their default arguments (developer's decision, November 11, 2026), with two exceptions:
 ``flags`` is not part of it (storage does not keep it), and ``-0.0`` and ``0.0`` hash apart
 (the values are hashed as bytes; this costs a recomputation, never a wrong result). ``attrs``
-is not part of it, as in pandas.
+is not part of it, as in pandas. ``PANDAS_IDENTITY_PROPERTIES`` lists every property and
+whether it is identity; it is the one place that states the decision.
 
 Values table
 ------------
@@ -61,7 +62,8 @@ A period alias is pandas' own period frequency string (``"M"``, ``"Q-DEC"``, as 
 from __future__ import annotations
 
 import datetime as dt
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -79,6 +81,112 @@ PANDAS_DATAFRAME_HASH_LABEL = "pandas_dataframe_v1"
 
 PANDAS_SERIES_HASH_LABEL = "pandas_series_v1"
 """``ContentHash.method`` of a ``pd.Series`` value hash: the single definition."""
+
+
+@dataclass(frozen=True)
+class PandasIdentityProperty:
+    """One property of a pandas value and whether the ``v1`` hash depends on it.
+
+    Attributes:
+        name: A stable name for the property.
+        identity: Whether two values that differ only in this property hash differently.
+        carried_by: Which part of the hash sees the property: the ordered Arrow digest of
+            the values table, the descriptor, or both; empty when ``identity`` is false.
+        description: What the property is, in pandas terms.
+    """
+
+    name: str
+    identity: bool
+    carried_by: Literal["digest", "descriptor", "digest and descriptor", ""]
+    description: str
+
+
+PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
+    PandasIdentityProperty("column_order", True, "digest", "order of the columns"),
+    PandasIdentityProperty(
+        "index_level_order", True, "digest", "order of the levels of a MultiIndex"
+    ),
+    PandasIdentityProperty(
+        "struct_field_order",
+        True,
+        "digest",
+        "order of the fields of a pd.ArrowDtype struct column, at every depth",
+    ),
+    PandasIdentityProperty(
+        "values", True, "digest", "the values, their row order and the row count"
+    ),
+    PandasIdentityProperty(
+        "arrow_type",
+        True,
+        "digest",
+        "a column's Arrow type: integer and float width, datetime unit and timezone",
+    ),
+    PandasIdentityProperty("index_values", True, "digest", "the index values"),
+    PandasIdentityProperty(
+        "index_names", True, "descriptor", "the name of each index level, typed"
+    ),
+    PandasIdentityProperty(
+        "index_dtype", True, "digest and descriptor", "the dtype of each index level"
+    ),
+    PandasIdentityProperty(
+        "columns_names", True, "descriptor", "columns.names, one per column level"
+    ),
+    PandasIdentityProperty(
+        "label_type",
+        True,
+        "descriptor",
+        "the type of a column label (0 vs '0'; a MultiIndex tuple vs its text)",
+    ),
+    PandasIdentityProperty("series_name", True, "descriptor", "a Series' name, typed"),
+    PandasIdentityProperty(
+        "value_kind", True, "descriptor", "a frame vs its one-column Series"
+    ),
+    PandasIdentityProperty(
+        "pandas_dtype",
+        True,
+        "descriptor",
+        "the pandas dtype where the Arrow values coincide: masked vs NumPy "
+        "(Int64 vs int64, boolean vs bool), string vs object, period frequency, "
+        "interval closed side",
+    ),
+    PandasIdentityProperty(
+        "categorical_dtype", True, "descriptor", "categorical vs its plain values"
+    ),
+    PandasIdentityProperty(
+        "categorical_categories",
+        True,
+        "descriptor",
+        "the category list, unused categories included, and its order",
+    ),
+    PandasIdentityProperty(
+        "categorical_ordered", True, "descriptor", "a categorical's ordered flag"
+    ),
+    PandasIdentityProperty(
+        "signed_zero",
+        True,
+        "digest",
+        "-0.0 vs 0.0 (pandas calls them equal; the values are hashed as bytes)",
+    ),
+    PandasIdentityProperty(
+        "index_kind", False, "", "RangeIndex vs an int64 Index with the same values"
+    ),
+    PandasIdentityProperty("attrs", False, "", "the attrs dict"),
+    PandasIdentityProperty(
+        "flags", False, "", "flags.allows_duplicate_labels (storage does not keep it)"
+    ),
+    PandasIdentityProperty(
+        "dict_key_order", False, "", "key order of dicts in an object column"
+    ),
+)
+"""Every property the ``v1`` hash was decided on, and whether it is identity.
+
+This is the single statement of the decision (developer, November 11 and 12, 2026): the
+identity is what ``assert_frame_equal`` / ``assert_series_equal`` compare by default, except
+``flags`` and ``signed_zero``. The functions below implement exactly this list;
+``tests/test_hashing/test_pandas_value_identity.py`` checks every entry against a pair of
+values. Changing an entry's ``identity`` changes existing hashes: it needs new labels and a
+new logical type identifier.
+"""
 
 _MASKED_DTYPE_NAMES = frozenset(
     {

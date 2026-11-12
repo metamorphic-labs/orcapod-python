@@ -1042,6 +1042,8 @@ series: {"kind": "pandas.series", "height": <rows>, "name": <label>, "dtype": <d
 **What is identity.** The hash tells apart what pandas' own `assert_frame_equal` /
 `assert_series_equal` tell apart with their default arguments (developer, November 11 and
 12, 2026: order is identity wherever the type's own equality depends on order).
+`PANDAS_IDENTITY_PROPERTIES` in `orcapod/hashing/pandas_value_hash.py` is the one list in
+code of every property below and whether it is identity.
 
 | Property | Part of the hash | Carried by |
 |---|---|---|
