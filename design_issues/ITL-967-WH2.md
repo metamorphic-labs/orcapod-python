@@ -1,8 +1,7 @@
 ## Hash-site audit — wrong hashes fixed before v0.3 (ITL-942)
 
 ### WH2 — A value-hashed logical type lost its identity in a column with no value
-
-**Status:** resolved (ITL-967)
+**Status:** resolved
 **Severity:** high
 **Issue:** ITL-967 (follow-up to ITL-942, finding I; found by CodeRabbit on PR #323)
 
