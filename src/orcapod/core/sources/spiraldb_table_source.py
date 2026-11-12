@@ -358,12 +358,13 @@ class SpiralDBTableSource(RootSource):
     def row_count_estimate(self) -> int:
         """The whole table's row count as SpiralDB's manifests record it.
 
-        No row is read. ``where`` and ``limit`` are not taken into account, and the
-        count can be above what a scan returns when rows were deleted or overwritten
-        and not yet compacted.
+        The count is of the version this source reads (the one it was built at, or
+        the given ``asof``). No row is read. ``where`` and ``limit`` are not taken into
+        account, and the count can be above what a scan returns when rows were
+        deleted or overwritten and not yet compacted.
         """
         with self._connector() as connector:
-            return connector.get_row_count_estimate(self._table_name)
+            return connector.get_row_count_estimate(self._table_name, asof=self._asof)
 
     def _too_large(self, found: str) -> SourceTooLargeError:
         """Return the error for a read that goes over ``max_rows``."""
@@ -436,7 +437,9 @@ class SpiralDBTableSource(RootSource):
                 # under the cap: the table's recorded row count decides, before any
                 # row is read (so no row reaches a function of a job that would fail).
                 # The count can be above the rows a scan returns, never below.
-                recorded = connector.get_row_count_estimate(self._table_name)
+                recorded = connector.get_row_count_estimate(
+                    self._table_name, asof=self._asof
+                )
                 bound = recorded if limit is None else min(limit, recorded)
                 if bound > max_rows:
                     raise self._too_large(

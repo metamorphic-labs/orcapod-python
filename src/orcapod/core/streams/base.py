@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
@@ -462,9 +463,11 @@ class StreamBase(TraceableBase):
         return self.as_polars_df(columns=columns, all_info=all_info), None
 
     def _preview_header(self, note: str | None) -> str:
-        """Return the header line a notebook display puts above the rows."""
+        """Return the header line a notebook display puts above the rows, HTML-escaped."""
         header = f"{self.__class__.__name__}[{self.label}]"
-        return header if note is None else f"{header} — {note}"
+        return html.escape(
+            header if note is None else f"{header} — {note}", quote=False
+        )
 
     def _repr_html_(self) -> str:
         df, note = self._preview()

@@ -169,8 +169,10 @@ pipeline has read from that table, not only the rows of the latest restriction. 
 sent downstream during a run are only the rows that run read.
 
 **Running again.** A second run scans the table again and computes nothing for the rows it
-has already seen. Rows added to the Spiral table since the last run are new keys: they are
-the only rows computed.
+has already seen. A source object keeps reading the version its table had when it was
+built, so rows added to the Spiral table afterwards are seen only by a new source: build
+the source (and the job around it) again, and the added rows are new keys, the only rows
+computed.
 
 **Known limitations.**
 

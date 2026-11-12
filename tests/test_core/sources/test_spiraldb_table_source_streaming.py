@@ -588,6 +588,20 @@ class TestNotebookPreview:
             "the table has about 25 rows\n"
         ) in html
 
+    def test_the_header_is_escaped_in_both_displays(self, project):
+        """A ``where`` value with markup characters is shown as text, not markup."""
+        project.create_table("default.marked", key_schema=_KEYS).write(
+            _rows(list(range(1, 26)), subject="<b>")
+        )
+        source = SpiralDBTableSource(_PROJECT, "marked", where={"subject_id": "<b>"})
+
+        for shown in (source._repr_html_(), source.view()._repr_html_()):
+            header = shown.splitlines()[0]
+            assert header.endswith(
+                "first 10 matching rows (where subject_id='&lt;b&gt;'); "
+                "the table has about 25 rows"
+            )
+
     def test_view_reads_the_same_head(self, big):
         source = SpiralDBTableSource(_PROJECT, "big", label="big")
 

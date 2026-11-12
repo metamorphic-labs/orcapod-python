@@ -1,8 +1,9 @@
 """SpiralDBTableSource against a live SpiralDB project (ITL-186). Opt-in.
 
 Skipped unless ``ORCAPOD_SPIRAL_LIVE_PROJECT`` names a project the saved ``spiral login``
-can read, with a ``default.spike_event`` table (the workshop project is
-``edi-tutorial-v1-841226``). Every test is read-only except
+can read, with a ``default.spike_event`` table of more than 1,000 rows (the workshop
+project is ``edi-tutorial-v1-841226``, 63,349 rows); the tests that need that many skip
+when the table records fewer. Every test is read-only except
 ``test_rows_appended_between_runs_are_the_only_ones_computed`` and
 ``test_a_source_reads_the_version_it_was_built_at``, which also need
 ``ORCAPOD_SPIRAL_LIVE_WRITE=1`` and write only to a table each creates and drops in the
@@ -36,6 +37,16 @@ pytestmark = pytest.mark.skipif(
     not PROJECT, reason="Set ORCAPOD_SPIRAL_LIVE_PROJECT to run the live Spiral tests"
 )
 
+# The rows ``default.spike_event`` must record for the tests that read or refuse many.
+_MIN_ROWS = 1_000
+
+
+def _require_a_large_table() -> None:
+    """Skip the calling test unless ``spike_event`` records more than ``_MIN_ROWS`` rows."""
+    recorded = SpiralDBTableSource(PROJECT, "spike_event").row_count_estimate
+    if recorded <= _MIN_ROWS:
+        pytest.skip(f"spike_event records {recorded} rows; these tests need more")
+
 
 def test_building_a_source_is_quick_and_names_the_table():
     start = time.monotonic()
@@ -50,6 +61,7 @@ def test_building_a_source_is_quick_and_names_the_table():
 
 
 def test_limit_reads_the_first_rows():
+    _require_a_large_table()
     source = SpiralDBTableSource(PROJECT, "spike_event", limit=1000)
 
     table = source.as_table(all_info=True)
@@ -79,6 +91,7 @@ def test_where_reads_only_matching_rows_with_the_same_record_ids():
 
 
 def test_a_whole_table_over_the_cap_is_refused_without_reading():
+    _require_a_large_table()
     source = SpiralDBTableSource(PROJECT, "spike_event", max_rows=10)
 
     start = time.monotonic()
@@ -168,5 +181,11 @@ def test_a_source_reads_the_version_it_was_built_at():
         assert keys(before) == [1, 2]
         assert [tag.as_dict()["k"] for tag, _ in before.iter_data()] == [1, 2]
         assert keys(SpiralDBTableSource(PROJECT, name, dataset="scratch")) == [1, 2, 3]
+
+        # The cap counts the rows of the version the source reads, not the current one.
+        capped = SpiralDBTableSource(PROJECT, name, dataset="scratch", max_rows=3)
+        table.write(pa.table({"k": [4], "v": [40]}))
+        assert capped.row_count_estimate == 3
+        assert keys(capped) == [1, 2, 3]
     finally:
         project.drop_table(f"scratch.{name}")

@@ -21,7 +21,9 @@ Test sections:
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -224,13 +226,15 @@ class TestConnector:
         with patch(_CONNECTOR, side_effect=connect):
             src = SpiralDBTableSource(_PROJECT_ID, _TABLE_NAME)
             src.as_table()
-            next(iter(src.iter_data()))  # a read that is not finished
+            # iter_data is a generator function, so the read can be closed.
+            unfinished = cast("Generator[Any, None, None]", src.iter_data())
+            next(unfinished)  # a read that is not finished
+            unfinished.close()
             with pytest.raises(ValueError):
                 SpiralDBTableSource(_PROJECT_ID, "no_such_table")
-        del src
         assert len(opened) == 4
         # About the connector's own closed flag: nothing public reports it.
-        assert [c._closed for c in opened[:2] + opened[3:]] == [True] * 3  # pyright: ignore[reportPrivateUsage]
+        assert [c._closed for c in opened] == [True] * 4  # pyright: ignore[reportPrivateUsage]
 
 
 # ===========================================================================

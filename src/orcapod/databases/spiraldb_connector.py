@@ -711,7 +711,7 @@ class SpiralDBConnector:
         self._require_open()
         return int(self._project.table(self._table_id(table_name)).last_modified_at())
 
-    def get_row_count_estimate(self, table_name: str) -> int:
+    def get_row_count_estimate(self, table_name: str, asof: int | None = None) -> int:
         """Return the table's row count as SpiralDB's manifests record it, without scanning.
 
         The count is what the manifests hold: it can be above the number of rows a
@@ -719,13 +719,15 @@ class SpiralDBConnector:
 
         Args:
             table_name: Plain table name (no dataset prefix).
+            asof: Count the table as of this version (a ``get_table_version`` value,
+                as ``scan_batches`` takes). If ``None`` (default), the current version.
 
         Returns:
             The recorded row count.
         """
         self._require_open()
         tbl = self._project.table(self._table_id(table_name))
-        stats = self._spiral.core.manifest_stats(tbl.core.get_snapshot(asof=None))
+        stats = self._spiral.core.manifest_stats(tbl.core.get_snapshot(asof=asof))
         return int(stats.key_space_stats.total_rows)
 
     def delete_table(self, table_name: str) -> None:

@@ -306,9 +306,12 @@ class SourceStreamBuilder:
     ) -> ArrowTableStream:
         """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
 
-        Each row's source-info value is ``<source_id>::<token>`` and its record ID is
-        the UUID v5 of the same two parts, so a row keeps its record ID wherever and
-        however often it is read, as long as its token is the same.
+        Each row's source-info prefix is ``<source_id>::<token>``: the value in a
+        source-info column is that prefix followed by ``::<column>`` (for example
+        ``_source_amplitude`` holds ``<source_id>::<token>::amplitude``). The row's
+        record ID is the UUID v5 of ``source_id`` and ``token``, so a row keeps its
+        record ID wherever and however often it is read, as long as its token is the
+        same.
 
         Args:
             table: The rows, with nullable flags already set correctly.
