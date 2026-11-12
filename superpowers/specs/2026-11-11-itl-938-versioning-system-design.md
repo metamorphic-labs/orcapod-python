@@ -940,6 +940,33 @@ One stored difference was found: on `61d0f18` the source-info token of every row
 through an operator is the token of the first row (`source1::row_0::x` where `v0.2.0` stores
 `source1::row_2::x`; fixed by ITL-845). Source-info tokens are not hashed into keys.
 
+The golden suite of `v0.2.0` (608 pinned cases in five files) was then generated with the code
+of `61d0f18`: **all 608 come out identical**. So `v0.2.0` computes `H0`, and the golden files
+at the `v0.2.0` tag can serve as the `H0` reference values.
+
+**Relation to the data context (proposed answer to the developer's question).** The hash
+version is not finer than the data context key was meant to be, and it is not orthogonal to
+it. It is broader than what the data context holds today:
+
+| The hash version must cover | In the data context today? |
+|---|---|
+| structure hasher, Arrow hasher | yes (`semantic_hasher`, `arrow_hasher`) |
+| value hashers (file, directory, array, expression, types, schema) | yes (the handler registry) |
+| type conversion rules, logical types and their names | yes (`type_converter`) |
+| what each identity is composed of (source, function, operator, node) | **no**: code in the source, pod and operator classes |
+| record-id, entry-id and fold recipes | **no**: code in the stream builder, function node, `arrow_utils` |
+| the grammar of system-tag column names | **no**: code in `arrow_data_utils` and the operators |
+| third-party library behaviour | **no** |
+
+And the data context holds one thing that is not a hash-version matter: the set of registered
+logical types can grow (a new type is added) without any existing hash changing.
+
+Proposal: make the data context version **be** the hash version. The context key is already
+stored per row and per node, and it is already what a reader uses to pick the hashers for a
+stored row, which is exactly what reading an old row under its own rules needs. Two changes
+make it true: the version changes whenever an existing golden value changes (and only then),
+and its manifest also names the definitions that live in code today.
+
 ```mermaid
 flowchart LR
     subgraph REG["Registry: one frozen manifest per hash version"]
