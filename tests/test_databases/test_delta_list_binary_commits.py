@@ -130,10 +130,22 @@ def test_list_bytes_batch_holding_a_stored_id(tmp_path: Path) -> None:
     db = DeltaTableDatabase(base_path=tmp_path)
     path = ("t",)
     db.add_records(path, _bytes_rows([b"r0", b"r1"], [[b"a"], [b"b"]]), flush=True)
-    db.add_records(path, _bytes_rows([b"r1", b"r2"], [[b"X"], [b"c"]]), flush=True)
+    db.add_records(
+        path,
+        _bytes_rows([b"r1", b"r2", b"r3", b"r4"], [[b"X"], [b"c"], None, [None, b"d"]]),
+        flush=True,
+    )
 
-    table = db.get_all_records(path, record_id_column="__record_id")
+    table = DeltaTableDatabase(base_path=tmp_path).get_all_records(
+        path, record_id_column="__record_id"
+    )  # reopened
     assert table is not None
     got = dict(zip(table["__record_id"].to_pylist(), table["v"].to_pylist()))
     # the stored id keeps its stored row (skipped, as when_not_matched_insert_all does)
-    assert got == {b"r0": [b"a"], b"r1": [b"b"], b"r2": [b"c"]}
+    assert got == {
+        b"r0": [b"a"],
+        b"r1": [b"b"],
+        b"r2": [b"c"],
+        b"r3": None,
+        b"r4": [None, b"d"],
+    }

@@ -282,12 +282,11 @@ def _merge_source_in_stored_layout(
         if not is_list or field.name not in stored.names:
             continue
         target = stored.field(field.name).type
-        try:
-            as_stored = _as_delta_writer_stores(pa.schema([pa.field("c", plain.type)]))
-        except Exception:
-            continue
-        if as_stored.field("c").type != target:
-            # More than the layout differs (schema evolution): the MERGE decides.
+        if arrow_utils.normalize_to_large_types(
+            plain.type
+        ) != arrow_utils.normalize_to_large_types(target):
+            # More than the layout differs (a timestamp unit, a width, an evolved
+            # struct): the MERGE decides, and no cast may change a value.
             continue
         batch = batch.set_column(
             index,
