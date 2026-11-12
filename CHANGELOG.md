@@ -100,18 +100,19 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
     another label raises `orcapod.errors.SideEffectLogHashLabelError` (a `StoreError`, so it
     fails the run whatever the `error_policy`) before it delivers or writes anything. The
     error names the log, the label found and the current one. Function, operator and source
-    nodes of the same job are not refused. Use a fresh store for the side-effect node, or
-    keep using v0.2 for it, until the log can be migrated.
+    nodes of the same job are not refused. A fresh store is not a way around this: it has
+    no invocation log, so the node delivers every side effect again. Run the node on a
+    fresh store only when a repeated delivery is acceptable, or keep using v0.2 for it
+    until the log can be migrated.
 
   **Migration:** none is needed to run the function, operator and source nodes of a v0.2
-  store under v0.3, at the price of computing everything again and of tables that hold both
-  generations; side-effect nodes need a fresh store. A tool that converts
+  store under v0.3, at the price of computing everything again; a side-effect node delivers again on
+  its first v0.3 run, whatever the store (see above). A tool that converts
   `arrow_v0.1` rows into `arrow_v1` rows is planned (ITL-913, ITL-914); until then the old
-  rows are kept for it. Operator-node and cached-source tables store their record hashes
-  without a label; there the rows of v0.2 are told apart by the starfix hash format at the
-  start of each record hash (`000001` for v0.2, `000002` for v0.3). That is exact for these
-  two versions, but a later Arrow hash label that keeps starfix hash format 2 could not be
-  told apart in those two kinds of table. A table that `table_scope="content_hash"` or a
+  rows are kept for it. Operator-node and cached-source tables written by v0.2 store
+  their record hashes without a label; such rows are told apart by the starfix hash format
+  at the start of each record hash (`000001` for v0.2). Since ITL-945 (below) v0.3 stores
+  these record hashes with their label, like every other stored hash. A table that `table_scope="content_hash"` or a
   `CachedSource` places under a content hash moves to a new path instead, so its v0.2 rows
   are in another table.
 - **Now hashable.** `fixed_size_list` columns, at any depth (ITL-927): a source or operator
