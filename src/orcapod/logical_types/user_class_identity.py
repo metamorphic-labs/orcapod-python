@@ -61,6 +61,9 @@ RESERVED_PREFIX = "orcapod."
 #: Number of hex digits of the SHA-256 fingerprint in an identity string (the full digest).
 FINGERPRINT_HEX_DIGITS = 64
 
+#: Type token of ``...`` in ``tuple[T, ...]``.
+ELLIPSIS_TOKEN = "..."
+
 #: Class attribute that holds the declared name of a structural class. It is looked up
 #: in the class's own namespace, so a subclass is structural only if it is decorated too.
 STRUCTURAL_NAME_ATTRIBUTE = "__orcapod_structural_name__"
@@ -454,7 +457,8 @@ def type_token(annotation: Any, converter: TypeConverterProtocol) -> Any:
     ``{"logical": <identifier text>}``, the Arrow extension name and metadata; a
     generic is ``{"generic": <origin>, "args": [...]}``; a union is
     ``{"union": [...]}`` with members sorted and ``"None"`` last; a ``Literal`` is
-    ``{"literal": [...]}``; another user class is ``{"class": <its record>}``.
+    ``{"literal": [...]}``; another user class is ``{"class": <its record>}``. The
+    ``...`` of ``tuple[T, ...]`` is the string ``"..."``.
 
     Args:
         annotation: A field annotation (``Annotated`` extras already stripped).
@@ -479,6 +483,9 @@ def _type_token(
 
     if annotation is None or annotation is type(None):
         return "None"
+    if annotation is Ellipsis:
+        # ``tuple[T, ...]``: the marker of a tuple of any length.
+        return ELLIPSIS_TOKEN
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
     if origin is typing.Union or origin is _types.UnionType:

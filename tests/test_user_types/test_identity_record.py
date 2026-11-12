@@ -114,6 +114,7 @@ class TestTypeTokens:
                 {"generic": "list", "args": [{"union": ["int", "None"]}]},
             ),
             (Literal["b", "a"], {"literal": ["'a'", "'b'"]}),
+            (tuple[int, ...], {"generic": "tuple", "args": ["int", "..."]}),
         ],
     )
     def test_token(self, converter, annotation: object, token: object) -> None:
@@ -152,6 +153,7 @@ class TestTypeTokens:
             dict[str, float],
             list[Path | None],
             tuple[int, str],
+            tuple[int, ...],
             Literal["a", "b"],
         ],
     )

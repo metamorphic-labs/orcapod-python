@@ -360,6 +360,43 @@ def test_from_instance_converts_nested_fields() -> None:
     assert _convert(Segment, SegmentB(PairB(1, 2), [])).end is None
 
 
+@op.dataclass(name="itl972.Named")
+class Named:
+    """A structural class with one text field."""
+
+    label: str
+
+
+@op.dataclass(name="itl972.Either")
+class Either:
+    """A structural class with a union of two structural classes."""
+
+    value: PairA | Named
+
+
+@dataclasses.dataclass
+class OtherEither:
+    """An ordinary dataclass with the same field as ``Either``."""
+
+    value: PairA | Named
+
+
+@dataclasses.dataclass
+class OrdinaryNamed:
+    """An ordinary dataclass with the field of ``Named``."""
+
+    label: str
+
+
+def test_from_instance_keeps_the_union_member_a_value_already_is() -> None:
+    """A union field keeps a value of one member and converts to the member that fits."""
+    kept = _convert(Either, OtherEither(Named("n")))
+    assert type(kept.value) is Named
+    converted = _convert(Either, OtherEither(OrdinaryNamed("n")))  # pyright: ignore[reportArgumentType]  # dataclasses do not check field types
+    assert type(converted.value) is Named
+    assert converted.value == Named("n")
+
+
 def test_from_instance_refuses_other_fields() -> None:
     """A missing or an extra field is an error naming the fields."""
 
@@ -474,6 +511,11 @@ class Point:
     y: float
 
 
+@op.dataclass(name="itl972.child.Key", frozen=True)
+class Key:
+    n: int
+
+
 @op.dataclass(name="itl972.child.Sample")
 class Sample:
     label: str
@@ -482,11 +524,12 @@ class Sample:
     note: str | None
     file: Path
     history: list[Point]
+    keys: set[Key]
 
 
 @function_pod(output_keys="sample")
 def make(x: int) -> Sample:
-    return Sample(f"s{x}", Point(x, x / 2), ["a", "b"], None, Path("/tmp/f"), [Point(0, 0.0)])
+    return Sample(f"s{x}", Point(x, x / 2), ["a", "b"], None, Path("/tmp/f"), [Point(0, 0.0)], {Key(1), Key(2)})
 
 
 job = PipelineJob(name="w", store=DeltaTableDatabase(Path(os.environ["WS_DB"])))
@@ -525,6 +568,8 @@ for row in converter.arrow_table_to_python_dicts(table.select(["sample"])):
         "note": value.note,
         "file_is_path": isinstance(value.file, Path),
         "history": [dataclasses.asdict(p) for p in value.history],
+        "keys_is_set": isinstance(value.keys, set),
+        "keys": sorted(key.n for key in value.keys),
     })
 report(out)
 """
@@ -545,12 +590,48 @@ def test_stored_values_are_read_without_the_class(tmp_path: Path) -> None:
             "has_from_instance": True,
             "module": "orcapod.synthesized",
             "is_dataclass": True,
-            "fields": ["label", "where", "tags", "note", "file", "history"],
+            "fields": ["label", "where", "tags", "note", "file", "history", "keys"],
             "where_class": "Point",
             "where": {"x": 1, "y": 0.5},
             "tags": ["a", "b"],
             "note": None,
             "file_is_path": True,
             "history": [{"x": 0, "y": 0.0}],
+            "keys_is_set": True,
+            "keys": [1, 2],
         }
     ]
+
+
+def test_synthesized_class_equals_and_hashes_like_a_defined_class() -> None:
+    """A class built from metadata and a defined class of the same type agree.
+
+    Their instances with equal fields are equal in both directions and, both being
+    hashable, have equal hashes.
+    """
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.structural_class import synthesize_structural_class
+
+    @op.dataclass(name="itl972.Synth", frozen=True)
+    class Defined:
+        x: int
+        label: str
+
+    record = {
+        "kind": "structural",
+        "name": "itl972.Synth",
+        "fields": [["x", "int"], ["label", "str"]],
+    }
+    # Non-public entry point: with ``Defined`` in the process a read would use it, so
+    # the class is built from the record directly, as a read without the class does.
+    converter: Any = get_default_context().type_converter
+    synthesized = synthesize_structural_class(record, converter)
+    assert synthesized is not Defined
+    assert synthesized.__module__ == "orcapod.synthesized"
+
+    built, defined = synthesized(1, "a"), Defined(1, "a")
+    assert built == defined
+    assert defined == built
+    assert hash(built) == hash(defined)
+    assert built != Defined(2, "a")
+    assert len({built, defined}) == 1

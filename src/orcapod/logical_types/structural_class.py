@@ -70,6 +70,8 @@ def annotation_from_token(token: Any, converter: TypeConverterProtocol) -> Any:
     if isinstance(token, str):
         if token in _SCALARS:
             return _SCALARS[token]
+        if token == uci.ELLIPSIS_TOKEN:
+            return Ellipsis
         return _walk_fqcn(token)
     if not isinstance(token, dict):
         raise ValueError(f"Malformed type token: {token!r}.")
@@ -183,7 +185,10 @@ def synthesize_structural_class(
         (field, annotation_from_token(token, converter))
         for field, token in record["fields"]
     ]
-    cls = dataclasses.make_dataclass(python_name, fields)
+    # Hashable (by field values, as ``==`` compares): the class may have to rebuild a
+    # ``set`` of its instances, and the stored record does not say whether the class
+    # that wrote them was frozen.
+    cls = dataclasses.make_dataclass(python_name, fields, unsafe_hash=True)
     cls.__module__ = uci.SYNTHESIZED_MODULE
     cls.__doc__ = f"Structural class {name!r}, built from stored metadata."
     finish_structural_class(cls, name)
@@ -351,6 +356,41 @@ def _convertible(offered: Any, wanted: Any) -> bool:
     return all(_convertible(x, y) for x, y in zip(args_offered, args_wanted))
 
 
+def _converted_union_value(value: Any, members: tuple[Any, ...]) -> Any:
+    """Return a field value converted to the union member it belongs to.
+
+    A value that already is an instance of a member class is kept. Otherwise a
+    dataclass instance goes to the first structural member with the same field names,
+    and a container to the first member with the container's origin. A value no member
+    claims is returned as it is.
+
+    Args:
+        value: The field value, not ``None``.
+        members: The members of the union annotation.
+
+    Returns:
+        The value to store in the new instance.
+    """
+    cls = type(value)
+    classes = [
+        m for m in members if isinstance(m, type) and typing.get_origin(m) is None
+    ]
+    if cls in classes:
+        return value
+    if dataclasses.is_dataclass(value):
+        offered = set(uci.stored_field_names(cls))
+        for member in classes:
+            if uci.is_structural(member) and offered == set(
+                uci.stored_field_names(member)
+            ):
+                return _converted_value(value, member)
+        return value
+    for member in members:
+        if typing.get_origin(member) is cls:
+            return _converted_value(value, member)
+    return value
+
+
 def _mentions_structural(annotation: Any) -> bool:
     """Return True if an annotation names a structural class at any depth."""
     if isinstance(annotation, type) and typing.get_origin(annotation) is None:
@@ -386,13 +426,7 @@ def _converted_value(value: Any, annotation: Any) -> Any:
             return value
         return annotation.from_instance(value)
     if origin in _UNIONS:
-        for member in args:
-            if isinstance(member, type) and typing.get_origin(member) is None:
-                if uci.is_structural(member) and dataclasses.is_dataclass(value):
-                    return _converted_value(value, member)
-            elif typing.get_origin(member) is type(value):
-                return _converted_value(value, member)
-        return value
+        return _converted_union_value(value, args)
     if origin in (list, set, frozenset) and len(args) == 1:
         return origin(_converted_value(item, args[0]) for item in value)
     if origin is tuple:
