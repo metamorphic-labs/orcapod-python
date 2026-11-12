@@ -181,3 +181,10 @@ columns by file content, extension identity kept); only the order options differ
       the labels are unreleased, so the pin may move without a label bump then).
 - [ ] When starfix 0.5.0 is installable: delete `superpowers/scripts/itl_897/starfix05_shim.py`
       (it refuses to run then) and the plan/spec references to it, before opening either PR.
+
+## Superseded (November 12, 2026)
+
+starfix 0.5.0 is on `main`; the stand-in script `starfix05_shim.py` named above was deleted and
+the library calls starfix's ordered options directly. The label pin test and the "bump a label
+whenever any hash can change" rule were replaced by the ITL-938 label rule. The refresh onto
+`main` is planned in `2026-11-12-itl-897-refresh-onto-v03-hash-step.md`.

@@ -57,6 +57,8 @@ The labels of v0.3:
 | `arrow_v1` | the Arrow table and schema hash (§9) | `ARROW_HASH_LABEL`, `hashing/arrow_hashers.py` |
 | `directory_v1` | the directory hash: a SHA-256 Merkle tree over the entries | `DIRECTORY_HASH_LABEL`, `hashing/directory_hashers.py` |
 | `ndarray_v1` | the array value digest (§8) | `NumpyArrayHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
+| `pandas_dataframe_v1` | the `pandas.DataFrame` value hash (§10) | `PANDAS_DATAFRAME_HASH_LABEL`, `hashing/pandas_value_hash.py` |
+| `pandas_series_v1` | the `pandas.Series` value hash (§10) | `PANDAS_SERIES_HASH_LABEL`, `hashing/pandas_value_hash.py` |
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
@@ -808,7 +810,7 @@ print(hasher.hash_object(np.array(2.5)).to_string())
 
 Every Arrow-derived hash in the sites above (row data hashes, `record_id`s built from a
 default `source_id`, base and pipeline entry ids, operator and cached-source record hashes,
-`pa.Table` and pandas values) comes from `StarfixArrowHasher.hash_table`, which returns
+`pa.Table` values) comes from `StarfixArrowHasher.hash_table`, which returns
 `ContentHash(method="arrow_v1", digest=D)`. `D` is 35 bytes: the starfix hash format
 number `00 00 02` followed by a SHA-256 digest, computed by `starfix` 0.5 (hash format 2) and
 byte-identical to the Rust `starfix` crate. The byte layout is specified in starfix's
@@ -827,7 +829,12 @@ table would get a different digest. Its number is not kept equal to the starfix 
 strings, binaries and lists hashing alike), nullability at every depth (top-level columns,
 struct fields and list items, whether or not the column holds data), every value, row order, list element
 order, list lengths at every depth, null structs (distinct from structs whose fields are all
-null) and the row count. Column order and struct field order are not part of the hash. How a
+null) and the row count. Column order and struct field order are not part of the hash:
+this is the hash of Orcapod's own tables (streams, datagrams, rows), which ignore order on
+purpose. A value whose own equality depends on order is hashed with
+`StarfixArrowHasher.hash_table_ordered` instead, which is the same procedure with starfix's
+`ordered_columns` and `ordered_struct_fields` options on, so that column order and struct
+field order at every depth are part of the digest; pandas values use it (§10). How a
 table is split into chunks or slices is not part of it either. A `fixed_size_list<T>[n]`
 column hashes differently from a `large_list<T>` column with the same values. Extension
 columns are hashed as their storage type plus their extension name and metadata, including
@@ -985,4 +992,96 @@ hasher = get_default_context().arrow_hasher
 digest = hasher.hash_table(pa.table({"x": pa.array([1, 2, 3], pa.int64())}))
 print(digest.method, digest.digest[:3].hex())
 # arrow_v1 000002
+```
+
+## 10. pandas Value Hash (`pandas_dataframe_v1`, `pandas_series_v1`)
+
+A `pandas.DataFrame` or `pandas.Series` value (a pod input or output, a value in a source
+column, or any object given to the semantic hasher) is hashed by
+`pandas_frame_content_hash` / `pandas_series_content_hash` in
+`orcapod/hashing/pandas_value_hash.py`:
+
+```text
+ContentHash("pandas_dataframe_v1" | "pandas_series_v1",
+            sha256(canonical_json(descriptor) + b"\x00" + D))
+```
+
+- `D` is the 35-byte digest of `StarfixArrowHasher.hash_table_ordered` (§9) over the
+  **values table**: `pa.Table.from_pandas(value, preserve_index=True)` with its fields
+  renamed by position, `c0 .. cN-1` for the columns in frame order, then `i0 .. iM-1` for
+  the index levels in order. A Series is digested as its one-column frame. `D` covers the
+  values, the Arrow types, row order, the row count, **column order, index level order and
+  struct field order**.
+- `descriptor` is canonical JSON (sorted keys, `,` and `:` separators, UTF-8) in a grammar
+  Orcapod owns, built from the pandas objects themselves. It carries what the Arrow values
+  do not show: typed labels, `columns.names`, index level names and the pandas dtypes.
+- The label never enters the computation; only the bytes of `D` do.
+
+```text
+frame:  {"kind": "pandas.dataframe", "height": <rows>,
+         "columns": [[<label>, <dtype>], ...],      in column order
+         "columns_names": [<label>, ...],           columns.names, one per column level
+         "index": [[<label>, <dtype>], ...]}        index levels in order: name, dtype
+series: {"kind": "pandas.series", "height": <rows>, "name": <label>, "dtype": <dtype>,
+         "index": [[<label>, <dtype>], ...]}
+
+<label> := <str> | null | {"bool": b} | {"int": n} | {"float": <float.hex()>}
+         | {"tuple": [<label>, ...]}
+         | {"timestamp": [<epoch value>, <unit>, <tz or null>]} | {"date": <iso date>}
+         | {"timedelta": [<value>, <unit>]} | {"period": [<ordinal>, <period alias>]}
+         | {"nat": "datetime" | "timedelta"}
+<dtype> := {"numpy": <numpy dtype name>}
+         | {"masked": "Int8" | ... | "UInt64" | "Float32" | "Float64" | "boolean"}
+         | {"string": <storage>}
+         | {"datetimetz": [<unit>, <tz>]}
+         | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
+         | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
+         | "arrow"                                  pd.ArrowDtype; the type is in D
+```
+
+**What is identity.** The hash tells apart what pandas' own `assert_frame_equal` /
+`assert_series_equal` tell apart with their default arguments (developer, November 11 and
+12, 2026: order is identity wherever the type's own equality depends on order).
+
+| Property | Part of the hash | Carried by |
+|---|---|---|
+| Column order | yes | `D` (ordered) |
+| MultiIndex level order (frame and Series) | yes | `D` (ordered) |
+| Struct field order in a `pd.ArrowDtype` struct column, at every depth | yes | `D` (ordered) |
+| Values, row order, row count, Arrow type (int width, datetime unit and timezone) | yes | `D` |
+| Index values, index level names, index dtype | yes | `D`, descriptor |
+| `RangeIndex` versus an `int64` index with the same values | no (pandas calls them equal) | |
+| `columns.name` / `columns.names` | yes | descriptor |
+| Column label type (`0` versus `"0"`), MultiIndex columns versus flat labels | yes | descriptor |
+| Series name, typed (`0` versus `"0"`); a frame versus its one-column Series | yes | descriptor |
+| pandas dtype where the Arrow values coincide: `Int64` versus `int64`, `boolean` versus `bool`, `string` versus `object` | yes | descriptor |
+| Categorical versus string; the category list, including unused categories; category order; `ordered` | yes | descriptor |
+| `attrs`, `flags` | no (`flags` is not kept by storage) | |
+| Key order of dicts in an `object` column | no (`dict` is unordered) | |
+| `-0.0` versus `0.0` | yes, although pandas calls them equal: the values are hashed as bytes. This costs a recomputation, never a wrong result | `D` |
+
+A label or dtype outside the grammar raises `ValueError` naming it (a dtype error names its
+column). A value that cannot be converted to Arrow raises `ValueError`.
+
+Storage is not affected: a pandas value is stored as the Arrow IPC stream of
+`pa.Table.from_pandas(value, preserve_index=True)`, which keeps column order, and the
+logical type identifiers stay `pandas.dataframe` / `pandas.series` with `{"version":1}`.
+Before v0.3 a pandas value was hashed as an Arrow table (§9, order ignored), so a frame and
+the same frame with its columns reordered shared a hash, and a cached pod could be served
+the result computed for the other one (ITL-897, ITL-887).
+
+```python
+import pandas as pd
+from orcapod.contexts import get_default_context
+
+semantic_hasher = get_default_context().semantic_hasher
+frame = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+print(semantic_hasher.hash_object(frame).method)
+# pandas_dataframe_v1
+print(semantic_hasher.hash_object(frame) == semantic_hasher.hash_object(frame.copy()))
+# True
+print(semantic_hasher.hash_object(frame) == semantic_hasher.hash_object(frame[["b", "a"]]))
+# False
+print(semantic_hasher.hash_object(frame["a"]).method)
+# pandas_series_v1
 ```

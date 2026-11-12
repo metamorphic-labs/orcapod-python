@@ -1,6 +1,9 @@
 # ITL-897: pandas DataFrame hash ignores column order (step 1: investigation and proposal)
 
-Status: proposal; decisions 1, 2 and 4 are with the developer. No library code is changed.
+Status: implemented for pandas values (November 12, 2026) on `main`'s v0.3 hash step, with
+starfix 0.5.0's ordered options called directly and labels under the ITL-938 label rule
+(`arrow_v0.1` below is `arrow_v1` on `main`). `pa.Table` values are not included. The text
+below is the investigation as written on November 11.
 Mechanism decided (developer, Nov 11): orders come from starfix's ordered mode (ITL-898), not from
 the descriptor. Implementation (coordinator, option A): the Arrow hasher gains `hash_table_ordered`,
 sharing one private starfix call and the semantic preprocessing with `hash_table`; pandas digests
