@@ -162,48 +162,6 @@ class TestGetFunctionSignatureUnionCanonical:
         assert get_function_signature(bar) == get_function_signature(bar)
 
 
-class TestCombineHashes:
-    def test_basic_produces_64_char_hex(self):
-        from orcapod.hashing.hash_utils import combine_hashes
-
-        result = combine_hashes("abc", "def")
-        assert len(result) == 64
-
-    def test_order_false_preserves_insertion_order(self):
-        from orcapod.hashing.hash_utils import combine_hashes
-
-        r1 = combine_hashes("aaa", "bbb")
-        r2 = combine_hashes("bbb", "aaa")
-        assert r1 != r2
-
-    def test_order_true_is_commutative(self):
-        from orcapod.hashing.hash_utils import combine_hashes
-
-        r1 = combine_hashes("aaa", "bbb", order=True)
-        r2 = combine_hashes("bbb", "aaa", order=True)
-        assert r1 == r2
-
-    def test_hex_char_count_truncates(self):
-        from orcapod.hashing.hash_utils import combine_hashes
-
-        result = combine_hashes("abc", "def", hex_char_count=16)
-        assert len(result) == 16
-
-    def test_prefix_hasher_id(self):
-        from orcapod.hashing.hash_utils import combine_hashes
-
-        result = combine_hashes("abc", prefix_hasher_id=True)
-        assert result.startswith("sha256@")
-        assert len(result) == len("sha256@") + 64
-
-    def test_prefix_and_truncation_combined(self):
-        from orcapod.hashing.hash_utils import combine_hashes
-
-        result = combine_hashes("abc", prefix_hasher_id=True, hex_char_count=8)
-        assert result.startswith("sha256@")
-        assert len(result) == len("sha256@") + 8
-
-
 class TestHashFile:
     def test_str_path_accepted(self, tmp_path):
         """Passing a str reaches the _to_path str-conversion branch (line 105)."""

@@ -36,7 +36,6 @@ RECORD_ID_COL = "_tag_record_id::abc"
 
 # Findings whose fix awaits the developer's decision (ITL-942): the tests document the
 # wrong hash and must fail until the fix lands (strict xfail).
-_PENDING_H = pytest.mark.xfail(strict=True, reason="ITL-942 H: fix awaiting decision")
 _PENDING_DICT_KEYS = pytest.mark.xfail(
     strict=True, reason="ITL-942 dict keys: fix awaiting decision"
 )
@@ -96,7 +95,6 @@ def _folded_source_id(stream: Any) -> str:
 
 
 class TestFoldSeparatesMembers:
-    @_PENDING_H
     @pytest.mark.parametrize(
         "make_op", [lambda: Batch(batch_size=2), lambda: GroupBy(by=["g"])]
     )
@@ -105,7 +103,6 @@ class TestFoldSeparatesMembers:
         right = _folded_source_id(make_op()(_stream_with_source_ids(["a", "bc"])))
         assert left != right
 
-    @_PENDING_H
     def test_null_member_differs_from_empty_member(self) -> None:
         left = _folded_source_id(
             Batch(batch_size=2)(_stream_with_source_ids([None, "x"]))
@@ -114,6 +111,22 @@ class TestFoldSeparatesMembers:
             Batch(batch_size=2)(_stream_with_source_ids(["", "x"]))
         )
         assert left != right
+
+    def test_source_info_stays_the_list_of_member_tokens(self) -> None:
+        # Only the scalar system-tag fold changed: source-info columns still list
+        # each member's own provenance token, in member order.
+        source = DictSource(
+            data=[{"g": 1, "k": 1, "x": 10}, {"g": 1, "k": 2, "x": 20}],
+            tag_columns=["g", "k"],
+            source_id="members",
+        )
+        member_tokens = (
+            source.as_table(columns={"source": True}).column("_source_x").to_pylist()
+        )
+        for op in (Batch(batch_size=2), GroupBy(by=["g"])):
+            table = op(source).as_table(columns={"source": True})
+            assert table.column("_source_x").to_pylist() == [member_tokens]
+            assert table.column("x").to_pylist() == [[10, 20]]
 
     def test_member_order_is_identity(self) -> None:
         left = _folded_source_id(

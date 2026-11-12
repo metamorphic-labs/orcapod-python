@@ -417,8 +417,8 @@ Prefixes are computed from `SystemConstant` in `system_constants.py`. The `const
    to a deterministic digest via `arrow_utils.fold_system_tag_values` and their column name
    gains `::{pipeline_hash}` — a blend of rules 2 and 3.
 
-   The fold is SHA-based (`uuid5` for `record_id`, `combine_hashes` for `source_id`) and so is
-   stable across processes. Never use `hash()` or a set-based construction there: the digest
+   The fold is SHA-based (`uuid5` for `record_id`, SHA-256 of the canonical JSON member list
+   for `source_id`) and so is stable across processes. Never use `hash()` or a set-based construction there: the digest
    becomes a cache key, so a per-process value would look correct in a single-process test and
    miss the cache on every new driver run.
 

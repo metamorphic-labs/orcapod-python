@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Collection, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
-from orcapod.hashing.hash_utils import combine_hashes
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, SourceInfoValue
 from orcapod.utils.lazy_module import LazyModule
@@ -1362,7 +1363,9 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
     those columns directly to derive a record's identity.  Each column folds
     independently over its own ordered member values.
 
-    Both digests are SHA-based and therefore stable across processes.  Never
+    Both digests are SHA-based and therefore stable across processes, and both
+    preimages decode back to the ordered member list (no two member lists share
+    a fold).  Never
     substitute ``hash()`` or a set-based construction: orcapod uses the result
     as a cache key, so a per-process digest would miss the cache on every new
     driver run while looking correct in a single-process test.
@@ -1382,11 +1385,20 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
         otherwise.
     """
     if column_name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX):
+        # Hex never contains the separator or "null", so the joined name decodes
+        # back to the member list.
         name = constants.BLOCK_SEPARATOR.join(
-            "" if v is None else v.hex() for v in values
+            "null" if v is None else v.hex() for v in values
         )
         return uuid.uuid5(_AGGREGATED_RECORD_ID_NAMESPACE, name).bytes
-    return combine_hashes(*["" if v is None else str(v) for v in values], order=False)
+    # The canonical JSON array of the members: where one member ends and the next
+    # begins is part of the preimage, and a null member differs from "" (ITL-942 H).
+    members = json.dumps(
+        [None if v is None else str(v) for v in values],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(members.encode("utf-8")).hexdigest()
 
 
 def aggregated_list_type(
