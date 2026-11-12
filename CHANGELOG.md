@@ -150,7 +150,15 @@ read its tables as results, and computes every input again into its own tables.
   `InputValidationError` naming both keys, before anything is computed, delivered or
   written. For a function node this is checked for the whole input, so it fails the run
   whatever the `error_policy`. Only one data context is shipped, so this needs a custom
-  context registry to happen.
+  context registry to happen. It applies to nodes, caches and cached sources used
+  directly. Inside a `PipelineJob` it is not reached: a job wraps every input in a source
+  node of the default data context, so an input of another data context is not seen as
+  such there (a known gap, ITL-951). `ResultCache.store` refuses an output of another
+  data context in the same way.
+- **A full data context key must match its manifest.** `resolve_context` selects a manifest
+  by the version part of a key, and used to return it whatever the rest of the key said
+  (`"custom:v1:production"` gave `std:v1:default`). A full key that is not the manifest's
+  key now raises `ContextResolutionError`.
 - **Hash values.** The content hash of a stream that has no producer (a bare
   `ArrowTableStream`) covers its `_context_key` column, so it changes with the key. No other
   hash value changes because of this entry.

@@ -658,6 +658,9 @@ class OperatorJobNode(OperatorNodeBase):
             pipeline_database: Database for pipeline records.
             cache_mode: Caching behaviour (OFF, LOG, or REPLAY).
         """
+        # Another store has its own tables of other generations to account for.
+        self._stale_tables_checked = False
+        self._skipped_rows_reported = False
         self._pipeline_database = pipeline_database
         self._cache_mode = cache_mode
 
@@ -1007,7 +1010,10 @@ class OperatorJobNode(OperatorNodeBase):
             if cols_to_drop:
                 records_table = records_table.drop(cols_to_drop)
         tag_keys = self.keys()[0]
-        return ArrowTableStream(records_table, tag_columns=tag_keys)
+        # Stored rows are this node's: give them its data context, not the default.
+        return ArrowTableStream(
+            records_table, tag_columns=tag_keys, data_context=self.data_context
+        )
 
     def get_cached_output(self) -> StreamProtocol | None:
         """Return cached output stream in REPLAY mode, else None.
@@ -1114,7 +1120,9 @@ class OperatorJobNode(OperatorNodeBase):
                 records = records.drop(cols_to_drop)
 
         tag_keys = self.keys()[0]
-        self._cached_output_stream = ArrowTableStream(records, tag_columns=tag_keys)
+        self._cached_output_stream = ArrowTableStream(
+            records, tag_columns=tag_keys, data_context=self.data_context
+        )
         self._update_modified_time()
 
     def run(self) -> None:

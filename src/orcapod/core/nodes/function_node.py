@@ -964,6 +964,9 @@ class FunctionJobNode(FunctionNodeBase):
                 ``set_ephemeral_store(ephemeral_database)`` after
                 ``attach_databases()``.
         """
+        # Another store has its own tables of other generations to account for.
+        self._stale_tables_checked = False
+        self._skipped_rows_reported = False
         if pipeline_database is not None:
             if result_database is None:
                 # Default result database is pipeline_database scoped to "_result"

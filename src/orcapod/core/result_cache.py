@@ -194,10 +194,16 @@ class ResultCache:
 
         constraints: dict[str, Any] = {
             constants.INPUT_DATA_HASH_COL: input_data.content_hash().to_prefixed_digest(),
-            constants.DATA_CONTEXT_COL: data_context_key,
         }
         if additional_constraints:
+            if constants.DATA_CONTEXT_COL in additional_constraints:
+                raise ValueError(
+                    f"additional_constraints must not constrain "
+                    f"{constants.DATA_CONTEXT_COL!r}: a lookup always matches the "
+                    "caller's data context only."
+                )
             constraints.update(additional_constraints)
+        constraints[constants.DATA_CONTEXT_COL] = data_context_key
 
         result_table = self._result_database.get_records_with_column_value(
             self._versioned_record_path,
@@ -265,6 +271,7 @@ class ResultCache:
             data_context_key: Key of the caller's data context, stored on the row.
         """
         require_same_data_context(input_data.data_context_key, data_context_key)
+        require_same_data_context(output_data.data_context_key, data_context_key)
         self._account_for_stale_tables(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})

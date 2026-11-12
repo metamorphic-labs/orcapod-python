@@ -252,9 +252,9 @@
     },
     "examples": [
         {
-            "context_key": "std:v0.1:default",
-            "version": "v0.1",
-            "description": "Initial stable release with extension type hashing support",
+            "context_key": "std:v1:default",
+            "version": "v1",
+            "description": "Data context of Orcapod v0.3",
             "type_converter": {
                 "_class": "orcapod.semantic_types.universal_converter.UniversalTypeConverter",
                 "_config": {}

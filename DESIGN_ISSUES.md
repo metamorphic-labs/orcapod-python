@@ -2583,5 +2583,8 @@ Known limits, follow-ups:
   is not given to the rows of its stream; and `PipelineJob` wraps each input in a source
   node of the default data context. So inside a job an input of another data context is
   not seen as such, and the check only fires for nodes and caches driven directly.
+- For the same reason there is no per-row data context check on the cache-hit path of a
+  function node (CodeRabbit, PR #313): every row of a stream carries the stream object's
+  data context, so the whole-input check covers hits and misses. To revisit with ITL-951.
 - Open: whether the in-memory column `_context_key` (`ColumnConfig(context=True)`) is
   renamed to `__data_context` as well. It is unchanged here.

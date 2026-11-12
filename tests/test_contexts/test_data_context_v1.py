@@ -29,10 +29,12 @@ MANIFEST_DIR = CONTEXTS_DIR / "data"
 
 
 def _pins() -> dict[str, str | None]:
+    """The pinned sha256 of each manifest, by version; ``None`` for an open manifest."""
     return json.loads((CONTEXTS_DIR / "released_manifests.json").read_text())
 
 
 def _manifest_files() -> dict[str, Path]:
+    """The manifest files shipped in the package, by version."""
     return {path.stem: path for path in sorted(MANIFEST_DIR.glob("*.json"))}
 
 
@@ -71,8 +73,9 @@ def test_only_the_default_manifest_is_open() -> None:
 
 def test_a_final_release_ships_no_open_manifest() -> None:
     version = Version(orcapod.__version__)
-    if version.is_devrelease or version.local is not None:
-        return  # a development build: the default manifest may still be open
+    if version.is_prerelease or version.local is not None:
+        # A development build or a release candidate: the manifest may still be open.
+        return
     assert None not in _pins().values(), (
         "A release must freeze its data context manifest: set its sha256 in "
         "src/orcapod/contexts/released_manifests.json."
@@ -87,6 +90,7 @@ GOLDEN_DIR = Path(__file__).parents[1] / "test_hashing" / "golden" / "data"
 
 
 def _v1() -> dict[str, object]:
+    """The v1 manifest as parsed JSON."""
     return json.loads((MANIFEST_DIR / "v1.json").read_text())
 
 
@@ -222,3 +226,12 @@ def test_the_pre_v1_data_context_does_not_resolve(name: str) -> None:
     assert "std:v0.1:default" in message
     assert "before v0.3" in message
     assert "orcapod-sanctuary" in message
+
+
+@pytest.mark.parametrize("name", ["custom:v1:production", "std:v1:fast"])
+def test_a_full_key_that_is_not_the_manifests_key_does_not_resolve(name: str) -> None:
+    """Only the version part of a key selects the manifest; the whole key must match it."""
+    with pytest.raises(contexts.ContextResolutionError) as info:
+        _ = contexts.resolve_context(name)
+    assert name in str(info.value)
+    assert "std:v1:default" in str(info.value)

@@ -32,7 +32,7 @@ import pytest
 
 from orcapod import FunctionPod, PipelineJob, contexts, function_pod
 from orcapod.contexts import stored_data_contexts
-from orcapod.core.data_function import CachedDataFunction
+from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
@@ -67,16 +67,19 @@ delivered: list[int] = []
 
 @function_pod(output_keys="double")
 def double(x: int) -> int:
+    """Double ``x`` and record the call."""
     calls.append(x)
     return 2 * x
 
 
 def _deliver(double: int, ctx: Any) -> None:
+    """The side effect of the sink: record what was delivered."""
     delivered.append(double)
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    """Forget the calls and deliveries of earlier tests."""
     calls.clear()
     delivered.clear()
 
@@ -108,6 +111,7 @@ def build_job(
 
 
 def _cached_source(store: Store) -> CachedSource:
+    """A two-row source cached in ``store``."""
     table = pa.table({"k": ["a", "b"], "x": [1, 2]})
     return CachedSource(
         ArrowTableSource(table, tag_columns=["k"], source_id="fixed"),
@@ -148,6 +152,7 @@ def snapshot(store: Store) -> dict[tuple[str, ...], list[dict[str, Any]]]:
 
 
 def delta_files(root: pathlib.Path) -> dict[str, bytes]:
+    """Every file under ``root`` with its bytes."""
     return {
         str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
     }
@@ -173,11 +178,13 @@ def new_store(
 
 @pytest.fixture
 def store(new_store: Callable[[], Store]) -> Store:
+    """One fresh, empty store."""
     return new_store()
 
 
 @pytest.fixture(params=["sync", "async"])
 def orchestrator(request: pytest.FixtureRequest) -> Orchestrator:
+    """The synchronous or the asynchronous orchestrator."""
     return {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}[
         request.param
     ]()
@@ -285,6 +292,7 @@ def both_contexts_store(new_store: Callable[[], Store]) -> Store:
 
 
 def rows_of(table: pa.Table | None, column: str = "double") -> list[Any]:
+    """The sorted values of ``column``; empty for a missing table."""
     return [] if table is None else sorted(table[column].to_pylist())
 
 
@@ -375,11 +383,13 @@ class TestColumnAndLayout:
 
 
 def _triple(x: int) -> int:
+    """Triple ``x``."""
     return 3 * x
 
 
 @function_pod(output_keys="tripled", version="v3.7")
 def triple_v3_7(x: int) -> int:
+    """Triple ``x``; declared with version ``v3.7``."""
     return 3 * x
 
 
@@ -802,6 +812,7 @@ def _sink_job(store: Store) -> PipelineJob:
 def _sink_store(
     new_store: Callable[[], Store], copy: Callable[[Store, Store], None]
 ) -> Store:
+    """A store holding the invocation log of ``_sink_job``, rewritten by ``copy``."""
     written = new_store()
     _ = _sink_job(written).run()
     assert sorted(delivered) == [2, 4]
@@ -901,6 +912,7 @@ def notify(double: int, ctx: Any) -> int:
 
 
 def _notify_job(store: Store) -> PipelineJob:
+    """A job whose only stored node is a function pod that takes the invocation context."""
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
         source = DictSource(
@@ -915,6 +927,7 @@ def _notify_job(store: Store) -> PipelineJob:
 def _notify_store(
     new_store: Callable[[], Store], copy: Callable[[Store, Store], None]
 ) -> Store:
+    """A store holding the completions of ``_notify_job``, rewritten by ``copy``."""
     written = new_store()
     _ = _notify_job(written).run()
     assert sorted(delivered) == [2, 4]
@@ -989,6 +1002,43 @@ class TestSideEffectFunctionNodes:
         _ = _notify_job(store).run(orchestrator=orchestrator)
         assert delivered == []
 
+    def test_a_newly_attached_store_is_checked_again(
+        self, new_store: Callable[[], Store]
+    ):
+        """Attaching another store resets what the node knows about stale tables."""
+        # Only the old pipeline table: the result cache, which is rebuilt on attach,
+        # has nothing to refuse, so the node's own check must run again.
+        written = reopened(_notify_store(new_store, copy_as_v02))
+        old = new_store()
+        for path in written.list_sources():
+            if path[-1] == "pdb_v1":
+                rows = written.get_all_records(path, record_id_column=RID)
+                assert rows is not None
+                old.add_records(path, rows, record_id_column=RID)
+        old.flush()
+        fresh = new_store()
+        source = DictSource(
+            data=[{"k": "a", "double": 2}, {"k": "b", "double": 4}],
+            tag_columns=["k"],
+            source_id="src",
+        )
+        node = FunctionJobNode(
+            function_pod=notify.pod,  # pyright: ignore[reportArgumentType]  # the decorator types .pod as the pod base class
+            input_stream=source,
+            pipeline_database=fresh.at(JOB_NAME),
+            result_database=fresh.at(JOB_NAME, "_result"),
+        )
+        assert node.get_all_records() is None  # the fresh store has been checked
+
+        node.attach_databases(
+            pipeline_database=old.at(JOB_NAME),
+            result_database=old.at(JOB_NAME, "_result"),
+        )
+        with pytest.raises(SideEffectLogDataContextError):
+            node.run()
+
+        assert delivered == []
+
     def test_plain_function_node_in_the_same_store_is_only_reported(
         self, new_store: Callable[[], Store]
     ):
@@ -1042,6 +1092,7 @@ def _other_context_stream(column: str = "x") -> ArrowTableStream:
 
 
 def _assert_names_both_contexts(error: InputValidationError) -> None:
+    """Assert the error names the input's data context and the node's."""
     assert repr(OTHER) in str(error)
     assert repr(CURRENT) in str(error)
 
@@ -1050,8 +1101,10 @@ def _assert_names_both_contexts(error: InputValidationError) -> None:
 class TestInputOfAnotherDataContext:
     """A node does not write rows for an input hashed under another data context.
 
-    A ``PipelineJob`` wraps every input stream in a source node of the default data
-    context, so these tests drive the nodes directly, the way a job drives them.
+    These tests construct the nodes and caches directly. They do not cover a
+    ``PipelineJob``: a job wraps every input stream in a source node of the default
+    data context, so an input of another data context is not seen as such there (a
+    known gap, ``DESIGN_ISSUES.md`` DC1, ITL-951).
     """
 
     def test_function_node_raises_and_writes_nothing(self, store: Store):
@@ -1104,6 +1157,42 @@ class TestInputOfAnotherDataContext:
 
         _assert_names_both_contexts(info.value)
         assert delivered == []
+
+    def test_cached_function_refuses_an_output_of_another_data_context(
+        self, store: Store, other_context: contexts.DataContext
+    ):
+        """A function whose own data context differs produces outputs the cache refuses."""
+        function = PythonDataFunction(
+            _triple, output_keys="tripled", data_context=other_context
+        )
+        cached = CachedDataFunction(
+            function,  # pyright: ignore[reportArgumentType]  # PythonDataFunction does not match DataFunctionProtocol for the checker
+            result_database=store,
+            data_context=CURRENT,
+        )
+
+        with pytest.raises(InputValidationError) as info:
+            _ = cached.call(Data({"x": 1}))
+
+        _assert_names_both_contexts(info.value)
+        assert reopened(store).list_sources() == []
+
+    def test_cached_source_keeps_its_data_context_on_cached_rows(self, store: Store):
+        """Rows read back from the cache carry the source's data context, not the default."""
+        table = pa.table({"k": ["a", "b"], "x": [1, 2]})
+        source = CachedSource(
+            ArrowTableSource(
+                table, tag_columns=["k"], source_id="fixed", data_context=OTHER
+            ),
+            cache_database=store,
+        )
+        assert [data.data_context_key for _, data in source.iter_data()] == [
+            OTHER,
+            OTHER,
+        ]
+        assert stored_data_contexts(reopened(store), table_path(store, "sdb_v1")) == {
+            OTHER: 2
+        }
 
     def test_cached_source_raises_and_writes_nothing(self, store: Store):
         table = pa.table({"k": ["a", "b"], "x": [1, 2]})

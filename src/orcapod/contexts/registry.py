@@ -249,6 +249,20 @@ class JSONDataContextRegistry:
             # Resolve to version
             version = self.resolve_context_string(context_string)
 
+            # A full key selects its manifest by the version part only, so the
+            # whole key must be the one that manifest defines.
+            if (
+                context_string is not None
+                and ":" in context_string
+                and version in self._specs
+                and context_string != self._specs[version]["context_key"]
+            ):
+                raise ContextResolutionError(
+                    f"Unknown data context {context_string!r}: version "
+                    f"{version!r} is the data context "
+                    f"{self._specs[version]['context_key']!r}."
+                )
+
             # Return cached context if available
             if version in self._contexts:
                 logger.debug(f"Returning cached context for version {version}")

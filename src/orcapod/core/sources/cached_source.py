@@ -341,7 +341,10 @@ class CachedSource(RootSource):
             all_records = self._empty_table()
 
         tag_keys = self._source.keys()[0]
-        return ArrowTableStream(all_records, tag_columns=tag_keys)
+        # Cached rows are this source's: give them its data context, not the default.
+        return ArrowTableStream(
+            all_records, tag_columns=tag_keys, data_context=self.data_context
+        )
 
     def _empty_table(self) -> pa.Table:
         """Build an empty Arrow table matching the source's output schema."""

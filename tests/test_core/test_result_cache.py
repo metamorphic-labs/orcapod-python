@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+import pytest
+
 from orcapod.contexts import get_default_context
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.core.datagrams.tag_data import EmptyData
@@ -201,6 +203,17 @@ class TestAdditionalConstraints:
             data_context_key=CONTEXT_KEY,
         )
         assert result is None
+
+    def test_additional_constraints_cannot_replace_the_data_context(self):
+        """A caller's constraint on ``__data_context`` must not widen the lookup."""
+        cache, _ = _make_cache()
+        input_pkt = Data({"x": 10})
+        with pytest.raises(ValueError, match="__data_context"):
+            _ = cache.lookup(
+                input_pkt,
+                additional_constraints={constants.DATA_CONTEXT_COL: "std:v0.9:other"},
+                data_context_key=CONTEXT_KEY,
+            )
 
     def test_matching_constraint_returns_result(self):
         cache, _ = _make_cache()

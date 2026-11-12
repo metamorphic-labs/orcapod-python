@@ -709,8 +709,10 @@ doing anything when it finds its tables at an older layout or completions of ano
 context in its current tables.
 
 A node stores rows for inputs of its own data context only: an input of another data context
-raises `InputValidationError` naming both keys before anything is written. (What should
-eventually happen instead is tracked in ITL-951.) `std:v0.1:default` itself is not shipped
+raises `InputValidationError` naming both keys before anything is written. This holds for
+nodes, caches and cached sources used directly; inside a `PipelineJob` every input is wrapped
+in a source node of the default data context, so the refusal is not reached there. (What
+should eventually happen instead is tracked in ITL-951.) `std:v0.1:default` itself is not shipped
 with v0.3 and does not resolve; a pipeline or job file saved by v0.2 loads under the current
 data context with a warning.
 
