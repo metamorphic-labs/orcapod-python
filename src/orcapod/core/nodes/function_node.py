@@ -2191,6 +2191,9 @@ class FunctionJobNode(FunctionNodeBase):
     def as_source(self):
         """Return a DerivedSource backed by the DB records of this node.
 
+        Its ``source_id`` is the ``DerivedSource`` default,
+        ``derived:<algorithm label>:<hex>`` of this node's content hash.
+
         Raises:
             RuntimeError: If no database is attached.
         """
@@ -2199,13 +2202,10 @@ class FunctionJobNode(FunctionNodeBase):
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        path_str = "/".join(self.node_identity_path)
-        # A source id is the source's name: a default built from a hash keeps the
-        # hash's label (developer, November 11, 2026).
-        source_id = f"{path_str}:{self.content_hash().to_string()}"
+        # No source_id is given: the source takes the DerivedSource default,
+        # ``derived:<algorithm label>:<hex>`` of this node's content hash.
         return DerivedSource(
             origin=self,
-            source_id=source_id,
             data_context=self.data_context_key,
             config=self.orcapod_config,
         )

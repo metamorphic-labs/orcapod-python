@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
@@ -41,6 +42,9 @@ class DerivedSource(RootSource):
     it reflects the computed records.
     """
 
+    # The kind prefix of the default source id.
+    SOURCE_KIND: ClassVar[str] = "derived"
+
     def __init__(
         self,
         origin: "FunctionNode | OperatorNode",
@@ -48,10 +52,10 @@ class DerivedSource(RootSource):
         **kwargs: Any,
     ) -> None:
         if source_id is None:
-            # A source id is the source's name, used as-is in system tags and
-            # source-info values. A default built from a hash keeps a source-kind
-            # prefix and the hash's label (developer, November 11, 2026).
-            source_id = f"derived:{origin.content_hash().to_string()}"
+            # A source id is the source's name. A default built from a hash keeps
+            # a source-kind prefix and the hash's label (developer, November 11,
+            # 2026): ``derived:<algorithm label>:<hex>`` of the origin's content hash.
+            source_id = hash_source_id(self.SOURCE_KIND, origin.content_hash())
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._cached_table: pa.Table | None = None

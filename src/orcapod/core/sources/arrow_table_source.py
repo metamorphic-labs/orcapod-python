@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -68,6 +68,9 @@ class ArrowTableSource(RootSource):
     and set ``record_id_column`` to a column that is unique per row.
     """
 
+    # The config type key; also the kind prefix of the default source id.
+    SOURCE_KIND: ClassVar[str] = "arrow_table"
+
     def __init__(
         self,
         table: "pa.Table",
@@ -93,6 +96,7 @@ class ArrowTableSource(RootSource):
             table,
             tag_columns=tag_columns,
             source_id=self._source_id,
+            source_kind=self.SOURCE_KIND,
             record_id_column=record_id_column,
             system_tag_columns=system_tag_columns,
         )
@@ -110,7 +114,7 @@ class ArrowTableSource(RootSource):
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (in-memory table is not serializable)."""
         return {
-            "source_type": "arrow_table",
+            "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
             "source_id": self.source_id,
             **self._identity_config(),

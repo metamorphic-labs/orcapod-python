@@ -196,6 +196,13 @@ def renamed_labels(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
     yield RENAMED
 
 
+# Golden cases built on a default source id (no ``source_id`` given): "<group>:<case>.".
+DEFAULT_ID_CASES = (
+    "schema:source_stream_builder.default_source_id.",
+    "pipeline:default_source_ids.",
+)
+
+
 def _fresh_golden_values() -> str:
     """Every pinned hash, path and column name, computed now, as one JSON text.
 
@@ -211,7 +218,10 @@ class TestRenamingALabelChangesNoDigest:
     def test_every_pinned_value_keeps_its_digest(
         self, request: pytest.FixtureRequest
     ) -> None:
-        """Every golden value, recomputed under renamed labels, differs in label text only."""
+        """Every golden value, recomputed under renamed labels, differs in label text only.
+
+        The one exception is what follows from a default source id (rule 5a).
+        """
         before = _fresh_golden_values()
         renamed: dict[str, str] = request.getfixturevalue("renamed_labels")
         after = _fresh_golden_values()
@@ -231,7 +241,19 @@ class TestRenamingALabelChangesNoDigest:
             for entry, value in entries.items()
             if restored_values[group].get(entry) != value
         ]
-        assert not moved, f"{len(moved)} values depend on a label: {moved[:10]}"
+        # Rule 5a, the stated exception: a default source id built from a hash is a
+        # name that holds the label (``<source kind>:<algorithm label>:<hex>``), and
+        # the name is an input of the source's content hash and of its record ids.
+        # So a renamed label moves those for a source with no given ``source_id``
+        # (developer, November 11, 2026; ITL-957), and for nothing else.
+        by_rule_5a = [entry for entry in moved if entry.startswith(DEFAULT_ID_CASES)]
+        others = [entry for entry in moved if not entry.startswith(DEFAULT_ID_CASES)]
+        assert not others, f"{len(others)} values depend on a label: {others[:10]}"
+        assert by_rule_5a
+        assert all(
+            entry.endswith(".content_hash") or "._tag_record_id::" in entry
+            for entry in by_rule_5a
+        ), by_rule_5a
 
     def test_directory_hash_keeps_its_digest(
         self, tmp_path: Path, request: pytest.FixtureRequest
@@ -357,9 +379,10 @@ class TestNamesHoldBareDigests:
         labelled = node.content_hash().to_string()
         assert labelled.startswith("semantic_v1:")
 
+        # as_source() gives the DerivedSource default; the node path is not part
+        # of the id (ITL-957).
         from_node = node.as_source()
-        path = "/".join(node.node_identity_path)
-        assert from_node.source_id == f"{path}:{labelled}"
+        assert from_node.source_id == f"derived:{labelled}"
 
         plain = DerivedSource(origin=node)
         assert plain.source_id == f"derived:{labelled}"
