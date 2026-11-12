@@ -1065,13 +1065,13 @@ The rule:
 | 2 | Format `<algorithm>_v<N>`, integer `N`. **In v0.3 every label is `_v1`**: `semantic_v1`, `arrow_v1`, `ndarray_v1`, `polars_expr_v1`. "Let's let all version be simply v1 for this release since we used to have v0.1, v0.2." The labels of `H0` (`_v0.x`) and of `H1` (`_v1`) are therefore visibly different | **decided** |
 | 2a | **Stated exception: a file's hash keeps the label `sha256`.** "I'd like to keep it as one stated exception with sha256 as that's literally what we do to get hash of a file." The label is the name of the digest function applied to the file's bytes (the file hasher's algorithm is configurable, and the label follows it) | **decided** |
 | 2b | The directory hash is a procedure of its own ("folder hashing is implementation specific"), so it follows the format: `merkle_sha256` becomes `directory_v1` ("directory_v1 is better than folder_v1"), matching the type name `orcapod.Directory` | **decided** |
-| 3 | A label changes when its algorithm changes so that some existing input would get a different digest; an extension that leaves existing digests alone keeps it | proposed |
-| 4 | A hash stored as a value carries its label: `label:hex` in text, `label:` + raw bytes in a binary column | proposed |
-| 5 | A hash used inside a name (path component, column name, function or operator identity, source-info token) is bare hex | proposed |
+| 3 | A label changes when its algorithm would give an existing input, even if not all inputs, a different digest; an extension that leaves existing digests alone keeps it | **decided** |
+| 4 | A hash stored as a value carries its label: `label:hex` in text, `label:` + raw bytes in a binary column. The operator cache row key and the cached-source row key, bare today, become labelled | **decided** |
+| 5 | A hash used inside a name (path component, column name, function or operator identity, source-info token) is bare hex. Reasons: a path must change only when schema or subject changes, and a label in the name would change it on a label bump even when the digest is unchanged; names are mixed today and bare is the shorter way to make them uniform; `:` in names is rewritten on Windows, constrains table names on SQL backends and makes the source-info token ambiguous | **decided** |
 | 6 | A label never enters a hash computation: a nested hash contributes its digest only. "Agree with rule 6 - it simplifies and also I don't think the extra guarantee was meaningful anyway." The guarantee given up: that two different algorithms can never feed the same text into a parent hash. With SHA-256 that needs two algorithms to hash the very same bytes, and the position and type of the value (the schema, the extension name in an Arrow cell) already tell the two apart | **decided** |
-| 7 | An identifier built by a recipe (record ids) is not a labelled hash; its recipe is named in the data context file | proposed |
-| 8 | A logical type's value hash follows the same format; its implementer picks the label | proposed |
-| 9 | Each label is defined once, next to its algorithm, and listed in the data context file | proposed |
+| 7 | An identifier built by a recipe (record ids) is not a labelled hash; its recipe is named in the data context file | **decided** |
+| 8 | A logical type's value hash follows the same format; its implementer picks the label | **decided** |
+| 9 | Each label MUST be defined in a single place, and is listed in the data context file | **decided** |
 
 ## Part 6. Paths before and after v0.3 (decided)
 
@@ -1087,8 +1087,16 @@ before (H0)   <job>/<function name>/<output-schema hash>/v<major>/<wrapper kind>
               source/node:<content hash>                                                      (no layout component)
               side_effects/<name>/schema:<pipeline hash>/tdb_v1
 
-after  (H1)   …/pdb_v2        …/rdb_v2        operator cache and cached source gain a layout component        …/tdb_v2
+after  (H1)   <job>/<function name>/<output-schema digest>/v<major>/<wrapper kind>/schema:<pipeline digest>/pdb_v2
+              <job>/_result/<function name>/<output-schema digest>/v<major>/<wrapper kind>/rdb_v2
+              operator cache and cached source gain a layout component;  side-effect log …/tdb_v2
+
+example       my_pipeline/double/semantic_v0.1:17de3328…a26939/v0/python.function.v0/schema:semantic_v0.1:6fe7280a…b9ec94/pdb_v1     (H0)
+              my_pipeline/double/<64 hex>/v0/python.function.v0/schema:<64 hex>/pdb_v2                                              (H1)
 ```
+
+Digests inside a path are bare in `H1` (5.6, rule 5), and their values differ from `H0`
+because labels no longer enter hash computations (rule 6).
 
 The hashes inside a path also move for nodes that involve a logical type, because the whole
 type identifier now enters the schema hash, and for nodes touched by the wrong-hash fixes.
@@ -1120,7 +1128,7 @@ table untouched, to be migrated.
 | **Manifest** | One file per data context version, frozen at release, naming every definition the version covers. The current one ships in Orcapod; all of them, with the old code, in `orcapod-sanctuary` |
 | **`__data_context` column** | In every Orcapod table. Rows under the current data context are the current entries; reads and lookups filter on it |
 | **Logical type identifier** | Arrow extension name + extension metadata, owned by the type's implementer, built-in types included. Changes only when an existing value would be stored or hashed differently. Stored with the column; all of it enters the schema hash; a change is a schema change and so a new path |
-| **Label on a hash** | Names the algorithm that produced that value. Informational. Changes when that algorithm changes |
+| **Label on a hash** | `<algorithm>_v<N>`; names the whole hashing procedure that produced that digest; informational. Every label is `_v1` in v0.3 (`semantic_v1`, `arrow_v1`, `directory_v1`, …); the file hash keeps `sha256`. Changes only when an existing input would get a different digest. Stored with a hash kept as a value; absent from hashes inside names; never part of a hashed input; defined in one place |
 | **Function major version** | Stays in the path: the user's handle for a clean break |
 | **Old layout found** | Count and skip. Side-effect logs fail explicitly |
 | **Source identity** | Chosen by the source: content or address. Same `source_id` and same record id mean the same entry |
@@ -1135,6 +1143,7 @@ table untouched, to be migrated.
 | 4 | **Logical type identifiers** (ITL-935): the contract; every built-in type writes an identifier; the whole identifier enters the schema hash | to dispatch | stored column type, schema hash and paths of every table with a file, path, directory, UUID, DataFrame, Series or array column |
 | 5 | User class identity (PR #292); dict and set order (PR #301) | open PRs | as in 5.2 |
 | 6 | New types follow the contract: torch (PR #300), Polars values (PR #286), pandas changes (ITL-897). No label used as a version marker | held | new entries only |
+| 6a | **Hash label rule** (5.6): labels renamed to `_v1`; labels removed from every hashed input; bare digests in path components and source-info tokens; labelled row keys for the operator cache and cached source; each label defined once | to file | every structure hash that contains a nested hash; every Arrow hash over a logical-type cell; every path component |
 | 7 | Golden rule in CI: an existing golden value may change only together with a data context version increment, or with the identifier of the logical type it belongs to | to file | — |
 | 8 | Function version stored as a column of the result table. Checked by reading the code and by running a function declared `version="v3.7"` on main and on `61d0f18`: no column of either table holds the version or its minor part. The major part is in the path (`…/v3/…`); the full string is only in a saved job file (`"version": "v3.7"`). The body is tracked (`__pf_var_function_content_hash`), the version is not. **History:** until November 10, 2025 the cached pod wrote a tiered pod id as columns `__pod_id_version` (the full version string), `__pod_id_signature`, `__pod_id_content`, `__pod_id_git_hash`, and a lookup could be restricted to one tier (`match_tier`). The refactor `8f5e2fa69` ("major cleanup and simplification of protocols", November 10, 2025) replaced that with `get_function_variation_data()` = name, signature hash, content hash, git hash: `version` was dropped from the stored columns, `minor_version_string` was added as a property that nothing reads, and the tier-restricted lookup was left as commented-out code. Decided: restore it, as `__pf_var_function_version` holding the full version string | to file | result-table layout |
 | 9 | Documentation: `CLAUDE.md` and `docs/reference/hashing.md` (what the content hash covers, the system-tag prefix, the label rule, the path rule, the data context rule) | to file | — |
@@ -1190,6 +1199,12 @@ file or section), and the versioned file keeps only the core.
    component. Reads and lookups use rows of the current data context only. A table at an old
    layout is counted and skipped, with one total reported; side-effect logs raise instead.
    Freeze `v1.json` at the tag.
+1a. **Hash label rule.** Apply 5.6: rename the labels (`semantic_v1`, `arrow_v1`,
+   `directory_v1`; the file hash keeps `sha256`); feed only digests into hash computations
+   (structure hasher expansion, the generic, union and schema handlers, the Arrow cell token);
+   store bare digests in path components and source-info tokens; label the operator-cache and
+   cached-source row keys; define each label in one place. Sequence it before the final
+   golden regeneration of v0.3.
 2. **Manifest format for a data context version.** Define the manifest: one entry per
    definition the version covers (structure hashing, Arrow hashing and its preparation step,
    identity compositions, record-id, entry-id and fold recipes, conversion rules, the
