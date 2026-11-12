@@ -12,8 +12,8 @@ uv run python scripts/design_issues.py --status open   # only open / in progress
 uv run python scripts/design_issues.py --full          # the text of every entry, by area
 ```
 
-The index gives each entry's id, status, severity, Linear issue and title under its area
-heading, and ends with a count by status. To find one entry, search this directory for its
+The index gives each entry's id, status, severity, Linear issue, file name and title under
+its area heading, and ends with a count by status. To find one entry, search this directory for its
 id: `ls design_issues/*-GB1.md`.
 
 ## An entry file
@@ -75,7 +75,7 @@ uv run python scripts/design_issues.py --check
 
 fails if a file in this directory other than `README.md` is not named
 `<LINEAR-ISSUE-ID>-<ENTRY-ID>.md`, is empty, does not start with one `## ` area heading
-followed by one `### <ENTRY-ID> — <title>` heading, has an entry id that differs from the
+a blank line, and one `### <ENTRY-ID> — <title>` heading, has an entry id that differs from the
 one in its name, lacks a valid `**Status:**` or `**Severity:**` line, is named for an issue
 its `**Issue:**` line does not mention, has no body, or has a code fence that is never
 closed. `tests/test_design_issues.py` runs the same check, so CI rejects a malformed entry.
@@ -95,12 +95,21 @@ entries:
   check exempts.
 
 A branch that still edits an entry in `DESIGN_ISSUES.md` conflicts once when it merges
-`main` (the file is deleted there). Keep the branch's copy, then:
+`main` (the file is deleted there). While that merge is in progress, keep the branch's
+copy, then:
 
 ```
 uv run python scripts/migrate_design_issues.py --source DESIGN_ISSUES.md
-git rm DESIGN_ISSUES.md
+git rm -f DESIGN_ISSUES.md
+git diff MERGE_HEAD --stat -- design_issues/
 ```
 
-The script rewrites only the entry files whose text differs, and creates a file for each
-entry the branch added.
+The script prints `created:` for each entry the branch added and `updated:` for each entry
+file whose text differs from the branch's copy. That copy is older than `main` for every
+entry `main` changed after the branch started, so an `updated:` file is not always yours:
+the last command must list only the entries your branch added or edited. Put every other
+file back before committing the merge:
+
+```
+git checkout MERGE_HEAD -- design_issues/<file>
+```

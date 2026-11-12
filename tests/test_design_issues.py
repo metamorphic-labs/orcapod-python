@@ -29,6 +29,7 @@ Body text.
 
 
 def _run(script: Path, *args: str | Path) -> subprocess.CompletedProcess[str]:
+    """Run a script with the given arguments and capture its output."""
     return subprocess.run(
         [sys.executable, str(script), *map(str, args)],
         capture_output=True,
@@ -47,10 +48,12 @@ def entries(tmp_path: Path) -> Path:
 
 
 def _check(directory: Path) -> subprocess.CompletedProcess[str]:
+    """Run ``design_issues.py --check`` on a directory."""
     return _run(SCRIPT, "--check", "--dir", directory)
 
 
 def _write(directory: Path, name: str, text: str) -> None:
+    """Write one file into an entries directory."""
     (directory / name).write_text(text, encoding="utf-8")
 
 
@@ -152,6 +155,8 @@ def test_check_rejects_a_wrong_file_name(entries: Path, name: str) -> None:
         ("", "empty"),
         ("\n \n", "empty"),
         (ENTRY.removeprefix("## `src/x.py` — things\n\n"), "area heading"),
+        (ENTRY.replace("things\n\n###", "things\n###"), "no blank line"),
+        (ENTRY.replace("things\n\n###", "things\nStray.\n\n###"), "text between"),
         (ENTRY.replace("### AB1 — A title", "### AB1 A title"), "### <ENTRY-ID> — "),
         (ENTRY.replace("### AB1", "### AB2"), "AB2"),
         (ENTRY.replace("**Status:** open\n", ""), "**Status:**"),
@@ -234,11 +239,32 @@ def test_index_lists_every_entry_by_area(log: Path) -> None:
     assert result.returncode == 0, result.stderr
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert lines[0] == "## An area that sorts first"
-    assert lines[1].split() == ["Z1", "in", "progress", "low", "PLT-3", "Third"]
+    assert lines[1].split() == [
+        "Z1",
+        "in",
+        "progress",
+        "low",
+        "PLT-3",
+        "PLT-3-Z1.md",
+        "Third",
+    ]
     assert lines[2] == "## `src/x.py` — things"
     # Entry ids order by their number: AB2 before AB10.
-    assert lines[3].split() == ["AB2", "resolved", "high", "-", "Second"]
-    assert lines[4].split()[:4] == ["AB10", "open", "medium", "ITL-7"]
+    assert lines[3].split() == [
+        "AB2",
+        "resolved",
+        "high",
+        "-",
+        "NOISSUE-AB2.md",
+        "Second",
+    ]
+    assert lines[4].split()[:5] == [
+        "AB10",
+        "open",
+        "medium",
+        "ITL-7",
+        "ITL-7-AB10.md",
+    ]
     assert lines[4].endswith("A title with `code`")
     assert lines[5] == "3 design issues: 1 open, 1 in progress, 1 resolved"
 
@@ -316,12 +342,14 @@ Body three.
 
 @pytest.fixture
 def source(tmp_path: Path) -> Path:
+    """A single-file log holding ``LOG``."""
     path = tmp_path / "DESIGN_ISSUES.md"
     path.write_text(LOG, encoding="utf-8")
     return path
 
 
 def _migrate(source: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run the migration from ``source`` into an ``out`` directory beside it."""
     return _run(MIGRATE, "--source", source, "--out", source.parent / "out", *args)
 
 

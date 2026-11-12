@@ -11,7 +11,7 @@ Usage:
     uv run python scripts/design_issues.py --check
 
 Without an option it prints an index: every entry by area, with its id, status, severity,
-Linear issue and title. ``--full`` prints the text of every entry, grouped by area, as one
+Linear issue, file name and title. ``--full`` prints the text of every entry, grouped by area, as one
 Markdown document. ``--check`` only validates the entry files. The script changes nothing
 and uses the standard library only.
 """
@@ -176,6 +176,8 @@ def parse_entry(text: str) -> Entry:
     start = entry_lines[0]
     if any(line.strip() for line in lines[1:start]):
         problems.append("has text between the area heading and the entry heading")
+    elif start == 1:
+        problems.append("has no blank line between the area heading and the entry")
 
     fields: dict[str, str] = {}
     order: list[str] = []
@@ -290,15 +292,16 @@ def _entry_order(entry: Entry) -> tuple[str, str, int, str]:
     return area, parts.group(1), int(parts.group(2) or 0), parts.group(3)
 
 
-def format_index(entries: Sequence[Entry]) -> str:
+def format_index(named: Sequence[tuple[str, Entry]]) -> str:
     """Format entries as an index: one line per entry under its area heading.
 
     Args:
-        entries: The entries, in the order to list them.
+        named: Each entry with the name of its file, in the order to list them.
 
     Returns:
         The index text, ending with a count by status.
     """
+    entries = [entry for _, entry in named]
     widths = [
         max((len(value) for value in column), default=0)
         for column in (
@@ -306,11 +309,12 @@ def format_index(entries: Sequence[Entry]) -> str:
             [e.status_word for e in entries],
             [e.severity or "-" for e in entries],
             [(e.issue_ids or ("-",))[0] for e in entries],
+            [name for name, _ in named],
         )
     ]
     out: list[str] = []
     area: str | None = None
-    for entry in entries:
+    for name, entry in named:
         if entry.area != area:
             area = entry.area
             out.extend(["", area, ""] if out else [area, ""])
@@ -319,6 +323,7 @@ def format_index(entries: Sequence[Entry]) -> str:
             entry.status_word,
             entry.severity or "-",
             (entry.issue_ids or ("-",))[0],
+            name,
         )
         padded = "  ".join(cell.ljust(width) for cell, width in zip(cells, widths))
         out.append(f"{padded}  {entry.title}")
@@ -382,18 +387,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
-    entries = [
-        entry
-        for _, entry in loaded
+    named = [
+        (path.name, entry)
+        for path, entry in loaded
         if args.status is None or entry.status_word == args.status
     ]
     if args.check:
         noun = "design issue" if len(loaded) == 1 else "design issues"
         print(f"{len(loaded)} {noun} OK")
     elif args.full:
-        sys.stdout.write(format_full(entries))
+        sys.stdout.write(format_full([entry for _, entry in named]))
     else:
-        sys.stdout.write(format_index(entries))
+        sys.stdout.write(format_index(named))
     return 0
 
 

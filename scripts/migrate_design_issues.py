@@ -20,9 +20,10 @@ file). ``--verify`` writes nothing: it rebuilds the source from its own preamble
 separators plus the entry files on disk, and fails unless the result equals the source
 byte for byte.
 
-A branch that still edits an entry in ``DESIGN_ISSUES.md`` can use the script after
-merging ``main``: keep the branch's copy of the file, run the script on it, delete the
-copy, and commit the entry files that changed. The script uses the standard library only.
+A branch that still edits an entry in ``DESIGN_ISSUES.md`` can use the script while
+merging ``main``; ``design_issues/README.md`` gives the steps. The branch's copy is older
+than ``main`` for every entry ``main`` changed since, so keep only the rewritten files of
+the entries the branch itself changed. The script uses the standard library only.
 """
 
 from __future__ import annotations
@@ -121,6 +122,7 @@ def split_log(text: str) -> list[Piece]:
     area: str | None = None
 
     def close_entry() -> None:
+        """Add the open entry to ``pieces``; its trailing blank lines go to ``between``."""
         nonlocal entry
         if entry is None:
             return
