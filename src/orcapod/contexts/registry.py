@@ -20,6 +20,12 @@ from orcapod.contexts.core import (
 )
 from orcapod.utils.object_spec import parse_objectspec
 
+# The data context of everything Orcapod wrote before v0.3. Its manifest is not
+# shipped: stored rows that carry this key, and tables without a data context column,
+# belong to it.
+PRE_V1_DATA_CONTEXT_VERSION = "v0.1"
+PRE_V1_DATA_CONTEXT_KEY = "std:v0.1:default"
+
 logger = logging.getLogger(__name__)
 
 # Check jsonschema availability once at import time so the "not available"
@@ -251,6 +257,14 @@ class JSONDataContextRegistry:
                 return self._contexts[version]
 
             # Validate version exists
+            if version not in self._specs and version == PRE_V1_DATA_CONTEXT_VERSION:
+                raise ContextResolutionError(
+                    f"The data context {PRE_V1_DATA_CONTEXT_KEY!r} is the one of "
+                    "Orcapod before v0.3. This version of Orcapod does not ship its "
+                    "manifest and cannot hash under it; the old manifest and its "
+                    "code are to be kept in orcapod-sanctuary. Use an Orcapod "
+                    "version before v0.3 for stores and jobs written under it."
+                )
             if version not in self._specs:
                 available = ", ".join(self.get_available_versions())
                 raise ContextResolutionError(

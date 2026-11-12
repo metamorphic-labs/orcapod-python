@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from orcapod.errors import SchemaVersionError, StoreReadError, StoreWriteError
+from orcapod.errors import StoreReadError, StoreWriteError
 from orcapod.contexts.stored import (
     StaleTable,
     keep_rows_of_data_context,
@@ -38,12 +38,6 @@ else:
     pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
-
-
-# Process-level cache of v1 result DB paths that have already been checked for
-# legacy v0 schema. Populated on first access; prevents repeated table_exists
-# calls for the same path within a single process.
-_checked_rdb_paths: set[tuple[str, ...]] = set()
 
 
 class ResultCache:
@@ -89,7 +83,6 @@ class ResultCache:
         self._record_path = record_path
         self._auto_flush = auto_flush
         self._delivers_side_effects = delivers_side_effects
-        self._ignore_schema: tuple[str, ...] | None = None
         # Set once a read has reported the stored rows it skipped.
         self._skipped_rows_reported = False
         # Set once stored results of other generations have been accounted for.
@@ -101,21 +94,11 @@ class ResultCache:
         return self._result_database
 
     @property
-    def base_record_path(self) -> tuple[str, ...]:
-        """The unversioned base record path (v0 path), without schema version suffix.
-
-        Used by migration utilities that need to reference the legacy v0 table
-        path. The public ``record_path`` property returns the versioned v1 path.
-        """
-        return self._record_path
-
-    @property
     def record_path(self) -> tuple[str, ...]:
         """The versioned path where records are stored.
 
-        Returns ``_record_path + (RESULT_DB_SCHEMA_VERSION,)`` — the actual
-        storage location of result records in the v1 schema.  Use
-        ``base_record_path`` to access the unversioned path.
+        Returns ``_record_path + (RESULT_DB_SCHEMA_VERSION,)``: the actual storage
+        location of result records. The layout version is the last component.
         """
         return self._versioned_record_path
 
@@ -128,20 +111,10 @@ class ResultCache:
         """Set auto-flush behavior."""
         self._auto_flush = on
 
-    def set_ignore_schema(self, ignore_schema: tuple[str, ...] | None) -> None:
-        """Set which old schema versions to tolerate without raising ``SchemaVersionError``.
-
-        Args:
-            ignore_schema: Tuple of schema version strings to tolerate (e.g.
-                ``("v0",)``), or ``None`` to use the default (raise on any
-                old schema).
-        """
-        self._ignore_schema = ignore_schema
-
     def stale_tables(self, data_context_key: str) -> list[StaleTable]:
         """Find stored results of other generations: rows this cache will not use.
 
-        Result tables at an older layout (``rdb_v1``), and, for a cache whose
+        Result tables at an older layout (``rdb_v1``, or no layout component), and, for a cache whose
         function delivers side effects, rows of another data context in the current
         table (ITL-944). The tables are only read.
 
@@ -153,10 +126,12 @@ class ResultCache:
         """
         return find_stale_tables(
             self._result_database,
+            # Orcapod v0.1 stored the table at the path without a layout component.
             tuple(
                 self._record_path + (layout,)
                 for layout in OLD_RESULT_DB_SCHEMA_VERSIONS
-            ),
+            )
+            + (self._record_path,),
             current=(self._versioned_record_path, data_context_key)
             if self._delivers_side_effects
             else None,
@@ -177,54 +152,6 @@ class ResultCache:
             current_context=data_context_key,
         )
         self._stale_tables_checked = True
-
-    def _ensure_rdb_schema(self, data_context_key: str) -> None:
-        """Check for a legacy v0 result DB on first access per path.
-
-        Detection flow (runs at most once per v1 path per process):
-
-        1. If the v1 path is already in ``_checked_rdb_paths`` → return immediately.
-        2. If the v1 table exists → mark checked and return.
-        3. If the v0 path (bare ``_record_path``) has a table:
-           - ``"v0"`` in ``_ignore_schema`` → log info, continue.
-           - Otherwise → raise ``SchemaVersionError``.
-        4. Neither path exists → fresh database, continue.
-        5. Mark v1 path as checked.
-
-        Args:
-            data_context_key: Key of the caller's data context.
-
-        Raises:
-            SchemaVersionError: If a v0 table is detected and not ignored.
-            SideEffectLogDataContextError: If this cache's function delivers side
-                effects and results of another generation exist.
-        """
-        self._account_for_stale_tables(data_context_key)
-        v1_path = self._versioned_record_path
-        if v1_path in _checked_rdb_paths:
-            return
-        if self._result_database.table_exists(v1_path):
-            _checked_rdb_paths.add(v1_path)
-            return
-        v0_path = self._record_path
-        if self._result_database.table_exists(v0_path):
-            ignore = self._ignore_schema or ()
-            if "v0" not in ignore:
-                raise SchemaVersionError(
-                    f"Result DB rows found at v0 schema path {'/'.join(v0_path)!r}.\n"
-                    "Run migration first:\n"
-                    f"  orcapod migrate result-db <DB_PATH> {'/'.join(v0_path)}\n"
-                    "To suppress this error and recompute all results instead, set:\n"
-                    '  node.node_config = NodeConfig(ignore_schema=("v0",))'
-                )
-            logger.info(
-                "Result DB v0 schema detected at %r — proceeding because "
-                "ignore_schema=%r",
-                v0_path,
-                ignore,
-            )
-        # Only cache as checked after the raise-or-ignore decision passes.
-        _checked_rdb_paths.add(v1_path)
 
     def lookup(
         self,
@@ -259,7 +186,7 @@ class ResultCache:
         """
         from orcapod.core.datagrams import Data
 
-        self._ensure_rdb_schema(data_context_key)
+        self._account_for_stale_tables(data_context_key)
 
         RECORD_ID_COL = "_record_id"
 
@@ -335,7 +262,7 @@ class ResultCache:
                 same ID already exists.
             data_context_key: Key of the caller's data context, stored on the row.
         """
-        self._ensure_rdb_schema(data_context_key)
+        self._account_for_stale_tables(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})
 
@@ -417,7 +344,7 @@ class ResultCache:
         Returns:
             A PyArrow table of cached results, or ``None`` if empty.
         """
-        self._ensure_rdb_schema(data_context_key)
+        self._account_for_stale_tables(data_context_key)
 
         record_id_column = constants.DATA_RECORD_ID if include_system_columns else None
         result_table = self._result_database.get_all_records(

@@ -436,7 +436,7 @@ class OperatorNode(OperatorNodeBase):
         # From DataContextMixin
         from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
 
-        node._data_context = contexts.resolve_context(
+        node._data_context = contexts.resolve_saved_context(
             descriptor.get("data_context_key")
         )
         config_dict = descriptor.get("config")
@@ -747,7 +747,7 @@ class OperatorJobNode(OperatorNodeBase):
         # From DataContextMixin
         from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
 
-        node._data_context = contexts.resolve_context(
+        node._data_context = contexts.resolve_saved_context(
             descriptor.get("data_context_key")
         )
         config_dict = descriptor.get("config")

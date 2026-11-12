@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, NamedTuple, Protocol, cast
 
+from orcapod.contexts.registry import PRE_V1_DATA_CONTEXT_KEY
 from orcapod.errors import SideEffectLogDataContextError
 from orcapod.system_constants import constants
 from orcapod.utils.lazy_module import LazyModule
@@ -39,10 +40,6 @@ else:
     pc = LazyModule("pyarrow.compute")
 
 logger = logging.getLogger(__name__)
-
-# The data context of everything stored before Orcapod v0.3: rows that carry this key
-# in a pre-v0.3 column, and every table without a ``__data_context`` column.
-PRE_V1_DATA_CONTEXT_KEY = "std:v0.1:default"
 
 
 def with_data_context(table: "pa.Table", context_key: str) -> "pa.Table":

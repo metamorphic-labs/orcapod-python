@@ -14,6 +14,7 @@ import json
 from importlib import resources
 from pathlib import Path
 
+import pytest
 from packaging.version import Version
 
 import orcapod
@@ -201,3 +202,23 @@ def test_logical_type_registration_is_unchanged_by_the_move() -> None:
     assert sorted(
         f"{t.__module__}.{t.__qualname__}" for t in registry._python_class_factories
     ) == ["builtins.object", "pydantic.main.BaseModel"]
+
+
+# ---------------------------------------------------------------------------
+# The data context of Orcapod before v0.3 is not shipped
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_v1_manifest_is_shipped() -> None:
+    assert sorted(_manifest_files()) == ["v1"]
+    assert contexts.get_available_contexts() == ["v1"]
+
+
+@pytest.mark.parametrize("name", ["std:v0.1:default", "v0.1"])
+def test_the_pre_v1_data_context_does_not_resolve(name: str) -> None:
+    with pytest.raises(contexts.ContextResolutionError) as info:
+        _ = contexts.resolve_context(name)
+    message = str(info.value)
+    assert "std:v0.1:default" in message
+    assert "before v0.3" in message
+    assert "orcapod-sanctuary" in message

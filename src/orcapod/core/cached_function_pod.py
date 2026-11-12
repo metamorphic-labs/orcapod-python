@@ -69,16 +69,6 @@ class CachedFunctionPod(WrappedFunctionPod):
         """Return the path to the cached records in the result store (versioned)."""
         return self._cache.record_path
 
-    def set_ignore_schema(self, ignore_schema: tuple[str, ...] | None) -> None:
-        """Propagate ``ignore_schema`` setting to the underlying ``ResultCache``.
-
-        Args:
-            ignore_schema: Tuple of schema version strings to tolerate (e.g.
-                ``("v0",)``), or ``None`` to use the default (raise on any
-                old schema).
-        """
-        self._cache.set_ignore_schema(ignore_schema)
-
     def stale_result_tables(self) -> list[StaleTable]:
         """Find stored results of other generations that this pod will not use.
 

@@ -421,6 +421,68 @@ class TestFunctionVersionColumn:
 
 
 # ---------------------------------------------------------------------------
+# A job file saved by Orcapod v0.2
+# ---------------------------------------------------------------------------
+
+
+def _saved_by_v02(job: PipelineJob, path: pathlib.Path) -> None:
+    """Save ``job`` and rewrite the file as v0.2 wrote it: every node under the old key."""
+    job.save(str(path))
+    text = path.read_text()
+    assert f'"data_context_key": "{CURRENT}"' in text
+    path.write_text(
+        text.replace(
+            f'"data_context_key": "{CURRENT}"', f'"data_context_key": "{PRE_V1}"'
+        )
+    )
+
+
+class TestJobSavedByV02:
+    def test_it_loads_under_the_current_data_context_and_shows_no_rows(
+        self,
+        new_store: Callable[[], Store],
+        tmp_path: pathlib.Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        written = new_store()
+        completed = build_job(written, with_operator=True)
+        _ = completed.run()
+        saved = tmp_path / "job.json"
+        _saved_by_v02(completed, saved)
+        store = new_store()
+        copy_as_v02(written, store)
+        calls.clear()
+
+        with caplog.at_level(logging.WARNING, logger="orcapod"):
+            loaded = PipelineJob.load(str(saved), store=store)
+
+        for label in ("dbl", "sel"):
+            assert loaded.nodes[label].get_all_records() is None
+        warnings = [
+            r.getMessage() for r in caplog.records if "saved under" in r.getMessage()
+        ]
+        assert warnings
+        assert all(PRE_V1 in w and CURRENT in w for w in warnings)
+
+    def test_after_a_run_of_this_version_it_shows_the_new_rows(
+        self, new_store: Callable[[], Store], tmp_path: pathlib.Path
+    ):
+        written = new_store()
+        completed = build_job(written, with_operator=True)
+        _ = completed.run()
+        saved = tmp_path / "job.json"
+        _saved_by_v02(completed, saved)
+        store = new_store()
+        copy_as_v02(written, store)
+
+        _ = build_job(store, with_operator=True).run()
+        loaded = PipelineJob.load(str(saved), store=reopened(store))
+
+        assert rows_of(loaded.nodes["dbl"].get_all_records()) == [2, 4]
+        assert rows_of(loaded.nodes["sel"].get_all_records()) == [2, 4]
+
+
+# ---------------------------------------------------------------------------
 # Tables at an older layout
 # ---------------------------------------------------------------------------
 
@@ -517,6 +579,55 @@ class TestOldLayout:
             assert report.startswith("Found 2 rows in stored table")
             assert PRE_V1 in report
             assert "left unchanged" in report
+
+    def test_tables_without_a_layout_component_are_counted_too(
+        self,
+        new_store: Callable[[], Store],
+        orchestrator: Orchestrator,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Function tables of Orcapod v0.1 had no layout component: also an old layout."""
+        written = new_store()
+        _ = build_job(written).run()
+        store = new_store()
+        source = reopened(written)
+        bare_paths = []
+        for path in sorted(source.list_sources()):
+            rows = source.get_all_records(path, record_id_column=RID)
+            assert rows is not None
+            store.add_records(path[:-1], rows.drop([COLUMN]), record_id_column=RID)
+            bare_paths.append("/".join(path[:-1]))
+        store.flush()
+        before = snapshot(store)
+        calls.clear()
+
+        with caplog.at_level(logging.WARNING, logger="orcapod"):
+            job = build_job(store)
+            _ = job.run(orchestrator=orchestrator)
+
+        assert sorted(calls) == [1, 2]
+        assert rows_of(job.nodes["dbl"].as_table()) == [2, 4]
+        after = snapshot(store)
+        for path, old_rows in before.items():
+            assert after[path] == old_rows, path
+        reports = [
+            r.getMessage()
+            for r in caplog.records
+            if "older table layout" in r.getMessage()
+        ]
+        assert len(reports) == 2
+        for path in bare_paths:
+            (report,) = [r for r in reports if repr(path) in r]
+            assert report.startswith("Found 2 rows in stored table")
+
+    def test_the_v0_migration_machinery_is_gone(self):
+        import orcapod.errors
+        from orcapod.types import NodeConfig
+
+        assert not hasattr(orcapod.errors, "SchemaVersionError")
+        assert "ignore_schema" not in NodeConfig.__dataclass_fields__
+        with pytest.raises(ModuleNotFoundError):
+            __import__("orcapod.migrations")
 
     def test_nothing_is_reported_for_a_store_of_this_version(
         self, store: Store, caplog: pytest.LogCaptureFixture

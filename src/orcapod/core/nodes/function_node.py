@@ -34,7 +34,6 @@ from orcapod.core.datagrams.tag_data import EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
     PipelineJobRequiredError,
-    SchemaVersionError,
     StoreError,
     StoreReadError,
     StoreWriteError,
@@ -129,11 +128,6 @@ def _build_record_id_preimage(
 # its original (tag, input_data) pair. Stripped from output tags in
 # record_and_forward() before downstream emission.
 _TAG_NODE_INPUT_REF = "_tag_node_input_ref"
-
-# Module-level set of versioned pdb paths that have been checked for legacy schema.
-# Keyed by the full versioned path (node_identity_path + (PIPELINE_DB_SCHEMA_VERSION,)).
-# Populated on first access; prevents repeated table_exists checks across instances.
-_checked_pdb_paths: set[tuple[str, ...]] = set()
 
 
 def _executor_supports_concurrent(
@@ -607,7 +601,7 @@ class FunctionNode(FunctionNodeBase):
         node._label = descriptor.get("label")
 
         # From DataContextMixin
-        node._data_context = contexts.resolve_context(
+        node._data_context = contexts.resolve_saved_context(
             descriptor.get("data_context_key")
         )
         from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
@@ -853,10 +847,6 @@ class FunctionJobNode(FunctionNodeBase):
     @node_config.setter
     def node_config(self, value: NodeConfig) -> None:
         self._node_config = value
-        if self._cached_function_pod is not None:
-            self._cached_function_pod.set_ignore_schema(value.ignore_schema)
-        if self._ephemeral_cached_pod is not None:
-            self._ephemeral_cached_pod.set_ignore_schema(value.ignore_schema)
 
     @property
     def _versioned_pipeline_path(self) -> tuple[str, ...]:
@@ -911,10 +901,12 @@ class FunctionJobNode(FunctionNodeBase):
         delivers = self._delivers_side_effects
         found = find_stale_tables(
             self._pipeline_database,
+            # Orcapod v0.1 stored the table at the path without a layout component.
             tuple(
                 self.node_identity_path + (layout,)
                 for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
-            ),
+            )
+            + (self.node_identity_path,),
             current=(self._versioned_pipeline_path, context_key) if delivers else None,
         )
         if delivers:
@@ -929,54 +921,6 @@ class FunctionJobNode(FunctionNodeBase):
             exc.add_context(node_label=self.label)
             raise
         self._stale_tables_checked = True
-
-    def _ensure_pdb_schema(self) -> None:
-        """Check once per versioned path that no legacy v0 schema table is present.
-
-        Detection flow:
-        1. If the v1 versioned path already exists → already migrated, skip check.
-        2. If v1 absent → check whether the unversioned (v0) path exists.
-        3. If v0 exists AND the version is not in ``ignore_schema`` → raise.
-        4. If v0 exists AND version is ignored → log a warning and proceed.
-        5. If v0 also absent → first use, proceed normally.
-
-        Results are cached per versioned path (module-level set) so the check
-        happens at most once per process per versioned path.
-
-        Raises:
-            SchemaVersionError: When a v0 table is found and ``ignore_schema``
-                does not include ``"v0"``.
-        """
-        global _checked_pdb_paths
-        self._account_for_stale_tables()
-        versioned_path = self._versioned_pipeline_path
-        if versioned_path in _checked_pdb_paths:
-            return
-        if self._pipeline_database is None:
-            return
-        # v1 path exists → schema is current, mark as checked
-        if self._pipeline_database.table_exists(versioned_path):
-            _checked_pdb_paths.add(versioned_path)
-            return
-        # v1 absent — check for legacy v0 table at the unversioned path
-        if self._pipeline_database.table_exists(self.node_identity_path):
-            ignore = self._node_config.ignore_schema or ()
-            if "v0" not in ignore:
-                node_path_str = "/".join(self.node_identity_path)
-                raise SchemaVersionError(
-                    f"Pipeline DB at {self.node_identity_path!r} contains a legacy v0 schema table.\n"
-                    "Run migration first:\n"
-                    f"  orcapod migrate pipeline-db <PIPELINE_DB_PATH> <RESULT_DB_PATH> {node_path_str}\n"
-                    "To suppress this error and recompute all results instead, set:\n"
-                    '  node.node_config = NodeConfig(ignore_schema=("v0",))'
-                )
-            logger.warning(
-                "Pipeline DB at %r has a legacy v0 schema table; "
-                "proceeding without migration because ignore_schema includes 'v0'. "
-                "All results will be recomputed from scratch.",
-                self.node_identity_path,
-            )
-        _checked_pdb_paths.add(versioned_path)
 
     # ------------------------------------------------------------------
     # attach_databases
@@ -1114,7 +1058,7 @@ class FunctionJobNode(FunctionNodeBase):
         node._label = descriptor.get("label")
 
         # From DataContextMixin
-        node._data_context = contexts.resolve_context(
+        node._data_context = contexts.resolve_saved_context(
             descriptor.get("data_context_key")
         )
         config_dict = descriptor.get("config")
@@ -1806,7 +1750,7 @@ class FunctionJobNode(FunctionNodeBase):
                 result keyed by the same hash (= the downstream's ``INPUT_DATA_HASH_COL``).
         """
         pipeline_database = self._require_pipeline_database()
-        self._ensure_pdb_schema()
+        self._account_for_stale_tables()
         base_entry_id = self.compute_base_entry_id(tag, input_data)
 
         # Determine the next recomputation index by querying all existing rows
@@ -2030,7 +1974,7 @@ class FunctionJobNode(FunctionNodeBase):
         if self._cached_function_pod is None or self._pipeline_database is None:
             return None
 
-        self._ensure_pdb_schema()
+        self._account_for_stale_tables()
         taginfo = self._pipeline_database.get_all_records(
             self._versioned_pipeline_path,
             record_id_column=_PIPELINE_ENTRY_ID_COL,

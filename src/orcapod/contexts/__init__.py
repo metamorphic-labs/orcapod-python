@@ -32,7 +32,7 @@ from orcapod.protocols import hashing_protocols as hp
 from orcapod.protocols import semantic_types_protocols as sp
 
 from .core import ContextResolutionError, ContextValidationError, DataContext
-from .registry import JSONDataContextRegistry
+from .registry import PRE_V1_DATA_CONTEXT_KEY, JSONDataContextRegistry
 from .stored import stored_data_contexts
 
 if TYPE_CHECKING:
@@ -85,6 +85,37 @@ def resolve_context(context_info: str | DataContext | None = None) -> DataContex
     # Use registry to resolve string/None to DataContext
     registry = _get_registry()
     return registry.get_context(context_info)
+
+
+def resolve_saved_context(context_key: str | None) -> DataContext:
+    """Resolve the data context named by a saved pipeline or job file.
+
+    A file saved by Orcapod before v0.3 names ``std:v0.1:default``, which this
+    version cannot hash under. Such a node is loaded under the current default data
+    context, with a warning: results the earlier version stored for it are at an
+    older table layout and are not read.
+
+    Args:
+        context_key: The ``data_context_key`` of a saved node, or ``None``.
+
+    Returns:
+        The data context to load the node under.
+
+    Raises:
+        ContextResolutionError: If the key names any other unknown data context.
+    """
+    if context_key == PRE_V1_DATA_CONTEXT_KEY:
+        current = get_default_context()
+        logger.warning(
+            "A node was saved under the data context %r (Orcapod before v0.3). It is "
+            "loaded under the current data context %r; results stored under %r are "
+            "not read.",
+            context_key,
+            current.context_key,
+            context_key,
+        )
+        return current
+    return resolve_context(context_key)
 
 
 def get_available_contexts() -> list[str]:
@@ -393,6 +424,7 @@ __all__ = [
     "ContextResolutionError",
     # Main functions
     "resolve_context",
+    "resolve_saved_context",
     "get_available_contexts",
     "get_context_info",
     "get_default_context",
