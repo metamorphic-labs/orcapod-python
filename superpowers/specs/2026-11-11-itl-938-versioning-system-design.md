@@ -1,178 +1,620 @@
 # ITL-938: one coherent versioning system for hashes, hash labels and stored paths
 
-Status: **draft, discussion in progress** (inventory complete; the system, the path decision,
-the v0.3 cut list and the follow-up issues are filled in as the developer decides them).
+Status: **draft, discussion in progress.** Parts 1 to 4 (what exists, the axes of change,
+their impact, the path-or-column test) are complete. Parts 5 to 8 (the system, the path
+layout, the v0.3 cut list, follow-up issues) are filled in as the developer decides them.
 
 Linear: [ITL-938](https://linear.app/metamorphic/issue/ITL-938). Design only; no library code.
 
-Everything in section 1 was read from the code on `origin/main` at `d61e3e39` and checked by
-running it (November 11, 2026). The ITL-910 comparisons ran a snapshot of
-`origin/eywalker/itl-910-adopt-starfix-05-hash-format-2-in-orcapod` at `6df680ce`
-(starfix 0.5.0). Items read from code but not exercised by a run are marked "(code only)".
+**How the facts here were obtained.** Everything was read from the code on `origin/main` at
+`d61e3e39` and checked by running it on November 11, 2026. Comparisons with ITL-910 ran a
+snapshot of `origin/eywalker/itl-910-adopt-starfix-05-hash-format-2-in-orcapod` at `6df680ce`
+(starfix 0.5.0). Every hash string quoted is a real value from those runs. Items read from
+code but not exercised by a run are marked "(code only)".
 
-Terms used here:
+**The probe pipeline** used for all examples:
 
-- **Label**: the text in front of a digest that names the algorithm, as in
-  `arrow_v0.1:000001d0e4…`. In code it is `ContentHash.method`.
-- **Labelled / bare**: a stored hash is *labelled* when the label is stored with the digest,
-  and *bare* when only the hex or raw bytes are stored.
-- **Preimage**: the exact bytes or structure fed into a hash function.
+```python
+s1 = DictSource([{"id": 0, "x": 5}, {"id": 1, "x": 10}, {"id": 2, "x": 15}], tag_columns=["id"], source_id="source1")
+s2 = DictSource([{"id": 0, "y": 3}, {"id": 2, "y": 6}, {"id": 4, "y": 9}], tag_columns=["id"], source_id="source2")
+
+@function_pod(output_keys="doubled")
+def double(x: int) -> int: return 2 * x
+
+@function_pod(output_keys="sum")
+def take_sum(doubled: int, y: int) -> int: return doubled + y
+
+job = PipelineJob(name="my_pipeline", store=DeltaTableDatabase("./store"))
+with job:
+    take_sum.pod(double.pod(s1, label="double").join(s2, label="join"), label="sum")
+job.run()
+```
+
+**Terms.**
+
+| Term | Meaning |
+|---|---|
+| Label | The text in front of a digest that names the algorithm, as in `arrow_v0.1:000001d3da…`. In code: `ContentHash.method`. |
+| Labelled / bare | A stored hash is *labelled* when the label is stored with the digest, *bare* when only hex or raw bytes are stored. |
+| Preimage | The exact bytes or structure fed into a hash function. |
+| Key column | A column whose value is used to find a row (a lookup or row key). |
+| Axis of change | One independent way in which Orcapod's behaviour can change between two versions of the code. |
 
 ---
 
-## 1. Inventory
+## Part 1. What exists today
 
-### 1.1 The hashers
+### 1.1 Where hashing happens
+
+```mermaid
+flowchart LR
+    subgraph VALUE["Per-type value hashers"]
+        V1["file bytes<br/><b>sha256:</b>2cf24dba…"]
+        V2["directory<br/><b>merkle_sha256:</b>…"]
+        V3["numpy array<br/><b>ndarray_v1:</b>8462766b…"]
+        V4["polars expression<br/><b>polars_expr_v1:</b>…"]
+    end
+    subgraph SEM["Structure hasher  semantic_v0.1"]
+        S1["schema hash<br/>semantic_v0.1:15816996…"]
+        S2["function uri hash<br/>semantic_v0.1:17de3328…"]
+        S3["node pipeline_hash<br/>semantic_v0.1:6fe7280a…"]
+        S4["node content_hash<br/>semantic_v0.1:5da63a88…"]
+    end
+    subgraph ARW["Arrow hasher  arrow_v0.1"]
+        A1["row data hash<br/>arrow_v0.1:000001d3da…"]
+        A2["pipeline entry id / row key<br/>arrow_v0.1:00000189…"]
+        A3["default source_id<br/>00000188… (bare)"]
+    end
+    subgraph FIXED["Fixed, unnamed algorithms"]
+        F1["source record id<br/>uuid5, 16 bytes"]
+        F2["folded system tags<br/>uuid5 / sha256"]
+    end
+    VALUE -->|"value inside a structure"| SEM
+    VALUE -->|"extension cell inside a row"| ARW
+    S1 --> S2 --> S3
+    S3 --> S4
+    A3 -->|"when the user gives no source_id"| S4
+    F1 --> A2
+    A1 --> A2
+```
 
 | Label | What it hashes | Algorithm | Where the label is set |
 |---|---|---|---|
-| `semantic_v0.1` | Python objects and structures: schemas, function identity, node identity, every `content_hash()` and `pipeline_hash()` | SHA-256 of canonical JSON of the expanded structure. A nested hash is embedded as its labelled string, so **labels are part of the preimage** of every enclosing hash | `contexts/data/v0.1.json` (`semantic_hasher.hasher_id`); duplicated in `hashing/versioned_hashers.py` (no callers) and `contexts/data/schemas/context_schema.json` |
-| `arrow_v0.1` (ITL-910: `arrow_v0.2`) | Arrow tables and schemas: every row's data hash, row keys, pandas values | starfix `ArrowDigester`. The digest is 35 bytes: starfix's own 3-byte format number (`000001` for starfix 0.4, `000002` for 0.5) followed by SHA-256 | same three places |
-| `sha256` | file content (`orcapod.File`) | SHA-256 of bytes; the label is the algorithm name, with no version | `hashing/hash_utils.py` |
-| `merkle_sha256` | directory content (`orcapod.Directory`) | Merkle tree over entries; child file labels are dropped from the preimage | `hashing/directory_hashers.py` |
-| `ndarray_v1` | `numpy.ndarray` values | `array_digest_v1` over dtype tag, shape and bytes | `hashing/semantic_hashing/builtin_handlers.py`, `logical_types/array_format.py` |
-| `polars_expr_v1` | `polars.Expr` (filter predicates) | SHA-256 of canonical JSON of an Orcapod-owned expression tree | `hashing/semantic_hashing/polars_expr.py` |
-| not on main yet | `torch_tensor_v1` (PR #300); `polars_dataframe_v1`, `polars_series_v1` (PR #286); `pandas_dataframe_v1`, `pandas_series_v1`, `arrow_table_v1` (ITL-897 branches, no PR) | per-type handlers | — |
-| no label at all | PR #292 class identity `Point@<sha256 hex>`; the two `uuid5` namespaces for record ids; `combine_hashes` (SHA-256 of concatenation) for folded system tags | fixed algorithms with no name | — |
+| `semantic_v0.1` | Python structures: schemas, function identity, node identity, every `content_hash()` and `pipeline_hash()` | SHA-256 of canonical JSON of the expanded structure. A nested hash is embedded as its labelled string, so **labels are part of the preimage** of every enclosing hash | `contexts/data/v0.1.json`; duplicated in `hashing/versioned_hashers.py` (no callers) and `contexts/data/schemas/context_schema.json` |
+| `arrow_v0.1` (ITL-910: `arrow_v0.2`) | Arrow tables and schemas: each row's data hash, row keys | starfix `ArrowDigester`. The digest is 35 bytes: starfix's own 3-byte format number (`000001` for starfix 0.4, `000002` for 0.5), then SHA-256 | same three places |
+| `sha256` | file content | SHA-256 of the bytes. The label is the algorithm name; it has no version | `hashing/hash_utils.py` |
+| `merkle_sha256` | directory content | Merkle tree over entries; child file labels are dropped from the preimage | `hashing/directory_hashers.py` |
+| `ndarray_v1` | `numpy.ndarray` values | `array_digest_v1` over dtype tag, shape, bytes | `builtin_handlers.py`, `logical_types/array_format.py` |
+| `polars_expr_v1` | `polars.Expr` filter predicates | SHA-256 of canonical JSON of an Orcapod-owned expression tree | `semantic_hashing/polars_expr.py` |
+| not on main yet | `torch_tensor_v1` (PR #300); `polars_dataframe_v1`, `polars_series_v1` (PR #286); `pandas_dataframe_v1`, `pandas_series_v1`, `arrow_table_v1` (ITL-897 branches) | per-type handlers | — |
+| no label | PR #292 class identity `Point@9117beaa…` (SHA-256 of a JSON description); the two `uuid5` namespaces for record ids; `combine_hashes` for folded system tags | fixed algorithms with no name | — |
 
 An extension-typed cell inside an Arrow table is hashed as
-`<extension name>::<label>:<digest>`, so per-type labels are inside the preimage of every
+`<extension name>::<label>:<digest>`, so per-type labels sit inside the preimage of every
 Arrow hash that covers such a cell.
 
-### 1.2 Every hash and where it is stored
-
-Probe pipeline: `source1 -> double -> join(source2) -> take_sum`, `PipelineJob("my_pipeline")`
-on `DeltaTableDatabase`. Values are from that run on main.
+### 1.2 Where each hash is stored
 
 | Hash | Computed from | Hasher | Stored form | Stored where |
 |---|---|---|---|---|
-| Node `content_hash()` | source: class, schema, `source_id`; operator/function: its identity + upstream content hashes | semantic | labelled string `semantic_v0.1:5da63a88…` | saved job JSON (node keys, edges, `content_hash`, `node_job_content_hashes`); column `__node_content_hash` (labelled bytes); path component `instance:…` when `table_scope="content_hash"`; path of a cached source `source/node:…` (code only) |
-| Node `pipeline_hash()` | schemas and topology only, never data | semantic | labelled string `semantic_v0.1:6fe7280a…` | path component `schema:semantic_v0.1:6fe7280a…`; saved job JSON; **bare hex** inside system-tag column names after Join/MergeJoin/Batch/GroupBy |
+| Node `content_hash()` | source: class, schema, `source_id`; operator or function: its identity + upstream content hashes | semantic | labelled string `semantic_v0.1:5da63a88…` | saved job JSON (node keys, edges, `content_hash`, `node_job_content_hashes`); column `__node_content_hash` (labelled bytes); path component `instance:…` when `table_scope="content_hash"`; cached-source path `source/node:…` (code only) |
+| Node `pipeline_hash()` | schemas and topology only, never data | semantic | labelled string `semantic_v0.1:6fe7280a…` | path component `schema:semantic_v0.1:6fe7280a…`; saved job JSON; **bare hex** inside system-tag column names after Join, MergeJoin, Batch, GroupBy |
 | Schema hash of a source | `(tag_schema, data_schema)` | semantic | **bare hex**, 64 chars | system-tag column names `_tag_source_id::52eb0af7…`, `_tag_record_id::52eb0af7…` |
-| Function `uri` | `(name, semantic hash of output schema, "v"+major, type id)` | semantic | tuple `('double', 'semantic_v0.1:17de3328…', 'v0', 'python.function.v0')` | **four path components** of both function tables; saved job JSON; inside every `_source_<col>` token of function outputs, joined with `:` |
-| Operator `uri` | `(ClassName, content hash)` | semantic | **bare hex** `('Join', '295ca933…')` | operator cache table path (code only); saved job JSON |
-| Row data hash | the row's data columns as an Arrow table | arrow | labelled bytes `b"arrow_v0.1:" + 35 bytes` | columns `__input_data_hash`, `__output_data_hash`; opt-in `_content_hash` column (labelled string) |
-| Pipeline entry id | Arrow table of (system-tag columns + `__input_data_hash`) | arrow | labelled bytes | `__pipeline_base_entry_id`; with the recomputation index, the row key `__record_id` of the pipeline table |
-| Result row key / `__data_id` | random `uuid7` of the output datagram | none | 16 raw bytes | `__record_id` in the result table; `__data_id` in the pipeline table; inside `_source_<col>` tokens |
+| Function `uri` | `(name, semantic hash of output schema, "v"+major, type id)` | semantic | `('double', 'semantic_v0.1:17de3328…', 'v0', 'python.function.v0')` | **four path components** of both function tables; saved job JSON; inside every `_source_<col>` token of function outputs |
+| Operator `uri` | `(ClassName, content hash)` | semantic | **bare hex** `('Join', '295ca933…')` | operator cache path (code only); saved job JSON |
+| Row data hash | the row's data columns as an Arrow table | arrow | labelled bytes `b"arrow_v0.1:"` + 35 bytes | `__input_data_hash`, `__output_data_hash`; opt-in `_content_hash` column (labelled string) |
+| Pipeline entry id | Arrow table of (system-tag columns + `__input_data_hash`) | arrow | labelled bytes | `__pipeline_base_entry_id`; with the recomputation index it gives the row key `__record_id` of the pipeline table |
+| Result row key, `__data_id` | random `uuid7` of the output datagram | none | 16 raw bytes | `__record_id` in the result table; `__data_id` in the pipeline table; inside `_source_<col>` tokens |
 | Source record id | `uuid5(namespace, "{source_id}::{row token}")` | fixed, unnamed | 16 raw bytes | values of `_tag_record_id::…` columns |
 | Folded record id / source id (Batch, GroupBy) | `uuid5` / SHA-256 over the members | fixed, unnamed | 16 raw bytes / bare hex | values of system-tag columns |
-| Default `source_id` (when the user gives none) | Arrow hash of the source table | arrow | **bare hex**, 70 chars, starts `000001` | `_tag_source_id::…` values, `_source_<col>` tokens, and from there the source's content hash |
-| Function signature / content hash | signature, function components | semantic | labelled bytes | `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` |
+| Default `source_id` | Arrow hash of the source table | arrow | **bare hex**, 70 chars: `000001883080da70…` | `_tag_source_id::…` values, `_source_<col>` tokens, and through them the source's content hash |
+| Function signature / content hash | signature; function components | semantic | labelled bytes | `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` |
 | Operator cache row key | Arrow hash of the row incl. `__node_content_hash` | arrow | **bare hex** | `_record_hash` (code only) |
-| File-hash cache | key `(path, mtime, size)`, value labelled digest | sha256 | key carries no algorithm | SQLite / Postgres cache table |
+| File-hash cache entry | key `(path, mtime, size)`; value labelled digest | sha256 | the key has no algorithm in it | SQLite / Postgres cache table, outside the store |
 
-### 1.3 The store on disk (main today)
+### 1.3 The store on disk
+
+**Anatomy of a path** (the pipeline table of node `double`):
+
+```
+store/my_pipeline/double/semantic_v0.1:17de3328…a26939/v0/python.function.v0/schema:semantic_v0.1:6fe7280a…b9ec94/pdb_v1
+      └────┬────┘ └─┬──┘ └──────────────┬─────────────┘ └┬┘ └───────┬────────┘ └──────────────────┬───────────────┘ └─┬──┘
+        job name  function     hash of the function's  function  function wrapper     pipeline hash of the node     layout of
+                   name          output schema          major        kind             (schemas + topology above it)  this table
+                                 [structure hasher]     version                       [structure hasher]
+                  └──────────────────────── function uri ───────────────────────┘
+```
+
+**All tables written by the probe pipeline:**
 
 ```
 store/
-└── my_pipeline/                                         job name
-    ├── double/                                          function name            ┐
-    │   └── semantic_v0.1:17de3328…a26939/               hash of output schema    │ function uri
-    │       └── v0/                                      function major version   │
-    │           └── python.function.v0/                  data function type id    ┘
-    │               └── schema:semantic_v0.1:6fe7280a…b9ec94/   node pipeline hash
-    │                   └── pdb_v1/                      pipeline-table layout version   <- Delta table
-    ├── take_sum/…/schema:semantic_v0.1:1417915f…feff07/pdb_v1/                          <- Delta table
+└── my_pipeline/
+    ├── double/semantic_v0.1:17de3328…/v0/python.function.v0/schema:semantic_v0.1:6fe7280a…/pdb_v1/    pipeline table, 3 rows
+    ├── take_sum/semantic_v0.1:d50b00b6…/v0/python.function.v0/schema:semantic_v0.1:1417915f…/pdb_v1/  pipeline table, 2 rows
     └── _result/
-        ├── double/semantic_v0.1:17de3328…a26939/v0/python.function.v0/rdb_v1/           <- Delta table
-        └── take_sum/semantic_v0.1:d50b00b6…1979a6/v0/python.function.v0/rdb_v1/         <- Delta table
+        ├── double/semantic_v0.1:17de3328…/v0/python.function.v0/rdb_v1/                               result table, 3 rows
+        └── take_sum/semantic_v0.1:d50b00b6…/v0/python.function.v0/rdb_v1/                             result table, 2 rows
 ```
 
-The join has no table (operator nodes are not cached by default). The result table path has
-no pipeline hash: it is shared by every node that uses the function.
+- The join has no table: operator nodes are not cached by default.
+- The **result table** path has no pipeline hash. It holds the function's outputs keyed by the
+  hash of the input row, and is shared by every node that uses that function.
+- The **pipeline table** holds one row per (input row, node): its tags, and a pointer
+  (`__data_id`) to the output in the result table.
+- Other table kinds (code only): operator cache `<Class>/<bare hash>/schema:…` (no layout
+  suffix), cached source `source/node:<content hash>`, side-effect log `…/schema:…/tdb_v1`,
+  status and log tables `…/execution_status`, `…/execution_logs`.
+- Non-Delta backends (SQLite, Postgres, Spiral) turn the same path tuple into a table name.
 
-Hash-bearing columns, pipeline table (`…/pdb_v1`):
+**Anatomy of a pipeline-table row** (`take_sum`, row for `id=2`), grouped by what each column
+is for:
 
-| Column | Type | Example | Label |
-|---|---|---|---|
-| `__record_id` (row key) | binary | `arrow_v0.1:` + 35 bytes | labelled |
-| `__pipeline_base_entry_id` | binary | `arrow_v0.1:` + 35 bytes | labelled |
-| `__input_data_hash`, `__output_data_hash` | binary | `arrow_v0.1:` + `000001…` | labelled |
-| `__node_content_hash` | binary | `semantic_v0.1:` + 32 bytes | labelled |
-| `__data_id` | binary | 16 bytes (uuid7) | none (random) |
-| `_tag_source_id::52eb0af7…::6fe7280a…:1` | string | `source1` | column **name** holds two bare semantic hashes |
-| `_tag_record_id::52eb0af7…::6fe7280a…:1` | binary | 16 bytes (uuid5) | bare, in name and value |
-| `_source_doubled` | string | `double:semantic_v0.1:17de3328…:v0:python.function.v0::<uuid7>::doubled` | label inside the token |
-| `__input_data_context_key` | string | `std:v0.1:default` | written, never read |
+```
+ USED TO FIND THE ROW (keys)
+   __record_id                  arrow_v0.1:0000012f…        row key = entry id + recomputation index
+   __pipeline_base_entry_id     arrow_v0.1:00000103…        hash of (system tags + input data hash)
+   __input_data_hash            arrow_v0.1:00000196…        hash of the input row's data; lookup key into the result table
+   __node_content_hash          semantic_v0.1:48ddd935…     which node (and so which input data) wrote the row
+   __data_id                    16 bytes (uuid7)            pointer to the output row in the result table
 
-Result table (`…/rdb_v1`): `__record_id` (bare uuid7), `__input_data_hash` (labelled, the lookup
-key), `__pf_var_function_signature_hash`, `__pf_var_function_content_hash` (labelled),
-`_context_key` = `std:v0.1:default` (read back: it selects the data context for a cached row),
-`_source_<col>` tokens.
+ USER-VISIBLE CONTENT (tags; the data columns live in the result table)
+   id                           2
 
-**On the ITL-910 branch** the same pipeline gives the same directory tree, the same node
-content and pipeline hashes, the same column names. The only differences are the values of
-the Arrow-hashed columns: `arrow_v0.1:000001…` becomes `arrow_v0.2:000002…` in
-`__record_id` (pipeline table), `__pipeline_base_entry_id`, `__input_data_hash`,
-`__output_data_hash`. With a default (table-derived) `source_id`, the bare `000001…` hex
-would also change to `000002…` and carry into source content hashes.
+ PROVENANCE CARRIED WITH THE ROW (system tags, source info)
+   _tag_source_id::1560128e…::1560128e…:0     "source2"         column NAME embeds bare structure hashes
+   _tag_record_id::1560128e…::1560128e…:0     16 bytes (uuid5)
+   _tag_source_id::52eb0af7…::6fe7280a…:1     "source1"
+   _tag_record_id::52eb0af7…::6fe7280a…:1     16 bytes (uuid5)
+   _source_y                    "source2::row_1::y"
+   _source_doubled              "double:semantic_v0.1:17de3328…:v0:python.function.v0::<uuid7>::doubled"
+
+ DESCRIPTION OF HOW THE ROW CAME TO BE
+   __output_data_hash           arrow_v0.1:000001c1…
+   __input_data_context_key     "std:v0.1:default"          written, never read
+   __computed, __is_ephemeral, __pipeline_recomputation_index
+```
+
+The result table adds: `__pf_var_function_name`, `__pf_var_function_signature_hash` and
+`__pf_var_function_content_hash` (labelled `semantic_v0.1:`), `__pf_var_git_hash`,
+`__pf_exec_executor_type`, `__pf_exec_python_version` (`3.12.15`), `_context_key`
+(`std:v0.1:default`; read back to choose the data context for a cached row), `__pod_ts`.
+
+**Main versus the ITL-910 branch.** Same directory tree, same node content and pipeline
+hashes, same column names. Only the Arrow-hashed values differ:
+
+| | main (starfix 0.4) | ITL-910 (starfix 0.5) |
+|---|---|---|
+| Path of `double` pipeline table | `…/schema:semantic_v0.1:6fe7280a…/pdb_v1` | identical |
+| Row data hash, `{"x": 5}` | `arrow_v0.1:000001d3daa548b1…` | `arrow_v0.2:000002136ffea0f7…` |
+| Default source id | `000001883080da70…` | `00000243d6b9f563…` |
+| Content hash of a source with that default id | `semantic_v0.1:d8eb49fa…` | `semantic_v0.1:5b6ae6d2…` |
+| `ndarray_v1`, `sha256`, schema and uri hashes | — | identical |
 
 ### 1.4 Every version, label and format marker
 
 | # | Marker | Values today | What it is meant to capture | Who bumps it, when | Can a reader tell which version wrote a stored value? | What moves when it is bumped |
 |---|---|---|---|---|---|---|
-| 1 | Semantic hasher label | `semantic_v0.1` | the algorithm for hashing Python structures | never bumped; hash-moving fixes have gone in under the same label (PR #301 proposes another) | yes where labelled; no in column names and operator uri (bare) | every content/pipeline hash value, every function path, every system-tag column name |
-| 2 | Arrow hasher label | `arrow_v0.1` -> `arrow_v0.2` (ITL-910) | the algorithm for hashing Arrow data. Rule accepted Nov 11, 2026: bump whenever any hash can change | Orcapod, by editing the context JSON | yes in labelled columns; only by the starfix prefix in bare hex | row hashes and row keys. **No path moves** |
-| 3 | starfix format number | `000001`, `000002` (first 3 bytes of the digest) | starfix's own byte format | starfix | yes | same as 2 |
-| 4 | Per-type value labels | `sha256`, `merkle_sha256`, `ndarray_v1`, `polars_expr_v1` (+ pending `torch_tensor_v1`, `polars_*_v1`, `pandas_*_v1`, `arrow_table_v1`) | the hash definition for one value type | type author; rule in PR #300: bytes under a label never change | only inside a preimage; the label is not stored next to the cell | any Arrow hash covering such a cell |
-| 5 | Data context key and version | `std:v0.1:default`, `v0.1` | the whole bundle: both hashers, the type converter, the registered logical types and handlers | **never bumped**: `v0.1.json` has been edited in place 20 times (see its changelog), including hard cuts | the key is stored in every result row, but it is the same string before and after every change, so it tells nothing | nothing |
-| 6 | Table layout suffixes | `pdb_v1`, `rdb_v1`, `tdb_v1` | the column layout of Orcapod's own pipeline, result and side-effect tables | Orcapod, on a layout change | by path only: `SchemaVersionError` fires when a table exists at the path **without** the suffix and none with it; `NodeConfig(ignore_schema=("v0",))` opts out | the last path component. `tdb_v1` and operator cache tables have no check |
-| 7 | Function major version | `v0` (from `version="v0.0"`) | the user's statement that the function's results changed | the user | yes, path component and uri | function uri, both function table paths |
-| 8 | Data function type id | `python.function.v0` | the kind of function wrapper | Orcapod; hard-coded in four files | yes, path component | function table paths |
-| 9 | Stored representation versions | array format `{"version":1}` in the Arrow extension metadata; PR #308 nullability `{"format":"orcapod.nullability","version":1}`; every other logical type: none | the byte layout of a stored value | type author | arrays: yes, and an unknown version raises (verified: `{"version":2}` gives `ValueError … expected metadata b'{"version":1}'`). Other types: no. `orcapod.file` changed layout once (ITL-451) under the same name with no marker | nothing in paths or labels |
-| 10 | Saved file formats | `orcapod_pipeline_version: 0.1.0`, `orcapod_pipeline_job_version: 0.1.0` | the JSON layout of a saved pipeline / job | Orcapod | yes; load rejects unknown versions. Hashes inside the file are trusted, not re-verified | nothing |
-| 11 | File-hash cache table version | `1` (`PRAGMA user_version`) | the cache table's DDL | Orcapod | yes | nothing |
-| 12 | Package version | `0.2.x` -> `0.3.0` (git tag) | the release | release process | **no: it is written nowhere in a store** | nothing |
-| 13 | Golden files | 685 pinned values in 5 files | a test that hashes do not move | regenerated only with approval | — | ITL-910 changes 186 of them |
-| 14 | `table_scope` | `pipeline_hash` (default) / `content_hash` | not a version: whether a node's table is shared across data (schema-level) or private to one input | user, per node | yes, in saved JSON | adds an `instance:…` path component |
+| 1 | Structure hasher label | `semantic_v0.1` | the algorithm for hashing Python structures | never bumped; hash-moving fixes went in under the same label (PR #301 proposes another) | yes where labelled; no in column names and operator uri | every content and pipeline hash, every function path, every system-tag column name |
+| 2 | Arrow hasher label | `arrow_v0.1` -> `arrow_v0.2` (ITL-910) | the algorithm for hashing Arrow data. Rule accepted Nov 11, 2026: bump whenever any hash can change | Orcapod, by editing the context JSON | yes in labelled columns; only by the starfix prefix in bare hex | row hashes and row keys. **No path** |
+| 3 | starfix format number | `000001`, `000002` | starfix's own byte format | starfix | yes | same as 2 |
+| 4 | Per-type value labels | `sha256`, `merkle_sha256`, `ndarray_v1`, `polars_expr_v1`, pending others | the hash definition of one value type | type author. Rule in PR #300: bytes under a label never change | only inside a preimage; not stored next to the cell | any hash covering such a value |
+| 5 | Data context key and version | `std:v0.1:default`, `v0.1` | the whole bundle: both hashers, the type converter, the registered types and handlers | **never bumped**: `v0.1.json` has been edited in place 20 times | the key is in every result row but is the same string before and after every change | nothing |
+| 6 | Table layout suffixes | `pdb_v1`, `rdb_v1`, `tdb_v1` | the column layout of Orcapod's own tables | Orcapod, on a layout change | by path only: `SchemaVersionError` when a table exists **without** the suffix and none with it; `NodeConfig(ignore_schema=("v0",))` opts out | the last path component. `tdb_v1` and operator cache tables have no check |
+| 7 | Function major version | `v0` (from `version="v0.0"`) | the user's statement that results changed | the user | yes | function uri, both function table paths |
+| 8 | Function wrapper kind | `python.function.v0` | how a function is called and its outputs packaged | Orcapod; hard-coded in four files | yes | function table paths |
+| 9 | Stored representation versions | array format `{"version":1}` in Arrow extension metadata; PR #308 nullability `{"format":"orcapod.nullability","version":1}`; all other types: none | the byte layout of a stored value | type author | arrays: yes, an unknown version raises. Others: no | nothing |
+| 10 | Saved file formats | `orcapod_pipeline_version: 0.1.0`, `orcapod_pipeline_job_version: 0.1.0` | the JSON layout of a saved pipeline or job | Orcapod | yes; load rejects unknown versions. Hashes inside are trusted | nothing |
+| 11 | File-hash cache table version | `1` | the cache table's layout | Orcapod | yes | nothing |
+| 12 | Package version | `0.2.x` -> `0.3.0` | the release | release process | **no: written nowhere in a store** | nothing |
+| 13 | Golden files | 685 pinned values, 5 files | a test that hashes do not move | regenerated only with approval | — | ITL-910 changes 186 |
+| 14 | `table_scope` | `pipeline_hash` / `content_hash` | not a version: whether a node's table is shared across data or private to one input | user, per node | yes, in saved JSON | adds an `instance:…` path component |
 
-### 1.5 Failure modes, reproduced
+Three naming conventions coexist: `_v0.1` (hashers), `_v1` (per-type labels, table layouts),
+`0.1.0` (files).
 
-| # | Change | What happens today | Evidence |
+### 1.5 What stays the same and what changes today (measured)
+
+| Change made | Function uri | Pipeline hash | Table path | Row data hash |
+|---|---|---|---|---|
+| Baseline `double` | `('double', 'semantic_v0.1:17de3328…', 'v0', 'python.function.v0')` | `…6fe7280a…` | baseline | `arrow_v0.1:000001d3da…` |
+| Edit the function body (`x + x`) | same | same | **same** (by design) | same |
+| Minor version `v0.7` | same | same | **same** | same |
+| Major version `v1.0` | `…, 'v1', …` | `…ea0cf7b3…` | **moves** | same |
+| Rename to `twice` | `('twice', …)` | `…0de069df…` | **moves** | same |
+| Return type `float` | `…'semantic_v0.1:1f13e266…'…` | `…868ee85c…` | **moves** | same |
+| Rename output key to `twice_x` | `…'semantic_v0.1:b680b6b1…'…` | `…0e5702c0…` | **moves** | same |
+| Different source name (`other_name`) | same | same (`52eb0af7…` for the source) | **same**; rows are told apart by `__node_content_hash` | same |
+| Source column `int32` instead of `int64` | same | same | **same** | `arrow_v0.1:0000014dff…` (**differs**) |
+| Arrow label `arrow_v0.1` -> `arrow_v0.2` | same | same | **same** | `arrow_v0.2:…` (**differs**) |
+| Structure label -> `semantic_v0.2` | `…'semantic_v0.2:03141c1e…'…` | `semantic_v0.2:800bf59e…` | **moves** | same |
+
+### 1.6 Failure modes, reproduced
+
+| # | Change | What happens today | How it was reproduced |
 |---|---|---|---|
-| F1 | Arrow label changes (`arrow_v0.1` -> `arrow_v0.2`), nothing else | Same paths. Every lookup misses, everything recomputes, and the new rows are **appended to the same four tables**: 6 rows for 3 inputs, 4 for 2. Reads that scan the table see both generations | main with the label patched, run on a store written by main |
-| F1' | Same, on the ITL-910 branch tip | `StoreHashLabelError` naming the table, the node and both labels; nothing is read or written | ITL-910 snapshot on a store written by main |
-| F2 | Semantic label changes (`semantic_v0.1` -> `semantic_v0.2`), nothing else | **Every function path moves** (the label is in two path components, and because nested labels are in the preimage the hex changes too: `17de3328…` -> `03141c1e…`). The run succeeds, recomputes everything into new tables, and the old tables stay behind untouched. No error, no warning: stored results silently look dropped | main with the label patched |
-| F3 | One hasher's label changes but not the other | The two hashers behave in opposite ways (F1 keeps paths and mixes rows; F2 moves paths and orphans tables). Neither is detected on main | F1 + F2 |
-| F4 | A stored representation changes | Arrays: detected, raises on an unknown version. All other logical types carry no version: a layout change under the same extension name is read with the new code as if it were the new layout | `{"version":2}` test; `orcapod.file` history (ITL-451) |
-| F5 | The data context changes | The stored `_context_key` is identical before and after, so the one stored marker designed to say "which rules wrote this row" cannot distinguish anything | `v0.1.json` changelog, 20 in-place edits |
-| F6 | A hash is stored bare | System-tag column names, operator uri, default source ids and operator-cache row keys would look the same in form under a new algorithm; a reader cannot tell which hasher made them | inventory 1.2 |
-| F7 | A hash-moving fix ships without a label bump | Indistinguishable from a cache miss: silent recompute, mixed rows | PR #301 (dict/set order) as proposed |
+| F1 | Arrow label changes, nothing else | Same paths. Every lookup misses, everything recomputes, new rows are **appended to the same tables**: 6 rows for 3 inputs | main with the label patched, on a store written by main |
+| F1' | Same, on the ITL-910 branch tip | `StoreHashLabelError` naming the table, node and both labels; nothing read or written | ITL-910 snapshot on a store written by main |
+| F2 | Structure label changes, nothing else | **Every function path moves.** The run succeeds, recomputes into new tables, leaves the old ones behind. No error: stored results silently look dropped | main with the label patched |
+| F3 | One hasher's label changes but not the other | The two hashers behave in opposite ways (F1 mixes rows, F2 orphans tables) | F1 + F2 |
+| F4 | A stored representation changes | Arrays: an unknown version raises `ValueError … expected metadata b'{"version":1}' but got b'{"version":2}'`. Every other type has no version | forged `{"version":2}` column |
+| F5 | The data context changes | The stored `_context_key` is the same string before and after | `v0.1.json` changelog |
+| F6 | A hash is stored bare | System-tag column names, operator uri, default source ids, operator-cache row keys: a reader cannot tell which algorithm made them | inventory 1.2 |
+| F7 | A hash-moving fix ships without a label bump | Looks like a cache miss: silent recompute, mixed rows | PR #301 as proposed |
+| F8 | The stored Arrow type of a column differs while its Python type is the same (`int32` vs `int64`) | Same pipeline hash, same path. The second run fails at commit with `StoreWriteError … Cannot append to the stored table`, **after** its rows were already written to the result table (4 rows for 2 inputs) | two `ArrowTableSource`s, same job |
 
-### 1.6 What the inventory says
+```
+F1  Arrow label moves                     F2  Structure label moves
 
-1. There are **twelve independent version markers** and no rule relating them. Three name
-   conventions coexist: `_v0.1` (hashers), `_v1` (per-type, table layouts), `0.1.0` (files).
-2. The one marker meant to tie everything together, the data context version, is the only
-   one that has never moved.
-3. Whether a hashing change moves paths is an accident of which hasher it touches: paths
-   carry the semantic label and never the Arrow label.
-4. No reader checks a label on main. `ContentHash.from_string` accepts any label; comparisons
-   are byte equality, so a foreign label is a silent miss.
-5. A store does not say what wrote it: no package version, no meaningful context version, no
-   store-level marker.
+  …/schema:…6fe7280a…/pdb_v1/               …/double/semantic_v0.1:17de3328…/…/pdb_v1/   <- old rows, never read again
+    arrow_v0.1 row  id=0  ┐ old             …/double/semantic_v0.2:03141c1e…/…/pdb_v1/   <- new rows
+    arrow_v0.1 row  id=1  │ never match
+    arrow_v0.1 row  id=2  ┘                 no error, no warning
+    arrow_v0.2 row  id=0  ┐ new
+    arrow_v0.2 row  id=1  │
+    arrow_v0.2 row  id=2  ┘
+  a full read returns 6 rows
+```
 
 ---
 
-## 2. The system (to be decided)
+## Part 2. The axes of change
+
+Part 1 lists markers. This part sets them aside and asks a different question: **in which
+independent ways can Orcapod's behaviour change between two versions of the code?** Each such
+way is an axis. A marker is only a name we choose to give to a position on an axis.
+
+### 2.1 The hierarchy
+
+```
+Release (0.2.x, 0.3.0)                       any axis below can only move with a release
+│
+├── I. IDENTITY RULES                        how a hash value is produced
+│   ├── I1  Structure hashing                Python structures -> hash          today: semantic_v0.1
+│   ├── I2  Arrow data hashing               rows and tables -> hash            today: arrow_v0.1
+│   │   └── starfix byte format                                                 today: 000001
+│   ├── I3  Per-type value hashing           one value type -> hash             today: ndarray_v1, sha256, polars_expr_v1 …
+│   └── I4  Identity composition             WHAT goes into each identity       today: no marker
+│           ├── function identity   (name, output-schema hash, major version, wrapper kind)
+│           ├── operator identity   (class name + parameters)
+│           ├── source identity     (class, schema, source_id)
+│           ├── record-id recipe    (uuid5 namespace, "{source_id}::{row token}")
+│           ├── entry-id recipe     (system tags + input data hash)
+│           └── system-tag fold     (how Batch / GroupBy combine members)
+│
+├── II. TYPE RULES                           how a Python value becomes stored data
+│   ├── II1 Conversion rules                 Python type -> Arrow type          today: no marker
+│   │       (int -> int64, str -> large_string, nullability, list -> large_list)
+│   └── II2 Per-type representation          stored layout of one type          today: {"version":1} for arrays only
+│           (array = struct<dtype, shape, data>; file = JSON {"path": …})
+│
+├── III. STORE LAYOUT                        how Orcapod arranges its bookkeeping
+│   ├── III1 Path layout                     which components, in which order   today: no marker
+│   ├── III2 Table layout                    system columns per table kind      today: pdb_v1, rdb_v1, tdb_v1
+│   ├── III3 Column naming                   _tag_…::hash:pos, _source_…,       today: no marker
+│   │                                        format of source-info tokens
+│   └── III4 Backend encoding                how a backend writes Arrow         today: nullability version (PR #308)
+│
+└── IV. COMPUTATION BEHAVIOUR                what is computed
+    ├── IV1 User function                    name, signature, major version     today: in the uri (user-controlled)
+    ├── IV2 Function wrapper kind            how a function is called/packaged  today: python.function.v0
+    ├── IV3 Operator behaviour               which rows Join, Batch … emit      today: no marker
+    └── IV4 Execution environment            Python version, executor, git hash today: columns __pf_exec_*
+
+Outside the store, independent of all of the above:
+    saved pipeline / job file format (0.1.0)        file-hash cache table (1)
+```
+
+### 2.2 How the axes relate
+
+```mermaid
+flowchart TD
+    II1["II1 Conversion rules<br/>Python type -> Arrow type"]
+    II2["II2 Per-type representation<br/>stored layout of one type"]
+    I3["I3 Per-type value hashing"]
+    I1["I1 Structure hashing"]
+    I2["I2 Arrow data hashing<br/>(contains the starfix format)"]
+    I4["I4 Identity composition"]
+    III3["III3 Column naming"]
+    III2["III2 Table layout"]
+    III1["III1 Path layout"]
+    IV1["IV1 User function"]
+    IV3["IV3 Operator behaviour"]
+
+    DT(["dtypes of result columns"])
+    KEYS(["values of key columns<br/>(finding a row)"])
+    BYTES(["meaning of stored bytes<br/>(reading a row)"])
+    NAMES(["names of system columns"])
+    PATH(["table path"])
+    ROWS(["which rows a table holds"])
+
+    II2 -. "finer grain of" .-> II1
+    I3 -- "feeds" --> I1
+    I3 -- "feeds" --> I2
+    II1 -- "the Arrow hash covers Arrow types" --> I2
+    II1 --> DT
+    II2 --> DT
+    II2 --> BYTES
+    I2 --> KEYS
+    I1 --> KEYS
+    I4 --> KEYS
+    I1 -- "hashes sit in paths" --> PATH
+    I1 -- "hashes sit in column names" --> NAMES
+    I4 --> PATH
+    III3 --> NAMES
+    III2 --> NAMES
+    III1 --> PATH
+    IV1 --> PATH
+    IV3 --> ROWS
+    IV3 -. "can change list types" .-> DT
+```
+
+Reading the diagram:
+
+- **Finer grain.** II2 is a finer grain of II1 (one type's layout versus the rules for all
+  types). The starfix format is a finer grain of I2. I3 is a finer grain of both I1 and I2,
+  because a value's hash is consumed by whichever hasher covers the thing containing it.
+- **Dependency.** I2 depends on II1: the Arrow hash covers Arrow types, so changing how `int`
+  is stored changes every row hash even though the hashing algorithm did not change
+  (measured: the same values as `int32` hash to `arrow_v0.1:0000014dff…`, as `int64` to
+  `arrow_v0.1:000001d3da…`).
+- **Paired but independent.** For one type, II2 (how it is stored) and I3 (how it is hashed)
+  are separate. The array format was designed so that the hash is by value: a future storage
+  change need not move `ndarray_v1` hashes, and a hash fix need not change storage.
+- **Independent.** Store layout (III) is independent of identity and type rules, except that
+  column names (III3) embed I1 hashes. Computation behaviour (IV) is independent of all three.
+
+### 2.3 Each axis in detail, with examples
+
+For each axis: what it is, a change that has happened or could, and what should stay the same
+and what should change.
+
+#### I1 Structure hashing
+
+How a Python structure (a schema, a function's identity, a node's identity) becomes a hash.
+
+- Example values: `Schema({'x': int})` -> `semantic_v0.1:15816996…`; function output schema
+  -> `semantic_v0.1:17de3328…`; node pipeline hash -> `semantic_v0.1:6fe7280a…`.
+- A change on this axis: PR #301 (a dict's insertion order no longer affects its hash).
+  A different canonical JSON form would be another.
+- When it changes: every content and pipeline hash changes, so every hash in a path and every
+  system-tag column name changes. Row data hashes (`arrow_v0.1:…`) do **not** change.
+- Should stay the same when: data changes, a function body is edited, the Arrow hasher changes.
+
+#### I2 Arrow data hashing
+
+How a row or table of Arrow data becomes a hash.
+
+- Example values: row `{"x": 5}` -> `arrow_v0.1:000001d3daa548b1…`.
+- A change on this axis: starfix 0.4 -> 0.5 (ITL-910): the same row becomes
+  `arrow_v0.2:000002136ffea0f7…`.
+- When it changes: every row key changes (`__input_data_hash`, `__pipeline_base_entry_id`,
+  pipeline-table `__record_id`), and default source ids. No column name, no dtype, no path.
+- Should stay the same when: the structure hasher changes; a function is renamed.
+
+#### I3 Per-type value hashing
+
+How one value of a given type becomes a hash.
+
+- Example values: `np.arange(3, dtype="int16")` -> `ndarray_v1:8462766b…`; the same numbers
+  as `int64` -> `ndarray_v1:44ef444a…` (dtype is part of identity); a file containing
+  `hello` -> `sha256:2cf24dba…`.
+- A change on this axis: ITL-888 moved arrays from hashing `.npy` bytes (label `sha256`) to
+  hashing by value (label `ndarray_v1`).
+- When it changes: every row hash of a row holding that type, and every structure hash that
+  contains such a value (a `polars.Expr` inside a filter operator's identity). Tables that
+  never hold the type are unaffected.
+- Should stay the same when: the type's stored layout changes but its value does not.
+
+#### I4 Identity composition
+
+What goes into an identity, as opposed to how it is hashed. Nothing marks this axis today.
+
+- Example: a function's identity is the tuple
+  `('double', 'semantic_v0.1:17de3328…', 'v0', 'python.function.v0')`. Deciding that the
+  input schema should also be part of it is a change on this axis.
+- Example: a source's identity is `(class, schema, source_id)`. Measured consequence: two
+  `DictSource`s with the same `source_id="source1"` but one different value have the **same**
+  content hash `semantic_v0.1:d644c803…`.
+- Example: a source row's record id is `uuid5(namespace, "source1::row_2")`. ITL-817 proposes
+  deriving it from content instead.
+- Example: an operator's identity is its class name and parameters (`Join` ->
+  `('Join', '295ca933…')`).
+- When it changes: depends on which identity. A function-identity change moves paths; a
+  record-id change moves `_tag_record_id` values and, through the entry id, every row key.
+
+#### II1 Conversion rules
+
+How a Python type maps to an Arrow type.
+
+- Example: `int` -> `int64`; `str` -> `large_string`; `list[int]` -> `large_list<int64>`;
+  `int` (required) -> non-nullable, `int | None` -> nullable.
+- A change on this axis: the November 10 rule "always normalize to large variants".
+  A hypothetical one: storing Python `int` as `int32`.
+- When it changes: the dtype of result columns, and through I2 every row hash.
+- Today the path does **not** move: the schema hash covers Python type names, not Arrow types
+  (F8: `int32` and `int64` sources give the same pipeline hash `52eb0af7…` and the same path).
+
+#### II2 Per-type representation
+
+The stored layout of one logical type.
+
+- Example: an array is stored as extension `orcapod.ndarray` over
+  `struct<dtype, shape, data>` with metadata `{"version":1}`. Before v0.3 it was extension
+  `numpy.ndarray` over `large_binary` holding `.npy` bytes.
+- Example: `orcapod.file` changed from a plain path string to JSON `{"path": "…"}` (ITL-451)
+  under the same name, with no marker.
+- When it changes: the dtype of columns holding that type (if the layout changes shape), or
+  the meaning of the bytes (if the shape is the same). Ideally not the hash (see I3).
+- Today the path moves only if the type is renamed, because the schema hash uses the type's
+  name. A `{"version":2}` layout under the name `orcapod.ndarray` would keep the path.
+
+#### III1 Path layout
+
+Which components a table path has and in what order. Example: adding a generation name at the
+front, or putting the pipeline hash into the result table's path. No marker today; a change
+is visible only as tables appearing somewhere else.
+
+#### III2 Table layout
+
+The system columns of each kind of table.
+
+- Example: `pdb_v1` introduced labelled-bytes hash columns in place of `"method:hex"` strings
+  and renamed `_node_content_hash` to `__node_content_hash`.
+- A table without the suffix is "v0"; meeting one raises `SchemaVersionError`. Only the
+  pipeline and result tables are checked.
+
+#### III3 Column naming
+
+The names Orcapod gives to columns it adds to streams.
+
+- Example: a system-tag column is named `_tag_source_id::<schema hash>` and after a join
+  `_tag_source_id::52eb0af7…::6fe7280a…:1` (source schema hash, then the pipeline hash and
+  position of the join input).
+- Example: a source-info token is `source1::row_2::x`.
+- A change on this axis: truncating the hashes in column names, or a different separator.
+- When it changes: names of system columns in every stored table, and (because system tags
+  are hashed into the entry id) possibly every row key.
+
+#### III4 Backend encoding
+
+How one backend physically writes an Arrow table. Example: SpiralDB stores every column as
+nullable, so PR #308 records nullability in table metadata under `__orcapod_nullability__`
+with `"version": 1`. This axis is per backend and invisible to every hash.
+
+#### IV1 User function
+
+The user's function: name, signature, major version. The user controls it; all three are in
+the uri and so in the path (table in 1.5). Body edits are excluded by design.
+
+#### IV2 Function wrapper kind
+
+`python.function.v0`: how Orcapod calls a function and packages its outputs. In the uri and
+the path.
+
+#### IV3 Operator behaviour
+
+Which rows an operator emits, in what order, with what list types. Nothing marks this axis
+today: `Join`'s identity is the string `"Join"`.
+
+- Example of a change: `MergeJoin` sorting its merged lists differently, or `GroupBy` ordering
+  members by a different tiebreaker. The pipeline hash and path stay the same while the rows
+  written differ.
+- Example that also changes a dtype: `Batch` typing its list columns as `large_list` instead
+  of `list`.
+
+#### IV4 Execution environment
+
+Python version, executor, git hash of the user's code. Recorded per row
+(`__pf_exec_python_version = '3.12.15'`). It affects neither where a row is found nor how it
+is read.
+
+---
+
+## Part 3. The impact of each axis
+
+The developer's rule (November 11, 2026): **anything that changes the schema of the result or
+tag tables (a column name, a dtype, an added column) must be reflected in the path of the
+table.** The last column measures today's code against that rule.
+
+| Axis | Result column names or dtypes | System column names or dtypes | Values of key columns (old rows cannot be found) | Meaning of stored bytes (old rows misread) | Reaches the path today? |
+|---|---|---|---|---|---|
+| I1 Structure hashing | no | **yes**: system-tag column names embed these hashes | yes | no | Yes, as a side effect: hashes in the path change; old tables are orphaned silently (F2) |
+| I2 Arrow hashing | no | no | yes, every row key | no | **No** (F1) |
+| I3 Per-type hashing | no | no | yes, where rows hold the type | no | No |
+| I4 Identity composition | no | sometimes | yes | no | Only if the changed identity is in the path |
+| II1 Conversion rules | **yes** (dtype) | no | yes | possibly | **No** (F8) |
+| II2 Per-type representation | **yes** if the layout changes shape | no | no, if the hash is by value | **yes** | Only if the type is renamed |
+| III1 Path layout | no | no | no | no | It is the path |
+| III2 Table layout | no | **yes** | no | no | Yes for pipeline and result tables; not for the other kinds |
+| III3 Column naming | no | **yes** | possibly | no | **No** |
+| III4 Backend encoding | as physically stored | as physically stored | no | yes | No |
+| IV1 User function | yes (signature) | no | — | — | Yes |
+| IV2 Wrapper kind | possibly | possibly | — | — | Yes |
+| IV3 Operator behaviour | possibly | possibly | no | **yes**: same path, different rows | **No** |
+| IV4 Environment | no | no | no | no | No, and correctly: it is recorded in columns |
+
+Measured against the rule, **four axes break it today**: II1, II2, III3 and IV3. I1 satisfies
+it only by accident, and without any way to find the old tables.
+
+How a change reaches a path today, when it does:
+
+```
+  (a) by an explicit name      …/v0/…            …/pdb_v1          the reader can look for the old name
+  (b) through a hash value     …/semantic_v0.1:17de3328…/…         the old path cannot be derived from the new one
+  (c) not at all               arrow label, Arrow types, operator behaviour, column naming
+```
+
+---
+
+## Part 4. Path or column? A proposed test
+
+For a change that leaves column names and dtypes alone but changes what a column's values
+mean, the question is whether it belongs in the path or in a column. Proposed test: ask what
+the column is used for.
+
+```mermaid
+flowchart TD
+    Q0{"Does the change alter a column name,<br/>a dtype, or the set of columns?"}
+    Q1{"Does it change the values of a column<br/>used to FIND a row (a key)?"}
+    Q2{"Does it change how stored bytes<br/>must be DECODED?"}
+    Q3{"Does it change WHICH rows<br/>the same inputs produce?"}
+    P["PATH"]
+    C["COLUMN"]
+    Q0 -- yes --> P
+    Q0 -- no --> Q1
+    Q1 -- yes --> P
+    Q1 -- no --> Q2
+    Q2 -- yes --> P
+    Q2 -- no --> Q3
+    Q3 -- yes --> P
+    Q3 -- "no: it only describes how the row came to be" --> C
+```
+
+| Kind of column | Examples | Verdict | Reason |
+|---|---|---|---|
+| Used to find a row | `__input_data_hash`, `__pipeline_base_entry_id`, `__record_id`, `__node_content_hash` | path | Old and new rows can never match each other. Sharing a table gains nothing and makes every full read return duplicates (F1: 6 rows for 3 inputs) |
+| Bytes that need a rule to decode | a stored array, a file reference | path | A table has one schema. Two representations cannot share a column without one of them being misread |
+| The rows themselves | output of `Join`, `Batch`, `GroupBy` | path | Rows produced under the old behaviour would be served as if current |
+| Describes how a row came to be | `__pf_exec_python_version`, `__pf_exec_executor_type`, `__pf_var_git_hash`, `__pod_ts` | column | It affects neither finding nor reading the row |
+
+By this test almost every axis belongs in the path and only IV4 stays a column. That argues
+for a small number of names in the path, each covering a family of axes, instead of one
+marker per axis.
+
+Applied to concrete cases:
+
+| Case | Schema changes? | Key values change? | Bytes meaning changes? | Verdict |
+|---|---|---|---|---|
+| starfix 0.4 -> 0.5 (`arrow_v0.1` -> `arrow_v0.2`) | no | yes | no | path |
+| Arrays move from `.npy` bytes to `struct<dtype, shape, data>` | yes | yes (hash by value replaced hash of bytes) | yes | path |
+| Dict insertion order stops affecting hashes (PR #301) | system-tag names for affected nodes | yes | no | path |
+| SpiralDB table gains the nullability metadata (PR #308) | yes (nullability is part of the schema) | yes (Arrow hash covers nullability) | no | path |
+| `GroupBy` changes its member tiebreaker | no | no | rows differ | path |
+| User upgrades Python 3.12 -> 3.13 | no | no | no | column |
+| User edits a function body | no | no | no (by the developer's decision) | neither |
+
+---
+
+## Part 5. The system (to be decided)
 
 _Filled in during the discussion._
 
-## 3. Generation names in paths (to be decided)
+## Part 6. Generation names in paths (to be decided)
 
 _Filled in during the discussion._
 
-## 4. Before the v0.3 tag, and after (to be decided)
+## Part 7. Before the v0.3 tag, and after (to be decided)
 
 _Filled in during the discussion._
 
-## 5. Follow-up issues to file
+## Part 8. Follow-up issues to file
 
 _Filled in during the discussion._
 
-## 6. Decisions
+## Part 9. Decisions
 
-Decisions made before this discussion (developer, as relayed in ITL-938 and ITL-910):
+Decisions made before this discussion (developer, as recorded in ITL-938, ITL-910, ITL-913):
 
 | Date | Decision |
 |---|---|
@@ -180,7 +622,21 @@ Decisions made before this discussion (developer, as relayed in ITL-938 and ITL-
 | Nov 11, 2026 | "A hash bug overrides hash stability: erroneous values move, and the change is marked explicitly as a fix." |
 | Nov 11, 2026 | Arrow label rule: bump Orcapod's label whenever any hash can change; label numbers are not kept aligned with starfix's format number. |
 | Nov 11, 2026 | v0.3 fails explicitly when it meets v0.2 rows (ITL-910). |
-| Nov 11, 2026 | Migration matches stored results by tags, not by reproducing old hashes (ITL-913). |
+| Nov 11, 2026 | "As for the migration, we are going to use tags as the source of truth in matching and finding records." (ITL-913) |
 | Nov 11, 2026 | Open question that started this design: "Should we think about having explicit name so that we have path change everywhere for v0.3?" |
 
-Decisions made in this discussion: _none yet._
+Decisions made in this discussion:
+
+| Date | Decision (developer's words where quoted) |
+|---|---|
+| Nov 11, 2026 | Organise by axes of change, not by today's markers: "what we really need is to organize hierarchically all the different elements / ways by which something about the behavior of the Orcapod system can change." |
+| Nov 11, 2026 | "Anything that ends up changing the schema of the results (changes the column name/dtype or adds more columns to results / tags table) should have itself reflected in the path of the table." |
+| Nov 11, 2026 | "Even if the schema/column doesn't change but the meaning of the columns change, we should critically evaluate whether that should be present as entirely different path or if it should just be reflected in a column that keeps that info." (To be evaluated; Part 4 is the proposal.) |
+
+Open questions for the developer:
+
+1. Is the axis list complete and at the right grain? I4 (identity composition) and IV3
+   (operator behaviour) have no marker today: should both be in the system?
+2. Is the path-or-column test of Part 4 accepted?
+3. Type rules (II1, II2) do not reach the path today. Confirm this is a gap to close.
+4. Next: which axes share one name, which get their own, and the exact path layout per option.
