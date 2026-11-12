@@ -25,7 +25,7 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 - [x] `MapData({"x": "<tag name>"})` and `MapTags({"<tag>": "<data name>"})` collisions.
 - [x] `Join` of two streams where one stream's tag name equals the other's data name.
 - [x] `function_pod` whose output key equals a tag name.
-- [x] Run with `uv run python ...`; save stdout to `exp01_same_name_today.out.txt`.
+- [x] Run with `uv run python ...`; save stdout to `exp01_same_name_today.out`.
 
 ### Task 2: Experiment 02, today's workarounds on the EDI-shaped table
 
@@ -38,7 +38,7 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 - [x] For each: compute elapsed time (`experiment_start - session_start_datetime`) with a pod,
       then Join with a second table keyed on the same columns; record lines, renames,
       `pipeline_hash` / `content_hash` changes and downstream Join behaviour.
-- [x] Save stdout to `exp02_workarounds_today.out.txt`.
+- [x] Save stdout to `exp02_workarounds_today.out`.
 
 ### Task 3: Experiment 03, prototype of the smallest feature (design C), out of tree
 
@@ -49,7 +49,7 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 - [x] Show `keys()`, `output_schema()`, `as_table()`, `iter_data()`, a pod reading the copy,
       a downstream Join keyed on the original tags, and that streams not using it keep their
       hashes.
-- [x] Save stdout to `exp03_copy_tag_prototype.out.txt`.
+- [x] Save stdout to `exp03_copy_tag_prototype.out`.
 
 ### Task 4: Need analysis from the EDI schemas
 
@@ -70,7 +70,7 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 ## Progress notes
 
 (successor: read this section first)
-- Tasks 1-5 done (exp01-exp04 with .out.txt; design doc written). Findings: Join/MergeJoin
+- Tasks 1-5 done (exp01-exp04 with .out; design doc written). Findings: Join/MergeJoin
   tag-vs-data collision crashes late (J1), pod output key == tag name accepted (P1); W1/W3
   give 9 rows instead of 5; GroupBy already turns non-key tags into data (precedent for C).
 - Coordinator answered the ask: open the PR as is; decisions go to the developer; J1/P1 filed

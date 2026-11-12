@@ -42,6 +42,7 @@ copy_out = fx.elapsed_s2.pod(copy_in)
 
 
 def h(x) -> str:
+    """Return the first 16 hex characters of a ``ContentHash``."""
     return x.to_hex(16)
 
 
@@ -103,6 +104,7 @@ print("\n=== divergence: the copy is ordinary data once created")
 
 @function_pod(output_keys="session_start")
 def to_day(session_start: dt.datetime) -> dt.datetime:
+    """Truncate the copied session start to midnight."""
     return session_start.replace(hour=0, minute=0)
 
 

@@ -35,10 +35,12 @@ S3 = dt.datetime(2026, 1, 5, 14, 0, tzinfo=UTC)
 
 
 def us(t: dt.datetime) -> int:
+    """Return ``t`` as microseconds since the epoch."""
     return int(t.timestamp() * 1_000_000)
 
 
 def session_table() -> pa.Table:
+    """Return the EDI-shaped ``session`` table (m1 has two sessions)."""
     return pa.table(
         {
             "subject_id": pa.array(["m1", "m1", "m2"], pa.large_string()),
@@ -57,6 +59,7 @@ def session_table() -> pa.Table:
 
 
 def experiment_table() -> pa.Table:
+    """Return the EDI-shaped ``experiment`` table (two experiments per session)."""
     starts = [S1, S1, S2, S2, S3]
     offsets_s = [60, 900, 120, 1500, 30]
     return pa.table(
@@ -77,6 +80,7 @@ KEYS_EXPERIMENT = ["subject_id", "session_start_datetime", "experiment_index"]
 
 
 def src(table: pa.Table, tags: list[str], source_id: str) -> ArrowTableSource:
+    """Build an ``ArrowTableSource`` with nullability inferred from the data."""
     return ArrowTableSource(
         table, tag_columns=tags, source_id=source_id, infer_nullable=True
     )
@@ -86,6 +90,7 @@ session = src(session_table(), KEYS_SESSION, "session")
 
 
 def show(label: str, stream) -> None:
+    """Print a stream's keys, system-tag columns and hashes."""
     print(f"\n=== {label}")
     tags, data = stream.keys()
     print("keys():", tags, "|", data)
@@ -98,6 +103,7 @@ def show(label: str, stream) -> None:
 
 
 def rows(stream, cols: list[str]) -> None:
+    """Print the given columns of a stream as a table."""
     df = stream.as_table().select(cols).to_pandas()
     print(df.to_string(index=False))
 
@@ -114,6 +120,7 @@ show("baseline: experiment, primary keys as tags", baseline)
 def elapsed_s(
     session_start_datetime: dt.datetime, experiment_start_timestamp: int
 ) -> float:
+    """Return seconds from session start (read as data) to experiment start."""
     return experiment_start_timestamp / 1e6 - session_start_datetime.timestamp()
 
 
@@ -145,6 +152,7 @@ except Exception as exc:  # noqa: BLE001
 # ----------------------------------------------------------------------------------------
 @function_pod(output_keys="elapsed_s")
 def elapsed_s2(session_start: dt.datetime, experiment_start_timestamp: int) -> float:
+    """Return seconds from the copied session start to experiment start."""
     return experiment_start_timestamp / 1e6 - session_start.timestamp()
 
 

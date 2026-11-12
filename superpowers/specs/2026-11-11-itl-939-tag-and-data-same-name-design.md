@@ -5,7 +5,7 @@
 **Date:** November 11, 2026.
 **Experiments:** `superpowers/specs/itl-939-experiments/` (exp01 today's rules, exp02 today's
 workarounds, exp03 copy-operator prototype, exp04 foreign keys, exp05 hashes and divergence; each `expNN_*.py` has its captured
-output next to it as `expNN_*.out.txt`; rerun with `uv run python <script>`).
+output next to it as `expNN_*.out`; rerun with `uv run python <script>`).
 
 ## 1. Summary
 
@@ -299,7 +299,9 @@ Not recommended.
 * **Save and load:** `to_config()` / `from_config()` carry `name_map`. The DB source stays a
   DB source, unlike the W2 recipe on a DB source.
 * **Validation (at graph-build time):** every key must be a user tag column of the input, not
-  a system tag. Every target name must be unused in both groups. Otherwise raise
+  a system tag. Target names must be distinct from each other, unused in both groups, and must
+  not start with `_` (`constants.DATAGRAM_PREFIX`, which covers `_tag_`, `_source_`, `__` and
+  `_context_key`), since Orcapod reads such a column as a system column (sources drop it). Otherwise raise
   `InputValidationError` naming the column. Copying a list-valued tag (after `Batch`) gives a
   list-valued data column.
 
@@ -318,10 +320,14 @@ the source; route C applies `CopyTagsToData` to the unchanged source.
 | Record-id preimage column names | differ: `_tag_source_id::8b20…` vs `::2f50…` | the system-tag column name carries the source's schema hash, and W2's schema has an extra column |
 | `FunctionNode` base entry id (arrow hash of the preimage) | differ (`000001a5ca3e…` vs `000001996248…`) | the preimage is hashed with its column names |
 
-So the two routes share cached pod **results** (same input data hash), but they are different
+So the two routes present the pod with the same input data hash, which is the result-cache
+key. When the pod has a result database (`function_pod(result_database=...)`) and both routes
+use the same one, a result computed on one route is reused on the other. Without a result
+database there is no cache to share, and each run computes. Either way they are different
 pipelines: different node tables (paths come from `pipeline_hash`) and different pipeline
-record ids. That is expected, because two different graphs produce the rows. A user who
-switches from the recipe to the operator recomputes nothing, but gets new pipeline records once.
+record ids. That is expected, because two different graphs produce the rows. A user with a
+shared result database who switches from the recipe to the operator recomputes nothing, but
+gets new pipeline records once.
 For the source itself, C changes nothing: the source keeps its schema hash, its system-tag
 column names and its stored tables. W2 changes all three.
 
@@ -340,9 +346,12 @@ after MapData the tag is unchanged: (('subject_id', 'session_start_datetime', 'e
 What it means: the copy has no tie to the tag after creation. Nothing re-checks equality, and
 nothing should. It is acceptable because the two values play different roles. The tag
 identifies the row, and no pod can change it, since pods never write tags. The copy is an
-input to computation, and computation may transform it like any other value. Row identity,
-joins and record ids follow the tag only, so a diverged copy can never mis-identify or mis-join
-a row. The only risk is a reader assuming the two are still equal. The names make the
+input to computation, and computation may transform it like any other value. Row identity at
+the source (source record ids) and `Join` matching follow the tags only, so a diverged copy can
+never mis-identify or mis-join a row. A downstream pod's record id does depend on the copy: its
+preimage includes the input data hash (`function_node.py:94`). If an earlier step changed the
+copy, the pod's input data and therefore its record id change too. That is correct, since the
+pod received a different input. The only risk is a reader assuming the two are still equal. The names make the
 difference visible (`session_start_datetime` is the key, `session_start` the input), and the
 docs should call the copy a snapshot. Design B carries the same divergence (exp01 #10) under a
 single name, which is where it does become confusing.

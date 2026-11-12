@@ -73,6 +73,7 @@ print("\n=== F3. after a pod, a data column cannot become a tag (no operator doe
 
 @function_pod(output_keys=["probe_id", "depth_mm"])
 def plan(probe_id: str, probe_plan_chamber_z_um: float) -> tuple[str, float]:
+    """Pass the probe id through and convert the planned depth to millimetres."""
     return probe_id, probe_plan_chamber_z_um / 1000.0
 
 

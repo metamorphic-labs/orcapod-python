@@ -51,14 +51,29 @@ class CopyTagsToData(UnaryOperator):
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
+        """Return the operator's identity: its class name and the sorted name map."""
         return (self.__class__.__name__, tuple(sorted(self.name_map.items())))
 
     def validate_unary_input(self, stream) -> None:
+        """Check the name map against the input stream.
+
+        Raises:
+            InputValidationError: If a key is not a user tag column, two keys share a
+                target name, a target starts with the reserved ``_`` prefix, or a target
+                is already a tag or data column.
+        """
         tag_columns, data_columns = stream.keys()
         missing = set(self.name_map) - set(tag_columns)
         if missing:
             raise InputValidationError(f"Not tag columns: {sorted(missing)}")
-        taken = set(self.name_map.values()) & (set(tag_columns) | set(data_columns))
+        targets = list(self.name_map.values())
+        duplicated = sorted({t for t in targets if targets.count(t) > 1})
+        if duplicated:
+            raise InputValidationError(f"Copy names given twice: {duplicated}")
+        reserved = sorted(t for t in targets if t.startswith(constants.DATAGRAM_PREFIX))
+        if reserved:
+            raise InputValidationError(f"Copy names use a reserved prefix: {reserved}")
+        taken = set(targets) & (set(tag_columns) | set(data_columns))
         if taken:
             raise InputValidationError(f"Copy names already used: {sorted(taken)}")
 
@@ -69,6 +84,7 @@ class CopyTagsToData(UnaryOperator):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
+        """Predict the output schemas: the input's, plus one data entry per copy."""
         tag_schema, data_schema = stream.output_schema(
             columns=columns, all_info=all_info
         )
@@ -77,6 +93,7 @@ class CopyTagsToData(UnaryOperator):
         return tag_schema, Schema({**data_schema, **copies})
 
     def unary_static_process(self, stream):
+        """Append each copy (and a null source-info column for it) to the input table."""
         tag_columns, _ = stream.keys()
         table = stream.as_table(
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
@@ -93,6 +110,7 @@ class CopyTagsToData(UnaryOperator):
 
 
 def section(title: str) -> None:
+    """Print a section header."""
     print(f"\n=== {title}")
 
 
@@ -122,6 +140,23 @@ print(
     "prediction matches static_process:",
     op.output_schema(experiment) == op.static_process(experiment).output_schema(),
 )
+src_cols = {"source": True}
+print(
+    "... also with columns={'source': True} (no stream lists _source_ columns):",
+    op.output_schema(experiment, columns=src_cols)
+    == op.static_process(experiment).output_schema(columns=src_cols),
+)
+for bad in (
+    {"session_start_datetime": "x", "experiment_index": "x"},
+    {"session_start_datetime": "_tag_x"},
+    {"session_start_datetime": "task_id"},
+    {"task_id": "t"},
+):
+    try:
+        CopyTagsToData(bad)(experiment)
+        print("validation", bad, "-> accepted")
+    except InputValidationError as exc:
+        print("validation", bad, "->", exc)
 
 # 2. The pod reads the copy; the tags still identify the row.
 section("2. pod on the copy, then Join with session on the shared keys")

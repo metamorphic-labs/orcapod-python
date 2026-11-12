@@ -24,6 +24,7 @@ T1 = dt.datetime(2026, 1, 6, 9, 30, 0, tzinfo=dt.timezone.utc)
 
 
 def probe(label: str, fn) -> None:
+    """Run ``fn`` and print its result, or the exception and where Orcapod raised it."""
     print(f"\n--- {label}")
     try:
         out = fn()
@@ -38,6 +39,7 @@ def probe(label: str, fn) -> None:
 
 
 def session_table() -> pa.Table:
+    """Return a two-row EDI-shaped ``session`` table."""
     return pa.table(
         {
             "subject_id": pa.array(["m1", "m2"], pa.large_string()),
@@ -52,6 +54,7 @@ def session_table() -> pa.Table:
 # 1. An Arrow table that physically carries the name twice (Arrow allows duplicate
 #    field names), with the name declared as a tag.
 def dup_name_source():
+    """Build a source from a table that holds ``session_start_datetime`` twice."""
     t = session_table()
     dup = pa.Table.from_arrays(
         [t["subject_id"], t["session_start_datetime"], t["session_start_datetime"]],
@@ -71,6 +74,7 @@ probe("1. ArrowTableSource on a table with a duplicated field name", dup_name_so
 
 # 2. tag_columns naming a column -> it simply leaves the data group.
 def baseline():
+    """Build the ``session`` source with its primary keys as tags."""
     src = ArrowTableSource(
         session_table(),
         tag_columns=["subject_id", "session_start_datetime"],
@@ -104,6 +108,7 @@ probe(
 # 5. A function pod whose output key equals a tag name.
 @function_pod(output_keys="session_start_datetime")
 def echo_end(session_end_datetime: dt.datetime) -> dt.datetime:
+    """Return the end time under the output key ``session_start_datetime``."""
     return session_end_datetime
 
 
@@ -119,6 +124,7 @@ probe(
 
 # 6. Join: stream A has the name as a tag, stream B has the same name as data.
 def b_stream():
+    """Build a stream with ``session_start_datetime`` as a DATA column."""
     t = pa.table(
         {
             "subject_id": pa.array(["m1", "m2"], pa.large_string()),
@@ -162,6 +168,7 @@ probe(
 def elapsed(
     session_start_datetime: dt.datetime, session_end_datetime: dt.datetime
 ) -> float:
+    """Return seconds from session start to session end."""
     return (session_end_datetime - session_start_datetime).total_seconds()
 
 
@@ -174,6 +181,7 @@ probe(
 # 10. Per-row view: Tag and Data are separate datagrams, so a shared name may survive
 #     iter_data() even though as_table() cannot hold it.
 def iter_pod_rows():
+    """Return the (tag, data) dicts of the pod whose output key is a tag name."""
     return [(t.as_dict(), d.as_dict()) for t, d in echo_end.pod(base).iter_data()]
 
 
@@ -181,6 +189,7 @@ probe("10. iter_data() of the pod whose output key == tag name", iter_pod_rows)
 
 
 def iter_join_rows():
+    """Return the (tag, data) dicts of the colliding Join."""
     return [(t.as_dict(), d.as_dict()) for t, d in Join()(base, b_stream()).iter_data()]
 
 
