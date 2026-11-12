@@ -5,48 +5,52 @@ Function pods can take and return your own classes: Python
 [pydantic](https://docs.pydantic.dev/) models. Orcapod stores their values in Arrow
 columns and caches results computed from them like any other value.
 
-Caching needs to know when two classes are **the same type**. This page explains how
-Orcapod decides, and what that means for notebooks, scripts and modules.
+Caching and type checking need to know when two classes are **the same type**. Orcapod
+has two kinds of class, and you choose the kind where you define the class.
 
-## What makes two classes the same type
+## Two kinds of class
 
-Orcapod identifies a dataclass or pydantic model by three things:
+| | `@op.dataclass` | `@dataclass`, pydantic model |
+|---|---|---|
+| Identified by | its **name** and its **fields** (names, types, order) | its **exact class**: module path, class name and fields |
+| Two classes with the same name and fields | one type | two types |
+| The class cell is run again in a notebook | still the same type; pods and stored results keep working | a new class; pods built for the earlier one refuse it |
+| The class moves to another module | same type (the module is not part of it) | another type; results are computed again |
+| Reading stored values without the class | works: the class is rebuilt from stored metadata | `ImportError` |
+| What a pod is promised | the fields | the class itself, with its methods and validators |
 
-| Component | What it is |
-|---|---|
-| **Name** | The class name for a class defined in a notebook or a script, the module path and class name for a class defined in a module, or a name you declare with `op.register_type` |
-| **Kind** | Dataclass or pydantic model. A dataclass and a pydantic model are never the same type, even with the same name and fields |
-| **Fields** | The name and type of every stored field, in the order the class declares them |
+**Use `@op.dataclass`** for data you pass between pods, keep in a store and work on in
+notebooks: records, measurements, parameters. It is the kind to use while a class is
+still being edited.
 
-Two classes that agree on all three are the same type: results stored with one are found
-again with the other.
+**Use an ordinary `@dataclass` or a pydantic model** when the pod needs that very class:
+its methods, its validators, its place in a library. Orcapod then never accepts another
+class in its place.
 
-Field order counts because your code can see it: a dataclass compares, unpacks and
-prints its fields in declared order, and a pydantic model dumps and serializes in
-declared order. Two classes with the same fields in another order are two types.
+In both kinds, adding, removing, renaming, retyping or reordering fields makes a **new
+type**. Results computed with the old definition stay in the database, and the new type
+computes its results into new tables, so a stored value is never read back with fields
+it was not written with. Field order counts because your code can see it: a dataclass
+compares, unpacks and prints its fields in declared order.
 
-Known boundary: defaults, methods, properties, pydantic computed fields and validators,
-and docstrings are **not** part of the identity, although a pod can observe them.
-Changing one of them keeps the type and its stored results. If such a change alters what
-a pod computes, bump the pod's version, as you would for any change to its code.
+Defaults, methods, properties, validators and docstrings are **not** part of a type,
+although a pod can observe them. Changing one of them keeps the type and its stored
+results. If such a change alters what a pod computes, bump the pod's version, as you
+would for any change to its code.
 
-Adding, removing, renaming, retyping or reordering fields makes a **new type**. Results computed with the old
-definition stay in the database, and the new type computes its results into new tables,
-so a stored value is never read back with fields it was not written with.
+## `op.dataclass` in a notebook
 
-## Defining and redefining a class in a notebook
-
-Define a class, use it in a pod and run a job:
+`op.dataclass` is used like `dataclasses.dataclass` and returns a real dataclass. Define
+a class, use it in a pod and run a job:
 
 ```python
-from dataclasses import dataclass
-
+import orcapod as op
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.sources import DictSource
 
 
-@dataclass
+@op.dataclass
 class Point:
     x: float
     y: float
@@ -86,10 +90,11 @@ print("function calls:", len(calls))
 ```
 
 Running the cell that defines `Point` again creates a new class object with the same
-name and fields. It is the same type, so the next run finds the stored results:
+name and fields. It is the same type: the pod defined earlier accepts it, and the next
+run finds the stored results.
 
 ```python
-@dataclass
+@op.dataclass
 class Point:
     x: float
     y: float
@@ -100,11 +105,11 @@ print("function calls:", len(calls))
 # function calls: 2
 ```
 
-Adding, removing, retyping or reordering fields makes a new type. Re-run the pod cell too, so that `norm` takes
-the new `Point`; the run then computes into new tables:
+Changing the fields makes a new type. Re-run the pod cell too, so that `norm` takes the
+new `Point`; the run then computes into new tables:
 
 ```python
-@dataclass
+@op.dataclass
 class Point:
     x: float
     y: float
@@ -122,68 +127,142 @@ print("function calls:", len(calls))
 # function calls: 4
 ```
 
-## How a class is named
+### The name
 
-The name is part of the identity, so it decides whether results survive moving code
-around:
-
-- A class defined in a **notebook or a script** run directly (`__main__`) is named by its
-  class name: `Point`.
-- A class defined in a **module** is named by its module path and class name:
-  `pkg.models.Point`.
-
-So results computed with `Point` in a notebook are **not** found by
-`pkg.models.Point` after you move the class into a module, unless you give the module
-class the same name. Declare it with `op.register_type`:
+The type is named by the class name, `Point`, wherever the class is defined: in a
+notebook, a script or any module. Pass `name=` to choose another name, for example to
+keep two unrelated `Point` classes apart or to rename a class without losing its
+results:
 
 ```python
-import orcapod as op
-
-
-@op.register_type(name="Point")
-@dataclass
-class ModulePoint:
+@op.dataclass(name="Point")
+class LabelledPoint:
     x: float
     y: float
     label: str = ""
 
 
-run(ModulePoint)
+run(LabelledPoint)
 print("function calls:", len(calls))
 # function calls: 4
 ```
 
-`op.register_type` accepts:
+A name must not be empty, contain `@`, `;` or spaces, or start with `orcapod.`. Two
+classes with the same fields and **different** names are different types.
 
-- `name="..."`: the name to use, the same wherever the class is defined. It must not be
-  empty, contain `@` or spaces, or start with `orcapod.`.
-- `qualified_name=False`: name a module class by its class name alone, without retyping it.
-- no arguments: keep the default name.
+`op.dataclass` also takes the options of `dataclasses.dataclass` (`frozen=True`,
+`slots=True`, `kw_only=True`, `order=True`, ...), except `init=False`.
 
-It never changes your class; it records the name in Orcapod's registry and returns the
-class. Declare the name before the class is first used in a source or a pod. Declaring
-the same class again with the same name does nothing; declaring it under a different
-name raises `ValueError`.
-
-You can see a class's identity on any column that holds it. The part before `@` is the
-name; the rest is a hash of the name, the kind and the fields:
+You can see a type on any column that holds it. The part before `@` is the name; the
+rest is a hash of the name, the kind and the fields:
 
 ```python
-source = DictSource(data=[{"k": "a", "p": ModulePoint(1.0, 2.0)}], tag_columns=["k"])
+source = DictSource(data=[{"k": "a", "p": LabelledPoint(1.0, 2.0)}], tag_columns=["k"])
 print(source.as_table().schema.field("p").type.extension_name)
 # Point@...
 ```
 
-The first time a class defined in a notebook or a script is used, Orcapod prints a
-one-time warning saying that it is identified by its class name and fields.
+### A structural class promises its fields, not its methods
+
+When two classes are the same type, Orcapod checks that they are compatible and passes
+the value **as it is**. It never converts a value from one class to another. A function
+annotated with `Point` can therefore receive an instance of another class of the same
+type: the object an upstream pod returned, an instance of the class as it was defined
+before the cell was re-run, or a class rebuilt from stored metadata.
+
+What you can rely on:
+
+- **The fields.** Every class of the type has the same fields with the same types.
+- **Equality.** Instances of two classes of the same type are equal when their field
+  values are equal.
+
+What you cannot rely on is a method or a `__post_init__` check of the class named in the
+annotation. Keep behavior in functions that take the value, or convert explicitly.
+
+```python
+print(LabelledPoint(1.0, 2.0) == Point(1.0, 2.0))
+# True
+```
+
+### Converting explicitly
+
+`from_instance` builds an instance of an `op.dataclass` from an instance of any other
+dataclass, ordinary or `op.dataclass`, that has exactly the same field names with the
+same types. It is the only conversion, and Orcapod never calls it for you.
+
+```python
+from dataclasses import dataclass
+
+
+@dataclass
+class LegacyPoint:
+    x: float
+    y: float
+    label: str = ""
+
+
+converted = Point.from_instance(LegacyPoint(1.0, 2.0, "origin"))
+print(type(converted).__name__, converted.label)
+# Point origin
+```
+
+A missing or an extra field raises `TypeError` rather than dropping or inventing data.
+
+## Ordinary dataclasses and pydantic models
+
+An ordinary `@dataclass` and a pydantic model are identified by their **exact class**:
+the module path, the class name and the fields.
+
+- A class defined in a **module** is named by its module path: `pkg.models.Reading`.
+- A class defined in a **notebook or a script** run directly is named under `__main__`:
+  `__main__.Reading`.
+
+Two different classes are never the same type, even with the same name and fields. In a
+notebook this shows when a class cell is run again: the new class is a new class, and a
+pod built for the earlier one refuses it. Re-run the pod cell as well.
+
+```python
+@dataclass
+class Reading:
+    value: float
+
+
+@function_pod(output_keys="doubled")
+def double(r: Reading) -> float:
+    return 2 * r.value
+
+
+@dataclass
+class Reading:  # the cell is run again
+    value: float
+
+
+try:
+    double.pod(DictSource(data=[{"k": "a", "r": Reading(1.0)}], tag_columns=["k"]))
+except ValueError as error:
+    print("refused:", "column 'r'" in str(error))
+# refused: True
+```
+
+The stored results are not lost: a pod built for the new class finds them, because the
+module path, the name and the fields are unchanged.
+
+Python's subclass rule holds: a pod annotated with a class accepts a column of a
+subclass. The subclass remains its own type, with its own fields and tables.
+
+A dataclass and a pydantic model are never the same type, and neither is ever the same
+type as an `op.dataclass`.
 
 ## Classes inside classes
 
-A field whose type is another dataclass or pydantic model carries that class's own
-identity: its name (however that class is named or registered), its kind and its fields.
-Renaming the inner class, registering it under another name, or changing its fields
-therefore makes the outer class a new type too. The order in which you declare the inner
-and outer classes does not matter, as long as both are declared before first use.
+A field whose type is another class carries that class's whole description: its name,
+its kind and its fields. Renaming the inner class or changing its fields therefore makes
+the outer class a new type too.
+
+Every class inside an `op.dataclass` must itself be an `op.dataclass`, so that the whole
+value can be rebuilt from stored metadata. A field typed by an ordinary dataclass or a
+pydantic model raises `TypeError` naming the field. An ordinary dataclass or a pydantic
+model may hold fields of any kind.
 
 A class that refers back to itself, directly (`next: Node | None`) or through other
 classes, cannot be stored: Arrow has no recursive struct type. Orcapod raises
@@ -191,25 +270,31 @@ classes, cannot be stored: Arrow has no recursive struct type. Orcapod raises
 
 ## Reading stored values back
 
-Reading stored values needs a class with the stored name, kind and fields. Orcapod
-looks for one among the classes registered or used in the current process, then in the
-script or notebook (`__main__`), then by importing the name as a module path.
+**An `op.dataclass` column** is read with any `op.dataclass` of the stored name and
+fields that is defined in the current process. If none is defined, Orcapod builds a
+dataclass from the stored description (in the module `orcapod.synthesized`): it has the
+stored fields, compares equal to your own class's instances, and converts with
+`from_instance`, but it has none of your methods.
 
-- If no class with that name exists, reading raises `ImportError` naming the column, the
-  type and its fields, and showing the `op.register_type` call to declare it.
-- If a class with that name exists but its fields or their order differ, reading raises
+**An ordinary dataclass or pydantic column** is read with the class found at the stored
+module path (for a notebook or script class: in the running `__main__`).
+
+- If there is no class at that path, reading raises `ImportError` naming the column, the
+  class and its stored fields.
+- If the class there has other fields or another field order, reading raises
   `TypeIdentityError` (from `orcapod.errors`) naming the column and both sets of fields.
 
 Neither case is reported as missing data, and nothing stored is changed.
 
 ## Rules and limits
 
-- Classes defined inside a function cannot be registered: define them at module level or
-  at the top of the notebook.
-- Each subclass is its own type with its own fields; it is never stored as its parent.
-- Two different classes registered under the same name with the same fields are the same
-  type. Orcapod warns once when that happens across two modules, because stored values are
-  then read back as the most recently registered class.
+- An ordinary dataclass or pydantic model defined inside a function cannot be stored: it
+  has no module path to be found by. An `op.dataclass` may be defined anywhere.
+- Each subclass is its own type with its own fields; it is never stored as its parent. A
+  value is stored only as its own class: a pod annotated `-> Base` that returns a `Child`
+  instance fails when the result is stored, instead of losing the child's fields.
+- There is no structural pydantic model: a pydantic model is always identified by its
+  exact class.
 - Results stored by Orcapod versions before 0.3 identified classes by module and class
   name only. Version 0.3 does not read those columns; pipelines compute their results again
   into new tables and leave the old ones untouched.

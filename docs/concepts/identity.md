@@ -173,21 +173,26 @@ stale results are not reused.
 
 ## Your own classes in the identity
 
-A dataclass or pydantic model enters both chains through its **identity**: its name, its
-kind (dataclass or pydantic) and the names and types of its fields, in declared order. The
-identity is part of every schema hash, so it reaches the pipeline hash of each source,
-pod and node that uses the class, and with it the database table paths. Each stored value
-is hashed together with it, so it also reaches the content hash.
+A class enters both chains through its **identity**: its kind, its name and the names and
+types of its fields, in declared order. The identity is part of every schema hash, so it
+reaches the pipeline hash of each source, pod and node that uses the class, and with it
+the database table paths. Each stored value is hashed together with it, so it also
+reaches the content hash.
 
-Two consequences:
+The name depends on the kind of class:
 
-- Two classes with the same name, kind and fields share results, wherever each is
-  defined. A class re-defined in a notebook cell with unchanged fields keeps its cache.
-- A class whose fields change or are reordered is a new type: its pods get new pipeline hashes and new
-  tables, and the results stored with the old definition stay where they are.
+- A class made with `@op.dataclass` is named by its class name (or the `name=` you give).
+  Two such classes with the same name and fields share results, wherever each is
+  defined.
+- An ordinary `@dataclass` or a pydantic model is named by its module path and class
+  name. Moving it to another module makes a new type.
 
-How a class gets its name, and how to keep results when moving a class from a notebook
-into a module, is described in [Your Own Data Types](your-own-data-types.md).
+In both kinds a class whose fields change or are reordered is a new type: its pods get
+new pipeline hashes and new tables, and the results stored with the old definition stay
+where they are.
+
+[Your Own Data Types](your-own-data-types.md) describes the two kinds and when to use
+each.
 
 ## How it connects to other concepts
 

@@ -54,10 +54,6 @@ KIND_STRUCTURAL = "structural"
 #: the same object.
 EXACT_KINDS: frozenset[str] = frozenset({KIND_DATACLASS, KIND_PYDANTIC})
 
-#: Decision point O1 (ITL-972): whether the fields of an exact class are part of its
-#: identity record. ``True``: a changed field gives a new identifier and new tables.
-EXACT_CLASS_FIELDS_IN_IDENTITY = True
-
 #: Modules whose classes are "defined in a notebook or script". ``__mp_main__`` is the
 #: name a ``multiprocessing`` spawn child gives the main module.
 MAIN_MODULES: tuple[str, ...] = ("__main__", "__mp_main__")
@@ -325,13 +321,13 @@ def identity_record(
 
     Returns:
         ``{"kind": kind, "name": name, "fields": [[field, token], ...]}``. The fields
-        keep the given order, which is part of the identity. An exact class's record
-        has no ``fields`` when ``EXACT_CLASS_FIELDS_IN_IDENTITY`` is off.
+        keep the given order, which is part of the identity.
     """
-    record: dict[str, Any] = {"kind": kind, "name": name}
-    if kind not in EXACT_KINDS or EXACT_CLASS_FIELDS_IN_IDENTITY:
-        record["fields"] = [[field, token] for field, token in fields]
-    return record
+    return {
+        "kind": kind,
+        "name": name,
+        "fields": [[field, token] for field, token in fields],
+    }
 
 
 def canonical_json(obj: Any) -> str:

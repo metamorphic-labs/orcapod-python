@@ -1,6 +1,7 @@
 # Two kinds of user class: exact and structural (ITL-972)
 
-**Status:** PROPOSED, awaiting approval. Nothing here is implemented.
+**Status:** APPROVED with changes by the developer, November 12, 2026 (section "Answers
+to the open points"). The sections below state the decided design.
 **Issue:** ITL-972 (v0.3; tag target November 16, 2026; workshop November 17).
 **Supersedes:** the identity model of PR #292 (ITL-881,
 `superpowers/specs/2026-11-10-user-class-identity-v0.3.md`). PR #292 stays open and is not
@@ -19,17 +20,28 @@ merged; its branch is merged into this one and reworked.
 | D5 | Dataclasses only. Pydantic models are completely class based. A structural pydantic model is ITL-973. |
 | D-order | Field order is part of identity (developer, November 11, 2026, for PR #292). Kept: I found no reason to change it. |
 
-## Open points, with a recommendation each
+## Answers to the open points (developer, November 12, 2026)
 
-| ID | Question | Recommendation |
+The design was sent with seven open points. The developer changed three; the coordinator
+read the rest as approved as recommended.
+
+| ID | Question | Answer |
 |---|---|---|
-| O1 | Do an ordinary class's fields enter its identity? (asked of the developer) | **Yes** (variant IN, §a.2). |
-| O2 | Is a subclass column accepted at a parameter annotated with its ordinary base class? | **No**: exact class means `is` (§a.4). Today `is_subhint` accepts it. |
-| O3 | Call form of the conversion (D4) | `P(other)` plus `P.from_instance(other)`; `P(other)` never changes the normal field constructor (§c.1). |
-| O4 | What the other instance must have | Exactly the same field names; nothing dropped, nothing defaulted (§c.2). |
-| O5 | Is an ordinary dataclass column accepted by the schema check at a structural parameter? | **No**: explicit construction only (§c.4). |
-| O6 | `op.dataclass` sets attributes on the class it defines (PR #292's rule was "`register_type` never modifies the class") | **Accept**: it is the defining decorator, like `dataclasses.dataclass`; there is no call form for a class you do not own (§b.1). |
-| O7 | Do instances of two structural classes with one identity compare equal (`==`)? | **No in v0.3**: stdlib dataclass equality (same class only). Convert first: `P(a) == b` (§b.6). |
+| O1 | Do an ordinary class's fields enter its identity? | **Yes** (as recommended). |
+| O2 | Is a subclass column accepted at a parameter annotated with its ordinary base class? | **Accepted** (changed). "why refuse this? Per subclass rule of Python shouldn't this be accepted?" Exact class means no equivalence between *different* classes of the same description; it does not suspend subclassing. The subclass keeps its own identity and all its fields in storage. |
+| O3 | Call form of the explicit conversion | **`P.from_instance(other)` only** (changed). The `P(other)` form is dropped: no `__init__` wrapper. |
+| O4 | What `from_instance` accepts | Exactly the same field names and equal declared types; nested structural fields converted recursively (as recommended). |
+| O5 | Is an ordinary dataclass column accepted at a structural parameter? | **No** (as recommended). |
+| O6 | May `op.dataclass` add its marker and methods to the class it defines? | **Yes** (as recommended). |
+| O7 | Do instances of two structural classes of one identity compare equal? | **Yes** (changed). "the whole point should be that structural classes identifies equality based on structural content as long as the two classes are of same structural identity." |
+| — | Automatic conversion at pod inputs (proposed in §c.3) | **Removed** (changed). "let's not do auto conversion either — we should just check for structural identity as the basis of noting that they are compatible but simply pass it in as is without incurring some magical conversion." |
+
+**Consequence, stated plainly.** Orcapod never converts a value from one class to
+another. A function annotated with structural class `B` may receive an instance of
+another class of the same identity (in memory: the producer's object) or the class bound
+to the type or built from metadata (from a store). **A structural class promises its
+fields, not its methods.** The test of the November 12 measurement therefore asserts
+compatibility, field access and structural equality on both paths, not `type(p) is QNew`.
 
 ## Terms
 
@@ -108,7 +120,7 @@ in large versus non-large layout at any depth is accepted (Delta compaction);
 
 ### a.2 Fields in or out (O1)
 
-**Variant IN (recommended).** Record `{"kind": "dataclass", "name": "pkg.models.Point",
+**Variant IN (DECIDED).** Record `{"kind": "dataclass", "name": "pkg.models.Point",
 "fields": [...]}`.
 
 - Hash: a field added, removed, retyped or reordered changes the identifier, so the schema
@@ -121,7 +133,7 @@ in large versus non-large layout at any depth is accepted (Delta compaction);
 - One mechanism for all three kinds; the read check "stored fields equal the class's fields"
   is a comparison of two identifiers.
 
-**Variant OUT (v0.2.0 behaviour).** Record `{"kind", "name"}` only; extension name
+**Variant OUT (v0.2.0 behaviour; not chosen).** Record `{"kind", "name"}` only; extension name
 `pkg.models.Point`, metadata `{"category":"orcapod.dataclass"}`, both exactly as on the
 ITL-967 branch.
 
@@ -138,8 +150,6 @@ ITL-967 branch.
 - Golden: no existing dataclass or pydantic entry moves relative to the ITL-967 branch.
 - It contradicts the ITL-935 rule quoted above.
 
-The code keeps the choice in one function (which keys an exact class's record has), so
-either answer is a small change until the golden files are regenerated.
 
 ### a.3 Rebinding and declared names: what remains of PR #292
 
@@ -157,21 +167,35 @@ earlier one is used (a cell re-run, `importlib.reload`, `%autoreload`), the regi
 the identifier to the **newest** class, and the old class object keeps its own binding so
 its instances still convert. Without this, re-running a cell raises "already bound" (the
 W1 failure of v0.2.0). It gives no equivalence: the two classes remain different types for
-every check, and with variant IN an edited class has another identifier anyway.
+every check, and an edited class has another identifier anyway.
+
+**What the rule means for data already in memory (found while implementing).** An Arrow
+table carries the identifier, not a class object, so the class of an Arrow-backed column
+is whatever class the identifier is bound to *now*. After a class is defined again and
+used, a source built before reports the new class as its column type and decodes its
+values as the new class; a pod built for the old class refuses that source. That is the
+module-path rule applied to memory as it applies to a store: data of `pkg.Point` is read
+as `pkg.Point` as currently defined. Only a pod's own output schema holds a class object
+(the annotation), so `A -> Old` feeding `B(p: New)` is refused naming the column.
 
 ### a.4 Enforcing the exact class
 
 | Place | Rule |
 |---|---|
-| Schema compatibility (`schema_utils._accepts`, used at every pod input) | For a dataclass or pydantic class on either side: accepted only if `incoming is receiving`. Inside generics and unions the same rule applies per member. `is_subhint` no longer decides for user classes, so a subclass column is refused at a base-class parameter (O2). The error names the column and both classes with their module paths; when both print the same path it adds that the class was defined again (re-run cell) and the pod must be rebuilt. |
-| Pod input, in memory | The column's type is the annotated class (schema check), and the value is the object the upstream produced. No conversion. |
-| Writing a value (`python_to_storage`) | `type(value) is python_type`, else `TypeError` naming both classes. Today any object with the right attributes is stored, and a subclass instance loses its extra fields silently. |
-| Reading stored values | The class is found by the stored name: the class bound in the reading context, else `sys.modules["__main__"]` for a `__main__.` name, else import by the longest module prefix. Its identifier, computed now, must equal the stored one. Not found: `ImportError`. Found with other fields (variant IN: another identifier; variant OUT: another struct): `TypeIdentityError` with the stored and the current fields. The database layer adds the column name (`register_discovered_logical_types` knows the column; the factory does not receive it). Never a fallback to the struct. |
+| Schema compatibility (`schema_utils._accepts`, used at every pod input) | Two different exact classes are never equivalent, whatever their name and fields. Python's subtype rule still holds (O2): a column of a subclass is accepted at a parameter annotated with its base class, as `is_subhint` decides today. A class defined again is not a subclass of the earlier one, so a pod built for the earlier class refuses it; the error names the column. |
+| Pod input | The value is passed as it is. No conversion. |
+| Writing a value (`python_to_storage`) | `type(value) is python_type`, else `TypeError` naming both classes. A column's type is one class with one stored struct; a subclass instance has other fields, which would be lost (audit finding R). A subclass value belongs in a column of the subclass, which a base-class parameter accepts (O2). |
+| Reading stored values | The class is found by the stored name: the class bound in the reading context, else `sys.modules["__main__"]` for a `__main__.` name, else import by the longest module prefix. Its record, computed now, must equal the stored one. Not found: `ImportError`. Found with other fields: `TypeIdentityError` with the stored and the current fields. The database layer adds the column name (`register_discovered_logical_types` knows the column; the factory does not receive it). Never a fallback to the struct. |
 | Subclass | Its own name, so its own identity, fields and tables. Never stored as its base. |
 | Nested class | The outer record embeds the inner record (`{"class": …}`), so a change to the inner class changes the outer identifier. An ordinary class may have fields of any kind. |
 
-The measured case (QOld, QNew; pod A `-> QOld`, pod B `p: QNew`): as ordinary classes they
-are two types, B refuses A's output at graph build, on both paths.
+**O2 has no storage or hashing problem.** A subclass column keeps the subclass's
+identifier in the stream's schema, hashes and stored tables; the base-class parameter only
+decides compatibility. The function receives subclass instances in memory and from a store
+alike, because the stored column is read as the subclass.
+
+The measured case (QOld, QNew; pod A `-> QOld`, pod B `p: QNew`) as ordinary classes: two
+types, B refuses A's output at graph build, on both paths.
 
 ## b. `orcapod.dataclass` (structural)
 
@@ -202,8 +226,8 @@ class Point: ...
   kind is fixed where the class is defined, and there is no call form for classes you do
   not own (wrap them: define a structural class with the same fields and construct it).
 - A local class is allowed: nothing is looked up by module path.
-- What it adds to the class (O6): a marker attribute with the name, `from_instance`, and an
-  `__init__` that wraps the generated one (§c.1; `inspect.signature` is preserved).
+- What it adds to the class (O6): a marker attribute with the name, the classmethod
+  `from_instance` (§c), and `__eq__` (§b.6). `__init__` is the one `dataclasses` generates.
 - Field types allowed: scalars, types with a logical type, containers and unions of these,
   and other **structural** classes. A field typed by an ordinary dataclass or a pydantic
   model raises `TypeError` at first use, naming the field: a structural class must be
@@ -259,27 +283,33 @@ defined; what a *pod parameter* receives does not (§c.3).
 ### b.5 Schema compatibility
 
 Two structural classes are accepted for each other when their records are equal, at the top
-level and inside generics and unions. Everything else about the check is as for any type.
+level and inside generics and unions. The value is then passed **as it is**: Orcapod checks
+compatibility and converts nothing. Everything else about the check is as for any type.
 
 ### b.6 Instance equality (O7)
 
-Unchanged stdlib behaviour: `==` is true only for the same class. Not changing it keeps the
-decorator from replacing a user's or the stdlib's `__eq__`; values that reach a pod are
-already instances of the annotated class.
+`op.dataclass` installs `__eq__`: two instances are equal when their classes are the same
+class, or two structural classes with equal records, and their compared fields
+(`field(compare=True)`) are equal. Fields typed by structural classes compare the same
+way, also inside lists and other containers, because their own `__eq__` is used. An
+instance of a class with another identity, or of any other type, is not equal
+(`NotImplemented`).
 
-## c. The conversion rule (D4)
+- Not installed when `eq=False` is passed or the class body defines `__eq__`.
+- `__hash__` stays what `dataclasses` generates (`frozen=True` or `unsafe_hash=True`): the
+  hash of the field tuple, which does not depend on the class object, so equal instances of
+  two classes have equal hashes. A class that is not hashable stays unhashable.
+- Ordering (`order=True`) is unchanged: `<` between two classes is not supported.
+- A class synthesized from stored metadata has the same `__eq__` and `from_instance`.
+
+## c. Explicit conversion (D4)
 
 ### c.1 Call form (O3)
 
-- `P.from_instance(other)`: the definition, a classmethod.
-- `P(other)`: the same conversion, taken when the call has exactly one positional argument
-  and no keywords, the argument is a dataclass instance, **and** `P`'s first field is not
-  annotated with a dataclass type (nor `Any`/`object`). Otherwise the call is the normal
-  field constructor, exactly as generated by `dataclasses`. The choice depends on the class
-  definition and the argument's kind, never on values. For a class whose first field is a
-  dataclass, use `P.from_instance(other)`.
+`P.from_instance(other)`, a classmethod, is the only conversion. `P(...)` is the plain
+field constructor that `dataclasses` generates. Nothing in Orcapod calls `from_instance`.
 
-### c.2 What "accepts" requires (O4)
+### c.2 What `from_instance` accepts (O4)
 
 - `other` is an instance of a dataclass: ordinary or structural. A pydantic model, a dict
   or anything else raises `TypeError` (D5).
@@ -291,41 +321,31 @@ already instances of the annotated class.
   `list`, `set`, `tuple`, `dict` values and `Optional`). Anything else raises `TypeError`
   naming the field and both types. Values are not otherwise validated or coerced.
 - The result is a new instance built by `P`'s own `__init__` (so `__post_init__` runs);
-  `other` is not modified. `P(p)` for `p` already a `P` returns a copy built the same way.
+  `other` is not modified.
 
-### c.3 Where Orcapod applies it automatically
+### c.3 No automatic conversion
 
-One place: where a Python data function's keyword arguments are assembled from the row
-(`PythonDataFunction`, sync and async, all four call sites through one helper). For each
-parameter annotated with a structural class `P` (also inside `list`/`set`/`tuple`/`dict`/
-`Optional`), a value whose class is not `P` is replaced by `P.from_instance(value)`.
+Orcapod passes values as they are, at pod inputs and everywhere else. Writing a value to a
+structural column requires an instance of a structural class with the column's identity
+(else `TypeError` saying to build one with `from_instance`).
 
-- The schema check has already established that the column's type has `P`'s identity, so
-  this is a change of class object, not of type: no field is added, dropped or retyped.
-- In memory the value is the upstream's object (possibly of another class of the same
-  identity); from a store it is an instance of whichever class the context has bound. Both
-  go through the same helper, so **the parameter always receives an instance of `P`**.
-- The measured case as structural classes: B receives `QNew` on both paths; `describe()`
-  works and `__post_init__` of `QNew` runs.
-- Nothing else converts: operators, sources and stores pass values through. Writing a value
-  to a structural column requires an instance of a structural class with the column's
-  identity (else `TypeError` saying to construct it).
+The measured case as structural classes: B accepts A's output on both paths. In memory it
+receives the `QOld` object; from a store the class bound to the type. On both paths `p.x`
+works and `p == QNew(p.x, p.y)` is true; `p.describe()` is not promised.
 
 ### c.4 Ordinary instance at a structural parameter (O5)
 
 Not accepted by the schema check: the column's type is the ordinary class, which is another
 type with another identifier. The user converts explicitly in a pod
-(`def to_point(p: OldPoint) -> Point: return Point(p)`). This keeps "no implicit conversion
-between types", keeps every column's identifier equal to what its schema says, and leaves
-D4 as what the developer stated: a property of the constructor.
+(`def to_point(p: OldPoint) -> Point: return Point.from_instance(p)`).
 
 ## d. Pydantic
 
 Exact class, the rules of §a with kind `pydantic` and category `orcapod.pydantic`: name is
-module path plus class name; the O1 answer applies to it as well; `is` in the schema check;
-`type(value) is cls` on write; read by import and identifier comparison; a subclass is its
+module path plus class name; fields in the identity; no equivalence between different
+classes in the schema check (subclassing as in §a.4); `type(value) is cls` on write; read by import and identifier comparison; a subclass is its
 own type. No structural kind, no `op.register_type`. A pydantic instance is not accepted by
-a structural constructor, and a structural class cannot have a pydantic field.
+`from_instance`, and a structural class cannot have a pydantic field.
 
 Kept from PR #292: the shared `UserClassLogicalType` base and factory, `model_fields` as
 the stored fields in declared order, building values with the model's constructor (so
@@ -343,10 +363,9 @@ The new category `orcapod.structural` is registered in `contexts/logical_types.j
 
 | Cause | What moves |
 |---|---|
-| Variant IN: the record (fields) enters every exact class's identifier | Every pinned value that involves `GoldenPoint` or `GoldenModel`: in `semantic.json` `type.dataclass`, `type.pydantic`; in `schema.json` `multi_field.logical_mix` and `single_field.{dataclass,pydantic}.{arrow_type,schema_hash}`; in `datagram.json` `{dataclass,pydantic}.{content_hash,pipeline_hash,system_tag_columns}`, the two rows' `data_hash`, and the keys that embed the moved pipeline hash. That was 25 entries when measured for PR #292 on `main`; I re-measure against the ITL-967 tip before regenerating and list each entry in the PR. For users: every pipeline with a dataclass or pydantic column gets new pipeline hashes and table paths. |
-| Variant OUT instead | No existing entry moves. |
+| The record (fields) enters every exact class's identifier (O1) | Every pinned value that involves `GoldenPoint` or `GoldenModel`: in `semantic.json` `type.dataclass`, `type.pydantic`; in `schema.json` `multi_field.logical_mix` and `single_field.{dataclass,pydantic}.{arrow_type,schema_hash}`; in `datagram.json` `{dataclass,pydantic}.{content_hash,pipeline_hash,system_tag_columns}`, the two rows' `data_hash`, and the keys that embed the moved pipeline hash. That was 25 entries when measured for PR #292 on `main`; I re-measure against the ITL-967 tip before regenerating and list each entry in the PR. For users: every pipeline with a dataclass or pydantic column gets new pipeline hashes and table paths. |
 | New fixtures | Added keys only: structural classes (default name, explicit name, nested, container and optional fields, field-order twins with different values, two classes of one identity with equal values), an ordinary subclass, an ordinary class with a structural field. |
-| Stored extension names and metadata | Exact classes (variant IN): `module.qualname` becomes `module.qualname@<digest>`, metadata gains `identity`. Structural: new. A column written by v0.2.0 or by the ITL-967 branch read directly raises `TypeIdentityError` (no identity record), as in PR #292. |
+| Stored extension names and metadata | Exact classes: `module.qualname` becomes `module.qualname@<digest>`, metadata gains `identity`. Structural: new. A column written by v0.2.0 or by the ITL-967 branch read directly raises `TypeIdentityError` (no identity record), as in PR #292. |
 
 **Relative to PR #292** (never merged, so no stored data exists): every user-class
 identifier moves, for three causes: `__main__` classes are named `__main__.X` instead of
@@ -377,25 +396,26 @@ Risks:
 2. Operators that compare Python types across streams (`MergeJoin`, `Join` on shared keys)
    must use the same structural equivalence as the schema check, or two classes of one
    identity are refused there. I audit every Python-type comparison PR #292 touched.
-3. `slots=True` makes `dataclasses` build a new class; the wrapper is applied after it. Tested.
-4. Exact `is` matching is stricter than v0.2.0 in two places (subclass column at a base
-   parameter; duck-typed values on write). Both are intended by D2 but can surprise.
-5. A synthesized class has no methods. Reading without the class defined gives data, not
+3. `slots=True` makes `dataclasses` build a new class; the marker and methods are added to
+   that class. Tested.
+4. Writing is stricter than v0.2.0: a value is stored only as its own class (no duck-typed
+   values, no subclass instance in a base-class column). Intended by D2 but can surprise.
+5. With no conversion, a function annotated with a structural class can receive an instance
+   without that class's methods. Documented as the contract of a structural class.
+6. A synthesized class has no methods. Reading without the class defined gives data, not
    behaviour; documented.
 
 Cuts, first cut first (each leaves a working, documented state):
 
-1. `P(other)` sugar: keep only `P.from_instance(other)`.
-2. Automatic conversion inside containers at pod inputs (`list[P]`, `dict[str, P]`):
-   top-level and `Optional[P]` parameters only; a container of another class of the same
-   identity raises.
-3. `Literal` tokens in structural classes (rejected with a clear error).
-4. Recursive conversion of nested structural fields in `from_instance` (the nested value
+1. `Literal` tokens in structural classes (rejected with a clear error).
+2. Recursive conversion of nested structural fields in `from_instance` (the nested value
    must already be of the declared class).
-5. The same-path hint in the schema-check error message.
 
-Not cut: the two kinds, exact matching, the structural identifier and metadata, reading
-without the class (synthesis), conversion at a top-level pod parameter, the regression test
+(`P(other)` and the automatic conversion at pod inputs, first on this list in the proposal,
+were removed by decision.)
+
+Not cut: the two kinds, no equivalence of exact classes, the structural identifier and
+metadata, structural equality, reading without the class (synthesis), the regression test
 for the measured case, docs, changelog, golden list by cause.
 
 Out of scope: structural pydantic (ITL-973); migration of v0.2 data; computed fields;

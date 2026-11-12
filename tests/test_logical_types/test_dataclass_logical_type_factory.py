@@ -558,7 +558,6 @@ def test_reconstruct_finds_class_nested_in_a_class():
     # read can only find it by importing its dotted name.
     name = f"{inner.__module__}.{inner.__qualname__}"
     record = uci.identity_record("dataclass", name, [("x", "int"), ("y", "str")])
-    assert uci.known_classes("dataclass", name) == []
     storage = pa.struct([pa.field("x", pa.int64()), pa.field("y", pa.large_string())])
     lt = DataclassLogicalTypeFactory().reconstruct_from_arrow(
         uci.identity_string(record),
@@ -733,43 +732,10 @@ def test_reconstruct_rejects_a_record_that_does_not_match_the_extension_name():
     storage = pa.struct(
         [pa.field("name", pa.large_string()), pa.field("count", pa.int64())]
     )
-    with pytest.raises(TypeIdentityError, match="does not match its identity record"):
+    with pytest.raises(TypeIdentityError, match="invalid identity record"):
         DataclassLogicalTypeFactory().reconstruct_from_arrow(
             _identity(_Flat),
             storage,
             {"category": metadata["category"], "identity": record},
             _make_full_converter(),
         )
-
-
-@dataclasses.dataclass
-class _RegisteredElsewhere:
-    """Declared under a dotted name whose module fails to import."""
-
-    x: int
-
-
-def test_reconstruct_uses_a_registered_class_without_importing_its_name(
-    tmp_path, monkeypatch
-):
-    """A registered class that matches is used before its dotted name is imported."""
-    import orcapod as op
-    from orcapod.logical_types.dataclass_logical_type_factory import (
-        DataclassLogicalTypeFactory,
-    )
-
-    # A module that would be imported for the dotted name, and fails on import.
-    package = tmp_path / "itl881_broken_module"
-    package.mkdir()
-    (package / "__init__.py").write_text("raise RuntimeError('import side effect')\n")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    op.register_type(_RegisteredElsewhere, name="itl881_broken_module.Point")
-
-    # This test is about the factory's read entry point (candidate lookup order).
-    lt = DataclassLogicalTypeFactory().reconstruct_from_arrow(
-        _identity(_RegisteredElsewhere),
-        pa.struct([pa.field("x", pa.int64())]),
-        _metadata(_RegisteredElsewhere),
-        _make_full_converter(),
-    )
-    assert lt.python_type is _RegisteredElsewhere
