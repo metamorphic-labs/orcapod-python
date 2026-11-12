@@ -813,9 +813,84 @@ them. Point (b) is open.
 
 ---
 
-## Part 5. The system (to be decided)
+## Part 5. The system (draft, under discussion)
 
-_Filled in during the discussion._
+### 5.1 The core logic
+
+A table's path is the name of two things and nothing else:
+
+| | What it is | For a function's pipeline table | For a function's result table |
+|---|---|---|---|
+| **Schema (S)** | the column names and data types actually stored | tag columns; system-tag columns (their names embed upstream schema and pipeline hashes); Orcapod's bookkeeping columns | the function's output columns; `_source_<col>` columns; bookkeeping columns |
+| **Subject (M)** | what one row stands for | "one input entry of this function, at this position in this chain of steps" | "one result of this function": its name, major version, wrapper kind |
+
+Everything else about a row, how it came to be, is a column value.
+
+```mermaid
+flowchart TD
+    C["A change to Orcapod, or to the user's pipeline"]
+    Q1{"Does it change S of this table?<br/>(a column name, a data type, the set of columns)"}
+    Q2{"Does it change M of this table?<br/>(which computation the rows belong to)"}
+    Q3{"Does it change a value that existing rows carry?"}
+    NP["NEW PATH for this table"]
+    SP["SAME PATH. Old and new rows share the table.<br/>Required: a column value tells them apart."]
+    NO["No effect on this table"]
+    C --> Q1
+    Q1 -- yes --> NP
+    Q1 -- no --> Q2
+    Q2 -- yes --> NP
+    Q2 -- no --> Q3
+    Q3 -- yes --> SP
+    Q3 -- no --> NO
+```
+
+The logic is applied **per table**. One change can move some tables and leave others alone.
+
+Why a structure-hash change moves paths *by its nature*: the names of system-tag columns embed
+the schema hash of each source and the pipeline hash of each join input. When an upstream
+schema's hash changes, the column names of every downstream pipeline table change, which is a
+change of S. Measured on a pipeline `array source -> size -> inc`, v0.2.0 against main:
+
+| Table | Own columns hold an array? | Change in S | Path |
+|---|---|---|---|
+| pipeline table of `size` | no (tags and system tags only) | `_tag_record_id::8a81bfa1…` becomes `_tag_record_id::f0b7551d…` | moves (`…7c1aad1b…` -> `…26e8aefa…`) |
+| pipeline table of `inc`, one step further down | no | same rename | moves (`…7d689f45…` -> `…67de61d1…`) |
+| result table of `inc` (`n: int -> m: int`) | no | none | **stays**, results reused |
+
+### 5.2 The changes between v0.2 and v0.3, run through the logic
+
+Measured: for a pipeline that holds only integers (the probe pipeline), the store written by
+v0.2.0 and the store written by main are **identical**: same paths, same column names and
+types, same hash values. On the ITL-910 branch only the Arrow-hashed values differ.
+
+| Change | S | M | Row values | Derived outcome | What the code does |
+|---|---|---|---|---|---|
+| Array format (ITL-888): stored type `large_binary` becomes `struct<dtype, shape, data>`; type name `numpy.ndarray` becomes `orcapod.ndarray` | changes for every table with an array column, and (through system-tag names) for every pipeline table downstream of an array source | no | — | new path for those tables; other tables untouched | matches |
+| starfix 0.5 (ITL-910): Arrow hash algorithm | no | no | every Arrow-hashed key value | **same path**; rows told apart by the label `arrow_v0.1:` / `arrow_v0.2:` in the values | path: matches. On meeting old rows the branch raises `StoreHashLabelError` |
+| Polars filter predicates become hashable (ITL-828) | — | — | — | nothing existing moves: on v0.2.0 a predicate filter could not be hashed at all (`TypeError`) | matches |
+| User class identity (PR #292): a dataclass column's extension name becomes `Point@<fingerprint>` | changes for tables with such columns and downstream pipeline tables | no | — | new path for those tables | expected to match (the type name changes) |
+| SpiralDB nullability metadata (PR #308) | changes for Spiral tables that gain it | no | — | new path | per ITL-936 |
+| New value types (torch, Polars values) | none for existing tables | no | — | nothing moves | — |
+| Dict and set ordering in structure hashes (PR #301), pandas and Arrow-table value hashes (ITL-897), the wrong-hash fixes of A.9 | only where a moved hash sits in a column name | no | key values | same path unless a column name moves; needs a distinguishing value | no marker today for most of these |
+| Operator fixes (SemiJoin on nested columns, ITL-847) | no | no | which rows are emitted | same path | same path; nothing recorded |
+
+**Conclusion.** The logic does not give v0.3 a distinct path everywhere. It gives a new path
+exactly to the tables whose schema changed (arrays, user classes, Spiral nullability, and
+their downstream pipeline tables). Every other table is shared by v0.2 and v0.3 rows, which
+differ in the Arrow-hashed key values and are told apart by the label inside those values.
+A generation name added to every path would separate tables whose schema and subject did not
+change.
+
+### 5.3 Where today's paths are not a faithful function of S and M
+
+| Kind | Case | Evidence |
+|---|---|---|
+| S changes, path does not | the stored Arrow type of a column (type conversion rules, a representation change under the same type name) | F8 |
+| S changes, path does not | the grammar of system-tag and source-info column names | no marker |
+| S changes, path moves only for two table kinds | Orcapod's bookkeeping columns | `pdb_v1`, `rdb_v1` only |
+| Neither S nor M changes, path moves | `SelectDataColumns(["x"])` versus `(("x",))` | A.9 F |
+| Neither S nor M changes, path moves | any change to how a structure hash is computed for an unchanged structure: the table is the same table under a new name | F2 |
+| M changes, path does not | two unordered inputs with the same `source_id` collapse | A.9 E |
 
 ## Part 6. Generation names in paths (to be decided)
 
@@ -851,6 +926,9 @@ Decisions made in this discussion:
 | Nov 11, 2026 | "Even if the schema/column doesn't change but the meaning of the columns change, we should critically evaluate whether that should be present as entirely different path or if it should just be reflected in a column that keeps that info." |
 | Nov 11, 2026 | Asked for the identity chains (pipeline versus content identity, source identity, source entry identity), system tags and source columns to be laid out explicitly, and for every hash computation site to state precisely what affects its result (sections 1.2.1, 1.2.2, Appendix A). |
 | Nov 11, 2026 | **Source identity contract.** "Whether source identity precisely reflects the exact content OR whether it is meant to just serve as the 'address' of how to (supposedly reliably) refer to the very source is up to the design / decision of the source. This is intentional as sometimes we want to treat the 'repository' as the source identity (e.g. a github repo address). Within the repo, we expect distinct entries to carry unique and reliable record/entry ID which will be used for source columns but as far as source ID is concerned, it's just the repo. We trust that the source will maintain that if source ID and record/entry ID is the same, then we are talking about exactly the same data entry." Also: the content hash is the Merkle chain that includes the identity of the bound sources; the pipeline hash captures only schema and the chain of steps. |
+| Nov 11, 2026 | **Function major version stays in the path.** "Function major version must stay in the path as that's one big handle that we are giving to the user to explicitly say that function has shifted dramatically enough that it won't make sense for the results to stay within a shared table even if everything else looks the same." |
+| Nov 11, 2026 | **Wrong-hash findings (A.9) are fixed before the v0.3 tag.** "I want all of these to be addressed before v0.3 tag as much as possible." |
+| Nov 11, 2026 | **A distinct path needs a reason from the nature of the change.** "Typically we want to have things into completely distinct path if the schema changed, OR if what's meant by the table content, even if schema is the same, is fundamentally changed. Otherwise, the two distinct entries could have simply been kept inside a same path (and thus same table) but with one of the columns being sure to change to capture the different version." The system must be able to say, for the changes from v0.2 to v0.3, if and how the path or the table schema changes and why (Part 5). |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
 Open questions for the developer:
