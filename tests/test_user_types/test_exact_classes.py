@@ -236,18 +236,18 @@ def test_subclass_and_base_are_different_types() -> None:
     assert base.pipeline_hash() != child.pipeline_hash()
 
 
-def test_a_value_is_stored_only_as_its_own_class() -> None:
-    """A subclass instance returned for a base-class column is not stored as the base."""
-    with pytest.raises(TypeError, match="Child"):
-        _ = child_as_base.pod(_numbers()).as_table()
+def test_subclass_output_uses_declared_base_storage() -> None:
+    """The declared logical type stores only base fields for a subclass output."""
+    table = child_as_base.pod(_numbers()).as_table()
+    assert table.schema.field("q").type.storage_type.names == ["x"]
 
 
-def test_in_memory_iteration_refuses_subclass_for_base_output() -> None:
-    """The shared output boundary refuses a subclass before in-memory iteration."""
-    from orcapod.errors import OutputTypeError
-
-    with pytest.raises(OutputTypeError, match="Child.*'q'.*Base"):
-        list(child_as_base.pod(_numbers()).iter_data())
+def test_in_memory_iteration_hands_over_the_returned_object() -> None:
+    """A compatible subclass remains its own class in memory."""
+    values = [
+        data.as_dict()["q"] for _, data in child_as_base.pod(_numbers()).iter_data()
+    ]
+    assert [type(value) for value in values] == [Child]
 
 
 def test_a_subclass_is_returned_by_declaring_it() -> None:

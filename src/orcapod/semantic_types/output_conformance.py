@@ -1,8 +1,7 @@
 """Function-output conformance (ITL-895, ITL-901).
 
-a returned value must already have the declared type, except that a NumPy scalar or a
-Python number is accepted for a numeric type of the same kind when the value is
-represented exactly; nothing that loses or changes information is converted.
+the returned value must be an instance of the declared type, or an exact numeric
+equivalent; a subclass stands in for its base and is stored as the base.
 
 Logical types retain ownership of their compatibility rules. The caller adds function
 and output context to a mismatch; this module never formats returned values.
@@ -41,7 +40,6 @@ class NearMiss(enum.Enum):
     BOOL_FOR_FLOAT = "bool_for_float"
     NONE_FOR_NON_OPTIONAL = "none_for_non_optional"
     ITERABLE_FOR_LIST = "iterable_for_list"
-    DATETIME_FOR_DATE = "datetime_for_date"
     FLOAT_NARROWING = "float_narrowing"
 
 
@@ -144,8 +142,6 @@ class _Checker:
             hint = "Return a list instead: list(value)"
             if isinstance(value, (set, frozenset)):
                 hint = "Return a list in a fixed order instead, e.g. sorted(value)"
-        elif case is NearMiss.DATETIME_FOR_DATE:
-            hint = "Return value.date() instead"
         else:
             hint = f"Return {type_text(declared)}(value) instead"
         return Nonconformance("", declared, value, hint)
@@ -189,8 +185,6 @@ class _Checker:
         )
         if kind in ("b", "i", "u", "f"):
             return self.check_number(value, declared, kind, numpy_type)
-        if declared is dt.date and isinstance(value, dt.datetime):
-            return self.near(NearMiss.DATETIME_FOR_DATE, value, declared)
         if declared in (str, bytes, dt.date, dt.datetime, dt.time, dt.timedelta):
             return (
                 None
@@ -238,6 +232,8 @@ class _Checker:
         numpy_type: tuple[str, int] | None,
     ) -> Nonconformance | None:
         """Require the same numeric kind and prevent overflow or floating narrowing."""
+        if isinstance(declared, type) and isinstance(value, declared):
+            return None  # Python subclassing is the primary acceptance rule.
         scalar = _numpy_scalar(value)
         actual_kind = (
             scalar[0]
@@ -319,6 +315,8 @@ def normalize_output_numbers(value: object, declared: object) -> object:
             return normalize_output_numbers(value, non_none[0])
     numpy_type = _numpy_type(declared)
     kind = numpy_type[0] if numpy_type else None
+    if isinstance(declared, type) and isinstance(value, declared):
+        return value  # Preserve subclass objects; the declared converter owns storage.
     if declared is bool or kind == "b":
         return bool(value)
     if declared is int or kind in ("i", "u"):

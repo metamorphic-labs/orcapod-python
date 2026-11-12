@@ -25,9 +25,10 @@ with one diagnostic on standalone and stored paths. Returned values and mapping 
 absent from diagnostic text and chained converter tracebacks.
 
 The November 12 decision supersedes the earlier warning conversions: only exactly represented
-same-kind numeric values are accepted across Python/NumPy types. Container changes,
-datetime-to-date, numeric narrowing, and boolean/integer kind changes require explicit
-conversion. Storage is validated eagerly; numeric exceptions are normalized while compatible
+same-kind numeric values are accepted across Python/NumPy types. Unrelated container types, numeric narrowing, and non-subclass kind changes require
+explicit conversion. Python subclasses are accepted; the declared logical type controls
+storage. Base storage omits subclass-only fields (and their contribution to row hashes);
+`bool` for `int` and `datetime` for `date` also follow this subclass rule. Storage is validated eagerly; numeric exceptions are normalized while compatible
 user-class objects retain their identity in memory.
 Regressions: `tests/test_core/function_pod/test_output_conformance.py`.
 

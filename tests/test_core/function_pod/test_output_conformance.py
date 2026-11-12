@@ -11,7 +11,7 @@ on both orchestrators and both store backends) and check the developer's decisio
   and saying what to return instead;
 * the rejection is a row failure in a pipeline (the run continues, the observer sees it);
 * only value-preserving numeric exceptions are accepted silently;
-* the output a downstream pod receives is exactly the stored value;
+* compatible subclass objects remain intact in memory and store as their base;
 * conforming outputs and same-kind NumPy scalars are accepted silently and hash as before.
 """
 
@@ -25,10 +25,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
+
+from pydantic import BaseModel
 
 from orcapod import PipelineJob, errors, function_pod
 from orcapod.core.datagrams import Data
@@ -337,14 +339,12 @@ REJECTED_CONVERSIONS = [
     pytest.param(list[int], range(2), "list(value)", id="range"),
     pytest.param(list[int], collections.deque([1, 2]), "list(value)", id="deque"),
     pytest.param(list[int], {"a": 1}.values(), "list(value)", id="dict-view"),
-    pytest.param(dt.date, dt.datetime(2020, 1, 1, 12), "value.date()", id="datetime"),
     pytest.param(np.float32, 0.1, "numpy.float32(value)", id="python-float-inexact"),
     pytest.param(np.float32, 0.5, "numpy.float32(value)", id="python-float-exact"),
     pytest.param(np.float32, np.float64(0.1), "numpy.float32(value)", id="float64"),
     pytest.param(np.int8, 128, "numpy.int8", id="int8-overflow"),
     pytest.param(np.int8, -129, "numpy.int8", id="int8-underflow"),
     pytest.param(np.int8, np.int64(128), "numpy.int8", id="numpy-int8-overflow"),
-    pytest.param(int, True, "int", id="bool-for-int"),
     pytest.param(bool, 1, "bool", id="int-for-bool"),
     pytest.param(
         float,
@@ -411,14 +411,18 @@ class ScientificFloat(float):
 
 
 ACCEPTED_SILENTLY = [
-    pytest.param(int, Count.ONE, 1, id="int-enum"),
-    pytest.param(float, ScientificFloat(1.5), 1.5, id="float-subclass"),
+    pytest.param(int, Count.ONE, Count.ONE, id="int-enum"),
+    pytest.param(
+        float, ScientificFloat(1.5), ScientificFloat(1.5), id="float-subclass"
+    ),
     pytest.param(int, np.int64(3), 3, id="D2-np-int64-for-int"),
     pytest.param(bool, np.bool_(True), True, id="D2-np-bool-for-bool"),
-    pytest.param(float, np.float64(1.5), 1.5, id="D2-np-float64-for-float"),
+    pytest.param(float, np.float64(1.5), np.float64(1.5), id="D2-np-float64-for-float"),
     pytest.param(float, np.float32(0.5), 0.5, id="D2-np-float32-for-float"),
     pytest.param(np.int8, np.int64(3), 3, id="D2-np-int64-for-np-int8"),
-    pytest.param(np.float32, np.float32(0.5), 0.5, id="np-float32-for-np-float32"),
+    pytest.param(
+        np.float32, np.float32(0.5), np.float32(0.5), id="np-float32-for-np-float32"
+    ),
     pytest.param(np.float32, np.float16(0.5), 0.5, id="D2-np-float16-for-np-float32"),
     pytest.param(int, 3, 3, id="int-for-int"),
     pytest.param(list[int], [1, 2], [1, 2], id="list-for-list"),
@@ -505,7 +509,8 @@ class TestDownstreamSeesStoredValue:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             job.run(orchestrator=orchestrator_cls())
-        self._assert_received(received, expected)
+        # Stored rows decode numeric subclasses using their declared storage type.
+        assert received == [expected]
         stored = job.nodes["up"].as_table()["y"].to_pylist()
         assert stored == [expected]
 
@@ -620,7 +625,7 @@ class TestConversionFailuresNameTheOutput:
 
 @dataclass
 class ExtendedReading(Reading):
-    """An exact subclass cannot be stored in its base class column."""
+    """A subclass adds a field that is omitted when stored as its base."""
 
     extra: int = 2
 
@@ -630,7 +635,7 @@ class TestUnifiedOutputBoundary:
 
     @pytest.mark.parametrize(
         ("declared", "returned"),
-        [(int, 1.5), (Reading, ExtendedReading(1)), (np.ndarray, np.float64(2))],
+        [(int, 1.5), (Reading, object()), (np.ndarray, np.float64(2))],
     )
     @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
     @pytest.mark.parametrize("store_kind", STORES)
@@ -706,3 +711,167 @@ def test_eager_validation_preserves_user_object_identity() -> None:
     assert type(original.count) is np.int64
     result.as_table()
     assert data.as_dict()["y"] is original
+
+
+class TestSubclassOutputs:
+    """Subclass objects survive in memory while storage uses the declared schema."""
+
+    @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+    @pytest.mark.parametrize("store_kind", STORES)
+    @pytest.mark.parametrize("async_function", [False, True])
+    def test_subclass_fields_and_hash(
+        self,
+        orchestrator_cls: Any,
+        store_kind: str,
+        async_function: bool,
+        tmp_path: Path,
+    ) -> None:
+        """Only declared base fields enter stored data and its content hash."""
+        original = ExtendedReading(1, 20)
+        first = make_pod(Reading, original, async_function=async_function)
+        second = make_pod(
+            Reading, ExtendedReading(1, 99), async_function=async_function
+        )
+        [(_, a)] = list(first.pod(make_source()).iter_data())
+        [(_, b)] = list(second.pod(make_source()).iter_data())
+        assert a.as_dict()["y"] is original
+        assert a.content_hash() == b.content_hash()
+        received: list[Any] = []
+
+        @function_pod(output_keys="count")
+        def inspect_reading(y: Reading) -> int:
+            received.append(y)
+            return y.count
+
+        list(inspect_reading.pod(first.pod(make_source())).iter_data())
+        assert received[0] is original
+        job = PipelineJob(name="subclass", store=_store(store_kind, tmp_path))
+        with job:
+            first.pod(make_source(), label="base")
+        job.run(orchestrator=orchestrator_cls())
+        table = job.nodes["base"].get_all_records()
+        assert table is not None
+        assert table.schema.field("y").type.storage_type.names == ["count"]
+        stored = Data(table.select(["y"]))
+        assert type(stored.as_dict()["y"]) is Reading
+        decoded = stored.as_dict()["y"]
+        assert isinstance(decoded, Reading)
+        assert decoded.count == 1
+
+    @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+    @pytest.mark.parametrize("store_kind", STORES)
+    @pytest.mark.parametrize(
+        "declared,returned,stored",
+        [
+            (int, True, 1),
+            (dt.date, dt.datetime(2020, 1, 1, 12), dt.date(2020, 1, 1)),
+        ],
+    )
+    def test_builtin_subclasses(
+        self,
+        declared: Any,
+        returned: Any,
+        stored: Any,
+        orchestrator_cls: Any,
+        store_kind: str,
+        tmp_path: Path,
+    ) -> None:
+        """Python subclassing takes precedence over numeric-kind special cases."""
+        pod = make_pod(declared, returned)
+        [(_, data)] = list(pod.pod(make_source()).iter_data())
+        assert data.as_dict()["y"] is returned
+        assert pod.pod(make_source()).as_table()["y"].to_pylist() == [stored]
+        job = PipelineJob(name="builtin_subclass", store=_store(store_kind, tmp_path))
+        with job:
+            pod.pod(make_source(), label="result")
+        job.run(orchestrator=orchestrator_cls())
+        assert job.nodes["result"].as_table()["y"].to_pylist() == [stored]
+
+
+@dataclass
+class NestedReading:
+    """A declared dataclass field containing another declared dataclass."""
+
+    inner: Reading
+
+
+class ModelReading(BaseModel):
+    """A pydantic base output."""
+
+    count: int
+
+
+class ExtendedModelReading(ModelReading):
+    """A pydantic subclass with an extra field."""
+
+    extra: int
+
+
+@pytest.mark.parametrize("async_function", [False, True])
+@pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+@pytest.mark.parametrize("store_kind", STORES)
+@pytest.mark.parametrize("shape", ["list", "optional", "nested", "pydantic"])
+def test_declared_saver_for_nested_subclasses(
+    async_function: bool,
+    orchestrator_cls: Any,
+    store_kind: str,
+    shape: str,
+    tmp_path: Path,
+) -> None:
+    """Declared field schemas select the base saver recursively on every path."""
+    cases: dict[str, tuple[Any, Any]] = {
+        "list": (list[Reading], [ExtendedReading(3, 9)]),
+        "optional": (Reading | None, ExtendedReading(3, 9)),
+        "nested": (NestedReading, NestedReading(ExtendedReading(3, 9))),
+        "pydantic": (ModelReading, ExtendedModelReading(count=3, extra=9)),
+    }
+    declared, original = cases[shape]
+    pod = make_pod(declared, original, async_function=async_function)
+    [(_, data)] = list(pod.pod(make_source()).iter_data())
+    if shape == "list":
+        assert data.as_dict()["y"][0] is original[0]
+    else:
+        assert data.as_dict()["y"] is original
+    job = PipelineJob(name="nested_subclass", store=_store(store_kind, tmp_path))
+    with job:
+        pod.pod(make_source(), label="base")
+    job.run(orchestrator=orchestrator_cls())
+    table = job.nodes["base"].get_all_records()
+    assert table is not None
+    arrow_type = table.schema.field("y").type.storage_type
+    decoded = cast(Any, Data(table.select(["y"])).as_dict()["y"])
+    if shape == "list":
+        arrow_type, decoded = arrow_type.value_type, decoded[0]
+    elif shape == "nested":
+        arrow_type, decoded = arrow_type.field("inner").type, decoded.inner
+    assert arrow_type.names == ["count"]
+    assert type(decoded) is (ModelReading if shape == "pydantic" else Reading)
+    assert decoded.count == 3
+
+
+@pytest.mark.parametrize("async_function", [False, True])
+def test_subclass_overridden_field_is_rejected(async_function: bool) -> None:
+    """A subclass cannot override the declared base field's value contract."""
+
+    @dataclass
+    class WrongReading(Reading):
+        count: str = "wrong"  # pyright: ignore[reportIncompatibleVariableOverride]  # deliberately incompatible subclass field
+
+    pod = make_pod(Reading, WrongReading(), async_function=async_function)
+    with pytest.raises(errors.OutputTypeError, match="count.*str") as memory:
+        list(pod.pod(make_source()).iter_data())
+    with pytest.raises(errors.OutputTypeError) as stored:
+        pod.pod(make_source()).as_table()
+    assert str(memory.value) == str(stored.value)
+
+
+def test_inferred_source_uses_value_class() -> None:
+    """Without a declared base schema, the source retains the subclass fields."""
+    source = DictSource(
+        data=[{"y": cast(Any, ExtendedReading(3, 9))}],
+        tag_columns=[],
+        source_id="subclass_source",
+    )
+    table = source.as_table()
+    assert table.schema.field("y").type.storage_type.names == ["count", "extra"]
+    assert type(Data(table.select(["y"])).as_dict()["y"]) is ExtendedReading

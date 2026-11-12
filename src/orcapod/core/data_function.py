@@ -588,9 +588,10 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     def _build_output_data(self, values: Any) -> DataProtocol:
         """Build an output Data from raw function return values.
 
-        Every returned value is checked against its declared output type and then
-        converted to Arrow here, eagerly, so the Data holds exactly the values that are
-        stored and hashed (ITL-895), and downstream pods receive those same values.
+        Every returned value is checked against its declared output type and validated
+        against Arrow storage eagerly. Numeric exceptions are normalized; compatible
+        subclass and structural objects pass unchanged in memory. The declared logical
+        type controls their stored representation (ITL-895).
         Without the check pyarrow would coerce some mismatches silently, for example
         truncating ``1.5`` returned for ``-> int``. The shared conformance policy
         permits only value-preserving numeric exceptions.

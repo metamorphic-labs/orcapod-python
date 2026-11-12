@@ -176,7 +176,7 @@ the other rows are computed and stored. With `error_policy="fail_fast"` the sync
 orchestrator stops the run; the asynchronous orchestrator does not stop for row failures yet
 (ITL-879, see below).
 
-The function-output rule is: a returned value must already have the declared type, except that a NumPy scalar or a Python number is accepted for a numeric type of the same kind when the value is represented exactly; nothing that loses or changes information is converted.
+The function-output rule is: the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base and is stored as the base.
 
 | Declared | Returned | Result |
 |---|---|---|
@@ -188,15 +188,18 @@ The function-output rule is: a returned value must already have the declared typ
 | `float` | NumPy floating scalar wider than 64 bits | rejected: explicitly return `float(value)` |
 | `list[T]` | tuple, NumPy array, range, deque, dict view, or iterator | rejected: return `list(value)` |
 | `list[T]` | set or frozenset | rejected: return `sorted(value)` for deterministic order |
-| `date` | `datetime` | rejected: return `value.date()` |
-| `int` | `bool`, float, Decimal, Fraction | rejected; choose an explicit conversion |
+| `date` | `datetime` | accepted as a Python subclass; storage keeps the date only |
+| `int` | `bool` | accepted as a Python subclass; stored as an integer |
+| `int` | float, Decimal, Fraction | rejected; choose an explicit conversion |
 | `bool` | `int` | rejected: return `bool(value)` explicitly |
 | floating type | integer or bool | rejected: return a floating value explicitly |
 | non-optional type | `None` | rejected; declare `T \| None` if null is intended |
-| ordinary dataclass or pydantic model | subclass or different class | rejected; return an instance of the declared class |
+| ordinary dataclass or pydantic model | subclass | accepted; storage keeps only declared base fields |
+| ordinary dataclass or pydantic model | unrelated class | rejected |
 | structural class | another structural class with the same identity | accepted; fields follow the same recursive checks |
 
-Boolean and integer are distinct kinds even though Python makes `bool` a subclass of `int`.
+Python subclassing takes precedence: `bool` for `int` is accepted, while `int` for
+`bool` is rejected. Numeric exceptions otherwise require the same kind.
 Nested list elements, dictionary keys and values, and stored user-class fields follow the
 same policy. A mismatch raises `OutputTypeError` at the common function-output boundary,
 before standalone iteration, table materialization, or sync/async storage can diverge.
@@ -206,7 +209,11 @@ structure without including returned dictionary keys or converter messages.
 Outputs are validated against the declared storage schema immediately, and accepted numeric
 exceptions are normalized so downstream pods, hashes and stored rows see the same value.
 Eager validation never replaces a compatible user-class object; stored reads keep their
-existing registry binding. No warning-and-convert path remains for
+existing registry binding. A `Sub` returned for `Base` reaches the next in-memory pod
+as that same `Sub` object. The stored column is `Base`: subclass-only fields are not
+stored and do not enter the row hash. Two such values differing only in those extra
+fields therefore have the same stored row hash. Likewise, a `datetime` declared as
+`date` is passed on unchanged in memory, but storage contains only its date. No warning-and-convert path remains for
 function outputs. Make container conversions explicit:
 
 ```python
