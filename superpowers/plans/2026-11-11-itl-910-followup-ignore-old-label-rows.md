@@ -95,4 +95,19 @@ switch, pinned by a test, developer being asked.
 
 ## Status log (for a successor)
 
-- 2026-11-11: investigation and ask done; tasks 1-5 in progress.
+- 2026-11-11: investigation and ask done; tasks 1-4 done and pushed (commits `34960c8c`,
+  `66517c5a`, `92ffb2ed`). Red state before the filters: 39 failures (both generations
+  returned). Golden files: no diff against `5363bfb8`. origin/main: 0 commits ahead of the
+  branch, no merge needed.
+- Side effects: re-delivery (option A) implemented as the interim behaviour and pinned by
+  `TestSideEffects`; the developer's answer is pending with the coordinator. Switching to a
+  failure for side-effect logs only = one check at the start of `SideEffectJobNode.execute` /
+  `async_execute` (see the removed `check_stored_hash_labels` in commit `9bef94ee`).
+- Report of skipped rows: not added. `keep_rows_hashed_under` is the one drop site; the count
+  of skipped rows is one `pc.sum(other)` there (the table path would come from the caller).
+- Found, not fixed, not filed: a `DeltaTableDatabase` object keeps the table version it read
+  first, so a job object that read a table before a run does not see the rows the run added
+  (v0.3-only store with 2 rows, run with 7 inputs, same-job `get_all_records()` gives 2; a
+  newly built job gives 7). `tests/test_arrays/test_array_v02_store.py` reads through a newly
+  built job for that reason.
+- Remaining: full suite on 3.11 / 3.13 / 3.12 (running), PR body, `worker_done`.

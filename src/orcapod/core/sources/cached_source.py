@@ -11,6 +11,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.hashing.stored_hash_labels import (
     current_hash_format,
     keep_rows_hashed_under,
+    report_skipped_rows,
 )
 from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
@@ -53,6 +54,9 @@ class CachedSource(RootSource):
     """
 
     HASH_COLUMN_NAME = "_record_hash"
+
+    # Set once a read has reported the cached rows it skipped.
+    _skipped_rows_reported: bool = False
 
     def __init__(
         self,
@@ -268,11 +272,18 @@ class CachedSource(RootSource):
         )
         if records is None:
             return None
+        stored_rows = records.num_rows
         records = keep_rows_hashed_under(
             records,
             self.HASH_COLUMN_NAME,
             current_hash_format(self.data_context.arrow_hasher),
         )
+        if records.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_skipped_rows(
+                self._cache_database.base_path + self.cache_path,
+                stored_rows - records.num_rows,
+            )
         return records.drop([self.HASH_COLUMN_NAME])
 
     def _build_merged_stream(self) -> ArrowTableStream:

@@ -84,14 +84,24 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
     stored key names its label (`arrow_v0.1:000001...` or `arrow_v0.2:000002...`), and
     `orcapod.hashing.stored_hash_labels.stored_hash_labels(store, record_path)` counts the
     rows of a table by label, for example `{"arrow_v0.1": 3, "arrow_v0.2": 3}`.
-  - **Side effects are delivered again.** A side-effect pod finds a completed delivery by an
-    Arrow-derived record id, so deliveries logged by v0.2 are not found: the first v0.3 run
-    delivers every side effect once more and logs it under `arrow_v0.2`. If a second delivery
-    is not acceptable (a notification, an upload that is not idempotent), do not run the
-    side-effect nodes of a v0.2 store under v0.3 until the store is migrated.
+  - When a read leaves out rows of another label, Orcapod logs one warning per table and
+    reader with the total, on the logger `orcapod.hashing.stored_hash_labels`:
+    `Skipped 3 rows of stored table 'my_job/.../pdb_v1': written under another hash label
+    than the current one. The rows are left in place unchanged and can be migrated later.`
+  - **Side-effect nodes are the exception: they fail instead of delivering again.** A
+    side-effect pod finds a delivery it already made by an Arrow-derived record id, so
+    deliveries logged by v0.2 cannot be found, and running the node would deliver every side
+    effect a second time. A side effect is an external action, not a value that can be
+    computed again, so a side-effect node whose invocation log holds deliveries logged under
+    another label raises `orcapod.errors.SideEffectLogHashLabelError` (a `StoreError`, so it
+    fails the run whatever the `error_policy`) before it delivers or writes anything. The
+    error names the log, the label found and the current one. Function, operator and source
+    nodes of the same job are not refused. Use a fresh store for the side-effect node, or
+    keep using v0.2 for it, until the log can be migrated.
 
-  **Migration:** none is needed to run v0.3 on a v0.2 store, at the price of computing
-  everything again and of tables that hold both generations. A tool that converts
+  **Migration:** none is needed to run the function, operator and source nodes of a v0.2
+  store under v0.3, at the price of computing everything again and of tables that hold both
+  generations; side-effect nodes need a fresh store. A tool that converts
   `arrow_v0.1` rows into `arrow_v0.2` rows is planned (ITL-913, ITL-914); until then the old
   rows are kept for it. Operator-node and cached-source tables store their record hashes
   without a label; there the rows of v0.2 are told apart by the starfix hash format at the
@@ -147,6 +157,10 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
+- **`orcapod.errors.SideEffectLogHashLabelError`** — a `StoreError` raised by a side-effect
+  node whose invocation log holds deliveries logged under another Arrow hash label (a log
+  written by v0.2), before anything is delivered. It has `record_path`, `found_label`,
+  `current_label` and `node_label`. (ITL-910)
 - **`orcapod.hashing.stored_hash_labels.stored_hash_labels(database, record_path)`** — counts
   the rows of a stored table by the Arrow hash label they were hashed under, to tell rows
   written by v0.2 (`arrow_v0.1`) from rows written by v0.3 (`arrow_v0.2`). (ITL-910)

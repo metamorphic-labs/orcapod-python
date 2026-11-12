@@ -323,9 +323,14 @@ the store, and it does not reuse those rows.
   them and are kept for a later migration. To see which labels a table holds, use
   `stored_hash_labels` (see
   [Stores written under another label](../reference/hashing.md#stores-written-under-another-label)).
-- A side-effect pod finds its completed deliveries by the same kind of key, so deliveries
-  logged by v0.2 are not found and each side effect is delivered once more on the first v0.3
-  run.
+- When a read leaves such rows out, Orcapod logs one warning with their number:
+  `Skipped 3 rows of stored table '...': written under another hash label than the current
+  one. The rows are left in place unchanged and can be migrated later.`
+- Side-effect pods are the exception. A side effect is an external action, and deliveries
+  logged by v0.2 cannot be matched with current inputs, so running the node would deliver
+  everything a second time. Instead the node raises `SideEffectLogHashLabelError` (from
+  `orcapod.errors`, a `StoreError`) before it delivers anything. Use a fresh store for that
+  node, or keep using the version that wrote the log.
 
 ## Multiple input streams
 

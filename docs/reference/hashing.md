@@ -679,6 +679,12 @@ A hex digest starts with the starfix format number (`000001` for `arrow_v0.1`, `
 `arrow_v0.2`), which tells these two labels apart. A later label that keeps starfix hash
 format 2 could not be told apart in operator-node and cached-source tables.
 
+A read that leaves rows out logs one warning per table with their total (logger
+`orcapod.hashing.stored_hash_labels`). A side-effect invocation log is never read in full: a
+delivery is looked up by its key, so deliveries logged under another label would not be found
+and every side effect would be delivered again. A side-effect node therefore raises
+`SideEffectLogHashLabelError` before delivering anything when its log holds such rows.
+
 `stored_hash_labels(database, record_path)` reads a stored table and counts its rows by
 label. A table written by v0.2 and then run under v0.3 gives
 `{"arrow_v0.1": n, "arrow_v0.2": n}`; a starfix format whose label is not known is listed as

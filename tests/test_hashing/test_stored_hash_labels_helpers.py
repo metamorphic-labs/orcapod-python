@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
 import pyarrow as pa
+import pytest
 
 from orcapod.contexts import get_default_context
 from orcapod.databases import InMemoryArrowDatabase
@@ -10,6 +13,8 @@ from orcapod.hashing.stored_hash_labels import (
     current_hash_format,
     hash_labels_of,
     keep_rows_hashed_under,
+    other_arrow_label,
+    report_skipped_rows,
     stored_hash_labels,
 )
 
@@ -88,6 +93,34 @@ class TestKeepRowsHashedUnder:
     def test_empty_table(self):
         table = pa.table({"key": pa.array([], pa.large_binary())})
         assert keep_rows_hashed_under(table, "key", "arrow_v0.2").num_rows == 0
+
+
+class TestOtherArrowLabel:
+    def test_none_when_every_label_is_current(self):
+        values = pa.array([NEW_KEY, None, b"hand-made"], pa.large_binary())
+        assert other_arrow_label(values, "arrow_v0.2") is None
+
+    def test_another_label_is_found(self):
+        values = pa.array([NEW_KEY, OLD_KEY], pa.large_binary())
+        assert other_arrow_label(values, "arrow_v0.2") == "arrow_v0.1"
+
+    def test_empty_column(self):
+        assert other_arrow_label(pa.array([], pa.large_binary()), "arrow_v0.2") is None
+
+
+class TestReportSkippedRows:
+    def test_warns_with_the_total_and_the_table(self, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING):
+            report_skipped_rows(("job", "fn", "pdb_v1"), 3)
+            report_skipped_rows(("job", "fn", "rdb_v1"), 1)
+        first, second = (record.getMessage() for record in caplog.records)
+        assert first == (
+            "Skipped 3 rows of stored table 'job/fn/pdb_v1': written under another "
+            "hash label than the current one. The rows are left in place unchanged "
+            "and can be migrated later."
+        )
+        assert second.startswith("Skipped 1 row of stored table 'job/fn/rdb_v1':")
+        assert {record.levelno for record in caplog.records} == {logging.WARNING}
 
 
 class TestCurrentHashFormat:

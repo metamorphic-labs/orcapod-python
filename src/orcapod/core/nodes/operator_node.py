@@ -37,6 +37,7 @@ from orcapod.errors import (
 from orcapod.hashing.stored_hash_labels import (
     current_hash_format,
     keep_rows_hashed_under,
+    report_skipped_rows,
 )
 from orcapod.protocols.core_protocols import (
     DataProtocol,
@@ -540,6 +541,10 @@ class OperatorJobNode(OperatorNodeBase):
         - **REPLAY**: skip computation, flow cached results downstream.
     """
 
+    # Set once a read has reported the stored rows it skipped (rows of another Arrow
+    # hash format); a class default so nodes rebuilt from a saved descriptor start unset.
+    _skipped_rows_reported: bool = False
+
     def __init__(
         self,
         operator: OperatorPodProtocol,
@@ -875,8 +880,8 @@ class OperatorJobNode(OperatorNodeBase):
         """Read this node's stored rows that the current Arrow hasher wrote.
 
         Every read of the whole stored table goes through here. Rows are narrowed to
-        this node's content hash (``_filter_by_content_hash``) and then to the starfix
-        hash format of the current Arrow hasher: the stored record hashes are hex
+        the starfix hash format of the current Arrow hasher and then to this node's
+        content hash (``_filter_by_content_hash``): the stored record hashes are hex
         digests without a label, and their first three bytes name the format, so rows
         written by Orcapod v0.2 (format 1, ``arrow_v0.1``) are left out and stay in
         the table untouched (ITL-910). A later Arrow hash label that keeps the starfix
@@ -892,12 +897,19 @@ class OperatorJobNode(OperatorNodeBase):
         )
         if records is None:
             return None
-        records = self._filter_by_content_hash(records)
-        return keep_rows_hashed_under(
+        stored_rows = records.num_rows
+        records = keep_rows_hashed_under(
             records,
             self.HASH_COLUMN_NAME,
             current_hash_format(self.data_context.arrow_hasher),
         )
+        if records.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_skipped_rows(
+                self._pipeline_database.base_path + self.node_identity_path,
+                stored_rows - records.num_rows,
+            )
+        return self._filter_by_content_hash(records)
 
     def _make_empty_table(self) -> "pa.Table":
         """Build a zero-row PyArrow table matching this node's full output schema.

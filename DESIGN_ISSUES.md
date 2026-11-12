@@ -2479,14 +2479,23 @@ of another label through one function, `hashing/stored_hash_labels.keep_rows_has
 `get_all_records`, `as_table`, `iter_data`, `as_source`, loaded jobs) on
 `__pipeline_base_entry_id`; `ResultCache.get_all_records` on `__input_data_hash`;
 `OperatorJobNode._read_stored_records` and `CachedSource._read_cached_records` on the starfix
-format at the start of the `_record_hash` record id. Side-effect invocation logs are read by
-key only, so completions logged under `arrow_v0.1` are not found and each side effect is
-delivered once more on the first v0.3 run. `stored_hash_labels(database, record_path)` counts
-a table's rows by label.
+format at the start of the `_record_hash` record id. Each reader logs one warning with the
+total number of rows it left out (`report_skipped_rows`; developer: total counts are enough,
+eventually old entries should be detected and a migration suggested).
+`stored_hash_labels(database, record_path)` counts a table's rows by label.
+
+Side-effect invocation logs are the one exception (developer, same day): they are read by key
+only, so deliveries logged under `arrow_v0.1` would not be found and every side effect would
+be delivered again. A side-effect node whose log holds such rows raises
+`SideEffectLogHashLabelError` before delivering anything. The developer wants a separate,
+later discussion of what side-effect logs hold.
 
 Known limits, follow-ups:
-- Whether v0.3 reports the rows it leaves out (for example once per table) is not decided;
-  `keep_rows_hashed_under` is the one place for it.
+- The warning is logged once per reader object (node, result cache, cached source) and
+  table, not once per process: stored paths are relative to the store, so a process-wide
+  record of reported tables would silence a second store with the same layout.
+- A global hash-version identifier stored with every row is being designed (not decided); it
+  would also give operator-node and cached-source rows a label.
 - Operator-node and cached-source record hashes carry no label, only the starfix format at
   the start of the hex digest. That separates `arrow_v0.1` (format 1) from `arrow_v0.2`
   (format 2) exactly, but a future label that keeps the starfix format could not be told apart

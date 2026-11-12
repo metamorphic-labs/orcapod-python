@@ -17,6 +17,7 @@ did. The real v0.2 store written by Orcapod v0.2.0 is covered in
 from __future__ import annotations
 
 import contextlib
+import logging
 import pathlib
 from collections.abc import Iterator
 from typing import Any
@@ -30,6 +31,7 @@ from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import SideEffectLogHashLabelError, StoreError
 from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.hashing.stored_hash_labels import stored_hash_labels
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -167,12 +169,10 @@ def write_v02_store(
     delivered.clear()
 
 
-def write_both_labels(
-    store: Store, *, with_operator: bool = False, with_sink: bool = False
-) -> None:
+def write_both_labels(store: Store, *, with_operator: bool = False) -> None:
     """A store written by v0.2 and then run by this version: both labels in every table."""
-    write_v02_store(store, with_operator=with_operator, with_sink=with_sink)
-    _ = build_job(store, with_operator=with_operator, with_sink=with_sink).run()
+    write_v02_store(store, with_operator=with_operator)
+    _ = build_job(store, with_operator=with_operator).run()
     calls.clear()
     delivered.clear()
 
@@ -214,12 +214,10 @@ class TestRun:
     def test_v02_rows_stay_in_place_unchanged(
         self, store: Store, orchestrator: Orchestrator
     ):
-        write_v02_store(store, with_operator=True, with_sink=True)
+        write_v02_store(store, with_operator=True)
         before = snapshot(store)
 
-        _ = build_job(store, with_operator=True, with_sink=True).run(
-            orchestrator=orchestrator
-        )
+        _ = build_job(store, with_operator=True).run(orchestrator=orchestrator)
 
         after = snapshot(store)
         assert set(before) <= set(after)
@@ -233,10 +231,10 @@ class TestRun:
         self, tmp_path: pathlib.Path
     ):
         root = tmp_path / "store"
-        write_v02_store(DeltaTableDatabase(root), with_operator=True, with_sink=True)
+        write_v02_store(DeltaTableDatabase(root), with_operator=True)
         before = delta_files(root)
 
-        build_job(DeltaTableDatabase(root), with_operator=True, with_sink=True).run()
+        build_job(DeltaTableDatabase(root), with_operator=True).run()
 
         after = delta_files(root)
         for name, content in before.items():
@@ -246,14 +244,13 @@ class TestRun:
     def test_rows_of_this_version_are_reused_next_to_v02_rows(
         self, store: Store, orchestrator: Orchestrator
     ):
-        write_both_labels(store, with_operator=True, with_sink=True)
+        write_both_labels(store, with_operator=True)
         before = snapshot(store)
 
-        job = build_job(store, with_operator=True, with_sink=True)
+        job = build_job(store, with_operator=True)
         _ = job.run(orchestrator=orchestrator)
 
         assert calls == []
-        assert delivered == []
         assert rows_of(job.nodes["dbl"].as_table()) == [2, 4]
         assert snapshot(store) == before
 
@@ -449,33 +446,60 @@ def _sink_job(store: Store) -> PipelineJob:
 
 
 class TestSideEffects:
-    def test_completions_logged_by_v02_are_not_found_so_effects_are_delivered_again(
+    """A side effect is an external action, so an old log fails instead of delivering again."""
+
+    def test_completions_logged_by_v02_raise_and_nothing_is_delivered(
         self, store: Store, orchestrator: Orchestrator
     ):
-        """Pins the behaviour on a log holding ``arrow_v0.1`` completions.
-
-        A completion is looked up by its Arrow-derived record id, so one logged under
-        another label is not found: the side effect is delivered again, once, and
-        logged under the current label next to the old completion.
-        """
         with writing_as_v02():
             _ = _sink_job(store).run()
         assert sorted(delivered) == [2, 4]
         delivered.clear()
         before = snapshot(store)
 
-        _ = _sink_job(store).run(orchestrator=orchestrator)
-        assert sorted(delivered) == [2, 4]
+        with pytest.raises(SideEffectLogHashLabelError) as info:
+            _ = _sink_job(store).run(orchestrator=orchestrator)
 
-        delivered.clear()
-        _ = _sink_job(store).run(orchestrator=orchestrator)
         assert delivered == []
+        assert snapshot(store) == before
+        error = info.value
+        assert isinstance(error, StoreError)
+        assert error.found_label == "arrow_v0.1"
+        assert error.current_label == "arrow_v0.2"
+        assert error.node_label == "sink"
+        assert error.record_path[-1] == "tdb_v1"
+        message = str(error)
+        assert "/".join(error.record_path) in message
+        assert "'arrow_v0.1'" in message
+        assert "'arrow_v0.2'" in message
+        assert "delivered" in message
+        assert "migrat" in message
 
-        after = snapshot(store)
-        (path,) = [p for p in after if p[-1] == "tdb_v1"]
-        for row in before[path]:
-            assert row in after[path]
-        assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v0.2": 2}
+    def test_delta_log_files_are_untouched(self, tmp_path: pathlib.Path):
+        root = tmp_path / "store"
+        with writing_as_v02():
+            _ = _sink_job(DeltaTableDatabase(root)).run()
+        delivered.clear()
+        before = delta_files(root)
+
+        with pytest.raises(SideEffectLogHashLabelError):
+            _ = _sink_job(DeltaTableDatabase(root)).run()
+
+        assert delivered == []
+        assert delta_files(root) == before
+
+    def test_function_node_upstream_of_a_refused_sink_is_not_refused(
+        self, store: Store
+    ):
+        """Only the side-effect node fails; function and operator tables are filtered."""
+        write_v02_store(store, with_sink=True)
+
+        job = build_job(store, with_sink=True)
+        with pytest.raises(SideEffectLogHashLabelError):
+            _ = job.run()
+
+        assert delivered == []
+        assert rows_of(build_job(store).nodes["dbl"].as_table()) == [2, 4]
 
     def test_completions_logged_by_this_version_are_not_delivered_again(
         self, store: Store, orchestrator: Orchestrator
@@ -492,16 +516,20 @@ class TestSideEffects:
 
 
 class TestStoredHashLabels:
-    @pytest.mark.parametrize("kind", ["pipeline", "result", "operator", "log"])
+    @pytest.mark.parametrize("kind", ["pipeline", "result", "operator"])
     def test_lists_both_labels_after_a_run_on_a_v02_store(
         self, store: Store, kind: str
     ):
-        write_v02_store(store, with_operator=True, with_sink=True)
+        write_v02_store(store, with_operator=True)
         path = table_path(store, kind)
         assert labels_in(store, path) == {"arrow_v0.1": 2}
 
-        _ = build_job(store, with_operator=True, with_sink=True).run()
+        _ = build_job(store, with_operator=True).run()
         assert labels_in(store, path) == {"arrow_v0.1": 2, "arrow_v0.2": 2}
+
+    def test_lists_the_label_of_a_v02_side_effect_log(self, store: Store):
+        write_v02_store(store, with_sink=True)
+        assert labels_in(store, table_path(store, "log")) == {"arrow_v0.1": 2}
 
     def test_fresh_table_holds_the_current_label_only(self, store: Store):
         _ = build_job(store).run()
@@ -509,3 +537,97 @@ class TestStoredHashLabels:
 
     def test_missing_table_holds_nothing(self, store: Store):
         assert labels_in(store, ("no", "such", "table")) == {}
+
+
+# ---------------------------------------------------------------------------
+# Skipped rows are reported: a warning with the total, once per reader and table
+# ---------------------------------------------------------------------------
+
+
+def skipped_row_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.name == "orcapod.hashing.stored_hash_labels"
+    ]
+
+
+class TestSkippedRowsAreReported:
+    def test_function_node_read(self, store: Store, caplog: pytest.LogCaptureFixture):
+        write_v02_store(store)
+        node = build_job(store).nodes["dbl"]
+        with caplog.at_level(logging.WARNING):
+            _ = node.as_table()
+            _ = node.get_all_records()
+
+        (message,) = skipped_row_warnings(caplog)
+        assert "2 rows" in message
+        assert "/".join(table_path(store, "pipeline")) in message
+        assert "another hash label" in message
+        assert "left in place" in message
+        assert "migrated" in message
+
+    def test_run_reports_each_table_once(
+        self, store: Store, orchestrator: Orchestrator, caplog: pytest.LogCaptureFixture
+    ):
+        write_v02_store(store, with_operator=True)
+        job = build_job(store, with_operator=True, cache_mode=CacheMode.REPLAY)
+        with caplog.at_level(logging.WARNING):
+            _ = job.run(orchestrator=orchestrator)
+
+        messages = skipped_row_warnings(caplog)
+        assert len(messages) == len(set(messages))
+        tables = {
+            "/".join(table_path(store, kind)) for kind in ("pipeline", "operator")
+        }
+        for table in tables:
+            assert sum(table in message for message in messages) == 1, table
+
+    def test_operator_node_read(self, store: Store, caplog: pytest.LogCaptureFixture):
+        write_v02_store(store, with_operator=True)
+        node = build_job(store, with_operator=True).nodes["sel"]
+        with caplog.at_level(logging.WARNING):
+            _ = node.get_all_records()
+            _ = node.get_all_records()
+
+        (message,) = skipped_row_warnings(caplog)
+        assert "2 rows" in message
+        assert "/".join(table_path(store, "operator")) in message
+
+    def test_cached_source_read(self, store: Store, caplog: pytest.LogCaptureFixture):
+        with writing_as_v02():
+            _ = _cached_source(store).as_table()
+        source = _cached_source(store)
+        with caplog.at_level(logging.WARNING):
+            _ = source.as_table()
+            _ = source.get_all_records()
+
+        (message,) = skipped_row_warnings(caplog)
+        assert "2 rows" in message
+
+    def test_cached_function_outputs(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ):
+        with writing_as_v02():
+            old = CachedDataFunction(double.pod.data_function, result_database=store)
+            _ = old.call(Data({"x": 1}))
+        cached = CachedDataFunction(double.pod.data_function, result_database=store)
+        with caplog.at_level(logging.WARNING):
+            assert cached.get_all_cached_outputs() is None
+            assert cached.get_all_cached_outputs() is None
+
+        (message,) = skipped_row_warnings(caplog)
+        assert "1 row " in message
+
+    def test_nothing_is_reported_for_rows_of_this_version(
+        self, store: Store, orchestrator: Orchestrator, caplog: pytest.LogCaptureFixture
+    ):
+        with caplog.at_level(logging.WARNING):
+            _ = build_job(store, with_operator=True).run(orchestrator=orchestrator)
+            job = build_job(store, with_operator=True)
+            _ = job.run(orchestrator=orchestrator)
+            _ = job.nodes["dbl"].get_all_records()
+            _ = job.nodes["sel"].get_all_records()
+
+        assert skipped_row_warnings(caplog) == []
