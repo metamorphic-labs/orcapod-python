@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import collections
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -214,6 +215,10 @@ UUID_B = uuid.UUID("87654321-4321-8765-4321-876543218765")
 # Group: semantic — BaseSemanticHasher on Python values and type objects
 # ---------------------------------------------------------------------------
 
+# Added by ITL-942 (finding T): field order is part of a namedtuple's hash.
+_POINT_XY = collections.namedtuple("Point", ["x", "y"])
+_POINT_YX = collections.namedtuple("Point", ["y", "x"])
+
 SEMANTIC_VALUES: dict[str, Any] = {
     "int.zero": 0,
     "int.one": 1,
@@ -251,6 +256,13 @@ SEMANTIC_VALUES: dict[str, Any] = {
     "ndarray.float64": np.array([[0.5, 1.5], [2.5, 3.5]], dtype=np.float64),
     "ndarray.empty": np.zeros((0,), dtype=np.float32),
     "dataframe.basic": pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}),
+    # Added by ITL-942: set order, dict keys and '__type__' dicts.
+    "set.mixed_str_equal": {1, "1", 2, "2"},
+    "dict.int_keys": {1: "x", 2: "y"},
+    "dict.str_keys_like_ints": {"1": "x", "2": "y"},
+    "dict.type_key": {"__type__": "tuple", "items": [1, 2]},
+    "namedtuple.xy": _POINT_XY(x=1, y=2),
+    "namedtuple.yx": _POINT_YX(y=2, x=1),
 }
 
 
@@ -521,6 +533,30 @@ def _arrow_tables() -> dict[str, pa.Table]:
     tables["bool.chunked"] = pa.Table.from_batches(
         tables["bool"].to_batches(max_chunksize=1)
     )
+    # Added by ITL-942 (finding I): nested nullability is part of the hash whether or
+    # not the column holds data.
+    non_null_struct = pa.struct([pa.field("x", pa.int64(), nullable=False)])
+    nullable_struct = pa.struct([pa.field("x", pa.int64(), nullable=True)])
+    non_null_list = pa.large_list(pa.field("item", pa.int64(), nullable=False))
+    for label, struct_t, list_t in (
+        ("non_null", non_null_struct, non_null_list),
+        ("nullable", nullable_struct, pa.large_list(pa.int64())),
+    ):
+        tables[f"nested_nullability.struct_{label}.data"] = pa.table(
+            {"a": pa.array([{"x": 1}], struct_t)}
+        )
+        tables[f"nested_nullability.struct_{label}.zero_rows"] = pa.table(
+            {"a": pa.array([], struct_t)}
+        )
+        tables[f"nested_nullability.struct_{label}.all_null"] = pa.table(
+            {"a": pa.array([None], struct_t)}
+        )
+        tables[f"nested_nullability.list_{label}.data"] = pa.table(
+            {"a": pa.array([[1]], list_t)}
+        )
+        tables[f"nested_nullability.list_{label}.zero_rows"] = pa.table(
+            {"a": pa.array([], list_t)}
+        )
     return tables
 
 
@@ -756,6 +792,26 @@ def pipeline_pod() -> dict[str, Any]:
     return stream_summary(golden_ratio.pod(_subjects()))
 
 
+@case("pipeline", "pod_default_version")
+def pipeline_pod_default_version() -> dict[str, Any]:
+    """Pin one uri for one function whatever the entry point (ITL-942 finding N).
+
+    ``FunctionPod.from_fn`` and ``@function_pod`` both default to version ``v0.0``,
+    so the same function gets the same uri, and therefore the same table paths.
+
+    Returns:
+        The uri of the pod built each way.
+    """
+    from orcapod import FunctionPod
+
+    built = FunctionPod.from_fn(
+        golden_ratio,
+        output_keys="ratio",
+        name="golden_ratio",
+    )
+    return {"from_fn.uri": list(built.uri), "decorator.uri": list(golden_ratio.pod.uri)}
+
+
 @case("pipeline", "join_pod")
 def pipeline_join_pod() -> dict[str, Any]:
     from orcapod.operators import Join
@@ -854,6 +910,22 @@ def pipeline_column_selection() -> dict[str, Any]:
         _prefixed(
             "drop_tag", stream_summary(DropTagColumns(columns=["subject"])(_grouped()))
         )
+    )
+    # Added by ITL-942 (finding F): every spelling of one set of names has one
+    # identity; these equal the sorted-list entries.
+    for spelling, columns in {
+        "tuple": ("weight", "age"),
+        "set": {"weight", "age"},
+        "unsorted": ["weight", "age"],
+    }.items():
+        stream = SelectDataColumns(columns=columns)(_subjects())
+        out[f"select_data_spelling.{spelling}.pipeline_hash"] = (
+            stream.pipeline_hash().to_string()
+        )
+    out["select_data_spelling.sorted.pipeline_hash"] = (
+        SelectDataColumns(columns=["age", "weight"])(_subjects())
+        .pipeline_hash()
+        .to_string()
     )
     return out
 

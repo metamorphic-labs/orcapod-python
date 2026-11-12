@@ -20,7 +20,7 @@ appended, because it is a variant of the same system tag mechanism.)
 | 4 | Default `source_id` | `StarfixArrowHasher.hash_table(table).to_hex(n)` | Truncated hex `str` | Unique per raw table content; used as source identifier when none is provided |
 | 5 | Per-row `record_id` (system tag value) | `uuid.uuid5(NAMESPACE, f"{source_id}::{provenance_token}")` | `bytes` (16, UUID v5) | Deterministic per `(source_id, row_identity)`; stable across re-runs of the same source |
 | 6 | Join system tag suffix | `stream.pipeline_hash().to_hex(n)` + `:{idx}` appended to column name | Column name suffix | Unique per `(input topology, canonical join position)`; encodes full join lineage in column name |
-| 6b | Aggregating operator system tag fold | `uuid.uuid5(NAMESPACE, joined_member_hex)` for `record_id`; `combine_hashes(*member_values)` otherwise | `bytes` (16) / hex `str`, plus a column name suffix | Deterministic per ordered member set; keeps system tags scalar through a many-to-one reduction |
+| 6b | Aggregating operator system tag fold | `uuid.uuid5(NAMESPACE, joined_member_hex)` for `record_id`; SHA-256 of the canonical JSON list of member values otherwise | `bytes` (16) / hex `str`, plus a column name suffix | Deterministic per ordered member set; keeps system tags scalar through a many-to-one reduction |
 | 7 | `compute_base_entry_id()` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL)` | `bytes` (`b"method:digest"`) | Unique per `(node, tag lineage, input_data content)` across all recomputation attempts |
 | 8 | `compute_pipeline_entry_id()` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL + recomputation_index)` | `bytes` (`b"method:digest"`) | Unique per `(node, tag lineage, input_data content, recomputation attempt)` |
 | 9 | Side-effect `record_id` | `StarfixArrowHasher.hash_table(system_tags + INPUT_DATA_HASH_COL + recomputation_index=0)` | `bytes` | Unique per `(tag lineage, input_data content)`; pod-version scoped via table path (`uri` + `pipeline_hash()`) |
@@ -275,6 +275,29 @@ SHA-256 digest.
 2. Recursively expand the structure: `ContentIdentifiable` objects are replaced by their hash via a **resolver callback** (see below); containers (list, dict, tuple, set) are serialised to nested JSON. A nested hash (of a type, a schema, a pod, a stream, a value with its own hasher) enters as `{"__type__": "hash", "digest": "<hex digest>"}`: the digest only, never the label (see [The hash label rule](#the-hash-label-rule)).
 3. JSON-serialise the expanded structure and compute `hashlib.sha256(json_bytes).digest()` → `ContentHash`.
 
+How containers expand (canonical JSON: sorted object keys, no whitespace, UTF-8):
+
+| Container | Expanded form | What counts |
+|---|---|---|
+| `list` | JSON array | order |
+| `tuple` | `{"__type__": "tuple", "items": [...]}` | order |
+| `set`, `frozenset` | `{"__type__": "set", "items": [...]}`, items sorted by their canonical JSON text | membership only; never iteration order or `PYTHONHASHSEED` (ITL-942: before v0.3, items were sorted by `str()`, so `{1, "1"}` hashed differently per process) |
+| `dict` with only `str` keys, none of them `"__type__"` | JSON object | keys and values, not insertion order |
+| any other `dict` | `{"__type__": "dict", "items": [[key, value], ...]}`, pairs sorted by canonical JSON | key types: `{1: "x"}` and `{"1": "x"}` differ (ITL-942: before v0.3, keys went through `str()` and could collapse) |
+| namedtuple | `{"__type__": "namedtuple", "name": ..., "fields": [[name, value], ...]}` | class name, field names and values, in declared order (ITL-942: before v0.3 fields were sorted by name, so `Point(x=1, y=2)` and a `Point` declared `(y, x)` holding `y=2, x=1` shared a hash) |
+| a type handler's `Encoded(tag, fields)` | `{"__type__": tag, **fields}` | the handler's tag and fields |
+
+**Only the hasher writes `"__type__"`.** A JSON object with a `"__type__"` key comes either
+from the hasher's own encodings (tags `tuple`, `set`, `dict`, `namedtuple`, `hash`) or from a
+type handler that returned an `Encoded` value (`generic_alias`, `union`). A mapping that has a
+`"__type__"` key is hashed in the pair-list form, so a user value such as
+`{"__type__": "tuple", "items": [1, 2]}` never shares the hash of `(1, 2)` (ITL-942). For
+authors of a `PythonTypeHandlerProtocol`: return
+`orcapod.hashing.semantic_hashing.Encoded(tag, fields)` to produce a tagged object; a plain
+dict with a `"__type__"` key is hashed as an ordinary mapping. `Encoded` rejects the hasher's
+own tags and a `"__type__"` field, and is trusted only as a handler's return value: an
+`Encoded` inside a user value has no handler and is refused by the strict hasher.
+
 **Resolver pattern:** The resolver callback is threaded through the entire recursive hash computation to ensure one consistent context per call:
 
 - **`content_resolver`** (used by `content_hash()`): routes every `ContentIdentifiable` leaf through `leaf.content_hash(hasher)`.
@@ -301,6 +324,15 @@ The table below shows what each class returns from `identity_structure()`.
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
 | Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
+| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
+
+**Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
+covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
+joined with itself, is a different pipeline from `MergeJoin()(m1, m2)` and has a different
+pipeline hash even when both inputs share one schema. Inputs are an unordered set compared by
+identity, so input order never matters, and two inputs with the same source identity (same
+class, schemas and `source_id`) count as one input: `MergeJoin()(m1, m1b)` hashes like
+`MergeJoin()(m1, m1)` when `m1b` has the `source_id` of `m1`.
 
 **Known exclusions from `identity_structure()`:**
 
@@ -435,7 +467,7 @@ topology suffix, encoding the full join lineage into each column name.
 |---|---|
 | **Inputs** | `source_id` string + provenance token: `"{col}={value}"` when `record_id_column` is specified, otherwise `"row_{index}"` |
 | **Algorithm** | `uuid.uuid5(_SOURCE_RECORD_ID_NAMESPACE, f"{source_id}::{provenance_token}")` where `_SOURCE_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "orcapod::record_id")` is a fixed constant |
-| **Output format** | `bytes` (16 bytes, UUID v5 bit pattern), stored in a `pa.binary(16)` Arrow column |
+| **Output format** | `bytes` (16 bytes, UUID v5 bit pattern), stored in a `large_binary` Arrow column; the column keeps that type through tags, operators and stored tables (ITL-942: before v0.3 a source gave it `fixed_size_binary[16]`, so the operator cache key of one row differed between a direct run and the async orchestrator) |
 | **Uniqueness guarantee** | Deterministic per `(source_id, row_identity)`; stable across identical re-runs of the same source |
 | **Known exclusions** | When `record_id_column` is not specified, the row index is used as the provenance token; `record_id` changes if rows are **reordered** within the source table |
 
@@ -458,7 +490,7 @@ topology suffix, encoding the full join lineage into each column name.
 | Field | Value |
 |---|---|
 | **Inputs** | The ordered list of a group's member values for one system tag column, plus that column's name (which selects the fold) |
-| **Algorithm** | `arrow_utils.fold_system_tag_values()`. For a `record_id` column: `uuid.uuid5(_AGGREGATED_RECORD_ID_NAMESPACE, BLOCK_SEPARATOR.join(v.hex() for v in values))`, where `_AGGREGATED_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "https://orcapod.org/namespaces/aggregated-record-id")` is a fixed constant. For every other system tag column: `combine_hashes(*[str(v) for v in values], order=False)` — SHA-256 over the members concatenated in order. `None` members contribute the empty string. The folded column name then gains `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex(system_tag_n_char)}` via `arrow_utils.append_to_system_tags()`. |
+| **Algorithm** | `arrow_utils.fold_system_tag_values()`. For a `record_id` column: `uuid.uuid5(_AGGREGATED_RECORD_ID_NAMESPACE, BLOCK_SEPARATOR.join(v.hex() for v in values))`, where `_AGGREGATED_RECORD_ID_NAMESPACE = uuid.uuid5(NAMESPACE_URL, "https://orcapod.org/namespaces/aggregated-record-id")` is a fixed constant. A `None` member contributes `null`. For every other system tag column: SHA-256 of the canonical JSON array of the members in order (`json.dumps([None if v is None else str(v) for v in values], separators=(",", ":"), ensure_ascii=False)`, UTF-8), as 64 hex characters. The array marks where each member ends, so `["ab", "c"]` and `["a", "bc"]` fold differently, and a `None` member (`null`) differs from `""` (ITL-942; before v0.3 the members were concatenated with no separator). The folded column name then gains `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex(system_tag_n_char)}` via `arrow_utils.append_to_system_tags()`. |
 | **Output format** | `bytes` (16, UUID v5 bit pattern) for a `record_id` column; 64-character hex `str` otherwise — in both cases **scalar**, matching the input column's type |
 | **Uniqueness guarantee** | Deterministic per ordered member set, and stable across processes (both primitives are SHA-based). `Batch` and `GroupBy` both order their members deterministically before folding, so an unchanged member set always folds to the same digest |
 | **Known exclusions** | Member order is significant; a permuted member set folds differently. This is why `GroupBy` sorts members by their non-key tag values with `record_id` as a tiebreaker rather than relying on upstream emission order |
@@ -579,7 +611,10 @@ uri = (canonical_function_name, output_schema_hash, major_version, data_function
 ```
 
 The `output_schema_hash` component (site 11) is the only hash in the URI; the other
-components are plain strings.
+components are plain strings. `major_version` comes from the `version` argument, which
+defaults to `"v0.0"` (major `v0`) for every entry point: `@function_pod`,
+`FunctionPod.from_fn`, `side_effect_function_pod` and `PythonDataFunction` (ITL-942: before
+v0.3, `from_fn` and `side_effect_function_pod` defaulted to `"v1.0"`).
 
 ---
 
@@ -731,14 +766,24 @@ table would get a different digest. Its number is not kept equal to the starfix 
 | `arrow_v1` | 0.5 | `00 00 02` | v0.3 |
 
 **What is part of the hash.** Column names, Arrow types (with large and non-large layouts of
-strings, binaries and lists hashing alike), nullability, every value, row order, list element
+strings, binaries and lists hashing alike), nullability at every depth (top-level columns,
+struct fields and list items, whether or not the column holds data), every value, row order, list element
 order, list lengths at every depth, null structs (distinct from structs whose fields are all
 null) and the row count. Column order and struct field order are not part of the hash. How a
 table is split into chunks or slices is not part of it either. A `fixed_size_list<T>[n]`
 column hashes differently from a `large_list<T>` column with the same values. Extension
 columns are hashed as their storage type plus their extension name and metadata, including
 pyarrow's canonical extension types (`arrow.uuid`, `arrow.fixed_shape_tensor`); only
-`ARROW:extension:*` metadata is hashed, all other metadata is ignored.
+`ARROW:extension:*` metadata is hashed, all other metadata is ignored. List item names
+(`item`, `element`) are not part of the hash.
+
+**The hashed type is the declared type.** Before starfix sees a table, Orcapod replaces the
+values of logical types that have a value hasher (`Path`, `File`, `Directory`, `UUID`, ...)
+by their content-hash tokens, typed `large_binary`. The type each column is hashed under is
+derived from its declared type alone (`SemanticHashingVisitor.hashed_type`): every struct and
+list field keeps its name, nullability and metadata. A column therefore hashes under one type
+whether it has data, only nulls or no rows (ITL-942: before v0.3 the type was rebuilt from the
+first non-null value, which dropped nested nullability for a column with data).
 
 **What cannot be hashed.** starfix raises `ValueError`, naming the column path and type, for:
 data of `null`, `map`, interval, `string_view` and `binary_view` columns (whatever the row

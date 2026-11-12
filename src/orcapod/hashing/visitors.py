@@ -196,6 +196,72 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         self._python_hasher = python_hasher
         self._current_field_path: list[str] = []
 
+    def hashed_type(self, arrow_type: "pa.DataType") -> "pa.DataType":
+        """Return the type a column of ``arrow_type`` is hashed under.
+
+        The result depends on the declared type only, never on the data, so one
+        schema always hashes one way (ITL-942 I). An extension type whose values
+        this visitor hashes (``visit_extension`` returns ``large_binary``) becomes
+        ``large_binary``; struct and list types are rebuilt around their fields
+        with ``Field.with_type``, which keeps every field's name, nullability and
+        metadata; everything else is returned unchanged.
+
+        Args:
+            arrow_type: The declared Arrow type of a column or nested field.
+
+        Returns:
+            The Arrow type of the values ``visit`` produces for ``arrow_type``.
+        """
+        if isinstance(arrow_type, pa.ExtensionType):
+            return (
+                pa.large_binary() if self._hashes_extension(arrow_type) else arrow_type
+            )
+        if pa.types.is_struct(arrow_type):
+            return pa.struct(
+                [field.with_type(self.hashed_type(field.type)) for field in arrow_type]
+            )
+        if pa.types.is_large_list(arrow_type):
+            value_field = arrow_type.value_field
+            return pa.large_list(
+                value_field.with_type(self.hashed_type(value_field.type))
+            )
+        if pa.types.is_list(arrow_type):
+            value_field = arrow_type.value_field
+            return pa.list_(value_field.with_type(self.hashed_type(value_field.type)))
+        if pa.types.is_fixed_size_list(arrow_type):
+            value_field = arrow_type.value_field
+            return pa.list_(
+                value_field.with_type(self.hashed_type(value_field.type)),
+                arrow_type.list_size,
+            )
+        return arrow_type
+
+    def _hashes_extension(self, extension_type: "pa.ExtensionType") -> bool:
+        """Return True if ``visit_extension`` hashes values of ``extension_type``.
+
+        The same type-level decision ``visit_extension`` takes for a non-null
+        value: a registered value hasher for the Python type, or for the innermost
+        element of a list- or set-backed extension type.
+        """
+        python_type = self._type_converter.arrow_type_to_python_type(extension_type)
+        if typing.get_origin(python_type) in (list, set) and pa.types.is_large_list(
+            extension_type.storage_type
+        ):
+            args = typing.get_args(python_type)
+            if args:
+                inner = args[0]
+                while typing.get_origin(inner) in (list, set):
+                    inner_args = typing.get_args(inner)
+                    if not inner_args:
+                        break
+                    inner = inner_args[0]
+                return isinstance(
+                    inner, type
+                ) and self._python_hasher.type_handler_registry.has_handler(inner)
+        if python_type is typing.Any or not isinstance(python_type, type):
+            return False
+        return self._python_hasher.type_handler_registry.has_handler(python_type)
+
     def visit_extension(
         self,
         extension_type: "pa.ExtensionType",

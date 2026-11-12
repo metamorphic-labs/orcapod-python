@@ -97,37 +97,6 @@ def canonical_annotation_str(
     return stabilize_type_names(inspect.formatannotation(annotation), annotation)
 
 
-def combine_hashes(
-    *hashes: str,
-    order: bool = False,
-    prefix_hasher_id: bool = False,
-    hex_char_count: int | None = None,
-) -> str:
-    """
-    Combine multiple hash strings into a single SHA-256 hash string.
-
-    Args:
-        *hashes: Hash strings to combine.
-        order: If True, sort inputs before combining so the result is
-               order-independent.  If False (default), insertion order
-               is preserved.
-        prefix_hasher_id: If True, prefix the result with ``"sha256@"``.
-        hex_char_count: Number of hex characters to return.  None (default)
-                        returns the full 64-character SHA-256 hex digest.
-
-    Returns:
-        A hex string (optionally truncated / prefixed).
-    """
-    prepared_hashes = sorted(hashes) if order else list(hashes)
-    combined = "".join(prepared_hashes)
-    combined_hash = hashlib.sha256(combined.encode()).hexdigest()
-    if hex_char_count is not None:
-        combined_hash = combined_hash[:hex_char_count]
-    if prefix_hasher_id:
-        return "sha256@" + combined_hash
-    return combined_hash
-
-
 def _to_path(file_path: PathLike) -> Path | UPath:
     """Convert a path-like to a Path, preserving UPath instances.
 

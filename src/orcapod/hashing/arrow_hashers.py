@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 from starfix import ArrowDigester
@@ -122,17 +122,14 @@ class StarfixArrowHasher:
             )
 
             try:
-                new_type: pa.DataType | None = None
-                processed_data: list[Any] = []
-                for value in column_data:
-                    processed_type, processed_value = visitor.visit(field.type, value)
-                    if new_type is None and processed_value is not None:
-                        new_type = processed_type
-                    processed_data.append(processed_value)
-
-                if new_type is None:
-                    new_type = field.type
-
+                # The hashed type is derived from the declared type alone, never
+                # from a row: nested nullability, field metadata and list item
+                # fields are kept, and a column hashes the same way whether it
+                # holds data, nulls or no rows (ITL-942 I).
+                new_type = visitor.hashed_type(field.type)
+                processed_data = [
+                    visitor.visit(field.type, value)[1] for value in column_data
+                ]
                 new_columns.append(pa.array(processed_data, type=new_type))
                 new_fields.append(field.with_type(new_type))
 

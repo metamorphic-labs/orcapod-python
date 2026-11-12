@@ -43,12 +43,13 @@ are wrapped in a ``{"__type__": ..., ...}`` tagged object so that
 structurally similar but type-distinct containers produce different hashes:
 
   list       → [...]                                        # native JSON array
-  dict       → {...}                                        # native JSON object; keys sorted
+  dict       → {...}                                        # str keys: native JSON object, keys sorted
+  dict       → {"__type__": "dict",      "items": [[k, v], ...]}  # any other key; sorted pairs
   tuple      → {"__type__": "tuple",     "items": [...]}
-  set        → {"__type__": "set",       "items": [...]}   # items sorted by str()
+  set        → {"__type__": "set",       "items": [...]}   # items sorted by canonical JSON
   frozenset  → {"__type__": "set",       "items": [...]}   # same tag as set
   namedtuple → {"__type__": "namedtuple","name": "T",
-                "fields": {...}}                            # sorted by field name
+                "fields": [[name, value], ...]}             # declared field order
 
 This means a ``list`` and a ``tuple`` with the same elements will hash
 differently (the tuple carries a type tag), while a plain ``list`` and a
@@ -71,6 +72,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
+from orcapod.hashing.semantic_hashing.encoded import TYPE_KEY, Encoded
 from orcapod.protocols import hashing_protocols as hp
 from orcapod.types import ContentHash
 from orcapod.utils.canonical_type_names import canonical_module_name
@@ -213,6 +215,11 @@ class SemanticAwarePythonHasher:
                 type(handler).__name__,
             )
             result = handler.handle(obj, self)
+            if isinstance(result, Encoded):
+                # The only route to a trusted tagged object: a handler's own result.
+                return self._hash_to_content_hash(
+                    self._expand_encoded(result, resolver=resolver)
+                )
             return self.hash_object(result, resolver=resolver)
 
         # Structures: expand into a tagged tree, then hash the tree.
@@ -313,9 +320,12 @@ class SemanticAwarePythonHasher:
             expanded_items = [
                 self._expand_element(item, _visited, resolver=resolver) for item in obj
             ]
+            # Sort by each item's canonical JSON text: a total order that never
+            # ties two distinct items ({1, "1"} sorts as [1, "1"]), so the order,
+            # and the hash, never depend on set iteration order (PYTHONHASHSEED).
             return {
                 "__type__": "set",
-                "items": sorted(expanded_items, key=str),
+                "items": sorted(expanded_items, key=_canonical_json),
             }
 
         # Should not be reached if _is_structure() is consistent.
@@ -349,32 +359,65 @@ class SemanticAwarePythonHasher:
         _visited: frozenset[int],
         resolver: Callable[[Any], ContentHash] | None = None,
     ) -> dict:
-        """Expand a dict/Mapping into a sorted native JSON object."""
-        items: dict[str, Any] = {}
-        for k, v in obj.items():
-            str_key = str(self._expand_element(k, _visited, resolver=resolver))
-            items[str_key] = self._expand_element(v, _visited, resolver=resolver)
-        # Sort for determinism regardless of insertion order.
-        return dict(sorted(items.items()))
+        """Expand a dict/Mapping into a JSON tree that keeps its keys' types.
+
+        A mapping whose keys are all ``str``, none of them ``"__type__"``, becomes
+        a native JSON object. Any other mapping becomes
+        ``{"__type__": "dict", "items": [[key, value], ...]}``, so ``{1: "x"}``
+        and ``{"1": "x"}`` differ, keys that share a ``str()`` never collapse into
+        one, and no mapping can spell out the hasher's own encoding of another
+        value (ITL-942); a type handler that wants a tagged object returns an
+        ``Encoded``. Insertion order never matters: object keys are sorted by the
+        serialiser, pairs by their canonical JSON text.
+        """
+        expanded = [
+            (
+                self._expand_element(k, _visited, resolver=resolver),
+                self._expand_element(v, _visited, resolver=resolver),
+            )
+            for k, v in obj.items()
+        ]
+        if all(isinstance(k, str) and k != TYPE_KEY for k in obj):
+            return dict(expanded)
+        pairs = sorted(([k, v] for k, v in expanded), key=_canonical_json)
+        return {"__type__": "dict", "items": pairs}
+
+    def _expand_encoded(
+        self,
+        encoded: Encoded,
+        resolver: Callable[[Any], ContentHash] | None = None,
+    ) -> dict[str, Any]:
+        """Expand a handler's ``Encoded`` result into ``{"__type__": tag, **fields}``."""
+        tree: dict[str, Any] = {TYPE_KEY: encoded.tag}
+        for key, value in encoded.fields.items():
+            tree[key] = self._expand_element(value, frozenset(), resolver=resolver)
+        return tree
 
     def _expand_namedtuple(
         self,
         obj: Any,
         _visited: frozenset[int],
         resolver: Callable[[Any], ContentHash] | None = None,
-    ) -> dict:
-        """Expand a namedtuple into a tagged dict preserving field names."""
+    ) -> dict[str, Any]:
+        """Expand a namedtuple into a tagged dict of its fields in declared order.
+
+        A namedtuple compares as an ordered tuple, so its field order is part of
+        its identity: ``fields`` is a list of ``[name, value]`` pairs in declared
+        order, never sorted by name (ITL-942 T).
+        """
         fields: tuple[str, ...] = obj._fields
-        expanded_fields = {
-            field: self._expand_element(
-                getattr(obj, field), _visited, resolver=resolver
-            )
-            for field in fields
-        }
         return {
             "__type__": "namedtuple",
             "name": type(obj).__name__,
-            "fields": dict(sorted(expanded_fields.items())),
+            "fields": [
+                [
+                    field,
+                    self._expand_element(
+                        getattr(obj, field), _visited, resolver=resolver
+                    ),
+                ]
+                for field in fields
+            ],
         }
 
     # ------------------------------------------------------------------
@@ -389,12 +432,7 @@ class SemanticAwarePythonHasher:
         (the output of _expand_structure or a raw primitive).
         """
         try:
-            json_bytes = json.dumps(
-                obj,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
+            json_bytes = _canonical_json(obj).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"SemanticAwarePythonHasher: failed to JSON-serialise object of type "
@@ -454,6 +492,11 @@ class SemanticAwarePythonHasher:
 # ---------------------------------------------------------------------------
 # Helper predicates
 # ---------------------------------------------------------------------------
+
+
+def _canonical_json(obj: Any) -> str:
+    """Return the canonical JSON text of an expanded tree: the hashed preimage."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _is_structure(obj: Any) -> bool:
