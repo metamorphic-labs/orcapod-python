@@ -1694,7 +1694,7 @@ Structure hasher over these structures:
 | `DictSource`, `ArrowTableSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource`, database table sources | `(class name, (tag schema, data schema), source_id)` | `(tag schema, data schema)` |
 | `ListSource` | `(class name, name, elements, tag function's module.qualname)` | same as above |
 | `CachedSource` | the wrapped source's | the wrapped source's |
-| `DerivedSource` | `(origin node's content hash,)` | from the origin's schema |
+| `DerivedSource` | `(origin node's content hash,)`. With ITL-939 (PR #317) a `tags_as_data` derived source follows the root-source rule instead: `(class name, output schema, source_id)`, where the default `source_id` is that of 5.6, rule 5a | from the origin's schema; for a `tags_as_data` source, from its own output schema |
 | `SourceNode` (unbound) | `("source_node", name, tag schema, data schema)` | `(tag schema, data schema)` |
 
 Where `source_id` comes from when the user gives none:
