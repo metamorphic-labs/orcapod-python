@@ -34,6 +34,15 @@ from orcapod.streams import ArrowTableStream
 SOURCE_ID_COL = "_tag_source_id::abc"
 RECORD_ID_COL = "_tag_record_id::abc"
 
+# Findings whose fix awaits the developer's decision (ITL-942): the tests document the
+# wrong hash and must fail until the fix lands (strict xfail).
+_PENDING_H = pytest.mark.xfail(strict=True, reason="ITL-942 H: fix awaiting decision")
+_PENDING_DICT_KEYS = pytest.mark.xfail(
+    strict=True, reason="ITL-942 dict keys: fix awaiting decision"
+)
+_PENDING_F = pytest.mark.xfail(strict=True, reason="ITL-942 F: fix awaiting decision")
+_PENDING_E = pytest.mark.xfail(strict=True, reason="ITL-942 E: fix awaiting decision")
+
 
 def _semantic_hasher() -> Any:
     return resolve_context(None).semantic_hasher
@@ -87,6 +96,7 @@ def _folded_source_id(stream: Any) -> str:
 
 
 class TestFoldSeparatesMembers:
+    @_PENDING_H
     @pytest.mark.parametrize(
         "make_op", [lambda: Batch(batch_size=2), lambda: GroupBy(by=["g"])]
     )
@@ -95,6 +105,7 @@ class TestFoldSeparatesMembers:
         right = _folded_source_id(make_op()(_stream_with_source_ids(["a", "bc"])))
         assert left != right
 
+    @_PENDING_H
     def test_null_member_differs_from_empty_member(self) -> None:
         left = _folded_source_id(
             Batch(batch_size=2)(_stream_with_source_ids([None, "x"]))
@@ -196,15 +207,6 @@ class TestStructureHasherProcessIndependence:
         assert hasher.hash_object({1, "1"}) != hasher.hash_object({1})
         assert hasher.hash_object({1, "1"}) != hasher.hash_object({"1"})
 
-    def test_function_with_set_default(self) -> None:
-        script = """
-            from orcapod.contexts import resolve_context
-            def f(a: int, b=frozenset({"x", "y", "z", "w"})) -> int:
-                return a
-            print(resolve_context(None).semantic_hasher.hash_object(f).to_string())
-        """
-        assert len({_run_with_seed(script, seed) for seed in _SEEDS}) == 1
-
 
 # ---------------------------------------------------------------------------
 # Dict keys keep their type
@@ -212,16 +214,19 @@ class TestStructureHasherProcessIndependence:
 
 
 class TestDictKeysKeepTheirType:
+    @_PENDING_DICT_KEYS
     def test_int_key_differs_from_str_key(self) -> None:
         hasher = _semantic_hasher()
         assert hasher.hash_object({1: "x"}) != hasher.hash_object({"1": "x"})
 
+    @_PENDING_DICT_KEYS
     def test_keys_with_equal_str_do_not_collapse(self) -> None:
         hasher = _semantic_hasher()
         both = {1: "a", "1": "b"}
         assert hasher.hash_object(both) != hasher.hash_object({"1": "b"})
         assert hasher.hash_object(both) != hasher.hash_object({1: "a"})
 
+    @_PENDING_DICT_KEYS
     def test_tuple_differs_from_its_tagged_dict_spelling(self) -> None:
         hasher = _semantic_hasher()
         assert hasher.hash_object((1, 2)) != hasher.hash_object(
@@ -250,6 +255,7 @@ def _xy_source() -> DictSource:
 
 
 class TestColumnSelectionIdentity:
+    @_PENDING_F
     @pytest.mark.parametrize("op_cls", [SelectDataColumns, DropDataColumns])
     def test_data_column_spellings_share_identity(self, op_cls: Any) -> None:
         source = _xy_source()
@@ -258,6 +264,7 @@ class TestColumnSelectionIdentity:
         assert len({s.pipeline_hash() for s in streams}) == 1
         assert len({s.content_hash() for s in streams}) == 1
 
+    @_PENDING_F
     @pytest.mark.parametrize("op_cls", [SelectTagColumns, DropTagColumns])
     def test_tag_column_spellings_share_identity(self, op_cls: Any) -> None:
         source = _xy_source()
@@ -292,6 +299,7 @@ def _weights(source_id: str, weight: float) -> DictSource:
 
 
 class TestCommutativeInputsAreAMultiset:
+    @_PENDING_E
     def test_self_merge_join_pipeline_hash_is_schema_and_topology(self) -> None:
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)

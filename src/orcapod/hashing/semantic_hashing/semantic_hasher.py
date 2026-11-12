@@ -45,7 +45,7 @@ structurally similar but type-distinct containers produce different hashes:
   list       → [...]                                        # native JSON array
   dict       → {...}                                        # native JSON object; keys sorted
   tuple      → {"__type__": "tuple",     "items": [...]}
-  set        → {"__type__": "set",       "items": [...]}   # items sorted by str()
+  set        → {"__type__": "set",       "items": [...]}   # items sorted by canonical JSON
   frozenset  → {"__type__": "set",       "items": [...]}   # same tag as set
   namedtuple → {"__type__": "namedtuple","name": "T",
                 "fields": {...}}                            # sorted by field name
@@ -283,9 +283,12 @@ class SemanticAwarePythonHasher:
             expanded_items = [
                 self._expand_element(item, _visited, resolver=resolver) for item in obj
             ]
+            # Sort by each item's canonical JSON text: a total order that never
+            # ties two distinct items ({1, "1"} sorts as [1, "1"]), so the order,
+            # and the hash, never depend on set iteration order (PYTHONHASHSEED).
             return {
                 "__type__": "set",
-                "items": sorted(expanded_items, key=str),
+                "items": sorted(expanded_items, key=_canonical_json),
             }
 
         # Should not be reached if _is_structure() is consistent.
@@ -359,12 +362,7 @@ class SemanticAwarePythonHasher:
         (the output of _expand_structure or a raw primitive).
         """
         try:
-            json_bytes = json.dumps(
-                obj,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
+            json_bytes = _canonical_json(obj).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"SemanticAwarePythonHasher: failed to JSON-serialise object of type "
@@ -424,6 +422,11 @@ class SemanticAwarePythonHasher:
 # ---------------------------------------------------------------------------
 # Helper predicates
 # ---------------------------------------------------------------------------
+
+
+def _canonical_json(obj: Any) -> str:
+    """Return the canonical JSON text of an expanded tree: the hashed preimage."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _is_structure(obj: Any) -> bool:
