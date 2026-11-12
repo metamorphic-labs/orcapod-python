@@ -516,10 +516,15 @@ def _conform_array(arr: pa.Array[Any], field: pa.Field[Any]) -> pa.Array[Any]:
         )
     if not field.nullable and arr.null_count:
         raise NullInRequiredColumnError((field.name,), arr.null_count)
-    if _is_list(field.type) and not field.type.value_field.nullable:
-        items = pc.list_flatten(arr)
-        if items.null_count:
-            raise NullInRequiredColumnError((field.name, ITEM), items.null_count)
+    if _is_list(field.type):
+        # Check the items against the item field, recursively, so a required item
+        # of a nested list or a required field of a struct item is checked too.
+        try:
+            _conform_array(pc.list_flatten(arr), field.type.value_field)
+        except NullInRequiredColumnError as err:
+            raise NullInRequiredColumnError(
+                (field.name, ITEM, *err.path[1:]), err.null_count
+            ) from None
     if not pa.types.is_struct(field.type) or arr.type == field.type:
         return arr
     struct = arr if isinstance(arr, pa.StructArray) else None

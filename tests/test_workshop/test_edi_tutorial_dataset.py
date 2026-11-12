@@ -1345,6 +1345,31 @@ class TestNullabilityRecordChecks:
             tool.conform_batch(batch, pa.schema([field]))
         assert info.value.path == ("l", "[]")
 
+    def test_a_null_nested_list_item_declared_non_null_is_refused(self):
+        inner = pa.list_(pa.field("item", pa.int32(), False))
+        field = pa.field("l", pa.list_(pa.field("item", inner, False)), False)
+        values = pa.ListArray.from_arrays(
+            pa.array([0, 2], pa.int32()),
+            pa.array([1, None], pa.int32()),
+            type=inner,  # pyright: ignore[reportArgumentType]
+        )
+        arr = pa.ListArray.from_arrays(
+            pa.array([0, 1], pa.int32()),
+            values,
+            type=field.type,  # pyright: ignore[reportArgumentType]
+        )
+        batch = pa.RecordBatch.from_arrays([arr], names=["l"])
+        with pytest.raises(tool.NullInRequiredColumnError) as info:
+            tool.conform_batch(batch, pa.schema([field]))
+        assert info.value.path == ("l", "[]", "[]")
+
+    def test_a_null_in_a_nullable_nested_item_is_accepted(self):
+        inner = pa.list_(pa.field("item", pa.int32(), True))
+        field = pa.field("l", pa.list_(pa.field("item", inner, False)), False)
+        arr = pa.array([[[1, None]]], field.type)
+        batch = pa.RecordBatch.from_arrays([arr], names=["l"])
+        assert tool.conform_batch(batch, pa.schema([field])).num_rows == 1
+
     def test_non_null_paths_follow_the_record_layout(self):
         schema = pa.schema(
             [
