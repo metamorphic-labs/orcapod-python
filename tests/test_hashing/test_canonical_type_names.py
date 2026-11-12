@@ -133,7 +133,10 @@ class TestCanonicalAnnotationStrings:
 
     def test_registered_logical_type_still_wins(self):
         tc = get_default_context().type_converter
-        assert canonical_annotation_str(P.Path, tc) == "orcapod.path"
+        assert (
+            canonical_annotation_str(P.Path, tc)
+            == "orcapod.path;7b2276657273696f6e223a317d"
+        )
         assert canonical_annotation_str(P.PurePath, tc) == "pathlib.PurePath"
 
 
@@ -241,7 +244,7 @@ class TestTypeHandlers:
             ),
             (
                 P.Path,
-                "semantic_v0.1:02a12969616ecd278958ffca715be2865fe4a32c27523059df37245c5048a880",
+                "semantic_v0.1:7f0da67eaf9d048c9d1791fbe223333cfcc8018c66878647c8b7ae8571c72bd3",
             ),
         ],
     )
@@ -295,7 +298,7 @@ class TestFunctionSignatureGolden:
     def test_function_object_hash(self):
         hasher = get_default_context().semantic_hasher
         assert hasher.hash_object(golden_fn).to_string() == (
-            "semantic_v0.1:632a091ad0a15f1d152e5a9fa262be60bf3204d135ddfcdb355f7aee79198951"
+            "semantic_v0.1:e82e5b01ef04e93b033bbd27c2fb50c4f83cbcc13acb9f69f51c92a75d12a2ad"
         )
 
 
@@ -324,7 +327,7 @@ class TestFunctionPodGolden:
     def test_uri(self, data_function: PythonDataFunction):
         assert data_function.uri == (
             "golden_pod_fn",
-            "semantic_v0.1:31aba778a6c9ac8dbb60b16fef30be2cae1dff221f29f44ac2cf83950893f9d0",
+            "semantic_v0.1:c41a34a30ccbba8f216b3553fb880f424f89f4d5e0e07bafb07769ce8e520c54",
             "v0",
             "python.function.v0",
         )

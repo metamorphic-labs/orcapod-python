@@ -16,6 +16,7 @@ from orcapod.types import ContentHash, PathLike
 from orcapod.utils.canonical_type_names import stabilize_type_names
 
 if TYPE_CHECKING:
+    from orcapod.logical_types.protocols import LogicalTypeProtocol
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,43 @@ def is_union_annotation(annotation: object) -> bool:
     return getattr(annotation, "__origin__", None) is typing.Union
 
 
+def generic_alias_logical_type(
+    annotation: object,
+    type_converter: "TypeConverterProtocol | None",
+) -> "LogicalTypeProtocol | None":
+    """Return the logical type a generic alias is stored as, or ``None``.
+
+    ``list[T]`` and ``set[T]`` of a logical type ``T`` are stored as a wrapper
+    logical type with its own identifier. Other generic aliases (``list[int]``,
+    ``dict[str, File]``) have no logical type of their own.
+
+    The alias is rebuilt from its origin and arguments first, so
+    ``typing.List[T]`` and ``list[T]`` resolve to the same logical type.
+
+    Args:
+        annotation: A generic alias such as ``list[File]``.
+        type_converter: The converter whose registry is consulted; the wrapper
+            is registered on first use. ``None`` means no logical types.
+
+    Returns:
+        The wrapper logical type, or ``None`` when the alias has none or its
+        arguments cannot be stored at all.
+    """
+    if type_converter is None:
+        return None
+    origin = getattr(annotation, "__origin__", None)
+    args = getattr(annotation, "__args__", None) or ()
+    if not isinstance(origin, type) or not args:
+        return None
+    try:
+        normalized = origin[args if len(args) > 1 else args[0]]  # pyright: ignore[reportIndexIssue]
+        return type_converter.get_logical_type_for_python_type(normalized)
+    except (TypeError, ValueError):
+        # Not subscriptable, or an argument with no Arrow representation: the
+        # alias cannot be a stored column, so it has no logical type.
+        return None
+
+
 def canonical_annotation_str(
     annotation: object,
     type_converter: "TypeConverterProtocol | None" = None,
@@ -56,7 +94,10 @@ def canonical_annotation_str(
     produce the same canonical string.
 
     For generic aliases (``list[X]``, ``dict[K, V]``), args are recursed with
-    the same converter so nested orcapod types are also canonicalized.
+    the same converter so nested orcapod types are also canonicalized. A generic
+    alias that is itself stored as a logical type (``list[T]`` / ``set[T]`` of a
+    logical ``T``) is written as that wrapper type's identifier text, which
+    contains the element's identifier.
 
     Non-union, non-generic types not found in the converter fall through to
     ``inspect.formatannotation``. Standard-library types defined in a private
@@ -88,6 +129,11 @@ def canonical_annotation_str(
     # Generic aliases (list[X], dict[K, V], etc.): recurse over args
     origin = getattr(annotation, "__origin__", None)
     if origin is not None and not is_union_annotation(annotation):
+        # A generic alias that is itself a logical type (list[T] / set[T] of a
+        # logical T): its own identifier, which contains the element's.
+        wrapper = generic_alias_logical_type(annotation, type_converter)
+        if wrapper is not None:
+            return logical_type_identifier(wrapper).text
         args = getattr(annotation, "__args__", None) or ()
         origin_str = canonical_annotation_str(origin, type_converter)
         if args:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import typing
 import uuid
 from typing import Any
 
@@ -30,13 +31,16 @@ from orcapod.contexts.core import DataContext
 from orcapod.core.sources import DictSource
 from orcapod.databases import DeltaTableDatabase
 from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
-from orcapod.errors import LogicalTypeIdentifierError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+from orcapod.hashing.semantic_hashing.builtin_handlers import GenericAliasHandler
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
     logical_type_identifier,
 )
 from orcapod.pipeline import PipelineJob
+from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+from orcapod.logical_types.protocols import LogicalTypeProtocol
 from orcapod.logical_types.registry import (
     LogicalTypeRegistry,
     make_arrow_extension_type,
@@ -59,6 +63,22 @@ BUILTINS_WITH_EMPTY_LEGACY: list[tuple[Any, str]] = [
 ALL_BUILTINS = [*BUILTINS_WITH_EMPTY_LEGACY, (np.ndarray, "orcapod.ndarray")]
 
 
+def _converter(context: DataContext | None = None) -> UniversalTypeConverter:
+    """The type converter of ``context`` (default: the default data context)."""
+    converter = (context or get_default_context()).type_converter
+    assert isinstance(converter, UniversalTypeConverter)
+    return converter
+
+
+def _extension_type(
+    python_type: Any, context: DataContext | None = None
+) -> pa.ExtensionType:
+    """The Arrow extension type ``python_type`` is stored as."""
+    arrow_type = _converter(context).python_type_to_arrow_type(python_type)
+    assert isinstance(arrow_type, pa.ExtensionType)
+    return arrow_type
+
+
 class Thing:
     """A third-party value type stored as a string."""
 
@@ -68,20 +88,20 @@ class Thing:
 
 def _thing_logical_type(
     metadata: bytes, also_reads: tuple[bytes, ...] = ()
-) -> BaseLogicalType:
+) -> LogicalTypeProtocol:
     """Build a third-party logical type ``thirdparty.thing`` with the given metadata."""
-    arrow_cls = make_arrow_extension_type(
+    arrow_cls: Any = make_arrow_extension_type(
         "thirdparty.thing", pa.large_string(), metadata, also_reads=also_reads
     )
-    polars_cls = make_polars_extension_type(
+    polars_cls: Any = make_polars_extension_type(
         "thirdparty.thing", pa.large_string(), metadata.decode() or None
     )
 
     class LogicalThing(BaseLogicalType):
         logical_type_name = "thirdparty.thing"
         python_type = Thing
-        _arrow = arrow_cls()
-        _polars = polars_cls()
+        _arrow: pa.ExtensionType = arrow_cls()
+        _polars: pl.BaseExtension = polars_cls()
 
         def get_arrow_extension_type(self) -> pa.ExtensionType:
             return self._arrow
@@ -98,15 +118,17 @@ def _thing_logical_type(
     return LogicalThing()
 
 
-def _fresh_context(*logical_types: BaseLogicalType) -> DataContext:
+def _fresh_context(*logical_types: LogicalTypeProtocol) -> DataContext:
     """Return a new default data context with extra logical types registered."""
     context = create_registry().get_context()
     for logical_type in logical_types:
-        context.type_converter.register_logical_type(logical_type)
+        _converter(context).register_logical_type(logical_type)
     return context
 
 
-def _stored_column(name: bytes, metadata: bytes | None, storage: pa.Array) -> pa.Table:
+def _stored_column(
+    name: bytes, metadata: bytes | None, storage: "pa.Array[Any]"
+) -> pa.Table:
     """A table as a reader sees it: storage column ``c`` with extension field metadata."""
     field_metadata = {b"ARROW:extension:name": name}
     if metadata is not None:
@@ -122,9 +144,7 @@ def _stored_column(name: bytes, metadata: bytes | None, storage: pa.Array) -> pa
 
 @pytest.mark.parametrize(("python_type", "name"), ALL_BUILTINS)
 def test_builtin_type_writes_version_1(python_type: Any, name: str) -> None:
-    arrow_type = get_default_context().type_converter.python_type_to_arrow_type(
-        python_type
-    )
+    arrow_type = _extension_type(python_type)
     assert arrow_type.extension_name == name
     assert arrow_type.__arrow_ext_serialize__() == VERSION_1
 
@@ -133,7 +153,7 @@ def test_builtin_type_writes_version_1(python_type: Any, name: str) -> None:
 def test_builtin_identifier_is_declared_by_the_extension_type(
     python_type: Any, name: str
 ) -> None:
-    logical_type = get_default_context().type_converter.get_logical_type(python_type)
+    logical_type = _converter().get_logical_type(python_type)
     assert logical_type is not None
     assert logical_type_identifier(logical_type) == LogicalTypeIdentifier(
         name, VERSION_1
@@ -144,9 +164,7 @@ def test_builtin_identifier_is_declared_by_the_extension_type(
 def test_list_and_set_wrappers_write_a_version_and_the_element_identifier(
     annotation: Any,
 ) -> None:
-    arrow_type = get_default_context().type_converter.python_type_to_arrow_type(
-        annotation
-    )
+    arrow_type = _extension_type(annotation)
     metadata = json.loads(arrow_type.__arrow_ext_serialize__())
     assert metadata["version"] == 1
     assert metadata["element_ext_metadata"] == VERSION_1.decode()
@@ -160,8 +178,8 @@ def test_identifier_text_is_name_and_hex_of_metadata() -> None:
 
 
 def test_extension_name_with_a_semicolon_is_refused() -> None:
-    arrow_cls = make_arrow_extension_type("bad;name", pa.large_string(), b"")
-    polars_cls = make_polars_extension_type("bad;name", pa.large_string())
+    arrow_cls: Any = make_arrow_extension_type("bad;name", pa.large_string(), b"")
+    polars_cls: Any = make_polars_extension_type("bad;name", pa.large_string())
 
     class Bad(BaseLogicalType):
         logical_type_name = "bad;name"
@@ -173,6 +191,12 @@ def test_extension_name_with_a_semicolon_is_refused() -> None:
         def get_polars_extension_type(self) -> pl.BaseExtension:
             return polars_cls()
 
+        def python_to_storage(self, value: Any, converter: Any = None) -> str:
+            return value.text
+
+        def storage_to_python(self, storage_value: Any, converter: Any = None) -> Thing:
+            return Thing(storage_value)
+
     with pytest.raises(ValueError, match="';'"):
         LogicalTypeRegistry().register_logical_type(Bad())
 
@@ -181,8 +205,8 @@ def test_extension_name_with_a_semicolon_is_refused() -> None:
 
 
 def test_identifier_round_trips_through_delta(tmp_path: pathlib.Path) -> None:
-    converter = get_default_context().type_converter
-    path_type = converter.python_type_to_arrow_type(pathlib.Path)
+    converter = _converter()
+    path_type = _extension_type(pathlib.Path)
     table = pa.table(
         {
             "p": pa.ExtensionArray.from_storage(
@@ -191,7 +215,7 @@ def test_identifier_round_trips_through_delta(tmp_path: pathlib.Path) -> None:
         }
     )
     database = ExtensionAwareDatabase(DeltaTableDatabase(tmp_path), converter)
-    database.add_record(("t",), "r1", table, flush=True)
+    database.add_record(("t",), b"r1", table, flush=True)
 
     stored = [pq.read_schema(f).field("p") for f in sorted(tmp_path.rglob("*.parquet"))]
     assert stored
@@ -254,6 +278,105 @@ def test_hashes_without_logical_types_do_not_depend_on_registered_types() -> Non
     assert plain.semantic_hasher.hash_object(
         plain_function
     ) == extended.semantic_hasher.hash_object(plain_function)
+
+
+def _thing_list_logical_type(metadata: bytes) -> LogicalTypeProtocol:
+    """A third-party wrapper logical type for ``list[Thing]`` with the given metadata."""
+    storage = pa.large_list(pa.large_string())
+    arrow_cls: Any = make_arrow_extension_type(
+        "thirdparty.thinglist", storage, metadata
+    )
+    polars_cls: Any = make_polars_extension_type(
+        "thirdparty.thinglist", storage, metadata.decode()
+    )
+
+    class LogicalThingList(BaseLogicalType):
+        logical_type_name = "thirdparty.thinglist"
+        python_type = list[Thing]  # type: ignore[assignment]
+        _arrow: pa.ExtensionType = arrow_cls()
+        _polars: pl.BaseExtension = polars_cls()
+
+        def get_arrow_extension_type(self) -> pa.ExtensionType:
+            return self._arrow
+
+        def get_polars_extension_type(self) -> pl.BaseExtension:
+            return self._polars
+
+        def python_to_storage(self, value: Any, converter: Any = None) -> list[str]:
+            return [thing.text for thing in value]
+
+        def storage_to_python(
+            self, storage_value: Any, converter: Any = None
+        ) -> list[Thing]:
+            return [Thing(text) for text in storage_value]
+
+    return LogicalThingList()
+
+
+def _wrapper_contexts() -> tuple[DataContext, DataContext]:
+    """Two contexts whose ``list[Thing]`` wrapper differs only in its metadata."""
+    element = b'{"version":1}'
+    return (
+        _fresh_context(
+            _thing_logical_type(element), _thing_list_logical_type(b'{"version":1}')
+        ),
+        _fresh_context(
+            _thing_logical_type(element), _thing_list_logical_type(b'{"version":2}')
+        ),
+    )
+
+
+def test_wrapper_metadata_alone_changes_the_schema_hash() -> None:
+    v1, v2 = _wrapper_contexts()
+    schema = Schema({"c": list[Thing]})
+    assert v1.semantic_hasher.hash_object(schema) != v2.semantic_hasher.hash_object(
+        schema
+    )
+    # The element type alone is unaffected by the wrapper's identifier.
+    assert v1.semantic_hasher.hash_object(Thing) == v2.semantic_hasher.hash_object(
+        Thing
+    )
+
+
+def test_wrapper_metadata_alone_changes_a_function_signature_hash() -> None:
+    v1, v2 = _wrapper_contexts()
+
+    def takes_things(things: list[Thing]) -> int:
+        return len(things)
+
+    assert v1.semantic_hasher.hash_object(
+        takes_things
+    ) != v2.semantic_hasher.hash_object(takes_things)
+
+
+def test_typing_list_and_builtin_list_of_a_logical_type_hash_the_same() -> None:
+    hasher = get_default_context().semantic_hasher
+    assert hasher.hash_object(typing.List[pathlib.Path]) == hasher.hash_object(
+        list[pathlib.Path]
+    )
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        list[int],
+        list[list[float]],
+        dict[str, int],
+        dict[str, op.File],
+        tuple[int, str],
+        typing.List[int],
+    ],
+)
+def test_generic_alias_without_a_wrapper_logical_type_hashes_as_before(
+    annotation: Any,
+) -> None:
+    """Only ``list[T]``/``set[T]`` of a logical ``T`` hash as a wrapper identifier."""
+    context = get_default_context()
+    # ``GenericAliasHandler()`` without a converter is the origin-and-arguments
+    # structure every alias had before wrapper identifiers were hashed.
+    assert GenericAliasHandler(type_converter=context.type_converter).handle(
+        annotation, context.semantic_hasher
+    ) == GenericAliasHandler().handle(annotation, context.semantic_hasher)
 
 
 class _ThingHandler:
@@ -321,7 +444,7 @@ def test_stored_tables_of_a_logical_type_pod_carry_the_identifier(
 
 
 def test_unknown_metadata_in_field_metadata_names_column_and_identifiers() -> None:
-    converter = get_default_context().type_converter
+    converter = _converter()
     table = _stored_column(
         b"orcapod.path", b'{"version":9}', pa.array(["/a"], pa.large_string())
     )
@@ -372,8 +495,8 @@ _LEGACY_STORAGE = {
 def test_builtin_data_without_metadata_is_read_as_version_1(
     python_type: Any, name: str, metadata: bytes | None, tmp_path: pathlib.Path
 ) -> None:
-    converter = get_default_context().type_converter
-    current = converter.python_type_to_arrow_type(python_type)
+    converter = _converter()
+    current = _extension_type(python_type)
     stored = _stored_column(name.encode(), metadata, _LEGACY_STORAGE[name])
 
     # Field-metadata channel (the type was not resolved by pyarrow at read time).
@@ -384,15 +507,15 @@ def test_builtin_data_without_metadata_is_read_as_version_1(
     pq.write_table(stored, file)
     read = pq.read_table(file)
     assert read.schema.field("c").type == current
-    assert read.column("c").chunk(0).storage.to_pylist() == (
-        _LEGACY_STORAGE[name].to_pylist()
-    )
+    chunk = read.column("c").chunk(0)
+    assert isinstance(chunk, pa.ExtensionArray)
+    assert chunk.storage.to_pylist() == _LEGACY_STORAGE[name].to_pylist()
 
 
 def test_array_without_metadata_is_refused() -> None:
     """The array format never wrote empty metadata, so it does not read it."""
-    converter = get_default_context().type_converter
-    array_type = converter.python_type_to_arrow_type(np.ndarray)
+    converter = _converter()
+    array_type = _extension_type(np.ndarray)
     table = _stored_column(
         b"orcapod.ndarray", b"", pa.array([], array_type.storage_type)
     )
@@ -401,10 +524,10 @@ def test_array_without_metadata_is_refused() -> None:
 
 
 def test_third_party_type_reads_only_what_it_declares() -> None:
-    strict = _fresh_context(_thing_logical_type(b'{"v":2}')).type_converter
-    lenient = _fresh_context(
-        _thing_logical_type(b'{"v":2}', also_reads=(b'{"v":1}',))
-    ).type_converter
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+    lenient = _converter(
+        _fresh_context(_thing_logical_type(b'{"v":2}', also_reads=(b'{"v":1}',)))
+    )
     old = _stored_column(
         b"thirdparty.thing", b'{"v":1}', pa.array(["a"], pa.large_string())
     )
@@ -417,8 +540,8 @@ def test_third_party_type_reads_only_what_it_declares() -> None:
 
 
 def test_list_wrapper_written_before_identifiers_is_read() -> None:
-    converter = get_default_context().type_converter
-    current = converter.python_type_to_arrow_type(list[pathlib.Path])
+    converter = _converter()
+    current = _extension_type(list[pathlib.Path])
     legacy_metadata = json.dumps(
         {
             "category": "list",
@@ -435,8 +558,8 @@ def test_list_wrapper_written_before_identifiers_is_read() -> None:
 
 
 def test_list_wrapper_of_an_unreadable_element_is_refused() -> None:
-    converter = get_default_context().type_converter
-    converter.python_type_to_arrow_type(list[pathlib.Path])
+    converter = _converter()
+    _extension_type(list[pathlib.Path])
     metadata = json.dumps(
         {
             "category": "list",

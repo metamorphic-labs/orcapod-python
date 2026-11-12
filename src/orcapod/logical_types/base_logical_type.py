@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from orcapod.types import DataType
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 
 class BaseLogicalType:
@@ -16,6 +21,18 @@ class BaseLogicalType:
     serialized metadata are the type's identifier.
     """
 
+    def get_arrow_extension_type(self) -> "pa.ExtensionType":
+        """Return the Arrow extension type for this logical type.
+
+        Its extension name and serialized metadata are the type's identifier.
+
+        Raises:
+            NotImplementedError: Always; every logical type implements this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement get_arrow_extension_type."
+        )
+
     def readable_extension_metadata(self) -> tuple[bytes, ...]:
         """Return every stored extension metadata value this type can read.
 
@@ -27,7 +44,7 @@ class BaseLogicalType:
         Returns:
             The readable metadata values, the current one first.
         """
-        extension_type = self.get_arrow_extension_type()  # pyright: ignore[reportAttributeAccessIssue]
+        extension_type = self.get_arrow_extension_type()
         declared = getattr(extension_type, "readable_metadata", None)
         if declared is not None:
             return tuple(declared)

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from orcapod.errors import LogicalTypeIdentifierError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import require_readable
 from orcapod.logical_types.registry import LogicalTypeRegistry
 from orcapod.logical_types.schema_walker import walk_field

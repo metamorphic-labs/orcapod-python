@@ -10,7 +10,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Iterable
 
-from orcapod.errors import LogicalTypeIdentifierError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.protocols import (
     LogicalTypeProtocol,

@@ -50,6 +50,53 @@ class LogicalTypeIdentifier:
         return f"{self.name};{self.metadata.hex()}"
 
 
+class LogicalTypeIdentifierError(ValueError):
+    """A stored column's logical type identifier cannot be read by this installation.
+
+    A logical type is identified by its Arrow extension name and extension
+    metadata. This error is raised when a stored column carries a name this
+    installation knows with metadata the registered logical type does not
+    declare as readable. Orcapod never falls back to the storage type or to the
+    current version of the type, because that could misread the values.
+
+    Attributes:
+        stored: The identifier found with the stored column.
+        readable: The extension metadata values this installation reads for
+            that extension name.
+        column: The column name, when the raising code knows it.
+    """
+
+    def __init__(
+        self,
+        stored: LogicalTypeIdentifier,
+        readable: tuple[bytes, ...],
+        column: str | None = None,
+    ) -> None:
+        self.stored = stored
+        self.readable = readable
+        self.column = column
+        subject = f"Column {column!r}" if column is not None else "A column"
+        readable_text = ", ".join(repr(m) for m in readable) or "nothing"
+        super().__init__(
+            f"{subject} was stored as logical type {stored.name!r} with extension "
+            f"metadata {stored.metadata!r}, which this installation cannot read. "
+            f"For {stored.name!r} it reads extension metadata: {readable_text}. "
+            f"The data was probably written by a different version of the type; "
+            f"read it with a version that supports that identifier."
+        )
+
+    def for_column(self, column: str) -> "LogicalTypeIdentifierError":
+        """Return the same error naming ``column``.
+
+        Args:
+            column: The name of the column the identifier was stored with.
+
+        Returns:
+            A new ``LogicalTypeIdentifierError`` with ``column`` set.
+        """
+        return LogicalTypeIdentifierError(self.stored, self.readable, column)
+
+
 def version_metadata(version: int) -> bytes:
     """Return the extension metadata Orcapod's built-in types use for ``version``.
 
@@ -110,8 +157,6 @@ def require_readable(
         LogicalTypeIdentifierError: If ``stored_metadata`` is not one of the
             values in ``logical_type.readable_extension_metadata()``.
     """
-    from orcapod.errors import LogicalTypeIdentifierError
-
     readable = tuple(logical_type.readable_extension_metadata())
     if stored_metadata not in readable:
         raise LogicalTypeIdentifierError(

@@ -162,7 +162,7 @@ compares the stored metadata with that list:
   to the current version of the type.
 
 ```python
-from orcapod.errors import LogicalTypeIdentifierError
+from orcapod.logical_types import LogicalTypeIdentifierError
 
 stored = pa.table(
     [pa.array(["/data/a.txt"], pa.large_string())],

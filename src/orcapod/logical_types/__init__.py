@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from .identifier import (
     LogicalTypeIdentifier,
+    LogicalTypeIdentifierError,
     arrow_type_identifier,
     logical_type_identifier,
     version_metadata,
@@ -62,6 +63,7 @@ __all__ = [
     "make_polars_extension_type",
     # ITL-935
     "LogicalTypeIdentifier",
+    "LogicalTypeIdentifierError",
     "arrow_type_identifier",
     "logical_type_identifier",
     "version_metadata",
