@@ -21,6 +21,10 @@ casts back on every read.
   view for ns / date64 / time / duration; Decision 2 (i) document that Delta stores written
   before the fix must be rebuilt. **Write no Delta code until the coordinator replies.** B's
   tests are prepared as strict xfails.
+- 2026-11-12: Part A committed (43bb9375), plus FunctionPodStream.as_table logical-type
+  tags (ecc879b7, approved by the coordinator as its own commit). Part B tests committed as
+  strict xfails (`tests/test_databases/test_delta_arrow_type_roundtrip.py`,
+  `test_store_read_back_keeps_tag_type`). Nothing pushed yet (coordinator: do not push).
 - Audit scripts: `.untracked/measure.py` (tags, all read points, `[sync|async] [memory|delta|sqlite]`),
   `.untracked/measure2.py` (data columns, all-info columns, operator node, CachedSource),
   `.untracked/rerun_ids.py` (consequence 2), `.untracked/repro_flush_poison.py`.

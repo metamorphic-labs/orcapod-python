@@ -241,3 +241,32 @@ def test_as_table_mixing_stored_and_new_rows_keeps_tag_type() -> None:
     assert table.num_rows == 3
     assert table.schema.field("k").type == pa.uint32()
     assert sorted(table.column("k").to_pylist()) == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Reads from the store: get_all_records() and a fresh job (part B on Delta)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("store", ["memory", "delta"])
+@pytest.mark.parametrize("name", list(TAG_COLUMNS))
+def test_store_read_back_keeps_tag_type(
+    name: str, store: str, tmp_path: pathlib.Path, request
+) -> None:
+    if store == "delta" and name in DELTA_CANNOT_WRITE | DELTA_CHANGES:
+        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
+    database = _new_store(store, tmp_path)
+    table = _source_table(name)
+    _build(database, table).run()
+    if store == "delta":
+        # A new store object sees the committed tables, as a new process would.
+        database = _new_store(store, tmp_path)
+
+    fresh = _build(database, table).nodes["double"]
+
+    records = fresh.get_all_records()
+    assert records is not None
+    assert records.schema.field("k").type == _expected(name)
+    tag, _ = next(iter(fresh.iter_data()))
+    assert tag.as_table().schema.field("k").type == _expected(name)
+    assert fresh.as_table().schema.field("k").type == _expected(name)
