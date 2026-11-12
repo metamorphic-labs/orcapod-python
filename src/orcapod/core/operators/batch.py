@@ -153,7 +153,7 @@ class Batch(UnaryOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Streaming batch: emit full batches as they accumulate.
 
@@ -173,14 +173,17 @@ class Batch(UnaryOperator):
             ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
         """
         try:
-            (pipeline_hash,) = self._pair_input_pipeline_hashes(
-                len(inputs), input_pipeline_hashes
-            )
+            if len(input_pipeline_hashes) != len(inputs):
+                raise ValueError(
+                    f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
+                    f"must match inputs length ({len(inputs)})"
+                )
+            pipeline_hash = input_pipeline_hashes[0]
             if self.batch_size == 0:
                 # Must collect all rows — barrier fallback
                 rows = await inputs[0].collect()
                 if rows:
-                    stream = self._materialize_to_stream(rows, pipeline_hash)
+                    stream = self._materialize_input_stream(rows, pipeline_hash)
                     result = self.unary_static_process(stream)
                     for tag, data in result.iter_data():
                         await output.send((tag, data))
@@ -190,7 +193,7 @@ class Batch(UnaryOperator):
             async for tag, data in inputs[0]:
                 batch.append((tag, data))
                 if len(batch) >= self.batch_size:
-                    stream = self._materialize_to_stream(batch, pipeline_hash)
+                    stream = self._materialize_input_stream(batch, pipeline_hash)
                     result = self.unary_static_process(stream)
                     for out_tag, out_data in result.iter_data():
                         await output.send((out_tag, out_data))
@@ -198,7 +201,7 @@ class Batch(UnaryOperator):
 
             # Flush partial batch
             if batch and not self.drop_partial_batch:
-                stream = self._materialize_to_stream(batch, pipeline_hash)
+                stream = self._materialize_input_stream(batch, pipeline_hash)
                 result = self.unary_static_process(stream)
                 for out_tag, out_data in result.iter_data():
                     await output.send((out_tag, out_data))

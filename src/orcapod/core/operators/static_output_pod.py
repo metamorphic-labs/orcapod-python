@@ -245,23 +245,18 @@ class StaticOutputOperatorPod(TraceableBase):
     @staticmethod
     def _materialize_to_stream(
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
-        pipeline_hash: ContentHash | None = None,
     ) -> StreamProtocol:
         """Materialize a list of (Tag, Data) pairs into an ArrowTableStream.
 
-        Used by the barrier-mode ``async_execute`` to convert collected
-        channel items back into a stream suitable for ``static_process``.
-        Every row keeps its own source info (see ``_rows_to_table``).
+        Holds an operator's or a node's OUTPUT rows, whose stream identity is
+        given by whoever holds them (the node, the ``DynamicPodStream``), so the
+        stream has no producer and its own pipeline hash is never read. Rows
+        that stand for an operator's INPUT go through
+        ``_materialize_input_stream``. Every row keeps its own source info (see
+        ``_rows_to_table``).
 
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
-            pipeline_hash: The pipeline hash of the stream the rows came from.
-                The rebuilt stream reports it as its own, so an operator that
-                names system-tag columns after its input's pipeline hash
-                (``MergeJoin``, ``Batch``, ``GroupBy``) names them as the sync
-                path does (ITL-906). ``None`` leaves the rebuilt stream's own
-                hash, which is schema-only: equal to the input's only when the
-                input is a root source.
 
         Returns:
             A stream over the rows, in order.
@@ -272,41 +267,40 @@ class StaticOutputOperatorPod(TraceableBase):
         table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
-        if pipeline_hash is None:
-            return ArrowTableStream(table, tag_columns=tag_keys)
-        return _RowsOfStream(table, tag_columns=tag_keys, pipeline_hash=pipeline_hash)
+        return ArrowTableStream(table, tag_columns=tag_keys)
 
     @staticmethod
-    def _pair_input_pipeline_hashes(
-        n_inputs: int, input_pipeline_hashes: Sequence[ContentHash] | None
-    ) -> list[ContentHash | None]:
-        """The pipeline hash of each input, positionally; ``None`` each when none given.
+    def _materialize_input_stream(
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+        pipeline_hash: ContentHash,
+    ) -> StreamProtocol:
+        """Rebuild an input stream from the rows a barrier ``async_execute`` collected.
+
+        The rebuilt stream reports ``pipeline_hash`` as its own, so an operator
+        that names system-tag columns after its input's pipeline hash
+        (``MergeJoin``, ``Batch``, ``GroupBy``) names them as the sync path
+        does (ITL-906). Every row keeps its own source info (see
+        ``_rows_to_table``).
 
         Args:
-            n_inputs: The number of input channels.
-            input_pipeline_hashes: The ``async_execute`` keyword of that name.
+            rows: Non-empty sequence of (Tag, Data) pairs.
+            pipeline_hash: The pipeline hash of the stream the rows came from.
 
         Returns:
-            One entry per input.
+            A stream over the rows, in order.
 
         Raises:
-            ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
+            ValueError: If ``rows`` is empty.
         """
-        if input_pipeline_hashes is None:
-            return [None] * n_inputs
-        if len(input_pipeline_hashes) != n_inputs:
-            n_hashes = len(input_pipeline_hashes)
-            raise ValueError(
-                f"input_pipeline_hashes length ({n_hashes}) must match inputs length ({n_inputs})"
-            )
-        return list(input_pipeline_hashes)
+        table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
+        return _RowsOfStream(table, tag_columns=tag_keys, pipeline_hash=pipeline_hash)
 
     async def async_execute(
         self,
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
-        input_pipeline_hashes: Sequence[ContentHash] | None = None,
+        input_pipeline_hashes: Sequence[ContentHash],
     ) -> None:
         """Default barrier-mode async execution.
 
@@ -315,22 +309,26 @@ class StaticOutputOperatorPod(TraceableBase):
         input has no rows, nothing is emitted (ITL-865): an operator whose
         result is not empty then must override this method.
 
+        Every operator's ``async_execute`` takes ``input_pipeline_hashes``, with
+        no default: the operator node passes it for every operator alike.
+
         Args:
             inputs: Readable channels, one per upstream node.
             output: Writable channel for downstream consumption.
             input_pipeline_hashes: Pipeline hash for each input stream,
                 positionally matching ``inputs``. Each rebuilt input stream
                 reports its hash, so system-tag column names equal the sync
-                path's (ITL-906). Without it, the rebuilt streams' schema-only
-                hashes are used, which equal the inputs' only for root sources.
+                path's (ITL-906).
 
         Raises:
             ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
         """
         try:
-            hashes = self._pair_input_pipeline_hashes(
-                len(inputs), input_pipeline_hashes
-            )
+            if len(input_pipeline_hashes) != len(inputs):
+                raise ValueError(
+                    f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
+                    f"must match inputs length ({len(inputs)})"
+                )
             all_rows = await asyncio.gather(*(ch.collect() for ch in inputs))
             if not all(all_rows):
                 # Every barrier operator that exists gives no rows when an input has
@@ -338,8 +336,8 @@ class StaticOutputOperatorPod(TraceableBase):
                 # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
                 return
             streams = [
-                self._materialize_to_stream(rows, pipeline_hash)
-                for rows, pipeline_hash in zip(all_rows, hashes)
+                self._materialize_input_stream(rows, pipeline_hash)
+                for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
             ]
             result = self.static_process(*streams)
             for tag, data in result.iter_data():
