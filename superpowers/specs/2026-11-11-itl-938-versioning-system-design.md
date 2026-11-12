@@ -1164,7 +1164,7 @@ every logical type identifier written by v0.3 are commitments.
 | Default `source_id` of database and Delta sources is a bare name | The source contract allows it; a better default is a separate choice |
 | Content-derived record ids (ITL-817) | Changes row keys: a data context increment of its own |
 
-### 7.4 The data context file (proposed additions)
+### 7.4 The data context file (additions agreed November 11, 2026)
 
 Today `contexts/data/v0.1.json` holds: `context_key`, `version`, `description`, the wiring of
 the hashers, the type converter with its list of logical types, the handler registry, and a
@@ -1180,14 +1180,14 @@ place."
 | `released_in` | the library version whose release froze this file; empty while the release is being prepared. A check can then refuse any edit to a file whose `released_in` is set |
 | `previous` | the data context this one follows (`std:v0.1:default` for `std:v1:default`) |
 | `definitions` | a name for each definition that lives in code and not in a swappable component: what each identity is composed of, the record-id, entry-id and fold recipes, the system-tag and source-info naming grammar, the type conversion rules |
-| `libraries` | third-party libraries whose behaviour enters a core hash, with the verified range (starfix `>=0.5,<0.6`, hash format 2) |
+| `libraries` | the critical libraries the core hashes depend on, with their version, e.g. starfix 0.5.0 (hash format 2); also pyarrow (conversion of Python values to Arrow types, which are hashed) and Polars (serialisation of filter expressions). Libraries used only by one logical type (numpy, pandas) belong to that type, not here |
 | `golden` | a digest of the core golden files, tying the manifest to the values it stands for |
 | `changes` | which definitions differ from `previous`, in place of the free-text changelog |
 
 **One split.** The file also lists the registered logical types and their value handlers.
 Logical types are outside the data context version, and adding one must not edit a frozen
-file. Proposed: the list of logical types moves to a separate, unfrozen registration (its own
-file or section), and the versioned file keeps only the core.
+file. Agreed: the list of logical types moves out of the frozen file to a separate, unfrozen
+registration, and the versioned file keeps only the core.
 
 ## Part 8. Follow-up issues to file (titles and one paragraph each)
 
