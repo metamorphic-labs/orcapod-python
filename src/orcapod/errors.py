@@ -196,6 +196,16 @@ class EphemeralResultMissingError(Exception):
         )
 
 
+class TableListingNotSupportedError(NotImplementedError):
+    """Raised by ``list_table_paths`` when a store cannot enumerate its tables.
+
+    Some stores can read and write a table at a known path but have no way to list
+    the tables they hold (for example a Delta store on cloud storage for which no
+    file system package is installed). Orcapod then cannot look for tables written
+    by an earlier version; it says so in a warning and carries on.
+    """
+
+
 class StoreError(RuntimeError):
     """Base of the errors raised when the store could not be read or written.
 
