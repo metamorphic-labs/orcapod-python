@@ -290,10 +290,13 @@ class TestFunctionSignatureGolden:
 
     def test_extractor_without_converter(self):
         info = FunctionSignatureExtractor().extract_function_info(golden_fn)
-        assert info["params"] == (
-            "a: pathlib.Path, b: pathlib.Path | str, c: list[pathlib.Path], "
-            "d: dict[str, pathlib.Path], e: datetime.datetime"
-        )
+        assert [(p["name"], p["annotation"]) for p in info["parameters"]] == [
+            ("a", "pathlib.Path"),
+            ("b", "pathlib.Path | str"),
+            ("c", "list[pathlib.Path]"),
+            ("d", "dict[str, pathlib.Path]"),
+            ("e", "datetime.datetime"),
+        ]
 
     def test_function_object_hash(self):
         hasher = get_default_context().semantic_hasher
