@@ -67,7 +67,7 @@ Source: tags `(subject, session, probe)`, data `(path)`; `GroupBy(by=["subject"]
   and data on the other raise a bare `KeyError: Field "t" exists 2 times in schema`, not
   `InputValidationError`; (2) `MapData(name_map={"<tag name>": ...})` is a silent no-op.
 
-## Decisions (pending coordinator approval)
+## Decisions (approved by the coordinator, November 11, 2026)
 
 1. Non-key tags become list-valued **tag** columns, in input tag order (as `Batch`).
 2. `by` must still name scalar tag columns; members still sort by non-key tag values, then every
@@ -226,3 +226,8 @@ def _null_last_key(value: Any) -> tuple[Any, ...]:
 ## Progress notes
 
 - 2026-11-11: investigation done, plan written, waiting for coordinator approval.
+- 2026-11-11: coordinator approved (list-valued tags; keep the change easy to adjust if the
+  developer prefers dropping). Conditions: only the six group_by row golden entries move; scalar
+  sort order pinned by a test; stored-data rerun kept as a test; out-of-scope findings go to
+  worker_done only.
+- 2026-11-11: Tasks 1-5 done and pushed (tests, fix, golden, docs). Remaining: Task 6.

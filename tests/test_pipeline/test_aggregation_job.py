@@ -249,6 +249,7 @@ class TestStoreWrittenBeforeTagsStayedTags:
 
         assert counter.pipeline_hash() == old_counter.pipeline_hash()
         assert _CALLS["path"] == [], "stored results must be reused, not recomputed"
+        assert after.nodes["agg"].keys() == (("subject", "date", "probe"), ("path",))
         assert counter.keys() == (("subject", "date", "probe"), ("n",))
         rows = sorted(
             counter.as_table().select(["date", "probe", "n"]).to_pylist(),
