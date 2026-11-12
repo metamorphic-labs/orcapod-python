@@ -39,10 +39,12 @@ COPY = {"session_start_datetime": "session_start"}
 
 
 def _micros(t: dt.datetime) -> int:
+    """Return ``t`` as microseconds since the epoch."""
     return int(t.timestamp() * 1_000_000)
 
 
 def _experiment_table(*, nullable_keys: bool = False) -> pa.Table:
+    """Return the EDI-shaped ``experiment`` table (two experiments per session)."""
     schema = pa.schema(
         [
             pa.field("subject_id", pa.large_string(), nullable=nullable_keys),
@@ -67,6 +69,7 @@ def _experiment_table(*, nullable_keys: bool = False) -> pa.Table:
 
 
 def _session_table() -> pa.Table:
+    """Return the EDI-shaped ``session`` table (subject ``m1`` has two sessions)."""
     schema = pa.schema(
         [
             pa.field("subject_id", pa.large_string(), nullable=False),
@@ -85,18 +88,21 @@ def _session_table() -> pa.Table:
 
 
 def _experiment(source_id: str = "experiment", **kwargs) -> ArrowTableSource:
+    """Return the ``experiment`` table as a source with its keys as tags."""
     return ArrowTableSource(
         _experiment_table(**kwargs), tag_columns=EXPERIMENT_KEYS, source_id=source_id
     )
 
 
 def _session() -> ArrowTableSource:
+    """Return the ``session`` table as a source with its keys as tags."""
     return ArrowTableSource(
         _session_table(), tag_columns=SESSION_KEYS, source_id="session"
     )
 
 
 def _prefixed(table: pa.Table, prefix: str) -> list[str]:
+    """Return the names of the table's columns that start with ``prefix``."""
     return [c for c in table.column_names if c.startswith(prefix)]
 
 
@@ -242,15 +248,18 @@ class TestArrowTypesPreserved:
 # ---------------------------------------------------------------------------
 
 
-def _expected_default_source_id(origin, tags_as_data) -> str:
+def _expected_default_source_id(origin, tags_as_data, record_id_column=None) -> str:
     """The documented definition: ``derived:`` plus the labelled derivation hash.
 
     The derivation hash is the content hash an operator node doing the derivation
     would have.
     """
     hasher = origin.data_context.semantic_hasher
+    parameters = ("DerivedSource", tuple(sorted(tags_as_data.items())))
+    if record_id_column is not None:
+        parameters += (("record_id_column", record_id_column),)
     derivation_hash = hasher.hash_object(
-        (("DerivedSource", tuple(sorted(tags_as_data.items()))), (origin,)),
+        (parameters, (origin,)),
         resolver=lambda obj: obj.content_hash(hasher),
     )
     return f"derived:{derivation_hash.to_string()}"
@@ -288,6 +297,19 @@ class TestProvenance:
             DerivedSource(_experiment("experiment2"), tags_as_data=COPY).source_id
             != base
         )
+
+    def test_record_id_column_enters_the_default_source_id(self):
+        origin = _experiment()
+        by_position = DerivedSource(origin, tags_as_data=COPY)
+        by_value = DerivedSource(
+            origin, tags_as_data=COPY, record_id_column="experiment_start_timestamp"
+        )
+        assert by_value.source_id == _expected_default_source_id(
+            origin, COPY, "experiment_start_timestamp"
+        )
+        assert by_value.source_id != by_position.source_id
+        assert by_value.content_hash() != by_position.content_hash()
+        assert by_value.pipeline_hash() == by_position.pipeline_hash()
 
     def test_explicit_source_id_replaces_the_default(self):
         derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp_t0")
@@ -494,6 +516,7 @@ class TestValidation:
 
 
 def _make_probe_db(path: Path) -> str:
+    """Create a SQLite file with a three-row ``probe`` table and return its path."""
     with closing(sqlite3.connect(path)) as conn:
         conn.execute(
             "CREATE TABLE probe (probe_id TEXT NOT NULL, name TEXT NOT NULL, "
@@ -508,6 +531,7 @@ def _make_probe_db(path: Path) -> str:
 
 
 def _probe_job(db_path: str, name: str = "probes") -> PipelineJob:
+    """Return a job that copies the ``name`` key into data and measures its length."""
     job = PipelineJob(name=name, store=InMemoryArrowDatabase())
     with job:
         derived = DerivedSource(
@@ -622,6 +646,7 @@ def task_upper(task_id: str) -> str:
 
 
 def _upper_job() -> PipelineJob:
+    """Return a job with one function node, ``upper``, over the ``experiment`` table."""
     job = PipelineJob(name="stage1", store=InMemoryArrowDatabase())
     with job:
         task_upper.pod(_experiment().select_data_columns(["task_id"]), label="upper")

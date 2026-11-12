@@ -24,27 +24,35 @@ else:
 def _derivation_hash(
     origin: "FunctionJobNode | OperatorJobNode | RootSource",
     tags_as_data: Mapping[str, str],
+    record_id_column: str | None,
 ) -> ContentHash:
     """Return the content hash an operator node doing this derivation would have.
 
     The hashed structure has the shape an operator's output stream hashes for its
     ``content_hash``: the producer's identity (class name and parameters) followed
     by its upstreams. Here that is ``(("DerivedSource", sorted tags_as_data items),
-    (origin,))``, with the origin entering through its own ``content_hash``. The
-    hasher is the origin's, so the result depends on the origin's identity and on
-    the mapping, and on nothing else.
+    (origin,))``, with the origin entering through its own ``content_hash``. A
+    ``record_id_column`` is a parameter of the derivation too, since it decides
+    the record IDs: when one is set, ``("record_id_column", name)`` is appended to
+    the parameters. The hasher is the origin's, so the result depends on the
+    origin's identity and on these parameters, and on nothing else.
 
     Args:
         origin: The source or job node the derived source reads from.
         tags_as_data: Maps a tag column of the origin to the name of its data copy.
+        record_id_column: The column that identifies a row, or ``None`` for the
+            row position.
 
     Returns:
         The derivation hash, from which ``_default_source_id`` builds the default
         ``source_id`` of a ``DerivedSource`` built with ``tags_as_data``.
     """
     hasher = origin.data_context.semantic_hasher
+    parameters: tuple[Any, ...] = ("DerivedSource", tuple(sorted(tags_as_data.items())))
+    if record_id_column is not None:
+        parameters += (("record_id_column", record_id_column),)
     return hasher.hash_object(
-        (("DerivedSource", tuple(sorted(tags_as_data.items()))), (origin,)),
+        (parameters, (origin,)),
         resolver=lambda obj: obj.content_hash(hasher),
     )
 
@@ -123,9 +131,10 @@ class DerivedSource(RootSource):
         - ``source_id`` defaults to ``derived:<algorithm label>:<hex digest>``,
           where label and digest are the derivation hash: the content hash an
           operator node doing this derivation over the origin would have, built
-          from the origin's content hash and the sorted ``tags_as_data`` items.
-          It changes when the origin's identity or the mapping changes. An
-          explicit ``source_id`` replaces it.
+          from the origin's content hash, the sorted ``tags_as_data`` items and
+          the ``record_id_column`` when one is set. It changes when the origin's
+          identity or one of these parameters changes. An explicit ``source_id``
+          replaces it.
         - ``content_hash`` follows the rule of every root source: class name,
           output schema and ``source_id``.
         - ``pipeline_hash`` is schema-only, as for every root source.
@@ -174,6 +183,7 @@ class DerivedSource(RootSource):
         cls,
         origin: "FunctionJobNode | OperatorJobNode | RootSource",
         tags_as_data: Mapping[str, str],
+        record_id_column: str | None,
     ) -> str:
         """Return the default ``source_id`` of a source built with ``tags_as_data``.
 
@@ -187,11 +197,13 @@ class DerivedSource(RootSource):
         Args:
             origin: The source or job node the derived source reads from.
             tags_as_data: Maps a tag column of the origin to the name of its copy.
+            record_id_column: The column that identifies a row, or ``None`` for
+                the row position.
 
         Returns:
             The default source id.
         """
-        derivation_hash = _derivation_hash(origin, tags_as_data)
+        derivation_hash = _derivation_hash(origin, tags_as_data, record_id_column)
         return f"{cls.SOURCE_KIND}:{derivation_hash.to_string()}"
 
     def __init__(
@@ -224,7 +236,9 @@ class DerivedSource(RootSource):
             if self._tags_as_data is None:
                 source_id = f"derived:{origin.content_hash().to_string()}"
             else:
-                source_id = self._default_source_id(origin, self._tags_as_data)
+                source_id = self._default_source_id(
+                    origin, self._tags_as_data, record_id_column
+                )
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._record_id_column = record_id_column

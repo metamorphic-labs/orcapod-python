@@ -476,7 +476,8 @@ data. The rules:
 - FunctionNode Phase 1 returns ALL records in the shared pipeline_path DB table.
   Phase 2 skips inputs whose hash is already in the DB.
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
-- DerivedSource before run() → raises ValueError (no computed records).
+- DerivedSource over a job node before run() → presents zero rows with the origin's columns
+  (no computed records; no error), in the plain form and with tags_as_data.
 - Join requires non-overlapping data columns; raises InputValidationError on collision.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted
   large_list<T> with source columns reordered to match, where T is the large-normalized input

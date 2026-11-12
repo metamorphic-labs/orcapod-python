@@ -423,7 +423,15 @@ def schema_source_stream_builder() -> dict[str, Any]:
 
 @case("schema", "derived_source_tags_as_data")
 def schema_derived_source_tags_as_data() -> dict[str, Any]:
-    # A source derived from another source with a tag also offered as data (ITL-939).
+    """Pin a source derived from another source with a tag also offered as data (ITL-939).
+
+    Three variants: the default source id (``derived:<label>:<hex>``, the derivation
+    hash), an explicit source id, and the default source id with a ``record_id_column``
+    (which enters the derivation hash).
+
+    Returns:
+        Each variant's source id and stream summary.
+    """
     from orcapod.core.sources import ArrowTableSource, DerivedSource
 
     origin = ArrowTableSource(
@@ -436,6 +444,7 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
     for variant, kwargs in {
         "default_source_id": {},
         "named_source_id": {"source_id": "golden_derived"},
+        "record_id_column": {"record_id_column": "subject"},
     }.items():
         derived = DerivedSource(
             origin, tags_as_data={"subject": "subject_value"}, **kwargs
