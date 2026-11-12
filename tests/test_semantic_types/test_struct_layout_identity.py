@@ -50,7 +50,7 @@ def _tables() -> dict[str, pa.Table]:
 
 
 _FLAT_HASHES: dict[str, object] = {
-    "stream_content": "1362a2951a4ce959504f5a33d325766ef6c35e021d166be54b2f358b8e47e97d",
+    "stream_content": "4f561b44f3fb2bf6e9743adab48651ba8cf39b48da9869855ddaa6daec121fa2",
     "stream_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
     "source_content": "7263fb2ff4346ac025631fd34c7204971478d83165084f9a748e61acc5e9f919",
     "source_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
@@ -66,7 +66,7 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
     "small": _FLAT_HASHES,
     "large": _FLAT_HASHES,
     "nested": {
-        "stream_content": "d88d09bb6c288a29cd0edbf62826bf8d9afb6b2c6b9d320aa248c4496b7d63f3",
+        "stream_content": "6966147a47464a25810cfc5ab4686724a6623121637a7826b84ba70e71a996f0",
         "stream_pipeline": "f8745264f2422bf76eaec06120aa00b510cafa0ee3abdfac3d5396a614afb3a1",
         "source_content": "2ee725a65a6050703c4164f901ac06e2137a0e2c71f7cf7b636423a1e1ac2a9b",
         "source_pipeline": "f8745264f2422bf76eaec06120aa00b510cafa0ee3abdfac3d5396a614afb3a1",
@@ -76,7 +76,7 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
         ],
     },
     "list_of_struct": {
-        "stream_content": "407a24e60bf74b666560f868d193dc35efcaf531d8d357bd7e414b861436336d",
+        "stream_content": "9fefd7ef3c1a043bdf2a36e9fbfcabca7db940307a883e76a644ca9ecb10978e",
         "stream_pipeline": "85b8d45d79762e42d1edf56c3853379193c21d5879a30166fcf3bc3c8e56a733",
         "source_content": "19a5d5780cd84af633704022bf8f7a80ba72555533390ee5e69c487f4ec253cf",
         "source_pipeline": "85b8d45d79762e42d1edf56c3853379193c21d5879a30166fcf3bc3c8e56a733",

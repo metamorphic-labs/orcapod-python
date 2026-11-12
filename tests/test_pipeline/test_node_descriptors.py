@@ -178,7 +178,7 @@ class TestOperatorNodeFromDescriptor:
             "label": "my_join",
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             "table_scope": "pipeline_hash",
             "output_schema": {
                 "tag": {"a": "int64"},

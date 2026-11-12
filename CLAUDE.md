@@ -433,6 +433,48 @@ The pipeline hash uses a **resolver pattern** — `PipelineElementProtocol` obje
 Prefixes are computed from `SystemConstant` in `system_constants.py`. The `constants` singleton
 (with no global prefix) is used throughout.
 
+### Stored tables: data context and layout versions
+
+Every row Orcapod stores carries `__data_context` (`constants.DATA_CONTEXT_COL`,
+`large_string`): the key of the data context that wrote it (`std:v1:default` since v0.3;
+developer, November 11, 2026, ITL-944). The key names one generation of hashing; rows of the
+current data context are the current entries.
+
+| Table | Layout (last path component) | Constant |
+|---|---|---|
+| Function pipeline | `pdb_v2` | `PIPELINE_DB_SCHEMA_VERSION` |
+| Function result | `rdb_v2` | `RESULT_DB_SCHEMA_VERSION` |
+| Side-effect log | `tdb_v2` | `TRACKING_DB_SCHEMA_VERSION` |
+| Operator cache | `odb_v1` | `OPERATOR_DB_SCHEMA_VERSION` |
+| Cached source | `sdb_v1` | `SOURCE_DB_SCHEMA_VERSION` |
+
+- A change to the bookkeeping columns of a table kind moves its layout version, so the table
+  gets a new path. Never add, rename or retype a stored column without it.
+- Every new stored table kind writes `__data_context` (`contexts/stored.with_data_context`),
+  and every read or lookup keeps rows of the current data context only
+  (`keep_rows_of_data_context`, or a lookup constraint on the column).
+- A table at an older layout is never read as current and never modified. What a node does
+  about such tables, and about rows of another data context, is decided in one place,
+  `contexts/stored.account_for_stale_tables`: count and report, or, for a node that delivers
+  side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
+  context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
+  of node goes through that function; never decide it locally.
+- A released data context manifest (`contexts/data/<version>.json`) is frozen: its sha256 is
+  pinned in `contexts/released_manifests.json`. A change that moves an existing golden hash
+  value for a reason other than a logical type's own change needs a new data context version
+  with its own manifest file, never an edit of a released one.
+- In memory the data context column is still `_context_key` (`ColumnConfig(context=True)`).
+- A writer refuses an input of another data context than its own
+  (`contexts/stored.require_same_data_context`, `InputValidationError` naming both keys)
+  before anything is written; a whole-input condition is checked outside the row error
+  policy. The eventual behaviour is ITL-951.
+- `std:v0.1:default` is not shipped; saved files that name it load through
+  `contexts.resolve_saved_context`. There is no `SchemaVersionError`, `ignore_schema` or
+  `orcapod.migrations`: do not reintroduce a per-layout migration path without a decision.
+- Logical types and the value handlers that hash their Python values are registered in
+  `contexts/logical_types.json`, never in a data context manifest: a logical type is
+  versioned by its own identifier, and that file is not frozen.
+
 ### System tag evolution rules
 
 1. **Name-preserving** — single-stream ops (filter, select, map). Column name and value pass

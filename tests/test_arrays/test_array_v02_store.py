@@ -1,11 +1,12 @@
-"""A v0.2 store under v0.3: its rows are ignored, recomputed and kept (ITL-888, ITL-910).
+"""A v0.2 store under v0.3: its tables are not read, inputs are recomputed (ITL-888, ITL-944).
 
 The array format changed in v0.3 without a migration (ITL-888), and so did every Arrow-derived
-hash (starfix hash format 2, label ``arrow_v0.2``, ITL-910). Rows a v0.2 store holds are keyed
-under ``arrow_v0.1`` and can never match v0.3 inputs. v0.3 does not refuse the store and does
-not reuse those rows: it ignores them, computes every input again under ``arrow_v0.2`` (into
-new tables where a pipeline hash moved, next to the old rows where it did not), and leaves
-what v0.2 wrote byte-for-byte in place for a later migration (ITL-913, ITL-914).
+hash (starfix hash format 2, label ``arrow_v0.2``, ITL-910). v0.3 stores every table at a new
+layout (``pdb_v2``, ``rdb_v2``), with the data context of each row in ``__data_context``
+(ITL-944). The tables a v0.2 store holds are at the old layout: v0.3 does not refuse the
+store and does not read those tables as results. It computes every input again into its own
+tables and leaves what v0.2 wrote byte-for-byte in place for a later migration (ITL-913,
+ITL-914).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import numpy as np
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
-from orcapod.hashing.stored_hash_labels import stored_hash_labels
+from orcapod.contexts import stored_data_contexts
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from tests.test_arrays.v02_store_pods import ARRAYS, CALLS, build_job
 
@@ -84,8 +85,8 @@ def test_v02_rows_are_ignored_recomputed_and_kept(
 ) -> None:
     """A v0.3 run on a v0.2 store computes every input again and changes no v0.2 file.
 
-    No v0.2 result is reused, not even for the array-free ``after_drop`` pod, whose result
-    table did not move: its stored rows are keyed under ``arrow_v0.1``.
+    No v0.2 result is reused, not even for the array-free ``after_drop`` pod: its v0.2
+    result table is at the old layout.
     """
     files_before = _files(store)
     tables_before = _tables(store)
@@ -117,25 +118,22 @@ def test_v02_rows_are_ignored_recomputed_and_kept(
         assert files_after.get(path) == content, path
 
     # Every table, old and new, is still readable, read the way Orcapod's Delta
-    # database reads it; every v0.2 table still holds its v0.2 rows, listed by label.
+    # database reads it; every v0.2 table still holds its v0.2 rows only, listed under
+    # the data context of everything written before v0.3.
     database = DeltaTableDatabase(base_path=store)
     for table in _tables(store):
         dt = deltalake.DeltaTable(str(store / table))
         assert dt.to_pyarrow_dataset(as_large_types=True).to_table().num_rows > 0
     for table in tables_before:
-        labels = stored_hash_labels(database, _table_path(table))
-        assert labels.get("arrow_v0.1") == len(ARRAYS), table
-        assert set(labels) <= {"arrow_v0.1", "arrow_v0.2"}, table
+        found = stored_data_contexts(database, _table_path(table))
+        assert found == {"std:v0.1:default": len(ARRAYS)}, table
 
 
 @pytest.mark.parametrize("label", ["plus_one", "after_drop", "total"])
 def test_reading_a_node_with_only_v02_rows_returns_nothing(
     store: Path, label: str
 ) -> None:
-    """Before v0.3 has run, a node whose tables hold only v0.2 rows reads as empty.
-
-    ``total``'s pipeline table is new under v0.3; ``plus_one``'s is the v0.2 one.
-    """
+    """Before v0.3 has run, a node whose tables exist only at the v0.2 layout reads as empty."""
     files_before = _files(store)
     node = build_job(store).nodes[label]
     assert node.as_table().num_rows == 0

@@ -364,28 +364,36 @@ later.
 
 ### A store written by an older version
 
-Stored rows are keyed by hashes of their Arrow data, and each hash carries the label of the
-scheme that produced it: `arrow_v0.1` up to Orcapod v0.2, `arrow_v0.2` since v0.3 (see
-[Arrow Table Hash](../reference/hashing.md#9-arrow-table-hash-arrow_v02)). Rows keyed under
-another label can never match current inputs, so Orcapod **ignores** them: it does not refuse
-the store, and it does not reuse those rows.
+Every row Orcapod stores names the **data context** that wrote it, in the column
+`__data_context`: `std:v1:default` since v0.3. The data context is one key for the whole of
+Orcapod's hashing, so rows that share it were keyed in exactly the same way (see
+[The data context of a stored row](../reference/hashing.md#the-data-context-of-a-stored-row)).
+Tables written before v0.3 have no such column and are stored at an older table layout
+(`pdb_v1`, `rdb_v1`). Orcapod **does not read them as results**: it does not refuse the
+store, and it does not reuse those rows.
 
 - The first run of v0.3 on a store written by v0.2 computes every input again and stores the
-  new rows in the same tables, next to the old ones.
+  rows in its own tables (`pdb_v2`, `rdb_v2`).
 - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
-  current label only: nothing before that first run, one row per input after it.
-- The old rows are never changed or deleted. They stay readable with the version that wrote
-  them and are kept for a later migration. To see which labels a table holds, use
-  `stored_hash_labels` (see
-  [Stores written under another label](../reference/hashing.md#stores-written-under-another-label)).
-- When a read leaves such rows out, Orcapod logs one warning with their number:
-  `Skipped 3 rows of stored table '...': written under another hash label than the current
-  one. The rows are left in place unchanged and can be migrated later.`
-- Side-effect pods are the exception. A side effect is an external action, and deliveries
-  logged by v0.2 cannot be matched with current inputs, so running the node would deliver
-  everything a second time. Instead the node raises `SideEffectLogHashLabelError` (from
-  `orcapod.errors`, a `StoreError`) before it delivers anything. Use a fresh store for that
-  node, or keep using the version that wrote the log.
+  current data context only: nothing before that first run, one row per input after it.
+- The old tables are never changed or deleted. They stay readable with the version that
+  wrote them and are kept for a later migration. To see which data contexts a table holds,
+  use `orcapod.contexts.stored_data_contexts`.
+- When Orcapod finds a table at an older layout, it logs one warning with the number of
+  rows: `Found 3 rows in stored table '...' written by an earlier version of Orcapod (older
+  table layout, data context std:v0.1:default). They are not used and are left unchanged;
+  they can be migrated later.`
+- Nodes that perform side effects are the exception: side-effect pods, and function pods
+  that take the invocation context (`ctx_arg`). A side effect is an external action, and
+  completions stored by v0.2 cannot be matched with current inputs, so running the node
+  would do everything a second time. Instead the node raises
+  `SideEffectLogDataContextError` (from `orcapod.errors`, a `StoreError`), naming the
+  tables, before it does anything. Use a fresh store for that node, or keep using the
+  version that wrote them.
+
+Each result row also records the full version string of the function that produced it, in
+the column `__pf_var_function_version` (for example `v3.7`); only the major part is in the
+table path.
 
 ## Multiple input streams
 

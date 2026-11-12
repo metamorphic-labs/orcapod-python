@@ -8,13 +8,17 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.hashing.stored_hash_labels import (
-    current_hash_format,
-    keep_rows_hashed_under,
-    report_skipped_rows,
+from orcapod.contexts.stored import (
+    keep_rows_of_data_context,
+    require_same_data_context,
+    account_for_stale_tables,
+    find_stale_tables,
+    report_rows_of_other_data_contexts,
+    with_data_context,
 )
 from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils.lazy_module import LazyModule
 
@@ -57,6 +61,8 @@ class CachedSource(RootSource):
 
     # Set once a read has reported the cached rows it skipped.
     _skipped_rows_reported: bool = False
+    # Set once a cache table found at the older layout has been accounted for.
+    _stale_tables_checked: bool = False
 
     def __init__(
         self,
@@ -118,7 +124,8 @@ class CachedSource(RootSource):
             "inner_source": inner_source_config,
             "cache_database": cache_db_ref,
             "cache_path_prefix": list(self._cache_path_prefix),
-            "cache_path": list(self.cache_path),
+            # The path without its layout component, as ``cache_path`` takes it.
+            "cache_path": list(self._unversioned_cache_path),
             "source_id": self.source_id,
             # Note: identity fields (content_hash, pipeline_hash, etc.) intentionally omitted
         }
@@ -188,13 +195,41 @@ class CachedSource(RootSource):
     # -------------------------------------------------------------------------
 
     @property
-    def cache_path(self) -> tuple[str, ...]:
-        """Cache table path, scoped to the source's content hash."""
+    def _unversioned_cache_path(self) -> tuple[str, ...]:
+        """The cache path without its layout component.
+
+        This is where Orcapod up to v0.2 stored the cache table (the old layout).
+        """
         if self._explicit_cache_path is not None:
             return self._explicit_cache_path
         return self._cache_path_prefix + (
             "source",
             f"node:{self._source.content_hash().to_string()}",
+        )
+
+    @property
+    def cache_path(self) -> tuple[str, ...]:
+        """Cache table path: scoped to the source's content hash, then the layout version.
+
+        The layout version (``sdb_v1``) is always the last component, also when an
+        explicit ``cache_path`` was given.
+        """
+        return self._unversioned_cache_path + (SOURCE_DB_SCHEMA_VERSION,)
+
+    def _account_for_stale_tables(self) -> None:
+        """Report, once per source object, a cache table found at the older layout.
+
+        A cache written by an earlier version of Orcapod holds no ``__data_context``
+        column. Its rows are not read and are left unchanged; their number is
+        reported (ITL-944).
+        """
+        if self._stale_tables_checked:
+            return
+        self._stale_tables_checked = True
+        account_for_stale_tables(
+            find_stale_tables(self._cache_database, (self._unversioned_cache_path,)),
+            delivers_side_effects=False,
+            current_context=self.data_context_key,
         )
 
     # -------------------------------------------------------------------------
@@ -223,6 +258,7 @@ class CachedSource(RootSource):
         Raises if the source cannot provide data (e.g. an unbound
         ``SourceProxy``).
         """
+        require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
             columns={"source": True, "system_tags": True}
         )
@@ -246,45 +282,43 @@ class CachedSource(RootSource):
             self.HASH_COLUMN_NAME,
             pa.array([h.encode() for h in record_hashes], type=pa.large_binary()),
         )
+        # The data context column is appended after the record hashes are computed:
+        # it names the generation of hashing that produced them and is not hashed.
+        self._account_for_stale_tables()
         self._cache_database.add_records(
             self.cache_path,
-            live_with_hash,
+            with_data_context(live_with_hash, self.data_context_key),
             record_id_column=self.HASH_COLUMN_NAME,
             skip_duplicates=True,
         )
         self._cache_database.flush()
 
     def _read_cached_records(self) -> "pa.Table | None":
-        """Read the cached rows that the current Arrow hasher wrote.
+        """Read the cached rows written under the current data context.
 
-        Every read of the whole cache table goes through here. The cached record
-        hashes are hex digests without a label, and their first three bytes name the
-        starfix hash format, so rows cached by Orcapod v0.2 (format 1, ``arrow_v0.1``)
-        are left out and stay in the table untouched (ITL-910). A later Arrow hash
-        label that keeps the starfix format could not be told apart here.
+        Every read of the whole cache table goes through here. Rows of another data
+        context stay in the table untouched, and a cache at the older layout is not
+        read (ITL-944).
 
         Returns:
-            The cached rows without the record hash column, or ``None`` when the
-            cache table does not exist.
+            The cached rows without the record hash and ``__data_context`` columns,
+            or ``None`` when the cache table does not exist.
         """
+        self._account_for_stale_tables()
         records = self._cache_database.get_all_records(
             self.cache_path, record_id_column=self.HASH_COLUMN_NAME
         )
         if records is None:
             return None
         stored_rows = records.num_rows
-        records = keep_rows_hashed_under(
-            records,
-            self.HASH_COLUMN_NAME,
-            current_hash_format(self.data_context.arrow_hasher),
-        )
+        records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
             self._skipped_rows_reported = True
-            report_skipped_rows(
+            report_rows_of_other_data_contexts(
                 self._cache_database.base_path + self.cache_path,
                 stored_rows - records.num_rows,
             )
-        return records.drop([self.HASH_COLUMN_NAME])
+        return records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
 
     def _build_merged_stream(self) -> ArrowTableStream:
         """Ingest live data (if available), then return all cached records.
@@ -307,7 +341,10 @@ class CachedSource(RootSource):
             all_records = self._empty_table()
 
         tag_keys = self._source.keys()[0]
-        return ArrowTableStream(all_records, tag_columns=tag_keys)
+        # Cached rows are this source's: give them its data context, not the default.
+        return ArrowTableStream(
+            all_records, tag_columns=tag_keys, data_context=self.data_context
+        )
 
     def _empty_table(self) -> pa.Table:
         """Build an empty Arrow table matching the source's output schema."""

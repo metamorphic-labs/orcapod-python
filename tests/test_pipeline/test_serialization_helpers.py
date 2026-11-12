@@ -767,7 +767,7 @@ def test_function_node_stored_node_uri_from_descriptor():
         "table_scope": "pipeline_hash",
         "node_uri": ["add_one", "v0", "python.function.v0", "schema_repr"],
         "output_schema": {"tag": {"x": "int64"}, "data": {"result": "int64"}},
-        "data_context_key": "std:v0.1:default",
+        "data_context_key": "std:v1:default",
     }
     node = FunctionNode.from_descriptor(
         descriptor, function_pod=None, input_stream=None, databases={}

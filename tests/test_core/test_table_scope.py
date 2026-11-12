@@ -533,7 +533,7 @@ class TestOperatorNodeDescriptorTableScope:
             "label": None,
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             # "table_scope" intentionally omitted
             "output_schema": {"tag": {"key": "large_string"}, "data": {"val": "int64"}},
             "operator": {
@@ -560,7 +560,7 @@ class TestOperatorNodeDescriptorTableScope:
             "label": None,
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             "table_scope": "pipeline_hash",
             "output_schema": {"tag": {"key": "large_string"}, "data": {"val": "int64"}},
             "operator": {
@@ -587,7 +587,7 @@ class TestOperatorNodeDescriptorTableScope:
             "label": None,
             "content_hash": "fake_hash",
             "pipeline_hash": "fake_pipeline_hash",
-            "data_context_key": "std:v0.1:default",
+            "data_context_key": "std:v1:default",
             "table_scope": "content_hash",
             "output_schema": {"tag": {"key": "large_string"}, "data": {"val": "int64"}},
             "operator": {

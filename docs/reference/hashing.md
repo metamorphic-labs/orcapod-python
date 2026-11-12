@@ -655,64 +655,93 @@ count; their schemas hash); union and run-end-encoded types; two schema nodes sh
 column `"a/b"` next to a struct column `a` with a child `b`); and a non-nullable field holding
 a null. A source whose table has such a column fails when it is constructed.
 
-#### Stores written under another label
+#### The data context of a stored row
 
-A change of the Arrow hash label changes the stored keys but not the tables they are stored
-in, so one table can hold rows of several labels. Orcapod writes and uses rows of its
-current label only. Key lookups cannot match a row of another label, and every read of a
-whole table (a node's `as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, a
-cached function's `get_all_cached_outputs()`, a stored operator node, a `CachedSource`) leaves
-the rows of another label out. Those rows are never changed or deleted: a store written by
-Orcapod v0.2 keeps its `arrow_v0.1` rows, v0.3 computes every input again and adds
-`arrow_v0.2` rows next to them, and a later migration can convert the old ones.
+A label names the algorithm that produced one hash. It does not say which generation of
+Orcapod's hashing a stored row belongs to. That is the **data context**: one key that changes
+whenever any existing hash value can change (the hashers, the identity definitions, the
+record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
+everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
+the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
+the library version that contains it and never edited afterwards. It names the hashers, the
+definitions that live in code, the libraries the hashes depend on and what changed from the
+previous data context. Logical types are not part of it: they are registered in
+`orcapod/contexts/logical_types.json` and versioned by their own identifier.
 
-How a stored row names its label:
+Every row Orcapod stores names its data context in the column `__data_context`:
 
-| Table | Key | Stored form |
-|---|---|---|
-| Function-node pipeline table | `__pipeline_base_entry_id` | `b"<label>:<digest>"` |
-| Function result table | `__input_data_hash` | `b"<label>:<digest>"` |
-| Side-effect invocation log | `record_id_hash` | `b"<label>:<digest>"` |
-| Operator-node table, cached-source table | the record id (`_record_hash`) | hex digest, no label |
+| Table | Layout (last path component) |
+|---|---|
+| Function-node pipeline table | `pdb_v2` |
+| Function result table | `rdb_v2` |
+| Operator-node cache table | `odb_v1` |
+| Cached-source table | `sdb_v1` |
+| Side-effect invocation log | `tdb_v2` |
 
-A hex digest starts with the starfix format number (`000001` for `arrow_v0.1`, `000002` for
-`arrow_v0.2`), which tells these two labels apart. A later label that keeps starfix hash
-format 2 could not be told apart in operator-node and cached-source tables.
+The layout component is always the last component of a table's path, also when a
+`CachedSource` is given an explicit `cache_path`.
 
-A read that leaves rows out logs one warning per table with their total (logger
-`orcapod.hashing.stored_hash_labels`). A side-effect invocation log is never read in full: a
-delivery is looked up by its key, so deliveries logged under another label would not be found
-and every side effect would be delivered again. A side-effect node therefore raises
-`SideEffectLogHashLabelError` before delivering anything when its log holds such rows.
+**Rows of the current data context are the current entries.** Key lookups match rows of the
+current data context only, and every read of a whole table (a node's `as_table()`,
+`iter_data()`, `get_all_records()`, `as_source()`, a cached function's
+`get_all_cached_outputs()`, a stored operator node, a `CachedSource`) leaves rows of another
+data context out. Those rows are never changed or deleted, and a read that leaves rows out
+logs one warning per table with their number (logger `orcapod.contexts.stored`).
 
-`stored_hash_labels(database, record_path)` reads a stored table and counts its rows by
-label. A table written by v0.2 and then run under v0.3 gives
-`{"arrow_v0.1": n, "arrow_v0.2": n}`; a starfix format whose label is not known is listed as
-`"starfix hash format <hex>"`, and rows whose key names no label are counted under `None`.
+**Tables written before v0.3** have no `__data_context` column and sit at an older layout
+(`pdb_v1`, `rdb_v1`, `tdb_v1`; operator-node and cached-source tables, and the function
+tables of Orcapod v0.1, had no layout component). Orcapod does not read them as results and never modifies them. When it finds
+one it logs one warning with the number of rows:
+
+```text
+Found 3 rows in stored table '...' written by an earlier version of Orcapod (older table
+layout, data context std:v0.1:default). They are not used and are left unchanged; they can
+be migrated later.
+```
+
+Nodes that perform side effects are the exception. A completion is looked up by its key, so
+completions stored under another data context would not be found and every side effect would
+be performed again. There are two kinds: a side-effect pod (`@side_effect_pod`, `@sink_pod`,
+`@tap_pod`), whose completions are in its invocation log, and a function pod that takes the
+invocation context (`@function_pod(ctx_arg=...)`), whose completions are in its pipeline and
+result tables. Either raises `SideEffectLogDataContextError`, naming the tables, before
+doing anything when it finds its tables at an older layout or completions of another data
+context in its current tables.
+
+A node stores rows for inputs of its own data context only: an input of another data context
+raises `InputValidationError` naming both keys before anything is written. This holds for
+nodes, caches and cached sources used directly; inside a `PipelineJob` every input is wrapped
+in a source node of the default data context, so the refusal is not reached there. (What
+should eventually happen instead is tracked in ITL-951.) `std:v0.1:default` itself is not shipped
+with v0.3 and does not resolve; a pipeline or job file saved by v0.2 loads under the current
+data context with a warning.
+
+`stored_data_contexts(database, record_path)` reads a stored table and counts its rows by
+data context. A table without the column reports all its rows under `std:v0.1:default`.
 
 ```python
 from orcapod import PipelineJob, function_pod
+from orcapod.contexts import stored_data_contexts
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.hashing.stored_hash_labels import stored_hash_labels
 from orcapod.sources import DictSource
 
 
 @function_pod(output_keys="doubled")
-def double_for_labels(x: int) -> int:
+def double_for_contexts(x: int) -> int:
     return 2 * x
 
 
-label_store = InMemoryArrowDatabase()
-label_job = PipelineJob(name="labels_demo", store=label_store)
-with label_job:
+context_store = InMemoryArrowDatabase()
+context_job = PipelineJob(name="contexts_demo", store=context_store)
+with context_job:
     rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"])
-    _ = double_for_labels.pod(rows, label="dbl")
-label_job.run()
+    _ = double_for_contexts.pod(rows, label="dbl")
+context_job.run()
 
-for path in sorted(label_store.list_sources()):
-    print(path[-1], stored_hash_labels(label_store, path))
-# rdb_v1 {'arrow_v0.2': 2}
-# pdb_v1 {'arrow_v0.2': 2}
+for path in sorted(context_store.list_sources()):
+    print(path[-1], stored_data_contexts(context_store, path))
+# rdb_v2 {'std:v1:default': 2}
+# pdb_v2 {'std:v1:default': 2}
 ```
 
 ```python

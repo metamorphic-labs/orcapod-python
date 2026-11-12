@@ -17,7 +17,7 @@ Coverage
 - Schema-only vs data hash: hash_schema and hash_table differ for the same schema
 - versioned_hashers factory: get_versioned_semantic_arrow_hasher returns a
   StarfixArrowHasher with hasher_id == _CURRENT_ARROW_HASHER_ID
-- Context integration: the v0.1 context wires up StarfixArrowHasher
+- Context integration: the v1 context wires up StarfixArrowHasher
 - Stability (golden values): fully-pinned 35-byte digests catch accidental
   algorithm changes in both schema and table hashing
 """
@@ -320,19 +320,19 @@ class TestContextIntegration:
     def test_v01_context_uses_starfix_hasher(self):
         from orcapod.contexts import resolve_context
 
-        ctx = resolve_context("v0.1")
+        ctx = resolve_context("v1")
         assert isinstance(ctx.arrow_hasher, StarfixArrowHasher)
 
     def test_v01_context_hasher_id(self):
         from orcapod.contexts import resolve_context
 
-        ctx = resolve_context("v0.1")
+        ctx = resolve_context("v1")
         assert ctx.arrow_hasher.hasher_id == "arrow_v0.2"
 
     def test_context_hash_table_functional(self):
         from orcapod.contexts import resolve_context
 
-        ctx = resolve_context("v0.1")
+        ctx = resolve_context("v1")
         table = pa.table({"key": [1, 2, 3], "val": [0.1, 0.2, 0.3]})
         h = ctx.arrow_hasher.hash_table(table)
         assert isinstance(h, ContentHash)

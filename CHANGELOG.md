@@ -32,8 +32,8 @@ readable with v0.2. A migration is planned after v0.3 (ITL-889).
   even when it has no array column itself. A pod whose inputs and outputs hold no array
   keeps its function result table, and nodes with no array column upstream keep their tables;
   but an array-free pod does **not** reuse its v0.2 results: every Arrow-derived hash changed
-  as well (ITL-910, below), so the v0.2 rows in such tables are ignored, the inputs are computed
-  again, and the new rows are stored next to the old ones.
+  as well (ITL-910, below) and every table moved to a new layout (ITL-944, below), so the
+  v0.2 tables are not read and the inputs are computed again.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and

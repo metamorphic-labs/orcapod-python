@@ -47,6 +47,7 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
 
 Row = tuple[TagProtocol, DataProtocol]
 
@@ -552,7 +553,8 @@ def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
     database = node._pipeline_database  # pyright: ignore[reportPrivateUsage]
     assert database is not None
     records = database.get_all_records(
-        node.node_identity_path, record_id_column=node.HASH_COLUMN_NAME
+        node.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,),
+        record_id_column=node.HASH_COLUMN_NAME,
     )
     assert records is not None
     return {
