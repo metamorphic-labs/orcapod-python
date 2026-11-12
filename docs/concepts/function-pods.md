@@ -142,6 +142,107 @@ The same step is available as a stream method: `wide.select_data_columns(["weigh
 Tag columns are never affected by this rule -- a function pod passes all tags through
 untouched.
 
+## Return values must match the declared type
+
+Each value the function returns is checked against its declared output type before it is
+stored or hashed. A `float` returned for an output declared `int` is rejected; it is not
+truncated. The `OutputTypeError` names the function, the output, the declared type and the
+type of the value (never the value itself, which stays on the error's `value` attribute),
+and says what to return instead:
+
+```python
+from orcapod.errors import OutputTypeError
+
+@function_pod(output_keys="half_weight")
+def halve(weight: float) -> int:
+    return weight / 2  # a float, although the function says it returns an int
+
+weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"])
+
+try:
+    list(halve.pod(weights).iter_data())
+except OutputTypeError as err:
+    print(err)
+# Function 'halve' returned float for output 'half_weight', which is declared int. The output does not conform. Return an int instead: round(value), or int(value) to truncate.
+```
+
+Fix the function (`return round(weight / 2)`), or declare the type it really returns
+(`-> float`).
+
+`OutputTypeError` is a `TypeError` (and a `ValueError`). Inside a `PipelineJob` it counts as
+a failure of the function for that row, like an exception the function raises itself. With
+the default `error_policy="continue"` the row is skipped and reported to the observer, and
+the other rows are computed and stored. With `error_policy="fail_fast"` the synchronous
+orchestrator stops the run; the asynchronous orchestrator does not stop for row failures yet
+(ITL-879, see below).
+
+The function-output rule is: the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base and is stored as the base.
+
+| Declared | Returned | Result |
+|---|---|---|
+| `int` / `float` / `bool` | same-kind NumPy scalar, represented exactly | accepted silently |
+| NumPy integer type | Python or NumPy integer within range | accepted silently; out of range rejected |
+| `int` / `float` | value-preserving numeric subclass such as `IntEnum` | accepted silently |
+| `float` | `numpy.float32`, including `numpy.float32(0.1)` | accepted: widening preserves the original float32 value exactly |
+| `numpy.float32` | Python `float` or `numpy.float64`, even `0.5` | rejected: explicitly return `numpy.float32(value)` |
+| `float` | NumPy floating scalar wider than 64 bits | rejected: explicitly return `float(value)` |
+| `list[T]` | tuple, NumPy array, range, deque, dict view, or iterator | rejected: return `list(value)` |
+| `list[T]` | set or frozenset | rejected: return `sorted(value)` for deterministic order |
+| `dict[K, V]` | another mapping, such as `MappingProxyType` or `UserDict` | rejected: return `dict(value)` |
+| `Literal[...]` | a value that is not a member, or equals one with another type (`True`, `1.0` or `numpy.int64(1)` for `Literal[1]`) | rejected: a `Literal` names exact values, so no numeric exception applies |
+| `date` | `datetime` | accepted as a Python subclass; storage keeps the date only |
+| `int` | `bool` | accepted as a Python subclass; stored as an integer |
+| `int` | float, Decimal, Fraction | rejected; choose an explicit conversion |
+| `bool` | `int` | rejected: return `bool(value)` explicitly |
+| floating type | integer or bool | rejected: return a floating value explicitly |
+| non-optional type | `None` | rejected; declare `T \| None` if null is intended |
+| ordinary dataclass or pydantic model | subclass | accepted; storage keeps only declared base fields |
+| ordinary dataclass or pydantic model | unrelated class | rejected |
+| structural class | another structural class with the same identity | accepted; fields follow the same recursive checks |
+
+Python subclassing takes precedence: `bool` for `int` is accepted, while `int` for
+`bool` is rejected. Numeric exceptions otherwise require the same kind.
+Nested list elements, dictionary keys and values, and stored user-class fields follow the
+same policy. A mismatch raises `OutputTypeError` at the common function-output boundary,
+before standalone iteration, table materialization, or sync/async storage can diverge.
+Errors name the function, output, declared type and returned type; nested locations show
+structure without including returned dictionary keys or converter messages.
+
+Outputs are validated against the declared storage schema immediately, and accepted numeric
+exceptions are normalized so downstream pods, hashes and stored rows see the same value.
+Eager validation never replaces a compatible user-class object; stored reads keep their
+existing registry binding. A `Sub` returned for `Base` reaches the next in-memory pod
+as that same `Sub` object. The stored column is `Base`: subclass-only fields are not
+stored and do not enter the row hash. Two such values differing only in those extra
+fields therefore have the same stored row hash. Likewise, a `datetime` declared as
+`date` is passed on unchanged in memory, but storage contains only its date.
+
+A consequence to know: the declared type's logical type decides what is stored, so a
+function should read only what its declared parameter type has. A function that reads a
+field its declared parameter type does not have (a subclass-only field, or the time of a
+`datetime` declared as `date`) gets results that depend on the execution path: standalone
+streams and the asynchronous orchestrator pass the in-memory object, while the synchronous
+orchestrator and any later read pass the stored base value. Such results can also be reused
+across values, because two values that differ only in what is not stored have the same row
+hash and the second is served the first one's stored result. This follows from Python
+subclassing and is left as it is (ITL-978).
+
+No warning-and-convert path remains for function outputs. Make container conversions
+explicit:
+
+```python
+@function_pod(output_keys="weights")
+def twice(weight: float) -> list[float]:
+    return list((weight, weight * 2))
+
+for tag, data in twice.pod(weights).iter_data():
+    print(data.as_dict())
+# {'weights': [25.3, 50.6]}
+```
+
+Previously stored rows are served unchanged; this check does not repair or recompute them.
+Input-source conformance remains outside this change.
+
 ## `PipelineJob` -- database-backed, cached execution
 
 Applying a pod directly, as above, computes in memory and keeps nothing. To store results and
@@ -375,6 +476,72 @@ at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these ro
 
 This is the contract for now. An opt-in mode that tolerates store failures may be added
 later.
+
+### Saving and loading a job
+
+`job.save(path)` writes the job to a JSON file: the graph, the store's location and how each
+source was configured. `PipelineJob.load(path)` reads it back, for example in a later Python
+session, so that you can read the results the job stored:
+
+```python
+import tempfile
+from pathlib import Path
+
+from orcapod.databases import DeltaTableDatabase
+
+workdir = Path(tempfile.mkdtemp())  # any directory you keep
+
+job = PipelineJob(name="bmi_demo", store=DeltaTableDatabase(workdir / "store"))
+with job:
+    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+job.run()
+job.save(workdir / "bmi_job.json")
+
+loaded = PipelineJob.load(workdir / "bmi_job.json")
+print(loaded.nodes["bmi"].as_table().sort_by("subject_id").to_pandas())
+#   subject_id          bmi
+# 0   mouse_01  1756.944444
+# 1   mouse_02  2210.000000
+# 2   mouse_03  2297.520661
+```
+
+A loaded job is for reading stored results. It cannot be run again: function pods are not
+saved with the job, so `loaded.run()` raises. To compute again, build the job from your code
+as before.
+
+- A function node's `as_table()`, `iter_data()` and `get_all_records()` return the rows the
+  saved run stored, with the types they were stored with. Rows come in the order the store
+  returns them; sort them if order matters.
+- Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
+  A loaded operator without a readable cache raises from `as_table()` and `iter_data()`.
+  Read its input nodes instead (an in-memory input source must be bound first, see below).
+  Saved descriptors do not yet preserve all runtime identity and cache configuration needed
+  for operator readback without reconstruction (follow-up ITL-977).
+- Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
+  paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
+  `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
+  this at INFO level. This does not affect reading the other nodes. To read such a source
+  node itself, bind a source to it: `loaded.bind(sources={"mice": source})`.
+- The results are read from the store recorded in the file. Pass
+  `PipelineJob.load(path, store=...)` if the store has moved. If the store you give lacks
+  results the saved run stored, reading the node raises an error naming the store, instead
+  of returning no rows.
+
+Logical types in saved schema text carry their complete identifier, written as
+`extension<name;hex-metadata>`, including inside nested containers. The loader checks the
+identifier against the registered type. Known types such as `Path`, `File`, UUID and arrays
+keep downstream operators available; a user class must be registered in the loading process.
+An unknown type is reported with its node and column, and affected operators become read-only
+stubs. An incompatible identifier raises `LogicalTypeIdentifierError` instead of using a stub.
+Stored data independently validates its full identifier when values are read.
+
+Older files containing name-only extension type text cannot be loaded by this reader: the
+error says the file was saved by an earlier version. Use that version to read the old file,
+and save a new job from the original pipeline under this version. Files with only supported
+primitive schema types still load; results from pre-v0.3 table layouts remain excluded as
+described below. This changes saved schema text only, not stored tables or hashes.
 
 ### A store written by an older version
 
