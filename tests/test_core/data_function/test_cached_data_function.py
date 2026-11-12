@@ -581,7 +581,10 @@ class TestWrapperDataContext:
         other = create_registry().get_context()
         assert other is not get_default_context()
         inner = PythonDataFunction(add, output_keys="result", data_context=other)
-        wrapper = CachedDataFunction(inner, result_database=InMemoryArrowDatabase())
+        wrapper = CachedDataFunction(
+            inner,  # pyright: ignore[reportArgumentType]  # PythonDataFunction does not match DataFunctionProtocol for the checker
+            result_database=InMemoryArrowDatabase(),
+        )
         assert wrapper.data_context is other
 
     def test_an_explicit_data_context_wins(self):
@@ -595,7 +598,7 @@ class TestWrapperDataContext:
         other = create_registry().get_context()
         inner = PythonDataFunction(add, output_keys="result", data_context=other)
         wrapper = CachedDataFunction(
-            inner,
+            inner,  # pyright: ignore[reportArgumentType]  # PythonDataFunction does not match DataFunctionProtocol for the checker
             result_database=InMemoryArrowDatabase(),
             data_context=get_default_context(),
         )

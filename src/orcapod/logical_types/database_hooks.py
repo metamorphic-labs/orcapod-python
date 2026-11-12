@@ -22,7 +22,7 @@ These two functions are typically called in sequence via ``UniversalTypeConverte
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import require_readable
@@ -181,10 +181,14 @@ def _apply_field(
             return col, field
         # A readable older identifier: the same storage under the current type.
         rewrapped = [
-            pa.ExtensionArray.from_storage(ext_type, chunk.storage)
+            pa.ExtensionArray.from_storage(
+                ext_type, cast("pa.ExtensionArray[Any]", chunk).storage
+            )
             for chunk in col.chunks
         ]
-        return pa.chunked_array(rewrapped, type=ext_type), field.with_type(ext_type)
+        # The pyarrow stubs take no extension type here; pyarrow does.
+        new_col = pa.chunked_array(rewrapped, type=ext_type)  # pyright: ignore[reportCallIssue, reportArgumentType]
+        return new_col, field.with_type(ext_type)
 
     # ── Case 2: field has extension metadata and a matching registered type ───
     if ext_name_bytes is not None:

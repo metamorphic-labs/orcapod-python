@@ -518,6 +518,7 @@ def test_extension_typed_column_with_a_readable_older_identifier_is_read() -> No
     assert read.schema.field("c").type.__arrow_ext_serialize__() == b'{"v":2}'
     assert read.column("c").to_pylist() == table.column("c").to_pylist()
     registered = lenient.register_storage_type(table.schema.field("c").type)
+    assert isinstance(registered, pa.ExtensionType)
     assert registered.__arrow_ext_serialize__() == b'{"v":2}'
 
 

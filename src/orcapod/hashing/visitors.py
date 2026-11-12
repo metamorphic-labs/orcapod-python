@@ -229,7 +229,7 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         self._python_hasher = python_hasher
         self._current_field_path: list[str] = []
 
-    def hashed_field(self, field: "pa.Field") -> "pa.Field":
+    def hashed_field(self, field: "pa.Field[Any]") -> "pa.Field[Any]":
         """Return the field a column or nested field is hashed under.
 
         The result depends on the declared field only, never on the data, so one
@@ -255,7 +255,9 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
             if not self._hashes_extension(arrow_type):
                 return field
             identifier = arrow_type_identifier(arrow_type)
-            metadata = dict(field.metadata or {})
+            metadata: dict[bytes | str, bytes | str] = {
+                key: value for key, value in (field.metadata or {}).items()
+            }
             metadata[b"ARROW:extension:name"] = identifier.name.encode("utf-8")
             metadata[b"ARROW:extension:metadata"] = identifier.metadata
             return field.with_type(pa.large_binary()).with_metadata(metadata)

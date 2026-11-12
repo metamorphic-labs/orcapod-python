@@ -292,7 +292,7 @@ class TestValueHashedLogicalTypeKeepsItsIdentityWithoutValues:
             python_schema=Schema({"c": Optional[uuid.UUID]}),
         )
         # Non-public helper: the test is about the schema the hasher hashes under.
-        hashed = context.arrow_hasher._process_table_columns  # pyright: ignore[reportPrivateUsage]
+        hashed = context.arrow_hasher._process_table_columns  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
         assert hashed(with_data).schema == hashed(with_data.slice(0, 0)).schema
         assert hashed(with_data).schema == hashed(with_data.slice(1, 1)).schema
 

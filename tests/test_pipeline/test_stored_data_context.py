@@ -240,7 +240,7 @@ def copy_as_other_context(written: Store, target: Store) -> None:
                     _other_key(value)
                     if name in KEY_COLUMNS
                     # Other data values too, so a read that picks these rows shows.
-                    else value + OTHER_OFFSET
+                    else cast(int, value) + OTHER_OFFSET
                     if name in ("double", "x")
                     else value
                     for value in rows.column(name).to_pylist()
