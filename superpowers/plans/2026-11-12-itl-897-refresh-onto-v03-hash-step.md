@@ -169,3 +169,17 @@ Tasks: (1) rename + `kind` + drop legacy reads, fix the 17 name-pin tests, docs;
 the descriptor; (3) string storage and object-column fixes with round-trip tests; (4)
 `PANDAS_IDENTITY_PROPERTIES` gains the option flag and the never-counted entries; (5) v0.2
 layout test; (6) golden (local), docs section 10, changelog, design issue, PR body.
+- Phase 2 done locally (not pushed): rename, descriptor kind, legacy read dropped, attrs
+  (as the JSON object storage keeps; `{}` when not JSON), string storage and object-column
+  fixes, `PANDAS_IDENTITY_PROPERTIES` with options, v0.2-layout test, docs, changelog,
+  design issue. ITL-981 mechanism commit 64c63bfe merged locally and wired:
+  `LogicalPandasDataFrame` / `LogicalPandasSeries` are `IgnoreListLogicalType`s, the two
+  handlers are `IgnoreListHandler`s, `hash_ignore` in `contexts/logical_types.json`,
+  `hash_table_ordered(..., struct_field_order=True)`. Tests:
+  `tests/test_hashing/test_pandas_ignore_list.py`. Full suites: only the 22 tests of
+  `tests/test_arrays/test_array_strict_hash.py` fail (ITL-981's own array tests, whose
+  implementation is not in 64c63bfe). Golden vs `main`: 13 values changed, 4 keys renamed,
+  5 added, all pandas (list in the Phase 2 decisions).
+- Remaining: wait for ITL-981's PR to merge into `main`; merge `main`; regenerate golden
+  (pandas entries only); full suites; PR body (scratchpad draft is outdated: rewrite from
+  the changelog fragment and this plan); ONE push; PR; readiness.
