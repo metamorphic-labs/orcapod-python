@@ -70,46 +70,6 @@ first `InputValidationError`, with each other failure attached as a note and log
 stay queued for the next flush. A flush that fails only for other reasons still raises
 `RuntimeError`, with the first failure as its cause.
 
-#### Dataclasses and pydantic models are identified by name, kind and fields (ITL-881)
-
-Orcapod 0.3 identifies a dataclass or pydantic model by its name, its kind (dataclass or
-pydantic) and its fields' names and types, in declared order. The name is the class name for a
-class defined in a notebook or script (`__main__`), the module path and class name for a
-class defined in a module, or the name declared with `op.register_type`.
-
-- **Hashes change for every pipeline that uses such a class.** The class's logical type
-  name and Arrow extension name become `Name@<SHA-256 of name, kind and fields>`; the
-  stored struct lists fields in declared order, as before. Every schema hash, pipeline hash, table path,
-  system-tag column name and data hash that involves a dataclass or pydantic value moves.
-  The first run under 0.3 computes those pod and operator results again, into new tables.
-  Tables written by earlier versions are left untouched and are not read by 0.3 pipelines;
-  reading such a column directly raises `TypeIdentityError`. There is no migration tool.
-  Results that involve no dataclass or pydantic value are unaffected.
-- **Changing a class's fields makes a new type.** Adding, removing, renaming, retyping or
-  reordering fields all count: a dataclass compares its fields as an ordered tuple and a
-  pydantic model dumps in declared order, so two classes with the same fields in another
-  order are different types. Defaults, methods and pydantic computed fields are not part
-  of the identity. The new type's pods get new tables; the results of
-  the old definition stay where they are. Before, a changed class shared the old tables and
-  a run returned 0 rows with only log warnings.
-- **A stored shape that disagrees with the registered class raises.** `DeltaTableDatabase`
-  raises the new `orcapod.errors.TypeIdentityError` as is. It is not a `StoreReadError`:
-  the table is intact and the class differs. Like a store error, it fails the run under
-  every `error_policy`, with both orchestrators: a stored row that cannot be decoded is
-  never skipped as a failed row. Reading a column whose class cannot be found raises
-  `ImportError` naming the column, the type and the `op.register_type` call to declare it.
-- **A subclass is its own type.** A dataclass or pydantic subclass was stored as its
-  parent when the parent was registered first: its extra fields were silently dropped from
-  stored data, and the pod's hash and table path depended on the registration order. It
-  now has its own identity and keeps all its fields, in any registration order.
-- **Recursive classes** raise `RecursiveTypeError` (a `TypeError`) naming the field path,
-  for example `Node.next -> Node`.
-- Pinned golden hash entries changed (approved): `semantic.json` `type.dataclass`,
-  `type.pydantic`; `schema.json` `multi_field.logical_mix`,
-  `single_field.{dataclass,pydantic}.{arrow_type,schema_hash}`; `datagram.json`
-  `{dataclass,pydantic}.{content_hash,pipeline_hash,system_tag_columns}` and the per-row
-  `data_hash`, `_tag_record_id::…` and `_tag_source_id::…` entries of both cases.
-
 ### Added
 
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
@@ -120,19 +80,6 @@ class defined in a module, or the name declared with `op.register_type`.
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
-
-#### `op.register_type` — declare the name of your own data types (ITL-881)
-
-`@op.register_type(name="Point")` declares the name a dataclass or pydantic model is
-identified by, wherever the class is defined. `@op.register_type(qualified_name=False)` names a
-module class by its class name alone. Registration never modifies the class; declaring the
-same class under a second name raises `ValueError`. See
-[Your Own Data Types](docs/concepts/your-own-data-types.md).
-
-Re-running a notebook cell that defines a dataclass or pydantic model, or reloading its
-module, no longer breaks later pods with `ValueError: … already bound`: a class with the
-same name and the same fields in the same order is the same type, and its stored results
-are found again.
 
 ### Fixed
 
@@ -200,22 +147,6 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
   against a `0.2.0` store.
 - `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
   have the same hashes (`predicates` is stored as a tuple).
-
-#### A nested class stored as `None` reads back (ITL-881)
-
-A dataclass or pydantic model with an optional nested class (`child: Inner | None`) that
-stored `None` raised `TypeError: 'NoneType' object is not subscriptable` when the value
-was read back. It now reads back as `None`.
-
-#### Stored dataclass and pydantic values stay readable after Delta compaction (ITL-881)
-
-Delta compaction (`optimize.compact()`) rewrites a `large_string` struct field as
-`string`. Reading a stored dataclass or pydantic column with a `str` or `bytes` field then
-failed, and a cached run returned 0 rows. Extension columns now accept large and non-large
-layouts of the same type at any nesting depth, as they already did at the top level
-(ITL-602). Known limitation: such a non-large column read over Arrow IPC or the C stream
-interface (not Parquet or Delta) gives invalid arrays, at any depth; Orcapod's own writers
-never produce one (ITL-894).
 
 ## [0.2.0] — 2026-11-10
 
