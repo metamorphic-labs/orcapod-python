@@ -250,6 +250,12 @@ module path, the name and the fields are unchanged.
 Python's subclass rule holds: a pod annotated with a class accepts a column of a
 subclass. The subclass remains its own type, with its own fields and tables.
 
+A column holds one class. To return a subclass from a pod, declare it: a pod annotated
+`-> Child` produces a `Child` column with all of `Child`'s fields, and a downstream
+parameter `p: Base` accepts that column. A pod annotated `-> Base` that returns a `Child`
+instance is an error (`TypeError`) when its output is turned into a table or stored: the
+value is refused, never stored as a `Base` without its own fields.
+
 A dataclass and a pydantic model are never the same type, and neither is ever the same
 type as an `op.dataclass`.
 

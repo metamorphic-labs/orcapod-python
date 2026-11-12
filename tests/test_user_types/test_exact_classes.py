@@ -240,3 +240,30 @@ def test_a_value_is_stored_only_as_its_own_class() -> None:
     """A subclass instance returned for a base-class column is not stored as the base."""
     with pytest.raises(TypeError, match="Child"):
         _ = child_as_base.pod(_numbers()).as_table()
+
+
+def test_in_memory_iteration_hands_over_the_returned_object() -> None:
+    """Before any conversion, a pod's own ``iter_data`` gives the function's return value.
+
+    Known behaviour: the datagram holds what the function returned, so iterating the pod's
+    output in memory shows the ``Child`` object. It is refused as soon as the output
+    becomes Arrow (``as_table``, an operator, a store); see the test above.
+    """
+    values = [
+        data.as_dict()["q"] for _, data in child_as_base.pod(_numbers()).iter_data()
+    ]
+    assert [type(value) for value in values] == [Child]
+
+
+def test_a_subclass_is_returned_by_declaring_it() -> None:
+    """Declaring ``-> Child`` keeps all fields, and a ``Base`` parameter accepts the column."""
+
+    @function_pod(output_keys="p")
+    def make_child(x: int) -> Child:
+        """Return a ``Child``."""
+        return Child(x, 9)
+
+    produced = make_child.pod(_numbers())
+    assert produced.as_table().column("p").to_pylist() == [{"x": 1, "z": 9}]
+    seen = describe_base.pod(produced)
+    assert [data.as_dict()["seen"] for _, data in seen.iter_data()] == ["Child:1"]
