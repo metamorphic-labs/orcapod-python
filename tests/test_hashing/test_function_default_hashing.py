@@ -98,11 +98,13 @@ class TestEqualDefaultsHashEqually:
 
 
 _SEED_SCRIPT = """
+    from typing import Any
+
     from orcapod.contexts import resolve_context
     from orcapod.core.data_function import PythonDataFunction
 
-    def f(x: int, option: frozenset = frozenset({"w", "x", "y", "z", "alpha", "beta"}),
-          *, table: dict = {"b": {1, 2, 3}, "a": ("p", "q")}) -> int:
+    def f(x: int, option: Any = frozenset({"w", "x", "y", "z", "alpha", "beta"}),
+          *, table: Any = {"b": {1, 2, 3}, "a": ("p", "q")}) -> int:
         return x
 
     value = resolve_context(None).semantic_hasher.hash_object(f).to_string()
