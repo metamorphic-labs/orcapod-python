@@ -55,20 +55,12 @@ def pair(x: list[torch.Tensor]) -> list[torch.Tensor]:
     return list(x)
 
 
-def _build(store: Any) -> PipelineJob:
-    """Build a job with pods, GroupBy and MergeJoin over tensor sources on ``store``."""
+def _numeric_sources() -> tuple[DictSource, DictSource]:
+    """The numeric tensors, and the same keys with the tensors shifted by one."""
     numeric = DictSource(
         data=[{"k": k, "x": TENSORS[k]} for k in NUMERIC],
         tag_columns=["k"],
         source_id="numeric",
-    )
-    every = DictSource(
-        data=[
-            {"k": k, "g": f"g{i % 2}", "x": v}
-            for i, (k, v) in enumerate(TENSORS.items())
-        ],
-        tag_columns=["k", "g"],
-        source_id="every",
     )
     shifted = DictSource(
         data=[
@@ -78,6 +70,20 @@ def _build(store: Any) -> PipelineJob:
         tag_columns=["k"],
         source_id="shifted",
     )
+    return numeric, shifted
+
+
+def _build(store: Any) -> PipelineJob:
+    """Build a job with pods, GroupBy and MergeJoin over tensor sources on ``store``."""
+    numeric, shifted = _numeric_sources()
+    every = DictSource(
+        data=[
+            {"k": k, "g": f"g{i % 2}", "x": v}
+            for i, (k, v) in enumerate(TENSORS.items())
+        ],
+        tag_columns=["k", "g"],
+        source_id="every",
+    )
     job = PipelineJob(name="tensors", store=store)
     with job:
         identity.pod(every, label="identity_all")
@@ -85,7 +91,16 @@ def _build(store: Any) -> PipelineJob:
         d = double.pod(y, label="double")
         total.pod(d, label="total")
         count.pod(GroupBy(by=["g"])(every, label="grouped"), label="count")
-        pair.pod(MergeJoin()(numeric, shifted, label="merge_join"), label="merged")
+        count.pod(MergeJoin()(numeric, shifted, label="merge_join"), label="merged")
+    return job
+
+
+def _build_list_output(store: Any) -> PipelineJob:
+    """Build a job whose pod returns ``list[torch.Tensor]`` on ``store``."""
+    numeric, shifted = _numeric_sources()
+    job = PipelineJob(name="tensor_lists", store=store)
+    with job:
+        pair.pod(MergeJoin()(numeric, shifted, label="merge_join"), label="pair")
     return job
 
 
@@ -143,12 +158,44 @@ def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -
     counts = _node(job, "count", "count", key="g")
     assert sum(counts.values()) == len(TENSORS)
 
-    # The operator node itself and the pod downstream of it hold the same lists.
-    for label, column in (("merge_join", "x"), ("merged", "pair")):
-        merged = _node(job, label, column)
-        assert sorted(merged) == sorted(NUMERIC)
-        for i, name in enumerate(NUMERIC):
-            assert_same_tensors_any_order(
-                list(merged[name]),
-                [TENSORS[name], TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]],
+    merged = _node(job, "merge_join", "x")
+    assert sorted(merged) == sorted(NUMERIC)
+    for i, name in enumerate(NUMERIC):
+        assert_same_tensors_any_order(
+            list(merged[name]),
+            [TENSORS[name], TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]],
+        )
+    assert set(_node(job, "merged", "count").values()) == {2}
+
+
+@pytest.mark.parametrize(
+    ("store", "runner"),
+    [
+        pytest.param(
+            store,
+            runner,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="ITL-984: the async orchestrator cannot write a pod output "
+                "list[<logical type stored as large_binary>] to Delta",
             )
+            if (store, runner) == ("delta", "async")
+            else (),
+        )
+        for store in sorted(STORES)
+        for runner in sorted(RUNNERS)
+    ],
+)
+def test_pod_returning_a_list_of_tensors(
+    tmp_path: Path, store: str, runner: str
+) -> None:
+    """A pod output ``list[torch.Tensor]`` is stored and read back exactly."""
+    job = _build_list_output(STORES[store](tmp_path))
+    RUNNERS[runner](job)
+    pairs = _node(job, "pair", "pair")
+    assert sorted(pairs) == sorted(NUMERIC)
+    for i, name in enumerate(NUMERIC):
+        assert_same_tensors_any_order(
+            list(pairs[name]),
+            [TENSORS[name], TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]],
+        )

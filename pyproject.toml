@@ -52,7 +52,7 @@ spiraldb = [
 ]
 # Convenience extra that installs PyTorch. Orcapod's torch.Tensor support depends only on
 # torch being importable, however it was installed (ITL-871).
-torch = ["torch>=2.3"]
+torch = ["torch>=2.6"]
 all = [
     "orcapod[redis]",
     "orcapod[ray]",
