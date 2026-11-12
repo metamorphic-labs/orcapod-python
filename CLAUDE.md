@@ -192,6 +192,25 @@ Examples:
 - `test(function_pod): add schema validation tests`
 - `refactor(schema_utils): use Schema.optional_fields directly`
 
+## Changelog
+
+A pull request never edits `CHANGELOG.md` (developer, November 11, 2026; ITL-961). It adds
+exactly one file, `changelog.d/<ISSUE-ID>.md` (e.g. `changelog.d/ITL-955.md`; a PR that
+resolves several issues uses its primary issue's id).
+
+- The file holds only the text that would have gone under the release heading in
+  `CHANGELOG.md`: the same category headings `CHANGELOG.md` uses
+  (`### Breaking changes and migration`, `### Added`, `### Changed`, `### Fixed`,
+  `### Known limitations`), each followed by its bullet lines; no version heading, no date.
+- If your branch already edits `CHANGELOG.md`, restore `CHANGELOG.md` to its state on the
+  branch's base and move that text, unchanged, into the fragment.
+- Check a fragment with `uv run python scripts/assemble_changelog.py --check`
+  (`tests/test_changelog_fragments.py` runs it in CI).
+- Only the release PR changes `CHANGELOG.md`: it folds the fragments in with
+  `uv run python scripts/assemble_changelog.py --version X.Y.Z`, which also deletes them
+  (see `RELEASING.md`). Entries already in `CHANGELOG.md` on `main` stay there.
+- `changelog.d/README.md` is the full statement of the convention.
+
 ## Lint, format and type checks
 
 Every pull request must pass the metamorphic-labs required CI, which runs exactly these
@@ -379,8 +398,19 @@ every emitted element came from an input row — and it keys only on tags, never
 
 Every pipeline element has two parallel hashes:
 
-1. **`content_hash()`** — data-inclusive. Changes when data changes. Used for deduplication
-   and memoization.
+1. **`content_hash()`** — the pipeline bound to its named sources: schema, topology and source
+   identity. For a source it is a stable *address*, not a digest of its rows (developer,
+   November 11, 2026: "sources content hash is meant to be a stable address and is not
+   necessarily going to reflect the very data content"). A root source hashes
+   `(class name, output schema, source_id)`; given a `source_id`, changed, added or reordered
+   rows leave it unchanged. Row content enters only where a source puts it into its own
+   identity: the default `source_id` of the in-memory sources (a hash of the table, used when
+   none is given) and the elements of a `ListSource`. A downstream stream or node hashes its
+   pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
+   not its body. Only a datagram (one row's tags or data) has a `content_hash()` that is a
+   digest of its values; that row hash, not the node's content hash, is what results are
+   memoized by. The node's content hash tells apart, inside a shared table, the rows of
+   pipelines bound to different sources (`__node_content_hash`).
 2. **`pipeline_hash()`** — schema + topology only. Ignores data content. Used for DB path
    scoping so that different sources with identical schemas share database tables.
 

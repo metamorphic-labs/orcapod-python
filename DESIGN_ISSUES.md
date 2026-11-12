@@ -1700,6 +1700,14 @@ was bumped from `>=0.11.0` to `>=0.14.0` to document the effective floor.
 No connector code changes were needed — the public API is fully compatible
 across this version range.
 
+**Update (ITL-926, November 11, 2026):** the floor is now `>=0.16.33`, and the lock pins
+pyspiral 0.16.33 and substrait 0.30.0. pyspiral 0.14.9 did not use the login saved by the
+0.16.33 `spiral login` CLI: it started a fresh device sign-in. Every call the connector makes
+has the same signature in 0.16.33 (`Table.key_schema` now returns a Spiral `Schema`; only
+`.names` is used). pyspiral appears frozen at 0.16.33; its successor `spiral-sdk` (same import
+name `spiral`) has a new table model and reads keyed (legacy) tables only through a private,
+windowed call, so moving to it is a separate issue.
+
 **Ongoing:** pyspiral releases frequently. See PLT-1785 for the tracking issue
 covering routine version bumps.
 
@@ -2382,6 +2390,117 @@ newcomer. Re-checked on `b197544e` (v0.2.0 + #291):
 
 ---
 
+## `src/orcapod/databases/delta_lake_databases.py` — reading back a handle family's own writes
+
+### DW1 — A read through one `at()` handle could miss rows its family had just written
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-864
+
+Right after a first `PipelineJob` run on a `DeltaTableDatabase`, `node.get_all_records()`
+returned 1 of 2 or 3 rows (plain `int -> int` pod, sync and async orchestrators), while
+`iter_data` and a fresh handle saw every row. Every `at()` handle shares the root's pending
+batches, and any handle's `flush()` writes every pending key, so the result-store handle
+flushed the pipeline table's rows. But each handle kept its own loaded-table cache, so the
+node's pipeline handle kept reading the table version it had loaded during the run. Every read
+method missed the rows a sibling flushed. Separately, the read methods merged pending and stored
+rows inconsistently: `get_records_by_ids` ignored pending rows, `get_records_with_column_value`
+ignored stored rows whenever a pending batch existed (and returned an empty table instead of
+`None`), and a pending row whose record id was already stored was returned as well, although a
+flush keeps the stored row and drops the pending one.
+
+**Fix:** the loaded-table cache and the committed snapshots (`_CommittedSnapshot`, which
+replaced the existing-ids and cache-dirty dicts in ITL-919) are shared across the `at()`
+family exactly as pending state (pending batches and their indexes) is. Every read method returns what a flush would leave: the
+stored rows plus the pending rows whose record id is not stored (`_pending_not_stored`), and
+`None` when there are none. These dicts are touched only from the thread that drives the
+pipeline; the async orchestrator runs only user functions in worker threads. Regression tests:
+`tests/test_databases/test_delta_read_your_writes.py` and
+`tests/test_pipeline/test_delta_node_records_after_run.py`. Stored ids come from
+`_stored_ids`: the snapshot of the loaded table version reads them on first use, through an
+id-only scan (a one-column schema); a failed scan raises `StoreReadError` and leaves the
+snapshot's ids unset (`None`), so the next read scans again instead of treating every stored
+id as unstored and returning duplicates. A handle that loaded the table before it had any
+stored ids (a fresh root over an existing table) reads them on its first read with pending
+rows (`_pending_not_stored`). After the family's own commit the ids are extended from the
+commit itself, with no re-read (ITL-919).
+
+When stored and pending rows are read together, the result has the schema a flush would give:
+both parts are large-normalized (`null` kept), then combined with
+`pa.concat_tables(promote_options="default")`. A column missing on one side is null-filled, and a
+`null`-typed column takes the other side's type. Columns whose types differ (`int64` vs `int32`,
+a string vs an int, a timestamp unit, a decimal precision) raise `pyarrow.ArrowTypeError`; nothing
+is widened. Before this, a read of stored rows next to pending rows with any schema difference,
+including a pending `string` column next to the stored `large_string`, raised `ArrowInvalid`;
+`get_all_records` already did so on `main`.
+A `get_records_with_column_value` query on a column that only the stored or only the pending
+rows have skips the side without it (after a flush that side holds null there, and
+`column == value` never matches null), so it returns before a flush what it returns after; a
+column neither side has still raises `ArrowInvalid`.
+
+Recorded for the nullability audit (ITL-842) and ITL-890: Delta's merge relaxes nullability (a
+non-null pending column into a nullable stored one stays nullable) and evolves struct children
+(`struct<p>` stored + `struct<p, q>` pending becomes `struct<p, q>`, stored rows `q = null`). The
+read path now mirrors both. Whether Orcapod should allow either at all is for those issues. A
+pending all-null `null`-typed column reads back as `null`, but Delta cannot store it: the flush
+fails and the batch stays pending (unchanged, pinned by
+`test_pending_null_typed_column_reads_back_but_does_not_flush`).
+
+Still open: a handle does not see writes made by another process, or by a separate
+`DeltaTableDatabase` root on the same path, until its own next commit to that table reloads it;
+this is unchanged. When it does reload (another writer committed in between), the stored ids
+are read again with the id-only scan, and the stored rows on the next lookup, each once per
+version (D3, now bounded by ITL-919's snapshot).
+
+---
+
+## `src/orcapod/databases/delta_lake_databases.py`, `src/orcapod/core/sources/delta_table_source.py` — exit after a Delta read
+
+### DX1 — A process that read a Delta table can hang or abort at interpreter exit
+**Status:** resolved (local stores); cloud stores remain exposed upstream
+**Severity:** high
+**Issue:** ITL-892
+
+`DeltaTable.to_pyarrow_dataset()` (and `to_pyarrow_table()`) reads through deltalake's
+`PyFileSystem(DeltaStorageHandler)`, a filesystem implemented in Python. After a scan returns,
+Arrow finishes tearing down the scan on a thread-pool worker. If that worker drops the last
+reference to a Python-backed buffer during interpreter finalization, CPython stops the thread,
+and `ThreadPool::~ThreadPool` in `__cxa_finalize` waits for it forever. On Linux with Python
+3.11/3.12 the process may abort with SIGABRT instead. This is upstream:
+apache/arrow#50482 and #54536, with an open fix PR, #54467. The failure follows a scan, not a
+write.
+
+Measured over 100 runs each, locked versions: one write plus one scan fails 57% of runs on
+macOS arm64 and 5–38% on Linux x86_64. A fresh `DeltaTableDatabase.get_all_records` fails 53%
+on macOS and 8–23% on Linux. `DeltaTableSource` fails 4–10%. A `PipelineJob` run fails 0–4%.
+Every pyarrow 20.0.0–26.0.1 × deltalake 1.0.2/1.6.6 combination fails, so no version pin helps.
+Scanning local tables through a native pyarrow filesystem (`SubTreeFileSystem(table_path,
+LocalFileSystem())`) gives 0/100 in every case. Its results are byte-identical. Cloud stores
+keep the Python filesystem and stay exposed until pyarrow ships the fix. Findings, scripts and
+raw results: `superpowers/specs/itl-892-exit-hang/FINDINGS.md`.
+
+**Fix:** `storage_utils.delta_to_pyarrow_dataset` opens local Delta tables on a native pyarrow
+filesystem (`SubTreeFileSystem` over `LocalFileSystem`). Every scan in `DeltaTableDatabase` and
+`DeltaTableSource` goes through it. Cloud URIs keep deltalake's reader. The results are
+schema- and value-identical: `tests/test_databases/test_delta_native_fs_read.py` compares them
+with deltalake's reader for logical types (Path, dataclass, numpy, pandas), partitioned tables
+and escaped partition values, and for table roots whose names need percent-encoding
+(`table_uri` is percent-encoded, so the helper decodes it with `pyarrow.fs.FileSystem.from_uri`;
+a root that is neither a `file://` URI nor an absolute POSIX path, such as a Windows drive path,
+is untested and keeps deltalake's reader). `tests/test_databases/test_delta_exit.py` runs fresh
+interpreters and fails if one does not exit cleanly; it failed before the fix. The remaining
+cloud-store exposure is documented in `docs/troubleshooting.md`.
+
+**Considered alternative, not implemented:** an `atexit` hook that releases the GIL briefly
+(`time.sleep(0.05)`) before finalization, the idea of apache/arrow#54467. It measured 0/100 on
+macOS and Linux and also covers cloud stores. But it is timing-based, so a loaded machine or a
+large scan can outlast it. It would also run in every process that imports Orcapod. If cloud
+stores need covering before pyarrow ships the fix, register it lazily on the first cloud-store
+scan. When pyarrow ships #54467, bump the floor and reconsider whether the helper is still
+needed.
+
+---
+
 ## `src/orcapod/core/operators/filters.py` — `PolarsFilter` identity and nullability (ITL-828)
 
 ### PF1 — An expression predicate could not be hashed, and a filter broke a join inside a job
@@ -2415,6 +2534,58 @@ function pod downstream of a filter, so a 0.2 store recomputes those results onc
 
 ---
 
+## `src/orcapod/databases/` — PipelineJob run time quadratic in rows
+
+### PQ1 — Every row a function node processes scans the rows already stored
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-919
+
+A function node in a `PipelineJob` does, per row: `ResultCache.lookup` (lookup by input data
+hash in the result table), `ResultCache.store` with a flush of the whole store (both
+tables), and `add_pipeline_record` (lookup by base entry id for the recomputation index,
+then `add_record(skip_duplicates=True)`). Sync and async orchestrators share that path;
+operator nodes write with one `add_records` and are not affected. Measured on `c8efc092`,
+in-memory store, sync: 7.2 / 20.9 / 64 ms per row at 100 / 400 / 1,000 rows (standalone
+pod: 0.09 ms).
+
+- `InMemoryArrowDatabase`: each lookup filtered the whole table, the duplicate check built
+  the set of every committed id, and each flush ran `is_in` over all ids, filtered and
+  concatenated, adding one chunk per row, so every later Arrow operation cost O(rows).
+  **Fix:** lazily built hash indexes over committed rows (binary and string columns, record
+  ids), extended on append and rebuilt only after a flush overwrites an id; flush keeps the
+  committed table at O(log N) record batches by binary-counter compaction. Stored rows, row
+  order, ids and schemas are unchanged (differential check against `main` on a joined
+  multi-node pipeline, both orchestrators). Store work per row is now independent of rows
+  stored (tests count Arrow bytes allocated per row).
+- `DeltaTableDatabase`: one Delta MERGE commit per row per table (cost grows with the
+  table and leaves one file per row), lookups re-opened and read every file, the
+  existing-id cache was re-read after every flush, and the pending batch was scanned per
+  lookup (main: 80 / 198 / 509 ms per row at 100 / 400 / 1,000 rows, sync). **Fix:** function
+  nodes inside `PipelineJob.run` commit every `commit_every_rows` rows (default 100), at node
+  end, best-effort on failure and at job end, results before pipeline records; a node used
+  on its own still commits per row. The store keeps, per loaded table version, the stored
+  ids and rows in memory (indexed), extended after its own commits from the new data files
+  only; the pending batch is compacted and indexed; a commit appends when every pending id is
+  new in the version loaded for that commit, and MERGEs otherwise. Stored rows, ids, hashes,
+  paths and schemas are unchanged (differential against `main`). Store failures that only a
+  commit reveals now surface at the next commit point and name no row (developer decision,
+  November 11, 2026). Found on the way: an async run hung on any node failure with more rows
+  in flight than the channel buffers (ITL-932, fixed: closing a channel never blocks), and an
+  async rerun of an ephemeral-result node skipped its rows (ITL-923, fixed). Remaining
+  (ITL-923 item 3): a pending row written with `skip_duplicates=False` whose id is already
+  stored is still dropped by the commit (Delta keeps the stored row; the in-memory store
+  overwrites it). Memory: a store object keeps the committed rows of each table it looks rows
+  up in for as long as it lives, all of them at once (main read one whole table per lookup
+  and released it), so memory is cumulative over the tables: measured for an `int -> int`
+  pod, about 820 bytes per stored row for the result table and 746 for the pipeline-record
+  table, so about 1.6 GB per function node at 1M rows. Keeping only the lookup columns would
+  need a read per matched row. A follow-up to bound it is for the coordinator to file. The store's own
+  size-triggered flush (`batch_size`) now commits only the full table, and `PipelineJob.run`
+  refuses `commit_every_rows >= batch_size`, so the results-first order holds.
+
+---
+
 ## `src/orcapod/logical_types/numpy_type.py`, `src/orcapod/logical_types/array_format.py` — array format
 
 ### AR1 — `numpy.ndarray` stored as a `.npy` file and hashed by file bytes
@@ -2442,6 +2613,102 @@ results.
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
 instead. Tighten under a new storage version once nested nullability survives Polars.
+
+## `src/orcapod/core/sources/spiraldb_table_source.py` — Spiral tables as a workshop source (ITL-926)
+
+### SP2 — A Spiral table source was unverified on v0.3, and is limited for large or unusual tables
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-926 (follow-ups: ITL-186 streaming source)
+
+Re-verified against the EDI sample project (`edi-sample-v1-855632`, read-only) and a
+disk-backed pyspiral fake (`tests/test_databases/fake_pyspiral.py`). The workshop path works:
+a `SpiralDBTableSource` with a composite key, a `Join` of two Spiral sources, a function pod,
+a Delta store, a re-run with no function calls, save and load, and the same hashes in a fresh
+process. Findings, with repro scripts, are in `superpowers/specs/itl-926-live/FINDINGS.md`.
+
+**Fixed:**
+
+* Nested string, binary and list types are normalized to large variants on both read paths
+  (ITL-40).
+* Errors name the project and dataset.
+* pyspiral is raised to 0.16.33.
+* The default `source_id` is `<project id>/<dataset>/<table>` (approved hash change).
+* Source building no longer calls `to_pylist()` on the whole table (byte-identical).
+* Non-nullable columns stay non-nullable end to end: true only on the original pyspiral
+  fake. SpiralDB keeps no non-null flag except on list items; fixed by the nullability record
+  (SP3, ITL-936).
+
+**Open (developer decisions pending):**
+
+* Every column of the EDI sample tables is nullable, so a function pod over them must
+  annotate `T | None`; recorded columns arrive as `T` (SP3, ITL-936).
+* `fixed_size_list` columns cannot be hashed: not supported until Orcapod adopts starfix
+  0.5.0 (ITL-910; starfix support is ITL-927). `map` columns fail the same way in starfix
+  0.4.0 (none in the EDI tables).
+* The whole table is read at construction, which rules out tables such as `spike_event`
+  (8.1M rows); the streaming design is in
+  `superpowers/specs/2026-11-11-itl-186-spiral-streaming-source-design.md`.
+* Record IDs are positional; key-based IDs are approved for the streaming source work
+  (ITL-186).
+* `unit` (100 rows) takes about 35 s to build live, and the Spiral scan itself is slow
+  (14.5 s for 3 rows); Orcapod's share is about 0.4 s. `scan_cost_probe.py` measures it.
+* `PostgreSQLTableSource` and `SQLiteTableSource` still default `source_id` to the bare table
+  name (to be filed separately).
+
+## `src/orcapod/databases/spiraldb_connector.py` — SpiralDB stores every column nullable (ITL-936)
+
+### SP3 — Non-nullable columns arrive as `T | None` from SpiralDB; a null in a non-null struct field is stored as 0
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-936
+
+Live, pyspiral 0.16.33, scratch table in `edi-tutorial-v1-841226` (November 11, 2026): a
+table written with `k`, `v`, struct `g` and its field `g.x`, and list `l` with its items all
+declared non-null reports `Schema({k=i64?, l=fixed_size_list(f32)[2]?, v=i32?, w=i32?,
+g={x=i32?, y=i32?}?})`: every top-level column and struct field nullable; only list items keep
+`not null`. Writing a null to top-level `v` declared non-null is refused by Arrow on the
+client. Writing `{k: 4, v: 40, g: {x: null, y: null}}` with `g.x` declared non-null is
+**accepted and reads back as `g.x = 0`**: silent data corruption on SpiralDB's side.
+
+**Fix:** Orcapod records each table's non-nullable paths in the table's key-value metadata
+(`__orcapod_nullability__`, format `orcapod.nullability` v1; `orcapod.databases.
+write_nullability_record` / `read_nullability_record`). `SpiralDBConnector` writes the record
+before the first rows of a table, checks every non-nullable path for nulls before any write,
+refuses a write that disagrees with the record, and on read restores the record in
+`get_column_info` and checks and restores every batch in `iter_batches`
+(`NullInNonNullableColumnError` / `NullabilityRecordError`, naming the table). Tables without
+a record are unchanged. The pyspiral fake now reports nullability as the server does. Open:
+the corruption itself is SpiralDB's (to raise with Spiral).
+
+Live check (coordinator, `superpowers/specs/itl-936-live/live_nullability.py write`): the
+connector's nullability record, refusals, a Join and save/load pass. Also found, for a
+top-level struct column (nested structs not tested): SpiralDB cannot store a null struct.
+Written without `push_down_nulls`, pyspiral refuses it (`Spiral does not support null column
+groups. Found a null in the column named "g".`); with `push_down_nulls=True`, `g = null` reads
+back as `g = {x: null, y: null}` with the struct valid (value and hash change). Null lists,
+null list items and null struct fields survive. The connector now refuses a null struct at any depth
+with `UnsupportedValueError` before writing, and never passes `push_down_nulls`.
+
+If the rows of a table's first write fail, the connector removes the nullability record it
+wrote just before them (a record naming columns the table lacks would make every read, and
+every result-store flush, raise). A record whose chunks were written but whose header was not
+is no record.
+
+Writers are not coordinated (SpiralDB has no lock; metadata writes are not versioned). The
+rollback removes the record only while the table still has no value columns, but if another
+writer's first rows land between that check and the removal, the table is left without a
+record: it reads as `T | None` (never a hidden null) and is repaired with
+`write_nullability_record` after checking the data.
+
+Known limitation: the connector treats "the table has no value columns yet" as "the table has
+no rows yet", to avoid a scan on every first write (a live Spiral scan costs seconds even for a
+few rows). A table whose columns are all key columns, already holding rows without a record,
+is recorded by the next write; if that write adds value columns declared non-nullable, the
+earlier rows hold nulls there and every read raises `NullInNonNullableColumnError` (a null is
+never hidden). Follow-up idea, unverified: a manifest-only row count
+(`spiral.core.manifest_stats(snapshot).key_space_stats.total_rows`, see the ITL-186 design)
+could replace the shortcut cheaply once confirmed live.
 
 ## `src/orcapod/logical_types/` — identity of user classes (dataclasses, pydantic models)
 

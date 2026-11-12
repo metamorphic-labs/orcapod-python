@@ -81,7 +81,8 @@ def _run_labelled(db_root: Path) -> tuple[int, list[Labelled]]:
     job = PipelineJob(name="compact", store=DeltaTableDatabase(db_root))
     with job:
         echo.pod(DictSource(data=rows, tag_columns=["k"], source_id="s"), label="echo")
-    job.run()
+    # One commit per row, so the result table has one file per row to compact.
+    job.run(commit_every_rows=1)
     values = [data.as_dict()["q"] for _, data in job.nodes["echo"].iter_data()]
     return len(calls), sorted(values, key=lambda v: v.n)
 
