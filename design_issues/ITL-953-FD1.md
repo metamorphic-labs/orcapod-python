@@ -25,9 +25,8 @@ raises: no fallback to `repr()` or the type name. The stored signature hash is n
 `hash_object(function)`. Moves: every function-value hash and every newly written stored
 signature hash; no pod identity, path or stored schema.
 
-Open, with the developer: whether `Path`, `Enum`, `datetime` / `date`, `Decimal` and numpy
-scalar defaults should get a hash rule instead of raising. A data value of those types is
-hashed through the type converter and the Arrow hasher, never through the structure hasher,
-which is why it has no handler for them. One option that needs no new handlers is to hash a
-pod parameter's default as the data value it would be in a column; `hash_default_value` is
-where that would go.
+Decided (developer, November 11, 2026): `Path`, `Enum`, `datetime` / `date`, `Decimal` and
+numpy scalar defaults keep raising in v0.3. A data value of those types is hashed through the
+type converter and the Arrow hasher, never through the structure hasher, which is why it has
+no handler for them. The follow-up, ITL-971, is to hash a pod parameter's default as the
+column value it would be; `hash_default_value` is where that goes.

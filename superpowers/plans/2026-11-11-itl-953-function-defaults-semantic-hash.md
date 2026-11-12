@@ -35,7 +35,8 @@ CodeRabbit round, `worker_done`.
 - **Stored column = `hash_object(function)`** (coordinator, supersedes D2/S2): one description
   of a signature. Every newly written `__pf_var_function_signature_hash` value moves.
   `get_function_signature` is no longer used by `src` (kept public, with the Y fix).
-- **D3 = raise** until the developer decides. `hash_default_value` (in
+- **D3 = raise** for v0.3 (developer, November 11, 2026); follow-up ITL-971, named in the
+  docs, changelog fragment, design-issue file and PR body. `hash_default_value` (in
   `builtin_handlers.py`) is the one function that decides how a default is hashed, so "hash a
   pod parameter's default as the data value it would be in a column" can be added there later.
   Not built.

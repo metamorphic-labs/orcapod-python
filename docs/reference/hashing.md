@@ -465,7 +465,9 @@ default fails at construction** (`@function_pod`, `FunctionPod.from_fn`,
 Remedies: use a default the hasher can hash (for example a `str` or `None`, building the
 object inside the function); remove the default and supply the value as an input column;
 or register a `PythonTypeHandlerProtocol` for the type in the data context's handler
-registry.
+registry. Raising is the v0.3 behaviour (developer decision, November 11, 2026); hashing a
+pod parameter's default as the column value it would be, which would cover `Path`,
+`datetime`, `date` and numpy scalars, is the follow-up ITL-971.
 
 **Where the hash is used.** As the hash of a function that appears as a value, and as the
 `function_signature_hash` stored with every result row (the
