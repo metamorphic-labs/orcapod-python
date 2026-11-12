@@ -24,7 +24,15 @@ manifest row count only when the head is not the whole read. A private class swi
 * Approach approved by the coordinator (Nov 12) with two conditions: (1) the no-scan
   fallback switch, tested; (2) check large cells: done, Polars' HTML already shortens lists
   (first 3, `…`, last) and strings (30 chars); no preview-only cell summary added.
-* Then PART 2: CI green, CodeRabbit rounds, all threads replied, worker_done with the sha.
+* Part 1 done: 3e5773ed (CodeRabbit rate-limited on it).
+* CodeRabbit round 1 (review of 012a86eb): 6 threads + nitpick + additional + linked-issues
+  check, plan approved by the coordinator; fixed in 3bca8ec9, merged origin/main (23bb59d2),
+  typed tests (dba32fad), pushed once. All 6 threads replied; top-level comment
+  issuecomment-6838421621 answers the body-only findings. PR body updated.
+* Live (read-only + scratch tables created and dropped): 7 live tests pass. One earlier run
+  had a transient failure of `test_an_async_job_over_a_limited_read` that did not recur.
+* Next: CI and CodeRabbit on dba32fad; further rounds; check every reviewThread has a reply;
+  worker_done with the reviewed sha.
 
 ## Note texts
 

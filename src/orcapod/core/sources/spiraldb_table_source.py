@@ -32,7 +32,7 @@ import asyncio
 import datetime
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -99,6 +99,25 @@ def _locationfrom_config(saved: Mapping[str, Any]) -> dict[str, object]:
 def _is_positive_int(value: object) -> bool:
     """Return whether ``value`` is an integer of at least 1 (``True`` is not)."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+class _Head(NamedTuple):
+    """The first rows of a source, and what is known of how many rows it reads.
+
+    Attributes:
+        rows: The rows read; zero rows (the source's columns) when ``rows_read`` is
+            false.
+        rows_read: Whether rows were read at all.
+        total_rows: The rows the source reads or, as an estimate, the table's recorded
+            row count.
+        total_is_estimate: Whether ``total_rows`` is the recorded row count rather than
+            an exact count.
+    """
+
+    rows: "pa.Table"
+    rows_read: bool
+    total_rows: int
+    total_is_estimate: bool
 
 
 def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
@@ -514,44 +533,65 @@ class SpiralDBTableSource(RootSource):
         )
         return whole.as_table(columns=columns, all_info=all_info)
 
+    def _head(
+        self,
+        n: int,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "_Head":
+        """Return the source's first ``n`` rows, read in one bounded scan, and its size.
+
+        At most ``n`` rows are read (fewer when the source's ``limit`` is smaller), with
+        ``where`` and the pinned version applied and ``max_rows`` not, so a table of any
+        size can be looked at. When these are not all the rows the source reads, the
+        size is the table's recorded row count (no scan), an estimate.
+
+        Args:
+            n: The most rows to read.
+            columns: Column configuration, as for ``as_table``.
+            all_info: Include all column groups, as for ``as_table``.
+        """
+        if not self._preview_reads_rows:
+            schema_only = self._stream.as_table(columns=columns, all_info=all_info)
+            return _Head(schema_only, False, self.row_count_estimate, True)
+        head_limit = n if self._limit is None else min(n, self._limit)
+        rows = self._whole_table(
+            self._read_batches(limit=head_limit, max_rows=None),
+            columns=columns,
+            all_info=all_info,
+        )
+        if rows.num_rows < head_limit or head_limit == self._limit:
+            return _Head(rows, True, rows.num_rows, False)
+        recorded = self.row_count_estimate
+        if self._limit is not None and not self._where:
+            recorded = min(self._limit, recorded)
+        return _Head(rows, True, recorded, True)
+
+    def _head_note(self, head: "_Head") -> str:
+        """Return the words a notebook display puts after the header: the one place."""
+        shown = head.rows.num_rows
+        if not head.rows_read:
+            return f"rows not read; the table has about {head.total_rows:,} rows"
+        if not head.total_is_estimate:
+            return f"all {shown:,} row{'' if shown == 1 else 's'}"
+        if self._where:
+            condition = ", ".join(f"{c}={v!r}" for c, v in self._where.items())
+            return (
+                f"first {shown:,} matching rows (where {condition}); the table has "
+                f"about {head.total_rows:,} rows"
+            )
+        return f"first {shown:,} rows of about {head.total_rows:,}"
+
     def _preview(
         self,
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "tuple[pl.DataFrame, str | None]":
-        """Return the first rows for a notebook display, read in one bounded scan.
-
-        At most ``PREVIEW_ROWS`` rows are read (fewer when the source's ``limit`` is
-        smaller), with ``where`` and the pinned version applied and ``max_rows`` not, so
-        a table of any size displays. The note says whether these are all the rows the
-        source reads and, when not, the table's recorded row count (no scan).
-        """
-        if not self._preview_reads_rows:
-            schema_only = self._stream.as_table(columns=columns, all_info=all_info)
-            return pl.DataFrame(schema_only), (
-                f"rows not read; the table has about {self.row_count_estimate:,} rows"
-            )
-        head_limit = (
-            PREVIEW_ROWS if self._limit is None else min(PREVIEW_ROWS, self._limit)
-        )
-        head = self._whole_table(
-            self._read_batches(limit=head_limit, max_rows=None),
-            columns=columns,
-            all_info=all_info,
-        )
-        shown = head.num_rows
-        if shown < head_limit or head_limit == self._limit:
-            return pl.DataFrame(head), f"all {shown:,} row{'' if shown == 1 else 's'}"
-        recorded = self.row_count_estimate
-        if self._where:
-            condition = ", ".join(f"{c}={v!r}" for c, v in self._where.items())
-            return pl.DataFrame(head), (
-                f"first {shown:,} matching rows (where {condition}); the table has "
-                f"about {recorded:,} rows"
-            )
-        total = recorded if self._limit is None else min(self._limit, recorded)
-        return pl.DataFrame(head), f"first {shown:,} rows of about {total:,}"
+        """Return the first ``PREVIEW_ROWS`` rows for a notebook display, and the note."""
+        head = self._head(PREVIEW_ROWS, columns=columns, all_info=all_info)
+        return pl.DataFrame(head.rows), self._head_note(head)
 
     # -------------------------------------------------------------------------
     # Serialization
