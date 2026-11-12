@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import pathlib
 import re
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -100,7 +100,7 @@ class TestStoredPathsAndKeys:
         (path,) = [p for p in store.list_sources() if p[-1] == "odb_v1"]
         table = store.get_all_records(path, record_id_column="_record_hash")
         assert table is not None
-        keys = table.column("_record_hash").to_pylist()
+        keys = cast(list[bytes], table.column("_record_hash").to_pylist())
         assert len(keys) == len(ROWS)
         assert all(key.startswith(b"arrow_v1:") for key in keys)
         assert table.column("__data_context").to_pylist() == [CURRENT] * len(ROWS)
@@ -145,7 +145,7 @@ class TestReadOnlyOperatorNode:
         node = self._read_only_node(InMemoryArrowDatabase(), tmp_path)
         records = node.get_all_records()
         assert records is not None
-        assert sorted(records["double"].to_pylist()) == [2, 4]
+        assert sorted(cast(list[int], records["double"].to_pylist())) == [2, 4]
 
 
 class TestSideEffectNodeChecksEveryRun:
