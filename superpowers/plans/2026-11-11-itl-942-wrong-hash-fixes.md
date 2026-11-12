@@ -228,3 +228,39 @@ migration), `docs/reference/hashing.md`, DESIGN_ISSUES entry, PR stacked on #309
 Executed after the developer's choices. Per finding: failing public-interface test →
 `uv run pytest <test> -v` shows FAIL → fix → PASS → golden suite run (record moved entries
 without regenerating) → commit `fix(<scope>): … (ITL-942)` listing moved golden entries.
+
+## Worker report (November 11-12, 2026)
+
+PR: https://github.com/metamorphic-labs/orcapod-python/pull/315 (stacked on #309), head
+`43f88ccf` + this report. CI green on 3.11/3.12/3.13, ruff, typecheck. CodeRabbit: round 1
+(a63896bb) answered; incremental review a63896bb..43f88ccf generated no actionable comments.
+
+Fixed, one commit each, test first: L1, G1, N1, I1, H1, F1 (+ dead `SelectDataColumns`
+deleted), dict keys D1, `'__type__'` forgery (M2, `Encoded`), T. E pinned as intended. Golden:
+7 changed (3 G, 4 H), 32 added, 0 removed.
+
+Merge points with #314 (ITL-945): remove the strict-xfail marker on
+`test_hash_key_differs_from_its_string_spelling`; keep `GenericAliasHandler` and
+`UnionTypeHandler` returning `Encoded`; `hash` is reserved in `encoded.HASHER_TAGS`.
+
+CodeRabbit findings on #309's code (shown in #315 only because of the stack), to route to #309:
+- `src/orcapod/core/nodes/operator_node.py:904` (major): a read-only `OperatorJobNode` from
+  `from_descriptor()` has `_operator = None`; reading `self.data_context` raises
+  `AttributeError`; use `_data_context` as `FunctionJobNode._fetch_joined_records()` does.
+- `src/orcapod/errors.py:465` (major): the side-effect error advises a fresh store as a safe
+  retry; a fresh store has no completion records, so delivered inputs are delivered again.
+- `src/orcapod/hashing/stored_hash_labels.py:168` (major): docstrings missing on `_Digest`,
+  `_TableHasher.hash_table`, `_RecordReader.get_all_records`.
+- `src/orcapod/side_effects.py:816` (major): `_log_labels_checked` is cleared only by
+  `attach_databases`; re-running a job object skips the log scan; clear it in `execute` and
+  `async_execute`.
+- `src/orcapod/side_effects.py:820` (major): the full invocation-log label scan runs
+  synchronously inside `async_execute`, blocking the event loop.
+- `tests/test_pipeline/test_stored_hash_labels.py:53` (major): docstrings missing.
+- Nitpick `tests/test_arrays/test_array_v02_store.py:103-105`: check for duplicate rows
+  before building `doubled`.
+- Nitpick `tests/test_hashing/golden/cases.py:621`: `arrow_extension_schema_hashes` docstring.
+
+Out of scope, reported: list of a value-hashed logical type folds `[]` and `[None]` alike
+(`visitors.py`, routed to ITL-935); spec ITL-938 cut list still says ITL-942 changes MergeJoin
+input identity (E was withdrawn); deltalake processes hang at exit in this sandbox (env only).
