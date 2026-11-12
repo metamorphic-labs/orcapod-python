@@ -16,12 +16,22 @@ pyspiral fake, which gains a scan log.
 ## State (keep current; a successor continues from here)
 
 * Branch `eywalker/itl-186-add-dynamic-mode-to-spiraldbsource`, from `origin/main` 25650c42.
-* Nov 12: design sent to the coordinator. Approved by the coordinator: D4 (batches of 8,192),
-  D7 (no orchestrator / Join change), D8 (full re-scan), D9 (PR scope), D10 (tests).
-  **Waiting on the developer: D1, D2, D3, D5, D6.** No library code until the reply.
-* Allowed meanwhile: Phase A below (fake + tests that do not depend on D1/D3/D5), local only.
-* Live probe scripts: `.untracked/itl186_probe_{sizes,scan,lazy,ids}.py` (untracked).
-* Finding passed to ITL-858: `superpowers/specs/2026-11-12-itl-186-what-a-job-keeps.md`.
+* Decisions (Nov 12): D1 option A (source id `<project>/<dataset>.<table>@<table id>`),
+  D2 OUT (restrictions not in the content hash; one function, `_restriction_identity`),
+  D3 row token = labelled Arrow hash of the primary key (key fields non-nullable),
+  D4 batches of 8,192, D5 `max_rows` cap 100,000, D6 one class without a mode,
+  D7 no orchestrator or Join change, D8 full re-scan, D9 scope, D10 tests.
+* Done: Phase A and Phase B below. Fake extended; connector `scan_batches`,
+  `get_arrow_schema`, `get_spiral_table_id`, `get_table_version`, `get_row_count_estimate`;
+  `SourceStreamBuilder.attach_provenance`; the source; tests (`test_spiraldb_table_source.py`
+  rewritten on the fake, `..._streaming.py`, `..._live.py` opt-in, three pins in `..._fake.py`);
+  docs, changelog fragment, `design_issues/ITL-186-SP4.md`.
+* Verified live, read-only, on `edi-tutorial-v1-841226`: all 26 tables build (about 1.5 s)
+  and read with `limit=50`; `spike_event` 63,349 rows iterate in 25 s; the opt-in live tests
+  pass, including the scratch-table append test.
+* Waits (reported, not in this PR): bounded-memory jobs, vectorized row digest, watermark and
+  polling, key ranges, column selection, lazy frame, PostgreSQL / SQLite sources.
+* Live probe scripts: `.untracked/itl186_*.py` (untracked).
 
 ## File structure
 
@@ -135,9 +145,10 @@ class FakeScan:
   The two failing tests are marked `xfail(strict=True, reason="ITL-186")` in the commit so
   the suite stays green; the marks are removed in Phase B.
 
-## Phase B (gated on D1, D2, D3, D5, D6; detailed after the reply)
+## Phase B (done)
 
-Written out task by task once the decisions are known, because the constructor signature,
-the source id, the token format and the cap all depend on them. Order: connector metadata
-and restricted scan; per-batch enrichment; the source; save/load; cap; async; docs,
-changelog fragment, design-issue entry; live opt-in tests; full suite, lint, types; PR.
+Order followed: connector metadata reads and restricted scan; `attach_provenance` extracted
+from `SourceStreamBuilder.build` (byte-identical for every other source); the source; tests
+shown failing against the old source (32 of 37) and passing against the new one; save and
+load; cap; async; docs, changelog fragment, design-issue entry; live opt-in tests; full
+suite, ruff, basedpyright.

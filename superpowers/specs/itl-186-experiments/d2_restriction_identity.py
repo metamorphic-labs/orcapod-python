@@ -16,9 +16,10 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
@@ -37,7 +38,7 @@ class Restricted(ArrowTableSource):
     def __init__(self, keys: list[int], restriction: str, in_identity: bool) -> None:
         self._restriction = restriction
         self._in_identity = in_identity
-        rows = FULL.filter(pa.compute.is_in(FULL["k"], pa.array(keys, pa.int64())))
+        rows = FULL.filter(pc.is_in(FULL["k"], pa.array(keys, pa.int64())))
         super().__init__(
             rows, tag_columns=["k"], source_id=SOURCE_ID, record_id_column="k"
         )
@@ -60,7 +61,9 @@ def build(store: Path, source: Any, calls: list[int]) -> PipelineJob:
 
 
 def keys_of(table: pa.Table | None) -> list[int] | None:
-    return None if table is None else sorted(table.column("k").to_pylist())
+    if table is None:
+        return None
+    return sorted(cast("list[int]", table.column("k").to_pylist()))
 
 
 def report(name: str, job: PipelineJob, calls: list[int], store: Path) -> None:

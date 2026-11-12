@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import SourceTooLargeError
 from orcapod.types import ColumnConfig
@@ -48,7 +49,6 @@ if TYPE_CHECKING:
 
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
-    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 else:
     pa = LazyModule("pyarrow")
@@ -329,7 +329,7 @@ class SpiralDBTableSource(RootSource):
             for i in range(keys.num_rows)
         ]
 
-    def _batch_streams(self) -> Iterator["ArrowTableStream"]:
+    def _batch_streams(self) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once and yield its rows as streams of at most ``batch_rows`` rows.
 
         Raises:
@@ -395,7 +395,12 @@ class SpiralDBTableSource(RootSource):
                 for pair in stream.iter_data():
                     yield pair
         finally:
-            streams.close()
+            try:
+                streams.close()
+            except ValueError:
+                # Cancelled while a batch was being read in the worker thread: the
+                # scan cannot be closed from here and ends with that read.
+                pass
 
     def as_table(
         self,
@@ -404,13 +409,18 @@ class SpiralDBTableSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         """Scan the table and return its rows as one PyArrow table (all held in memory)."""
-        tables = [
-            stream.as_table(columns=columns, all_info=all_info)
-            for stream in self._batch_streams()
-        ]
+        # One stream over all the rows, so that a whole-table option (sorting by
+        # tags) applies across batches.
+        enriched = {"source": True, "system_tags": True}
+        tables = [stream.as_table(columns=enriched) for stream in self._batch_streams()]
         if not tables:
             return self._stream.as_table(columns=columns, all_info=all_info)
-        return pa.concat_tables(tables)
+        whole = ArrowTableStream(
+            table=pa.concat_tables(tables),
+            tag_columns=self._tag_columns,
+            system_tag_columns=self._system_tag_columns,
+        )
+        return whole.as_table(columns=columns, all_info=all_info)
 
     # -------------------------------------------------------------------------
     # Serialization

@@ -109,7 +109,9 @@ def test_an_async_job_over_a_limited_read(tmp_path: Path):
     assert calls == []
 
 
-@pytest.mark.skipif(not WRITE, reason="Set ORCAPOD_SPIRAL_LIVE_WRITE=1 to write a scratch table")
+@pytest.mark.skipif(
+    not WRITE, reason="Set ORCAPOD_SPIRAL_LIVE_WRITE=1 to write a scratch table"
+)
 def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
     import spiral  # pyright: ignore[reportMissingImports]  # spiraldb extra, absent in the type-check job
 
@@ -134,7 +136,7 @@ def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
     try:
         table.write(pa.table({"k": [2, 3], "v": [20, 30]}))
         run()
-        assert sorted(calls) == [20, 30]
+        assert set(calls) == {20, 30} and len(calls) == 2
         calls.clear()
         table.write(pa.table({"k": [1], "v": [10]}))
         run()

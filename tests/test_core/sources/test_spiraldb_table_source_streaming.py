@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -55,16 +56,16 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _timestamps(source: SpiralDBTableSource) -> list[int]:
-    return source.as_table().column("timestamp").to_pylist()
+    return cast("list[int]", source.as_table().column("timestamp").to_pylist())
 
 
 def _record_ids(source: SpiralDBTableSource) -> dict[int, bytes]:
     """Return each row's record ID by its ``timestamp`` key."""
     table = source.as_table(all_info=True)
     (column,) = [n for n in table.column_names if n.startswith("_tag_record_id::")]
-    return dict(
-        zip(table.column("timestamp").to_pylist(), table.column(column).to_pylist())
-    )
+    timestamps = cast("list[int]", table.column("timestamp").to_pylist())
+    record_ids = cast("list[bytes]", table.column(column).to_pylist())
+    return dict(zip(timestamps, record_ids, strict=True))
 
 
 class TestNoRowIsReadUntilAsked:
@@ -148,10 +149,22 @@ class TestRows:
                 k: table_row[k] for k in shared
             }
 
+    def test_sorting_by_tags_sorts_across_batches(self, project):
+        keys = pa.schema([pa.field("k", pa.int64())])
+        project.create_table("default.groups", key_schema=keys).write(
+            pa.table({"k": [1, 2, 3, 4, 5], "g": [5, 4, 3, 2, 1], "v": [0.0] * 5})
+        )
+        source = SpiralDBTableSource(_PROJECT, "groups", tag_columns="g")
+
+        table = source.as_table(columns={"sort_by_tags": True})
+
+        assert table.column("g").to_pylist() == [1, 2, 3, 4, 5]
+        assert table.column("k").to_pylist() == [5, 4, 3, 2, 1]
+
     def test_async_iteration_yields_the_same_rows(self, project):
         source = SpiralDBTableSource(_PROJECT, "event")
 
-        async def collect() -> list[dict]:
+        async def collect() -> list[dict[str, object]]:
             return [
                 {**tag.as_dict(all_info=True), **data.as_dict(all_info=True)}
                 async for tag, data in source.async_iter_data()
@@ -196,10 +209,13 @@ class TestRestrictions:
         with pytest.raises(ValueError, match="nope"):
             SpiralDBTableSource(_PROJECT, "event", where={"nope": 1})
 
-    @pytest.mark.parametrize("name", ["limit", "max_rows", "batch_rows"])
-    def test_sizes_must_be_positive(self, project, name):
-        with pytest.raises(ValueError, match=name):
-            SpiralDBTableSource(_PROJECT, "event", **{name: 0})
+    def test_sizes_must_be_positive(self, project):
+        with pytest.raises(ValueError, match="limit"):
+            SpiralDBTableSource(_PROJECT, "event", limit=0)
+        with pytest.raises(ValueError, match="max_rows"):
+            SpiralDBTableSource(_PROJECT, "event", max_rows=0)
+        with pytest.raises(ValueError, match="batch_rows"):
+            SpiralDBTableSource(_PROJECT, "event", batch_rows=0)
 
     def test_every_read_of_one_source_uses_the_version_it_was_built_at(self, project):
         table = project.table("default.event")
@@ -403,7 +419,9 @@ class TestSaveAndLoad:
 
 
 class TestInAJob:
-    def _job(self, store: Path, calls: list[float], **source_kwargs) -> PipelineJob:
+    def _job(
+        self, store: Path, calls: list[float | None], max_rows: int | None = 100_000
+    ) -> PipelineJob:
         @function_pod(output_keys="doubled")
         def double(amplitude: float | None) -> float | None:
             calls.append(amplitude)
@@ -412,20 +430,21 @@ class TestInAJob:
         job = PipelineJob(name="events", store=DeltaTableDatabase(store))
         with job:
             double.pod(
-                SpiralDBTableSource(_PROJECT, "event", **source_kwargs), label="double"
+                SpiralDBTableSource(_PROJECT, "event", max_rows=max_rows),
+                label="double",
             )
         return job
 
     @pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
     def test_run_rerun_and_an_appended_row(self, project, tmp_path, orchestrator):
-        def run(calls: list[float]) -> PipelineJob:
+        def run(calls: list[float | None]) -> PipelineJob:
             job = self._job(tmp_path / "store", calls)
             job.run(orchestrator=orchestrator() if orchestrator else None)
             return job
 
-        calls: list[float] = []
+        calls: list[float | None] = []
         first = run(calls)
-        assert sorted(calls) == [1.5, 2.5, 3.5, 4.5, 5.5]
+        assert set(calls) == {1.5, 2.5, 3.5, 4.5, 5.5} and len(calls) == _ROWS
         assert first.nodes["double"].as_table().num_rows == _ROWS
 
         calls.clear()
@@ -439,7 +458,7 @@ class TestInAJob:
         assert third.nodes["double"].get_all_records().num_rows == _ROWS + 1
 
     def test_a_job_over_the_cap_fails_before_computing(self, project, tmp_path):
-        calls: list[float] = []
+        calls: list[float | None] = []
         job = self._job(tmp_path / "store", calls, max_rows=3)
 
         with pytest.raises(SourceTooLargeError):
