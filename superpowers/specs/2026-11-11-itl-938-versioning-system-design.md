@@ -1234,9 +1234,14 @@ registration, and the versioned file keeps only the core.
 9. **Side-effect logs across data context versions.** Decide what a side-effect log records
    and how a delivered effect is recognised after a data context change, so that v0.3's
    explicit failure can be replaced by recognising the old completion.
-10. **The stored Arrow type of a plain column and the path.** Two sources with the same Python
-    type and different Arrow widths share a path and the second write fails. Decide whether
-    the schema hash should cover the Arrow type.
+10. **The stored Arrow type of a plain column and the path.** Two sources with the same
+    Python type and different Arrow types (`int32` and `int64`, `float32` and `float64`, two
+    timestamp units) share a path, and the second write fails after its results were partly
+    written. Decided for v0.3: it stays an error, and "in general it shouldn't get hit". After
+    the tag, consider hashing the schema over Arrow types instead of Python types (the
+    developer's direction). An additive form exists: let the Arrow type enter the schema hash
+    only when it is not the default for its Python type, so no existing hash moves. Also make
+    the error arrive before anything is written.
 11. **Default `source_id` for database and Delta sources.** A bare table or directory name is
     not unique; decide a default address that is.
 12. **Tier-restricted cache lookup.** Restore the option, lost in `8f5e2fa69`, to return a
