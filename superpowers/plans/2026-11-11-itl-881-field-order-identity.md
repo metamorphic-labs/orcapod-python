@@ -79,4 +79,15 @@ Full suite on 3.11, 3.12, 3.13 one at a time; ruff; basedpyright; push; CI; Code
 
 ## Worker notes
 
-- (fill in as work proceeds)
+- Coordinator approved the plan (November 11): field order in identity, stay on `main`,
+  `TypeIdentityError` unwrapped (pinned in `tests/test_databases/test_delta_read_failures.py`),
+  defaults/methods/computed fields outside the identity (stated in the docs).
+- Done and pushed: identity record with ordered fields; storage struct in declared order;
+  golden regenerated (vs `main`: 17 changed + 8 replaced = the 25 approved entries, rest
+  added; twins pin different values; ndarray-field fixture added); `probe_record` for read
+  candidates (nested classes stay undeclared); compaction test asserts the rewrite; docs,
+  spec, CHANGELOG, DESIGN_ISSUES UCI1.
+- Remaining: full suite on 3.11/3.12/3.13, ruff, basedpyright, PR body, CI, CodeRabbit round.
+- Out of scope, to report: the semantic hasher expands a namedtuple with fields sorted by
+  name (`semantic_hasher._expand_namedtuple`), so namedtuple field order does not enter its
+  hash, although a namedtuple compares as an ordered tuple.

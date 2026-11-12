@@ -2460,12 +2460,16 @@ restart; a subclass was stored as its parent, dropping its extra fields.
 **Fix:** a user class is identified by `{kind, name, fields}` (spec
 `superpowers/specs/2026-11-10-user-class-identity-v0.3.md`). The identity string
 `Name@<full SHA-256 of the canonical record>` is the logical type name and Arrow extension
-name, with the record in the extension metadata; stored structs list fields in name order.
+name, with the record in the extension metadata. `fields` lists `[name, type]` pairs in
+declared order and the stored struct follows it: field order is part of the identity
+(developer, November 11, 2026), so the same fields in another order are another type.
 `op.register_type` declares names without modifying the class; `__main__` classes default
 to their class name. The registry rebinds an unchanged identity to a re-defined class and
 matches user classes by exact class only. The read path finds the class by kind and name,
 checks the identity, and raises `ImportError` or `TypeIdentityError` naming the column;
-`DeltaTableDatabase` re-raises `TypeIdentityError`. Resolves the entry PR #288 proposes for
+`DeltaTableDatabase` raises `TypeIdentityError` as is, never wrapped in `StoreReadError`.
+Testing a read candidate registers neither the class nor its nested classes
+(`probe_record`), so a rejected candidate can still be declared under a name. Resolves the entry PR #288 proposes for
 the same issue. Not covered: computed fields (deferred by the developer), local classes,
 Enum/NamedTuple/TypedDict.
 

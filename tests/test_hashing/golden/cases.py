@@ -232,7 +232,7 @@ class GoldenWithArray:
     """Dataclass with a NumPy array field; the array's logical type enters its identity."""
 
     label: str
-    values: np.ndarray
+    values: np.ndarray  # pyright: ignore[reportMissingTypeArgument]  # the bare class is the annotation Orcapod stores
 
 
 @dataclasses.dataclass

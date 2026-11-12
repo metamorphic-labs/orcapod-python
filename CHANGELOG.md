@@ -73,27 +73,33 @@ stay queued for the next flush. A flush that fails only for other reasons still 
 #### Dataclasses and pydantic models are identified by name, kind and fields (ITL-881)
 
 Orcapod 0.3 identifies a dataclass or pydantic model by its name, its kind (dataclass or
-pydantic) and its fields' names and types, in any order. The name is the class name for a
+pydantic) and its fields' names and types, in declared order. The name is the class name for a
 class defined in a notebook or script (`__main__`), the module path and class name for a
 class defined in a module, or the name declared with `op.register_type`.
 
 - **Hashes change for every pipeline that uses such a class.** The class's logical type
-  name and Arrow extension name become `Name@<SHA-256 of name, kind and fields>`, and the
-  stored struct lists fields in name order. Every schema hash, pipeline hash, table path,
+  name and Arrow extension name become `Name@<SHA-256 of name, kind and fields>`; the
+  stored struct lists fields in declared order, as before. Every schema hash, pipeline hash, table path,
   system-tag column name and data hash that involves a dataclass or pydantic value moves.
   The first run under 0.3 computes those pod and operator results again, into new tables.
   Tables written by earlier versions are left untouched and are not read by 0.3 pipelines;
   reading such a column directly raises `TypeIdentityError`. There is no migration tool.
   Results that involve no dataclass or pydantic value are unaffected.
-- **Changing a class's fields makes a new type.** Its pods get new tables; the results of
+- **Changing a class's fields makes a new type.** Adding, removing, renaming, retyping or
+  reordering fields all count: a dataclass compares its fields as an ordered tuple and a
+  pydantic model dumps in declared order, so two classes with the same fields in another
+  order are different types. Defaults, methods and pydantic computed fields are not part
+  of the identity. The new type's pods get new tables; the results of
   the old definition stay where they are. Before, a changed class shared the old tables and
   a run returned 0 rows with only log warnings.
 - **A stored shape that disagrees with the registered class raises.** `DeltaTableDatabase`
-  re-raises the new `orcapod.errors.TypeIdentityError` instead of logging the read failure
-  and returning no records. Reading a column whose class cannot be found raises
+  raises the new `orcapod.errors.TypeIdentityError` as is. It is not a `StoreReadError`:
+  the table is intact and the class differs. Reading a column whose class cannot be found raises
   `ImportError` naming the column, the type and the `op.register_type` call to declare it.
 - **A subclass is its own type.** A dataclass or pydantic subclass was stored as its
-  registered parent, silently dropping its extra fields; it now has its own identity.
+  parent when the parent was registered first: its extra fields were silently dropped from
+  stored data, and the pod's hash and table path depended on the registration order. It
+  now has its own identity and keeps all its fields, in any registration order.
 - **Recursive classes** raise `RecursiveTypeError` (a `TypeError`) naming the field path,
   for example `Node.next -> Node`.
 - Pinned golden hash entries changed (approved): `semantic.json` `type.dataclass`,
@@ -123,7 +129,8 @@ same class under a second name raises `ValueError`. See
 
 Re-running a notebook cell that defines a dataclass or pydantic model, or reloading its
 module, no longer breaks later pods with `ValueError: … already bound`: a class with the
-same name and fields is the same type, and its stored results are found again.
+same name and the same fields in the same order is the same type, and its stored results
+are found again.
 
 ### Fixed
 

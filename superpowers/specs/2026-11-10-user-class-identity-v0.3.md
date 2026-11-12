@@ -3,6 +3,12 @@
 **Status:** implemented on this branch (PR #292). Approved by the coordinator November 10,
 2026; P1, the identity-string format (fold, full-length hash) and the dropped naming switch
 decided by the developer the same day.
+**Revised November 11, 2026 (developer):** declared field **order is part of the identity**,
+for dataclasses and pydantic models. This reverses the November 10 ruling "not field order".
+Criterion: take the type's own equality seriously (a dataclass compares its fields as an
+ordered tuple; a pydantic model dumps, iterates and serializes in declared order); a finer
+identity can cost a recompute but cannot be incorrect. The sections below state the revised
+rule.
 **Issue:** ITL-881 (v0.3, a public release; tag target November 16, 2026).
 **Builds on:** the findings in PR #288 (`superpowers/specs/2026-11-10-user-class-identity.md`,
 experiments E01–E08). "W1"–"W15" are the workshop scenarios from §3.4 of that document.
@@ -13,7 +19,7 @@ Each decision is marked **CONFIRMED** (the developer decided it, November 10, 20
 | ID | Decision | Status |
 |---|---|---|
 | D-name | Nominal identity with a declared name; `__main__` classes default to the name only | CONFIRMED: developer decision 1 |
-| D-fields | Field names and field types are part of the identity; field order is not | CONFIRMED: developer decision 2 |
+| D-fields | Field names, field types and declared field order are part of the identity | CONFIRMED: developer decision 2, revised November 11, 2026 (order is identity) |
 | D-computed | Computed fields are not part of the identity in v0.3 | CONFIRMED as deferred: developer decision 2 defers it; v0.3 keeps today's stored fields |
 | D-kind | Dataclass and pydantic are distinct kinds | CONFIRMED: developer decision 3 |
 | D-rebind | Same identity re-registered: rebind silently | CONFIRMED: developer answer to S1 |
@@ -75,12 +81,11 @@ pydantic logical types by exact class only.
 
 ### Field component — CONFIRMED (decision 2; nested classes: P1)
 
-`fields` maps each **stored field's name** to its **type token**. It is a JSON object
-serialized with sorted keys, so field order never enters. The stored fields are exactly
+`fields` lists each **stored field's name** with its **type token**, as `[name, token]`
+pairs in declared order. It is a JSON array, so field order enters the identity. The stored fields are exactly
 the ones stored today: dataclass fields with `init=True`, pydantic `model_fields`. The
-Arrow storage struct also lists the fields in name order, so two classes with the same
-identity always have the same storage type (found by the W11 test: with class order the
-same identity had two structs, and the Delta read failed into 0 rows).
+Arrow storage struct lists the fields in the same declared order, so two classes with the
+same identity always have the same storage type.
 
 Type token of an annotation (from `typing.get_type_hints`, which strips `Annotated`
 extras):
@@ -121,7 +126,7 @@ recursive struct, so there is nothing to identify.
 
 Deliberately **not** part of the identity: defaults and default factories, methods and
 validators, properties and pydantic `computed_field`s, `init=False` dataclass fields,
-`ClassVar`s, private attributes, field order, docstrings, pydantic field aliases and
+`ClassVar`s, private attributes, docstrings, pydantic field aliases and
 constraints (`Field(gt=0)`, `Annotated` metadata), `frozen`/`slots`/config flags, base
 classes (only the resulting fields count). Computed fields are deferred (D-computed); a
 later decision to include them adds a key that is absent when empty, so it would move
@@ -148,8 +153,9 @@ canonical_json  = json.dumps(record, sort_keys=True, separators=(",", ":"), ensu
 ```
 
 `Point(x: int, y: float)` as a dataclass gives
-`Point@9117beaaf7ebe3ab0bd25de9448c92eb64aa070a58611517bd1e470a544584d8`; with `y: int`,
-`Point@c0a75f0c…`; as a pydantic model with `y: float`, `Point@703bff8a…`. SHA-256 of a
+`Point@76d961e40619a836535e3fdebdead7ea65aa9413955a889f3d5b51a7a94b65eb` (the SHA-256 of
+`{"fields":[["x","int"],["y","float"]],"kind":"dataclass","name":"Point"}`); with `y: int`,
+`Point@008496cf…`; as a pydantic model with `y: float`, `Point@8a0f5b42…`. SHA-256 of a
 documented JSON string, not the Orcapod semantic hasher, so the identity can be reproduced
 by hand and does not depend on a hasher version. The full digest is used (developer):
 there is no truncation rule to explain, and the name is not meant for people to type.
@@ -174,7 +180,7 @@ second mechanism.
 | Logical type name | identity string | `DataclassLogicalType.logical_type_name` / pydantic equivalent |
 | Arrow extension name (`ARROW:extension:name`) | identity string | same string; one Arrow/Polars extension registration per identity |
 | Arrow extension metadata | category plus the full record: `{"category":"orcapod.dataclass","identity":{…}}`, canonical JSON | read path uses it to find the class and to print the stored shape |
-| Arrow storage type | struct of the stored fields, in name order | derived from the annotations |
+| Arrow storage type | struct of the stored fields, in declared order | derived from the annotations |
 | Schema hash, source `pipeline_hash`, system-tag column names | identity string | `TypeObjectHandler` hashes a registered class as `type:<logical type name>` (unchanged code) |
 | Pod signature hash, node `pipeline_hash`, DB table paths | identity string | via the schema/signature hashes |
 | Per-row data hash, `content_hash` | identity string + record + values | the extension column is hashed with its extension name and metadata (unchanged code) |
@@ -331,8 +337,8 @@ entries plus the unpinned additions.
 additions (new keys only): a declared-name dataclass and a pydantic model with the same
 name and fields (distinct values), a nested dataclass with a container field (P1),
 `list[GoldenPoint]`, an `Optional` field, and field-order twins (`GoldenTwinAB`,
-`GoldenTwinBA`, both `golden.Twin`) that pin equal type, schema, data and pipeline hashes
-(only their `source_id`-derived entries differ).
+`GoldenTwinBA`, both `golden.Twin`) that pin **different** type, schema, data and pipeline
+hashes, and a dataclass with a NumPy array field.
 
 **For the CHANGELOG (stated plainly):** "Orcapod 0.3 identifies a dataclass or pydantic
 model by its name, its kind and its fields. Every pipeline whose data includes such a

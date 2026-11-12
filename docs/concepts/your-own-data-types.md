@@ -16,13 +16,21 @@ Orcapod identifies a dataclass or pydantic model by three things:
 |---|---|
 | **Name** | The class name for a class defined in a notebook or a script, the module path and class name for a class defined in a module, or a name you declare with `op.register_type` |
 | **Kind** | Dataclass or pydantic model. A dataclass and a pydantic model are never the same type, even with the same name and fields |
-| **Fields** | The name and type of every stored field, in any order |
+| **Fields** | The name and type of every stored field, in the order the class declares them |
 
 Two classes that agree on all three are the same type: results stored with one are found
-again with the other. Anything else about the class does not count: field order,
-defaults, methods, properties, pydantic computed fields and validators, docstrings.
+again with the other.
 
-Changing a field's name or type makes a **new type**. Results computed with the old
+Field order counts because your code can see it: a dataclass compares, unpacks and
+prints its fields in declared order, and a pydantic model dumps and serializes in
+declared order. Two classes with the same fields in another order are two types.
+
+Known boundary: defaults, methods, properties, pydantic computed fields and validators,
+and docstrings are **not** part of the identity, although a pod can observe them.
+Changing one of them keeps the type and its stored results. If such a change alters what
+a pod computes, bump the pod's version, as you would for any change to its code.
+
+Adding, removing, renaming, retyping or reordering fields makes a **new type**. Results computed with the old
 definition stay in the database, and the new type computes its results into new tables,
 so a stored value is never read back with fields it was not written with.
 
@@ -78,14 +86,13 @@ print("function calls:", len(calls))
 ```
 
 Running the cell that defines `Point` again creates a new class object with the same
-name and fields. It is the same type, so the next run finds the stored results. The
-same holds when the fields are listed in another order:
+name and fields. It is the same type, so the next run finds the stored results:
 
 ```python
 @dataclass
 class Point:
-    y: float
     x: float
+    y: float
 
 
 run(Point)
@@ -93,7 +100,7 @@ print("function calls:", len(calls))
 # function calls: 2
 ```
 
-Adding, removing or retyping a field makes a new type. Re-run the pod cell too, so that `norm` takes
+Adding, removing, retyping or reordering fields makes a new type. Re-run the pod cell too, so that `norm` takes
 the new `Point`; the run then computes into new tables:
 
 ```python
@@ -190,7 +197,7 @@ script or notebook (`__main__`), then by importing the name as a module path.
 
 - If no class with that name exists, reading raises `ImportError` naming the column, the
   type and its fields, and showing the `op.register_type` call to declare it.
-- If a class with that name exists but its fields differ, reading raises
+- If a class with that name exists but its fields or their order differ, reading raises
   `TypeIdentityError` (from `orcapod.errors`) naming the column and both sets of fields.
 
 Neither case is reported as missing data, and nothing stored is changed.

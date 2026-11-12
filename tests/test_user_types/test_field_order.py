@@ -74,8 +74,10 @@ def _source(value: Any) -> DictSource:
     return DictSource(data=[{"k": "a", "p": value}], tag_columns=["k"], source_id="s")
 
 
-def _column_type(value: Any) -> pa.DataType:
-    return _source(value).as_table().schema.field("p").type
+def _column_type(value: Any) -> pa.ExtensionType:
+    column_type = _source(value).as_table().schema.field("p").type
+    assert isinstance(column_type, pa.ExtensionType)
+    return column_type
 
 
 def _type_name(value: Any) -> str:
