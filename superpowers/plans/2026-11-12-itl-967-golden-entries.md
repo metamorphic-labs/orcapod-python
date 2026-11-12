@@ -432,12 +432,12 @@ Unchanged in `datagram.json`: 0 entries.
 |---|---|---|---|
 | `group_by.content_hash` | 1 | value changed | ITL-945(digest) |
 | `group_by.pipeline_hash` | 1 | value changed | ITL-945(digest) |
-| `group_by.row[{"cohort":"a"}]._tag_record_id::<H>::<H>` | 1 | key renamed only | ITL-945(key) |
-| `group_by.row[{"cohort":"a"}]._tag_source_id::<H>::<H>` | 1 | value changed, key renamed | ITL-945(key), ITL-942(digest) |
-| `group_by.row[{"cohort":"a"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(label) |
-| `group_by.row[{"cohort":"b"}]._tag_record_id::<H>::<H>` | 1 | key renamed only | ITL-945(key) |
-| `group_by.row[{"cohort":"b"}]._tag_source_id::<H>::<H>` | 1 | value changed, key renamed | ITL-945(key), ITL-942(digest) |
-| `group_by.row[{"cohort":"b"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(label) |
+| `group_by.row[{"cohort":"a","subject":["s1","s2"]}]._tag_record_id::<H>::<H>` | 1 | key renamed only | ITL-945(key) |
+| `group_by.row[{"cohort":"a","subject":["s1","s2"]}]._tag_source_id::<H>::<H>` | 1 | value changed, key renamed | ITL-945(key), ITL-942(digest) |
+| `group_by.row[{"cohort":"a","subject":["s1","s2"]}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(label) |
+| `group_by.row[{"cohort":"b","subject":["s3"]}]._tag_record_id::<H>::<H>` | 1 | key renamed only | ITL-945(key) |
+| `group_by.row[{"cohort":"b","subject":["s3"]}]._tag_source_id::<H>::<H>` | 1 | value changed, key renamed | ITL-945(key), ITL-942(digest) |
+| `group_by.row[{"cohort":"b","subject":["s3"]}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(label) |
 | `group_by.system_tag_columns` | 1 | value changed | ITL-945(digest) |
 
 ### `index_pick`
