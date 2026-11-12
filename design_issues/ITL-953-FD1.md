@@ -1,12 +1,11 @@
 ## `src/orcapod/hashing/semantic_hashing/function_info_extractors.py` — function signature hash (ITL-953)
 
 ### FD1 — Function defaults entered the function hash as `repr()`; parameter kind was not hashed
-
-**Status:** resolved (ITL-953)
-
+**Status:** resolved
 **Severity:** medium
+**Issue:** ITL-953
 
-**Issue:** Finding L2 of the ITL-938 hash-site audit (Appendix A.9).
+Finding L2 of the ITL-938 hash-site audit (Appendix A.9).
 `FunctionSignatureExtractor` wrote a function's parameters as one line of text in which a
 default value appeared as `repr(value)`. A `frozenset` default therefore hashed differently
 under every `PYTHONHASHSEED`, a `dict` default by insertion order, an `object()` default
