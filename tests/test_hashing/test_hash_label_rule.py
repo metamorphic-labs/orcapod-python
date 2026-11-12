@@ -231,7 +231,27 @@ class TestRenamingALabelChangesNoDigest:
             for entry, value in entries.items()
             if restored_values[group].get(entry) != value
         ]
-        assert not moved, f"{len(moved)} values depend on a label: {moved[:10]}"
+        # The stated exception (rule 5a): a default source id built from a hash is the
+        # source's name and keeps the hash's label, so the label reaches what is
+        # built from that name: the source's content hash and its record ids. The
+        # two golden cases of a ``tags_as_data`` source without a ``source_id`` are
+        # the only ones with such an id.
+        named_after_a_labelled_hash = tuple(
+            f"schema:derived_source_tags_as_data.{case}."
+            for case in ("default_source_id", "record_id_column")
+        )
+        unexpected = [
+            entry
+            for entry in moved
+            if not (
+                entry.startswith(named_after_a_labelled_hash)
+                and (entry.endswith(".content_hash") or "._tag_record_id::" in entry)
+            )
+        ]
+        assert not unexpected, (
+            f"{len(unexpected)} values depend on a label: {unexpected[:10]}"
+        )
+        assert len(moved) == 8, moved
 
     def test_directory_hash_keeps_its_digest(
         self, tmp_path: Path, request: pytest.FixtureRequest
