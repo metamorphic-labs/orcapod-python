@@ -2442,3 +2442,21 @@ results.
 Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
 nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
 instead. Tighten under a new storage version once nested nullability survives Polars.
+
+---
+
+## Tag and data groups — a value wanted as both (ITL-939)
+
+### TD1 — A key column cannot also be a pod input; same-name collisions fail late
+**Status:** in progress
+**Severity:** medium
+**Issue:** ITL-939 (design spike)
+
+A name cannot be in both the tag and the data group, so a key that a pod needs as data (EDI
+`session_start_datetime`, for elapsed-time arithmetic) cannot reach a pod without a workaround,
+and two of the obvious workarounds (keeping the column out of `tag_columns`, or reading the
+table twice and joining) give silently wrong joins. Nothing checks the rule at graph-build time:
+`Join`/`MergeJoin` across a tag-vs-data name, and a pod output key equal to a tag name, are
+accepted by `keys()` and fail only at materialisation. Design spike and recommendation (a
+`CopyTagsToData` operator) in `superpowers/specs/2026-11-11-itl-939-tag-and-data-same-name-design.md`,
+awaiting the developer's decisions.
