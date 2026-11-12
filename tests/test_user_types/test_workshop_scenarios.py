@@ -565,3 +565,88 @@ report(out)
     assert "pkg.models.Point" in out["message"]
     assert "op.register_type(<class>, name='Point')" in out["message"]
     assert out["second"] == ["Point(x=1, y=1)", "Point(x=2, y=2)"]
+
+
+NESTED_WRITER = """
+from dataclasses import dataclass
+
+import wsjob
+from child_harness import report
+
+
+@dataclass
+class Inner:
+    v: int
+
+
+@dataclass
+class Outer:
+    inner: Inner
+
+
+report(wsjob.run_job(Outer, rows=[{"inner": Inner(1)}, {"inner": Inner(2)}]))
+"""
+
+NESTED_READER = """
+import os
+from pathlib import Path
+import orcapod as op
+from child_harness import error_text, report
+from orcapod.contexts import get_default_context
+from orcapod.databases import DeltaTableDatabase, ExtensionAwareDatabase
+import wsjob
+from pkg.models import Inner, Outer
+
+root = Path(os.environ["WS_DB"])
+path = tuple(next(p for p in wsjob.table_paths(root) if "/_result/" in p).split("/"))
+converter = get_default_context().type_converter
+
+def read():
+    db = ExtensionAwareDatabase(DeltaTableDatabase(root), converter=converter)
+    table = db.get_all_records(path)
+    return [repr(r["q"]) for r in converter.arrow_table_to_python_dicts(table.select(["q"]))]
+
+out = {}
+try:
+    read()
+except Exception as exc:
+    out["first"] = error_text(exc)
+op.register_type(Inner, name="Inner")
+op.register_type(Outer, name="Outer")
+out["second"] = sorted(read())
+report(out)
+"""
+
+
+def test_failed_read_leaves_nested_classes_free_to_be_declared(workdir: Path) -> None:
+    """Testing a read candidate must not fix the names of its nested classes.
+
+    The stored ``Outer`` holds an ``Inner`` named ``Inner``. The reader's module classes
+    are not declared yet, so the first read rejects ``Outer``; declaring both classes
+    under their stored names afterwards must work in the same process.
+    """
+    stored = _script(workdir, NESTED_WRITER)
+    assert (stored["calls"], stored["rows"]) == (2, 2)
+    write_files(
+        workdir,
+        {
+            "pkg/__init__.py": "",
+            "pkg/models.py": """
+                from dataclasses import dataclass
+
+                @dataclass
+                class Inner:
+                    v: int
+
+                @dataclass
+                class Outer:
+                    inner: Inner
+            """,
+        },
+    )
+    out = _script(workdir, NESTED_READER)
+    assert out["first"].startswith("TypeIdentityError"), out
+    assert out["second"] == [
+        "Outer(inner=Inner(v=1))",
+        "Outer(inner=Inner(v=2))",
+    ]

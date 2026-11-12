@@ -82,8 +82,20 @@ def test_stored_values_read_after_delta_compaction(tmp_path: Path) -> None:
     """Delta compaction rewrites large_string struct fields as string; still readable."""
     expected = [Labelled("x1", 1), Labelled("x2", 2)]
     assert _run_labelled(tmp_path) == (2, expected)
+    rewritten: list[str] = []
     for log in tmp_path.rglob("_delta_log"):
-        deltalake.DeltaTable(str(log.parent)).optimize.compact()
+        table = deltalake.DeltaTable(str(log.parent))
+        before = set(table.file_uris())
+        metrics = table.optimize.compact()
+        if "q" in [field.name for field in table.schema().fields]:
+            # The result table must really be rewritten, or the cached read below
+            # would pass on the files the first run wrote.
+            assert metrics["numFilesRemoved"] == len(before) >= 2
+            assert metrics["numFilesAdded"] == 1
+            after = set(deltalake.DeltaTable(str(log.parent)).file_uris())
+            assert len(after) == 1 and not after & before
+            rewritten.append(str(log.parent))
+    assert len(rewritten) == 1
     assert _run_labelled(tmp_path) == (0, expected)
 
 

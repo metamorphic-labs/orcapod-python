@@ -9,7 +9,6 @@ Category tag: ``"orcapod.dataclass"``
 
 from __future__ import annotations
 
-import dataclasses
 
 import orcapod.logical_types.user_class_identity as uci
 from orcapod.logical_types.user_class_logical_type import (
@@ -54,7 +53,3 @@ class DataclassLogicalTypeFactory(UserClassLogicalTypeFactory):
     kind = uci.KIND_DATACLASS
     category = DATACLASS_CATEGORY
     logical_type_class = DataclassLogicalType
-
-    def stored_field_names(self, python_type: type) -> list[str]:
-        """Return the names of the ``init=True`` dataclass fields, in class order."""
-        return [f.name for f in dataclasses.fields(python_type) if f.init]

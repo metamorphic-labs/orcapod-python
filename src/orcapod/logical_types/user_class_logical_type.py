@@ -19,7 +19,6 @@ Read path (``reconstruct_from_arrow``):
 from __future__ import annotations
 
 import logging
-import typing
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import RecursiveTypeError, TypeIdentityError
@@ -182,8 +181,7 @@ class UserClassLogicalType(BaseLogicalType):
 class UserClassLogicalTypeFactory:
     """Base factory for user-class logical types.
 
-    Subclasses set ``kind``, ``category`` and ``logical_type_class`` and implement
-    ``supports_class`` and ``stored_field_names``.
+    Subclasses set ``kind``, ``category`` and ``logical_type_class``.
     """
 
     kind: str = ""
@@ -193,10 +191,6 @@ class UserClassLogicalTypeFactory:
     def supports_class(self, python_type: type) -> bool:
         """Return True if this factory handles ``python_type``."""
         return uci.class_kind(python_type) == self.kind
-
-    def stored_field_names(self, python_type: type) -> list[str]:
-        """Return the names of the fields stored for ``python_type``, in class order."""
-        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Write path
@@ -240,9 +234,8 @@ class UserClassLogicalTypeFactory:
     ) -> tuple[dict[str, Any], pa.StructType, list[tuple[str, Any]]]:
         """Return the identity record, storage struct and field annotations of a class.
 
-        Does not register ``python_type`` itself (its field types are registered, as
-        their Arrow types are needed), so the read path can test a candidate class
-        without fixing its name.
+        Registers the field types (their Arrow types are needed), but not
+        ``python_type`` itself.
 
         Args:
             python_type: The class.
@@ -256,14 +249,14 @@ class UserClassLogicalTypeFactory:
             ValueError: If the type hints cannot be resolved.
             RecursiveTypeError: If the class refers back to itself, naming the path.
         """
-        hints = _type_hints(python_type)
+        hints = uci.type_hints(python_type)
 
         arrow_fields = []
         field_annotations: list[tuple[str, Any]] = []
         tokens: list[tuple[str, str]] = []
         # Declared order: it is part of the identity, and the storage struct follows
         # it, so one identity always has one struct.
-        for field_name in self.stored_field_names(python_type):
+        for field_name in uci.stored_field_names(python_type):
             annotation = hints.get(field_name, Any)
             try:
                 arrow_type = converter.register_python_class(annotation)
@@ -356,12 +349,11 @@ class UserClassLogicalTypeFactory:
                     _check_storage(lt, storage_type, record)
                     return lt
                 continue
-            # Not used yet in this process: test it without registering it, so a
-            # non-matching candidate keeps its freedom to be declared under a name.
+            # Not used yet in this process: test it without registering it or the
+            # classes it refers to, so a rejected candidate and its nested classes
+            # keep their freedom to be declared under a name.
             try:
-                candidate_record, _, _ = self._describe(
-                    cls, uci.resolve_name(cls), converter
-                )
+                candidate_record = uci.probe_record(cls, converter)
             except (TypeError, ValueError) as exc:
                 mismatches.append(
                     f"{cls.__module__}.{cls.__qualname__} (cannot be stored: {exc})"
@@ -398,14 +390,6 @@ def _describe_candidate(cls: type, record: dict[str, Any] | None) -> str:
     if record is None:
         return where
     return f"{where} as {uci.describe_record(record)}"
-
-
-def _type_hints(python_type: type) -> dict[str, Any]:
-    """Return the resolved type hints of a class, as ``ValueError`` on failure."""
-    try:
-        return typing.get_type_hints(python_type)
-    except Exception as exc:
-        raise ValueError(f"Cannot get type hints for {python_type!r}: {exc}") from exc
 
 
 def _check_storage(

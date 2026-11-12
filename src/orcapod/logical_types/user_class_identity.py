@@ -33,6 +33,7 @@ import weakref
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
+from orcapod.errors import RecursiveTypeError
 from orcapod.utils.canonical_type_names import canonical_type_name
 
 if TYPE_CHECKING:
@@ -92,6 +93,45 @@ def class_kind(cls: Any) -> str | None:
     if issubclass(cls, BaseModel):
         return KIND_PYDANTIC
     return None
+
+
+def stored_field_names(cls: type) -> list[str]:
+    """Return the names of the fields stored for a user class, in declared order.
+
+    Args:
+        cls: A dataclass or pydantic model class.
+
+    Returns:
+        The ``init=True`` fields of a dataclass, or the ``model_fields`` of a pydantic
+        model. Computed fields and private attributes are not stored.
+
+    Raises:
+        TypeError: If ``cls`` is not a dataclass or pydantic model class.
+    """
+    kind = class_kind(cls)
+    if kind == KIND_DATACLASS:
+        return [f.name for f in dataclasses.fields(cls) if f.init]
+    if kind == KIND_PYDANTIC:
+        return list(cls.model_fields)  # pyright: ignore[reportAttributeAccessIssue]  # class_kind guarantees a BaseModel subclass
+    raise TypeError(f"{cls!r} is not a dataclass or pydantic model class.")
+
+
+def type_hints(cls: type) -> dict[str, Any]:
+    """Return the resolved type hints of a class.
+
+    Args:
+        cls: A class.
+
+    Returns:
+        Field name to annotation, with ``Annotated`` extras stripped.
+
+    Raises:
+        ValueError: If the hints cannot be resolved.
+    """
+    try:
+        return typing.get_type_hints(cls)
+    except Exception as exc:
+        raise ValueError(f"Cannot get type hints for {cls!r}: {exc}") from exc
 
 
 def validate_name(name: str) -> None:
@@ -444,6 +484,45 @@ def describe_record(record: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def probe_record(
+    cls: type, converter: TypeConverterProtocol, _path: tuple[type, ...] = ()
+) -> dict[str, Any]:
+    """Return the identity record ``cls`` would be built with, without building it.
+
+    Neither ``cls`` nor any user class it refers to is registered or given a name, so
+    a class tested as a read candidate and rejected can still be declared under a name
+    afterwards. A user class already built in this process keeps its built identity.
+
+    Args:
+        cls: A dataclass or pydantic model class.
+        converter: The type converter that resolves the logical types of field types
+            that are not user classes.
+
+    Returns:
+        The identity record.
+
+    Raises:
+        TypeError: If ``cls`` is not a user class or a field type has no type token.
+        RecursiveTypeError: If the class refers back to itself.
+        ValueError: If the class is local or its type hints cannot be resolved.
+    """
+    kind = class_kind(cls)
+    if kind is None:
+        raise TypeError(f"{cls!r} is not a dataclass or pydantic model class.")
+    if cls in _path:
+        raise RecursiveTypeError(
+            " -> ".join(c.__qualname__ for c in (*_path[_path.index(cls) :], cls))
+        )
+    reject_local_class(cls)
+    hints = type_hints(cls)
+    path = (*_path, cls)
+    fields = [
+        (name, _type_token(hints.get(name, Any), converter, path))
+        for name in stored_field_names(cls)
+    ]
+    return identity_record(kind, _built.get(cls) or resolve_name(cls), fields)
+
+
 def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
     """Return the type token of a field annotation.
 
@@ -462,6 +541,29 @@ def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
     Raises:
         TypeError: If the annotation is not a type the token rules cover.
     """
+    return _type_token(annotation, converter, None)
+
+
+def _type_token(
+    annotation: Any,
+    converter: TypeConverterProtocol,
+    probing: tuple[type, ...] | None,
+) -> str:
+    """Return a type token; with ``probing``, without registering any user class.
+
+    Args:
+        annotation: A field annotation.
+        converter: The type converter that resolves logical types.
+        probing: ``None`` to register the classes found, as ``type_token`` does.
+            Otherwise the user classes being probed, outermost first: a user class is
+            then described by ``probe_record`` instead of being registered.
+
+    Returns:
+        The type token.
+
+    Raises:
+        TypeError: If the annotation is not a type the token rules cover.
+    """
     import types as _types
 
     if annotation is None or annotation is type(None):
@@ -469,15 +571,20 @@ def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
     if origin is typing.Union or origin is _types.UnionType:
-        members = [type_token(a, converter) for a in args]
+        members = [_type_token(a, converter, probing) for a in args]
         non_none = sorted(m for m in members if m != "None")
         return " | ".join(non_none + (["None"] if "None" in members else []))
     if origin is Literal:
         return f"Literal[{', '.join(sorted(repr(a) for a in args))}]"
     if origin is not None:
-        inner = ", ".join(type_token(a, converter) for a in args)
+        inner = ", ".join(_type_token(a, converter, probing) for a in args)
         return f"{_class_token(origin)}[{inner}]"
     if isinstance(annotation, type):
+        if probing is not None and class_kind(annotation) is not None:
+            built = _identity_of.get(annotation)
+            if built is not None:
+                return built
+            return identity_string(probe_record(annotation, converter, probing))
         _ = converter.register_python_class(annotation)  # raises for unsupported types
         lt = converter.get_logical_type_for_python_type(annotation)
         if lt is not None:

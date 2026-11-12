@@ -49,7 +49,3 @@ class PydanticLogicalTypeFactory(UserClassLogicalTypeFactory):
     kind = uci.KIND_PYDANTIC
     category = PYDANTIC_CATEGORY
     logical_type_class = PydanticLogicalType
-
-    def stored_field_names(self, python_type: type) -> list[str]:
-        """Return the names in ``model_fields``, in class order."""
-        return list(python_type.model_fields)  # pyright: ignore[reportAttributeAccessIssue]  # supports_class guarantees a BaseModel subclass
