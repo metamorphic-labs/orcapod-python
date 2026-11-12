@@ -1073,6 +1073,28 @@ The rule:
 | 8 | A logical type's value hash follows the same format; its implementer picks the label | **decided** |
 | 9 | Each label MUST be defined in a single place, and is listed in the data context file | **decided** |
 
+**Hash inputs that contain a label today** (rule 6 removes the label from each; the stored
+columns stay labelled). The first three were in the inventory; the last three were found by
+the ITL-945 worker, who traced every hash conversion while running the test suite:
+
+| Hash input | Where |
+|---|---|
+| a nested hash inside a structure (types, schemas, function identity, node identity) | structure hasher |
+| the generic, union and schema handlers | value handlers |
+| an extension-typed cell, `<extension name>::<label>:<digest>` | Arrow hasher |
+| the `__input_data_hash` column inside the entry-id table, which feeds `__pipeline_base_entry_id`, the pipeline row key and the side-effect log key | `function_node.py:119` |
+| the `__node_content_hash` column inside the row hashed for the operator-cache row key | operator node |
+| the run snapshot hash in the run URI, a SHA-256 over labelled strings | `job.py:862` |
+
+Implementation detail decided by the coordinator, to be confirmed by the developer: a nested
+hash enters its parent as a structurally tagged value carrying the digest and no label, not
+as a bare hex string, so that a hash and a string equal to its hex cannot be confused.
+
+Open on the label rule: (a) `ctx.invocation_hash`, a documented idempotency key of the form
+`<label>:<hex>::<label>:<hex>`: bare `<hex>::<hex>` as an identifier built from hashes, or
+unchanged; (b) rule 9: define each label once in code beside its algorithm, with the data
+context file naming the hasher and not repeating the label.
+
 ## Part 6. Paths before and after v0.3 (decided)
 
 No generation name is added to paths. A path changes when, and only when, the table's schema
