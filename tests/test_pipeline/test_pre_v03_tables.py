@@ -461,7 +461,19 @@ class TestStoreThatCannotListItsTables:
 
 def test_operator_cache_of_v02_is_not_replayed(root: Path):
     """The old operator cache is counted by the job; REPLAY finds no current rows."""
+    import deltalake
+
     from orcapod.types import CacheMode
+
+    # The cache v0.2 wrote is there and holds rows, so "not replayed" is not vacuous.
+    (old_cache,) = _table_under(root, JOB, "SelectDataColumns")
+    old_table = deltalake.DeltaTable(str(root.joinpath(*old_cache)))
+    assert old_table.to_pyarrow_dataset(as_large_types=True).count_rows() > 0
+    old_files = {
+        name: content
+        for name, content in _files(root).items()
+        if Path(name).parts[: len(old_cache)] == old_cache
+    }
 
     job = pods.build_job(
         DeltaTableDatabase(root),
@@ -473,3 +485,6 @@ def test_operator_cache_of_v02_is_not_replayed(root: Path):
     assert isinstance(job.nodes["select"]._operator, SelectDataColumns)  # noqa: SLF001  # the node under test
     records = job.nodes["select"].get_all_records()
     assert records is None or records.num_rows == 0
+    # The old cache is left byte for byte.
+    files = _files(root)
+    assert all(files[name] == content for name, content in old_files.items())

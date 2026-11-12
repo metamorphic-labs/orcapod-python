@@ -402,9 +402,10 @@ store, and it does not reuse those rows.
   would do everything a second time. Instead the node raises
   `SideEffectLogDataContextError` (from `orcapod.errors`, a `StoreError`), naming the
   tables, before it does anything. Every older table under the node's function or pod name
-  in the job counts. Use a fresh store for that node, or keep using the version that wrote
-  them. If the store cannot list its tables, the node warns that it could not check, and
-  runs.
+  in the job counts. Keep using the version that wrote them. A fresh store is not a safe
+  way around the error: it holds no completions, so on it the node performs every side
+  effect again; use one only when a repeated delivery is acceptable. If the store cannot
+  list its tables, the node warns that it could not check, and runs.
 
 Each result row also records the full version string of the function that produced it, in
 the column `__pf_var_function_version` (for example `v3.7`); only the major part is in the

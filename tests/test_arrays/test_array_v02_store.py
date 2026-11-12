@@ -101,11 +101,13 @@ def test_v02_rows_are_ignored_recomputed_and_kept(
     # Read through a newly built job: a Delta database object that read a table before
     # the run does not see the rows the run added to it (not specific to hash labels).
     stored = build_job(store)
-    doubled = {
-        t.as_dict()["k"]: d.as_dict()["y"]
+    rows = [
+        (t.as_dict()["k"], d.as_dict()["y"])
         for t, d in stored.nodes["double"].iter_data()
-    }
-    assert sorted(doubled) == sorted(ARRAYS)
+    ]
+    # Checked on the list: a dict would hide a row returned twice.
+    assert sorted(k for k, _ in rows) == sorted(ARRAYS)
+    doubled = dict(rows)
     for k, x in ARRAYS.items():
         assert doubled[k].dtype == x.dtype and np.array_equal(doubled[k], x * 2)
     for label in ("total", "direct_sum", "plus_one", "after_drop"):

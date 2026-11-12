@@ -25,6 +25,7 @@ from orcapod.errors import (
     StoreWriteError,
 )
 from orcapod.contexts.stored import (
+    StaleTables,
     account_for_stale_tables,
     find_stale_tables,
     require_same_data_context,
@@ -816,7 +817,7 @@ class SideEffectJobNode(SideEffectNode):
         )
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
-        self._log_contexts_checked = False
+        self._unlisted_store_reported = False
 
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse an invocation log holding deliveries of another data context.
@@ -827,18 +828,15 @@ class SideEffectJobNode(SideEffectNode):
         older table layout (written by Orcapod up to v0.2), and rows of another data
         context in the current log. An older log is looked for at this node's own
         path and, because the hash in the path can differ between versions, anywhere
-        under the pod's name in the store (ITL-954). Checked once per node instance
-        and attached database; the logs are only read.
+        under the pod's name in the store (ITL-954). Checked at the start of every
+        run, so a log that appears between two runs of one node object is found too;
+        the logs are only read.
 
         Raises:
             SideEffectLogDataContextError: If such deliveries are found; nothing has
                 been delivered or written then.
         """
-        if (
-            self._log_contexts_checked
-            or self._pipeline_database is None
-            or self._table_path is None
-        ):
+        if self._pipeline_database is None or self._table_path is None:
             return
         current = self._pod.data_context_key
         found = find_stale_tables(
@@ -851,6 +849,12 @@ class SideEffectJobNode(SideEffectNode):
             # ("side_effects", <pod name>): the part of the path that holds no hash.
             name_path=self.node_uri,
         )
+        if found.unlisted:
+            # The check runs before every run; that the store cannot list its tables
+            # is reported once per node object and attached database.
+            if self._unlisted_store_reported:
+                found = StaleTables(tables=found.tables)
+            self._unlisted_store_reported = True
         try:
             account_for_stale_tables(
                 found, delivers_side_effects=True, current_context=current
@@ -858,7 +862,6 @@ class SideEffectJobNode(SideEffectNode):
         except StoreError as exc:
             exc.add_context(node_label=self.label)
             raise
-        self._log_contexts_checked = True
 
     # ------------------------------------------------------------------
     # DB attachment
@@ -879,7 +882,7 @@ class SideEffectJobNode(SideEffectNode):
                 or ``None`` to detach.
         """
         self._pipeline_database = pipeline_database
-        self._log_contexts_checked = False
+        self._unlisted_store_reported = False
         if pipeline_database is not None:
             self._table_path = self.node_uri + (
                 f"schema:{self.pipeline_hash().to_hex()}",

@@ -198,6 +198,13 @@ class OperatorNodeBase(StreamBase):
 
     @property
     def data_context_key(self) -> str:
+        """Key of the node's data context.
+
+        A node loaded from a saved job without its operator (read-only) has the data
+        context saved in its descriptor.
+        """
+        if self._operator is None:
+            return self._data_context.context_key
         return self._operator.data_context_key
 
     @property

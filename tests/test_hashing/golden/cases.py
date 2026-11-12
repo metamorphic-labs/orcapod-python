@@ -684,7 +684,7 @@ def arrow_schema_hashes() -> dict[str, Any]:
 
 @case("arrow", "extension_schema")
 def arrow_extension_schema_hashes() -> dict[str, Any]:
-    # hash_schema hashes extension columns with their identity since ITL-910 (ITL-846).
+    """Schema hashes of extension columns, hashed with their identity (ITL-910, ITL-846)."""
     hasher = _ctx().arrow_hasher
     return {
         k: hasher.hash_schema(t.schema).to_string()
