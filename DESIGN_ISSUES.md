@@ -2543,5 +2543,5 @@ process or its spelling. Fixed, one commit each, every moved golden value listed
   inputs with one source identity count as one. Pinned by tests.
 - **R** (subclass hashing as its registered base, with fields dropped) is fixed by ITL-881.
 
-Open: **T**, a namedtuple's field order is not part of its hash (`Point(x=1, y=2)` and a
-namedtuple declared `(y, x)` holding `y=2, x=1` share a hash), awaiting the developer.
+- **T** a namedtuple's fields were sorted by name, so `Point(x=1, y=2)` and a namedtuple
+  declared `(y, x)` holding `y=2, x=1` shared a hash. **Fix:** fields in declared order.
