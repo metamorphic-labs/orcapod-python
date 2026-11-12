@@ -211,8 +211,8 @@ class TestFunctionNodeContentHashScope:
         assert path[-1].startswith("instance:"), (
             f"Expected instance:... got {path[-1]!r}"
         )
-        assert node.pipeline_hash().to_string() in path[-2]
-        assert node.content_hash().to_string() in path[-1]
+        assert node.pipeline_hash().to_hex() in path[-2]
+        assert node.content_hash().to_hex() in path[-1]
 
     def test_two_nodes_different_source_id_have_different_paths(self):
         """Different source_id → different content_hash → different node_identity_path."""
@@ -472,8 +472,8 @@ class TestOperatorNodeContentHashScope:
         assert path[-1].startswith("instance:"), (
             f"Expected instance:... got {path[-1]!r}"
         )
-        assert node.pipeline_hash().to_string() in path[-2]
-        assert node.content_hash().to_string() in path[-1]
+        assert node.pipeline_hash().to_hex() in path[-2]
+        assert node.content_hash().to_hex() in path[-1]
 
     def test_two_nodes_different_source_ids_have_different_paths(self):
         db = InMemoryArrowDatabase()

@@ -9,11 +9,13 @@ where they are, unchanged, until they are migrated.
 Two stored forms carry the label:
 
 - prefixed digests, ``b"<label>:<digest>"`` (for example ``b"arrow_v1:\\x00\\x00\\x02..."``),
-  in function-node pipeline and result tables and side-effect invocation logs;
-- hex digests without a label (``b"000002..."``), the record ids of operator-node and
-  cached-source tables. Every starfix digest starts with its 3-byte hash format number, so
-  the first six hex characters name the starfix hash format of the row. A later Arrow
-  label that keeps the starfix format could not be told apart in these tables.
+  in every table Orcapod v0.3 writes: function-node pipeline and result tables,
+  side-effect invocation logs, and (since ITL-945) the record ids of operator-node and
+  cached-source tables;
+- hex digests without a label (``b"000001..."``), the record ids of operator-node and
+  cached-source tables written by Orcapod v0.2. Every starfix digest starts with its
+  3-byte hash format number, so the first six hex characters name the starfix hash
+  format of the row.
 
 To list the labels a stored table holds::
 

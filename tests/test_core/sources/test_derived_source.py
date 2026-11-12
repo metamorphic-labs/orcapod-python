@@ -417,7 +417,7 @@ class TestDerivedSourceId:
     def test_source_id_contains_full_content_hash(self):
         node = _make_node(n=3)
         src = node.as_source()
-        full_hash = node.content_hash().to_string()
+        full_hash = node.content_hash().to_hex()
         assert full_hash in src.source_id
 
     def test_different_nodes_different_source_ids(self):

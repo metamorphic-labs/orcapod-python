@@ -91,7 +91,7 @@ class TestCachedSourceCachePath:
     def test_cache_path_contains_content_hash(self, simple_source, db):
         ps = CachedSource(simple_source, cache_database=db)
         path = ps.cache_path
-        content_hash_str = simple_source.content_hash().to_string()
+        content_hash_str = simple_source.content_hash().to_hex()
         assert any(content_hash_str in segment for segment in path)
 
     def test_cache_path_prefix(self, simple_source, db):

@@ -124,6 +124,20 @@ def _build_record_id_preimage(
     )
 
 
+def _bare_digest(hash_string: str) -> str:
+    """Return the bare hex digest of a stored ``"<label>:<hex>"`` hash string.
+
+    Args:
+        hash_string: A hash as stored in a saved job, or ``""`` when absent.
+
+    Returns:
+        The hex digest without its label, or ``""`` for an empty string.
+    """
+    if not hash_string:
+        return ""
+    return ContentHash.from_string(hash_string).to_hex()
+
+
 # Private meta-column name stamped into tags routed to the compute channel.
 # Carries the correlation key (bytes) that links an execution result back to
 # its original (tag, input_data) pair. Stripped from output tags in
@@ -1098,9 +1112,10 @@ class FunctionJobNode(FunctionNodeBase):
         # resolves to the correct DB path.  This mirrors the live computation:
         #   path = function_pod.uri + (f"schema:{pipeline_hash}",)
         # Since node_uri == function_pod.uri (same fields), we reconstruct it here.
+        # The descriptor stores hashes as labelled values; a path holds bare digests.
         pipeline_hash_str = descriptor.get("pipeline_hash", "")
         node._stored_pipeline_path = node._stored_node_uri + (
-            f"schema:{pipeline_hash_str}",
+            f"schema:{_bare_digest(pipeline_hash_str)}",
         )
         if raw_table_scope != "pipeline_hash":
             # Use _stored_content_hash (already set to job_content_hash when
@@ -1108,7 +1123,9 @@ class FunctionJobNode(FunctionNodeBase):
             # descriptor) so the instance fragment matches the DB path written
             # during the original run for table_scope="content_hash".
             content_hash_str = node._stored_content_hash or ""
-            node._stored_pipeline_path += (f"instance:{content_hash_str}",)
+            node._stored_pipeline_path += (
+                f"instance:{_bare_digest(content_hash_str)}",
+            )
 
         # FunctionJobNode — stream-level caching state
         node._cached_output_datas = {}

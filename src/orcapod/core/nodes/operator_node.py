@@ -35,7 +35,6 @@ from orcapod.errors import (
     StoreWriteError,
 )
 from orcapod.hashing.stored_hash_labels import (
-    current_hash_format,
     keep_rows_hashed_under,
     report_skipped_rows,
 )
@@ -851,14 +850,15 @@ class OperatorJobNode(OperatorNodeBase):
         record_hashes = []
         for batch in hashed_table.to_batches():
             for i in range(len(batch)):
+                # A hash stored as a value carries its label: b"<label>:<digest>".
                 record_hashes.append(
-                    arrow_hasher.hash_table(batch.slice(i, 1)).to_hex()
+                    arrow_hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
                 )
 
         output_table = output_table.add_column(
             0,
             self.HASH_COLUMN_NAME,
-            pa.array([h.encode() for h in record_hashes], type=pa.large_binary()),
+            pa.array(record_hashes, type=pa.large_binary()),
         )
 
         # Store — record IDs are run-scoped (NODE_CONTENT_HASH_COL is included in
@@ -888,12 +888,11 @@ class OperatorJobNode(OperatorNodeBase):
         """Read this node's stored rows that the current Arrow hasher wrote.
 
         Every read of the whole stored table goes through here. Rows are narrowed to
-        the starfix hash format of the current Arrow hasher and then to this node's
-        content hash (``_filter_by_content_hash``): the stored record hashes are hex
-        digests without a label, and their first three bytes name the format, so rows
-        written by Orcapod v0.2 (format 1, ``arrow_v0.1``) are left out and stay in
-        the table untouched (ITL-910). A later Arrow hash label that keeps the starfix
-        format could not be told apart here.
+        the label of the current Arrow hasher and then to this node's content hash
+        (``_filter_by_content_hash``): the stored record hashes are labelled digests
+        (``b"arrow_v1:..."``, ITL-945), so rows written under another label are left
+        out and stay in the table untouched (ITL-910). Rows written by Orcapod v0.2
+        hold a hex digest without a label and are left out as well.
 
         Returns:
             The stored rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL``
@@ -909,7 +908,7 @@ class OperatorJobNode(OperatorNodeBase):
         records = keep_rows_hashed_under(
             records,
             self.HASH_COLUMN_NAME,
-            current_hash_format(self.data_context.arrow_hasher),
+            self.data_context.arrow_hasher.hasher_id,
         )
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
             self._skipped_rows_reported = True

@@ -9,7 +9,6 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.hashing.stored_hash_labels import (
-    current_hash_format,
     keep_rows_hashed_under,
     report_skipped_rows,
 )
@@ -233,18 +232,19 @@ class CachedSource(RootSource):
         # their data columns but originate from different positions in the source
         # will have different record_ids and must be stored as distinct entries.
         arrow_hasher = self.data_context.arrow_hasher
-        record_hashes: list[str] = []
+        record_hashes: list[bytes] = []
         for batch in live_table.to_batches():
             for i in range(len(batch)):
+                # A hash stored as a value carries its label: b"<label>:<digest>".
                 record_hashes.append(
-                    arrow_hasher.hash_table(batch.slice(i, 1)).to_hex()
+                    arrow_hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
                 )
 
         # Store in DB with hash as record ID (skip_duplicates deduplicates)
         live_with_hash = live_table.add_column(
             0,
             self.HASH_COLUMN_NAME,
-            pa.array([h.encode() for h in record_hashes], type=pa.large_binary()),
+            pa.array(record_hashes, type=pa.large_binary()),
         )
         self._cache_database.add_records(
             self.cache_path,
@@ -258,10 +258,10 @@ class CachedSource(RootSource):
         """Read the cached rows that the current Arrow hasher wrote.
 
         Every read of the whole cache table goes through here. The cached record
-        hashes are hex digests without a label, and their first three bytes name the
-        starfix hash format, so rows cached by Orcapod v0.2 (format 1, ``arrow_v0.1``)
-        are left out and stay in the table untouched (ITL-910). A later Arrow hash
-        label that keeps the starfix format could not be told apart here.
+        hashes are labelled digests (``b"arrow_v1:..."``, ITL-945), so rows cached
+        under another label are left out and stay in the table untouched (ITL-910).
+        Rows cached by Orcapod v0.2 hold a hex digest without a label and are left
+        out as well.
 
         Returns:
             The cached rows without the record hash column, or ``None`` when the
@@ -276,7 +276,7 @@ class CachedSource(RootSource):
         records = keep_rows_hashed_under(
             records,
             self.HASH_COLUMN_NAME,
-            current_hash_format(self.data_context.arrow_hasher),
+            self.data_context.arrow_hasher.hasher_id,
         )
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
             self._skipped_rows_reported = True

@@ -450,8 +450,8 @@ class TestFromStreamNonRootSource:
     Both ``SourceNode.from_stream()`` and ``SourceJobNode.from_stream()`` fall
     through to the ``else`` branch when the stream is neither a ``SourceNode``
     nor a ``RootSource``.  The slot name must be built as
-    ``"{stream.label}:{stream.content_hash().to_string()}"`` where
-    ``to_string()`` returns the **full** hash (no truncation).
+    ``"{stream.label}:{stream.content_hash().to_hex()}"`` where
+    ``to_hex()`` returns the **full** bare digest (no truncation).
     """
 
     def _make_arrow_stream(self):
@@ -470,7 +470,7 @@ class TestFromStreamNonRootSource:
         stream = self._make_arrow_stream()
         node = SourceNode.from_stream(stream)
 
-        expected_name = f"{stream.label}:{stream.content_hash().to_string()}"
+        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
         assert node.name == expected_name
         # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
         assert len(stream.content_hash().to_hex()) == 64
@@ -482,7 +482,7 @@ class TestFromStreamNonRootSource:
         stream = self._make_arrow_stream()
         job_node = SourceJobNode.from_stream(stream)
 
-        expected_name = f"{stream.label}:{stream.content_hash().to_string()}"
+        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
         assert job_node.name == expected_name
         # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
         assert len(stream.content_hash().to_hex()) == 64
