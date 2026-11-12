@@ -143,7 +143,8 @@ Decision (developer "Go with A", coordinator approval 2026-11-12): REQUIRE the h
 - Changelog ITL-906: add Join's old fallback. PR body: signature uniform and why.
 
 ### Steps
-- [ ] Failing tests (`tests/test_core/operators/test_async_sync_equivalence.py`): each barrier
+- [x] Failing tests (`tests/test_core/operators/test_async_sync_equivalence.py`): each barrier
   operator + Join without hashes raises `TypeError`; wrong length raises `ValueError` naming both.
-- [ ] Implement; update direct test callers; design issue Fix note; changelog.
-- [ ] Full suite 3.12, 3.11, 3.13; ruff; basedpyright; merge origin/main; one push; reply.
+- [x] Implement; update direct test callers; design issue Fix note; changelog.
+- [x] Full suite 3.12, 3.11, 3.13 (10167 passed, 109 skipped, 22 xfailed each); ruff; basedpyright exit 0; merged origin/main (290889e8).
+- [ ] Push, PR body, reply on thread 4557365620, CodeRabbit on new head, CI green.
