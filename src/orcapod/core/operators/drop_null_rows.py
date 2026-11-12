@@ -167,23 +167,6 @@ class DropNullRows(UnaryOperator):
     # Execution
     # ------------------------------------------------------------------
 
-    def _valid_rows(self, table: pa.Table) -> pa.ChunkedArray[Any] | None:
-        """Return the mask of rows whose named columns present in ``table`` are all non-null.
-
-        Args:
-            table: A table holding some or all of the named columns.
-
-        Returns:
-            A boolean column, one value per row, or ``None`` when ``table``
-            holds none of the named columns (every row is kept).
-        """
-        mask = None
-        for name in self.columns:
-            if name in table.column_names:
-                valid = pc.is_valid(table.column(name))
-                mask = valid if mask is None else pc.and_(mask, valid)
-        return mask
-
     def _narrow_fields(self, table: pa.Table) -> pa.Table:
         """Flag the named columns present in ``table`` non-nullable.
 
@@ -227,7 +210,11 @@ class DropNullRows(UnaryOperator):
         Returns:
             The surviving rows, in order, with the named fields non-nullable.
         """
-        mask = self._valid_rows(table)
+        mask = None
+        for name in self.columns:
+            if name in table.column_names:
+                valid = pc.is_valid(table.column(name))
+                mask = valid if mask is None else pc.and_(mask, valid)
         if mask is not None:
             table = table.filter(mask)
         return self._narrow_fields(table)
