@@ -53,6 +53,30 @@ def counted_leading_names(df: pd.DataFrame) -> str:
     return leading
 
 
+_CONSUMER_CALLS: list[int] = []
+
+
+@function_pod(output_keys="df")
+def make_frame_storage_changes(n: int) -> pd.DataFrame:
+    """A frame storage reads back in another form: object ints, pyarrow strings, attrs."""
+    frame = pd.DataFrame(
+        {
+            "ints": pd.Series(list(range(n)), dtype=object),
+            "text": pd.array(["x"] * n, dtype="string[pyarrow]"),
+        },
+        index=pd.RangeIndex(n),
+    )
+    frame.attrs = {1: "one"}
+    return frame
+
+
+@function_pod(output_keys="total")
+def counted_total(df: pd.DataFrame) -> int:
+    """The sum of ``ints``, recording every call that actually computes."""
+    _CONSUMER_CALLS.append(len(df))
+    return int(df["ints"].sum())
+
+
 _STORES: dict[str, Callable[[Path], ArrowDatabaseProtocol]] = {
     "in_memory": lambda _: InMemoryArrowDatabase(),
     "delta": lambda tmp: DeltaTableDatabase(tmp / "delta"),
@@ -145,3 +169,26 @@ class TestPandasColumnOrder:
             )
         assert got == {"first": "a/i", "equal": "a/i", "reordered": "b/j"}
         assert _COUNTED_CALLS == ["a/i", "b/j"]
+
+    def test_frame_read_back_from_the_store_keeps_its_cache_key(
+        self, store_name: str, orchestrator_name: str, tmp_path: Path
+    ) -> None:
+        """A frame that storage reads back in another form is still a cache hit.
+
+        Run 1 hashes the frame the pod returned; run 2 hashes the frame read back from
+        the store (``object`` ints as ``int64``, ``string[pyarrow]`` as ``string[python]``,
+        ``attrs`` as JSON). The consumer must not compute again.
+        """
+        store = _STORES[store_name](tmp_path)
+        _CONSUMER_CALLS.clear()
+        totals: list[int] = []
+        for _ in range(2):
+            source = DictSource([{"k": "a", "n": 3}], tag_columns=["k"])
+            job = PipelineJob(name="pandas_storage_form", store=store)
+            with job:
+                frames = make_frame_storage_changes.pod(source, label="make")
+                counted_total.pod(frames, label="total")
+            job.run(orchestrator=_ORCHESTRATORS[orchestrator_name]())
+            totals += [data["total"] for _, data in job.nodes["total"].iter_data()]
+        assert totals == [3, 3]
+        assert _CONSUMER_CALLS == [3]

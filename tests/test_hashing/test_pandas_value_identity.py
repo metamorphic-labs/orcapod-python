@@ -13,6 +13,7 @@ goes through.
 from __future__ import annotations
 
 import datetime as dt
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -55,10 +56,16 @@ def _with_columns_name(df: pd.DataFrame, name: str) -> pd.DataFrame:
     return out
 
 
-def _with_attrs(value: Any) -> Any:
+def _with_attrs(value: Any, attrs: dict[Any, Any] | None = None) -> Any:
     out = value.copy()
-    out.attrs = {"unit": "mV"}
+    out.attrs = {"unit": "mV"} if attrs is None else attrs
     return out
+
+
+def _daily(freq: str | None) -> pd.DataFrame:
+    """Three daily rows; the index carries ``freq`` or not."""
+    index = pd.DatetimeIndex(["2020-01-01", "2020-01-02", "2020-01-03"], freq=freq)
+    return pd.DataFrame({"a": [1, 2, 3]}, index=index)
 
 
 def _categorical(categories: list[str], ordered: bool = False) -> pd.DataFrame:
@@ -183,20 +190,66 @@ EQUAL: dict[str, tuple[Any, Any]] = {
             {"a": [1, 2], "b": ["x", "y"]}, index=pd.Index([0, 1], dtype="int64")
         ),
     ),
-    "attrs": (_frame(), _with_attrs(_frame())),
+    "attrs not JSON": (_frame(), _with_attrs(_frame(), {"o": {1, 2}})),
+    "attrs key order": (
+        _with_attrs(_frame(), {"a": 1, "b": 2}),
+        _with_attrs(_frame(), {"b": 2, "a": 1}),
+    ),
+    "unused MultiIndex levels": (
+        _frame().set_index(_multi_index()),
+        pd.concat([_frame(), _frame()])
+        .set_index(
+            pd.MultiIndex.from_tuples(
+                [(0, "p"), (1, "q"), (2, "r"), (3, "s")], names=["i", "j"]
+            )
+        )
+        .iloc[:2],
+    ),
     "dict key order in an object column": (
         pd.DataFrame({"s": [{"u": 1, "v": "x"}]}),
         pd.DataFrame({"s": [{"v": "x", "u": 1}]}),
     ),
     "chunked copy": (_frame(), pd.concat([_frame().iloc[:1], _frame().iloc[1:]])),
-    "Series attrs": (pd.Series([1, 2]), _with_attrs(pd.Series([1, 2]))),
 }
 
 
 # Where the hash deliberately departs from pandas' assert functions: (pair, hashes equal).
 EXCEPTIONS: dict[str, tuple[tuple[Any, Any], bool]] = {
+    # Storage does not restore these, so they never count (pandas tells the pair apart).
     "flags": ((_frame(), _frame().set_flags(allows_duplicate_labels=False)), True),
+    "index freq": ((_daily("D"), _daily(None)), True),
+    "string storage": (
+        (
+            pd.DataFrame({"a": pd.array(["x", None], dtype="string[python]")}),
+            pd.DataFrame({"a": pd.array(["x", None], dtype="string[pyarrow]")}),
+        ),
+        True,
+    ),
+    "object ints vs int64": (
+        (
+            pd.DataFrame({"a": [1, 2]}),
+            pd.DataFrame({"a": pd.Series([1, 2], dtype=object)}),
+        ),
+        True,
+    ),
+    "object ints with None vs float64": (
+        (
+            pd.DataFrame({"a": [1.0, np.nan]}),
+            pd.DataFrame({"a": pd.Series([1, None], dtype=object)}),
+        ),
+        True,
+    ),
+    "object int index vs int64 index": (
+        (
+            pd.DataFrame({"a": [1, 2]}, index=pd.Index([5, 6], dtype="int64")),
+            pd.DataFrame({"a": [1, 2]}, index=pd.Index([5, 6], dtype=object)),
+        ),
+        True,
+    ),
+    # The hash is strict where pandas calls the pair equal.
     "-0.0 vs 0.0": ((pd.DataFrame({"a": [0.0]}), pd.DataFrame({"a": [-0.0]})), False),
+    "attrs": ((_frame(), _with_attrs(_frame())), False),
+    "Series attrs": ((pd.Series([1, 2]), _with_attrs(pd.Series([1, 2]))), False),
 }
 
 # The identity property (``PANDAS_IDENTITY_PROPERTIES``) each pair above exercises.
@@ -235,6 +288,13 @@ PROPERTY_OF_PAIR: dict[str, str] = {
     "RangeIndex vs Index[int64]": "index_kind",
     "attrs": "attrs",
     "Series attrs": "attrs",
+    "attrs not JSON": "attrs_not_json",
+    "index freq": "index_freq",
+    "unused MultiIndex levels": "index_unused_levels",
+    "string storage": "string_storage",
+    "object ints vs int64": "object_dtype",
+    "object ints with None vs float64": "object_dtype",
+    "object int index vs int64 index": "object_dtype",
     "dict key order in an object column": "dict_key_order",
     "flags": "flags",
     "-0.0 vs 0.0": "signed_zero",
@@ -288,21 +348,32 @@ class TestIdentityProperties:
         assert len(declared) == len(PANDAS_IDENTITY_PROPERTIES)
         assert set(PROPERTY_OF_PAIR.values()) == set(declared)
         for name, (first, second) in self._pairs().items():
-            if name not in PROPERTY_OF_PAIR:  # "copy", "reordered back", "chunked copy"
+            if (
+                name not in PROPERTY_OF_PAIR
+            ):  # "copy", "chunked copy", "attrs key order"
                 continue
             differs = _hash(first) != _hash(second)
             assert differs == declared[PROPERTY_OF_PAIR[name]], name
 
     @pytest.mark.parametrize("name", list(EXCEPTIONS))
     def test_exceptions_to_pandas_equality(self, name: str) -> None:
-        """``flags`` hashes equal though pandas differs; ``-0.0`` the other way round."""
+        """What storage does not restore hashes equal though pandas differs; ``-0.0`` and
+        ``attrs`` hash apart though pandas calls the values equal.
+        """
         (first, second), hashes_equal = EXCEPTIONS[name]
         assert (_hash(first) == _hash(second)) == hashes_equal
         if hashes_equal:
             with pytest.raises(AssertionError):
-                assert_frame_equal(first, second)
+                _assert_fn(first)(first, second)
         else:
-            assert_frame_equal(first, second)
+            _assert_fn(first)(first, second)
+
+    def test_only_identity_properties_are_options(self) -> None:
+        from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
+
+        options = {p.name for p in PANDAS_IDENTITY_PROPERTIES if p.option}
+        assert options == {"column_order", "struct_field_order", "series_name", "attrs"}
+        assert all(p.identity for p in PANDAS_IDENTITY_PROPERTIES if p.option)
 
     def test_carrier_is_stated_exactly_for_identity_properties(self) -> None:
         from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
@@ -380,6 +451,94 @@ class TestStorage:
         assert _hash(back) == _hash(value)
 
 
+def _object(values: list[Any]) -> pd.Series:
+    return pd.Series(values, dtype=object)
+
+
+# Values storage reads back in another form: the hash is the hash of that form.
+CHANGED_BY_STORAGE: dict[str, Any] = {
+    "string[pyarrow]": pd.DataFrame(
+        {"a": pd.array(["x", None], dtype="string[pyarrow]")}
+    ),
+    "object ints": pd.DataFrame({"a": _object([1, 2])}),
+    "object ints with None": pd.DataFrame({"a": _object([1, None])}),
+    "object floats": pd.DataFrame({"a": _object([1.5, None])}),
+    "object bools": pd.DataFrame({"a": _object([True, False])}),
+    "object datetimes": pd.DataFrame({"a": _object([dt.datetime(2020, 1, 1)])}),
+    "object timedeltas": pd.DataFrame({"a": _object([dt.timedelta(days=1)])}),
+    "object int index": pd.DataFrame(
+        {"a": [1, 2]}, index=pd.Index([5, 6], dtype=object)
+    ),
+    "RangeIndex with a step": pd.DataFrame({"a": [1, 2]}, index=pd.RangeIndex(5, 9, 2)),
+    "index freq": _daily("D"),
+    "flags": _frame().set_flags(allows_duplicate_labels=False),
+    "unused MultiIndex levels": EQUAL["unused MultiIndex levels"][1],
+    "attrs read back as JSON": _with_attrs(_frame(), {1: "x", "t": (1, 2)}),
+    "attrs not JSON": _with_attrs(_frame(), {"o": {1, 2}}),
+    "Series string[pyarrow]": pd.Series(
+        pd.array(["x"], dtype="string[pyarrow]"), name="s"
+    ),
+    "Series object ints with None": pd.Series([1, None], dtype=object, name="s"),
+    "Series attrs read back as JSON": _with_attrs(pd.Series([1, 2]), {1: "x"}),
+}
+
+# ``object`` columns that read back as ``object``: hashed as they are.
+OBJECT_KEPT_BY_STORAGE: dict[str, pd.DataFrame] = {
+    "strings with None": pd.DataFrame({"a": _object(["x", None])}),
+    "bools with None": pd.DataFrame({"a": _object([True, None])}),
+    "bytes": pd.DataFrame({"a": _object([b"x", b"y"])}),
+    "dates": pd.DataFrame({"a": _object([dt.date(2020, 1, 1)])}),
+    "dicts": pd.DataFrame({"a": _object([{"v": 1, "u": 2}])}),
+    "lists": pd.DataFrame({"a": _object([[1, 2], [3]])}),
+}
+
+
+def _stored_and_read(value: Any) -> Any:
+    """``value`` after the storage round trip of its logical type (public methods)."""
+    logical = (
+        LogicalPandasSeries()
+        if isinstance(value, pd.Series)
+        else LogicalPandasDataFrame()
+    )
+    with warnings.catch_warnings():
+        # pyarrow warns that attrs it cannot write as JSON are dropped.
+        warnings.simplefilter("ignore", UserWarning)
+        return logical.storage_to_python(logical.python_to_storage(value))
+
+
+class TestHashOfWhatStorageRestores:
+    """``hash(read(write(v))) == hash(v)``, also where storage changes the value."""
+
+    @pytest.mark.parametrize("name", list(CHANGED_BY_STORAGE))
+    def test_value_changed_by_storage_keeps_its_hash(self, name: str) -> None:
+        value = CHANGED_BY_STORAGE[name]
+        back = _stored_and_read(value)
+        # Precondition: the round trip does change something pandas can see.
+        with pytest.raises(AssertionError):
+            _assert_fn(value)(back, value)
+            assert back.attrs == value.attrs
+            assert back.flags == value.flags
+            assert type(back.index) is type(value.index)
+            if isinstance(value.index, pd.MultiIndex):
+                assert list(back.index.levels[0]) == list(value.index.levels[0])
+        assert _hash(back) == _hash(value)
+        # And the form storage restores is stable under a second round trip.
+        assert _hash(_stored_and_read(back)) == _hash(back)
+
+    @pytest.mark.parametrize("name", list(OBJECT_KEPT_BY_STORAGE))
+    def test_object_column_kept_by_storage_keeps_its_hash(self, name: str) -> None:
+        value = OBJECT_KEPT_BY_STORAGE[name]
+        back = _stored_and_read(value)
+        assert back["a"].dtype == object
+        assert _hash(back) == _hash(value)
+
+    def test_object_strings_still_differ_from_string_dtype(self) -> None:
+        """Both read back as they are, so the dtype stays part of the hash."""
+        assert _hash(pd.DataFrame({"a": ["x"]})) != _hash(
+            pd.DataFrame({"a": pd.array(["x"], dtype="string")})
+        )
+
+
 class TestDescriptorGrammar:
     """Pins of the descriptor grammar.
 
@@ -398,6 +557,7 @@ class TestDescriptorGrammar:
         assert pandas_frame_descriptor(frame) == {
             "kind": "orcapod.pandas.dataframe",
             "height": 2,
+            "attrs": {},
             "columns": [
                 [{"int": 0}, {"masked": "Int64"}],
                 [
@@ -425,8 +585,9 @@ class TestDescriptorGrammar:
         assert pandas_series_descriptor(series) == {
             "kind": "orcapod.pandas.series",
             "height": 2,
+            "attrs": {},
             "name": {"tuple": ["a", {"int": 1}]},
-            "dtype": {"string": "python"},
+            "dtype": "string",
             "index": [
                 ["i", {"numpy": "int64"}],
                 [None, {"numpy": "float64"}],
@@ -462,9 +623,9 @@ class TestDescriptorGrammar:
         assert pandas_dtype_descriptor(pd.DatetimeTZDtype("ns", "UTC")) == {
             "datetimetz": ["ns", "UTC"]
         }
-        assert pandas_dtype_descriptor(pd.StringDtype("pyarrow")) == {
-            "string": "pyarrow"
-        }
+        # The storage of a string dtype is not restored by storage, so it is not a term.
+        assert pandas_dtype_descriptor(pd.StringDtype("pyarrow")) == "string"
+        assert pandas_dtype_descriptor(pd.StringDtype("python")) == "string"
         assert pandas_dtype_descriptor(pd.BooleanDtype()) == {"masked": "boolean"}
         assert pandas_dtype_descriptor(pd.PeriodDtype("M")) == {"period": "M"}
         assert pandas_dtype_descriptor(pd.PeriodDtype("Q")) == {"period": "Q-DEC"}
