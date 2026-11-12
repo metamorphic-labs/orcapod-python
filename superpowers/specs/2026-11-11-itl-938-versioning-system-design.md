@@ -857,29 +857,48 @@ change of S. Measured on a pipeline `array source -> size -> inc`, v0.2.0 agains
 | pipeline table of `inc`, one step further down | no | same rename | moves (`…7d689f45…` -> `…67de61d1…`) |
 | result table of `inc` (`n: int -> m: int`) | no | none | **stays**, results reused |
 
-### 5.2 The changes between v0.2 and v0.3, run through the logic
+### 5.2 Every change from the old version to v0.3: what changed, where it shows, how to migrate
 
-Measured: for a pipeline that holds only integers (the probe pipeline), the store written by
-v0.2.0 and the store written by main are **identical**: same paths, same column names and
-types, same hash values. On the ITL-910 branch only the Arrow-hashed values differ.
+**Baseline.** The old deployed version is `nauticalab/orcapod-python` at `61d0f18` with starfix
+0.4.0. That commit is contained in the tag `v0.2.0` (which adds only release documentation),
+so `v0.2.0` was used as the baseline. **Target.** `main` at `d61e3e39` plus the open pull
+requests expected in v0.3.
 
-| Change | S | M | Row values | Derived outcome | What the code does |
+**Method.** One script builds a source and a function node for each kind of column and prints
+the stored type, the row data hashes, the schema and pipeline hashes, and the system-tag
+columns of a join and a batch. It was run on `v0.2.0`, on `main`, and on snapshots of PR #309
+(ITL-910), PR #292 and PR #301.
+
+**Result in one table.** "same" means byte-identical between `v0.2.0` and the version named.
+
+| Column kind | `main` | + PR #309 starfix 0.5 | + PR #292 class identity | + PR #301 dict order |
+|---|---|---|---|---|
+| `int`, `str`, `float`, `bool`, `int \| None`, `list[int]`, nested list, `Path`, `File`, `DataFrame` | same: type, hashes, paths | row data hash only: `arrow_v0.1:000001\|8065521a…` becomes `arrow_v0.2:000002\|5682a627…` | same | same |
+| `dict[str,int]` | same | row data hash only | same | row data hash of a dict written in another key order: `…63b89b7a…` becomes `…33a846ce…` (equal to the same dict in sorted order) |
+| `numpy.ndarray` | **stored type** `numpy.ndarray` over `large_binary` becomes `orcapod.ndarray` over `struct<dtype, shape, data>`; row hash `…45f0d32e…` becomes `…a1920ba5…`; schema hash `21afcd86` becomes `3c83b899`; function output-schema hash `67e09e1a` becomes `272e93f6`; all paths of such nodes move | row data hash label and value | — | — |
+| dataclass, pydantic model | same | row data hash only | **logical type name** `inv_models.Point` becomes `inv_models.Point@1a18cd5e…` (storage `struct<x, y>` unchanged); row hash `…16134b5a…` becomes `…07101202…`; schema hash `90a5ffbb` becomes `9fbb8279`; output-schema hash `0c513ac2` becomes `aa6490d2`; all paths of such nodes move | same |
+| default `source_id` (no id given) | same | `000001883080…` becomes `00000243d6b9…`; the source's content hash `d8eb49fa` becomes `5b6ae6d2` | same | same |
+| system-tag column names and types, join and batch pipeline hashes, folded values, source-info tokens | same | same | same | same |
+| table layout (`pdb_v1`, `rdb_v1`), path grammar, bookkeeping columns | same | same | same | same |
+
+**Change by change.**
+
+| # | Change | What changed | Where it shows | Outcome by the logic of 5.1 | Migration |
 |---|---|---|---|---|---|
-| Array format (ITL-888): stored type `large_binary` becomes `struct<dtype, shape, data>`; type name `numpy.ndarray` becomes `orcapod.ndarray` | changes for every table with an array column, and (through system-tag names) for every pipeline table downstream of an array source | no | — | new path for those tables; other tables untouched | matches |
-| starfix 0.5 (ITL-910): Arrow hash algorithm | no | no | every Arrow-hashed key value | **same path**; rows told apart by the label `arrow_v0.1:` / `arrow_v0.2:` in the values | path: matches. On meeting old rows the branch raises `StoreHashLabelError` |
-| Polars filter predicates become hashable (ITL-828) | — | — | — | nothing existing moves: on v0.2.0 a predicate filter could not be hashed at all (`TypeError`) | matches |
-| User class identity (PR #292): a dataclass column's extension name becomes `Point@<fingerprint>` | changes for tables with such columns and downstream pipeline tables | no | — | new path for those tables | expected to match (the type name changes) |
-| SpiralDB nullability metadata (PR #308) | changes for Spiral tables that gain it | no | — | new path | per ITL-936 |
-| New value types (torch, Polars values) | none for existing tables | no | — | nothing moves | — |
-| Dict and set ordering in structure hashes (PR #301), pandas and Arrow-table value hashes (ITL-897), the wrong-hash fixes of A.9 | only where a moved hash sits in a column name | no | key values | same path unless a column name moves; needs a distinguishing value | no marker today for most of these |
-| Operator fixes (SemiJoin on nested columns, ITL-847) | no | no | which rows are emitted | same path | same path; nothing recorded |
+| 1 | Array format (ITL-888, merged) | arrays stored as a value-based struct, not `.npy` bytes; hashed by value | stored column type and logical type name; value-hash label `sha256` becomes `ndarray_v1`; row data hashes; schema, output-schema and pipeline hashes; system-tag column names downstream; result and pipeline table paths | schema changes: new path for every table with an array column and every pipeline table downstream | **Possible from the old store alone.** Read the old table at its old path (the old path is computable: same structure hasher, old type name), decode the `.npy` bytes, write the struct, recompute keys. Not for values v0.3 refuses: a masked array's mask was dropped silently on write, so the stored value is already not what the user had |
+| 2 | starfix 0.5 (ITL-910, PR #309) | the Arrow hash algorithm. Format 1 lost information: nested-list lengths, a null struct versus a struct of nulls, booleans (also chunk-dependent) | label and prefix of every Arrow-hashed value: `__input_data_hash`, `__output_data_hash`, `__pipeline_base_entry_id`, the pipeline row key; bare default `source_id` and what derives from it (record ids, `_tag_source_id` values, `_source_` tokens, the source's content hash, content-scoped and cached-source paths) | values only: same path; old and new rows share the table, told apart by the label | **Possible when the inputs can be obtained again** (sources still available, or upstream results in the store). A key is the hash of an *input*, and a function's tables do not store its inputs. Procedure: re-derive each input row, match the old row by its tags (the developer's decision of November 11), write a new pipeline row with the new key pointing at the existing result, and a result row keyed by the new input hash. **Not blindly safe for inputs that hold nested lists, nullable structs or booleans:** under format 1 two different inputs could share one key, so an old row may point at the result of a different input. Detectable during migration: if two old rows shared an input hash and their re-derived inputs get different new hashes, the later one must be recomputed |
+| 3 | Polars filter predicates (ITL-828, merged) | a predicate becomes hashable | new values only (`polars_expr_v1`) | nothing existing moves: `v0.2.0` raised `TypeError` for a predicate filter; a filter by `constraints` is unchanged (`98590003` on both) | Nothing to migrate |
+| 4 | User class identity (PR #292) | a dataclass or pydantic column's logical type name gains a fingerprint of the class's fields | logical type name in the stored column; row data hashes (the name is part of the hashed cell); schema, output-schema and pipeline hashes; system-tag column names downstream; table paths | schema changes (the logical type is part of the data type): new path | **Possible with the user's class definition.** The stored struct is unchanged; rows are copied under the new type name and re-keyed. The fingerprint comes from the current class, so the class must still match the stored fields; a class that changed since cannot be matched |
+| 5 | Dict and set order (PR #301) | equal dicts and sets hash the same whatever their insertion order | row data hashes of rows holding a dict or set written in a non-sorted order; no label of its own | values only: same path. Told apart only because the Arrow label moves in the same release | **Possible.** Under the old rule equal values could have several keys, never the reverse, so no result is attached to the wrong input. Re-key; where two old rows collapse to one key, keep one |
+| 6 | Spiral nullability (PR #308) | Spiral tables record which columns are non-nullable | table metadata `__orcapod_nullability__`; for a Spiral source, column types `int \| None` become `int`, so schema hashes and paths | schema changes for those tables: new path | A table without the metadata reads as before; one that gains it is a new schema |
+| 7 | New value types (PR #300 torch, PR #286 Polars values) | new logical types | new type names and labels | nothing existing moves | Nothing to migrate |
+| 8 | Wrong-hash fixes (ITL-942, in progress) | fold separator; nested nullability hashed consistently; process-independent set hashing; column-selection arguments normalised; unordered inputs no longer collapsed by `source_id`; record-id type; default version | per fix: folded `_tag_source_id` values after Batch or GroupBy; row hashes of nested columns; pipeline hashes and paths of nodes after a column selection or a merge join | mostly values; a few are a pure rename of the path (same schema, same subject) | Per fix. A rename is migratable by moving the table (the old path is computable). The fold collision and the collapsed inputs could have attached one identity to two different things; affected rows are recomputed |
+| 9 | Behaviour fixes (merged: ITL-884, ITL-878, ITL-847/829; open: PR #299, PR #293) | Delta refuses a changed column type instead of casting silently; a failed store write fails the run; SemiJoin handles nested columns; outputs must match the declared type; Delta reads return every row | no hash, label, type or path | nothing moves | No migration. Old stores may hold values written under the old behaviour (a silently cast column, an output that did not match its declared type); these cannot be told apart from correct rows by anything stored |
 
 **Conclusion.** The logic does not give v0.3 a distinct path everywhere. It gives a new path
 exactly to the tables whose schema changed (arrays, user classes, Spiral nullability, and
 their downstream pipeline tables). Every other table is shared by v0.2 and v0.3 rows, which
 differ in the Arrow-hashed key values and are told apart by the label inside those values.
-A generation name added to every path would separate tables whose schema and subject did not
-change.
 
 ### 5.3 Where today's paths are not a faithful function of S and M
 
@@ -892,9 +911,22 @@ change.
 | Neither S nor M changes, path moves | any change to how a structure hash is computed for an unchanged structure: the table is the same table under a new name | F2 |
 | M changes, path does not | two unordered inputs with the same `source_id` collapse | A.9 E |
 
-## Part 6. Generation names in paths (to be decided)
+## Part 6. Generation names in paths (decided: none)
 
-_Filled in during the discussion._
+No generation name is added to paths. The developer's question of November 11 ("Should we
+think about having explicit name so that we have path change everywhere for v0.3?") is
+answered by the logic of Part 5: a path changes when, and only when, the table's schema or
+subject changes. Path layout before and after v0.3 is therefore the same:
+
+```
+<job>/<function name>/<output-schema hash>/v<major>/<wrapper kind>/schema:<pipeline hash>/pdb_v1
+<job>/_result/<function name>/<output-schema hash>/v<major>/<wrapper kind>/rdb_v1
+```
+
+**On meeting rows of an older value-level generation** (decided November 11, 2026): v0.3 does
+not fail. It writes and uses `arrow_v0.2` rows; `arrow_v0.1` rows stay in the same table,
+untouched and distinguishable by the label in their values, so that they can be migrated
+later. A read of a whole table must use rows of the current label only.
 
 ## Part 7. Before the v0.3 tag, and after (to be decided)
 
@@ -929,6 +961,10 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **Function major version stays in the path.** "Function major version must stay in the path as that's one big handle that we are giving to the user to explicitly say that function has shifted dramatically enough that it won't make sense for the results to stay within a shared table even if everything else looks the same." |
 | Nov 11, 2026 | **Wrong-hash findings (A.9) are fixed before the v0.3 tag.** "I want all of these to be addressed before v0.3 tag as much as possible." |
 | Nov 11, 2026 | **A distinct path needs a reason from the nature of the change.** "Typically we want to have things into completely distinct path if the schema changed, OR if what's meant by the table content, even if schema is the same, is fundamentally changed. Otherwise, the two distinct entries could have simply been kept inside a same path (and thus same table) but with one of the columns being sure to change to capture the different version." The system must be able to say, for the changes from v0.2 to v0.3, if and how the path or the table schema changes and why (Part 5). |
+| Nov 11, 2026 | **v0.3 does not fail on `arrow_v0.1` rows** (reverses the earlier decision of the same day). "Looking back, I don't think it'd make sense for the branch to raise an error when it meets old rows from arrow_v0.1. As long as just store and make use of arrow_v0.2, then it's ok that arrow_v0.1-based values are present next arrow_v0.2. I do want to make sure that we COULD perform migration from arrow_v0.1-based entries into arrow_v0.2-based entries down the line." And: "For value only changes such as starfix, I think it'd make sense to NOT fail but still be possible/completely clear to distinguish old vs new entries." |
+| Nov 11, 2026 | **The logical type is part of the data type.** "Logical data type is absolutely part of the data type -- even if underlying representation technically didn't change, if extension type changed, it should generally be considered to have migrated in data type. Change in logical / extension metadata should be seen as changing schema just as much as actually changing the data type in arrow." |
+| Nov 11, 2026 | **What a label is for.** "I'm generally not convinced yet of the need for all hashes to be prefixed with operator/data type specific prefix. I think what's critical is that we have confidence that hash would change if what it identifies had changed. Label may help to make WHY something changed more obvious OR sometime label change is necessary to ensure we don't accidentally collide in hash when we don't have a guarantee that hash would be of different values when it ought to be ... its need heavily depends on what we want to be able to 'easily' identify as the source of change just by looking at the hash string and to much lesser extent, whether we need to further guarantee that hash would change." |
+| Nov 11, 2026 | Operator behaviour changes: leaning to record nothing (treat like upstream data changing); to be confirmed with concrete examples. Which value tells generations apart: leaning to labels plus a per-row rules name; to be confirmed with concrete examples. |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
 Open questions for the developer:
