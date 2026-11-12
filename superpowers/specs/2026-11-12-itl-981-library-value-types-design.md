@@ -317,3 +317,37 @@ What the rename touches:
    stores them.
 4. Metadata key order: sorted keys, `{"ignore":[...],"version":1}` (proposed), so that
    `json.dumps(sort_keys=True)` reproduces it; the brief sketched version first.
+
+## (viii) Scoping: storage type inside the Arrow schema hash (not part of ITL-981 unless decided)
+
+Question from the coordinator: `StarfixArrowHasher.hash_schema` hashes a logical-type field
+as its storage type plus the `ARROW:extension:*` keys, so that hash depends on the storage
+type. Should a logical-type field be hashed as a fixed placeholder plus name and metadata?
+
+Findings (read from the code and measured on main):
+
+- No library code calls `hash_schema` (the only match under `src/` is its definition). It is
+  reached only by tests and by 47 golden values in `arrow.json` (`schema.*`, 42 plain;
+  `extension_schema.extension.*`, 5).
+- Every schema or type hash Orcapod stores or embeds goes through the semantic hasher over
+  Python types: the schema hash (Site 3) and the system tag column names built from it, the
+  type hash, the pipeline hash and the paths built from it, the function signature. There a
+  logical type contributes its identifier text only (`canonical_annotation_str`,
+  `TypeObjectHandler`): name and metadata, never the storage type.
+- `hash_table` (default source ids, row and datagram hashes) hashes a value-hashed column as
+  `large_binary` plus the keys, also with zero rows (ITL-967): already independent of
+  storage. Value-hashed today: UUID, File, Directory, ndarray, pandas DataFrame and Series,
+  and `list` / `set` of them.
+- Types without a value handler (Path, UPath, dataclass, pydantic, structural classes,
+  lists of them, unregistered extension types) are hashed in `hash_table` as their stored
+  values under the storage type. For them the stored struct is the value, so the storage
+  type must stay in the hash.
+
+So no stored or embedded hash depends on a value-hashed type's storage type today; only the
+unused public method does. If it is to be made consistent, the change is to give
+`hash_schema` the same field rule as `hash_table` (`SemanticHashingVisitor.hashed_field`):
+about 10 lines, one test, and golden moves limited to `arrow.json`
+`extension_schema.extension.*` entries of value-hashed types whose storage is not already
+`large_binary` (none of the five there today: `uuid` is `large_binary`, `path` has no value
+handler). Recommendation: not needed for the tag; leave it to ITL-980, or take the
+10-line alignment in ITL-981 if the developer wants the public method consistent.
