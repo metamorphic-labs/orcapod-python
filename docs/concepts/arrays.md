@@ -32,6 +32,9 @@ for tag, data in scale.pod(source).iter_data():
     new tables in v0.3. Because v0.3 also changed every hash of Arrow data, v0.3 reuses no
     result of a store written by v0.2: it ignores the v0.2 rows and computes every input
     again (see [A store written by an older version](function-pods.md#a-store-written-by-an-older-version)).
+    Nodes that perform side effects are the exception: a side-effect pod, or a function pod
+    that takes the invocation context, does not run again on such a store but raises
+    `SideEffectLogDataContextError` before it delivers anything.
     The v0.2 tables and rows stay on disk unchanged, readable with v0.2. A migration is
     planned after v0.3 (ITL-889).
 

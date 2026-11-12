@@ -26,6 +26,11 @@ ITL-938 design session: v0.3 does not refuse a v0.2 store. It ignores rows hashe
 `arrow_v0.1`, computes every input again under `arrow_v0.2`, and leaves the old rows in place,
 unchanged and distinguishable, for a later migration (ITL-913, ITL-914).
 
+(Superseded before v0.3 was tagged: the label-based read filter described in the next two
+paragraphs, `stored_hash_labels` and `SideEffectLogHashLabelError` were replaced by the data
+context column and the table layouts, see DC1, ITL-944, and DC2, ITL-954. The text is kept
+as the record of what ITL-910 first did.)
+
 Key lookups cannot match a row of another label. Every read of a whole table drops the rows
 of another label through one function, `hashing/stored_hash_labels.keep_rows_hashed_under`
 (without it: 4 rows for 2 inputs): `FunctionJobNode._fetch_joined_records` (phase 1,

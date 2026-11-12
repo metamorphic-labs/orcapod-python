@@ -21,11 +21,10 @@ the path, up to the name of the function or pod, holds no hash: the tables under
 are listed (``list_table_paths``), and a table whose last path component is not one of
 the current layouts (``CURRENT_LAYOUTS``) was written before v0.3 (ITL-954).
 
-To list the data contexts a stored table holds::
-
-    from orcapod.contexts import stored_data_contexts
-
-    stored_data_contexts(store, record_path)  # {"std:v1:default": 3}
+Example:
+    To list the data contexts a stored table holds, call
+    ``stored_data_contexts(store, record_path)`` (from ``orcapod.contexts``); it
+    returns, for example, ``{"std:v1:default": 3}``.
 """
 
 from __future__ import annotations
