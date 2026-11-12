@@ -230,6 +230,25 @@ class TestNestedDicts:
         second = Holder("h", {"b": 2, "a": 1})
         assert _row_hash(first, Holder) == _row_hash(second, Holder)
 
+    def test_dataclass_dict_storage_is_canonical_but_fresh_object_is_unchanged(self):
+        """User objects keep their dict order; stored and read-back values are canonical."""
+        original = Holder("h", {"b": 2, "a": 1})
+        # Registered dataclasses work at runtime but are absent from DataValue's union.
+        fresh_values: dict[str, Any] = {"m": original}
+        ordered_values: dict[str, Any] = {"m": Holder("h", {"a": 1, "b": 2})}
+        fresh = Datagram(fresh_values, python_schema={"m": Holder})
+        ordered = Datagram(ordered_values, python_schema={"m": Holder})
+        assert fresh.as_dict()["m"] is original
+        assert list(original.counts) == ["b", "a"]
+        assert fresh.content_hash() == ordered.content_hash()
+        assert fresh.as_table().equals(ordered.as_table())
+
+        restored = Datagram(fresh.as_table()).as_dict()["m"]
+        assert isinstance(restored, Holder)
+        assert list(restored.counts) == ["a", "b"]
+        assert restored == original
+        assert list(original.counts) == ["b", "a"]
+
 
 # ---------------------------------------------------------------------------
 # Arrow tables that already hold key/value lists
@@ -347,6 +366,28 @@ class TestFunctionPodDictOutputs:
 class TestDatagramColumnUpdates:
     """``update`` and ``with_columns`` hold dict values in canonical key order."""
 
+    @pytest.mark.parametrize("operation", ["update", "with_columns"])
+    def test_arrow_backed_dict_write_keeps_schema_and_canonical_order(
+        self, operation: str
+    ):
+        """Dict writes through a known Arrow field retain its schema and canonical keys."""
+        original = Datagram({"m": {"a": 1}}, python_schema={"m": dict[str, int]})
+        field = original.as_table().schema.field("m")
+        value = {"b": 2, "a": 1}
+        if operation == "update":
+            result = original.update(m=value)
+            name = "m"
+        else:
+            result = original.with_columns(column_types={"added": field}, added=value)
+            name = "added"
+        assert (
+            result.as_table()
+            .schema.field(name)
+            .equals(field.with_name(name), check_metadata=True)
+        )
+        assert _keys(result.as_dict()[name]) == ["a", "b"]
+        assert list(value) == ["b", "a"]
+
     def test_update_holds_dict_in_key_order(self):
         """A replaced dict value iterates in key order, like a constructed one."""
         datagram = Datagram({"m": {"a": 1}}, python_schema={"m": dict[str, int]})
@@ -457,11 +498,16 @@ class TestV020Store:
     """A Delta result store written by the released v0.2.0 code.
 
     ``data/v0_2_0_dict_store.tar.gz`` was produced by v0.2.0 running ``total`` over two
-    inputs: ``k=unsorted`` holding ``{"b": 2, "a": 1}`` (stored in that order, so its
-    v0.2.0 input hash is order dependent) and ``k=sorted`` holding ``{"a": 1, "c": 3}``
-    (already in key order, so its hash does not move); and ``tally`` over ``n=5``,
-    whose output ``{"z": 5, "a": 5}`` is stored in insertion order. ``data/generate_v0_2_0_dict_store.py``
-    regenerates it from a checkout of the ``v0.2.0`` tag.
+    inputs: ``k=unsorted`` holding ``{"b": 2, "a": 1}`` (stored in that order) and
+    ``k=sorted`` holding ``{"a": 1, "c": 3}``; and ``tally`` over ``n=5``, whose output
+    ``{"z": 5, "a": 5}`` is stored in insertion order.
+    ``data/generate_v0_2_0_dict_store.py`` regenerates it from a checkout of the
+    ``v0.2.0`` tag.
+
+    v0.3 reads no table v0.2 wrote (new table layouts and paths, ITL-944/ITL-945), so
+    no row stored in v0.2's insertion order is ever served: every input is computed
+    again, whether its dict was in key order or not, and the v0.2 tables stay as they
+    were.
     """
 
     @pytest.fixture
@@ -485,12 +531,26 @@ class TestV020Store:
             source_id="itl905_v020",
         )
 
-    def test_unsorted_row_recomputes_once_and_old_rows_stay(self, store):
-        """An out-of-order v0.2.0 input recomputes once; its old row stays."""
+    @staticmethod
+    def _row_counts(
+        store: DeltaTableDatabase, paths: list[tuple[str, ...]]
+    ) -> dict[tuple[str, ...], int]:
+        """Return the number of rows in each of ``paths``."""
+        counts = {}
+        for path in paths:
+            records = store.get_all_records(path)
+            counts[path] = 0 if records is None else records.num_rows
+        return counts
+
+    def test_v020_rows_are_not_read_and_stay(self, store):
+        """Every input is computed once; the v0.2.0 tables are left as they were."""
+        old_paths = store.list_table_paths(("total",))
+        old_counts = self._row_counts(store, old_paths)
+        assert sorted(old_counts.values()) == [2]
+
         pod = CachedFunctionPod(_pod(total, "total"), result_database=store)
-        before = store.get_all_records(pod.record_path)
-        assert before is not None
-        assert before.num_rows == 2
+        assert pod.record_path not in old_paths
+        assert store.get_all_records(pod.record_path) is None
 
         results = {
             tag.as_dict()["k"]: out
@@ -498,12 +558,14 @@ class TestV020Store:
         }
         store.flush()
 
-        assert results["sorted"].get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
+        # Neither the key-ordered nor the out-of-order input is served from v0.2.0.
+        assert results["sorted"].get_meta_value(pod.RESULT_COMPUTED_FLAG) is True
         assert results["unsorted"].get_meta_value(pod.RESULT_COMPUTED_FLAG) is True
         assert results["unsorted"].as_dict()["total"] == 3
-        after = store.get_all_records(pod.record_path)
-        assert after is not None
-        assert after.num_rows == 3  # both old rows kept, one new row
+        assert self._row_counts(store, old_paths) == old_counts
+        new_records = store.get_all_records(pod.record_path)
+        assert new_records is not None
+        assert new_records.num_rows == 2
 
         again = {
             tag.as_dict()["k"]: out
@@ -514,27 +576,29 @@ class TestV020Store:
             for out in again.values()
         )
 
-    def test_cached_unsorted_dict_output_is_served_as_stored(self, store):
-        """A cached v0.2.0 dict output is served in its stored order.
-
-        An Arrow table is never re-sorted, so a cache hit returns the old insertion order
-        and hash until the entry is recomputed.
-        """
+    def test_v020_dict_output_in_insertion_order_is_never_served(self, store):
+        """A dict output v0.2.0 stored out of key order is recomputed, not served."""
         inputs = DictSource(
             data=[{"k": "r", "n": 5}],
             tag_columns=["k"],
             data_schema={"k": str, "n": int},
             source_id="itl905_v020_int",
         )
-        pod = CachedFunctionPod(_pod(tally, "counts"), result_database=store)
-        [(_, cached)] = list(pod.process(inputs).iter_data())
-        fresh_pod = CachedFunctionPod(
-            _pod(tally, "counts"), result_database=InMemoryArrowDatabase()
-        )
-        [(_, fresh)] = list(fresh_pod.process(inputs).iter_data())
+        old_paths = store.list_table_paths(("tally",))
+        [old_path] = old_paths
+        old_row = store.get_all_records(old_path)
+        assert old_row is not None
+        # The released store holds the output in insertion order.
+        assert [e["key"] for e in old_row.column("counts")[0].as_py()] == ["z", "a"]
 
+        pod = CachedFunctionPod(_pod(tally, "counts"), result_database=store)
+        [(_, computed)] = list(pod.process(inputs).iter_data())
+        store.flush()
+        [(_, cached)] = list(pod.process(inputs).iter_data())
+
+        assert computed.get_meta_value(pod.RESULT_COMPUTED_FLAG) is True
         assert cached.get_meta_value(pod.RESULT_COMPUTED_FLAG) is False
-        assert _keys(cached.as_dict()["counts"]) == ["z", "a"]
-        assert _keys(fresh.as_dict()["counts"]) == ["a", "z"]
-        assert cached.as_dict() == fresh.as_dict()
-        assert cached.content_hash() != fresh.content_hash()
+        assert _keys(computed.as_dict()["counts"]) == ["a", "z"]
+        assert _keys(cached.as_dict()["counts"]) == ["a", "z"]
+        assert cached.content_hash() == computed.content_hash()
+        assert self._row_counts(store, old_paths) == {old_path: 1}

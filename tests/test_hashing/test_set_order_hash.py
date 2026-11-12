@@ -14,8 +14,10 @@ import textwrap
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pytest
 
+from orcapod.core.datagrams import Datagram
 from orcapod.sources import DictSource
 
 _ROW_HASH_SCRIPT = textwrap.dedent(
@@ -91,3 +93,44 @@ class TestPlainSetOrder:
                 tag_columns=["k"],
                 data_schema={"k": str, "s": set[float]},
             ).as_table()
+
+    @pytest.mark.parametrize("operation", ["update", "with_columns"])
+    def test_arrow_backed_set_write_preserves_order_and_schema(self, operation: str):
+        """Set writes through an Arrow list schema sort without changing its fields."""
+        field = pa.field(
+            "s",
+            pa.large_list(pa.field("item", pa.int16(), nullable=False)),
+            nullable=False,
+            metadata={b"purpose": b"set-order"},
+        )
+        original = Datagram(
+            pa.Table.from_arrays(
+                [pa.array([[1]], type=field.type)], schema=pa.schema([field])
+            )
+        )
+        value = {300, -1, 7}
+        if operation == "update":
+            result = original.update(s=value)
+            result_field = field
+        else:
+            result = original.with_columns(column_types={"added": field}, added=value)
+            result_field = field.with_name("added")
+        table = result.as_table()
+        assert table.schema.field(result_field.name).equals(
+            result_field, check_metadata=True
+        )
+        assert table.column(result_field.name).to_pylist() == [[-1, 7, 300]]
+        assert original.as_table().column("s").to_pylist() == [[1]]
+
+    def test_materialized_set_update_keeps_fresh_hash(self):
+        """Updating a materialized set preserves the hash of an equal fresh value."""
+        value = {300, -1, 7}
+        fresh = Datagram({"s": value}, python_schema={"s": set[int]})
+        before = fresh.content_hash()
+        assert fresh.update(s=value).content_hash() == before
+
+    def test_arrow_backed_list_update_keeps_list_order(self):
+        """An ordered list remains ordered as supplied at the same boundary."""
+        original = Datagram({"s": [1]}, python_schema={"s": list[int]})
+        original.as_table()
+        assert original.update(s=[300, -1, 7]).as_dict()["s"] == [300, -1, 7]

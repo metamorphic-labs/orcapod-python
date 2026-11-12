@@ -17,7 +17,7 @@ the end, which supersedes sections 2, 4 and 5 where they differ.
 > that arrives in Arrow form is an ordered list and its order is part of its hash. So fix 2
 > (hash-time sorting) was implemented and then REMOVED. Plain `set[T]` was folded in (separate
 > commit). In-memory canonical copy (fix 3) and raising on NaN/duplicate keys are kept,
-> provisional pending the developer.
+> decided by the developer on November 12, 2026.
 
 ---
 

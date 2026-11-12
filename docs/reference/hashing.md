@@ -480,7 +480,7 @@ moves no path.
 
 ---
 
-### 1d. `dict` and `set` values: canonical order
+### 1e. `dict` and `set` values: canonical order
 
 A `dict` and a `set` have no order, so equal values must hash equally whatever order they
 were built in. Arrow stores both as lists: `dict[K, V]` as `large_list<struct<key, value>>`
@@ -512,10 +512,12 @@ pod outputs (sync and async), and dicts nested in lists, dicts or dataclass and 
 fields. A datagram built from Python values also holds its dict values (including dicts
 inside lists, dicts and `Optional`) as key-ordered copies, including values set later with
 `update` or `with_columns`, so a newly computed pod output and the same output read back
-from a cache written by `0.3.0` iterate in the same order. An output served from a cache
-written by `0.2.0` keeps the order it was stored in until it is recomputed (see the `0.3.0`
-changelog). The caller's dict is never modified; dicts inside dataclass or pydantic objects
-keep their own order in memory.
+from the cache iterate in the same order (decided November 12, 2026). The caller's dict
+is never modified; dicts inside dataclass or pydantic objects
+keep their own order in memory. Their stored dict values and hashes are canonical, but
+a fresh user-class instance can iterate a nested dict in insertion order while a read-back
+instance iterates it in key order. An order-sensitive pod can therefore observe different
+orders for equal hashed inputs; reconstructing user-class instances is outside this fix.
 
 **The order** is defined on the converted (storage) key or element, in
 `semantic_types/canonical_order.py`:
@@ -531,8 +533,10 @@ keep their own order in memory.
 
 A NaN key or element (a Python `float`, a NumPy floating scalar or a `Decimal`) has no order
 and raises `CanonicalOrderError` (a `ValueError`) naming the column, as do keys or elements
-that cannot be compared and two keys or elements that convert to the same stored value. A
-dict or set already built in this order is stored byte-for-byte as before this rule existed,
+that cannot be compared and two keys or elements that convert to the same stored value
+(decided November 12, 2026). A
+dict or set whose nested unordered containers are all already in this order is stored
+byte-for-byte as before this rule existed,
 so its hash did not change.
 
 **Signed zero.** A float is hashed by its stored bytes, and `0.0` and `-0.0` have different
@@ -546,9 +550,18 @@ result. Within one dict or set the two compare equal, so they cannot both be pre
 contents. A `list<struct<key, value>>` column that arrives already in Arrow form (an
 `ArrowTableSource`, a Delta table, rows read back from a store) is read by Python as a
 `dict`, but at the Arrow level it is an ordered list and its stored order is part of its
-hash. Rows written by `0.2.0` from dicts that were not built in key order therefore keep
-their old hash when read back; see the `0.3.0` changelog for what that means for an
-existing store. A `list[T]` value is never sorted: its order is part of its identity.
+hash. A `list[T]` value is never sorted: its order is part of its identity. (Tables written
+by `0.2.0`, which stored dicts in insertion order, are not read by v0.3 at all.)
+
+**Two orderings, two layers.** This section is about the order a dict or set is *stored* in,
+which is also the order it is read back in. The semantic hasher (section 1a) separately
+orders the *hash input* it builds for a Python `dict` or `set` object, by each item's
+canonical JSON text (ITL-942); that order is never stored and never seen. The two rules are
+different on purpose (JSON text puts `10` before `2`; storage order is numeric) and neither
+is defined in terms of the other: changing the hasher's order would move every semantic
+hash, and changing the storage order would move row hashes and what a pod reads back.
+`set[T]` of a logical type (`set[Path]`, `set[UUID]`) is ordered by `ListLogicalType`, not
+by this rule.
 
 ---
 

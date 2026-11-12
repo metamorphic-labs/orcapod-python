@@ -1690,9 +1690,19 @@ class UniversalTypeConverter:
 
         elif origin is list:
             element_converter = self.get_python_to_arrow_converter(args[0])
-            return lambda value: (
-                [element_converter(item) for item in value] if value is not None else []
-            )
+
+            def convert_list(value: Any) -> list[Any]:
+                """Convert list storage, preserving set order independence on updates."""
+                if value is None:
+                    return []
+                elements = [element_converter(item) for item in value]
+                # An Arrow schema remembers a plain set only as a list. Python set
+                # inputs still need canonical storage order; actual lists keep theirs.
+                return (
+                    sort_set_elements(elements) if isinstance(value, set) else elements
+                )
+
+            return convert_list
 
         elif origin is dict:
             key_converter = self.get_python_to_arrow_converter(args[0])
