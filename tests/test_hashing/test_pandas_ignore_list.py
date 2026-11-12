@@ -44,25 +44,31 @@ def _with_attrs(value: Any) -> Any:
     return out
 
 
-def _struct_frame(order: list[str]) -> pd.DataFrame:
+def _struct_series(order: list[str]) -> pd.Series:
     types = {"u": pa.int64(), "v": pa.large_string()}
     struct = pa.struct([(name, types[name]) for name in order])
     array = pa.array([{"u": 1, "v": "x"}], struct)
-    return pd.DataFrame({"s": pd.Series(array, dtype=pd.ArrowDtype(struct))})
+    return pd.Series(array, dtype=pd.ArrowDtype(struct), name="s")
+
+
+def _struct_frame(order: list[str]) -> pd.DataFrame:
+    return pd.DataFrame({"s": _struct_series(order)})
+
+
+def _reordered(frame: pd.DataFrame) -> pd.DataFrame:
+    """``frame`` with its columns in reverse order."""
+    return frame.reindex(columns=list(frame.columns)[::-1])
 
 
 # option -> two values that differ only in that property
 FRAME_PAIRS: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {
-    "column_order": (_frame(), _frame()[["b", "a"]]),
+    "column_order": (_frame(), _reordered(_frame())),
     "struct_field_order": (_struct_frame(["u", "v"]), _struct_frame(["v", "u"])),
     "attrs": (_frame(), _with_attrs(_frame())),
 }
 SERIES_PAIRS: dict[str, tuple[pd.Series, pd.Series]] = {
     "series_name": (pd.Series([1, 2], name="a"), pd.Series([1, 2], name="b")),
-    "struct_field_order": (
-        _struct_frame(["u", "v"])["s"],
-        _struct_frame(["v", "u"])["s"],
-    ),
+    "struct_field_order": (_struct_series(["u", "v"]), _struct_series(["v", "u"])),
     "attrs": (pd.Series([1, 2]), _with_attrs(pd.Series([1, 2]))),
 }
 
@@ -128,7 +134,7 @@ class TestHandlers:
             return handler.hash_ignoring(frame, ["column_order"]).digest
 
         base = _frame()
-        assert digest(base) == digest(base[["b", "a"]])
+        assert digest(base) == digest(_reordered(base))
         # a value, a label, a label's type, a column's dtype, the index
         assert digest(base) != digest(base.assign(a=[1, 3]))
         assert digest(base) != digest(base.rename(columns={"a": "c"}))
@@ -188,7 +194,7 @@ class TestIdentifier:
         assert strict.__arrow_ext_serialize__() == b'{"ignore":[],"version":1}'
 
     def test_storage_is_the_same_under_every_list(self) -> None:
-        frame = _with_attrs(_frame()[["b", "a"]])
+        frame = _with_attrs(_reordered(_frame()))
         strict = LogicalPandasDataFrame()
         loose = LogicalPandasDataFrame(ignore=["attrs", "column_order"])
         assert loose.python_to_storage(frame) == strict.python_to_storage(frame)
@@ -258,8 +264,10 @@ class TestDataContext:
         # As a store hands it back: the storage column with the identifier on the field.
         field = stored.schema.field("x")
         assert isinstance(field.type, pa.ExtensionType)
+        chunk = stored.column("x").chunk(0)
+        assert isinstance(chunk, pa.ExtensionArray)
         plain = pa.table(
-            [stored.column("x").chunk(0).storage],
+            [chunk.storage],
             schema=pa.schema(
                 [
                     pa.field(
