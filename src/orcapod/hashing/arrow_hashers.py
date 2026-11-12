@@ -126,12 +126,15 @@ class StarfixArrowHasher:
                 # from a row: nested nullability, field metadata and list item
                 # fields are kept, and a column hashes the same way whether it
                 # holds data, nulls or no rows (ITL-942 I).
-                new_type = visitor.hashed_type(field.type)
+                # A value-hashed logical type keeps its identifier on the field, so
+                # it is part of the hash also when the column holds no value
+                # (ITL-967).
+                new_field = visitor.hashed_field(field)
                 processed_data = [
                     visitor.visit(field.type, value)[1] for value in column_data
                 ]
-                new_columns.append(pa.array(processed_data, type=new_type))
-                new_fields.append(field.with_type(new_type))
+                new_columns.append(pa.array(processed_data, type=new_field.type))
+                new_fields.append(new_field)
 
             except Exception as exc:
                 raise RuntimeError(
