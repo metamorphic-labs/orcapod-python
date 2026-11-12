@@ -15,7 +15,7 @@ Example usage:
     context = resolve_context()
 
     # Get specific version
-    context = resolve_context("v0.1")
+    context = resolve_context("v1")
 
     # Use context components
     registry = context.semantic_type_registry
@@ -62,7 +62,7 @@ def resolve_context(context_info: str | DataContext | None = None) -> DataContex
     Args:
         context_info: One of:
             - None: Use default context
-            - str: Version string ("v0.1") or full key ("std:v0.1:default")
+            - str: Version string ("v1") or full key ("std:v1:default")
             - DataContext: Return as-is
 
     Returns:
@@ -73,8 +73,8 @@ def resolve_context(context_info: str | DataContext | None = None) -> DataContex
 
     Examples:
         >>> context = resolve_context()  # Default
-        >>> context = resolve_context("v0.1")  # Specific version
-        >>> context = resolve_context("std:v0.1:default")  # Full key
+        >>> context = resolve_context("v1")  # Specific version
+        >>> context = resolve_context("std:v1:default")  # Full key
         >>> context = resolve_context("latest")  # Latest version
     """
     # If already a DataContext, return as-is
@@ -112,7 +112,7 @@ def get_context_info(version: str) -> dict[str, Any]:
         Dictionary with context metadata
 
     Example:
-        >>> info = get_context_info("v0.1")
+        >>> info = get_context_info("v1")
         >>> print(info['description'])
         'Initial stable release with basic Path semantic type support'
     """
@@ -208,7 +208,7 @@ def get_default_type_converter() -> "sp.TypeConverterProtocol":
 def create_registry(
     contexts_dir: str | None = None,
     schema_file: str | None = None,
-    default_version: str = "v0.1",
+    default_version: str = "v1",
 ) -> JSONDataContextRegistry:
     """
     Create a custom context registry.
@@ -311,7 +311,7 @@ def enable_file_hash_caching(
         raise RuntimeError(
             "enable_file_hash_caching(): no FileHandler registered for "
             "orcapod.File in the default context. This should not happen "
-            "with the standard v0.1 context."
+            "with the standard v1 context."
         )
 
     base_hasher = existing_handler.file_hasher
@@ -364,7 +364,7 @@ def enable_file_hash_caching(
         raise RuntimeError(
             "enable_file_hash_caching(): no DirectoryHandler registered for "
             "orcapod.Directory in the default context. This should not happen "
-            "with the standard v0.1 context."
+            "with the standard v1 context."
         )
     existing_dir_hasher = existing_dir_handler.directory_hasher
     registry.register(

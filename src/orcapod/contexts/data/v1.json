@@ -1,0 +1,171 @@
+{
+    "context_key": "std:v1:default",
+    "version": "v1",
+    "description": "Data context of Orcapod v0.3: the hashing generation H1",
+    "file_hasher": {
+        "_class": "orcapod.hashing.file_hashers.FileHasher",
+        "_config": {
+            "algorithm": "sha256"
+        }
+    },
+    "directory_hasher": {
+        "_class": "orcapod.hashing.directory_hashers.BasicDirectoryHasher",
+        "_config": {
+            "file_hasher": {"_ref": "file_hasher"},
+            "algorithm": "sha256"
+        }
+    },
+    "type_converter": {
+        "_class": "orcapod.semantic_types.universal_converter.UniversalTypeConverter",
+        "_config": {
+            "logical_type_registry": {
+                "_class": "orcapod.logical_types.registry.LogicalTypeRegistry",
+                "_config": {
+                    "logical_types": [
+                        {
+                            "_class": "orcapod.logical_types.builtin_logical_types.LogicalPath",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.builtin_logical_types.LogicalUPath",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.builtin_logical_types.LogicalUUID",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.file_type.LogicalFile",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.directory_type.LogicalDirectory",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.numpy_type.LogicalNumpyArray",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.pandas_type.LogicalPandasDataFrame",
+                            "_config": {}
+                        },
+                        {
+                            "_class": "orcapod.logical_types.pandas_type.LogicalPandasSeries",
+                            "_config": {}
+                        }
+                    ],
+                    "factories": [
+                        {
+                            "factory": {
+                                "_class": "orcapod.logical_types.dataclass_logical_type_factory.DataclassLogicalTypeFactory",
+                                "_config": {}
+                            },
+                            "category": "orcapod.dataclass",
+                            "python_bases": [{"_type": "builtins.object"}]
+                        },
+                        {
+                            "factory": {
+                                "_class": "orcapod.logical_types.pydantic_logical_type_factory.PydanticLogicalTypeFactory",
+                                "_config": {}
+                            },
+                            "category": "orcapod.pydantic",
+                            "python_bases": [{"_type": "pydantic.BaseModel"}]
+                        },
+                        {
+                            "factory": {
+                                "_class": "orcapod.logical_types.list_logical_type_factory.ListLogicalTypeFactory",
+                                "_config": {}
+                            },
+                            "category": "list"
+                        },
+                        {
+                            "factory": {
+                                "_class": "orcapod.logical_types.list_logical_type_factory.ListLogicalTypeFactory",
+                                "_config": {}
+                            },
+                            "category": "set"
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    "function_semantic_hasher": {
+        "_class": "orcapod.hashing.semantic_hashing.function_info_extractors.FunctionSignatureExtractor",
+        "_config": {
+            "include_module": true,
+            "include_defaults": true,
+            "type_converter": {"_ref": "type_converter"}
+        }
+    },
+    "python_type_handler_registry": {
+        "_class": "orcapod.hashing.semantic_hashing.type_handler_registry.PythonTypeHandlerRegistry",
+        "_config": {
+            "handlers": [
+                [{"_type": "builtins.bytes"},         {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.BytesHandler",        "_config": {}}],
+                [{"_type": "builtins.bytearray"},     {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.BytesHandler",        "_config": {}}],
+                [{"_type": "uuid.UUID"},               {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.UUIDHandler",         "_config": {}}],
+                [{"_type": "orcapod.logical_types.file_type.File"}, {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.FileHandler", "_config": {"file_hasher": {"_ref": "file_hasher"}}}],
+                [{"_type": "orcapod.logical_types.directory_type.Directory"}, {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.DirectoryHandler", "_config": {"directory_hasher": {"_ref": "directory_hasher"}}}],
+                [{"_type": "types.FunctionType"},      {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.FunctionHandler",     "_config": {"function_info_extractor": {"_ref": "function_semantic_hasher"}}}],
+                [{"_type": "types.BuiltinFunctionType"},{"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.FunctionHandler",    "_config": {"function_info_extractor": {"_ref": "function_semantic_hasher"}}}],
+                [{"_type": "types.MethodType"},        {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.FunctionHandler",     "_config": {"function_info_extractor": {"_ref": "function_semantic_hasher"}}}],
+                [{"_type": "builtins.type"},           {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.TypeObjectHandler",   "_config": {"type_converter": {"_ref": "type_converter"}}}],
+                [{"_type": "types.GenericAlias"},      {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.GenericAliasHandler", "_config": {}}],
+                [{"_type": "types.UnionType"},         {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.UnionTypeHandler",    "_config": {}}],
+                [{"_type": "typing._GenericAlias"},    {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.GenericAliasHandler", "_config": {}}],
+                [{"_type": "typing._SpecialForm"},     {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.SpecialFormHandler",  "_config": {}}],
+                [{"_type": "pyarrow.Table"},            {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.ArrowTableHandler",   "_config": {}}],
+                [{"_type": "pyarrow.RecordBatch"},      {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.ArrowTableHandler",   "_config": {}}],
+                [{"_type": "numpy.ndarray"},            {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.NumpyArrayHandler",        "_config": {}}],
+                [{"_type": "pandas.DataFrame"},         {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PandasDataFrameHandler",  "_config": {}}],
+                [{"_type": "pandas.Series"},            {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PandasSeriesHandler",      "_config": {}}],
+                [{"_type": "polars.Expr"},              {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PolarsExprHandler",        "_config": {}}],
+                [{"_type": "orcapod.types.Schema"},     {"_class": "orcapod.hashing.semantic_hashing.builtin_handlers.SchemaHandler",            "_config": {"type_converter": {"_ref": "type_converter"}}}]
+            ]
+        }
+    },
+    "semantic_hasher": {
+        "_class": "orcapod.hashing.semantic_hashing.semantic_hasher.SemanticAwarePythonHasher",
+        "_config": {
+            "hasher_id": "semantic_v0.1",
+            "type_handler_registry": {
+                "_ref": "python_type_handler_registry"
+            }
+        }
+    },
+    "arrow_hasher": {
+        "_class": "orcapod.hashing.arrow_hashers.StarfixArrowHasher",
+        "_config": {
+            "hasher_id": "arrow_v0.2",
+            "type_converter": {"_ref": "type_converter"},
+            "semantic_hasher": {"_ref": "semantic_hasher"}
+        }
+    },
+    "metadata": {
+        "created_date": "2026-11-11",
+        "author": "OrcaPod Core Team",
+        "changelog": [
+            "First frozen manifest. std:v1:default is what Orcapod v0.3.0 computes (H1). Everything written before v0.3 carries std:v0.1:default or no data context column and is the earlier generation H0 (ITL-938, ITL-944)"
+        ],
+        "hash_labels": {
+            "structure": "semantic_v0.1",
+            "arrow": "arrow_v0.2",
+            "file": "sha256",
+            "directory": "merkle_sha256",
+            "array": "ndarray_v1",
+            "polars_expression": "polars_expr_v1"
+        },
+        "libraries": {
+            "starfix": ">=0.5.0,<0.6 (hash format 2, digest prefix 000002)"
+        },
+        "table_layouts": {
+            "function_pipeline": "pdb_v2",
+            "function_result": "rdb_v2",
+            "side_effect_log": "tdb_v2",
+            "operator_cache": "odb_v1",
+            "cached_source": "sdb_v1"
+        }
+    }
+}

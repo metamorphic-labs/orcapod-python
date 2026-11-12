@@ -15,9 +15,10 @@
     "properties": {
         "context_key": {
             "type": "string",
-            "pattern": "^[a-zA-Z0-9_-]+:v[0-9]+\\.[0-9]+:[a-zA-Z0-9_-]+$",
-            "description": "Unique identifier for this context (e.g., 'std:v0.1:default')",
+            "pattern": "^[a-zA-Z0-9_-]+:v[0-9]+(\\.[0-9]+)?:[a-zA-Z0-9_-]+$",
+            "description": "Unique identifier for this context (e.g., 'std:v1:default')",
             "examples": [
+                "std:v1:default",
                 "std:v0.1:default",
                 "std:v0.2:fast",
                 "custom:v1.0:production"
@@ -25,9 +26,10 @@
         },
         "version": {
             "type": "string",
-            "pattern": "^v[0-9]+\\.[0-9]+$",
+            "pattern": "^v[0-9]+(\\.[0-9]+)?$",
             "description": "Version identifier matching the filename",
             "examples": [
+                "v1",
                 "v0.1",
                 "v1.0",
                 "v2.3"

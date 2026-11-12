@@ -38,14 +38,14 @@ class JSONDataContextRegistry:
     - Validates JSON structure against schema
     - Lazy loading with caching
     - Robust error handling and logging
-    - Context string resolution (e.g., "v0.1", "std:v0.1:default")
+    - Context string resolution (e.g., "v1", "std:v1:default")
     """
 
     def __init__(
         self,
         contexts_dir: Path | str | None = None,
         schema_file: Path | str | None = None,
-        default_version: str = "v0.1",
+        default_version: str = "v1",
     ):
         """
         Initialize the context registry.
@@ -123,7 +123,7 @@ class JSONDataContextRegistry:
 
     def _load_spec_file(self, json_file: Path) -> None:
         """Load and validate a single context specification file."""
-        version = json_file.stem  # e.g., "v0.1" from "v0.1.json"
+        version = json_file.stem  # e.g., "v1" from "v1.json"
 
         # Load JSON
         with open(json_file, "r") as f:
@@ -193,8 +193,8 @@ class JSONDataContextRegistry:
 
         Supports various formats:
         - None -> default version
-        - "v0.1" -> "v0.1"
-        - "std:v0.1:default" -> "v0.1" (extract version from full key)
+        - "v1" -> "v1"
+        - "std:v1:default" -> "v1" (extract version from full key)
         - "latest" -> highest version number
         """
         if context_string is None:
@@ -205,11 +205,11 @@ class JSONDataContextRegistry:
             versions = self.get_available_versions()
             return versions[-1] if versions else self._default_version
 
-        # If it looks like a simple version (v0.1), use directly
+        # If it looks like a simple version (v1), use directly
         if context_string.startswith("v") and ":" not in context_string:
             return context_string
 
-        # If it looks like a full context key (std:v0.1:default), extract version
+        # If it looks like a full context key (std:v1:default), extract version
         if ":" in context_string:
             parts = context_string.split(":")
             if len(parts) >= 2 and parts[1].startswith("v"):
