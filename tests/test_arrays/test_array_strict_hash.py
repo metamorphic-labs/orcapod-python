@@ -23,8 +23,9 @@ from orcapod.contexts import get_default_context
 from orcapod.contexts.core import ContextValidationError, DataContext
 from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.core.operators import MergeJoin
-from orcapod.errors import InputValidationError
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.sources import ArrowTableSource, DictSource
+from orcapod.utils.arrow_utils import shared_arrow_type
 
 HASH_LABEL = "ndarray_v1"
 """Label of an array value hash (open decision 2 of the design note)."""
@@ -328,20 +329,36 @@ def test_unknown_option_name_is_an_error(tmp_path: Path) -> None:
 
 
 def test_merge_join_of_two_ignore_lists_is_an_error(tmp_path: Path) -> None:
-    """Joining one column typed with two ignore lists names the column and both types."""
+    """Joining one column typed with two ignore lists names the column and both lists.
+
+    A data context reads only columns of its own list, so the error is the read
+    refusal, raised when the join inspects its inputs.
+    """
     lenient = _context_ignoring(tmp_path, ["memory_order"])
 
     def stream(context: DataContext) -> ArrowTableSource:
         table = context.type_converter.python_dicts_to_arrow_table(
             [{"k": "r1", "x": BASE}], python_schema={"k": str, "x": np.ndarray}
         )
-        return ArrowTableSource(
-            table, tag_columns=["k"], source_id="s", data_context=context
-        )
+        return ArrowTableSource(table, tag_columns=["k"], source_id="s")
 
-    with pytest.raises(InputValidationError, match="'x'") as raised:
+    with pytest.raises(LogicalTypeIdentifierError, match="'x'") as raised:
         MergeJoin()(stream(get_default_context()), stream(lenient)).as_table()
-    assert "memory_order" in str(raised.value)
+    message = str(raised.value)
+    assert repr(ignore_metadata(["memory_order"])) in message
+    assert repr(ignore_metadata([])) in message
+
+
+def test_the_join_type_rule_tells_two_ignore_lists_apart(tmp_path: Path) -> None:
+    """The rule joins use for a shared column finds no shared type for two lists."""
+    lenient = _context_ignoring(tmp_path, ["memory_order"])
+    strict_type = get_default_context().type_converter.python_type_to_arrow_type(
+        np.ndarray
+    )
+    lenient_type = lenient.type_converter.python_type_to_arrow_type(np.ndarray)
+    assert shared_arrow_type(strict_type, lenient_type) is None
+    assert shared_arrow_type(strict_type, strict_type) == strict_type
+    assert "memory_order" in str(lenient_type)
 
 
 def test_native_byte_order_is_absolute() -> None:
