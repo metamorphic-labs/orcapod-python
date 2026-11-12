@@ -1289,3 +1289,98 @@ class TestFloatComparison:
         stored.data = stored.data.set_column(j, field, pa.array(rows, field.type))
         with pytest.raises(tool.VerificationError, match="lfp_voltage_uv"):
             self._verify(client, target, nmap, subset)
+
+
+class TestNullabilityRecordChecks:
+    """annotate --dry-run, the list-item null check, and verify against the record."""
+
+    def test_a_null_list_item_declared_non_null_is_refused(self):
+        item = pa.field("item", pa.float32(), False)
+        field = pa.field("l", pa.list_(item, 2), False)
+        # pyarrow builds this array without checking the item's non-null flag
+        arr = pa.FixedSizeListArray.from_arrays(
+            pa.array([1.0, None], pa.float32()),
+            type=field.type,  # pyright: ignore[reportArgumentType]
+        )
+        batch = pa.RecordBatch.from_arrays([arr], names=["l"])
+        with pytest.raises(tool.NullInRequiredColumnError) as info:
+            tool.conform_batch(batch, pa.schema([field]))
+        assert info.value.path == ("l", "[]")
+
+    def test_non_null_paths_follow_the_record_layout(self):
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), False),
+                pa.field("w", pa.int32(), True),
+                pa.field(
+                    "g",
+                    pa.struct(
+                        [pa.field("x", pa.int32(), False), pa.field("y", pa.int32())]
+                    ),
+                    False,
+                ),
+                pa.field("l", pa.list_(pa.field("item", pa.float32(), False), 2), True),
+            ]
+        )
+        assert tool.non_null_paths(schema) == [("g",), ("g", "x"), ("k",), ("l", "[]")]
+
+    def test_annotate_dry_run_lists_paths_and_writes_nothing(
+        self, client, nmap, subset
+    ):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        before = list(client.log)
+        lines = tool.annotate(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            allow_writes=target,
+            nmap=nmap,
+            subset=subset,
+            write_record=None,
+            dry_run=True,
+        )
+        assert client.log == before
+        session = next(line for line in lines if line.startswith("session:"))
+        assert "booth" in session and "session_notes" not in session
+
+    def _verify(self, client, target, nmap, subset, reader):
+        return tool.verify(
+            client,
+            source_project=SOURCE,
+            target_project=target,
+            nmap=nmap,
+            subset=subset,
+            read_record=reader,
+        )
+
+    def test_verify_checks_each_record_against_the_map(self, client, nmap, subset):
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        written = client.written_schemas
+
+        def no_record(metadata: Any) -> Any:
+            return None
+
+        report = self._verify(client, target, nmap, subset, no_record)
+        assert len(report.notes) == len(SUBSET_JSON["tables"])
+
+        for (pid, ident), schemas in written.items():
+            if pid == target:
+                paths = sorted(tool.non_null_paths(schemas[0]))
+                client._projects[target][ident].metadata["rec"] = json.dumps(
+                    paths
+                ).encode()
+
+        def reader(metadata: Any) -> Any:
+            raw = metadata.get("rec")
+            return None if raw is None else frozenset(map(tuple, json.loads(raw)))
+
+        report = self._verify(client, target, nmap, subset, reader)
+        assert report.problems == [] and report.notes == []
+
+        client._projects[target]["default.session"].metadata["rec"] = (
+            b'[["subject_id"]]'
+        )
+        with pytest.raises(tool.VerificationError, match="session: nullability record"):
+            self._verify(client, target, nmap, subset, reader)

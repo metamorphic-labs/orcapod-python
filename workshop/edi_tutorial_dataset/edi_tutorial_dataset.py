@@ -454,13 +454,49 @@ def stored_schema(schema: pa.Schema) -> pa.Schema:
     return pa.schema([pa.field(f.name, _stored_type(f.type), True) for f in schema])
 
 
+# The path segment for a list item, as in Orcapod's nullability record (ITL-936).
+ITEM = "[]"
+
+
+def _is_list(t: pa.DataType) -> bool:
+    return (
+        pa.types.is_list(t)
+        or pa.types.is_large_list(t)
+        or pa.types.is_fixed_size_list(t)
+    )
+
+
+def non_null_paths(schema: pa.Schema) -> list[tuple[str, ...]]:
+    """Return the paths ``schema`` declares non-nullable, sorted.
+
+    A path starts with a top-level column; each further segment is a struct field
+    name, or ``"[]"`` for a list item, as Orcapod's nullability record (ITL-936)
+    lists them. Used to show what ``annotate`` records and to check it in ``verify``.
+    """
+    out: list[tuple[str, ...]] = []
+
+    def walk(field: pa.Field[Any], path: tuple[str, ...]) -> None:
+        if not field.nullable:
+            out.append(path)
+        t = field.type
+        if pa.types.is_struct(t):
+            for child in t:
+                walk(child, (*path, child.name))
+        elif _is_list(t):
+            walk(t.value_field, (*path, ITEM))
+
+    for f in schema:
+        walk(f, (f.name,))
+    return sorted(out)
+
+
 def _conform_array(arr: pa.Array[Any], field: pa.Field[Any]) -> pa.Array[Any]:
     """Return ``arr`` typed as ``field`` declares, refusing nulls it does not allow.
 
     Raises:
         SchemaMismatchError: if the types differ beyond nullability.
-        NullInRequiredColumnError: if ``field`` (or a declared struct child) is
-            non-nullable and holds nulls.
+        NullInRequiredColumnError: if ``field`` (or a declared struct child, or a
+            list item declared non-nullable) holds nulls.
     """
     if not _same_type_up_to_nullability(arr.type, field.type):
         raise SchemaMismatchError(
@@ -468,6 +504,10 @@ def _conform_array(arr: pa.Array[Any], field: pa.Field[Any]) -> pa.Array[Any]:
         )
     if not field.nullable and arr.null_count:
         raise NullInRequiredColumnError((field.name,), arr.null_count)
+    if _is_list(field.type) and not field.type.value_field.nullable:
+        items = pc.list_flatten(arr)
+        if items.null_count:
+            raise NullInRequiredColumnError((field.name, ITEM), items.null_count)
     if not pa.types.is_struct(field.type) or arr.type == field.type:
         return arr
     struct = arr if isinstance(arr, pa.StructArray) else None
@@ -886,6 +926,7 @@ class Report:
     pending: dict[str, list[str]]
     problems: list[str]
     accepted: list[str] = dataclasses.field(default_factory=list)
+    notes: list[str] = dataclasses.field(default_factory=list)
 
     def render(self) -> str:
         """Return a human-readable summary."""
@@ -905,6 +946,9 @@ class Report:
         if self.accepted:
             lines.append("accepted exceptions (recorded in the map):")
             lines.extend(f"  {a}" for a in self.accepted)
+        if self.notes:
+            lines.append("notes:")
+            lines.extend(f"  {n}" for n in self.notes)
         if self.problems:
             lines.append("problems:")
             lines.extend(f"  {p}" for p in self.problems)
@@ -1237,8 +1281,13 @@ def verify(
     target_project: str,
     nmap: NullabilityMap,
     subset: Subset,
+    read_record: Callable[[Mapping[str, bytes]], Any] | None = None,
 ) -> Report:
     """Check the target project against the source, the map and the subset.
+
+    With ``read_record`` (Orcapod's ``read_nullability_record``, ITL-936), each
+    table's nullability record must list exactly the non-nullable paths the map
+    declares; a table without a record is listed in the report's notes.
 
     Checks: the project holds exactly the subset's tables (plus the marker table);
     each table's schema has the source's types exactly and the map's nullability, its
@@ -1316,12 +1365,34 @@ def verify(
             problems.append(f"{name}: {mismatch}")
         results.append(result)
     problems.extend(integrity.problems(present))
+    notes: list[str] = []
+    if read_record is not None:
+        for name in sorted(present & set(subset.tables)):
+            ident = _qualified(subset, name)
+            src_schema = source.table(ident).schema().to_arrow()
+            want = set(non_null_paths(target_schema(src_schema, nmap.tables[name])))
+            record = read_record(target.table(ident).get_metadata())
+            if record is None:
+                notes.append(f"{name}: no nullability record")
+            elif set(record) != want:
+                problems.append(
+                    f"{name}: nullability record differs from the map: "
+                    f"missing {sorted(want - set(record))}, "
+                    f"extra {sorted(set(record) - want)}"
+                )
     report = Report(
-        results, trials, nmap.pending(), problems, integrity.accepted(present)
+        results, trials, nmap.pending(), problems, integrity.accepted(present), notes
     )
     if problems:
         raise VerificationError(problems)
     return report
+
+
+def load_record_reader() -> Callable[[Mapping[str, bytes]], Any] | None:
+    """Return Orcapod's ``read_nullability_record`` (ITL-936), or ``None`` without it."""
+    import orcapod.databases
+
+    return getattr(orcapod.databases, "read_nullability_record", None)
 
 
 _FLOAT_BITS = {16: np.uint16, 32: np.uint32, 64: np.uint64}
@@ -1451,7 +1522,8 @@ def annotate(
     allow_writes: str | None,
     nmap: NullabilityMap,
     subset: Subset,
-    write_record: RecordWriter,
+    write_record: RecordWriter | None,
+    dry_run: bool = False,
 ) -> list[str]:
     """Give each copied table Orcapod's nullability record (ITL-936).
 
@@ -1470,10 +1542,14 @@ def annotate(
         allow_writes: Must repeat ``target_project``.
         nmap: The nullability map.
         subset: The subset definition (which tables, which dataset).
-        write_record: Writes the record; returns whether it changed anything.
+        write_record: Writes the record; returns whether it changed anything. Not
+            called (and may be ``None``) with ``dry_run``.
+        dry_run: Check the data and list each table's non-nullable paths, but write
+            nothing.
 
     Returns:
-        One line per table: ``recorded`` or ``unchanged``.
+        One line per table: ``recorded``, ``unchanged``, or with ``dry_run`` the
+        paths that would be recorded.
 
     Raises:
         TargetRefusedError: if the target fails a guard.
@@ -1498,6 +1574,10 @@ def annotate(
         except ToolError as err:
             err.add_note(f"while checking table {name!r} before recording it")
             raise
+        if dry_run or write_record is None:
+            paths = ["/".join(p) for p in non_null_paths(declared)]
+            lines.append(f"{name}: would record {len(paths)} non-null path(s): {paths}")
+            continue
         changed = write_record(table, declared)
         lines.append(f"{name}: {'recorded' if changed else 'unchanged'}")
     return lines
@@ -2053,6 +2133,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--target-project", required=True)
     a.add_argument("--allow-writes", required=True, help="repeat --target-project")
+    a.add_argument(
+        "--dry-run", action="store_true", help="list the paths, write nothing"
+    )
 
     v = sub.add_parser("verify", help="check the target against the source and the map")
     v.add_argument("--target-project", required=True)
@@ -2130,7 +2213,8 @@ def main(
                         allow_writes=args.allow_writes,
                         nmap=nmap,
                         subset=subset,
-                        write_record=load_record_writer(),
+                        write_record=None if args.dry_run else load_record_writer(),
+                        dry_run=args.dry_run,
                     )
                 )
             )
@@ -2174,6 +2258,7 @@ def main(
                 target_project=args.target_project,
                 nmap=nmap,
                 subset=subset,
+                read_record=load_record_reader(),
             )
         print(report.render())
         return 1 if report.problems else 0
