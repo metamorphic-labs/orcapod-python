@@ -2555,9 +2555,13 @@ Known limits, follow-ups:
   moves with the data context key.
 - Old-layout tables are reported once per reader object, not once per process or job, and
   counting their rows reads the whole table (the store protocol has no row count).
-- The manifest still lists object specs only. Naming the definitions that live in code
-  (identity compositions, record-id and fold recipes, the system-tag naming grammar) is the
-  manifest-format follow-up of the ITL-938 design document, Part 8 item 2.
+- The manifest has the fields of the ITL-938 design document, section 7.4 (`released_in`,
+  `previous`, `definitions`, `libraries`, `golden`, `changes`), and the logical types and
+  their value handlers moved to the unfrozen `contexts/logical_types.json`. The names under
+  `definitions` are labels only: nothing in the code reads them or checks that a definition
+  changed, and `changes` lists what is true on this branch (starfix format 2); the entries
+  for ITL-935 and ITL-942 are added when those land. `golden.digest` stays `null` until the
+  manifest is frozen, because the golden files still move.
 - Pending the developer's answer when this entry was written: whether `v0.1.json` stays
   loadable; whether the v0 to v1 machinery (`SchemaVersionError`, `NodeConfig(ignore_schema=)`,
   `orcapod.migrations`, `orcapod migrate`) is removed; what a node does with an input whose

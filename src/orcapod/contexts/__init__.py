@@ -210,6 +210,7 @@ def create_registry(
     contexts_dir: str | None = None,
     schema_file: str | None = None,
     default_version: str = "v1",
+    logical_types_file: str | None = None,
 ) -> JSONDataContextRegistry:
     """
     Create a custom context registry.
@@ -220,6 +221,8 @@ def create_registry(
         contexts_dir: Directory containing context JSON files
         schema_file: JSON schema file for validation
         default_version: Default version to use
+        logical_types_file: The logical type registration file; defaults to the
+            one shipped in ``orcapod.contexts``
 
     Returns:
         JSONDataContextRegistry instance
@@ -229,7 +232,9 @@ def create_registry(
         >>> test_registry = create_registry("/path/to/test/contexts")
         >>> test_context = test_registry.get_context("test")
     """
-    return JSONDataContextRegistry(contexts_dir, schema_file, default_version)
+    return JSONDataContextRegistry(
+        contexts_dir, schema_file, default_version, logical_types_file
+    )
 
 
 def enable_file_hash_caching(

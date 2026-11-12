@@ -431,6 +431,9 @@ current data context are the current entries.
   value for a reason other than a logical type's own change needs a new data context version
   with its own manifest file, never an edit of a released one.
 - In memory the data context column is still `_context_key` (`ColumnConfig(context=True)`).
+- Logical types and the value handlers that hash their Python values are registered in
+  `contexts/logical_types.json`, never in a data context manifest: a logical type is
+  versioned by its own identifier, and that file is not frozen.
 
 ### System tag evolution rules
 

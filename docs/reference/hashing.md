@@ -662,8 +662,11 @@ Orcapod's hashing a stored row belongs to. That is the **data context**: one key
 whenever any existing hash value can change (the hashers, the identity definitions, the
 record-id recipes, the libraries behind them). Orcapod v0.3 writes `std:v1:default`;
 everything stored before v0.3 is the earlier generation, `std:v0.1:default`. The manifest of
-the current data context is `orcapod/contexts/data/v1.json`; once released, a manifest file
-is never edited.
+the current data context is `orcapod/contexts/data/v1.json`. It is frozen at the release of
+the library version that contains it and never edited afterwards. It names the hashers, the
+definitions that live in code, the libraries the hashes depend on and what changed from the
+previous data context. Logical types are not part of it: they are registered in
+`orcapod/contexts/logical_types.json` and versioned by their own identifier.
 
 Every row Orcapod stores names its data context in the column `__data_context`:
 

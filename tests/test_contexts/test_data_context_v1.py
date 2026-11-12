@@ -18,6 +18,10 @@ from packaging.version import Version
 
 import orcapod
 from orcapod import contexts
+from orcapod.hashing.semantic_hashing.type_handler_registry import (
+    PythonTypeHandlerRegistry,
+)
+from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
 CONTEXTS_DIR = Path(str(resources.files("orcapod.contexts")))
 MANIFEST_DIR = CONTEXTS_DIR / "data"
@@ -72,3 +76,128 @@ def test_a_final_release_ships_no_open_manifest() -> None:
         "A release must freeze its data context manifest: set its sha256 in "
         "src/orcapod/contexts/released_manifests.json."
     )
+
+
+# ---------------------------------------------------------------------------
+# The contents of the manifest (ITL-938 design document, section 7.4)
+# ---------------------------------------------------------------------------
+
+GOLDEN_DIR = Path(__file__).parents[1] / "test_hashing" / "golden" / "data"
+
+
+def _v1() -> dict[str, object]:
+    return json.loads((MANIFEST_DIR / "v1.json").read_text())
+
+
+def golden_digest() -> str:
+    """The digest a manifest's ``golden`` field holds once the manifest is frozen.
+
+    sha256 over the golden hash files in name order; each file contributes its name, a
+    NUL byte, its bytes and a NUL byte.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(GOLDEN_DIR.glob("*.json")):
+        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def test_v1_follows_the_pre_v1_data_context() -> None:
+    assert _v1()["previous"] == "std:v0.1:default"
+
+
+def test_v1_names_its_definitions_libraries_and_changes() -> None:
+    manifest = _v1()
+    definitions = manifest["definitions"]
+    assert isinstance(definitions, dict) and definitions
+    assert all(isinstance(name, str) and name for name in definitions.values())
+    libraries = manifest["libraries"]
+    assert isinstance(libraries, dict)
+    assert {"starfix", "pyarrow", "polars"} <= set(libraries)
+    changes = manifest["changes"]
+    assert isinstance(changes, list) and changes
+    for change in changes:
+        assert change["definition"] in definitions or change["definition"] in (
+            "arrow_hasher",
+            "semantic_hasher",
+        )
+
+
+def test_released_in_is_set_exactly_when_the_manifest_is_pinned() -> None:
+    """An open manifest has no ``released_in`` and no golden digest; a frozen one has both."""
+    pinned = _pins()["v1"]
+    manifest = _v1()
+    golden = manifest["golden"]
+    assert isinstance(golden, dict)
+    if pinned is None:
+        assert manifest["released_in"] is None
+        assert golden["digest"] is None
+    else:
+        assert isinstance(manifest["released_in"], str) and manifest["released_in"]
+        assert golden["digest"] == golden_digest(), (
+            "The golden hash files differ from the ones this released data context "
+            "stands for. A released data context's values must not move."
+        )
+
+
+def test_v1_lists_no_logical_types() -> None:
+    """Logical types are outside the data context version: registering one edits no manifest."""
+    text = (MANIFEST_DIR / "v1.json").read_text()
+    assert "orcapod.logical_types" not in text
+    for name in ("numpy", "pandas", "uuid.UUID"):
+        assert name not in text
+
+
+def test_logical_type_registration_is_unchanged_by_the_move() -> None:
+    """The default context registers exactly what the single file registered before."""
+    context = contexts.create_registry().get_context()
+    handlers = context.semantic_hasher.type_handler_registry
+    assert isinstance(handlers, PythonTypeHandlerRegistry)
+    assert sorted(
+        f"{t.__module__}.{t.__qualname__}={type(handlers.get_handler_for_type(t)).__name__}"
+        for t in handlers.registered_types()
+    ) == [
+        "builtins.builtin_function_or_method=FunctionHandler",
+        "builtins.bytearray=BytesHandler",
+        "builtins.bytes=BytesHandler",
+        "builtins.function=FunctionHandler",
+        "builtins.method=FunctionHandler",
+        "builtins.type=TypeObjectHandler",
+        "numpy.ndarray=NumpyArrayHandler",
+        "orcapod.logical_types.directory_type.Directory=DirectoryHandler",
+        "orcapod.logical_types.file_type.File=FileHandler",
+        "orcapod.types.Schema=SchemaHandler",
+        "pandas.core.frame.DataFrame=PandasDataFrameHandler",
+        "pandas.core.series.Series=PandasSeriesHandler",
+        "polars.expr.expr.Expr=PolarsExprHandler",
+        "pyarrow.lib.RecordBatch=ArrowTableHandler",
+        "pyarrow.lib.Table=ArrowTableHandler",
+        "types.GenericAlias=GenericAliasHandler",
+        "types.UnionType=UnionTypeHandler",
+        "typing._GenericAlias=GenericAliasHandler",
+        "typing._SpecialForm=SpecialFormHandler",
+        "uuid.UUID=UUIDHandler",
+    ]
+    # The logical type registry has no public listing; this test is about what it holds.
+    converter = context.type_converter
+    assert isinstance(converter, UniversalTypeConverter)
+    registry = converter._logical_type_registry
+    assert registry is not None
+    assert sorted(registry._by_logical_name) == [
+        "orcapod.directory",
+        "orcapod.file",
+        "orcapod.ndarray",
+        "orcapod.path",
+        "orcapod.upath",
+        "orcapod.uuid",
+        "pandas.dataframe",
+        "pandas.series",
+    ]
+    assert sorted(registry._category_factories) == [
+        "list",
+        "orcapod.dataclass",
+        "orcapod.pydantic",
+        "set",
+    ]
+    assert sorted(
+        f"{t.__module__}.{t.__qualname__}" for t in registry._python_class_factories
+    ) == ["builtins.object", "pydantic.main.BaseModel"]

@@ -1,7 +1,7 @@
 """Built-in LogicalType implementations for orcapod.
 
 Provides three built-in logical types registered into the default
-``DataContext.logical_type_registry`` via ``contexts/data/v0.1.json``:
+``DataContext.logical_type_registry`` via ``contexts/logical_types.json``:
 
 - ``LogicalPath``: maps ``pathlib.Path`` ↔ Arrow large_string extension ``"orcapod.path"``
 - ``LogicalUPath``: maps ``upath.UPath`` ↔ Arrow large_string extension ``"orcapod.upath"``

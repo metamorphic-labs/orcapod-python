@@ -60,9 +60,24 @@ read its tables as results, and computes every input again into its own tables.
   now `std:v1:default` (manifest `orcapod/contexts/data/v1.json`). The version increments
   when, and only when, an existing hash value changes for a reason other than a logical
   type's own change. Everything stored before v0.3 (rows that carry `std:v0.1:default`, and
-  tables without the new column) is the earlier generation. A released manifest file is
-  frozen: `orcapod/contexts/released_manifests.json` pins the sha256 of each one, and a test
-  fails when a pinned file is edited. `v1.json` is pinned when v0.3.0 is tagged.
+  tables without the new column) is the earlier generation. A manifest is frozen at the
+  release of the library version that contains it, and may be edited in place only while
+  that release is prepared: `orcapod/contexts/released_manifests.json` pins the sha256 of
+  each released one, and a test fails when a pinned file is edited. `v1.json` is pinned
+  when v0.3.0 is tagged.
+- **Manifest contents.** Besides the wiring of the hashers, a manifest now has
+  `released_in` (the library version that froze it; `null` while open), `previous` (the data
+  context it follows), `definitions` (a name for each definition that lives in code),
+  `libraries` (the libraries the core hashes depend on, with versions), `golden` (a digest
+  of the golden hash files, set when the manifest is frozen) and `changes` (what differs
+  from `previous`).
+- **Logical types moved out of the manifest.** The registered logical types and the value
+  handlers that hash their Python values are now in
+  `orcapod/contexts/logical_types.json`, which is not frozen: a logical type is versioned by
+  its own identifier, not by the data context. What the default context registers is
+  unchanged. `JSONDataContextRegistry` and `contexts.create_registry` take
+  `logical_types_file` to use another registration file; a manifest that lists its logical
+  types inline is still built as written.
 - **New column `__data_context`** (`large_string`) on every row of the function pipeline
   table, the function result table, the operator-cache table, the cached-source table and
   the side-effect invocation log. It **replaces** `__input_data_context_key` in the pipeline
