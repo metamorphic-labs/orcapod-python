@@ -169,6 +169,7 @@ def test_check_rejects_a_wrong_file_name(entries: Path, name: str) -> None:
         ("", "empty"),
         ("\n \n", "empty"),
         (ENTRY.removeprefix("## `src/x.py` — things\n\n"), "area heading"),
+        (ENTRY.replace("## `src/x.py` — things", "## "), "no text after '## '"),
         (ENTRY.replace("things\n\n###", "things\n###"), "no blank line"),
         (ENTRY.replace("things\n\n###", "things\nStray.\n\n###"), "text between"),
         (ENTRY.replace("### AB1 — A title", "### AB1 A title"), "### <ENTRY-ID> — "),

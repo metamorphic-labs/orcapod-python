@@ -164,6 +164,8 @@ def parse_entry(text: str) -> Entry:
     entry_lines = [i for i, line in enumerate(lines) if mask[i] and line[:4] == "### "]
     if not area_lines or area_lines[0] != 0:
         problems.append("does not start with its '## <area heading>' line")
+    elif not lines[0][3:].strip():
+        problems.append("has an area heading with no text after '## '")
     if len(area_lines) > 1:
         problems.append("has more than one area heading ('## '); a file holds one")
     if len(entry_lines) > 1:
