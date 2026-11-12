@@ -1023,7 +1023,10 @@ same structure is used for both chains; the chains differ only in how the inputs
 | Input order, for `Join` and `MergeJoin` | |
 | `label` | |
 | A predicate written another way | `10 < col` equals `col > 10` |
-| Two operators that produce the same output | `DropDataColumns(["y"])` and `SelectDataColumns(["x"])` differ |
+
+Identity follows how the operator was written, not what it outputs: `DropDataColumns(["y"])`
+and `SelectDataColumns(["x"])` on a stream with data columns `x, y` give the same rows and
+different hashes.
 
 A stream with no producer (`ArrowTableStream` built from a table): content identity is
 `(class name, the whole table including system tags and source info, tag columns)`; pipeline
