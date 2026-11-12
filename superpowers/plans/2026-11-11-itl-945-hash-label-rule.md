@@ -91,7 +91,21 @@ No change. Source record id (`uuid5`), folded record id (`uuid5`), folded source
 
 ### Tracer results
 
-Filled in once the traced suite run finishes (see "Notes").
+Suite on the base commit with the tracer: 7755 passed, 96 skipped, 18 xfailed (Python 3.12).
+97 library lines turned a `ContentHash` into text or bytes. Every one is in the tables above
+or in this list of sites that need no change:
+
+- in-memory keys and comparisons on the labelled string: `pipeline/base.py` (node map, graph
+  edges), `pipeline/job.py:173`, `:382`, `:568`, `data_function_proxy.py:308`,
+  `source_proxy.py:110-119`;
+- `__hash__` (`core/base.py:187`, `content_identifiable_mixin.py:182`) and the short display
+  name (`content_identifiable_mixin.py:259`);
+- an error message (`errors.py:208`, `repr`);
+- old migrations (`migrations/pipeline_db.py`, `migrations/result_db.py`);
+- `invocation.py:51`, the invocation hash handed to side-effect functions (open point 4).
+
+The tracer found no site that the reading had missed. Sites the suite does not execute, found
+by reading only: `derived_source.py:51`, `postgres_hash_cacher.py:259`.
 
 ---
 
@@ -167,7 +181,35 @@ in the PR after implementation.
 
 ## (h) Open points
 
-See the question sent to the coordinator; answers are recorded under "Decisions".
+Each with my recommendation; answers are recorded under "Decisions".
+
+1. **Three hash inputs outside the brief carry a label** (A2 sites 6, 7, 8: entry-id preimage,
+   operator-cache row-key preimage, run snapshot hash). Recommend: feed the digest only at all
+   three; the stored columns stay labelled.
+2. **Form of a nested hash in the structure JSON.** Recommend the bare hex string. Consequence:
+   a nested hash and a plain string equal to its hex give the same parent hash (the same kind
+   of equality already exists between `b"a"` and `"61"`). Alternative: a tagged object
+   `{"__type__":"hash","digest":"<hex>"}`.
+3. **Extension cell token.** Recommend `<ext name>::` + raw digest bytes. ITL-935 changes the
+   identifier part of the same line (`visitors.py:310`): a one-line overlap at integration.
+4. **Invocation hash** (`InvocationContext.invocation_hash`, `"<label>:<hex>::<label>:<hex>"`,
+   public, used by users as an idempotency key). It is an identifier built from two hashes, so
+   recommend bare digests: `"<hex>::<hex>"`. This changes a documented public string.
+5. **Where a label is defined.** The design says "defined in a single place, and is listed in
+   the data context file". Recommend the constant in code and no literal in the manifest (the
+   manifest names the class). The alternative, the manifest as the definition, keeps the
+   literal in every manifest file and leaves the per-type labels in code anyway.
+6. **`BasicDirectoryHasher(algorithm=...)`.** `directory_v1` names the SHA-256 Merkle
+   procedure. Recommend: the constructor raises `ValueError` for any other algorithm; the
+   manifest line `"algorithm": "sha256"` is untouched.
+7. **Row-key readers.** With labelled row keys, `operator_node._read_stored_records` and
+   `cached_source._read_cached_records` must filter on the label instead of the starfix format
+   (one argument each). ITL-944 rewrites both readers; at integration its version wins.
+8. **`contexts/data/v0.1.json` after ITL-944.** On this branch it is the only manifest, so it
+   gets the `_v1` labels. What `std:v0.1:default` means once `v1.json` exists is ITL-944's
+   question.
+9. **Saved job JSON** keeps labelled hash strings as node keys and fields: they are stored
+   values read back with `ContentHash.from_string`. Recommend keep.
 
 ## Decisions
 
