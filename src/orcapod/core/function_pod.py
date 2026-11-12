@@ -29,6 +29,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
+from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.system_constants import constants
 from orcapod.types import (
     ColumnConfig,
@@ -1049,7 +1050,16 @@ class FunctionPodStream(StreamBase):
             # TODO: re-verify the implemetation of this conversion
             converter = self.data_context.type_converter
 
-            struct_data = converter.python_dicts_to_struct_dicts(all_data)
+            # The data columns have declared types: convert each value as its column's
+            # type, never as the type the value happens to have. A subclass instance
+            # returned for a base-class column is then refused instead of being stored
+            # as the base without its own fields (ITL-972). Only the remaining columns
+            # (meta, source info) are typed from their values.
+            python_schema = dict(infer_python_schema_from_pylist_data(all_data))
+            python_schema.update(self.output_schema()[1])
+            struct_data = converter.python_dicts_to_struct_dicts(
+                all_data, python_schema=python_schema
+            )
             all_tags_as_tables: pa.Table = pa.Table.from_pylist(
                 all_tags, schema=tag_schema
             )

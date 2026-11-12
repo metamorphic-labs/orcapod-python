@@ -8,6 +8,7 @@ that would make two classes interchangeable.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 from pathlib import Path
 from typing import Any
@@ -176,3 +177,66 @@ def test_chain_of_two_classes_is_refused_through_a_store(
         with job:
             produced = _make_pod(first).pod(_numbers(), label="make")
             _ = _receive_pod(second).pod(produced, label="receive")
+
+
+# ---------------------------------------------------------------------------
+# Subclasses: Python's subtype rule at a pod input, own identity in storage
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Base:
+    """An ordinary dataclass."""
+
+    x: int
+
+
+@dataclasses.dataclass
+class Child(Base):
+    """A subclass with a field of its own."""
+
+    z: int = 0
+
+
+@function_pod(output_keys="seen")
+def describe_base(p: Base) -> str:
+    """Return the class name of the argument and its ``x``."""
+    return f"{type(p).__name__}:{p.x}"
+
+
+@function_pod(output_keys="q")
+def child_as_base(x: int) -> Base:
+    """Return a ``Child`` although the pod is annotated ``-> Base``."""
+    return Child(x, 9)
+
+
+def test_subclass_column_is_accepted_at_a_base_class_parameter() -> None:
+    """A pod annotated with the base class accepts a column of the subclass."""
+    source = _source(Child(1, 7))
+    assert source.output_schema()[1]["p"] is Child
+    assert source.as_table().schema.field("p").type.storage_type.names == ["x", "z"]
+
+    result = describe_base.pod(source)
+    assert [data.as_dict()["seen"] for _, data in result.iter_data()] == ["Child:1"]
+
+
+def test_base_class_column_is_refused_at_a_subclass_parameter() -> None:
+    """The subtype rule has one direction: a base column is not a subclass column."""
+    with pytest.raises(ValueError, match="column 'p'"):
+        _ = _sum_pod(Child).pod(_source(Base(1)))
+
+
+def test_subclass_and_base_are_different_types() -> None:
+    """A subclass has its own identifier and pipeline hash."""
+    base, child = _source(Base(1)), _source(Child(1))
+    assert (
+        base.as_table().schema.field("p").type.extension_name
+        != child.as_table().schema.field("p").type.extension_name
+    )
+    assert base.pipeline_hash() != child.pipeline_hash()
+
+
+def test_a_value_is_stored_only_as_its_own_class() -> None:
+    """A subclass instance returned for a base-class column is not stored as the base."""
+    with pytest.raises(TypeError, match="Child"):
+        _ = child_as_base.pod(_numbers()).as_table()
