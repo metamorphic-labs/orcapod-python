@@ -285,7 +285,7 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         **constraints: Any,
     ) -> "StreamProtocol": ...
 
-    def drop_null_rows(
+    def drop_nulls(
         self,
         columns: str | Collection[str],
         label: str | None = None,

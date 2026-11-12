@@ -1,4 +1,4 @@
-"""DropNullRows operator: drop rows with a null in named columns, narrow ``T | None`` to ``T``."""
+"""DropNulls operator: drop rows with a null in named columns, narrow ``T | None`` to ``T``."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def _without_none(python_type: DataType) -> DataType:
     return typing.Union[members]  # noqa: UP007  # built from a runtime tuple of members
 
 
-class DropNullRows(UnaryOperator):
+class DropNulls(UnaryOperator):
     """Keep the rows where every named column is non-null; narrow those columns to ``T``.
 
     A row survives only if all the named columns hold a value. Afterwards each
@@ -82,7 +82,7 @@ class DropNullRows(UnaryOperator):
         names = (columns,) if isinstance(columns, str) else tuple(columns)
         if not names:
             raise ValueError(
-                "DropNullRows needs at least one column name; got an empty collection."
+                "DropNulls needs at least one column name; got an empty collection."
             )
         # A sorted tuple of unique names, so a list, a tuple and a set of the
         # same names (in any order) are one identity.
@@ -130,7 +130,7 @@ class DropNullRows(UnaryOperator):
         ]
         if missing:
             raise InputValidationError(
-                f"DropNullRows: columns {missing} are not tag or data columns of the"
+                f"DropNulls: columns {missing} are not tag or data columns of the"
                 + f" input stream. Tag columns: {list(tag_columns)}; data columns:"
                 + f" {list(data_columns)}."
             )

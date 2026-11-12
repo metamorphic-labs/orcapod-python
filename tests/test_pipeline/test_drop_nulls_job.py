@@ -1,7 +1,7 @@
-"""``DropNullRows`` in a ``PipelineJob`` against a Delta Lake store (ITL-943).
+"""``DropNulls`` in a ``PipelineJob`` against a Delta Lake store (ITL-943).
 
 The workshop shape: a source whose value column is nullable by specification,
-``drop_null_rows``, then a pod with a non-optional parameter. A second run on
+``drop_nulls``, then a pod with a non-optional parameter. A second run on
 the same store must reuse the stored results.
 """
 
@@ -62,11 +62,11 @@ def _recordings(timestamps: list[int | None]) -> ArrowTableSource:
 
 
 def _run(store: DeltaTableDatabase, timestamps: list[int | None]) -> PipelineJob:
-    """Record and run ``source -> drop_null_rows -> to_seconds`` as a ``PipelineJob``."""
+    """Record and run ``source -> drop_nulls -> to_seconds`` as a ``PipelineJob``."""
     pod = FunctionPod(PythonDataFunction(to_seconds, output_keys="seconds"))  # pyright: ignore[reportArgumentType]  # PythonDataFunction is not yet typed as matching DataFunctionProtocol (baselined in other tests); it works at runtime
     job = PipelineJob(name="recordings", store=store)
     with job:
-        present = _recordings(timestamps).drop_null_rows(
+        present = _recordings(timestamps).drop_nulls(
             "recording_start_timestamp", label="present"
         )
         pod(present, label="seconds")
@@ -137,7 +137,7 @@ def test_job_save_and_load_round_trips_the_operator(
         for node in json.loads(path.read_text())["pipeline"]["nodes"].values()
         if node.get("operator_config")
     ]
-    assert [c["class_name"] for c in saved] == ["DropNullRows"]
+    assert [c["class_name"] for c in saved] == ["DropNulls"]
     assert saved[0]["config"] == {"columns": ["recording_start_timestamp"]}
 
     loaded = PipelineJob.load(str(path), store=store)

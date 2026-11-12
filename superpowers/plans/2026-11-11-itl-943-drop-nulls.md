@@ -1,12 +1,12 @@
-# DropNullRows Operator Implementation Plan (ITL-943)
+# DropNulls Operator Implementation Plan (ITL-943)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A unary operator `DropNullRows(columns)` and `stream.drop_null_rows(columns)` that keeps
+**Goal:** A unary operator `DropNulls(columns)` and `stream.drop_nulls(columns)` that keeps
 only rows where every named column is non-null and narrows each named column from `T | None`
 to `T` (schema and Arrow field).
 
-**Architecture:** One operator class in `src/orcapod/core/operators/drop_null_rows.py`. Pure
+**Architecture:** One operator class in `src/orcapod/core/operators/drop_nulls.py`. Pure
 Arrow (validity mask, `Table.filter`, re-wrap the same arrays under a schema whose named
 fields are non-nullable); no Polars. A streaming `async_execute` applies the same
 table-level narrowing to each datagram's Arrow table.
@@ -17,10 +17,9 @@ table-level narrowing to each datagram's Arrow table.
 
 ## Design (approved by the coordinator, November 11, 2026)
 
-Coordinator's answer to the STEP 1 `ask`: (b)-(j) approved as proposed. (a) The NAME is the
-developer's call, still open between `DropNulls`/`drop_nulls` and
-`DropNullRows`/`drop_null_rows`; **use `DropNullRows` / `drop_null_rows` meanwhile and keep
-the name easy to switch with one rename** (class, stream method, registry key, module, docs).
+Coordinator's answer to the STEP 1 `ask`: (b)-(j) approved as proposed. (a) The NAME was the
+developer's call; the developer chose **`DropNulls` / `drop_nulls`** on November 11, 2026, and
+the operator (first built under a longer working name) was renamed everywhere, with no alias.
 
 - **Argument:** `columns: str | Collection[str]`; a bare `str` is one name. Empty collection is
   `ValueError` at construction. Stored as `self.columns = tuple(sorted(set(names)))`.
@@ -33,7 +32,7 @@ the name easy to switch with one rename** (class, stream method, registry key, m
 - **Tag vs data:** one operator; names may be tag or data columns, mixed.
 - **Nested:** only top-level validity is tested (null list / null struct; not an empty list,
   list items, struct children, or NaN). Only the top-level field becomes non-nullable.
-- **Identity:** `identity_structure() == ("DropNullRows", self.columns)`; same for content and
+- **Identity:** `identity_structure() == ("DropNulls", self.columns)`; same for content and
   pipeline hash. `"x"`, `["x"]`, `("x",)`, `{"x"}`, `["x", "x"]` are one identity; order is
   irrelevant.
 - **Hash effects (measured):** nullability is in the Arrow schema hash. A surviving row's
@@ -59,17 +58,17 @@ with a source whose keys are `T`.
 
 ## Files
 
-- Create: `src/orcapod/core/operators/drop_null_rows.py` (the operator)
+- Create: `src/orcapod/core/operators/drop_nulls.py` (the operator)
 - Modify: `src/orcapod/core/operators/__init__.py` (export), `src/orcapod/operators/...`
   (public re-export, wherever `PolarsFilter` is listed)
-- Modify: `src/orcapod/core/streams/base.py` (`drop_null_rows` method),
+- Modify: `src/orcapod/core/streams/base.py` (`drop_nulls` method),
   `src/orcapod/protocols/core_protocols/streams.py` (protocol method)
 - Modify: `src/orcapod/pipeline/serialization.py` (operator registry)
-- Create: `tests/test_core/operators/test_drop_null_rows.py`
-- Create: `tests/test_pipeline/test_drop_null_rows_job.py` (Delta store, cache hits)
+- Create: `tests/test_core/operators/test_drop_nulls.py`
+- Create: `tests/test_pipeline/test_drop_nulls_job.py` (Delta store, cache hits)
 - Modify: `tests/test_core/operators/test_async_sync_equivalence.py` (two cases)
 - Modify: `tests/test_core/operators/test_operator_config.py` (round trip)
-- Modify: `tests/test_hashing/golden/cases.py` (new case `pipeline/drop_null_rows`), then
+- Modify: `tests/test_hashing/golden/cases.py` (new case `pipeline/drop_nulls`), then
   regenerate; the diff of `tests/test_hashing/golden/data/pipeline.json` must only add lines
 - Modify: `docs/concepts/operators.md`, `CHANGELOG.md`, `DESIGN_ISSUES.md`, `CLAUDE.md`,
   `.zed/rules`
@@ -77,11 +76,11 @@ with a source whose keys are `T`.
 ## Operator sketch
 
 ```python
-class DropNullRows(UnaryOperator):
+class DropNulls(UnaryOperator):
     def __init__(self, columns: str | Collection[str], **kwargs: Any) -> None:
         names = (columns,) if isinstance(columns, str) else tuple(columns)
         if not names:
-            raise ValueError("DropNullRows needs at least one column name.")
+            raise ValueError("DropNulls needs at least one column name.")
         self.columns: tuple[str, ...] = tuple(sorted(set(names)))
         super().__init__(**kwargs)
 
@@ -114,7 +113,7 @@ fall back to the inherited barrier path and report it.
 
 ## Tasks
 
-- [ ] **1. Tests first** (`tests/test_core/operators/test_drop_null_rows.py`): rows with nulls
+- [ ] **1. Tests first** (`tests/test_core/operators/test_drop_nulls.py`): rows with nulls
   dropped and order preserved; `output_schema` and `as_table` narrowed; other columns' types
   and nullability untouched; multiple columns; tag column; mixed tag and data; nested (list
   with null items, struct with null children survive; null list / struct dropped; nested
@@ -126,14 +125,14 @@ fall back to the inherited barrier path and report it.
   source info unchanged; schema prediction vs `unary_static_process(...).output_schema(...)`
   (comment at the non-public use); pod with a non-optional parameter refused before, runs
   after; `Join` after it; nullable tag narrowed then joined with a `T`-keyed source;
-  `stream.drop_null_rows` equals the operator. Run: all fail with `ImportError`.
-- [ ] **2. More tests:** two `Case`s in `test_async_sync_equivalence.py` (`drop_null_rows`
-  on `nul`, `drop_null_rows_tag_and_data`), config round trip in `test_operator_config.py`,
-  `tests/test_pipeline/test_drop_null_rows_job.py` (PipelineJob with `DeltaTableDatabase`:
+  `stream.drop_nulls` equals the operator. Run: all fail with `ImportError`.
+- [ ] **2. More tests:** two `Case`s in `test_async_sync_equivalence.py` (`drop_nulls`
+  on `nul`, `drop_nulls_tag_and_data`), config round trip in `test_operator_config.py`,
+  `tests/test_pipeline/test_drop_nulls_job.py` (PipelineJob with `DeltaTableDatabase`:
   run, results; second job on the same store makes no new pod calls). Commit (WIP, failing).
 - [ ] **3. Implement** the operator, exports, stream method, protocol method, registry.
   Run the new tests until green. Commit.
-- [ ] **4. Golden:** add `@case("pipeline", "drop_null_rows")` to `cases.py` (a source with a
+- [ ] **4. Golden:** add `@case("pipeline", "drop_nulls")` to `cases.py` (a source with a
   nullable data column; summaries of the operator on one and on two columns), regenerate,
   check `git diff --stat` and that the diff has no removed or changed line. Commit.
 - [ ] **5. Docs:** `docs/concepts/operators.md` section with a runnable sample (drop null rows,
@@ -151,22 +150,21 @@ fall back to the inherited barrier path and report it.
 (Updated as work proceeds, for a successor.)
 
 - November 11: tasks 1-5 done and pushed. Operator in
-  `src/orcapod/core/operators/drop_null_rows.py`; tests in
-  `tests/test_core/operators/test_drop_null_rows.py`,
-  `tests/test_pipeline/test_drop_null_rows_job.py`, two `Case`s plus a tagless test in
-  `test_async_sync_equivalence.py`, `TestDropNullRowsConfig` in `test_operator_config.py`.
-- Golden: cases `pipeline/drop_null_rows` and `pipeline/drop_null_rows_job` appended to
+  `src/orcapod/core/operators/drop_nulls.py`; tests in
+  `tests/test_core/operators/test_drop_nulls.py`,
+  `tests/test_pipeline/test_drop_nulls_job.py`, two `Case`s plus a tagless test in
+  `test_async_sync_equivalence.py`, `TestDropNullsConfig` in `test_operator_config.py`.
+- Golden: cases `pipeline/drop_nulls` and `pipeline/drop_nulls_job` appended to
   `cases.py`; `pipeline.json` gained 128 lines, none removed or changed.
 - The streaming async path is exactly equivalent row by row (including Data meta columns, so
   no xfail was needed); no fallback to the barrier path.
 - Large normalization uses `normalize_to_large_types(..., keep_null=True)` per field with
   `restore_column_types` (the table-level helper maps `null` to `large_string`).
-- Open: the NAME (developer's call). To rename: class and module `drop_null_rows.py`, stream
-  method in `core/streams/base.py` and `protocols/core_protocols/streams.py`, registry key in
-  `pipeline/serialization.py`, export in `core/operators/__init__.py`, docs, CHANGELOG,
-  DESIGN_ISSUES, CLAUDE.md, `.zed/rules`, tests and golden case names. A rename changes the
-  operator's identity hash (the class name is in `identity_structure`), so the two golden
-  cases must be regenerated with it (new entries only; nothing released yet).
+- NAME decided (developer, November 11, 2026): `DropNulls` / `drop_nulls`. Renamed class,
+  module (`drop_nulls.py`), stream method, registry key, export, docs, CHANGELOG, DESIGN_ISSUES,
+  CLAUDE.md, `.zed/rules`, tests (files too), golden case names and this plan file. The class
+  name is in `identity_structure`, so the two golden cases this PR added were regenerated with
+  it (additions only against main; no existing entry moved).
 - Observation, not fixed (out of scope): a `PipelineJob` saved with an in-memory
   `ArrowTableSource` and loaded again gives operator nodes whose pipeline hash differs from
   the saved job's (same for `MapData`), because the source is not reconstructable.

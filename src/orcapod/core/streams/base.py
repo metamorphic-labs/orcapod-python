@@ -186,7 +186,7 @@ class StreamBase(TraceableBase):
             self, label=label
         )
 
-    def drop_null_rows(
+    def drop_nulls(
         self,
         columns: str | Collection[str],
         label: str | None = None,
@@ -195,7 +195,7 @@ class StreamBase(TraceableBase):
 
         Each named column, tag or data, is non-nullable afterwards (``T``
         instead of ``T | None``), so a pod whose parameter is a plain ``T``
-        can consume it. See ``orcapod.core.operators.DropNullRows``.
+        can consume it. See ``orcapod.core.operators.DropNulls``.
 
         Args:
             columns: One column name, or a collection of names.
@@ -204,9 +204,9 @@ class StreamBase(TraceableBase):
         Returns:
             A stream over the surviving rows, in input order.
         """
-        from orcapod.core.operators import DropNullRows
+        from orcapod.core.operators import DropNulls
 
-        return DropNullRows(columns)(self, label=label)
+        return DropNulls(columns)(self, label=label)
 
     def select_tag_columns(
         self,

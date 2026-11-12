@@ -29,7 +29,7 @@ boundary because it synthesizes no new data values -- every element of every emi
 from an input row -- and it keys only on tags, never on data content.
 
 The filters are the operators that read data columns: `PolarsFilter` evaluates its predicate
-on values, and `DropNullRows` reads only whether a value is present (its validity), never the
+on values, and `DropNulls` reads only whether a value is present (its validity), never the
 value. Both decide which rows exist; neither synthesizes a value.
 
 ## Operator categories
@@ -354,9 +354,9 @@ except ValueError as exc:
 # Cannot hash the Polars expression 'col("age").python_udf()' for an Orcapod identity
 ```
 
-### DropNullRows
+### DropNulls
 
-`DropNullRows(columns)` keeps the rows where every named column is non-null, and narrows
+`DropNulls(columns)` keeps the rows where every named column is non-null, and narrows
 each named column from `T | None` to `T`. Use it when a column is nullable by specification
 but a function needs a value: a pod whose parameter is a plain `int` refuses an `int | None`
 column, and `PolarsFilter` can drop the null rows but leaves the type as it was.
@@ -364,7 +364,7 @@ column, and `PolarsFilter` can drop the null rows but leaves the type as it was.
 ```python
 import pyarrow as pa
 from orcapod import function_pod
-from orcapod.operators import DropNullRows
+from orcapod.operators import DropNulls
 from orcapod.sources import ArrowTableSource
 
 recordings = ArrowTableSource(
@@ -397,7 +397,7 @@ except ValueError as exc:
     print(str(exc).rsplit(": ", 1)[1])
 # column 'start_ms' has type int | None, the function expects int
 
-present = DropNullRows("start_ms")(recordings)
+present = DropNulls("start_ms")(recordings)
 print(present.output_schema()[1])
 # Schema({'start_ms': int})
 print(to_seconds.pod(present).as_table().to_pylist())
@@ -418,8 +418,8 @@ The rules:
 - **Everything else is unchanged**: other columns' types and nullability, logical types
   (a `Path | None` column becomes `Path`), system tags, source info and row order. A result
   with no rows has the same narrowed schema.
-- **Identity** is the set of names: `DropNullRows("a")`, `DropNullRows(["a"])` and
-  `DropNullRows({"a"})` are one operator, and the order of names does not matter.
+- **Identity** is the set of names: `DropNulls("a")`, `DropNulls(["a"])` and
+  `DropNulls({"a"})` are one operator, and the order of names does not matter.
 - **Row hashes.** Nullability is part of a row's Arrow schema, so a surviving row's data
   hash changes when a named data column was nullable (its tag hash, when a named tag column
   was). The new hash is the one the row has in a stream that declared the column
@@ -427,11 +427,11 @@ The rules:
 
 Tag columns work the same way. A stream whose key column is `str | None` cannot be joined
 with one whose key is `str` (`Join` never reconciles types), so narrow the key first. The
-stream method is `drop_null_rows`:
+stream method is `drop_nulls`:
 
 ```python
-by_method = recordings.drop_null_rows(["session", "start_ms"])
-by_operator = DropNullRows(["start_ms", "session"])(recordings)
+by_method = recordings.drop_nulls(["session", "start_ms"])
+by_operator = DropNulls(["start_ms", "session"])(recordings)
 print(by_method.pipeline_hash() == by_operator.pipeline_hash())
 # True
 ```
@@ -531,7 +531,7 @@ operators or function pods.
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
 `drop_tag_columns`, `drop_data_columns`, `map_tags`, `map_data`, `polars_filter`,
-`drop_null_rows`, `pick` and `index`.
+`drop_nulls`, `pick` and `index`.
 
 ```python
 import polars as pl

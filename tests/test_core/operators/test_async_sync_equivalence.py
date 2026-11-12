@@ -31,7 +31,7 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
-    DropNullRows,
+    DropNulls,
     DropTagColumns,
     GroupBy,
     Index,
@@ -313,11 +313,11 @@ CASES = [
     ),
     Case("index", lambda: Index("l8", 0), lambda: (source_a(),)),
     Case("pick", lambda: Pick("d", "q"), lambda: (source_a(),)),
-    Case("drop_null_rows", lambda: DropNullRows("nul"), lambda: (source_a(),)),
+    Case("drop_nulls", lambda: DropNulls("nul"), lambda: (source_a(),)),
     Case(
-        "drop_null_rows_many",
+        "drop_nulls_many",
         # A nullable column with a null, one without, a tag, a non-nullable list.
-        lambda: DropNullRows(["nul", "s", "ta", "l8"]),
+        lambda: DropNulls(["nul", "s", "ta", "l8"]),
         lambda: (source_a(),),
     ),
 ]
@@ -333,7 +333,7 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
     )
 
 
-def test_drop_null_rows_without_tag_columns() -> None:
+def test_drop_nulls_without_tag_columns() -> None:
     """A stream without tag columns: the async path drops the same rows, in order.
 
     Outside the matrix, whose pairing needs unique tag rows.
@@ -347,8 +347,8 @@ def test_drop_null_rows_without_tag_columns() -> None:
         source_id="tagless",
         nullable=("x", "s"),
     )
-    expected = sync_rows(DropNullRows("x"), source)
-    actual = async_rows(DropNullRows("x"), source)
+    expected = sync_rows(DropNulls("x"), source)
+    actual = async_rows(DropNulls("x"), source)
     assert [data.as_dict() for _, data in actual] == [
         {"x": 1, "s": "a"},
         {"x": 3, "s": "c"},

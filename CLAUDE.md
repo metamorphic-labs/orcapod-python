@@ -294,7 +294,7 @@ src/orcapod/
 │       ├── column_selection.py # Select/Drop Tag/Data columns
 │       ├── mappers.py          # MapTags, MapData (rename columns)
 │       ├── filters.py          # PolarsFilter
-│       └── drop_null_rows.py   # DropNullRows (drop rows with a null in named columns, T | None → T)
+│       └── drop_nulls.py       # DropNulls (drop rows with a null in named columns, T | None → T)
 ├── hashing/
 │   └── semantic_hashing/       # BaseSemanticHasher, type handlers
 ├── semantic_types/             # Type conversion (Python ↔ Arrow)
@@ -377,7 +377,7 @@ tag tuple into one row with list-valued members. It still synthesizes no new dat
 every emitted element came from an input row — and it keys only on tags, never on data.
 
 Filters are the operators that read data columns (ITL-943): `PolarsFilter` evaluates its
-predicate on values, and `DropNullRows` reads only whether a value is present (its validity),
+predicate on values, and `DropNulls` reads only whether a value is present (its validity),
 never the value. A filter decides which rows exist and never synthesizes a value; no other
 operator reads data content.
 
@@ -530,10 +530,10 @@ data. The rules:
   `as_table()` (which legitimately differs: `ArrowTableStream.output_schema` ignores
   `columns.source`, so `_source_*`, `_content_hash`, and `_context_key` appear in the table
   but never in the schema).
-- `DropNullRows` keeps the rows where every named column (tag or data) is non-null and clears
+- `DropNulls` keeps the rows where every named column (tag or data) is non-null and clears
   the nullable flag of each named field, so `T | None` becomes `T`. Only top-level validity is
   read (not list items, struct children or NaN). Its identity is the sorted tuple of unique
-  names. Both paths apply one rule, `DropNullRows._narrow_table`: an Arrow validity mask and
+  names. Both paths apply one rule, `DropNulls._narrow_table`: an Arrow validity mask and
   the same arrays re-wrapped under the new field flags, with no Polars round-trip and no cast
   other than large normalization. A named column that is already non-nullable is a no-op.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises

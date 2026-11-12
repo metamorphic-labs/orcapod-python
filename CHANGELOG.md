@@ -72,7 +72,7 @@ stay queued for the next flush. A flush that fails only for other reasons still 
 
 ### Added
 
-- **`DropNullRows` operator and `stream.drop_null_rows(columns)`** — keeps the rows where
+- **`DropNulls` operator and `stream.drop_nulls(columns)`** — keeps the rows where
   every named column is non-null and narrows each named column from `T | None` to `T`, in
   `output_schema()` and in the Arrow table, so a pod whose parameter is a plain `T` can
   consume a column that is nullable by specification. The names may be tag columns, data

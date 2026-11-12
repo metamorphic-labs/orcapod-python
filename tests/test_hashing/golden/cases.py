@@ -968,33 +968,29 @@ def _nullable_readings() -> Any:
     )
 
 
-@case("pipeline", "drop_null_rows")
-def pipeline_drop_null_rows() -> dict[str, Any]:
-    """Pin ``DropNullRows``: the operator's own identity and the narrowed rows."""
-    from orcapod.operators import DropNullRows
+@case("pipeline", "drop_nulls")
+def pipeline_drop_nulls() -> dict[str, Any]:
+    """Pin ``DropNulls``: the operator's own identity and the narrowed rows."""
+    from orcapod.operators import DropNulls
 
     out = _prefixed("source", stream_summary(_nullable_readings()))
-    out["operator[x].content_hash"] = DropNullRows("x").content_hash().to_string()
-    out["operator[x,y].content_hash"] = (
-        DropNullRows(["y", "x"]).content_hash().to_string()
-    )
-    out.update(
-        _prefixed("data", stream_summary(DropNullRows("x")(_nullable_readings())))
-    )
+    out["operator[x].content_hash"] = DropNulls("x").content_hash().to_string()
+    out["operator[x,y].content_hash"] = DropNulls(["y", "x"]).content_hash().to_string()
+    out.update(_prefixed("data", stream_summary(DropNulls("x")(_nullable_readings()))))
     out.update(
         _prefixed(
-            "data_many", stream_summary(DropNullRows(["x", "y"])(_nullable_readings()))
+            "data_many", stream_summary(DropNulls(["x", "y"])(_nullable_readings()))
         )
     )
     out.update(
-        _prefixed("tag", stream_summary(_nullable_readings().drop_null_rows("site")))
+        _prefixed("tag", stream_summary(_nullable_readings().drop_nulls("site")))
     )
     return out
 
 
-@case("pipeline", "drop_null_rows_job")
-def pipeline_drop_null_rows_job() -> dict[str, Any]:
-    """Record a job with ``DropNullRows`` upstream of a pod with non-optional parameters."""
+@case("pipeline", "drop_nulls_job")
+def pipeline_drop_nulls_job() -> dict[str, Any]:
+    """Record a job with ``DropNulls`` upstream of a pod with non-optional parameters."""
     from orcapod import PipelineJob
     from orcapod.databases import InMemoryArrowDatabase
 
@@ -1003,7 +999,7 @@ def pipeline_drop_null_rows_job() -> dict[str, Any]:
     with job:
         present = (
             _nullable_readings()
-            .drop_null_rows(["x", "y"], label="present")
+            .drop_nulls(["x", "y"], label="present")
             .map_data({"x": "age", "y": "weight"}, label="renamed")
         )
         golden_ratio.pod(present, label="ratio")

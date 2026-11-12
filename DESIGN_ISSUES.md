@@ -2445,7 +2445,7 @@ instead. Tighten under a new storage version once nested nullability survives Po
 
 ---
 
-## `src/orcapod/core/operators/drop_null_rows.py` — null rows and nullable columns (ITL-943)
+## `src/orcapod/core/operators/drop_nulls.py` — null rows and nullable columns (ITL-943)
 
 ### DN1 — No way to turn a `T | None` column into `T`
 **Status:** resolved
@@ -2457,7 +2457,7 @@ Many value columns are nullable by specification (EDI, Spiral tables), and a pod
 but the column stayed `T | None`, so the pod was still refused; a nullable key column likewise
 could not be joined with a non-nullable one.
 
-**Fix:** `DropNullRows(columns)` and `stream.drop_null_rows(columns)` keep the rows where every
+**Fix:** `DropNulls(columns)` and `stream.drop_nulls(columns)` keep the rows where every
 named column (tag or data) is non-null and clear the nullable flag of each named field.
 Decisions (coordinator, November 11, 2026): one operator for tag and data columns; only
 top-level validity is read; a missing column is `InputValidationError`; an already non-nullable
@@ -2466,6 +2466,6 @@ table rule (`_narrow_table`), pure Arrow. A surviving row's `Data` (or `Tag`) co
 changes when a named column was nullable, to the hash of the same row declared non-nullable;
 no existing golden value moved.
 
-Open: the class and method names (`DropNullRows` / `drop_null_rows` versus `DropNulls` /
+Open: the class and method names (`DropNulls` / `drop_nulls` versus `DropNulls` /
 `drop_nulls`) await the developer's decision. Possible follow-up: a variant that raises on a
 null instead of dropping the row.
