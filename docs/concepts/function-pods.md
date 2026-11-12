@@ -307,6 +307,29 @@ at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these ro
 This is the contract for now. An opt-in mode that tolerates store failures may be added
 later.
 
+### A store written by an older version
+
+Stored rows are keyed by hashes of their Arrow data, and each hash carries the label of the
+scheme that produced it: `arrow_v0.1` up to Orcapod v0.2, `arrow_v0.2` since v0.3 (see
+[Arrow Table Hash](../reference/hashing.md#9-arrow-table-hash-arrow_v02)). Rows keyed under
+another label can never match current inputs. Rather than compute next to them, which would
+mix old and new rows in one table, or ignore them, which would make your stored results look
+lost, Orcapod refuses the store: `job.run()` raises `StoreHashLabelError` (from
+`orcapod.errors`, a `StoreError`) before any node computes or writes anything, and reading
+such a node (`as_table()`, `iter_data()`, `get_all_records()`) raises it too. The store is left
+exactly as it was. The error names the table, the label found and the current one:
+
+```text
+The stored table 'my_job/double/semantic_v0.1:.../pdb_v1' of node 'dbl' holds rows hashed
+under 'arrow_v0.1', but this version of Orcapod hashes with 'arrow_v0.2'. Rows hashed under
+another label can never match current inputs, so nothing was read, computed or written. Use a
+fresh store for this pipeline, or keep using the Orcapod version that wrote this store; a
+migration tool for stores written by Orcapod v0.2 is planned.
+```
+
+Run the pipeline on a fresh store, or keep using the version that wrote the store. There is
+no option to skip the check.
+
 ## Multiple input streams
 
 If you pass multiple streams to a function pod, they are automatically joined (using

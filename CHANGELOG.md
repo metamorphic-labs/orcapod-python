@@ -7,10 +7,12 @@
 #### NumPy arrays: new storage format and new hashes, no automatic migration (ITL-888, ITL-883)
 
 **The array format and every array hash changed in v0.3.** A store written by v0.2 that holds
-`numpy.ndarray` columns is **not migrated**. Under v0.3, every node that handles arrays
-computes again into new tables, and its v0.2 results are no longer returned. Nothing written by
-v0.2 is changed or deleted, and those tables stay readable with v0.2. Use a fresh store for
-v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.3 (ITL-889).
+`numpy.ndarray` columns is **not migrated**. Every node that handles arrays gets new tables,
+so its v0.2 results are no longer found; and since every Arrow-derived hash changed too
+(ITL-910, below), v0.3 refuses a v0.2 store with `StoreHashLabelError` rather than computing
+next to its rows. Nothing written by v0.2 is changed or deleted, and those tables stay readable
+with v0.2. Use a fresh store for v0.3, or keep using v0.2 for an existing store. A migration is
+planned after v0.3 (ITL-889).
 
 - **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
   `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
@@ -29,8 +31,10 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   change too, and so do the table paths of those nodes. Pipeline hashes are chained, so the
   pipeline and operator tables of every node downstream of an array column move as well,
   even when it has no array column itself. A pod whose inputs and outputs hold no array
-  keeps its function result table, so it reuses its v0.2 results without computing again.
-  Nodes with no array column upstream do not move.
+  keeps its function result table, and nodes with no array column upstream keep their tables;
+  because every Arrow-derived hash changed as well (ITL-910, below), such tables still hold
+  v0.2 rows, so a v0.3 job on a v0.2 store is refused with `StoreHashLabelError` instead of
+  reusing them.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
@@ -65,7 +69,33 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   `table_scope="pipeline_hash"` do not move. Paths that embed a content hash
   (`table_scope="content_hash"`, `CachedSource` tables) move with it. Where a `GroupBy` or
   `Batch` orders members by `record_id`, the order of members can change too.
-- **Results stored by 0.2.0.** STORED-DATA-PARAGRAPH (ITL-910 D1, pending)
+- **Results stored by 0.2.0 are refused, never mixed or silently dropped.** Rows a v0.2 store
+  holds are keyed under `arrow_v0.1` and can never match v0.3 inputs. A v0.3 job pointed at
+  such a store raises `orcapod.errors.StoreHashLabelError` (a `StoreError`, so it fails the run
+  whatever the orchestrator's `error_policy`) before any node computes or writes anything:
+  `PipelineJob.run()` checks the stored tables of every function node (pipeline and result
+  tables), every operator node and every side-effect node first. Reading such a node
+  (`as_table()`, `iter_data()`, `get_all_records()`, also on a loaded job) raises the same
+  error, and so does a `CachedSource` whose cache table holds v0.2 rows. The store is left
+  exactly as it was, and there is no option to skip the check (`NodeConfig.ignore_schema`
+  does not apply). The error names the table, the label found and the current one:
+
+  ```
+  The stored table 'my_job/double/semantic_v0.1:.../pdb_v1' of node 'dbl' holds rows hashed
+  under 'arrow_v0.1', but this version of Orcapod hashes with 'arrow_v0.2'. Rows hashed under
+  another label can never match current inputs, so nothing was read, computed or written. Use a
+  fresh store for this pipeline, or keep using the Orcapod version that wrote this store; a
+  migration tool for stores written by Orcapod v0.2 is planned.
+  ```
+
+  **Migration:** run v0.3 pipelines on a fresh store, or keep using v0.2 for an existing store.
+  A migration tool is planned (ITL-913, ITL-914). The check reads each stored table once per
+  node per run (one full read per table; a cheaper projected read is a follow-up).
+  Operator-node and cached-source tables store their record hashes without a label; for them
+  the check compares the starfix hash format at the start of each record hash (`000001` for
+  v0.2), which detects every v0.2 row. A table that `table_scope="content_hash"` or a
+  `CachedSource` places under a content hash moves to a new path instead, so its v0.2 rows are
+  not found there and not refused.
 - **Now hashable.** `fixed_size_list` columns, at any depth (ITL-927): a source or operator
   carrying one works, and its type is kept. A `fixed_size_list<T>[n]` hashes differently from a
   `large_list<T>` with the same values. pyarrow's canonical extension types (`arrow.uuid`,
@@ -113,6 +143,9 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
+- **`orcapod.errors.StoreHashLabelError`** — a `StoreError` raised when a stored table holds
+  rows hashed under another Arrow hash label (a store written by v0.2). It has `record_path`,
+  `found_label`, `current_label` and `node_label`. (ITL-910)
 
 ### Fixed
 

@@ -2448,7 +2448,7 @@ instead. Tighten under a new storage version once nested nullability survives Po
 ## `src/orcapod/hashing/arrow_hashers.py` — Arrow hash format (starfix)
 
 ### HS2 — starfix hash format 1 collided on nested lists, null structs and Booleans
-**Status:** in progress
+**Status:** resolved
 **Severity:** high
 **Issue:** ITL-910 (fixes the starfix side of ITL-848; ITL-927)
 
@@ -2463,5 +2463,24 @@ data, so a source with such a column failed at construction (ITL-927).
 (developer's label rule: the label moves whenever any table hash can change). Every
 Arrow-derived hash moves; the golden files were regenerated once, explicitly. Order options
 stay off. pyarrow's canonical extension types and `hash_schema` on extension columns hash with
-their extension identity instead of as their storage type. Open: what a v0.3 node does with
-rows a v0.2 store holds under `arrow_v0.1` in the same table (ITL-910 decision D1).
+their extension identity instead of as their storage type.
+
+Stored rows: under the default `table_scope`, table paths did not move, so a v0.3 node would
+have recomputed into the same tables as a v0.2 store and later read both generations (observed:
+4 rows for 2 inputs). Developer decision (November 11, 2026): fail explicitly. A table holding
+rows under another Arrow label raises `StoreHashLabelError` on every read and before the first
+write, and `PipelineJob.run()` checks every node's tables before any node runs; there is no
+opt-out. Function-node pipeline and result tables and side-effect logs are checked by the label
+in their stored keys; operator-node and cached-source tables, whose record hashes carry no
+label, by the starfix format at the start of each hex digest.
+
+Known limits, follow-ups:
+- The check reads each table in full once per node per run, through `get_all_records`. A
+  projected, limited read on `ArrowDatabaseProtocol` (one column, one row) would make it cheap
+  on large stores.
+- The format-prefix check on operator and cached-source tables detects a change of starfix
+  format, not of Orcapod's label: a future label bump that keeps the starfix format would not be
+  detected there. Storing the label with those record hashes would close that gap.
+- Tables placed under a content hash (`table_scope="content_hash"`, `CachedSource` without an
+  explicit `source_id`) move to new paths when the content hash moves, so their v0.2 rows are
+  not found and not refused.

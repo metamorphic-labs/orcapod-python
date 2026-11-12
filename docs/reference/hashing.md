@@ -655,6 +655,14 @@ count; their schemas hash); union and run-end-encoded types; two schema nodes sh
 column `"a/b"` next to a struct column `a` with a child `b`); and a non-nullable field holding
 a null. A source whose table has such a column fails when it is constructed.
 
+**Stores written under another label.** Function-node pipeline and result tables and
+side-effect invocation logs store their keys as `b"<label>:<digest>"`; operator-node and
+cached-source tables store record hashes as hex digests, which start with the starfix format
+number. A table holding rows under another Arrow label (`arrow_v0.1`, format `000001`, written
+by Orcapod v0.2) is refused with `StoreHashLabelError` on every read and before the first
+write; `PipelineJob.run()` checks every node's tables before any node runs. See
+[A store written by an older version](../concepts/function-pods.md#a-store-written-by-an-older-version).
+
 ```python
 import pyarrow as pa
 from orcapod.contexts import get_default_context
