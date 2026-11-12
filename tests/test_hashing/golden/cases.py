@@ -1568,12 +1568,13 @@ def pipeline_default_source_ids() -> dict[str, Any]:
 
 
 def _torch_values() -> dict[str, Any]:
-    """Tensors whose hashes are pinned: the ndarray cases' values plus torch-only cases."""
+    """Tensors whose hashes are pinned: the ndarray cases' values, torch-only dtypes
+    and one case per optional property of the value hash."""
     import torch
 
     base = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     return {
-        # The same values as the ndarray.* semantic cases: equal digest bodies.
+        # The same values as the ndarray.* semantic cases.
         "int32": torch.arange(6, dtype=torch.int32).reshape(2, 3),
         "int64": torch.arange(6, dtype=torch.int64).reshape(2, 3),
         "float64": torch.tensor([[0.5, 1.5], [2.5, 3.5]], dtype=torch.float64),
@@ -1582,13 +1583,19 @@ def _torch_values() -> dict[str, Any]:
         "bfloat16": torch.tensor([1.5, -2.25, 3.0], dtype=torch.bfloat16),
         "complex32": torch.tensor([1 + 2j, -0.5 + 0.25j], dtype=torch.complex32),
         "zero_dim": torch.tensor(2.5),
+        # One case per optional property of the hash (all others canonical).
         "non_contiguous": base.T,
+        "requires_grad": base.clone().requires_grad_(True),
+        "parameter": torch.nn.Parameter(base.clone(), requires_grad=False),
+        "conj": torch.tensor([1 + 2j, 3 - 4j], dtype=torch.complex64).conj(),
+        # A view of a larger buffer is hashed as its clone: contiguous strides.
+        "step_slice": torch.arange(12, dtype=torch.float32).reshape(2, 6)[:, ::2],
         # Powers of two are exact in every float8 format. A dtype this torch lacks is
         # left out; its pinned entry is listed by unavailable_entries.
         **{
             name: torch.tensor([0.5, 1.0, 2.0]).to(dtype)
             for name in TORCH_VERSIONED_DTYPES
-            if isinstance(dtype := getattr(torch, name, None), torch.dtype)
+            if (dtype := installed_torch_dtype(name)) is not None
         },
     }
 
@@ -1601,6 +1608,24 @@ TORCH_VERSIONED_DTYPES = (
     "float8_e8m0fnu",
 )
 """Pinned torch dtypes that a supported torch may lack (``float8_e8m0fnu`` needs 2.7)."""
+
+
+def installed_torch_dtype(name: str) -> Any:
+    """Return the installed torch's dtype called ``name``, or ``None`` if it has none.
+
+    The one place the torch cases ask whether a dtype exists, so a test can stand
+    in for an older torch by replacing this function.
+
+    Args:
+        name: A torch dtype name, for example ``"float8_e8m0fnu"``.
+
+    Returns:
+        The ``torch.dtype``, or ``None``.
+    """
+    import torch
+
+    dtype = getattr(torch, name, None)
+    return dtype if isinstance(dtype, torch.dtype) else None
 
 
 def unavailable_entries(group: str) -> set[str]:
@@ -1617,12 +1642,10 @@ def unavailable_entries(group: str) -> set[str]:
     """
     if group != "torch" or not group_available(group):
         return set()
-    import torch
-
     return {
         f"value.{name}"
         for name in TORCH_VERSIONED_DTYPES
-        if not isinstance(getattr(torch, name, None), torch.dtype)
+        if installed_torch_dtype(name) is None
     }
 
 

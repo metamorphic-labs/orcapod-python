@@ -282,37 +282,116 @@ def _reference_array_digest(tag: str, shape: tuple[int, ...], data: bytes) -> st
     return hashlib.sha256(preimage).hexdigest()
 
 
-TORCH_PINNED_ROWS: dict[str, tuple[str, tuple[int, ...], bytes]] = {
-    "bool": ("bool", (3,), b"\x01\x00\x01"),
+def _reference_tensor_digest(
+    element_digest: str,
+    flags: tuple[int, int, int],
+    strides: tuple[int, ...],
+    class_name: str,
+) -> str:
+    """The tensor value hash ``D`` from its specification (``hashlib`` + ``struct`` only).
+
+    ``D = SHA-256(lp("orcapod.torch.tensor") || E || u8(requires_grad) || u8(conj_bit)
+    || u8(neg_bit) || u64le(ndim) || i64le(each stride) || lp(class name))``.
+    """
+    import hashlib
+    import struct
+
+    def lp(text: str) -> bytes:
+        raw = text.encode("utf-8")
+        return struct.pack("<Q", len(raw)) + raw
+
+    preimage = lp("orcapod.torch.tensor") + bytes.fromhex(element_digest)
+    preimage += bytes(flags) + struct.pack("<Q", len(strides))
+    preimage += b"".join(struct.pack("<q", s) for s in strides) + lp(class_name)
+    return hashlib.sha256(preimage).hexdigest()
+
+
+_TENSOR = "torch.Tensor"
+_ARANGE_2X3 = np.arange(6, dtype="<f4").reshape(2, 3)
+
+# name: (dtype tag, shape, element bytes in C order,
+#        (requires_grad, conj_bit, neg_bit), strides, class name)
+TORCH_PINNED: dict[
+    str,
+    tuple[str, tuple[int, ...], bytes, tuple[int, int, int], tuple[int, ...], str],
+] = {
+    "bool": ("bool", (3,), b"\x01\x00\x01", (0, 0, 0), (1,), _TENSOR),
     # bfloat16 bits of 1.5, -2.25, 3.0, little-endian.
-    "bfloat16": ("bfloat16", (3,), bytes.fromhex("c03f10c04040")),
-    "zero_dim": ("float32", (), np.array(2.5, "<f4").tobytes()),
-    # The transposed (2, 3) arange stored in C order: shape (3, 2).
+    "bfloat16": (
+        "bfloat16",
+        (3,),
+        bytes.fromhex("c03f10c04040"),
+        (0, 0, 0),
+        (1,),
+        _TENSOR,
+    ),
+    "zero_dim": ("float32", (), np.array(2.5, "<f4").tobytes(), (0, 0, 0), (), _TENSOR),
+    "empty": ("float32", (0,), b"", (0, 0, 0), (1,), _TENSOR),
+    # The transposed (2, 3) arange: shape (3, 2), elements in C order, strides (1, 3).
     "non_contiguous": (
         "float32",
         (3, 2),
-        np.arange(6, dtype="<f4").reshape(2, 3).T.copy().tobytes(),
+        _ARANGE_2X3.T.copy().tobytes(),
+        (0, 0, 0),
+        (1, 3),
+        _TENSOR,
+    ),
+    "requires_grad": (
+        "float32",
+        (2, 3),
+        _ARANGE_2X3.tobytes(),
+        (1, 0, 0),
+        (3, 1),
+        _TENSOR,
+    ),
+    "parameter": (
+        "float32",
+        (2, 3),
+        _ARANGE_2X3.tobytes(),
+        (0, 0, 0),
+        (3, 1),
+        "torch.nn.parameter.Parameter",
+    ),
+    # The logical values of the conjugate view: 1-2j, 3+4j.
+    "conj": (
+        "complex64",
+        (2,),
+        np.array([1 - 2j, 3 + 4j], "<c8").tobytes(),
+        (0, 1, 0),
+        (1,),
+        _TENSOR,
+    ),
+    # Every second column of a (2, 6) arange, stored as its clone: strides (3, 1).
+    "step_slice": (
+        "float32",
+        (2, 3),
+        np.arange(12, dtype="<f4").reshape(2, 6)[:, ::2].copy().tobytes(),
+        (0, 0, 0),
+        (3, 1),
+        _TENSOR,
     ),
 }
 
 
-@pytest.mark.parametrize("name", sorted(TORCH_PINNED_ROWS))
-def test_pinned_tensor_digests_match_an_independent_reference(name: str) -> None:
-    # Runs without torch: the pinned torch_tensor_v1 values are the v1 digest of the row.
-    """Pinned tensor hashes equal the v1 digest computed from the stored row by hand."""
-    tag, shape, data = TORCH_PINNED_ROWS[name]
+@pytest.mark.parametrize("name", sorted(TORCH_PINNED))
+def test_pinned_tensor_hashes_match_an_independent_reference(name: str) -> None:
+    # Runs without torch: the pinned torch_tensor_v1 values are D computed by hand.
+    """Pinned tensor hashes equal the value hash computed from the specification."""
+    tag, shape, data, flags, strides, class_name = TORCH_PINNED[name]
+    element = _reference_array_digest(tag, shape, data)
     assert GOLDEN["torch"][f"value.{name}"] == (
-        "torch_tensor_v1:" + _reference_array_digest(tag, shape, data)
+        "torch_tensor_v1:"
+        + _reference_tensor_digest(element, flags, strides, class_name)
     )
 
 
 @pytest.mark.parametrize("name", ["int32", "int64", "float64", "empty"])
-def test_tensor_and_ndarray_pins_share_the_digest_body(name: str) -> None:
-    """Pinned tensor and ndarray hashes of equal values share the digest body."""
+def test_tensor_and_ndarray_pins_differ(name: str) -> None:
+    """Pinned tensor and ndarray hashes of equal elements have different digests."""
     tensor_label, tensor_body = GOLDEN["torch"][f"value.{name}"].split(":")
     array_label, array_body = GOLDEN["semantic"][f"value.ndarray.{name}"].split(":")
     assert (tensor_label, array_label) == ("torch_tensor_v1", "ndarray_v1")
-    assert tensor_body == array_body
+    assert tensor_body != array_body
 
 
 OLDER_TORCH_GOLDEN = """
@@ -321,14 +400,15 @@ import pathlib
 import shutil
 import sys
 
-import torch
-
-# Simulate a supported PyTorch that predates float8_e8m0fnu (added in torch 2.7).
-if hasattr(torch, "float8_e8m0fnu"):
-    del torch.float8_e8m0fnu
-
 from tests.test_hashing.golden import cases
 from tests.test_hashing.golden.generate_golden_hashes import golden_path, main
+
+# Stand in for a supported PyTorch that predates float8_e8m0fnu (added in torch
+# 2.7). The attribute itself cannot be removed: torch.save refers to it.
+_installed = cases.installed_torch_dtype
+cases.installed_torch_dtype = (
+    lambda name: None if name == "float8_e8m0fnu" else _installed(name)
+)
 
 live = cases.compute_group("torch")
 print("produced:", "value.float8_e8m0fnu" in live)
