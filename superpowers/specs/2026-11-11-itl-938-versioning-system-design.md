@@ -860,8 +860,9 @@ change of S. Measured on a pipeline `array source -> size -> inc`, v0.2.0 agains
 ### 5.2 Every change from the old version to v0.3: what changed, where it shows, how to migrate
 
 **Baseline.** The old deployed version is `nauticalab/orcapod-python` at `61d0f18` with starfix
-0.4.0. That commit is contained in the tag `v0.2.0` (which adds only release documentation),
-so `v0.2.0` was used as the baseline. **Target.** `main` at `d61e3e39` plus the open pull
+0.4.0. The tables below were measured against the tag `v0.2.0`, which contains that commit plus
+15 later commits. The same script was then run on `61d0f18` itself: every value in the first
+table is identical to `v0.2.0`. See 5.4 for the one stored difference found. **Target.** `main` at `d61e3e39` plus the open pull
 requests expected in v0.3.
 
 **Method.** One script builds a source and a function node for each kind of column and prints
@@ -924,17 +925,30 @@ migration can be planned: cheap where nothing relevant to an entry changed, or a
 under both; if the old entry exists, create the new entry from it". A purely additive change,
 under which no previously computed hash changes, does not change the number.
 
-Working name here: **hash version**, written `H1`, `H2`, … (the name is open).
+Working name here: **hash version** (the name is open).
+
+**Numbering (decided November 11, 2026).** `H0` is exactly what the deployed
+`nauticalab/orcapod-python` at `61d0f18` (starfix 0.4.0) computes. `H1` is what v0.3.0 computes
+at its tag. v0.2.0 gets no number of its own: it was just released and has no real users. Only
+one manifest has to be written after the fact (`H0`); `H1` is maintained as the ongoing one
+until the v0.3.0 tag.
+
+`v0.2.0` is **not** the same code as `61d0f18`: 15 commits and 128 source files lie between
+them (fixes to joins, source info, Arrow types of aggregated columns, tag column order). On
+the scenarios of 5.2 the two give identical paths, column names, column types and hash values.
+One stored difference was found: on `61d0f18` the source-info token of every row that passed
+through an operator is the token of the first row (`source1::row_0::x` where `v0.2.0` stores
+`source1::row_2::x`; fixed by ITL-845). Source-info tokens are not hashed into keys.
 
 ```mermaid
 flowchart LR
     subgraph REG["Registry: one frozen manifest per hash version"]
-        M1["H1 (= what v0.2.0 computes)<br/>structure: canonical JSON, rules s1<br/>arrow: starfix format 1<br/>array: sha256 of .npy bytes<br/>record id: positional uuid5<br/>fold: sha256, no separator<br/>…"]
-        M2["H2 (= what v0.3.0 computes)<br/>structure: s1 + fixes<br/>arrow: starfix format 2<br/>array: array_digest_v1<br/>record id: positional uuid5<br/>fold: sha256 with separator<br/>…"]
+        M1["H0 (= nauticalab 61d0f18)<br/>structure: canonical JSON, rules s1<br/>arrow: starfix format 1<br/>array: sha256 of .npy bytes<br/>record id: positional uuid5<br/>fold: sha256, no separator<br/>…"]
+        M2["H1 (= what v0.3.0 computes)<br/>structure: s1 + fixes<br/>arrow: starfix format 2<br/>array: array_digest_v1<br/>record id: positional uuid5<br/>fold: sha256 with separator<br/>…"]
     end
-    ROW["a stored row<br/>hash version = H1"] -->|"look up"| M1
-    CUR["current Orcapod<br/>hash version = H2"] --> M2
-    M1 -->|"diff"| D["what differs between H1 and H2:<br/>arrow, array, fold, …"]
+    ROW["a stored row<br/>hash version = H0"] -->|"look up"| M1
+    CUR["current Orcapod<br/>hash version = H1"] --> M2
+    M1 -->|"diff"| D["what differs between H0 and H1:<br/>arrow, array, fold, …"]
     M2 --> D
     D --> PLAN["per entry: unaffected -> relabel;<br/>affected -> hash under both, link old to new"]
 ```
@@ -1031,6 +1045,7 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **Report skipped older rows as a total count.** "Yes but just total counts I think would be sufficient (eventually we want to detect old entries and suggest to perform migration)." |
 | Nov 11, 2026 | **Old results looking absent without migration is accepted; additive changes do not change the hash version.** "I think old values looking absent without explicit migration is something we have to accept. Generally, as long as what we do is simply additive in features, such that previous hash value should NOT have changed under new version, then we don't need to actually alter the hash version number and thus we won't run into suddenly empty table under the new hash version." |
 | Nov 11, 2026 | **One global hash version, stored per row, with a registry.** "Anytime anything really that could alter previously computed hash changes between versions, we need information inside the row that would allow us to precisely tell what must have changed. Since summarizing everything that actually changed is not really sensible, the way to do is to have a single number that keeps on varying so that every unique different combo of hashing mechanism would yield different number such that we know for sure that if two rows share this number, they were computed using exactly identical set of algorithms/definitions/libraries such that same entry would have yielded same hash. ... we should have a look up somewhere (possibly as part of orcapod-sanctuary) that maps every exact number to actual combination of specific tools. This way, when given two such numbers (e.g. v15 vs v1), we can look up what is actually different between the two versions ... and consequently decide if we can cheaply migrate ... or minimally we can just rerun all hashing under v1 and v15, and if v1 version exist, take it and create a new entry with v15 hash." Whether this is what `arrow_v0.1` / `arrow_v0.2` should mean, or belongs in the data context, is open (5.4). |
+| Nov 11, 2026 | **Numbering of the hash version.** "I'd rather that H0 is what the current nauticalab/orcapod-python exactly points to, forget about v0.2.0 as we just had released it but with no real users anywhere yet and we are about to move to v0.3.0. So let H1 be what v0.3.0 going to be. ... This way we only have to backfill one manifest from H0 and the updated ongoing one as H1." |
 | Nov 11, 2026 | Operator-behaviour marker: deferred until the global hash versioning strategy is confirmed. |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
