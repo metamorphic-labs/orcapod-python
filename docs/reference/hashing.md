@@ -489,8 +489,9 @@ value-hashed type's (see [the hash label rule](#the-hash-label-rule)),
 `b"polars.dataframe;7b2276657273696f6e223a317d::" + digest`: the logical type's identifier,
 then the digest, without the label.
 
-The stored Arrow IPC bytes are not hashed: they vary for equal frames (the bytes under null
-slots, Polars' own field metadata). The hash is
+Storage and hashing are separate. The value is stored with Polars' own `write_ipc`; the
+stored bytes are never hashed (they depend on the Polars version that wrote them). The hash
+is computed from the value's content:
 
 ```text
 sha256(descriptor + b"\x00" + starfix.ArrowDigester.hash_table(
@@ -500,7 +501,7 @@ sha256(descriptor + b"\x00" + starfix.ArrowDigester.hash_table(
 under the label `polars_dataframe_v1` for a frame and `polars_series_v1` for a Series (a
 Series is hashed as its one-column frame, with its own descriptor).
 
-`values` is the frame exported with `compat_level=oldest`, with top-level `Null` columns left
+`values` is the frame exported to Arrow with `compat_level=oldest`, with top-level `Null` columns left
 out, `Array` cast to `large_list`, nested `Null` cast to an all-null `bool` and dictionaries
 decoded, for hashing only. starfix runs in its ordered mode, so column order and struct field
 order at every depth are part of the digest, and it tells a null struct from a struct whose
@@ -547,6 +548,14 @@ the Arrow layout Polars exports (string views, large or small offsets) and memor
 Supporting a new dtype adds to the grammar without changing any existing hash; only a change
 that would give an existing value a different digest needs new labels (`polars_dataframe_v2`,
 `polars_series_v2`). A dtype outside the grammar raises `ValueError` naming the column.
+
+The hash functions can leave three properties out (`polars_frame_content_hash(df,
+ignore_column_order=..., ignore_struct_field_order=...)`, `polars_series_content_hash(s,
+ignore_name=..., ignore_struct_field_order=...)`); the registered handlers use none of them,
+so the hash above is strict. Ignoring column order lists the descriptor's columns sorted by
+name and runs starfix with `ordered_columns=False`; ignoring struct field order does the same
+for every struct's fields with `ordered_struct_fields=False`; ignoring a Series' name drops
+`"name"` from the descriptor and hashes its values as a column named `""`.
 
 A `pandas.DataFrame` is hashed differently: as the `arrow_v1` hash of its Arrow table, which
 ignores column order. A Polars frame and the equal pandas frame never share a hash.

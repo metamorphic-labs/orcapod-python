@@ -9,12 +9,12 @@
 `TypeError: No LogicalType or LogicalTypeFactory registered for <class 'polars.dataframe.frame.DataFrame'>`.
 
 **Fix:** `LogicalPolarsDataFrame` (`polars.dataframe`) and `LogicalPolarsSeries`
-(`polars.series`, a one-column frame) store the value as an Arrow IPC stream in
-`large_binary`, the pandas envelope (helpers shared in `logical_types/arrow_ipc.py`), exported
-with `compat_level=oldest` as one record batch, so every supported dtype reads back exactly.
-`Object`, `Int128`, `UInt128` and Polars extension dtypes are rejected at write time, naming
-the column. `pl.from_arrow` renames a column called `""` to `column_0`, so the reader restores
-the stored names. The IPC bytes are not canonical (bytes under null slots, `_PL_*` metadata),
+(`polars.series`, a one-column frame) store the value in `large_binary` with Polars' own
+`write_ipc` (Polars' defaults, pinned) and read it with `read_ipc` from memory (developer's
+decision, November 12, 2026: storage is the library's own serialization, the hash is defined
+separately from the value's content). Every supported dtype reads back exactly; chunking and
+sortedness flags are not stored. `Object`, `Int128`, `UInt128` and Polars extension dtypes
+are rejected at write time, naming the column. The stored bytes are never hashed,
 so `PolarsDataFrameHandler` / `PolarsSeriesHandler` hash
 `sha256(Orcapod dtype descriptor + starfix digest of the values)` instead, under the labels
 `polars_dataframe_v1` / `polars_series_v1` (developer's decision, November 10, 2026).

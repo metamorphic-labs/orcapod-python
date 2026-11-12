@@ -437,8 +437,8 @@ type.
 | `numpy.ndarray` | `orcapod.ndarray` | `struct` of dtype tag, shape and element bytes (see [Arrays](arrays.md)) |
 | `pandas.DataFrame` | `pandas.dataframe` | `large_binary` (Arrow IPC stream) |
 | `pandas.Series` | `pandas.series` | `large_binary` (Arrow IPC stream) |
-| `polars.DataFrame` | `polars.dataframe` | `large_binary` (Arrow IPC stream) |
-| `polars.Series` | `polars.series` | `large_binary` (Arrow IPC stream) |
+| `polars.DataFrame` | `polars.dataframe` | `large_binary` (Polars IPC file, `write_ipc`) |
+| `polars.Series` | `polars.series` | `large_binary` (Polars IPC file, `write_ipc`) |
 
 A `polars.DataFrame` comes back with exactly the schema it was stored with: column order and
 names, integer and float widths, `Categorical`, `Enum` with its category order, `Decimal`

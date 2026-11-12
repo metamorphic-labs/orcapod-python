@@ -45,6 +45,8 @@ from orcapod.logical_types.polars_type import (
     LogicalPolarsDataFrame,
     LogicalPolarsSeries,
     polars_dtype_descriptor,
+    polars_frame_content_hash,
+    polars_series_content_hash,
 )
 from orcapod.sources import DictSource
 from orcapod.types import ContentHash
@@ -461,6 +463,88 @@ class TestHashDefinition:
         ).digest()
         got = get_default_context().semantic_hasher.hash_object(series)
         assert got == ContentHash(POLARS_SERIES_HASH_LABEL, expected)
+
+
+class TestIgnorableProperties:
+    """The hash functions can leave out three properties; by default they leave out none.
+
+    Which properties a data context ignores is configured elsewhere (ITL-981); these tests
+    are about the hash functions' own parameters.
+    """
+
+    _FIELDS = {"u": pl.Int8, "v": pl.String}
+
+    def _frame(self, *, swap_columns: bool, swap_fields: bool) -> pl.DataFrame:
+        fields = dict(reversed(self._FIELDS.items())) if swap_fields else self._FIELDS
+        frame = pl.DataFrame(
+            {
+                "a": pl.Series([{"u": 1, "v": "x"}, None], dtype=pl.Struct(fields)),
+                "b": pl.Series(
+                    [[{"u": 2, "v": "y"}], []], dtype=pl.List(pl.Struct(fields))
+                ),
+            }
+        )
+        return frame.select("b", "a") if swap_columns else frame
+
+    def test_defaults_are_the_strict_hash(self) -> None:
+        frame = self._frame(swap_columns=False, swap_fields=False)
+        hasher = get_default_context().semantic_hasher
+        assert polars_frame_content_hash(frame) == hasher.hash_object(frame)
+        assert polars_series_content_hash(frame["a"]) == hasher.hash_object(frame["a"])
+
+    def test_ignoring_column_order(self) -> None:
+        base = self._frame(swap_columns=False, swap_fields=False)
+        swapped = self._frame(swap_columns=True, swap_fields=False)
+        assert polars_frame_content_hash(base) != polars_frame_content_hash(swapped)
+        assert polars_frame_content_hash(
+            base, ignore_column_order=True
+        ) == polars_frame_content_hash(swapped, ignore_column_order=True)
+        # Struct field order still counts.
+        fields_swapped = self._frame(swap_columns=True, swap_fields=True)
+        assert polars_frame_content_hash(
+            base, ignore_column_order=True
+        ) != polars_frame_content_hash(fields_swapped, ignore_column_order=True)
+
+    def test_ignoring_struct_field_order(self) -> None:
+        base = self._frame(swap_columns=False, swap_fields=False)
+        swapped = self._frame(swap_columns=False, swap_fields=True)
+        assert polars_frame_content_hash(base) != polars_frame_content_hash(swapped)
+        assert polars_frame_content_hash(
+            base, ignore_struct_field_order=True
+        ) == polars_frame_content_hash(swapped, ignore_struct_field_order=True)
+        # Column order still counts.
+        columns_swapped = self._frame(swap_columns=True, swap_fields=True)
+        assert polars_frame_content_hash(
+            base, ignore_struct_field_order=True
+        ) != polars_frame_content_hash(columns_swapped, ignore_struct_field_order=True)
+
+    def test_ignoring_both_orders(self) -> None:
+        base = self._frame(swap_columns=False, swap_fields=False)
+        both = self._frame(swap_columns=True, swap_fields=True)
+        assert polars_frame_content_hash(
+            base, ignore_column_order=True, ignore_struct_field_order=True
+        ) == polars_frame_content_hash(
+            both, ignore_column_order=True, ignore_struct_field_order=True
+        )
+
+    def test_ignoring_series_name(self) -> None:
+        one, other = pl.Series("m", [1, 2]), pl.Series("n", [1, 2])
+        assert polars_series_content_hash(one) != polars_series_content_hash(other)
+        assert polars_series_content_hash(
+            one, ignore_name=True
+        ) == polars_series_content_hash(other, ignore_name=True)
+        different_values = pl.Series("n", [1, 3])
+        assert polars_series_content_hash(
+            one, ignore_name=True
+        ) != polars_series_content_hash(different_values, ignore_name=True)
+
+    def test_series_struct_field_order(self) -> None:
+        one = self._frame(swap_columns=False, swap_fields=False)["a"]
+        other = self._frame(swap_columns=False, swap_fields=True)["a"]
+        assert polars_series_content_hash(one) != polars_series_content_hash(other)
+        assert polars_series_content_hash(
+            one, ignore_struct_field_order=True
+        ) == polars_series_content_hash(other, ignore_struct_field_order=True)
 
 
 class TestLogicalTypeIdentifier:

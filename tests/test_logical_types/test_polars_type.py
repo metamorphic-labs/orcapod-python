@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import io
 from collections.abc import Callable
 
 import numpy as np
@@ -146,30 +147,31 @@ class TestLogicalPolarsDataFrameProtocol:
 
 
 class TestLogicalPolarsDataFrameStorage:
-    def test_storage_is_arrow_ipc_stream_bytes(self) -> None:
-        df = pl.DataFrame({"x": [1, 2]})
+    def test_storage_is_polars_own_ipc_file(self) -> None:
+        """The stored cell is what ``DataFrame.write_ipc`` writes with Polars' defaults."""
+        df = pl.DataFrame({"x": [1, 2], "s": ["a", None]})
         stored = LogicalPolarsDataFrame().python_to_storage(df)
         assert isinstance(stored, bytes)
-        table = pa.ipc.open_stream(stored).read_all()
-        assert table.column_names == ["x"]
+        assert stored.startswith(b"ARROW1")  # the Arrow IPC file format, not a stream
+        native = io.BytesIO()
+        df.write_ipc(native)
+        assert stored == native.getvalue()
 
-    def test_strings_are_stored_as_large_string(self) -> None:
-        """The storage pins ``compat_level=oldest``: no ``string_view`` on disk."""
-        df = pl.DataFrame({"s": ["a"], "b": [b"x"], "l": [["a"]]})
+    def test_stored_bytes_are_read_by_polars_read_ipc(self) -> None:
+        df = pl.DataFrame({"x": pl.Series([1, 2], dtype=pl.Int8)})
         stored = LogicalPolarsDataFrame().python_to_storage(df)
-        schema = pa.ipc.open_stream(stored).schema
-        assert schema.field("s").type == pa.large_string()
-        assert schema.field("b").type == pa.large_binary()
-        assert schema.field("l").type == pa.large_list(pa.large_string())
+        back = pl.read_ipc(io.BytesIO(stored), memory_map=False)
+        _assert_exact(back, df)
 
-    def test_chunked_frame_is_stored_as_one_batch(self) -> None:
+    def test_chunked_frame_reads_back_with_equal_content(self) -> None:
+        """Chunking is not stored: the frame comes back equal, in one chunk."""
         df = pl.concat(
             [pl.DataFrame({"x": [1]}), pl.DataFrame({"x": [2]})], rechunk=False
         )
         assert df.n_chunks() == 2
-        stored = LogicalPolarsDataFrame().python_to_storage(df)
-        batches = list(pa.ipc.open_stream(stored))
-        assert len(batches) == 1
+        back = _round_trip(df)
+        _assert_exact(back, df)
+        assert back.n_chunks() == 1
 
     def test_non_dataframe_raises_type_error(self) -> None:
         lt = LogicalPolarsDataFrame()
@@ -218,7 +220,7 @@ class TestLogicalPolarsDataFrameRoundTrip:
         assert back.shape == (0, 0)
 
     def test_empty_column_name_is_kept(self) -> None:
-        """``pl.from_arrow`` alone renames a ``""`` column to ``column_0``."""
+        """A column named ``""`` keeps its name (``pl.from_arrow`` would rename it)."""
         df = pl.DataFrame({"": [1, 2], "x": ["a", "b"]})
         _assert_exact(_round_trip(df), df)
 
