@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterator, Sequence
@@ -13,6 +14,13 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.head import (
+    STALE_NOTE,
+    HeadStatus,
+    StreamHead,
+    check_head_size,
+    head_column_config,
+)
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import StoreError, TypeIdentityError
 from orcapod.utils.store_errors import keep_store_error, note_callback_failure
@@ -1035,57 +1043,162 @@ class FunctionPodStream(StreamBase):
         all_info: bool = False,
     ) -> pa.Table:
         if self._cached_output_table is None:
-            all_tags = []
-            all_data = []
-            tag_schema, data_schema = None, None
-            for tag, data in self.iter_data():
-                if tag_schema is None:
-                    tag_schema = tag.arrow_schema(all_info=True)
-                if data_schema is None:
-                    data_schema = data.arrow_schema(all_info=True)
-                # TODO: make use of arrow_compat dict
-                all_tags.append(tag.as_dict(all_info=True))
-                all_data.append(data.as_dict(all_info=True))
-
-            # TODO: re-verify the implemetation of this conversion
-            converter = self.data_context.type_converter
-
-            # The data columns have declared types: convert each value as its column's
-            # type, never as the type the value happens to have. A subclass instance
-            # returned for a base-class column is then refused instead of being stored
-            # as the base without its own fields (ITL-972). Only the remaining columns
-            # (meta, source info) are typed from their values.
-            python_schema = dict(infer_python_schema_from_pylist_data(all_data))
-            python_schema.update(self.output_schema()[1])
-            struct_data = converter.python_dicts_to_struct_dicts(
-                all_data, python_schema=python_schema
-            )
-            all_tags_as_tables: pa.Table = pa.Table.from_pylist(
-                all_tags, schema=tag_schema
-            )
-            # drop context key column from tags table (guard: column absent on empty stream)
-            if constants.CONTEXT_KEY in all_tags_as_tables.column_names:
-                all_tags_as_tables = all_tags_as_tables.drop([constants.CONTEXT_KEY])
-            all_data_as_tables: pa.Table = pa.Table.from_pylist(
-                struct_data, schema=data_schema
-            )
-
-            self._cached_output_table = arrow_utils.hstack_tables(
-                all_tags_as_tables, all_data_as_tables
-            )
+            self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
         assert self._cached_output_table is not None, (
             "_cached_output_table should not be None here."
         )
 
         column_config = ColumnConfig.handle_config(columns, all_info=all_info)
 
+        def all_content_hashes() -> pa.Array:
+            if self._cached_content_hash_column is None:
+                # TODO: verify that order will be preserved
+                self._cached_content_hash_column = pa.array(
+                    [data.content_hash().to_string() for _, data in self.iter_data()],
+                    type=pa.large_string(),
+                )
+            return self._cached_content_hash_column
+
+        return self._shape_table(
+            self._cached_output_table, column_config, all_content_hashes
+        )
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first rows already computed; never calls the function.
+
+        After a complete computation (``as_table``, or iteration to the end) the rows are
+        the first of the result. After an iteration that stopped part way they are the
+        rows computed so far (``PARTIAL``). Before any computation, or once an input
+        changed, there are none. A ``CachedFunctionPod``'s result store is not looked
+        up: that needs the input rows' hashes, i.e. reading the input. See
+        ``StreamBase.head``.
+        """
+        check_head_size(n)
+        config = head_column_config(columns, all_info)
+        has_results = bool(self._cached_output_datas) or (
+            self._cached_output_table is not None
+        )
+        if has_results and self.is_stale:
+            return self._head_without_rows(
+                config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
+            )
+        tag_columns = self.keys(columns=config)[0]
+
+        # The contiguous run of computed inputs from the first; an input whose output
+        # is None (filtered out) is skipped, as iteration skips it.
+        computed: list[tuple[TagProtocol, DataProtocol]] = []
+        index = 0
+        while index in self._cached_output_datas:
+            tag, data = self._cached_output_datas[index]
+            if data is not None:
+                computed.append((tag, data))
+            index += 1
+        shown = computed[:n]
+
+        def shown_content_hashes() -> pa.Array:
+            return pa.array(
+                [data.content_hash().to_string() for _, data in shown],
+                type=pa.large_string(),
+            )
+
+        if self._cached_output_table is not None:
+            return StreamHead.of_rows(
+                self,
+                self._shape_table(
+                    self._cached_output_table.slice(0, n), config, shown_content_hashes
+                ),
+                tag_columns=tag_columns,
+                total_rows=self._cached_output_table.num_rows,
+                origin="computed",
+            )
+        finished = not self._needs_iterator and self._cached_input_iterator is None
+        if not finished and not computed:
+            return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+        if not shown:
+            # Nothing to show (an empty result, or n == 0): the declared columns.
+            empty = self._head_without_rows(config, HeadStatus.ROWS)
+            return dataclasses.replace(
+                empty,
+                status=HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
+                total_rows=len(computed),
+                origin="computed",
+            )
+        return StreamHead.of_rows(
+            self,
+            self._shape_table(
+                self._table_from_pairs(shown), config, shown_content_hashes
+            ),
+            tag_columns=tag_columns,
+            total_rows=len(computed),
+            status=HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
+            origin="computed",
+        )
+
+    def _table_from_pairs(
+        self, pairs: list[tuple[TagProtocol, DataProtocol]]
+    ) -> pa.Table:
+        """Return the output rows ``pairs`` as one table with every column group."""
+        all_tags = []
+        all_data = []
+        tag_schema, data_schema = None, None
+        for tag, data in pairs:
+            if tag_schema is None:
+                tag_schema = tag.arrow_schema(all_info=True)
+            if data_schema is None:
+                data_schema = data.arrow_schema(all_info=True)
+            # TODO: make use of arrow_compat dict
+            all_tags.append(tag.as_dict(all_info=True))
+            all_data.append(data.as_dict(all_info=True))
+
+        # TODO: re-verify the implemetation of this conversion
+        converter = self.data_context.type_converter
+
+        # The data columns have declared types: convert each value as its column's
+        # type, never as the type the value happens to have. A subclass instance
+        # returned for a base-class column is then refused instead of being stored
+        # as the base without its own fields (ITL-972). Only the remaining columns
+        # (meta, source info) are typed from their values.
+        python_schema = dict(infer_python_schema_from_pylist_data(all_data))
+        python_schema.update(self.output_schema()[1])
+        struct_data = converter.python_dicts_to_struct_dicts(
+            all_data, python_schema=python_schema
+        )
+        all_tags_as_tables: pa.Table = pa.Table.from_pylist(all_tags, schema=tag_schema)
+        # drop context key column from tags table (guard: column absent on empty stream)
+        if constants.CONTEXT_KEY in all_tags_as_tables.column_names:
+            all_tags_as_tables = all_tags_as_tables.drop([constants.CONTEXT_KEY])
+        all_data_as_tables: pa.Table = pa.Table.from_pylist(
+            struct_data, schema=data_schema
+        )
+        return arrow_utils.hstack_tables(all_tags_as_tables, all_data_as_tables)
+
+    def _shape_table(
+        self,
+        table: pa.Table,
+        column_config: ColumnConfig,
+        content_hashes: Callable[[], pa.Array],
+    ) -> pa.Table:
+        """Return ``table`` with the column groups of ``column_config``.
+
+        Args:
+            table: Output rows with every column group (``_table_from_pairs``).
+            column_config: The column groups to keep, and whether to sort by tags.
+            content_hashes: Returns the content hash of each row of ``table``; called
+                only when ``column_config`` asks for them.
+        """
         drop_columns = []
         if not column_config.system_tags:
             # TODO: get system tags more effiicently
             drop_columns.extend(
                 [
                     c
-                    for c in self._cached_output_table.column_names
+                    for c in table.column_names
                     if c.startswith(constants.SYSTEM_TAG_PREFIX)
                 ]
             )
@@ -1094,30 +1207,16 @@ class FunctionPodStream(StreamBase):
         if not column_config.context:
             drop_columns.append(constants.CONTEXT_KEY)
 
-        output_table = self._cached_output_table.drop(
-            [c for c in drop_columns if c in self._cached_output_table.column_names]
-        )
+        output_table = table.drop([c for c in drop_columns if c in table.column_names])
 
-        # lazily prepare content hash column if requested
         if column_config.content_hash:
-            if self._cached_content_hash_column is None:
-                content_hashes = []
-                # TODO: verify that order will be preserved
-                for tag, data in self.iter_data():
-                    content_hashes.append(data.content_hash().to_string())
-                self._cached_content_hash_column = pa.array(
-                    content_hashes, type=pa.large_string()
-                )
-            assert self._cached_content_hash_column is not None, (
-                "_cached_content_hash_column should not be None here."
-            )
             hash_column_name = (
                 "_content_hash"
                 if column_config.content_hash is True
                 else column_config.content_hash
             )
             output_table = output_table.append_column(
-                hash_column_name, self._cached_content_hash_column
+                hash_column_name, content_hashes()
             )
 
         if column_config.sort_by_tags:

@@ -12,6 +12,13 @@ from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.head import (
+    STALE_NOTE,
+    HeadStatus,
+    StreamHead,
+    check_head_size,
+    head_column_config,
+)
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -422,6 +429,33 @@ class DynamicPodStream(StreamBase):
             "StreamProtocol has not been updated or is empty."
         )
         return self._cached_stream.iter_data()
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first rows of the operator's kept result; never runs the operator.
+
+        The head of an operator is not the operator over the heads of its inputs (a
+        group over ten rows has the wrong members), so before the result is computed,
+        or after an input changed, there are no rows. See ``StreamBase.head``.
+        """
+        check_head_size(n)
+        config = head_column_config(columns, all_info)
+        had_result = self._cached_stream is not None
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            return self._cached_stream.head(n, columns=config).for_stream(
+                self, origin="computed"
+            )
+        return self._head_without_rows(
+            config,
+            HeadStatus.NOT_COMPUTED,
+            note=STALE_NOTE if had_result else None,
+        )
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(kernel={self.producer}, upstreams={self.upstreams})"
