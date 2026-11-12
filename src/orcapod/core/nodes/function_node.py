@@ -17,10 +17,11 @@ directly from ``FunctionNodeBase``, neither from the other.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from abc import abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
@@ -33,13 +34,22 @@ from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.datagrams.tag_data import EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
+    InputValidationError,
     PipelineJobRequiredError,
-    SchemaVersionError,
     StoreError,
+    TypeIdentityError,
     StoreReadError,
     StoreWriteError,
 )
-from orcapod.utils.store_errors import keep_store_error
+from orcapod.contexts.stored import (
+    StaleTables,
+    keep_rows_of_data_context,
+    require_same_data_context,
+    account_for_stale_tables,
+    find_stale_tables,
+    report_rows_of_other_data_contexts,
+)
+from orcapod.utils.store_errors import commit_best_effort, keep_store_error
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
     DataFunctionExecutorProtocol,
@@ -49,6 +59,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
+from orcapod.databases.utils import as_table_committing
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
@@ -56,6 +67,7 @@ from orcapod.protocols.observability_protocols import (
 )
 from orcapod.system_constants import (
     constants,
+    OLD_PIPELINE_DB_SCHEMA_VERSIONS,
     PIPELINE_DB_SCHEMA_VERSION,
     RESULT_DB_SCHEMA_VERSION,
 )
@@ -101,20 +113,37 @@ def _build_record_id_preimage(
     single-row Arrow table.  ``NODE_CONTENT_HASH_COL`` is intentionally excluded —
     it is redundant (fully determined by the table path + system tags).
 
+    The input data hash enters as its raw digest, without its label: a label names
+    the algorithm that produced a digest and is never part of a hash input, so
+    renaming the Arrow label changes no entry id. The stored ``INPUT_DATA_HASH_COL``
+    column of the pipeline and result tables keeps the labelled form.
+
     Args:
         tag: The tag datagram for the input row.
         input_data: The data datagram for the input row.
 
     Returns:
         A single-row ``pa.Table`` with system-tag columns and
-        ``INPUT_DATA_HASH_COL`` (``large_binary``).
+        ``INPUT_DATA_HASH_COL`` (``large_binary``, the raw digest).
     """
     return tag.as_table(columns={"system_tags": True}).append_column(
         constants.INPUT_DATA_HASH_COL,
-        pa.array(
-            [input_data.content_hash().to_prefixed_digest()], type=pa.large_binary()
-        ),
+        pa.array([input_data.content_hash().digest], type=pa.large_binary()),
     )
+
+
+def _bare_digest(hash_string: str) -> str:
+    """Return the bare hex digest of a stored ``"<label>:<hex>"`` hash string.
+
+    Args:
+        hash_string: A hash as stored in a saved job, or ``""`` when absent.
+
+    Returns:
+        The hex digest without its label, or ``""`` for an empty string.
+    """
+    if not hash_string:
+        return ""
+    return ContentHash.from_string(hash_string).to_hex()
 
 
 # Private meta-column name stamped into tags routed to the compute channel.
@@ -122,11 +151,6 @@ def _build_record_id_preimage(
 # its original (tag, input_data) pair. Stripped from output tags in
 # record_and_forward() before downstream emission.
 _TAG_NODE_INPUT_REF = "_tag_node_input_ref"
-
-# Module-level set of versioned pdb paths that have been checked for legacy schema.
-# Keyed by the full versioned path (node_identity_path + (PIPELINE_DB_SCHEMA_VERSION,)).
-# Populated on first access; prevents repeated table_exists checks across instances.
-_checked_pdb_paths: set[tuple[str, ...]] = set()
 
 
 def _executor_supports_concurrent(
@@ -256,6 +280,13 @@ class FunctionNodeBase(StreamBase):
 
     @property
     def data_context_key(self) -> str:
+        """Key of the node's data context.
+
+        A node loaded from a saved job without its function pod (read-only) has
+        the data context saved in its descriptor.
+        """
+        if self._function_pod is None:
+            return self._data_context.context_key
         return self._function_pod.data_context_key
 
     @property
@@ -351,11 +382,24 @@ class FunctionNodeBase(StreamBase):
         if self._node_identity_path_cache is not None:
             return self._node_identity_path_cache
         pf = self._function_pod
-        path = pf.uri + (f"schema:{self.pipeline_hash().to_string()}",)
+        # Hashes inside a path are bare hex digests: a label never enters a name.
+        path = pf.uri + (f"schema:{self.pipeline_hash().to_hex()}",)
         if self._table_scope != "pipeline_hash":
-            path += (f"instance:{self.content_hash().to_string()}",)
+            path += (f"instance:{self.content_hash().to_hex()}",)
         self._node_identity_path_cache = path
         return path
+
+    @property
+    def node_name_path(self) -> tuple[str, ...]:
+        """The beginning of ``node_identity_path`` up to the function's name.
+
+        ``(<function name>,)``, or ``("side_effect_function", <function name>)`` for
+        a pod that takes the invocation context. Unlike the rest of the path it
+        holds no hash, so it is the same in every version of Orcapod; tables an
+        earlier version wrote for this function are found under it (ITL-954).
+        """
+        depth = 2 if self.node_type == "side_effect_function" else 1
+        return self.node_identity_path[:depth]
 
     @property
     def node_uri(self) -> tuple[str, ...]:
@@ -600,7 +644,7 @@ class FunctionNode(FunctionNodeBase):
         node._label = descriptor.get("label")
 
         # From DataContextMixin
-        node._data_context = contexts.resolve_context(
+        node._data_context = contexts.resolve_saved_context(
             descriptor.get("data_context_key")
         )
         from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
@@ -781,6 +825,17 @@ class FunctionJobNode(FunctionNodeBase):
     execution.
     """
 
+    # Set once a read has reported the stored rows it skipped (rows of another data
+    # context); a class default so nodes rebuilt from a saved descriptor start unset.
+    _skipped_rows_reported: bool = False
+    # Set once stored rows of other generations have been accounted for. A node
+    # that delivers side effects unsets it at the start of every run.
+    _stale_tables_checked: bool = False
+    # Set once the rows of the current tables were counted by data context.
+    _current_tables_checked: bool = False
+    # Set once a store that cannot list its tables was reported.
+    _unlisted_store_reported: bool = False
+
     def __init__(
         self,
         function_pod: FunctionPodProtocol,
@@ -822,6 +877,11 @@ class FunctionJobNode(FunctionNodeBase):
         # .node_config setter or PipelineJob.apply_node_config().
         self._node_config: NodeConfig = NodeConfig()
 
+        # Batched commits, set only while PipelineJob.run runs the node (ITL-919).
+        self._commit_every_rows: int | None = None
+        self._rows_since_commit = 0
+        self._commit_failed = False
+
         self.attach_databases(
             pipeline_database=pipeline_database,
             result_database=result_database,
@@ -840,10 +900,6 @@ class FunctionJobNode(FunctionNodeBase):
     @node_config.setter
     def node_config(self, value: NodeConfig) -> None:
         self._node_config = value
-        if self._cached_function_pod is not None:
-            self._cached_function_pod.set_ignore_schema(value.ignore_schema)
-        if self._ephemeral_cached_pod is not None:
-            self._ephemeral_cached_pod.set_ignore_schema(value.ignore_schema)
 
     @property
     def _versioned_pipeline_path(self) -> tuple[str, ...]:
@@ -854,52 +910,112 @@ class FunctionJobNode(FunctionNodeBase):
         """
         return self.node_identity_path + (PIPELINE_DB_SCHEMA_VERSION,)
 
-    def _ensure_pdb_schema(self) -> None:
-        """Check once per versioned path that no legacy v0 schema table is present.
+    @property
+    def _stored_data_context_key(self) -> str:
+        """Key of the data context this node writes on its rows and reads back.
 
-        Detection flow:
-        1. If the v1 versioned path already exists → already migrated, skip check.
-        2. If v1 absent → check whether the unversioned (v0) path exists.
-        3. If v0 exists AND the version is not in ``ignore_schema`` → raise.
-        4. If v0 exists AND version is ignored → log a warning and proceed.
-        5. If v0 also absent → first use, proceed normally.
+        A node loaded from a saved job has no function pod; its context then comes
+        from the descriptor.
+        """
+        context = (
+            self._data_context if self._function_pod is None else self.data_context
+        )
+        return context.context_key
 
-        Results are cached per versioned path (module-level set) so the check
-        happens at most once per process per versioned path.
+    @property
+    def _delivers_side_effects(self) -> bool:
+        """Whether running this node is an external action.
+
+        True for a function pod that takes the invocation context (``ctx_arg``):
+        its call is a side effect, and its completions are its function tables.
+        """
+        return (
+            self._function_pod is not None
+            and self._function_pod.ctx_arg_name is not None
+        )
+
+    def _begin_run(self) -> None:
+        """Make a node that delivers side effects look for older completions again.
+
+        Tables written before v0.3 can appear in a store between two runs of one
+        node object. Such a node must find them before it delivers anything, so it
+        looks for them at the start of every run, also when every input is already
+        held in memory; other nodes report once, when they first read the store.
 
         Raises:
-            SchemaVersionError: When a v0 table is found and ``ignore_schema``
-                does not include ``"v0"``.
+            SideEffectLogDataContextError: If this node delivers side effects and
+                completions it cannot match exist; nothing has been delivered then.
         """
-        global _checked_pdb_paths
-        versioned_path = self._versioned_pipeline_path
-        if versioned_path in _checked_pdb_paths:
+        if self._delivers_side_effects:
+            self._stale_tables_checked = False
+            self._account_for_stale_tables()
+
+    def _account_for_stale_tables(self) -> None:
+        """Report or refuse stored rows of other generations.
+
+        Done once per node object; a node that delivers side effects does it at
+        the start of every run (``_begin_run``). Its current tables are read and
+        counted by data context the first time only: the later runs list the store
+        for tables at an older layout, which reads no table.
+
+        A pipeline table written by an earlier version of Orcapod (``pdb_v1``) holds
+        no ``__data_context`` column: its rows are not read as results and are left
+        unchanged, and their number is reported (ITL-944). Such tables are looked for
+        at this node's own path and, because the hashes in a path can differ between
+        versions, anywhere under the function's name in the store (ITL-954). A node
+        that delivers side effects fails instead, and for it the result tables and
+        rows of another data context in the current tables count too: none of them
+        can be matched with current inputs, so every side effect would be delivered
+        again.
+
+        Raises:
+            SideEffectLogDataContextError: If this node delivers side effects and
+                such rows exist; nothing has been delivered or written then.
+        """
+        if self._stale_tables_checked or self._pipeline_database is None:
             return
-        if self._pipeline_database is None:
-            return
-        # v1 path exists → schema is current, mark as checked
-        if self._pipeline_database.table_exists(versioned_path):
-            _checked_pdb_paths.add(versioned_path)
-            return
-        # v1 absent — check for legacy v0 table at the unversioned path
-        if self._pipeline_database.table_exists(self.node_identity_path):
-            ignore = self._node_config.ignore_schema or ()
-            if "v0" not in ignore:
-                node_path_str = "/".join(self.node_identity_path)
-                raise SchemaVersionError(
-                    f"Pipeline DB at {self.node_identity_path!r} contains a legacy v0 schema table.\n"
-                    "Run migration first:\n"
-                    f"  orcapod migrate pipeline-db <PIPELINE_DB_PATH> <RESULT_DB_PATH> {node_path_str}\n"
-                    "To suppress this error and recompute all results instead, set:\n"
-                    '  node.node_config = NodeConfig(ignore_schema=("v0",))'
-                )
-            logger.warning(
-                "Pipeline DB at %r has a legacy v0 schema table; "
-                "proceeding without migration because ignore_schema includes 'v0'. "
-                "All results will be recomputed from scratch.",
-                self.node_identity_path,
+        context_key = self._stored_data_context_key
+        delivers = self._delivers_side_effects
+        found = find_stale_tables(
+            self._pipeline_database,
+            # Orcapod v0.1 stored the table at the path without a layout component.
+            tuple(
+                self.node_identity_path + (layout,)
+                for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
             )
-        _checked_pdb_paths.add(versioned_path)
+            + (self.node_identity_path,),
+            current=(self._versioned_pipeline_path, context_key)
+            if delivers and not self._current_tables_checked
+            else None,
+            name_path=self.node_name_path or None,
+        )
+        if delivers:
+            for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
+                if cached_pod is not None:
+                    found.include(
+                        cached_pod.stale_result_tables(
+                            include_current=not self._current_tables_checked
+                        )
+                    )
+            if found.unlisted:
+                # That the store cannot list its tables is reported once per node
+                # object and attached database, not at every run.
+                if self._unlisted_store_reported:
+                    found = StaleTables(tables=found.tables)
+                self._unlisted_store_reported = True
+        try:
+            account_for_stale_tables(
+                found, delivers_side_effects=delivers, current_context=context_key
+            )
+        except StoreError as exc:
+            exc.add_context(node_label=self.label)
+            raise
+        if delivers:
+            for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
+                if cached_pod is not None:
+                    cached_pod.stale_result_tables_accounted_for()
+        self._stale_tables_checked = True
+        self._current_tables_checked = True
 
     # ------------------------------------------------------------------
     # attach_databases
@@ -941,6 +1057,11 @@ class FunctionJobNode(FunctionNodeBase):
                 ``set_ephemeral_store(ephemeral_database)`` after
                 ``attach_databases()``.
         """
+        # Another store has its own tables of other generations to account for.
+        self._stale_tables_checked = False
+        self._current_tables_checked = False
+        self._unlisted_store_reported = False
+        self._skipped_rows_reported = False
         if pipeline_database is not None:
             if result_database is None:
                 # Default result database is pipeline_database scoped to "_result"
@@ -1037,7 +1158,7 @@ class FunctionJobNode(FunctionNodeBase):
         node._label = descriptor.get("label")
 
         # From DataContextMixin
-        node._data_context = contexts.resolve_context(
+        node._data_context = contexts.resolve_saved_context(
             descriptor.get("data_context_key")
         )
         config_dict = descriptor.get("config")
@@ -1086,9 +1207,10 @@ class FunctionJobNode(FunctionNodeBase):
         # resolves to the correct DB path.  This mirrors the live computation:
         #   path = function_pod.uri + (f"schema:{pipeline_hash}",)
         # Since node_uri == function_pod.uri (same fields), we reconstruct it here.
+        # The descriptor stores hashes as labelled values; a path holds bare digests.
         pipeline_hash_str = descriptor.get("pipeline_hash", "")
         node._stored_pipeline_path = node._stored_node_uri + (
-            f"schema:{pipeline_hash_str}",
+            f"schema:{_bare_digest(pipeline_hash_str)}",
         )
         if raw_table_scope != "pipeline_hash":
             # Use _stored_content_hash (already set to job_content_hash when
@@ -1096,7 +1218,9 @@ class FunctionJobNode(FunctionNodeBase):
             # descriptor) so the instance fragment matches the DB path written
             # during the original run for table_scope="content_hash".
             content_hash_str = node._stored_content_hash or ""
-            node._stored_pipeline_path += (f"instance:{content_hash_str}",)
+            node._stored_pipeline_path += (
+                f"instance:{_bare_digest(content_hash_str)}",
+            )
 
         # FunctionJobNode — stream-level caching state
         node._cached_output_datas = {}
@@ -1105,6 +1229,9 @@ class FunctionJobNode(FunctionNodeBase):
 
         # FunctionJobNode — orchestrator config
         node._node_config = NodeConfig()
+        node._commit_every_rows = None
+        node._rows_since_commit = 0
+        node._commit_failed = False
 
         # FunctionJobNode — DB persistence state (wired by attach_databases)
         node._pipeline_database = None
@@ -1157,6 +1284,11 @@ class FunctionJobNode(FunctionNodeBase):
             store: The ``ArrowDatabaseProtocol`` to use for ephemeral result
                 storage, or ``None`` to detach and revert to persistent-only writes.
         """
+        # Another store has its own tables of other generations to account for,
+        # as in ``attach_databases``.
+        self._stale_tables_checked = False
+        self._current_tables_checked = False
+        self._unlisted_store_reported = False
         self.ephemeral_result_store = store
         if store is not None and self._function_pod is not None:
             self._ephemeral_cached_pod = CachedFunctionPod(
@@ -1192,6 +1324,155 @@ class FunctionJobNode(FunctionNodeBase):
                 "or supply one via Pipeline.load(..., pipeline_database=<db>)."
             )
         return self._pipeline_database
+
+    # ------------------------------------------------------------------
+    # Batched commits (ITL-919)
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _batched_commits(self, rows_per_commit: int) -> Iterator[None]:
+        """Commit this node's writes every ``rows_per_commit`` rows inside the block.
+
+        ``PipelineJob.run`` runs each function node inside this block. Its result
+        caches stop committing after every stored result, and the node commits its
+        pending writes (ephemeral results, then its result table, then the pipeline
+        records) every ``rows_per_commit`` rows and at its end. Outside the block
+        (a node run on its own) every result is committed as it is stored.
+
+        Args:
+            rows_per_commit: How many processed rows' writes one commit holds.
+
+        Yields:
+            Nothing; the node commits in batches while the block runs.
+        """
+        pods = [
+            pod
+            for pod in (self._cached_function_pod, self._ephemeral_cached_pod)
+            if isinstance(pod, CachedFunctionPod)
+        ]
+        self._commit_every_rows = rows_per_commit
+        self._rows_since_commit = 0
+        self._commit_failed = False
+        for pod in pods:
+            pod.set_auto_flush(False)
+        try:
+            yield
+        finally:
+            self._commit_every_rows = None
+            for pod in pods:
+                pod.set_auto_flush(True)
+
+    def _ephemeral_store_in_use(self) -> ArrowDatabaseProtocol | None:
+        """Return the ephemeral store this node writes results to, if it does."""
+        if self._node_config.is_result_ephemeral and self._ephemeral_cached_pod:
+            return self.ephemeral_result_store
+        return None
+
+    def _commit_result_table(self) -> None:
+        """Commit this node's pending result rows, before its pipeline records.
+
+        Every view of a store shares one set of pending writes, and a flush commits
+        them table by table in no guaranteed order. Committing the result table on
+        its own first means a crash between the two commits leaves results without
+        pipeline records (found in the result cache on the rerun, so nothing is
+        recomputed), never pipeline records pointing at results that were lost.
+        Only a store that commits table by table
+        (``TableCommittingDatabaseProtocol``, the Delta store) needs and offers this;
+        for another store the pipeline flush that follows commits everything.
+        """
+        pod = self._cached_function_pod
+        if not isinstance(pod, CachedFunctionPod):
+            return
+        result_database = as_table_committing(pod.result_database)
+        if result_database is not None:
+            result_database.flush_batch(pod.record_path)
+
+    def _commit_pending_writes(self) -> None:
+        """Commit this node's pending writes, results first (see ``_batched_commits``).
+
+        Raises:
+            StoreReadError: If a stored table could not be read; it names this node.
+            StoreWriteError: If a commit failed, naming this node and the store
+                (``flush=True``, no row: the batch holds many rows). The failed
+                writes stay pending, and earlier commits are kept.
+        """
+        pipeline_database = self._require_pipeline_database()
+        ephemeral = self._ephemeral_store_in_use()
+        try:
+            if ephemeral is not None:
+                try:
+                    ephemeral.flush()
+                except StoreReadError:
+                    raise
+                except Exception as exc:
+                    raise StoreWriteError(
+                        ephemeral.base_path, node_label=self.label, flush=True
+                    ) from exc
+            try:
+                self._commit_result_table()
+                pipeline_database.flush()
+            except StoreReadError:
+                raise
+            except Exception as exc:
+                raise StoreWriteError(
+                    pipeline_database.base_path, node_label=self.label, flush=True
+                ) from exc
+        except StoreError as exc:
+            self._commit_failed = True
+            exc.add_context(node_label=self.label)
+            raise
+        self._rows_since_commit = 0
+
+    def _row_processed(self) -> None:
+        """Count a processed row; commit once a batch is full (only inside a job run)."""
+        if self._commit_every_rows is None:
+            return
+        self._rows_since_commit += 1
+        if self._rows_since_commit >= self._commit_every_rows:
+            self._commit_pending_writes()
+
+    def _commit_at_node_end(self) -> None:
+        """Commit what is still pending when the node finishes (only inside a job run)."""
+        if self._commit_every_rows is not None:
+            self._commit_pending_writes()
+
+    def _commit_after_failure(self, run_error: BaseException) -> None:
+        """Commit what succeeded before a failure, never replacing the run's error.
+
+        The job flushes its store after a failed run, but not a node's ephemeral
+        store, a separate database, and not table by table: so the node commits its
+        ephemeral results and then its result table here, best-effort (a failure
+        is noted on ``run_error``). Skipped when the failure was this node's own
+        commit: the job's flush is that commit's one retry.
+
+        Args:
+            run_error: The error the node is failing with.
+        """
+        if self._commit_every_rows is None or self._commit_failed:
+            return
+        ephemeral = self._ephemeral_store_in_use()
+        if ephemeral is not None:
+            commit_best_effort(run_error, ephemeral.flush)
+        commit_best_effort(run_error, self._commit_result_table)
+
+    @staticmethod
+    def _commit_or_end_node(
+        commit: Any, ctx_obs: Any, node_label: str, node_hash: str
+    ) -> None:
+        """Run a commit step; if it fails, end the node for the observer and re-raise.
+
+        Args:
+            commit: ``_row_processed`` or ``_commit_at_node_end``.
+            ctx_obs: The node's contextualized observer.
+            node_label: The node's label, for the observer.
+            node_hash: The node's content hash, for the observer.
+        """
+        try:
+            commit()
+        except StoreError as exc:
+            with keep_store_error(exc, "Observer on_node_end"):
+                ctx_obs.on_node_end(node_label, node_hash)
+            raise
 
     # ------------------------------------------------------------------
     # as_node — return the lightweight FunctionNode equivalent
@@ -1263,9 +1544,19 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             Materialized list of (tag, output_data) pairs, excluding
             ``None`` outputs and failed data.
+
+        Raises:
+            InputValidationError: If the input stream is of another data context
+                than this node; raised before any row is processed, whatever the
+                error policy.
         """
         from orcapod.pipeline.observer import NoOpObserver
 
+        self._begin_run()
+        # A whole-input condition, not a row failure: the error policy does not apply.
+        require_same_data_context(
+            input_stream.data_context_key, self._stored_data_context_key
+        )
         node_label = self.label
         node_hash = self.content_hash().to_string()
 
@@ -1291,27 +1582,41 @@ class FunctionJobNode(FunctionNodeBase):
         self.get_cached_results(base_entry_ids=base_entry_ids)
 
         output: list[tuple[TagProtocol, DataProtocol]] = []
-        for tag, data, base_entry_id in upstream_entries:
-            ctx_obs.on_data_start(node_label, tag, data)
+        try:
+            for tag, data, base_entry_id in upstream_entries:
+                ctx_obs.on_data_start(node_label, tag, data)
 
-            if base_entry_id in self._cached_output_datas and not isinstance(
-                self._cached_output_datas[base_entry_id][1], EmptyData
-            ):
-                tag_out, result = self._cached_output_datas[base_entry_id]
-                ctx_obs.on_data_end(node_label, tag, data, result, cached=True)
-                if result is not None:
-                    output.append((tag_out, result))
-            else:
+                if base_entry_id in self._cached_output_datas and not isinstance(
+                    self._cached_output_datas[base_entry_id][1], EmptyData
+                ):
+                    tag_out, result = self._cached_output_datas[base_entry_id]
+                    ctx_obs.on_data_end(node_label, tag, data, result, cached=True)
+                    if result is not None:
+                        output.append((tag_out, result))
+                    continue
+
                 pkt_logger = ctx_obs.create_data_logger(tag, data)
                 try:
                     tag_out, result = self._process_data_internal(
-                        tag, data, logger=pkt_logger, run_id=run_id
+                        tag,
+                        data,
+                        logger=pkt_logger,
+                        run_id=run_id,
+                        base_entry_id=base_entry_id,
                     )
                 except StoreError as exc:
                     # A failed store read or write fails the run whatever the error
                     # policy: error_policy only decides about rows whose function
                     # raised.
                     exc.add_context(node_label=node_label, tag=tag.as_dict())
+                    with keep_store_error(exc, "Observer on_data_crash"):
+                        ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    with keep_store_error(exc, "Observer on_node_end"):
+                        ctx_obs.on_node_end(node_label, node_hash)
+                    raise
+                except TypeIdentityError as exc:
+                    # A stored row that cannot be decoded as its class is never
+                    # skipped as a row failure, whatever the error policy (ITL-881).
                     with keep_store_error(exc, "Observer on_data_crash"):
                         ctx_obs.on_data_crash(node_label, tag, data, exc)
                     with keep_store_error(exc, "Observer on_node_end"):
@@ -1328,10 +1633,21 @@ class FunctionJobNode(FunctionNodeBase):
                     if error_policy == "fail_fast":
                         ctx_obs.on_node_end(node_label, node_hash)
                         raise
-                else:
-                    ctx_obs.on_data_end(node_label, tag, data, result, cached=False)
-                    if result is not None:
-                        output.append((tag_out, result))
+                    continue
+
+                ctx_obs.on_data_end(node_label, tag, data, result, cached=False)
+                if result is not None:
+                    output.append((tag_out, result))
+                self._commit_or_end_node(
+                    self._row_processed, ctx_obs, node_label, node_hash
+                )
+
+            self._commit_or_end_node(
+                self._commit_at_node_end, ctx_obs, node_label, node_hash
+            )
+        except Exception as run_error:
+            self._commit_after_failure(run_error)
+            raise
 
         ctx_obs.on_node_end(node_label, node_hash)
         # Mark this node as freshly computed so subsequent iter_data() calls
@@ -1346,6 +1662,7 @@ class FunctionJobNode(FunctionNodeBase):
         *,
         logger: DataExecutionLoggerProtocol | None = None,
         run_id: str | None = None,
+        base_entry_id: bytes | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Core compute + persist + cache.
 
@@ -1359,6 +1676,8 @@ class FunctionJobNode(FunctionNodeBase):
             logger: Optional data execution logger.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
+            base_entry_id: The row's ``compute_base_entry_id``, when the caller
+                already has it; computed here otherwise.
 
         When ``node_config.is_result_ephemeral=True``:
         - Uses ``_ephemeral_cached_pod`` for both compute and storage.
@@ -1376,6 +1695,9 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             A ``(tag, output_data)`` 2-tuple.
         """
+        # A node that delivers side effects must not run on completions it cannot match.
+        self._account_for_stale_tables()
+        require_same_data_context(data.data_context_key, self._stored_data_context_key)
         # Guard: EmptyData inputs skip all computation and go straight to cache lookup.
         # EmptyData.content_hash() returns the cached_content_hash, so
         # result_cache.lookup(data) works transparently — it finds the downstream
@@ -1383,11 +1705,12 @@ class FunctionJobNode(FunctionNodeBase):
         # add_pipeline_record is intentionally skipped for EmptyData inputs because
         # EmptyData.as_table() raises EmptyDataAccessError (no payload to read source
         # columns from). Pipeline DB write for this path is deferred.
+        if base_entry_id is None:
+            base_entry_id = self.compute_base_entry_id(tag, data)
         if isinstance(data, EmptyData):
             if self._cached_function_pod is not None:
                 cached = self._cached_function_pod.lookup_cached_data(data)
                 if cached is not None:
-                    base_entry_id = self.compute_base_entry_id(tag, data)
                     self._cached_output_datas[base_entry_id] = (tag, cached)
                     self._cached_output_table = None
                     self._cached_content_hash_column = None
@@ -1422,9 +1745,10 @@ class FunctionJobNode(FunctionNodeBase):
                     )
                 )
                 if self._pipeline_database is not None:
-                    self.add_pipeline_record(
+                    self._add_pipeline_record(
                         tag,
                         data,
+                        base_entry_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
                         is_ephemeral=True,
@@ -1440,9 +1764,10 @@ class FunctionJobNode(FunctionNodeBase):
                         self._cached_function_pod.RESULT_COMPUTED_FLAG, False
                     )
                 )
-                self.add_pipeline_record(
+                self._add_pipeline_record(
                     tag,
                     data,
+                    base_entry_id,
                     data_record_id=output_data.datagram_uuid,
                     computed=result_computed,
                     output_data_hash=output_data.content_hash(),
@@ -1453,7 +1778,6 @@ class FunctionJobNode(FunctionNodeBase):
             )
 
         # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
-        base_entry_id = self.compute_base_entry_id(tag, data)
         self._cached_output_datas[base_entry_id] = (tag_out, output_data)
         self._cached_output_table = None
         self._cached_content_hash_column = None
@@ -1509,22 +1833,27 @@ class FunctionJobNode(FunctionNodeBase):
         data: DataProtocol,
         *,
         logger: DataExecutionLoggerProtocol | None = None,
+        base_entry_id: bytes | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Async counterpart of ``_process_data_internal``.
 
         Mirrors the sync ephemeral/persistent branch logic using async variants
         of ``process_data``. See ``_process_data_internal`` for full behaviour
-        documentation.
+        documentation, including ``base_entry_id``.
 
         Returns:
             A ``(tag, output_data)`` 2-tuple.
         """
+        # A node that delivers side effects must not run on completions it cannot match.
+        self._account_for_stale_tables()
+        require_same_data_context(data.data_context_key, self._stored_data_context_key)
         # Guard: same logic as sync _process_data_internal — see inline comment there.
+        if base_entry_id is None:
+            base_entry_id = self.compute_base_entry_id(tag, data)
         if isinstance(data, EmptyData):
             if self._cached_function_pod is not None:
                 cached = self._cached_function_pod.lookup_cached_data(data)
                 if cached is not None:
-                    base_entry_id = self.compute_base_entry_id(tag, data)
                     self._cached_output_datas[base_entry_id] = (tag, cached)
                     self._cached_output_table = None
                     self._cached_content_hash_column = None
@@ -1559,9 +1888,10 @@ class FunctionJobNode(FunctionNodeBase):
                     )
                 )
                 if self._pipeline_database is not None:
-                    self.add_pipeline_record(
+                    self._add_pipeline_record(
                         tag,
                         data,
+                        base_entry_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
                         is_ephemeral=True,
@@ -1577,9 +1907,10 @@ class FunctionJobNode(FunctionNodeBase):
                         self._cached_function_pod.RESULT_COMPUTED_FLAG, False
                     )
                 )
-                self.add_pipeline_record(
+                self._add_pipeline_record(
                     tag,
                     data,
+                    base_entry_id,
                     data_record_id=output_data.datagram_uuid,
                     computed=result_computed,
                     output_data_hash=output_data.content_hash(),
@@ -1590,7 +1921,6 @@ class FunctionJobNode(FunctionNodeBase):
             )
 
         # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
-        base_entry_id = self.compute_base_entry_id(tag, data)
         self._cached_output_datas[base_entry_id] = (tag_out, output_data)
         self._cached_output_table = None
         self._cached_content_hash_column = None
@@ -1724,16 +2054,54 @@ class FunctionJobNode(FunctionNodeBase):
                 so that downstream ``EmptyData`` flow-through can locate its cached
                 result keyed by the same hash (= the downstream's ``INPUT_DATA_HASH_COL``).
         """
+        self._add_pipeline_record(
+            tag,
+            input_data,
+            self.compute_base_entry_id(tag, input_data),
+            data_record_id=data_record_id,
+            computed=computed,
+            is_ephemeral=is_ephemeral,
+            output_data_hash=output_data_hash,
+        )
+
+    def _add_pipeline_record(
+        self,
+        tag: TagProtocol,
+        input_data: DataProtocol,
+        base_entry_id: bytes,
+        data_record_id: uuid.UUID,
+        computed: bool,
+        is_ephemeral: bool = False,
+        output_data_hash: ContentHash | None = None,
+    ) -> None:
+        """``add_pipeline_record`` with the row's base entry id already computed.
+
+        Args:
+            tag: The tag associated with the input data.
+            input_data: The input data that was processed.
+            base_entry_id: ``compute_base_entry_id(tag, input_data)``.
+            data_record_id: UUID of the result record in the result database.
+            computed: Whether the result was freshly computed.
+            is_ephemeral: Whether the result is stored in the ephemeral store.
+            output_data_hash: Content hash of the output, if any.
+        """
         pipeline_database = self._require_pipeline_database()
-        self._ensure_pdb_schema()
-        base_entry_id = self.compute_base_entry_id(tag, input_data)
+        # The row key combines the input's hash with this node's hasher: an input
+        # of another data context would be stored under a mixed key.
+        require_same_data_context(
+            input_data.data_context_key, self._stored_data_context_key
+        )
+        self._account_for_stale_tables()
 
         # Determine the next recomputation index by querying all existing rows
         # for this base_entry_id. No await is used here, so within a single-threaded
         # asyncio event loop this read-then-write sequence is uninterrupted.
         existing = pipeline_database.get_records_with_column_value(
             self._versioned_pipeline_path,
-            {_PIPELINE_BASE_ENTRY_ID_COL: base_entry_id},
+            {
+                _PIPELINE_BASE_ENTRY_ID_COL: base_entry_id,
+                constants.DATA_CONTEXT_COL: self._stored_data_context_key,
+            },
         )
         if existing is None or existing.num_rows == 0:
             new_index = 0
@@ -1773,8 +2141,8 @@ class FunctionJobNode(FunctionNodeBase):
                     ],
                     type=pa.large_binary(),
                 ),
-                f"{constants.META_PREFIX}input_data{constants.CONTEXT_KEY}": pa.array(
-                    [input_data.data_context_key], type=pa.large_string()
+                constants.DATA_CONTEXT_COL: pa.array(
+                    [self._stored_data_context_key], type=pa.large_string()
                 ),
                 f"{constants.META_PREFIX}computed": pa.array(
                     [computed], type=pa.bool_()
@@ -1889,22 +2257,36 @@ class FunctionJobNode(FunctionNodeBase):
 
         return joined if joined.num_rows > 0 else None
 
-    def as_source(self):
+    def as_source(self, tags_as_data: "Mapping[str, str] | None" = None):
         """Return a DerivedSource backed by the DB records of this node.
+
+        Its ``source_id`` is the ``DerivedSource`` default: without
+        ``tags_as_data``, ``derived:<algorithm label>:<hex>`` of this node's
+        content hash.
+
+        Args:
+            tags_as_data: Maps a tag column of this node to the name of a data
+                column that receives a copy of it. When given, the result is a
+                new root source with its own provenance and a ``source_id``
+                derived from this node's content hash and the mapping; see
+                ``DerivedSource``.
 
         Raises:
             RuntimeError: If no database is attached.
+            InputValidationError: If ``tags_as_data`` is not valid for this
+                node's columns.
         """
         if self._pipeline_database is None:
             raise RuntimeError("Cannot create a DerivedSource without a database")
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        path_str = "/".join(self.node_identity_path)
-        source_id = f"{path_str}:{self.content_hash().to_string()}"
+        # No source_id is given: the source takes the DerivedSource default
+        # (``derived:<algorithm label>:<hex>`` of this node's content hash, or the
+        # ``tags_as_data`` id when a mapping is given).
         return DerivedSource(
             origin=self,
-            source_id=source_id,
+            tags_as_data=tags_as_data,
             data_context=self.data_context_key,
             config=self.orcapod_config,
         )
@@ -1946,7 +2328,7 @@ class FunctionJobNode(FunctionNodeBase):
         if self._cached_function_pod is None or self._pipeline_database is None:
             return None
 
-        self._ensure_pdb_schema()
+        self._account_for_stale_tables()
         taginfo = self._pipeline_database.get_all_records(
             self._versioned_pipeline_path,
             record_id_column=_PIPELINE_ENTRY_ID_COL,
@@ -1954,6 +2336,19 @@ class FunctionJobNode(FunctionNodeBase):
 
         if taginfo is None:
             return None
+
+        # Rows written under another data context are not this node's current
+        # entries: they stay in the table untouched (ITL-944). Result rows are
+        # reached only through the pipeline rows kept here.
+        context_key = self._stored_data_context_key
+        stored_rows = taginfo.num_rows
+        taginfo = keep_rows_of_data_context(taginfo, context_key)
+        if taginfo.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_rows_of_other_data_contexts(
+                self._pipeline_database.base_path + self._versioned_pipeline_path,
+                stored_rows - taginfo.num_rows,
+            )
 
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema
@@ -1991,6 +2386,13 @@ class FunctionJobNode(FunctionNodeBase):
                 self._cached_function_pod.record_path,
                 record_id_column=constants.DATA_RECORD_ID,
             )
+            if results is not None:
+                # A result row of another data context is not this entry's result,
+                # even when a current pipeline row names its record id: it is left
+                # out and the entry counts as having no stored result.
+                results = keep_rows_of_data_context(results, context_key).drop(
+                    [constants.DATA_CONTEXT_COL]
+                )
             if results is None:
                 # Tag table has persistent entries but result DB is empty — data loss
                 logger.warning(
@@ -2034,6 +2436,9 @@ class FunctionJobNode(FunctionNodeBase):
                     )
                 )
             if eph_results is not None:
+                eph_results = keep_rows_of_data_context(eph_results, context_key).drop(
+                    [constants.DATA_CONTEXT_COL]
+                )
                 if results_schema is None:
                     results_schema = eph_results.schema
                 ephemeral_df = ephemeral_taginfo_df.join(
@@ -2115,6 +2520,11 @@ class FunctionJobNode(FunctionNodeBase):
             joined = arrow_utils.restore_schema_nullability(
                 joined, taginfo_schema, results_schema
             )
+        # In memory, each row names its data context in the datagram context column.
+        joined = joined.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([context_key] * joined.num_rows, type=pa.large_string()),
+        )
         return _JoinedRecords(
             table=joined,
             taginfo_columns=taginfo_columns,
@@ -2308,6 +2718,7 @@ class FunctionJobNode(FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        self._begin_run()
         if self._load_status == LoadStatus.UNAVAILABLE:
             raise RuntimeError(
                 f"FunctionJobNode {self.label!r} is unavailable: "
@@ -2355,6 +2766,12 @@ class FunctionJobNode(FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        try:
+            self._begin_run()
+        except StoreError:
+            # Nothing was delivered; downstream must not wait for rows.
+            await output.close()
+            raise
         status = self.load_status
         if status == LoadStatus.CACHE_ONLY:
             await self._async_execute_cache_only(output, observer=observer)
@@ -2369,6 +2786,15 @@ class FunctionJobNode(FunctionNodeBase):
 
         from orcapod.pipeline.observer import NoOpObserver
 
+        # A whole-input condition, not a row failure: the error policy does not apply.
+        if self._input_stream is not None:
+            try:
+                require_same_data_context(
+                    self._input_stream.data_context_key, self._stored_data_context_key
+                )
+            except InputValidationError:
+                await output.close()
+                raise
         node_label = self.label
         node_hash = self.content_hash().to_string()
 
@@ -2417,14 +2843,22 @@ class FunctionJobNode(FunctionNodeBase):
                 )
 
                 # Local dict: correlation_key → (original_tag, original_input_data)
-                input_store: dict[bytes, tuple[TagProtocol, DataProtocol]] = {}
+                input_store: dict[bytes, tuple[TagProtocol, DataProtocol, bytes]] = {}
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
                     try:
                         async for tag, data in input_channel:
                             base_entry_id = self.compute_base_entry_id(tag, data)
-                            if base_entry_id in cached_by_base_entry_id:
+                            # A cached EmptyData is a result that is gone (an
+                            # ephemeral result from an earlier run): compute the row
+                            # again, as the sync path does (ITL-923).
+                            if base_entry_id in cached_by_base_entry_id and not (
+                                isinstance(
+                                    cached_by_base_entry_id[base_entry_id][1],
+                                    EmptyData,
+                                )
+                            ):
                                 cached_tag, cached_data = cached_by_base_entry_id[
                                     base_entry_id
                                 ]
@@ -2435,7 +2869,11 @@ class FunctionJobNode(FunctionNodeBase):
                                 await output.send((cached_tag, cached_data))
                             else:
                                 correlation_key = uuid.uuid4().bytes
-                                input_store[correlation_key] = (tag, data)
+                                input_store[correlation_key] = (
+                                    tag,
+                                    data,
+                                    base_entry_id,
+                                )
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
                                 )
@@ -2447,16 +2885,19 @@ class FunctionJobNode(FunctionNodeBase):
                     """Stage 3: record pipeline entry, strip key, emit to output."""
                     async for output_tag, output_data in result_channel.reader:
                         correlation_key = output_tag.get_meta_value(_TAG_NODE_INPUT_REF)
-                        original_tag, input_data = input_store.pop(correlation_key)
+                        original_tag, input_data, base_entry_id = input_store.pop(
+                            cast(bytes, correlation_key)
+                        )
                         result_computed = bool(
                             output_data.get_meta_value(
                                 execution_pod.RESULT_COMPUTED_FLAG, False
                             )
                         )
                         try:
-                            self.add_pipeline_record(
+                            self._add_pipeline_record(
                                 original_tag,
                                 input_data,
+                                base_entry_id,
                                 data_record_id=output_data.datagram_uuid,
                                 computed=result_computed,
                                 is_ephemeral=is_ephemeral,
@@ -2470,9 +2911,6 @@ class FunctionJobNode(FunctionNodeBase):
                             )
                             raise
                         # Update in-memory cache so iter_data() sees the result.
-                        base_entry_id = self.compute_base_entry_id(
-                            original_tag, input_data
-                        )
                         clean_tag = output_tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
                         )
@@ -2482,6 +2920,9 @@ class FunctionJobNode(FunctionNodeBase):
                         )
                         self._cached_output_table = None
                         self._cached_content_hash_column = None
+                        # Commits every commit_every_rows rows inside a job (ITL-919);
+                        # no await in between, so no other row interleaves.
+                        self._row_processed()
                         await output.send((clean_tag, output_data))
 
                 # Capture outer self so _NodeLabelObserver methods can
@@ -2541,10 +2982,7 @@ class FunctionJobNode(FunctionNodeBase):
                             if correlation_key is not None:
                                 original = input_store.pop(correlation_key, None)
                                 if original is not None:
-                                    orig_tag, orig_data = original
-                                    base_entry_id = fn_node.compute_base_entry_id(
-                                        orig_tag, orig_data
-                                    )
+                                    _, _, base_entry_id = original
                                     fn_node._cached_output_datas[base_entry_id] = (
                                         clean,
                                         None,
@@ -2588,6 +3026,8 @@ class FunctionJobNode(FunctionNodeBase):
                         )
                     )
                     tg.create_task(record_and_forward())
+                # Commit the last rows inside a job (ITL-919); a no-op otherwise.
+                self._commit_at_node_end()
             else:
                 # No-DB path: delegate dispatch entirely to the pod.
                 # The pod's async_execute() closes `output` in its own finally.
@@ -2596,5 +3036,8 @@ class FunctionJobNode(FunctionNodeBase):
                 )
 
             ctx_obs.on_node_end(node_label, node_hash)
+        except Exception as run_error:
+            self._commit_after_failure(run_error)
+            raise
         finally:
             await output.close()

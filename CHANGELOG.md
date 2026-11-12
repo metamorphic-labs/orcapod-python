@@ -4,6 +4,52 @@
 
 ### Breaking changes and migration
 
+#### NumPy arrays: new storage format and new hashes, no automatic migration (ITL-888, ITL-883)
+
+**The array format and every array hash changed in v0.3.** A store written by v0.2 that holds
+`numpy.ndarray` columns is **not migrated**. Every node that handles arrays gets new tables,
+so its v0.2 results are no longer found; and since every Arrow-derived hash changed too
+(ITL-910, below), no v0.2 result is reused at all: v0.3 ignores the rows a v0.2 store holds and
+computes every input again. Nothing written by v0.2 is changed or deleted, and those tables stay
+readable with v0.2. A migration is planned after v0.3 (ITL-889).
+
+- **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
+  `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
+  data: large_binary>`: an Orcapod dtype tag, the shape, and the elements in C order,
+  little-endian, packed. It replaces the `.npy` file under `numpy.ndarray`; that name is no
+  longer registered or written.
+- **Identity.** An array is its dtype, shape and element bits. A structured dtype's field
+  names, types and order are part of the dtype, at every nesting depth. Memory layout, byte
+  order, structured offsets and padding, and subclass are not part of it. Arrays read back
+  canonical: C order, little-endian (`>f4` reads back `<f4`), structured fields packed in
+  their declared order, as plain `np.ndarray`.
+- **Hash.** `NumpyArrayHandler` returns `ContentHash("ndarray_v1", digest)`. The digest is
+  SHA-256 over a length-prefixed encoding of the stored row (`docs/reference/hashing.md`,
+  section 8), and the label replaces the bare `sha256`. Because the logical type name is now
+  `orcapod.ndarray`, the type, schema and pipeline hashes of anything with an array column
+  change too, and so do the table paths of those nodes. Pipeline hashes are chained, so the
+  pipeline and operator tables of every node downstream of an array column move as well,
+  even when it has no array column itself. A pod whose inputs and outputs hold no array
+  keeps its function result table, and nodes with no array column upstream keep their tables;
+  but an array-free pod does **not** reuse its v0.2 results: every Arrow-derived hash changed
+  as well (ITL-910, below) and every table moved to a new layout (ITL-944, below), so the
+  v0.2 tables are not read and the inputs are computed again.
+- **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
+  the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
+  NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
+  `clongdouble`, datetimes and timedeltas without a unit, and structured dtypes with titles
+  (whether to accept these last three kinds later is tracked in ITL-911).
+- **Function pods.** A pod declared `-> np.ndarray` that returns something other than an array,
+  such as a NumPy scalar, now raises `TypeError` naming the output.
+- **MergeJoin** orders merged arrays by their stored `(dtype tag, shape, data)`, and lists of
+  arrays (an array column after `GroupBy` or `Batch`) by their elements' keys, in order.
+- **Pick** on a column whose logical type has no keyed access (an array, a dataclass, a
+  pydantic model) raises `InputValidationError` naming the column, instead of
+  `NotImplementedError` (ITL-883).
+- `LogicalTypeRegistry.get_by_python_type` now picks the most specific registered class along
+  the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
+  subclasses, whatever the registration order.
+
 #### A changed column type is refused when appending to a Delta table (ITL-884)
 
 Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'
@@ -29,16 +75,6 @@ stay queued for the next flush. A flush that fails only for other reasons still 
 
 ### Added
 
-- **`orcapod.errors.OutputTypeError`** — raised when a function pod returns a value that
-  does not match its declared output type. It names the function, the output, the declared
-  type and the type of the value (never the value itself, which stays on its `value`
-  attribute), and says what to return instead (ITL-895).
-- **`orcapod.errors.ValueConversionWarning`** — issued when Orcapod accepts a value and
-  stores a converted form of it, such as a `tuple` returned for a `list` output. The message
-  names the function, the output, the declared and returned types, what was converted and
-  how to avoid it. Each function instance issues it once per output and conversion, however
-  many rows a run has. With `-W error::orcapod.errors.ValueConversionWarning` every
-  conversion raises instead, and in a pipeline that row fails (ITL-895).
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
   written to the store. It names the node, the row's tag and the table, and chains the
   database's own exception as its cause. (ITL-878 #287)
@@ -49,33 +85,6 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   `except StoreError` handles both. (ITL-884 #290)
 
 ### Fixed
-
-#### A function pod no longer stores a value that does not match its declared output type (ITL-895)
-
-A function pod no longer stores a returned value that does not match its declared output type.
-pyarrow converts a `float` for an integer field with `__int__`, so a pod declared `-> int` that
-returned `1.5` stored `1` with no error, on every path (standalone, cached, `PipelineJob` sync
-and async, in-memory and Delta). The returned value is now checked and the function pod raises
-`OutputTypeError` (a `TypeError` and a `ValueError`), which says what to return instead. In a
-`PipelineJob` it is a row failure under `error_policy`, like any other exception the function
-raises. Rejected now (developer decisions, 2026-11-11): an `int` or `bool` for a `float` output
-(return `0.0` or `float(value)`); `numpy.float64`, `Decimal` or `Fraction` for an integer
-(truncated before); a number for `date` or `datetime` (read as epoch ticks before); `bytes` for
-`str` and the reverse; a `set` or `frozenset` for a `list` (its order differs between
-processes, so the stored value and its hash did too; ITL-901); a generator or other one-shot
-iterator for a `list`; `None` for an output not declared `T | None` (a NULL in a not-null
-field, which left an in-memory node unreadable); and the same mismatches inside lists, dicts
-and dataclass fields (a NumPy float array returned for `list[int]` was truncated too). Still
-accepted, converted, and reported with `ValueConversionWarning`: a `tuple` or another ordered
-container (NumPy array, `deque`, `range`, dict view) for a `list`, a `datetime` for a `date`
-(the time of day is dropped), a Python `float` for `numpy.float32` (rounded to 32 bits), and a
-`numpy.longdouble` wider than 64 bits for `float` (rounded to 64 bits). A NumPy scalar of the
-declared kind (`numpy.int64` for `int`) is accepted silently. Each output is converted to Arrow
-as soon as it is returned, so a downstream pod receives exactly the stored value: before, it
-saw `1.5` on some paths and `1` on others. Stored results of conforming values and their hashes
-are unchanged. Rows stored wrongly before this fix are still served from the store, because the
-function is not called again for them. To find them, call the function again on the stored
-inputs and compare. (ITL-895, ITL-901)
 
 #### A Delta table that cannot be read is no longer reported as having no rows (ITL-884)
 

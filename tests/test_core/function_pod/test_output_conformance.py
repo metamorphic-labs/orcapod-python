@@ -10,8 +10,7 @@ on both orchestrators and both store backends) and check the developer's decisio
   ``OutputTypeError`` naming the pod, the output, the declared type and the value's type,
   and saying what to return instead;
 * the rejection is a row failure in a pipeline (the run continues, the observer sees it);
-* a few near misses are converted, with a ``ValueConversionWarning`` that is issued once
-  per function, output and conversion, however many rows;
+* only value-preserving numeric exceptions are accepted silently;
 * the output a downstream pod receives is exactly the stored value;
 * conforming outputs and same-kind NumPy scalars are accepted silently and hash as before.
 """
@@ -20,6 +19,7 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
+import enum
 import warnings
 from dataclasses import dataclass
 from decimal import Decimal
@@ -45,11 +45,20 @@ class Reading:
     count: int
 
 
-def make_pod(declared: Any, returns: Any, name: str = "f") -> Any:
+def make_pod(
+    declared: Any, returns: Any, name: str = "f", *, async_function: bool = False
+) -> Any:
     """Build a function pod named ``name``, declared ``-> declared``, returning ``returns``."""
 
     def fn(x: int) -> Any:
         return returns
+
+    if async_function:
+
+        async def async_fn(x: int) -> Any:
+            return returns
+
+        fn = async_fn
 
     fn.__annotations__["return"] = declared
     fn.__name__ = fn.__qualname__ = name
@@ -94,11 +103,11 @@ LOSSY = [
     pytest.param(
         list[int],
         np.array([1.5, 2.0]),
-        "float64",
+        "ndarray",
         id="Q2-float-ndarray-for-list-of-int",
     ),
     pytest.param(
-        list[int], collections.deque([1, 1.5]), "float", id="Q2-float-in-deque"
+        list[int], collections.deque([1, 1.5]), "deque", id="Q2-float-in-deque"
     ),
     pytest.param(list[int], {"a": 1}, "dict", id="mapping-for-list"),
     pytest.param(str, b"x", "bytes", id="bytes-for-str"),
@@ -155,15 +164,16 @@ class TestStandalonePodRejects:
         assert secret not in str(info.value)
         assert info.value.value == returned
 
-    def test_long_dict_key_is_shortened_in_the_path(self) -> None:
-        """A long dict key in the mismatch path is cut to 40 characters."""
+    def test_long_dict_key_is_omitted_from_the_path(self) -> None:
+        """Mapping paths contain structure only, never returned key content."""
         key = "k" * 100
         pod = make_pod(dict[str, int], {key: 1.5})
         with pytest.raises(errors.OutputTypeError) as info:
             list(pod.pod(make_source()).iter_data())
         message = str(info.value)
         assert key not in message
-        assert "'kkkk" in message
+        assert "kkkk" not in message
+        assert "[*]" in message
 
     def test_error_is_a_type_error(self) -> None:
         """Existing ``except TypeError`` handlers catch the rejection."""
@@ -178,7 +188,7 @@ class TestStandalonePodRejects:
                 float, 0, "Return a float instead: 0.0 or float(value)", id="D1"
             ),
             pytest.param(
-                float, True, "Return a float instead: 1.0 or float(value)", id="D3"
+                float, True, "Return a float instead: 0.0 or float(value)", id="D3"
             ),
             pytest.param(
                 int, 1.5, "Return an int instead: round(value)", id="float-for-int"
@@ -320,182 +330,89 @@ class TestPipelineJobRowFailure:
         assert job.nodes["nothing"].as_table().num_rows == 0
 
 
-def _conversion_warnings(
-    record: list[warnings.WarningMessage],
-) -> list[warnings.WarningMessage]:
-    """The ValueConversionWarnings among recorded warnings (others, such as a
-    ResourceWarning from garbage collection, can arrive at any time)."""
-    return [w for w in record if w.category is errors.ValueConversionWarning]
-
-
-# (declared type, returned value, stored value, returned type name, words of the message)
-CONVERTED = [
-    pytest.param(
-        list[int],
-        (1, 2),
-        [1, 2],
-        "tuple",
-        "converted it to a list",
-        id="D5-tuple-for-list",
-    ),
-    pytest.param(
-        dt.date,
-        dt.datetime(2020, 1, 1, 12),
-        dt.date(2020, 1, 1),
-        "datetime.datetime",
-        "dropped the time of day",
-        id="D6-datetime-for-date",
-    ),
-    pytest.param(
-        np.float32,
-        0.1,
-        float(np.float32(0.1)),
-        "float",
-        "rounded it to 32 bits",
-        id="D7-float-for-float32",
-    ),
-    pytest.param(
-        list[int],
-        collections.deque([1, 2]),
-        [1, 2],
-        "collections.deque",
-        "converted it to a list",
-        id="Q2-deque-for-list",
-    ),
-    pytest.param(
-        list[int],
-        np.array([1, 2]),
-        [1, 2],
-        "numpy.ndarray",
-        "converted it to a list",
-        id="Q2-int-ndarray-for-list",
-    ),
+# Developer decision, November 12: former warning conversions now fail.
+REJECTED_CONVERSIONS = [
+    pytest.param(list[int], (1, 2), "list(value)", id="tuple"),
+    pytest.param(list[int], np.array([1, 2]), "list(value)", id="array"),
+    pytest.param(list[int], range(2), "list(value)", id="range"),
+    pytest.param(list[int], collections.deque([1, 2]), "list(value)", id="deque"),
+    pytest.param(list[int], {"a": 1}.values(), "list(value)", id="dict-view"),
+    pytest.param(dt.date, dt.datetime(2020, 1, 1, 12), "value.date()", id="datetime"),
+    pytest.param(np.float32, 0.1, "numpy.float32(value)", id="python-float-inexact"),
+    pytest.param(np.float32, 0.5, "numpy.float32(value)", id="python-float-exact"),
+    pytest.param(np.float32, np.float64(0.1), "numpy.float32(value)", id="float64"),
+    pytest.param(np.int8, 128, "numpy.int8", id="int8-overflow"),
+    pytest.param(np.int8, -129, "numpy.int8", id="int8-underflow"),
+    pytest.param(np.int8, np.int64(128), "numpy.int8", id="numpy-int8-overflow"),
+    pytest.param(int, True, "int", id="bool-for-int"),
+    pytest.param(bool, 1, "bool", id="int-for-bool"),
     pytest.param(
         float,
         np.longdouble(1.5),
-        1.5,
-        "numpy.longdouble",
-        "rounded it to 64 bits",
-        id="longdouble-for-float",
+        "float(value)",
+        id="longdouble",
         marks=pytest.mark.skipif(
             np.dtype(np.longdouble).itemsize <= 8,
-            reason="numpy.longdouble is 64-bit on this platform: nothing is rounded",
+            reason="longdouble is not wider than float64 on this platform",
         ),
-    ),
-    pytest.param(
-        dict[str, list[int]],
-        {"a": (1,)},
-        [{"key": "a", "value": [1]}],  # a map column reads back as key/value records
-        "tuple",
-        "at [*]",
-        id="D5-nested-names-the-place",
     ),
 ]
 
 
-class TestConvertedWithWarning:
-    """Near misses that are converted, with a ``ValueConversionWarning``."""
+class TestRejectedConversions:
+    """Former warning conversions fail at the same boundary on every path."""
 
-    @pytest.mark.parametrize(
-        ("declared", "returned", "stored", "type_name", "words"), CONVERTED
-    )
-    def test_warns_and_stores_the_converted_value(
-        self, declared: Any, returned: Any, stored: Any, type_name: str, words: str
+    @pytest.mark.parametrize("async_function", [False, True])
+    @pytest.mark.parametrize("declared,returned,hint", REJECTED_CONVERSIONS)
+    @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+    @pytest.mark.parametrize("store_kind", STORES)
+    def test_rejects_on_all_paths(
+        self,
+        declared: Any,
+        returned: Any,
+        hint: str,
+        orchestrator_cls: Any,
+        store_kind: str,
+        tmp_path: Path,
+        async_function: bool,
     ) -> None:
-        """The warning names function, output, returned type and fix; the converted value is stored."""
-        pod = make_pod(declared, returned, name="near_miss")
-        with pytest.warns(errors.ValueConversionWarning) as record:
-            table = pod.pod(make_source()).as_table()
-        message = str(record[0].message)
-        assert "'near_miss'" in message
-        assert "'y'" in message
-        assert type_name in message
-        assert words in message
-        assert "to avoid this warning" in message
-        assert table["y"].to_pylist() == [stored]
-
-    def test_warning_never_shows_the_value(self) -> None:
-        """The message must be the same on every row, so it is shown once per run."""
-        first = make_pod(list[int], (1, 2), name="same")
-        second = make_pod(list[int], (3, 4, 5), name="same")
-        with pytest.warns(errors.ValueConversionWarning) as one:
-            first.pod(make_source()).as_table()
-        with pytest.warns(errors.ValueConversionWarning) as two:
-            second.pod(make_source()).as_table()
-        assert str(one[0].message) == str(two[0].message)
-
-    def test_message_in_full(self) -> None:
-        """The exact warning text for a datetime returned for a date."""
-        pod = make_pod(dt.date, dt.datetime(2020, 1, 1, 12), name="day")
-        with pytest.warns(errors.ValueConversionWarning) as record:
+        """No rejected row is stored; observers receive the standalone diagnostic."""
+        pod = make_pod(
+            declared,
+            returned,
+            name="requires_explicit_conversion",
+            async_function=async_function,
+        )
+        with pytest.raises(errors.OutputTypeError) as caught:
+            list(pod.pod(make_source()).iter_data())
+        assert hint in str(caught.value)
+        with pytest.raises(errors.OutputTypeError) as materialized:
             pod.pod(make_source()).as_table()
-        assert str(record[0].message) == (
-            "Function 'day' returned datetime.datetime for output 'y', which is "
-            "declared datetime.date; Orcapod dropped the time of day. Return "
-            "value.date() to avoid this warning."
-        )
-
-    def test_one_value_with_two_conversions_warns_twice(self) -> None:
-        """A tuple of datetimes for ``list[date]`` gives a list warning and a date warning."""
-        pod = make_pod(list[dt.date], (dt.datetime(2020, 1, 1, 3),))
-        with pytest.warns(errors.ValueConversionWarning) as record:
-            table = pod.pod(make_source()).as_table()
-        messages = sorted(str(w.message) for w in record)
-        assert len(messages) == 2
-        assert any("converted it to a list" in m for m in messages)
-        assert any("dropped the time of day" in m for m in messages)
-        assert table["y"].to_pylist() == [[dt.date(2020, 1, 1)]]
-
-    def test_issued_once_per_function_however_many_rows(self) -> None:
-        """1,000 converted rows give one warning, even under the ``always`` filter."""
-        pod = make_pod(list[int], (1, 2), name="many")
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("always")
-            table = pod.pod(make_source(tuple(range(1000)))).as_table()
-        assert table.num_rows == 1000
-        assert len(_conversion_warnings(record)) == 1
-
-    def test_dedup_does_not_rely_on_the_warning_registry(self) -> None:
-        """catch_warnings resets the registry; the function still warns only once."""
-        pod = make_pod(list[int], (1, 2), name="again")
-        with warnings.catch_warnings(record=True) as first:
-            warnings.simplefilter("always")
-            pod.pod(make_source((1, 2))).as_table()
-        with warnings.catch_warnings(record=True) as second:
-            warnings.simplefilter("always")
-            pod.pod(make_source((3, 4))).as_table()
-        assert len(_conversion_warnings(first)) == 1
-        assert _conversion_warnings(second) == []
-
-    def test_each_function_instance_warns(self) -> None:
-        """Two function instances each warn once."""
-        first = make_pod(list[int], (1, 2), name="twin")
-        second = make_pod(list[int], (1, 2), name="twin")
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter("always")
-            first.pod(make_source()).as_table()
-            second.pod(make_source()).as_table()
-        assert len(_conversion_warnings(record)) == 2
-
-    def test_error_filter_makes_it_a_row_failure(self) -> None:
-        """An escalated warning fails every converted row, not only the first."""
-        pod = make_pod(list[int], (1, 2), name="strict")
-        observer = _CrashRecorder()
-        job = PipelineJob(name="itl895", store=InMemoryArrowDatabase())
+        assert str(materialized.value) == str(caught.value)
+        recorder = _CrashRecorder()
+        job = PipelineJob(name="policy", store=_store(store_kind, tmp_path))
         with job:
-            pod.pod(make_source((1, 2)), label="strict")
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", errors.ValueConversionWarning)
-            job.run(orchestrator=SyncPipelineOrchestrator(), observer=observer)
-        assert job.nodes["strict"].as_table().num_rows == 0
-        assert len(observer.crashes) == 2
-        # Escalated to an error, the warning is raised on every row, not only the first.
-        assert all(
-            isinstance(c, errors.ValueConversionWarning) for c in observer.crashes
-        )
+            pod.pod(make_source(), label="bad")
+        job.run(orchestrator=orchestrator_cls(), observer=recorder)
+        assert len(recorder.crashes) == 1
+        assert type(recorder.crashes[0]) is errors.OutputTypeError
+        assert str(recorder.crashes[0]) == str(caught.value)
+        assert job.nodes["bad"].as_table().num_rows == 0
+
+
+class Count(enum.IntEnum):
+    """A value-preserving integer subclass."""
+
+    ONE = 1
+
+
+class ScientificFloat(float):
+    """A float subclass with unchanged numeric value."""
 
 
 ACCEPTED_SILENTLY = [
+    pytest.param(int, Count.ONE, 1, id="int-enum"),
+    pytest.param(float, ScientificFloat(1.5), 1.5, id="float-subclass"),
     pytest.param(int, np.int64(3), 3, id="D2-np-int64-for-int"),
     pytest.param(bool, np.bool_(True), True, id="D2-np-bool-for-bool"),
     pytest.param(float, np.float64(1.5), 1.5, id="D2-np-float64-for-float"),
@@ -516,25 +433,22 @@ class TestAcceptedSilently:
     def test_no_warning_and_value_stored(
         self, declared: Any, returned: Any, stored: Any
     ) -> None:
-        """No ``ValueConversionWarning`` and the value is stored as returned."""
+        """No warning and the value is stored as returned."""
         pod = make_pod(declared, returned)
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
             table = pod.pod(make_source()).as_table()
-        assert _conversion_warnings(record) == []
+        assert not record
         assert table["y"].to_pylist() == [stored]
 
 
 # (declared type, returned value, value a downstream pod receives)
-DOWNSTREAM = [
-    pytest.param(list[int], (1, 2), [1, 2], id="D5-tuple-becomes-list"),
+DOWNSTREAM = ACCEPTED_SILENTLY + [
+    pytest.param(np.int8, 127, 127, id="int8-upper-bound"),
+    pytest.param(np.int8, -128, -128, id="int8-lower-bound"),
     pytest.param(
-        dt.date,
-        dt.datetime(2020, 1, 1, 12),
-        dt.date(2020, 1, 1),
-        id="D6-datetime-becomes-date",
+        float, np.float32(0.1), float(np.float32(0.1)), id="exact-float32-widening"
     ),
-    pytest.param(np.float32, 0.1, float(np.float32(0.1)), id="D7-float-rounded"),
 ]
 
 
@@ -565,7 +479,8 @@ class TestDownstreamSeesStoredValue:
         """A downstream pod applied in memory receives the converted value."""
         received: list[Any] = []
         up, down = self._chain(declared, returned, received)
-        with pytest.warns(errors.ValueConversionWarning):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             list(down.pod(up.pod(make_source())).iter_data())
         self._assert_received(received, expected)
 
@@ -587,7 +502,8 @@ class TestDownstreamSeesStoredValue:
         job = PipelineJob(name="itl895", store=_store(store_kind, tmp_path))
         with job:
             down.pod(up.pod(make_source(), label="up"), label="down")
-        with pytest.warns(errors.ValueConversionWarning):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             job.run(orchestrator=orchestrator_cls())
         self._assert_received(received, expected)
         stored = job.nodes["up"].as_table()["y"].to_pylist()
@@ -598,7 +514,8 @@ class TestDownstreamSeesStoredValue:
         self, declared: Any, returned: Any, expected: Any
     ) -> None:
         """The output ``Data`` gives the same converted value as a dict and as a table."""
-        with pytest.warns(errors.ValueConversionWarning):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             [(_tag, data)] = list(
                 make_pod(declared, returned).pod(make_source()).iter_data()
             )
@@ -699,3 +616,93 @@ class TestConversionFailuresNameTheOutput:
         restored = pickle.loads(pickle.dumps(error))
         assert str(restored) == str(error)
         assert restored.declared_type is int
+
+
+@dataclass
+class ExtendedReading(Reading):
+    """An exact subclass cannot be stored in its base class column."""
+
+    extra: int = 2
+
+
+class TestUnifiedOutputBoundary:
+    """Every execution path reports the same function-output mismatch."""
+
+    @pytest.mark.parametrize(
+        ("declared", "returned"),
+        [(int, 1.5), (Reading, ExtendedReading(1)), (np.ndarray, np.float64(2))],
+    )
+    @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+    @pytest.mark.parametrize("store_kind", STORES)
+    def test_errors_match_standalone_and_stored(
+        self,
+        declared: Any,
+        returned: Any,
+        orchestrator_cls: Any,
+        store_kind: str,
+        tmp_path: Path,
+    ) -> None:
+        """Invalid outputs never reach storage and carry one identical diagnostic."""
+        pod = make_pod(declared, returned, name="invalid_output")
+        with pytest.raises(errors.OutputTypeError) as standalone:
+            list(pod.pod(make_source()).iter_data())
+        with pytest.raises(errors.OutputTypeError) as table:
+            pod.pod(make_source()).as_table()
+        observer = _CrashRecorder()
+        job = PipelineJob(name="unified", store=_store(store_kind, tmp_path))
+        with job:
+            pod.pod(make_source(), label="invalid")
+        job.run(orchestrator=orchestrator_cls(), observer=observer)
+        assert len(observer.crashes) == 1
+        assert type(observer.crashes[0]) is errors.OutputTypeError
+        assert str(observer.crashes[0]) == str(standalone.value) == str(table.value)
+        assert job.nodes["invalid"].as_table().num_rows == 0
+        assert "Cannot store" not in str(standalone.value)
+
+    def test_structural_equivalence_still_checks_fields(self) -> None:
+        """Equivalent structural classes share the same recursive output checks."""
+        import orcapod as op
+
+        @op.dataclass(name="OutputReading")
+        class First:
+            count: int
+
+        @op.dataclass(name="OutputReading")
+        class Second:
+            count: int
+
+        pod = make_pod(First, Second(1.5))  # pyright: ignore[reportArgumentType]  # deliberately invalid field
+        with pytest.raises(errors.OutputTypeError, match="count.*float"):
+            list(pod.pod(make_source()).iter_data())
+        good = make_pod(First, Second(2))
+        assert list(good.pod(make_source()).iter_data())[0][1].as_dict()["y"].count == 2
+
+    def test_mapping_keys_are_not_disclosed(self) -> None:
+        """A mapping key is returned data, not diagnostic context."""
+        pod = make_pod(dict[str, int], {"secret-token": 1.5})
+        with pytest.raises(errors.OutputTypeError) as caught:
+            list(pod.pod(make_source()).iter_data())
+        assert "secret-token" not in str(caught.value)
+        assert "[*]" in str(caught.value)
+
+    def test_converter_error_traceback_does_not_disclose_value(self) -> None:
+        """Converter diagnostics cannot leak a returned datetime through chaining."""
+        import traceback
+
+        pod = make_pod(dt.datetime, dt.datetime(2047, 8, 19, 3, 4, 5))
+        with pytest.raises(errors.OutputTypeError) as caught:
+            list(pod.pod(make_source()).iter_data())
+        diagnostic = "".join(traceback.format_exception(caught.value))
+        assert "2047" not in diagnostic
+        assert caught.value.__suppress_context__
+
+
+def test_eager_validation_preserves_user_object_identity() -> None:
+    """Storage validation never rebuilds or mutates a compatible user object."""
+    original = Reading(np.int64(3))  # pyright: ignore[reportArgumentType]  # exercise the accepted same-kind numeric exception
+    result = make_pod(Reading, original).pod(make_source())
+    [(_, data)] = list(result.iter_data())
+    assert data.as_dict()["y"] is original
+    assert type(original.count) is np.int64
+    result.as_table()
+    assert data.as_dict()["y"] is original

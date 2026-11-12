@@ -1,3 +1,7 @@
+> Historical investigation and November 11 decisions. The November 12 policy in
+> `docs/concepts/function-pods.md` supersedes warning conversions. Probe
+> `09_warning_dedup.py` measures commit `5537c0a6`, not the current branch.
+
 # ITL-895 root cause: a pod declared `-> int` stores `1.5` as `1`
 
 Investigated on `b197544e` (origin/main, November 11, 2026). Each claim has a script in this
