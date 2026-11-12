@@ -650,6 +650,33 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             data_context=self.data_context,
         )
 
+    def _call_arguments(
+        self, data: DataProtocol, extra: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the keyword arguments the function is called with for ``data``.
+
+        A parameter annotated with an ``orcapod.dataclass`` receives an instance of
+        that class: a value of another class of the same type (another class object
+        with the same name and fields, as an upstream pod or a store may hand over) is
+        rebuilt as the annotated class. Every other value is passed as it is.
+
+        Args:
+            data: The input data.
+            extra: Arguments supplied by the pod beside the data, such as the
+                invocation context.
+
+        Returns:
+            The data's values, converted where needed, merged with ``extra``.
+        """
+        from orcapod.structural import convert_argument, mentions_structural
+
+        arguments = data.as_dict()
+        schema = self.input_data_schema
+        for name, annotation in schema.items():
+            if name in arguments and mentions_structural(annotation):
+                arguments[name] = convert_argument(arguments[name], annotation)
+        return {**arguments, **extra}
+
     def _call_async_function_sync(self, data: DataProtocol, **kwargs: Any) -> Any:
         """Run the wrapped async function synchronously.
 
@@ -671,7 +698,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         """
         import asyncio
 
-        call_dict = {**data.as_dict(), **kwargs}
+        call_dict = self._call_arguments(data, kwargs)
         fn = self._function
         try:
             asyncio.get_running_loop()
@@ -713,7 +740,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             if not self._active:
                 return None
             raw = self._executor.execute_callable(
-                self._function, {**data.as_dict(), **kwargs}, logger=logger
+                self._function, self._call_arguments(data, kwargs), logger=logger
             )
             return self._build_output_data(raw)
         if logger is not None:
@@ -738,7 +765,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             if not self._active:
                 return None
             raw = await self._executor.async_execute_callable(
-                self._function, {**data.as_dict(), **kwargs}, logger=logger
+                self._function, self._call_arguments(data, kwargs), logger=logger
             )
             return self._build_output_data(raw)
         if logger is not None:
@@ -769,7 +796,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._is_async:
             raw_result = self._call_async_function_sync(data, **kwargs)
         else:
-            raw_result = self._function(**data.as_dict(), **kwargs)
+            raw_result = self._function(**self._call_arguments(data, kwargs))
         return self._build_output_data(raw_result)
 
     async def direct_async_call(
@@ -791,7 +818,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if not self._active:
             return None
 
-        call_dict = {**data.as_dict(), **kwargs}
+        call_dict = self._call_arguments(data, kwargs)
         if self._is_async:
             raw_result = await self._function(**call_dict)
         else:

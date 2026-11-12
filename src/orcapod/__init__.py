@@ -61,8 +61,8 @@ from orcapod.logical_types.directory_type import Directory
 # Extension registration API (ITL-473)
 from .extensions import OrcapodExtension, register_extension
 
-# Your own data types: dataclass / pydantic identity (ITL-881)
-from .user_types import register_type
+# Your own data types: a dataclass identified by its name and fields (ITL-972)
+from .structural import dataclass
 
 # Post-run hook types (ITL-523)
 from .hooks import (
@@ -111,8 +111,8 @@ __all__ = [
     # Extension registration API (ITL-473)
     "OrcapodExtension",
     "register_extension",
-    # Your own data types (ITL-881)
-    "register_type",
+    # Your own data types (ITL-972)
+    "dataclass",
     # Post-run hook types (ITL-523)
     "HookConfig",
     "InvocationStatus",

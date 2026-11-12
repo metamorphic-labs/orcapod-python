@@ -1,50 +1,66 @@
 """Identity of user classes (dataclasses and pydantic models).
 
-A user class is identified by an *identity record* with three components (ITL-881,
-spec ``superpowers/specs/2026-11-10-user-class-identity-v0.3.md``):
+Orcapod knows three kinds of user class (ITL-972):
 
-- ``kind``: ``"dataclass"`` or ``"pydantic"``.
-- ``name``: a declared name; otherwise ``__qualname__`` for a class defined in
-  ``__main__`` (a notebook or script) and ``module.qualname`` for a module class.
-- ``fields``: the stored fields as ``[name, type token]`` pairs in declared order.
-  Order is part of the identity: a dataclass compares its fields as an ordered tuple,
-  and a pydantic model dumps and iterates in declared order, so two classes with the
-  same fields in another order are different types.
+- ``"dataclass"``: an ordinary dataclass. An **exact** class: two classes are one type
+  only when they are the same class object. Named by module path and qualified name.
+- ``"pydantic"``: a ``pydantic.BaseModel`` subclass. Exact as well.
+- ``"structural"``: a class made by ``orcapod.dataclass``. Named by its declared name
+  (default: the class name); two structural classes with the same name and the same
+  fields in the same order are one type, whatever class object they are.
 
-The *identity string* ``f"{name}@{fingerprint}"`` is the class's logical type name and
-Arrow extension name. ``identity_string`` is the only place that defines its format.
+A class is described by an *identity record*, a JSON object with ``kind``, ``name`` and
+``fields`` (``[name, type token]`` pairs in declared order; order is part of the
+identity). A type token is JSON as well and describes a field type completely: a class
+typed by another user class embeds that class's whole record, so a structural class can
+be rebuilt from its record with no class importable.
 
-This module also holds the process-wide state that belongs to classes rather than to a
-data context: declared names and the table of classes seen under each
-``(kind, name)``, which the read path uses to find a class for a stored column.
+The *identity string* ``f"{name}@{sha256 of the record}"`` is the class's logical type
+name and Arrow extension name; ``identity_string`` is the only place that defines its
+format. Arrow's and Polars' extension registries are keyed by name, so the digest keeps
+two shapes of one name apart within a process.
 """
 
 from __future__ import annotations
 
+import ast
 import dataclasses
+import functools
 import hashlib
 import json
+import operator
 import re
 import sys
 import typing
 import unicodedata
-import warnings
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.errors import RecursiveTypeError
-from orcapod.utils.canonical_type_names import canonical_type_name
+from orcapod.utils.canonical_type_names import (
+    canonical_module_name,
+    canonical_type_name,
+)
 
 if TYPE_CHECKING:
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 KIND_DATACLASS = "dataclass"
 KIND_PYDANTIC = "pydantic"
+KIND_STRUCTURAL = "structural"
+
+#: Kinds identified by the class object: two classes are one type only if they are
+#: the same object.
+EXACT_KINDS: frozenset[str] = frozenset({KIND_DATACLASS, KIND_PYDANTIC})
+
+#: Decision point O1 (ITL-972): whether the fields of an exact class are part of its
+#: identity record. ``True``: a changed field gives a new identifier and new tables.
+EXACT_CLASS_FIELDS_IN_IDENTITY = True
 
 #: Modules whose classes are "defined in a notebook or script". ``__mp_main__`` is the
 #: name a ``multiprocessing`` spawn child gives the main module.
-MAIN_MODULES: frozenset[str] = frozenset({"__main__", "__mp_main__"})
+MAIN_MODULES: tuple[str, ...] = ("__main__", "__mp_main__")
 
 #: Prefix reserved for Orcapod's own types (``orcapod.path``, ``orcapod.uuid``, ...).
 RESERVED_PREFIX = "orcapod."
@@ -52,26 +68,60 @@ RESERVED_PREFIX = "orcapod."
 #: Number of hex digits of the SHA-256 fingerprint in an identity string (the full digest).
 FINGERPRINT_HEX_DIGITS = 64
 
-_NAME_FORBIDDEN = re.compile(r"[@\s]")
+#: Class attribute that holds the declared name of a structural class. It is looked up
+#: in the class's own namespace, so a subclass is structural only if it is decorated too.
+STRUCTURAL_NAME_ATTRIBUTE = "__orcapod_structural_name__"
 
-# Declared names, keyed by class object (weak, so classes from re-run cells can go away).
-_declared: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
-# The name each class object was built under; a class has one name per process.
-_built: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
-# The identity string and record each class object was built with.
-_identity_of: weakref.WeakKeyDictionary[type, str] = weakref.WeakKeyDictionary()
+#: Module name given to structural classes built from stored metadata.
+SYNTHESIZED_MODULE = "orcapod.synthesized"
+
+_NAME_FORBIDDEN = re.compile(r"[@;\s]")
+
+# The identity record each class object was last described with.
 _record_of: weakref.WeakKeyDictionary[type, dict[str, Any]] = (
     weakref.WeakKeyDictionary()
 )
-# Classes seen under each (kind, name), most recent last.
-_known: dict[tuple[str, str], list[weakref.ref[type]]] = {}
-# Names that already produced the one-time ``__main__`` notice.
-_noticed_main_names: set[str] = set()
+# Structural classes defined in this process under each name, most recent last.
+_structural_classes: dict[str, list[weakref.ref[type]]] = {}
+# Structural classes built from stored metadata, by identity string.
+_synthesized: dict[str, type] = {}
+# Resolved type hints per class.
+_hints_of: weakref.WeakKeyDictionary[type, dict[str, Any]] = weakref.WeakKeyDictionary()
+
+_SCALARS: dict[str, Any] = {
+    "int": int,
+    "float": float,
+    "str": str,
+    "bool": bool,
+    "bytes": bytes,
+    "None": type(None),
+}
+_GENERIC_ORIGINS: dict[str, Any] = {
+    "list": list,
+    "set": set,
+    "frozenset": frozenset,
+    "tuple": tuple,
+    "dict": dict,
+}
 
 
 # ---------------------------------------------------------------------------
 # Kinds and names
 # ---------------------------------------------------------------------------
+
+
+def structural_name(cls: Any) -> str | None:
+    """Return the declared name of a structural class, or ``None`` for any other object.
+
+    Args:
+        cls: Any object.
+
+    Returns:
+        The name given by ``orcapod.dataclass`` to this very class.
+    """
+    if not isinstance(cls, type):
+        return None
+    return vars(cls).get(STRUCTURAL_NAME_ATTRIBUTE)
 
 
 def class_kind(cls: Any) -> str | None:
@@ -81,18 +131,26 @@ def class_kind(cls: Any) -> str | None:
         cls: Any object.
 
     Returns:
-        ``"dataclass"`` for a dataclass type (including pydantic dataclasses),
-        ``"pydantic"`` for a ``pydantic.BaseModel`` subclass, else ``None``.
+        ``"structural"`` for a class made by ``orcapod.dataclass``, ``"dataclass"`` for
+        any other dataclass type (including pydantic dataclasses), ``"pydantic"`` for a
+        ``pydantic.BaseModel`` subclass, else ``None``.
     """
     if not isinstance(cls, type):
         return None
     if dataclasses.is_dataclass(cls):
+        if structural_name(cls) is not None:
+            return KIND_STRUCTURAL
         return KIND_DATACLASS
     from pydantic import BaseModel
 
     if issubclass(cls, BaseModel):
         return KIND_PYDANTIC
     return None
+
+
+def is_structural(cls: Any) -> bool:
+    """Return True if ``cls`` is a class made by ``orcapod.dataclass``."""
+    return class_kind(cls) == KIND_STRUCTURAL
 
 
 def stored_field_names(cls: type) -> list[str]:
@@ -109,7 +167,7 @@ def stored_field_names(cls: type) -> list[str]:
         TypeError: If ``cls`` is not a dataclass or pydantic model class.
     """
     kind = class_kind(cls)
-    if kind == KIND_DATACLASS:
+    if kind in (KIND_DATACLASS, KIND_STRUCTURAL):
         return [f.name for f in dataclasses.fields(cls) if f.init]
     if kind == KIND_PYDANTIC:
         return list(cls.model_fields)  # pyright: ignore[reportAttributeAccessIssue]  # class_kind guarantees a BaseModel subclass
@@ -128,22 +186,30 @@ def type_hints(cls: type) -> dict[str, Any]:
     Raises:
         ValueError: If the hints cannot be resolved.
     """
+    cached = _hints_of.get(cls)
+    if cached is not None:
+        return cached
     try:
-        return typing.get_type_hints(cls)
+        hints = typing.get_type_hints(cls)
     except Exception as exc:
         raise ValueError(f"Cannot get type hints for {cls!r}: {exc}") from exc
+    _hints_of[cls] = hints
+    return hints
 
 
-def validate_name(name: str) -> None:
-    """Check that ``name`` can be used as the name of a user class.
+def validate_name(name: str) -> str:
+    """Check a declared name of a structural class and return its normal form.
 
     Args:
         name: The proposed name.
 
+    Returns:
+        The name, NFC-normalized, so one name typed in two Unicode forms is one name.
+
     Raises:
         TypeError: If ``name`` is not a string.
-        ValueError: If ``name`` is empty, contains ``@`` or whitespace, or starts with
-            the reserved ``orcapod.`` prefix.
+        ValueError: If ``name`` is empty, contains ``@``, ``;`` or whitespace, or starts
+            with the reserved ``orcapod.`` prefix.
     """
     if not isinstance(name, str):
         raise TypeError(f"A type name must be a string, got {name!r}.")
@@ -151,113 +217,58 @@ def validate_name(name: str) -> None:
         raise ValueError("A type name must not be empty.")
     if _NAME_FORBIDDEN.search(name):
         raise ValueError(
-            f"Invalid type name {name!r}: a name must not contain '@' or whitespace."
+            f"Invalid type name {name!r}: a name must not contain '@', ';' or "
+            f"whitespace."
         )
     if name.startswith(RESERVED_PREFIX):
         raise ValueError(
             f"Invalid type name {name!r}: the prefix {RESERVED_PREFIX!r} is reserved "
             f"for Orcapod's own types."
         )
+    return unicodedata.normalize("NFC", name)
 
 
-def is_main_class(cls: type) -> bool:
-    """Return True if ``cls`` was defined in ``__main__`` (or ``__mp_main__``)."""
-    return cls.__module__ in MAIN_MODULES
+def exact_class_name(cls: type) -> str:
+    """Return the name of an exact class: its module path and qualified name.
 
-
-def default_name(cls: type, *, qualified_name: bool | None = None) -> str:
-    """Return the name a class gets without a declared name.
+    A class defined in a notebook or script is named ``__main__.<qualname>``; a
+    ``multiprocessing`` spawn child calls that module ``__mp_main__``, which is written
+    ``__main__`` so that the child finds the same type.
 
     Args:
-        cls: A dataclass or pydantic model class.
-        qualified: ``None`` applies the location rule: ``__qualname__`` for a class
-            defined in ``__main__`` (or ``__mp_main__``), ``module.qualname`` for a
-            module class. ``False`` always gives ``__qualname__``; ``True`` always gives
-            ``module.qualname``.
+        cls: An ordinary dataclass or a pydantic model class.
 
     Returns:
-        The name component.
+        ``f"{module}.{qualname}"``.
     """
-    if qualified_name is None:
-        qualified_name = not is_main_class(cls)
-    if not qualified_name:
-        return cls.__qualname__
-    if is_main_class(cls):
-        # A spawn child names the main module "__mp_main__"; both are "__main__".
-        return f"__main__.{cls.__qualname__}"
-    from orcapod.utils.canonical_type_names import canonical_module_name
-
+    if cls.__module__ in MAIN_MODULES:
+        return f"{MAIN_MODULES[0]}.{cls.__qualname__}"
     module = canonical_module_name(cls) or cls.__module__
     return f"{module}.{cls.__qualname__}"
 
 
-def resolve_name(cls: type) -> str:
-    """Return the name component for ``cls``: its declared name or ``default_name``.
+def class_name(cls: type) -> str:
+    """Return the name component of a user class's identity.
 
     Args:
-        cls: A dataclass or pydantic model class.
+        cls: A user class.
 
     Returns:
-        The name component of the class's identity.
+        The declared name of a structural class, else ``exact_class_name(cls)``.
     """
-    declared = _declared.get(cls)
+    declared = structural_name(cls)
     if declared is not None:
         return declared
-    return default_name(cls)
+    return exact_class_name(cls)
 
 
-def declare(cls: type, name: str | None, *, qualified_name: bool | None = None) -> None:
-    """Record the name a user class is identified by.
-
-    Registration never modifies the class: the name is kept in a process-wide table
-    keyed by the class object. Declaring the same class again with the same name is a
-    no-op; any other name raises.
-
-    Args:
-        cls: A dataclass or pydantic model class.
-        name: The declared name, or ``None`` for ``default_name(cls, qualified_name=...)``.
-        qualified_name: Only without ``name``: ``False`` for the class name alone,
-            ``True`` for ``module.qualname``, ``None`` for the location rule.
-
-    Raises:
-        TypeError: If ``cls`` is not a dataclass or pydantic model class.
-        ValueError: If both ``name`` and ``qualified_name`` are given, the class is local,
-            the name is invalid, or the class is already registered (declared or used)
-            under a different name.
-    """
-    kind = class_kind(cls)
-    if kind is None:
-        raise TypeError(
-            f"Only dataclasses and pydantic models can be registered as types, "
-            f"got {cls!r}."
-        )
-    if name is not None and qualified_name is not None:
-        raise ValueError(
-            "Pass either name=... or qualified_name=..., not both: qualified_name only chooses "
-            "between the class name and its module path when no name is given."
-        )
-    reject_local_class(cls)
-    if name is not None:
-        validate_name(name)
-        # One spelling per name: the same name typed in two Unicode forms is one name.
-        name = unicodedata.normalize("NFC", name)
-    effective = (
-        name if name is not None else default_name(cls, qualified_name=qualified_name)
-    )
-    previous = _built.get(cls) or _declared.get(cls)
-    if previous is not None and previous != effective:
-        raise ValueError(
-            f"Cannot register {cls.__module__}.{cls.__qualname__} as {effective!r}: it "
-            f"is already registered as {previous!r} in this process, and a class has "
-            f"one name. Declare the name once, before the class is first used (for "
-            f"example with the @op.register_type decorator)."
-        )
-    _declared[cls] = effective
-    remember(kind, effective, cls)
+def class_path(cls: type) -> str:
+    """Return ``module.qualname`` of a class as Python reports it, for messages."""
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
 def reject_local_class(cls: type) -> None:
-    """Raise if ``cls`` is defined inside a function.
+    """Raise if an exact class is defined inside a function.
 
     Args:
         cls: A class.
@@ -267,162 +278,34 @@ def reject_local_class(cls: type) -> None:
     """
     if "<locals>" in cls.__qualname__:
         raise ValueError(
-            f"Cannot register local class {cls!r}: a class defined inside a function "
-            f"cannot be found again when stored values are read. Define the class at "
-            f"module level."
+            f"Cannot store local class {cls!r}: a class defined inside a function "
+            f"cannot be found again by its module path when stored values are read. "
+            f"Define the class at module level, or make it an orcapod.dataclass, "
+            f"which is identified by its name and fields."
         )
 
 
-def built_name(cls: type) -> str | None:
-    """Return the name ``cls`` was built under in this process, or ``None``."""
-    return _built.get(cls)
-
-
-def identity_of(cls: type) -> str | None:
-    """Return the identity string ``cls`` was built with, or ``None`` if not built."""
-    return _identity_of.get(cls)
-
-
-def built_record(cls: type) -> dict[str, Any] | None:
-    """Return the identity record ``cls`` was built with, or ``None`` if not built."""
-    return _record_of.get(cls)
-
-
-def mark_built(
-    cls: type, name: str, identity: str, record: dict[str, Any] | None = None
-) -> None:
-    """Record that ``cls`` was built under ``name`` with ``identity``.
-
-    A class has one name per process.
-
-    Args:
-        cls: The class.
-        name: Its name component.
-        identity: Its identity string.
-        record: Its identity record.
-    """
-    _built[cls] = name
-    _identity_of[cls] = identity
-    if record is not None:
-        _record_of[cls] = record
-
-
-def equivalent_hints(a: Any, b: Any) -> bool:
-    """Return True if two type hints are equal up to user-class identity.
-
-    Two user classes are equivalent when they were built with the same identity string,
-    for example a notebook class and its re-definition from a re-run cell. Generic hints
-    are compared by origin and arguments; union members in any order.
-
-    Args:
-        a: A type hint.
-        b: A type hint.
-
-    Returns:
-        True if the hints denote the same types.
-    """
-    import types as _types
-
-    if a == b:
-        return True
-    if isinstance(a, type) and isinstance(b, type):
-        ident = _identity_of.get(a)
-        return ident is not None and ident == _identity_of.get(b)
-    origin_a, origin_b = typing.get_origin(a), typing.get_origin(b)
-    if origin_a is None or origin_b is None:
-        return False
-    args_a, args_b = typing.get_args(a), typing.get_args(b)
-    unions = (typing.Union, _types.UnionType)
-    if origin_a in unions and origin_b in unions:
-        return all(any(equivalent_hints(x, y) for y in args_b) for x in args_a) and all(
-            any(equivalent_hints(x, y) for x in args_a) for y in args_b
-        )
-    if origin_a != origin_b or len(args_a) != len(args_b):
-        return False
-    return all(equivalent_hints(x, y) for x, y in zip(args_a, args_b))
-
-
 # ---------------------------------------------------------------------------
-# Known classes per (kind, name)
+# Structural classes known in this process
 # ---------------------------------------------------------------------------
 
 
-def remember(kind: str, name: str, cls: type) -> None:
-    """Record ``cls`` as a class seen under ``(kind, name)``.
+def remember_structural(name: str, cls: type) -> None:
+    """Record ``cls`` as a structural class defined under ``name`` in this process.
 
     Args:
-        kind: The class kind.
-        name: The name component.
+        name: The declared name.
         cls: The class object.
     """
-    refs = _known.setdefault((kind, name), [])
+    refs = _structural_classes.setdefault(name, [])
     refs[:] = [r for r in refs if r() is not None and r() is not cls]
     refs.append(weakref.ref(cls))
 
 
-def known_classes(kind: str, name: str) -> list[type]:
-    """Return the live classes seen under ``(kind, name)``, most recent first."""
-    classes = [r() for r in _known.get((kind, name), [])]
+def structural_classes(name: str) -> list[type]:
+    """Return the live structural classes defined under ``name``, most recent first."""
+    classes = [r() for r in _structural_classes.get(name, [])]
     return [c for c in reversed(classes) if c is not None]
-
-
-def candidate_classes(kind: str, name: str) -> Iterator[type]:
-    """Yield the classes that may be the class stored under ``(kind, name)``.
-
-    In order: classes registered or declared under that name in this process, a class
-    reachable from ``__main__`` by that name, and a class importable by that dotted
-    name. Each candidate still has to match the stored identity. The dotted name is
-    imported only when the caller asks for a candidate beyond the earlier ones, so a
-    read that a registered class satisfies imports nothing.
-
-    Args:
-        kind: The stored kind.
-        name: The stored name component.
-
-    Yields:
-        Distinct candidate classes of the right kind.
-    """
-    seen: list[type] = []
-
-    def fresh(cls: Any) -> bool:
-        """Record ``cls`` and return True if it is of the stored kind and not seen yet."""
-        if class_kind(cls) != kind or cls in seen:
-            return False
-        seen.append(cls)
-        return True
-
-    for cls in known_classes(kind, name):
-        if fresh(cls):
-            yield cls
-    for module_name in MAIN_MODULES:
-        module = sys.modules.get(module_name)
-        if module is not None:
-            obj = _walk_attributes(module, name.split("."))
-            if fresh(obj):
-                yield obj
-    obj = _import_dotted(name)
-    if fresh(obj):
-        yield obj
-
-
-def _walk_attributes(root: Any, parts: list[str]) -> Any:
-    """Follow ``parts`` as attributes from ``root``; return ``None`` if one is missing."""
-    obj = root
-    for part in parts:
-        obj = getattr(obj, part, None)
-        if obj is None:
-            return None
-    return obj
-
-
-def _import_dotted(name: str) -> Any:
-    """Import the object a dotted name refers to, or return ``None`` if there is none."""
-    from orcapod.logical_types.type_utils import _walk_fqcn
-
-    try:
-        return _walk_fqcn(name)
-    except ImportError:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -431,24 +314,24 @@ def _import_dotted(name: str) -> Any:
 
 
 def identity_record(
-    kind: str, name: str, fields: Iterable[tuple[str, str]]
+    kind: str, name: str, fields: Iterable[tuple[str, Any]]
 ) -> dict[str, Any]:
     """Build the identity record of a user class.
 
     Args:
-        kind: ``"dataclass"`` or ``"pydantic"``.
+        kind: ``"dataclass"``, ``"pydantic"`` or ``"structural"``.
         name: The name component.
         fields: ``(stored field name, type token)`` pairs in declared order.
 
     Returns:
         ``{"kind": kind, "name": name, "fields": [[field, token], ...]}``. The fields
-        keep the given order, which is part of the identity.
+        keep the given order, which is part of the identity. An exact class's record
+        has no ``fields`` when ``EXACT_CLASS_FIELDS_IN_IDENTITY`` is off.
     """
-    return {
-        "kind": kind,
-        "name": name,
-        "fields": [[field, token] for field, token in fields],
-    }
+    record: dict[str, Any] = {"kind": kind, "name": name}
+    if kind not in EXACT_KINDS or EXACT_CLASS_FIELDS_IN_IDENTITY:
+        record["fields"] = [[field, token] for field, token in fields]
+    return record
 
 
 def canonical_json(obj: Any) -> str:
@@ -477,29 +360,46 @@ def identity_string(record: dict[str, Any]) -> str:
     return f"{record['name']}@{digest[:FINGERPRINT_HEX_DIGITS]}"
 
 
-def describe_fields(fields: Iterable[Iterable[str]]) -> str:
-    """Render ``[name, type token]`` pairs in their order, e.g. ``{x: int, y: float}``."""
-    return "{" + ", ".join(": ".join(pair) for pair in fields) + "}"
+def describe_token(token: Any) -> str:
+    """Render a type token for messages, e.g. ``list[int]`` or ``int | None``."""
+    if isinstance(token, str):
+        return token
+    if "logical" in token:
+        return token["logical"].split(";", 1)[0]
+    if "generic" in token:
+        inner = ", ".join(describe_token(arg) for arg in token["args"])
+        return f"{token['generic']}[{inner}]"
+    if "union" in token:
+        return " | ".join(describe_token(member) for member in token["union"])
+    if "literal" in token:
+        return f"Literal[{', '.join(token['literal'])}]"
+    if "class" in token:
+        return str(token["class"].get("name"))
+    return canonical_json(token)
 
 
 def describe_record(record: dict[str, Any]) -> str:
     """Render an identity record for messages, e.g. ``Point (dataclass) {x: int}``."""
-    return f"{record['name']} ({record['kind']}) {describe_fields(record['fields'])}"
+    text = f"{record.get('name')} ({record.get('kind')})"
+    fields = record.get("fields")
+    if fields is None:
+        return text
+    inner = ", ".join(f"{name}: {describe_token(token)}" for name, token in fields)
+    return f"{text} {{{inner}}}"
 
 
 # ---------------------------------------------------------------------------
-# Type tokens
+# Describing a class: record and type tokens
 # ---------------------------------------------------------------------------
 
 
-def probe_record(
+def class_record(
     cls: type, converter: TypeConverterProtocol, _path: tuple[type, ...] = ()
 ) -> dict[str, Any]:
-    """Return the identity record ``cls`` would be built with, without building it.
+    """Return the identity record of a user class.
 
-    Neither ``cls`` nor any user class it refers to is registered or given a name, so
-    a class tested as a read candidate and rejected can still be declared under a name
-    afterwards. A user class already built in this process keeps its built identity.
+    The record depends only on the class definition and on the logical types the
+    converter knows for its field types; no user class is registered.
 
     Args:
         cls: A dataclass or pydantic model class.
@@ -510,9 +410,10 @@ def probe_record(
         The identity record.
 
     Raises:
-        TypeError: If ``cls`` is not a user class or a field type has no type token.
+        TypeError: If ``cls`` is not a user class, a field type has no type token, or
+            a structural class has a field typed by an exact class.
         RecursiveTypeError: If the class refers back to itself.
-        ValueError: If the class is local or its type hints cannot be resolved.
+        ValueError: If an exact class is local or type hints cannot be resolved.
     """
     kind = class_kind(cls)
     if kind is None:
@@ -521,23 +422,64 @@ def probe_record(
         raise RecursiveTypeError(
             " -> ".join(c.__qualname__ for c in (*_path[_path.index(cls) :], cls))
         )
-    reject_local_class(cls)
+    if kind in EXACT_KINDS:
+        reject_local_class(cls)
     hints = type_hints(cls)
     path = (*_path, cls)
-    fields = [
-        (name, _type_token(hints.get(name, Any), converter, path))
-        for name in stored_field_names(cls)
-    ]
-    return identity_record(kind, _built.get(cls) or resolve_name(cls), fields)
+    fields: list[tuple[str, Any]] = []
+    for name in stored_field_names(cls):
+        token = _type_token(hints.get(name, Any), converter, path)
+        if kind == KIND_STRUCTURAL:
+            exact = _first_exact_class(token)
+            if exact is not None:
+                raise TypeError(
+                    f"Field {name!r} of the orcapod.dataclass {class_name(cls)!r} is "
+                    f"typed by {describe_record(exact)}, which is identified by its "
+                    f"exact class. Every class inside an orcapod.dataclass must be an "
+                    f"orcapod.dataclass, so that it can be rebuilt from stored "
+                    f"metadata alone."
+                )
+        fields.append((name, token))
+    record = identity_record(kind, class_name(cls), fields)
+    _record_of[cls] = record
+    return record
 
 
-def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
+def known_record(cls: type) -> dict[str, Any] | None:
+    """Return the record ``cls`` was last described with in this process, or ``None``."""
+    return _record_of.get(cls)
+
+
+def _first_exact_class(token: Any) -> dict[str, Any] | None:
+    """Return the record of the first exact class a token mentions, or ``None``."""
+    if isinstance(token, str):
+        return None
+    if "class" in token:
+        record = token["class"]
+        if record["kind"] in EXACT_KINDS:
+            return record
+        for _, inner in record.get("fields", []):
+            found = _first_exact_class(inner)
+            if found is not None:
+                return found
+        return None
+    for members in (token.get("args"), token.get("union")):
+        for member in members or []:
+            found = _first_exact_class(member)
+            if found is not None:
+                return found
+    return None
+
+
+def type_token(annotation: Any, converter: TypeConverterProtocol) -> Any:
     """Return the type token of a field annotation.
 
-    Builtins are written bare (``int``); classes with a logical type use its logical
-    type name (``orcapod.path``, or a nested user class's identity string); other
-    classes use their canonical name; generics are written ``origin[args]``; unions list
-    their members sorted, with ``None`` last.
+    A token is JSON. Builtin scalars and classes without a logical type are strings
+    (``"int"``, ``"datetime.datetime"``); a type with a logical type is
+    ``{"logical": <identifier text>}``, the Arrow extension name and metadata; a
+    generic is ``{"generic": <origin>, "args": [...]}``; a union is
+    ``{"union": [...]}`` with members sorted and ``"None"`` last; a ``Literal`` is
+    ``{"literal": [...]}``; another user class is ``{"class": <its record>}``.
 
     Args:
         annotation: A field annotation (``Annotated`` extras already stripped).
@@ -549,55 +491,40 @@ def type_token(annotation: Any, converter: TypeConverterProtocol) -> str:
     Raises:
         TypeError: If the annotation is not a type the token rules cover.
     """
-    return _type_token(annotation, converter, None)
+    return _type_token(annotation, converter, ())
 
 
 def _type_token(
-    annotation: Any,
-    converter: TypeConverterProtocol,
-    probing: tuple[type, ...] | None,
-) -> str:
-    """Return a type token; with ``probing``, without registering any user class.
-
-    Args:
-        annotation: A field annotation.
-        converter: The type converter that resolves logical types.
-        probing: ``None`` to register the classes found, as ``type_token`` does.
-            Otherwise the user classes being probed, outermost first: a user class is
-            then described by ``probe_record`` instead of being registered.
-
-    Returns:
-        The type token.
-
-    Raises:
-        TypeError: If the annotation is not a type the token rules cover.
-    """
+    annotation: Any, converter: TypeConverterProtocol, path: tuple[type, ...]
+) -> Any:
+    """Return a type token; ``path`` holds the user classes being described."""
     import types as _types
+
+    from orcapod.logical_types.identifier import logical_type_identifier
 
     if annotation is None or annotation is type(None):
         return "None"
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
     if origin is typing.Union or origin is _types.UnionType:
-        members = [_type_token(a, converter, probing) for a in args]
-        non_none = sorted(m for m in members if m != "None")
-        return " | ".join(non_none + (["None"] if "None" in members else []))
+        members = [_type_token(a, converter, path) for a in args]
+        non_none = sorted((m for m in members if m != "None"), key=canonical_json)
+        return {"union": non_none + (["None"] if "None" in members else [])}
     if origin is Literal:
-        return f"Literal[{', '.join(sorted(repr(a) for a in args))}]"
-    if origin is not None:
-        inner = ", ".join(_type_token(a, converter, probing) for a in args)
-        return f"{_class_token(origin)}[{inner}]"
-    if isinstance(annotation, type):
-        if probing is not None and class_kind(annotation) is not None:
-            built = _identity_of.get(annotation)
-            if built is not None:
-                return built
-            return identity_string(probe_record(annotation, converter, probing))
+        return {"literal": sorted(repr(a) for a in args)}
+    if isinstance(annotation, type) and origin is None:
+        if class_kind(annotation) is not None:
+            return {"class": class_record(annotation, converter, path)}
         _ = converter.register_python_class(annotation)  # raises for unsupported types
         lt = converter.get_logical_type_for_python_type(annotation)
         if lt is not None:
-            return lt.logical_type_name
+            return {"logical": logical_type_identifier(lt).text}
         return _class_token(annotation)
+    if origin is not None:
+        return {
+            "generic": _class_token(origin),
+            "args": [_type_token(a, converter, path) for a in args],
+        }
     raise TypeError(f"Cannot build a type token for annotation {annotation!r}.")
 
 
@@ -608,28 +535,262 @@ def _class_token(cls: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# One-time notice for __main__ classes (S3)
+# Rebuilding annotations and structural classes from tokens
 # ---------------------------------------------------------------------------
 
 
-def notice_main_class(cls: type, name: str) -> None:
-    """Warn once per name that a ``__main__`` class is identified by its name only.
+def annotation_from_token(token: Any, converter: TypeConverterProtocol) -> Any:
+    """Return the Python annotation a type token describes.
 
     Args:
-        cls: The class being registered.
-        name: The name component it was given.
+        token: A type token, as ``type_token`` builds it.
+        converter: The type converter of the reading context.
+
+    Returns:
+        The annotation.
+
+    Raises:
+        ImportError: If a class named by the token cannot be imported, or a logical
+            type named by it is not registered in the reading context.
+        ValueError: If the token is malformed, or an exact class it names is defined
+            with other fields than the token records.
     """
-    if not is_main_class(cls) or cls in _declared or name in _noticed_main_names:
-        return
-    if name != cls.__qualname__:
-        return
-    _noticed_main_names.add(name)
-    warnings.warn(
-        f"{name} is defined in a notebook or script, so Orcapod identifies it by its "
-        f"name {name!r} and its fields. Results stored with it are found again by any "
-        f"class named {name!r} with the same fields, including one moved into a module "
-        f"and registered with @op.register_type(name={name!r}). Changing its fields "
-        f"makes a new type and recomputes.",
-        UserWarning,
-        stacklevel=2,
-    )
+    from orcapod.logical_types.type_utils import _walk_fqcn
+
+    if isinstance(token, str):
+        if token in _SCALARS:
+            return _SCALARS[token]
+        return _walk_fqcn(token)
+    if not isinstance(token, dict):
+        raise ValueError(f"Malformed type token: {token!r}.")
+    if "logical" in token:
+        name = token["logical"].split(";", 1)[0]
+        lt = converter.get_logical_type_by_arrow_extension_name(name)
+        if lt is None:
+            raise ImportError(
+                f"The logical type {name!r} is not registered in this data context."
+            )
+        from orcapod.logical_types.identifier import logical_type_identifier
+
+        if logical_type_identifier(lt).text != token["logical"]:
+            raise ValueError(
+                f"The logical type {name!r} registered in this data context has the "
+                f"identifier {logical_type_identifier(lt).text!r}, not the stored "
+                f"{token['logical']!r}."
+            )
+        return lt.python_type
+    if "generic" in token:
+        origin = _GENERIC_ORIGINS.get(token["generic"]) or _walk_fqcn(token["generic"])
+        args = tuple(annotation_from_token(arg, converter) for arg in token["args"])
+        return origin[args] if args else origin
+    if "union" in token:
+        members = [
+            annotation_from_token(member, converter) for member in token["union"]
+        ]
+        return functools.reduce(operator.or_, members)
+    if "literal" in token:
+        return Literal[tuple(ast.literal_eval(text) for text in token["literal"])]  # pyright: ignore[reportInvalidTypeForm]  # built at run time from stored values
+    if "class" in token:
+        return class_for_record(token["class"], converter)
+    raise ValueError(f"Malformed type token: {token!r}.")
+
+
+def find_exact_class(name: str) -> Any:
+    """Return the object an exact class's name refers to now, or ``None``.
+
+    Args:
+        name: ``module.qualname``; ``__main__.<qualname>`` is looked up in the running
+            main module (``__main__`` or ``__mp_main__``).
+
+    Returns:
+        The object found by attribute walk or import, or ``None`` if there is none.
+    """
+    from orcapod.logical_types.type_utils import _walk_fqcn
+
+    main_prefix = f"{MAIN_MODULES[0]}."
+    if name.startswith(main_prefix):
+        for module_name in MAIN_MODULES:
+            module = sys.modules.get(module_name)
+            obj = module
+            for part in name[len(main_prefix) :].split("."):
+                obj = getattr(obj, part, None)
+                if obj is None:
+                    break
+            if obj is not None:
+                return obj
+        return None
+    try:
+        return _walk_fqcn(name)
+    except ImportError:
+        return None
+
+
+def class_for_record(record: dict[str, Any], converter: TypeConverterProtocol) -> type:
+    """Return the class a stored identity record describes.
+
+    A structural record gives the most recently defined structural class with that
+    record, or a class synthesized from the record when none is defined. An exact
+    record gives the class its name refers to, which must have the stored record.
+
+    Args:
+        record: A stored identity record.
+        converter: The type converter of the reading context.
+
+    Returns:
+        The class.
+
+    Raises:
+        ImportError: If an exact class cannot be found by its name.
+        ValueError: If the record is malformed, or the exact class found is described
+            by another record.
+    """
+    kind, name = record.get("kind"), record.get("name")
+    if not isinstance(name, str) or kind not in (*EXACT_KINDS, KIND_STRUCTURAL):
+        raise ValueError(f"Malformed identity record: {record!r}.")
+    if kind == KIND_STRUCTURAL:
+        if not isinstance(record.get("fields"), list):
+            raise ValueError(f"Malformed identity record: {record!r}.")
+        for cls in structural_classes(name):
+            try:
+                if class_record(cls, converter) == record:
+                    return cls
+            except (TypeError, ValueError):
+                continue
+        return synthesize_structural_class(record, converter)
+    cls = find_exact_class(name)
+    if class_kind(cls) != kind:
+        raise ImportError(
+            f"Cannot find the {kind} {name!r} to read stored values of type "
+            f"{describe_record(record)}: no such class is defined at that module path."
+        )
+    current = class_record(cls, converter)
+    if current != record:
+        raise ValueError(
+            f"Stored values of {describe_record(record)} do not match the class "
+            f"defined now: {describe_record(current)}."
+        )
+    return cls
+
+
+def synthesize_structural_class(
+    record: dict[str, Any], converter: TypeConverterProtocol
+) -> type:
+    """Build a structural class from a stored record when no class is defined for it.
+
+    The class is a dataclass with the stored fields, named after the last component of
+    the stored name, in the module ``orcapod.synthesized``. It is built once per
+    identity in a process.
+
+    Args:
+        record: A stored structural identity record.
+        converter: The type converter of the reading context.
+
+    Returns:
+        A structural class whose record equals ``record``.
+
+    Raises:
+        ValueError: If the record cannot be turned into a class with the same record.
+    """
+    identity = identity_string(record)
+    cached = _synthesized.get(identity)
+    if cached is not None:
+        return cached
+    name = record["name"]
+    python_name = re.sub(r"\W", "_", name.rsplit(".", 1)[-1])
+    if not python_name.isidentifier():
+        python_name = f"_{python_name}"
+    fields = [
+        (field, annotation_from_token(token, converter))
+        for field, token in record["fields"]
+    ]
+    cls = dataclasses.make_dataclass(python_name, fields)
+    cls.__module__ = SYNTHESIZED_MODULE
+    cls.__doc__ = f"Structural class {name!r}, built from stored metadata."
+    make_structural(cls, name)
+    if class_record(cls, converter) != record:
+        raise ValueError(
+            f"Cannot rebuild the structural class {describe_record(record)} from its "
+            f"stored record."
+        )
+    _synthesized[identity] = cls
+    return cls
+
+
+def make_structural(cls: type, name: str) -> None:
+    """Mark a dataclass as the structural class ``name``.
+
+    Called by ``orcapod.dataclass`` on the class it has just created, and on classes
+    synthesized from stored metadata.
+
+    Args:
+        cls: A dataclass created for this purpose.
+        name: The validated declared name.
+    """
+    setattr(cls, STRUCTURAL_NAME_ATTRIBUTE, name)
+    remember_structural(name, cls)
+
+
+# ---------------------------------------------------------------------------
+# Same type?
+# ---------------------------------------------------------------------------
+
+
+def same_user_type(a: type, b: type) -> bool:
+    """Return True if two user classes are one type.
+
+    Exact classes are one type only when they are the same object. Structural classes
+    are one type when their identity records are equal.
+
+    Args:
+        a: A class.
+        b: A class.
+
+    Returns:
+        Whether Orcapod treats the two classes as the same type.
+    """
+    if a is b:
+        return True
+    if not (is_structural(a) and is_structural(b)):
+        return False
+    record_a, record_b = _record_of.get(a), _record_of.get(b)
+    if record_a is None or record_b is None:
+        from orcapod.contexts import get_default_context
+
+        converter = get_default_context().type_converter
+        record_a = record_a or class_record(a, converter)
+        record_b = record_b or class_record(b, converter)
+    return record_a == record_b
+
+
+def equivalent_hints(a: Any, b: Any) -> bool:
+    """Return True if two type hints denote the same types.
+
+    Hints are equal, or differ only in structural classes that are one type
+    (``same_user_type``). Generic hints are compared by origin and arguments; union
+    members in any order.
+
+    Args:
+        a: A type hint.
+        b: A type hint.
+
+    Returns:
+        True if the hints denote the same types.
+    """
+    import types as _types
+
+    if a == b:
+        return True
+    if isinstance(a, type) and isinstance(b, type):
+        return same_user_type(a, b)
+    origin_a, origin_b = typing.get_origin(a), typing.get_origin(b)
+    if origin_a is None or origin_b is None:
+        return False
+    args_a, args_b = typing.get_args(a), typing.get_args(b)
+    unions = (typing.Union, _types.UnionType)
+    if origin_a in unions and origin_b in unions:
+        return all(any(equivalent_hints(x, y) for y in args_b) for x in args_a) and all(
+            any(equivalent_hints(x, y) for x in args_a) for y in args_b
+        )
+    if origin_a != origin_b or len(args_a) != len(args_b):
+        return False
+    return all(equivalent_hints(x, y) for x, y in zip(args_a, args_b))

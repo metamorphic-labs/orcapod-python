@@ -1,19 +1,20 @@
 """Shared logical type and factory for user classes (dataclasses and pydantic models).
 
 A user class's logical type name and Arrow extension name are its *identity string*
-(``user_class_identity.identity_string``): the name, kind and the fields' names and
-types in declared order, so two classes with the same name and different fields, or
-the same fields in another order, are different types with different tables
-(ITL-881). The Arrow extension metadata carries the full identity record, which
-the read path uses to find the class and to describe a mismatch.
+(``user_class_identity.identity_string``), and its Arrow extension metadata carries the
+full identity record. Together they are the class's logical type identifier.
+
+Exact classes (ordinary dataclasses, pydantic models; ITL-972) are bound to the class
+object: a value is written only if its class is that object, and stored values are read
+by finding the class at its module path and comparing its record with the stored one.
 
 Write path (``create_for_python_type``):
-    Resolves the name (declared name or naming policy), resolves each stored field's
-    Arrow type and type token through the converter, and builds the identity.
+    Describes the class (name, kind, fields in declared order) and resolves each stored
+    field's Arrow type through the converter.
 
 Read path (``reconstruct_from_arrow``):
-    Reads the identity record from the metadata, finds candidate classes by kind and
-    name, and accepts the one whose identity string equals the stored extension name.
+    Reads the identity record from the metadata, finds the class for it
+    (``class_for_stored_record``) and returns that class's logical type.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ class UserClassLogicalType(BaseLogicalType):
     Subclasses set ``category``.
 
     Args:
-        logical_name: The identity string (e.g. ``"Point@76d961e4..."``).
+        logical_name: The identity string (e.g. ``"pkg.models.Point@76d961e4..."``).
         python_type: The class.
         storage_type: The Arrow ``pa.StructType`` of the stored fields.
         field_annotations: ``(field_name, python_annotation)`` pairs matching the
@@ -140,16 +141,44 @@ class UserClassLogicalType(BaseLogicalType):
 
         Raises:
             ValueError: If ``converter`` is ``None``.
+            TypeError: If ``value`` is not an instance of this type's class
+                (``accepts_instance``).
         """
         if converter is None:
             raise ValueError(
                 f"{type(self).__name__}.python_to_storage requires a converter — "
                 "pass a TypeConverterProtocol instance for field-level conversion."
             )
+        if not self.accepts_instance(value, converter):
+            raise TypeError(
+                f"Cannot store a value of class {uci.class_path(type(value))} as "
+                f"{uci.class_path(self._python_type)}: "
+                f"{self.instance_requirement}"
+            )
         return {
             name: converter.python_to_storage(getattr(value, name), annotation)
             for name, annotation in self._field_annotations
         }
+
+    #: What ``accepts_instance`` requires, for the error message.
+    instance_requirement: str = (
+        "an ordinary dataclass or pydantic model is stored only from instances of "
+        "that exact class. Build an instance of the class, or annotate the value "
+        "with its own class."
+    )
+
+    def accepts_instance(self, value: Any, converter: TypeConverterProtocol) -> bool:
+        """Return True if ``value`` may be stored as this type.
+
+        Args:
+            value: The value offered.
+            converter: The active converter.
+
+        Returns:
+            For an exact class: whether ``type(value)`` is the class object. A subclass
+            instance is refused, because its own fields would be lost.
+        """
+        return type(value) is self._python_type
 
     def storage_to_python(
         self, storage_value: Any, converter: TypeConverterProtocol | None
@@ -215,51 +244,41 @@ class UserClassLogicalTypeFactory:
             A logical type whose name is the class's identity string.
 
         Raises:
-            ValueError: If the class is local or its type hints cannot be resolved.
+            ValueError: If an exact class is local or type hints cannot be resolved.
             TypeError: If the class refers back to itself (directly or through other
-                classes), naming the field path.
+                classes), naming the field path, or a field type cannot be stored.
         """
-        uci.reject_local_class(python_type)
-        name = uci.built_name(python_type) or uci.resolve_name(python_type)
-        record, storage_type, field_annotations = self._describe(
-            python_type, name, converter
-        )
+        record = uci.class_record(python_type, converter)
+        storage_type, field_annotations = self._storage(python_type, converter)
         identity = uci.identity_string(record)
-        uci.mark_built(python_type, name, identity, record)
-        uci.remember(self.kind, name, python_type)
-        uci.notice_main_class(python_type, name)
         logger.debug("%s: built %r for %r", type(self).__name__, identity, python_type)
         return self.logical_type_class(
             identity, python_type, storage_type, field_annotations, record
         )
 
-    def _describe(
-        self, python_type: type, name: str, converter: TypeConverterProtocol
-    ) -> tuple[dict[str, Any], pa.StructType, list[tuple[str, Any]]]:
-        """Return the identity record, storage struct and field annotations of a class.
+    def _storage(
+        self, python_type: type, converter: TypeConverterProtocol
+    ) -> tuple[pa.StructType, list[tuple[str, Any]]]:
+        """Return the storage struct and field annotations of a class.
 
         Registers the field types (their Arrow types are needed), but not
         ``python_type`` itself.
 
         Args:
             python_type: The class.
-            name: The name component to use.
             converter: The active converter for field-type resolution.
 
         Returns:
-            ``(record, storage_type, field_annotations)``.
+            ``(storage_type, field_annotations)``, fields in declared order: the order
+            is part of the identity, so one identity always has one struct.
 
         Raises:
             ValueError: If the type hints cannot be resolved.
             RecursiveTypeError: If the class refers back to itself, naming the path.
         """
         hints = uci.type_hints(python_type)
-
         arrow_fields = []
         field_annotations: list[tuple[str, Any]] = []
-        tokens: list[tuple[str, str]] = []
-        # Declared order: it is part of the identity, and the storage struct follows
-        # it, so one identity always has one struct.
         for field_name in uci.stored_field_names(python_type):
             annotation = hints.get(field_name, Any)
             try:
@@ -275,10 +294,7 @@ class UserClassLogicalTypeFactory:
                 arrow_type = arrow_type.storage_type
             arrow_fields.append(pa.field(field_name, arrow_type))
             field_annotations.append((field_name, annotation))
-            tokens.append((field_name, uci.type_token(annotation, converter)))
-
-        record = uci.identity_record(self.kind, name, tokens)
-        return record, pa.struct(arrow_fields), field_annotations
+        return pa.struct(arrow_fields), field_annotations
 
     # ------------------------------------------------------------------
     # Read path
@@ -300,108 +316,45 @@ class UserClassLogicalTypeFactory:
             converter: The active converter.
 
         Returns:
-            The logical type of the class whose identity matches the stored one.
+            The logical type of the class the stored record describes.
 
         Raises:
-            ImportError: If no class with the stored kind and name can be found.
+            ImportError: If an exact class cannot be found at its module path.
             TypeIdentityError: If the column has no identity record (written before
-                Orcapod 0.3), or the classes found have a different identity or a
-                different storage type.
+                Orcapod 0.3), the record is invalid, the class found is defined with
+                other fields, or its storage type differs from the stored one.
         """
         record = metadata.get("identity")
         if not isinstance(record, dict):
             raise TypeIdentityError(
-                f"The stored {self.kind} column type {arrow_extension_name!r} was written "
-                f"by an Orcapod version before 0.3, which identified classes by module "
-                f"and qualified name only. Orcapod 0.3 identifies a class by its name, "
-                f"kind and fields and does not read such columns; re-running the "
+                f"The stored column type {arrow_extension_name!r} was written by an "
+                f"Orcapod version before 0.3, which stored no description of the "
+                f"class. Orcapod 0.3 does not read such columns; re-running the "
                 f"pipeline computes the results into new tables."
             )
-        name = record.get("name")
-        kind = record.get("kind")
         if (
-            kind != self.kind
-            or not isinstance(name, str)
-            or not isinstance(record.get("fields"), list)
+            record.get("kind") != self.kind
+            or not isinstance(record.get("name"), str)
+            or uci.identity_string(record) != arrow_extension_name
         ):
             raise TypeIdentityError(
                 f"Stored column type {arrow_extension_name!r} has an invalid identity "
                 f"record for category {self.category!r}: {record!r}."
             )
-
-        if uci.identity_string(record) != arrow_extension_name:
+        try:
+            cls = uci.class_for_record(record, converter)
+        except ImportError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise TypeIdentityError(str(exc)) from exc
+        _ = converter.register_python_class(cls)
+        lt = converter.get_logical_type_for_python_type(cls)
+        if not isinstance(lt, UserClassLogicalType):
             raise TypeIdentityError(
-                f"Stored column type {arrow_extension_name!r} does not match its "
-                f"identity record {uci.describe_record(record)}."
+                f"{uci.class_path(cls)} is not registered as a user class."
             )
-
-        kind = self.kind
-        found_any = False
-        mismatches: list[str] = []
-        renamable = False  # a candidate has the stored fields under another name
-        # Lazy: the dotted name is imported only if no registered class matches.
-        for cls in uci.candidate_classes(kind, name):
-            found_any = True
-            built = uci.identity_of(cls)
-            if built is not None:
-                if built != arrow_extension_name:
-                    built_record = uci.built_record(cls)
-                    mismatches.append(_describe_candidate(cls, built_record))
-                    continue
-                lt = converter.get_logical_type_for_python_type(cls)
-                if isinstance(lt, UserClassLogicalType):
-                    _check_storage(lt, storage_type, record)
-                    return lt
-                continue
-            # Not used yet in this process: test it without registering it or the
-            # classes it refers to, so a rejected candidate and its nested classes
-            # keep their freedom to be declared under a name.
-            try:
-                candidate_record = uci.probe_record(cls, converter)
-            except (TypeError, ValueError) as exc:
-                mismatches.append(
-                    f"{cls.__module__}.{cls.__qualname__} (cannot be stored: {exc})"
-                )
-                continue
-            if uci.identity_string(candidate_record) != arrow_extension_name:
-                mismatches.append(_describe_candidate(cls, candidate_record))
-                renamable = renamable or candidate_record["fields"] == record["fields"]
-                continue
-            _ = converter.register_python_class(cls)
-            lt = converter.get_logical_type_for_python_type(cls)
-            if isinstance(lt, UserClassLogicalType):
-                _check_storage(lt, storage_type, record)
-                return lt
-
-        if not found_any:
-            raise ImportError(
-                f"Cannot find the {kind} {name!r} to read stored values of type "
-                f"{uci.describe_record(record)}. Define the class and register it "
-                f"under that name before reading, for example "
-                f"op.register_type({name.rsplit('.', 1)[-1]}, name={name!r})."
-            )
-
-        hint = (
-            f" A class with the stored fields exists under another name: register it "
-            f"as {name!r} before it is first used, e.g. "
-            f"op.register_type(<class>, name={name!r})."
-            if renamable
-            else " A class with the same name but different fields, or the same fields "
-            "in another order, is a different type; restore the stored fields and "
-            "their order, or use the class as it is now to compute new results."
-        )
-        raise TypeIdentityError(
-            f"Stored values of {uci.describe_record(record)} do not match the classes "
-            f"found: {'; '.join(mismatches)}.{hint}"
-        )
-
-
-def _describe_candidate(cls: type, record: dict[str, Any] | None) -> str:
-    """Render a candidate class for a read error: its path and, if known, its identity."""
-    where = f"{cls.__module__}.{cls.__qualname__}"
-    if record is None:
-        return where
-    return f"{where} as {uci.describe_record(record)}"
+        _check_storage(lt, storage_type, record)
+        return lt
 
 
 def _check_storage(

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-import warnings
 from typing import TYPE_CHECKING, Iterable
 
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
@@ -377,7 +376,9 @@ class LogicalTypeRegistry:
         """Rebind an identity to a logical type built for a new class object.
 
         Used when a user class with an unchanged identity is defined again (a notebook
-        cell re-run, a module reload). The logical-name and Arrow-name bindings move to
+        cell re-run, a module reload, a second structural class with the same name and
+        fields). It makes the newest class the one stored values are read as; it does
+        not make two exact classes one type. The logical-name and Arrow-name bindings move to
         the new logical type; the previous class object keeps its binding, so instances
         created before the re-definition still convert. Arrow's and Polars' global
         registrations are reused: name, storage type and metadata are identical.
@@ -386,19 +387,6 @@ class LogicalTypeRegistry:
             previous: The logical type currently bound to the identity.
             logical_type: The logical type for the new class object.
         """
-        old_cls = previous.python_type
-        new_cls = logical_type.python_type
-        old_path = f"{old_cls.__module__}.{old_cls.__qualname__}"
-        new_path = f"{new_cls.__module__}.{new_cls.__qualname__}"
-        if old_path != new_path:
-            warnings.warn(
-                f"{new_path} has the same identity as {old_path} "
-                f"({logical_type.logical_type_name}: same name, kind and fields), so "
-                f"Orcapod treats them as one type. Stored values of this type are now "
-                f"read back as {new_path}.",
-                UserWarning,
-                stacklevel=4,
-            )
         self._move_bindings(previous, logical_type)
 
     def _move_bindings(

@@ -54,6 +54,11 @@ def _define(source: str) -> type:
     return namespace["Reading"]
 
 
+def _numbers() -> DictSource:
+    """Return a one-row source holding ``1`` in data column ``x``."""
+    return DictSource(data=[{"k": "a", "x": 1}], tag_columns=["k"], source_id="n")
+
+
 def _source(value: Any) -> DictSource:
     """Return a one-row source holding ``value`` in data column ``p``."""
     return DictSource(data=[{"k": "a", "p": value}], tag_columns=["k"], source_id="s")
@@ -70,15 +75,15 @@ def _sum_pod(cls: type) -> Any:
     return function_pod(output_keys="t")(total)
 
 
-def _passthrough_pod(cls: type) -> Any:
-    """Return a pod ``emit(p: cls) -> cls`` that returns its argument."""
+def _make_pod(cls: type) -> Any:
+    """Return a pod ``make(x: int) -> cls`` that builds an instance."""
 
-    def emit(p):
-        """Return ``p`` unchanged."""
-        return p
+    def make(x):
+        """Return ``cls(x, x + 1)``."""
+        return cls(x=x, y=x + 1)
 
-    emit.__annotations__ = {"p": cls, "return": cls}
-    return function_pod(output_keys="q")(emit)
+    make.__annotations__ = {"x": int, "return": cls}
+    return function_pod(output_keys="q")(make)
 
 
 def _receive_pod(cls: type) -> Any:
@@ -152,7 +157,7 @@ def test_chain_of_two_classes_is_refused_in_memory(kind: str) -> None:
     """Pod A returns the first class; pod B, annotated with the second, refuses it."""
     first = _define(KINDS[kind])
     second = _define(KINDS[kind])
-    produced = _passthrough_pod(first).pod(_source(first(x=1, y=2)))
+    produced = _make_pod(first).pod(_numbers())
 
     with pytest.raises(ValueError, match="column 'q'"):
         _ = _receive_pod(second).pod(produced)
@@ -169,7 +174,5 @@ def test_chain_of_two_classes_is_refused_through_a_store(
 
     with pytest.raises(ValueError, match="column 'q'"):
         with job:
-            produced = _passthrough_pod(first).pod(
-                _source(first(x=1, y=2)), label="emit"
-            )
+            produced = _make_pod(first).pod(_numbers(), label="make")
             _ = _receive_pod(second).pod(produced, label="receive")
