@@ -193,7 +193,7 @@ class _LegacyGroupBy(GroupBy):
         return ArrowTableStream(
             grouped.as_table(columns={"source": True, "system_tags": True}),
             tag_columns=self.by,
-            data_context=stream.data_context,
+            data_context=grouped.data_context,  # pyright: ignore[reportAttributeAccessIssue]  # not on StreamProtocol, as in GroupBy itself (ITL-844)
         )
 
     def unary_output_schema(self, stream, *, columns=None, all_info=False):
@@ -220,7 +220,9 @@ class TestStoreWrittenBeforeTagsStayedTags:
 
     @staticmethod
     def _run(store, source, group_by):
-        pod = FunctionPod(PythonDataFunction(count_paths, output_keys="n"))
+        pod = FunctionPod(
+            PythonDataFunction(count_paths, output_keys="n")  # pyright: ignore[reportArgumentType]  # protocol mismatch baselined elsewhere (ITL-844)
+        )
         job = PipelineJob(name="legacy", store=store)
         with job:
             grouped = group_by(source, label="agg")

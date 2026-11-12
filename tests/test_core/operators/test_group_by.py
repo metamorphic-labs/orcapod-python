@@ -140,7 +140,9 @@ class TestGroupByTagsStayTags:
 
     def test_a_pod_receives_only_data_columns(self, session_source):
         """A function pod never sees tag content, so its signature is the data."""
-        pod = FunctionPod(PythonDataFunction(_count_paths, output_keys="n"))
+        pod = FunctionPod(
+            PythonDataFunction(_count_paths, output_keys="n")  # pyright: ignore[reportArgumentType]  # protocol mismatch baselined elsewhere (ITL-844)
+        )
         out = pod(GroupBy(by=["subject", "date"])(session_source))
         assert [d.as_dict()["n"] for _, d in out.iter_data()] == [2, 2]
 

@@ -359,7 +359,8 @@ def test_group_by_keeps_non_key_tags_as_tags_on_both_paths() -> None:
         sync_rows(GroupBy(["ta"]), source_a()),
         async_rows(GroupBy(["ta"]), source_a()),
     ):
-        assert sorted(tuple(tag.as_dict()["k"]) for tag, _ in rows) == [(1, 2), (3,)]
+        members = sorted(tuple(cast(list[int], tag.as_dict()["k"])) for tag, _ in rows)
+        assert members == [(1, 2), (3,)]
         for tag, data in rows:
             assert set(tag.keys()) == {"k", "ta"}
             assert set(data.keys()) == set(data_keys)
