@@ -111,7 +111,7 @@ the ignore list of the cell's own column type. The stored bytes are never hashed
 
 ### C. Storage
 
-- Column: Arrow extension `orcapod.ndarray` over `large_binary`; one `.npy` file per cell.
+- Column: Arrow extension `numpy.ndarray` over `large_binary`; one `.npy` file per cell.
   Null array is a null cell.
 - Write: `numpy.lib.format.write_array(buffer, array, version=(3, 0), allow_pickle=False)`
   on the plain-`ndarray` view of the value (the user's array is not modified). `np.save`
@@ -174,11 +174,11 @@ name or non-canonical metadata raises `LogicalTypeIdentifierError`.
 `contexts/logical_types.json` gets one new top-level object, the single place a list is
 declared, keyed by extension name:
 
-    "hash_ignore": {"orcapod.ndarray": []}
+    "hash_ignore": {"numpy.ndarray": []}
 
 The context loader puts each entry into the reference table as `hash_ignore:<extension name>`
 before it builds anything. The logical type entry and the value handler entry both take it:
-`"_config": {"ignore": {"_ref": "hash_ignore:orcapod.ndarray"}}`. So:
+`"_config": {"ignore": {"_ref": "hash_ignore:numpy.ndarray"}}`. So:
 
 - (a) the logical type's Arrow extension metadata is `ignore_metadata(VERSION, self.ignore)`;
 - (b) a bare value: the semantic hasher finds the handler by Python type and calls
@@ -260,7 +260,7 @@ changelog fragment, design-issue file, plan.
 
 Each branch:
 
-1. adds its entry to `hash_ignore` in `logical_types.json` (`"orcapod.torch_tensor": []`
+1. adds its entry to `hash_ignore` in `logical_types.json` (`"torch.tensor": []`
    ...), and `{"ignore": {"_ref": "hash_ignore:<name>"}}` to its logical type and handler
    entries (also inside a deferred registration);
 2. subclasses `IgnoreListLogicalType` with `EXTENSION_NAME`, `STORAGE_TYPE`, `VERSION`,
@@ -272,6 +272,42 @@ Each branch:
 
 Nothing else is needed: the visitor, the loader, the metadata and the Arrow type classes
 are shared.
+
+## (vii) Extension names are `<library>.<type>` (developer, November 12, 2026)
+
+The array type's extension name (and logical type name) is `numpy.ndarray`, not
+`orcapod.ndarray`; torch uses `torch.tensor`; `pandas.dataframe`, `pandas.series`,
+`polars.dataframe`, `polars.series` are unchanged; Orcapod's own types keep `orcapod.*`.
+The leading type text of the value hash is the extension name (`numpy.ndarray`,
+`torch.tensor`); for NumPy that is the text section (i) B already has.
+
+What the rename touches:
+
+- One constant (`NDARRAY_EXTENSION_NAME`) and the `hash_ignore` key. Tests and docs that
+  spell the name: 8 test files, `arrays.md`, `hashing.md`, `logical-type-identifiers.md`.
+- Golden: no further entry. The same 32 values move; cause M now includes the name.
+- Neither pyarrow nor NumPy registers `numpy.ndarray` (measured, pyarrow 23.0.1: only
+  `arrow.*` names are registered).
+- v0.2 stored arrays as `numpy.ndarray` with EMPTY metadata over `large_binary`, which is
+  also the new storage type. Measured by setting the name on main and running
+  `tests/test_arrays/test_array_v02_store.py`: 2 of 6 tests fail, because every pyarrow or
+  Delta read of a v0.2 table (also the read that only counts its rows) now calls the
+  registered class's `__arrow_ext_deserialize__`, which raises. With the new storage the
+  storage check would pass and the empty metadata would raise
+  `LogicalTypeIdentifierError` instead: a v0.2 store could then not even be counted.
+- So the registered Arrow class must not raise for metadata it does not know. It returns a
+  "foreign" extension type that keeps the stored name and metadata bytes unchanged and is
+  equal to no current type. Orcapod's own read (`require_readable`) refuses such a column
+  with `LogicalTypeIdentifierError` naming the column, as today, when the column is to be
+  used. A v0.2 table is never read as current, so it is counted and left unchanged as on
+  main. This is the mechanism of section (ii) (a class per list, dispatch on the stored
+  metadata) with one more case, so it costs no extra file.
+- The empty v0.2 metadata is NOT listed in `also_reads`: v0.3 does not read v0.2 arrays
+  (other format version, other hash).
+- `tests/test_arrays/data/make_v02_array_store.py` recognises a v0.2 installation by
+  `logical_type_name == "numpy.ndarray"`; that guard becomes a version check.
+- `LogicalTypeIdentifierError` messages for a v0.2 array column now name `numpy.ndarray`
+  with empty metadata, which reads correctly ("written by a different version").
 
 ## Open decisions for the developer
 

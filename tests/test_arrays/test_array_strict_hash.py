@@ -87,7 +87,7 @@ def _context_ignoring(tmp_path: Path, names: list[str]) -> DataContext:
     """Build a data context whose ndarray ignore list is ``names``."""
     shipped = Path(contexts_package.__file__).parent / "logical_types.json"
     registration = json.loads(shipped.read_text())
-    registration["hash_ignore"]["orcapod.ndarray"] = names
+    registration["hash_ignore"]["numpy.ndarray"] = names
     custom = tmp_path / f"logical_types_{'_'.join(names) or 'strict'}.json"
     custom.write_text(json.dumps(registration))
     return JSONDataContextRegistry(logical_types_file=custom).get_context()
@@ -229,9 +229,9 @@ def test_hash_is_unchanged_by_storage(name: str) -> None:
 
 
 def test_column_is_npy_bytes_under_the_default_identifier() -> None:
-    """An array column is ``orcapod.ndarray`` over ``large_binary`` holding ``.npy`` files."""
+    """An array column is ``numpy.ndarray`` over ``large_binary`` holding ``.npy`` files."""
     field = _source({"a": BASE}).as_table().schema.field("x")
-    assert field.type.extension_name == "orcapod.ndarray"
+    assert field.type.extension_name == "numpy.ndarray"
     assert field.type.storage_type == pa.large_binary()
     assert field.type.__arrow_ext_serialize__() == ignore_metadata([])
     cell = _source({"a": BASE}).as_table().column("x").chunk(0).storage[0].as_py()

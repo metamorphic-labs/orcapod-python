@@ -27,7 +27,7 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
    list. Polars extension keeps `metadata_str`.
 4. [ ] Context loader (`contexts/registry.py`): `hash_ignore` of `logical_types.json` into
    the reference table as `hash_ignore:<extension name>` before anything is built.
-   `logical_types.json`: `"hash_ignore": {"orcapod.ndarray": []}` and the two `_ref`s.
+   `logical_types.json`: `"hash_ignore": {"numpy.ndarray": []}` and the two `_ref`s.
 5. [ ] `numpy_type.py`: storage `large_binary`, `.npy` format 3.0 write
    (`numpy.lib.format.write_array`, `allow_pickle=False`), read after checking the magic;
    refusals (masked, object, StringDType, longdouble, unit-less datetimes, titles,
