@@ -129,3 +129,16 @@ this change. Report the data-less reproduction in the final worker report.
   async forwards one row and then raises the same no-data-columns ValueError.
 - All previous review bodies/threads audited; older nitpick docstrings already
   replied to. Three latest threads will receive approved dispositions after commit.
+
+### Final local validation
+
+- [x] Full suites completed sequentially on Python 3.12, 3.11, 3.13: each
+  9442 passed, 101 skipped, 23 xfailed; all exit 0.
+- [x] Ruff check/format pass. Basedpyright on Python 3.11 exits 0 with no errors
+  (10370 existing warnings). Both fragment checkers pass.
+- [x] Main remains b46549fd; no golden or CHANGELOG.md differences against main.
+- [x] Approved review dispositions implemented, tested and checkpointed in 91a342cf.
+- [ ] Push once and verify remote CI, CodeRabbit head coverage and thread replies.
+
+Audit logs, skip names, review data and the coordinator report are under the
+worktree-local gitignored `.untracked/` directory.
