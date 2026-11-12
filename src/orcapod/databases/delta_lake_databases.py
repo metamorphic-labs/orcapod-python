@@ -251,6 +251,54 @@ def _as_delta_writer_stores(schema: pa.Schema) -> pa.Schema:
     )
 
 
+def _merge_source_in_stored_layout(
+    delta_table: deltalake.DeltaTable, batch: pa.Table
+) -> pa.Table:
+    """Return ``batch`` with its list columns in the layout the table stores.
+
+    Delta stores ``large_list<large_binary>`` as ``list<binary>``, and the MERGE
+    cannot plan a ``CASE WHEN`` over the two (ITL-984). A list column, a logical
+    list included, is therefore handed to the MERGE as its storage type cast to
+    the stored type. The values are unchanged and the stored field metadata stays
+    as it is; every other column, and a list column the table does not have yet,
+    is passed as it is.
+
+    Args:
+        delta_table: The loaded stored table.
+        batch: The rows about to be merged.
+
+    Returns:
+        ``batch``, with the cast list columns.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    for index, field in enumerate(batch.schema):
+        column = batch.column(index)
+        if isinstance(field.type, pa.ExtensionType):
+            plain = column.combine_chunks().storage  # pyright: ignore[reportAttributeAccessIssue]  # an extension array
+            is_list = pa.types.is_large_list(plain.type) or pa.types.is_list(plain.type)
+        else:
+            plain = column
+            is_list = pa.types.is_large_list(field.type) or pa.types.is_list(field.type)
+        if not is_list or field.name not in stored.names:
+            continue
+        target = stored.field(field.name).type
+        try:
+            as_stored = _as_delta_writer_stores(pa.schema([pa.field("c", plain.type)]))
+        except Exception:
+            continue
+        if as_stored.field("c").type != target:
+            # More than the layout differs (schema evolution): the MERGE decides.
+            continue
+        batch = batch.set_column(
+            index,
+            pa.field(field.name, target, nullable=field.nullable),
+            pa.chunked_array([plain]).cast(target)
+            if isinstance(plain, pa.Array)
+            else plain.cast(target),
+        )
+    return batch
+
+
 def _without_field_metadata(delta_type: Any) -> Any:
     """Return a Delta type with the metadata of every nested field dropped.
 
@@ -1701,35 +1749,24 @@ class DeltaTableDatabase:
                 assert base.ids is not None
                 incoming_ids = self._non_null_ids(combined_table)
                 inserted_ids = incoming_ids - base.ids
-                if self._stores_as_is(delta_table, combined_table):
-                    # The rows have the stored schema: append (ITL-919). A MERGE reads
-                    # the whole stored table on each commit; it remains for every
-                    # other batch. A row whose id is stored already is left out, as
-                    # the MERGE leaves it (ITL-984: the MERGE cannot take a large
-                    # list of large binary, so a batch holding stored ids is not
-                    # handed to it); a row with no id never matches, so it is kept.
-                    if len(inserted_ids) == len(incoming_ids):
-                        new_rows = combined_table
-                    else:
-                        is_stored = pc.is_in(
-                            combined_table[self.RECORD_ID_COLUMN],
-                            value_set=pa.array(
-                                sorted(base.ids),
-                                type=combined_table[self.RECORD_ID_COLUMN].type,
-                            ),
-                        )
-                        new_rows = combined_table.filter(pc.invert(is_stored))
-                    if new_rows.num_rows:
-                        deltalake.write_deltalake(
-                            table_uri,
-                            new_rows,
-                            mode="append",
-                            storage_options=self._storage_options or None,
-                        )
+                if len(inserted_ids) == len(incoming_ids) and self._stores_as_is(
+                    delta_table, combined_table
+                ):
+                    # Every pending id is new in the version just loaded and the rows
+                    # have the stored schema: append (ITL-919). A MERGE reads the whole
+                    # stored table on each commit; it remains for every other batch.
+                    deltalake.write_deltalake(
+                        table_uri,
+                        combined_table,
+                        mode="append",
+                        storage_options=self._storage_options or None,
+                    )
                 else:
                     # Some pending ids are stored already: insert only the others.
                     delta_table.merge(
-                        source=combined_table,
+                        source=_merge_source_in_stored_layout(
+                            delta_table, combined_table
+                        ),
                         predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
                         source_alias="source",
                         target_alias="target",
