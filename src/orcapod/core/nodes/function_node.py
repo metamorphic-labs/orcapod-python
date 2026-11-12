@@ -363,6 +363,18 @@ class FunctionNodeBase(StreamBase):
         return path
 
     @property
+    def node_name_path(self) -> tuple[str, ...]:
+        """The beginning of ``node_identity_path`` up to the function's name.
+
+        ``(<function name>,)``, or ``("side_effect_function", <function name>)`` for
+        a pod that takes the invocation context. Unlike the rest of the path it
+        holds no hash, so it is the same in every version of Orcapod; tables an
+        earlier version wrote for this function are found under it (ITL-954).
+        """
+        depth = 2 if self.node_type == "side_effect_function" else 1
+        return self.node_identity_path[:depth]
+
+    @property
     def node_uri(self) -> tuple[str, ...]:
         """Canonical URI tuple identifying this computation.
 
@@ -895,10 +907,13 @@ class FunctionJobNode(FunctionNodeBase):
 
         A pipeline table written by an earlier version of Orcapod (``pdb_v1``) holds
         no ``__data_context`` column: its rows are not read as results and are left
-        unchanged, and their number is reported (ITL-944). A node that delivers side
-        effects fails instead, and for it the result tables and rows of another data
-        context in the current tables count too: none of them can be matched with
-        current inputs, so every side effect would be delivered again.
+        unchanged, and their number is reported (ITL-944). Such tables are looked for
+        at this node's own path and, because the hashes in a path can differ between
+        versions, anywhere under the function's name in the store (ITL-954). A node
+        that delivers side effects fails instead, and for it the result tables and
+        rows of another data context in the current tables count too: none of them
+        can be matched with current inputs, so every side effect would be delivered
+        again.
 
         Raises:
             SideEffectLogDataContextError: If this node delivers side effects and
@@ -917,11 +932,12 @@ class FunctionJobNode(FunctionNodeBase):
             )
             + (self.node_identity_path,),
             current=(self._versioned_pipeline_path, context_key) if delivers else None,
+            name_path=self.node_name_path or None,
         )
         if delivers:
             for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
                 if cached_pod is not None:
-                    found.extend(cached_pod.stale_result_tables())
+                    found.include(cached_pod.stale_result_tables())
         try:
             account_for_stale_tables(
                 found, delivers_side_effects=delivers, current_context=context_key
@@ -929,6 +945,10 @@ class FunctionJobNode(FunctionNodeBase):
         except StoreError as exc:
             exc.add_context(node_label=self.label)
             raise
+        if delivers:
+            for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
+                if cached_pod is not None:
+                    cached_pod.stale_result_tables_accounted_for()
         self._stale_tables_checked = True
 
     # ------------------------------------------------------------------

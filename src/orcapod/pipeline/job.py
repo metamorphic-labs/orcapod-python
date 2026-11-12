@@ -13,7 +13,16 @@ from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
-from orcapod.errors import StoreError, StoreReadError, StoreWriteError
+from orcapod.contexts.stored import (
+    report_unclaimed_tables,
+    unclaimed_tables_written_before_v03,
+)
+from orcapod.errors import (
+    StoreError,
+    StoreReadError,
+    StoreWriteError,
+    TableListingNotSupportedError,
+)
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
@@ -405,6 +414,43 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 )
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)
+
+    def _report_unclaimed_tables_written_before_v03(self) -> None:
+        """Report, once per run, the pre-v0.3 tables no node of this job reports itself.
+
+        A function or side-effect node looks under its own name in the store and
+        reports, or refuses, the tables an earlier version of Orcapod wrote there.
+        Operator caches and cached sources have no name in their path that survives
+        a change of hashes, and a node that left the job has no node to report it.
+        This lists the tables stored under the job's name once and reports one
+        total of what is left (ITL-954). The tables are not read.
+        """
+        if self._store is None:
+            return
+        pipeline_db = self._store.at(*self._name)
+        claimed: set[tuple[str, ...]] = set()
+        for node in (self._persistent_node_map or {}).values():
+            if isinstance(node, FunctionJobNode):
+                name_path = node.node_name_path
+                if name_path:
+                    claimed.update({name_path, ("_result",) + name_path})
+            elif isinstance(node, SideEffectJobNode):
+                claimed.add(node.node_uri)
+        try:
+            unclaimed = unclaimed_tables_written_before_v03(pipeline_db, claimed)
+        except TableListingNotSupportedError as exc:
+            logger.info(
+                "The store cannot list its tables (%s), so tables written by an "
+                "earlier version of Orcapod are reported only where a node finds "
+                "them at its own path.",
+                exc,
+            )
+            return
+        if unclaimed:
+            report_unclaimed_tables(
+                pipeline_db.base_path,
+                [pipeline_db.base_path + path for path in unclaimed],
+            )
 
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()
@@ -836,6 +882,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "To run a new computation, create a fresh PipelineJob from the "
                 "original pipeline definition."
             )
+
+        self._report_unclaimed_tables_written_before_v03()
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         hash_dag: OrcaDAG[str] = OrcaDAG()

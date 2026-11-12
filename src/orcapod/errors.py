@@ -273,6 +273,16 @@ class EphemeralResultMissingError(Exception):
         )
 
 
+class TableListingNotSupportedError(NotImplementedError):
+    """Raised by ``list_table_paths`` when a store cannot enumerate its tables.
+
+    Some stores can read and write a table at a known path but have no way to list
+    the tables they hold (for example a Delta store on cloud storage for which no
+    file system package is installed). Orcapod then cannot look for tables written
+    by an earlier version; it says so in a warning and carries on.
+    """
+
+
 class StoreError(RuntimeError):
     """Base of the errors raised when the store could not be read or written.
 
@@ -486,6 +496,12 @@ class SideEffectLogDataContextError(StoreError):
     error before it does anything and leaves the tables as they are. Other function,
     operator and source tables do not fail this way: there, such rows are reported,
     skipped and computed again.
+
+    Tables written by Orcapod up to v0.2 are found by name: every table at an older
+    layout stored under the node's function or pod name in the job counts,
+    whatever hashes its path holds (ITL-954). A table of another function or pod
+    with the same name in the same job, or of another node of the same function,
+    therefore raises this error too; ``record_paths`` names every table found.
 
     Use a fresh store for the node, or keep using the Orcapod version that wrote the
     tables; migrating stored rows to the current data context is planned.

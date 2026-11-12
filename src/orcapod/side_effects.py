@@ -825,8 +825,10 @@ class SideEffectJobNode(SideEffectNode):
         data context, so deliveries logged under another one would not be found and
         every side effect would be delivered again (ITL-944). Two cases: a log at an
         older table layout (written by Orcapod up to v0.2), and rows of another data
-        context in the current log. Checked once per node instance and attached
-        database; the logs are only read.
+        context in the current log. An older log is looked for at this node's own
+        path and, because the hash in the path can differ between versions, anywhere
+        under the pod's name in the store (ITL-954). Checked once per node instance
+        and attached database; the logs are only read.
 
         Raises:
             SideEffectLogDataContextError: If such deliveries are found; nothing has
@@ -846,6 +848,8 @@ class SideEffectJobNode(SideEffectNode):
                 for layout in OLD_TRACKING_DB_SCHEMA_VERSIONS
             ),
             current=(self._table_path, current),
+            # ("side_effects", <pod name>): the part of the path that holds no hash.
+            name_path=self.node_uri,
         )
         try:
             account_for_stale_tables(

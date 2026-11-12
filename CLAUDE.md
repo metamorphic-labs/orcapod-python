@@ -459,6 +459,17 @@ current data context are the current entries.
   side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
   context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
   of node goes through that function; never decide it locally.
+- A table written before v0.3 is found by NAME, never by a computed hash (ITL-954): the
+  hashes in a path differ between versions. `find_stale_tables(..., name_path=...)` lists the
+  store under the hash-free beginning of the node's path (`ArrowDatabaseProtocol.list_table_paths`;
+  `<function>`, `side_effect_function/<function>`, `side_effects/<pod>`, relative to the
+  node's database) and every table there whose last component is not in
+  `contexts/stored.CURRENT_LAYOUTS` is pre-v0.3. A new layout constant must be added to
+  `CURRENT_LAYOUTS`, and a superseded one to the `OLD_*_SCHEMA_VERSIONS` tuples. A store that
+  cannot list raises `TableListingNotSupportedError`: side-effecting nodes then warn and
+  proceed (developer, November 11, 2026). Operator caches and cached sources have no stable
+  name; `PipelineJob.run()` reports one total for them. Every database class implements
+  `list_table_paths`.
 - A released data context manifest (`contexts/data/<version>.json`) is frozen: its sha256 is
   pinned in `contexts/released_manifests.json`. A change that moves an existing golden hash
   value for a reason other than a logical type's own change needs a new data context version

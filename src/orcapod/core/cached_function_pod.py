@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import WrappedFunctionPod
-from orcapod.contexts.stored import StaleTable
+from orcapod.contexts.stored import StaleTables
 from orcapod.core.result_cache import ResultCache
 from orcapod.hooks import InvocationStatus
 from orcapod.protocols.core_protocols import (
@@ -57,6 +57,9 @@ class CachedFunctionPod(WrappedFunctionPod):
             auto_flush=auto_flush,
             # A pod that takes the invocation context performs an external action.
             delivers_side_effects=function_pod.ctx_arg_name is not None,
+            # The uri holds no hash up to the function's name, which comes after
+            # "side_effect_function" for a pod that takes the invocation context.
+            name_path=self.uri[: 2 if function_pod.ctx_arg_name is not None else 1],
         )
 
     @property
@@ -69,13 +72,13 @@ class CachedFunctionPod(WrappedFunctionPod):
         """Return the path to the cached records in the result store (versioned)."""
         return self._cache.record_path
 
-    def stale_result_tables(self) -> list[StaleTable]:
+    def stale_result_tables(self) -> StaleTables:
         """Find stored results of other generations that this pod will not use.
 
         Returns:
-            Result tables at an older layout, and, for a pod that takes the
-            invocation context, rows of another data context in the current
-            result table. Empty when there is nothing.
+            Result tables at an older layout (at this pod's path, or anywhere
+            under its function's name), and, for a pod that takes the invocation
+            context, rows of another data context in the current result table.
         """
         return self._cache.stale_tables(self.data_context_key)
 
@@ -87,6 +90,14 @@ class CachedFunctionPod(WrappedFunctionPod):
                 ``False`` leaves the commit to the caller.
         """
         self._cache.set_auto_flush(on)
+
+    def stale_result_tables_accounted_for(self) -> None:
+        """Record that the caller accounted for what ``stale_result_tables`` found.
+
+        The pod then does not report or refuse those tables again on its first
+        lookup.
+        """
+        self._cache.stale_tables_accounted_for()
 
     def lookup_cached_data(self, data: DataProtocol) -> DataProtocol | None:
         """Look up a cached result for ``data`` without triggering computation.
