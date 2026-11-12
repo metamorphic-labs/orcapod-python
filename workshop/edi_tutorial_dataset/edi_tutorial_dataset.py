@@ -105,6 +105,7 @@ class NullInRequiredColumnError(ToolError):
     """
 
     def __init__(self, path: tuple[str, ...], null_count: int) -> None:
+        """Record the column path and null count and build the message."""
         self.path = path
         self.null_count = null_count
         super().__init__(
@@ -125,6 +126,7 @@ class VerificationError(ToolError):
     """``verify`` found problems; ``problems`` lists them."""
 
     def __init__(self, problems: list[str]) -> None:
+        """Keep ``problems`` and list them in the message."""
         self.problems = problems
         super().__init__(f"{len(problems)} problem(s):\n  " + "\n  ".join(problems))
 
@@ -217,6 +219,7 @@ class NullabilityMap:
 
 
 def _column_from_json(d: Mapping[str, Any]) -> ColumnSpec:
+    """Build a ``ColumnSpec`` from its JSON form."""
     return ColumnSpec(
         arrow_type=d["arrow_type"],
         nullable=d["nullable"],
@@ -377,6 +380,12 @@ def target_schema(
         )
 
     def nullability(decided: bool | None, field: pa.Field[Any], path: str) -> bool:
+        """Return the decided nullability, or the source's while pending if allowed.
+
+        Raises:
+            PendingDecisionError: if ``decided`` is pending and ``allow_pending`` is
+                false.
+        """
         if decided is not None:
             return decided
         if allow_pending:
@@ -430,6 +439,7 @@ def key_schema(schema: pa.Schema, keys: Sequence[str]) -> pa.Schema:
 
 
 def _stored_type(t: pa.DataType) -> pa.DataType:
+    """Return ``t`` as SpiralDB stores it: struct fields nullable, list items kept."""
     if pa.types.is_struct(t):
         return pa.struct([pa.field(f.name, _stored_type(f.type), True) for f in t])
     if pa.types.is_fixed_size_list(t):
@@ -459,6 +469,7 @@ ITEM = "[]"
 
 
 def _is_list(t: pa.DataType) -> bool:
+    """Return whether ``t`` is a list, large list or fixed-size list type."""
     return (
         pa.types.is_list(t)
         or pa.types.is_large_list(t)
@@ -476,6 +487,7 @@ def non_null_paths(schema: pa.Schema) -> list[tuple[str, ...]]:
     out: list[tuple[str, ...]] = []
 
     def walk(field: pa.Field[Any], path: tuple[str, ...]) -> None:
+        """Record ``path`` if ``field`` is non-nullable; descend into its children."""
         if not field.nullable:
             out.append(path)
         t = field.type
@@ -549,6 +561,7 @@ def conform_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
 
 
 def _qualified(subset: Subset, table: str) -> str:
+    """Return the identifier of ``table`` in the subset's dataset."""
     return f"{subset.dataset}.{table}"
 
 
@@ -749,6 +762,17 @@ class Integrity:
         return self._unresolved(set(present), accepted=True)
 
     def _unresolved(self, present: set[str], *, accepted: bool) -> list[str]:
+        """Return the unresolved references among the tables in ``present``.
+
+        Args:
+            present: Tables the project holds.
+            accepted: Report the key tuples the map accepts as unresolved instead of the
+                others (a parent table missing from the project is reported only when
+                false).
+
+        Returns:
+            One line per foreign key with unresolved key tuples, with a sample of them.
+        """
         out = []
         for (child, fk), refs in sorted(
             self.child_refs.items(), key=lambda kv: (kv[0][0], kv[0][1].parent)
@@ -781,6 +805,7 @@ def _json_key(key: tuple[Any, ...]) -> tuple[Any, ...]:
 
 
 def _tuples(batch: pa.RecordBatch, columns: Sequence[str]) -> set[tuple[Any, ...]]:
+    """Return the distinct tuples of ``columns`` across the rows of ``batch``."""
     if not batch.num_rows:
         return set()
     cols = [batch.column(batch.schema.get_field_index(c)).to_pylist() for c in columns]
@@ -800,6 +825,7 @@ class DryRunSink:
     skipped_rows = 0
 
     def __init__(self, replace: Iterable[str] = ()) -> None:
+        """Remember the tables a real copy would replace."""
         self._replace = frozenset(replace)
 
     def open_table(
@@ -833,6 +859,14 @@ class SpiralSink:
         marker: Mapping[str, Any],
         replace: Iterable[str] = (),
     ) -> None:
+        """Hold the target project and the subset, and encode the build marker.
+
+        Args:
+            project: The target Spiral project.
+            subset: The subset being copied.
+            marker: The build marker, stored as JSON in each created table's metadata.
+            replace: Tables to drop and copy again.
+        """
         self._project = project
         self._subset = subset
         self._replace = frozenset(replace)
@@ -847,10 +881,12 @@ class SpiralSink:
     ) -> str:
         """Prepare ``table`` for writing; return ``"skip"`` if it is already complete.
 
+        An existing table that is not complete is dropped and created again, so no
+        row of an earlier attempt survives.
+
         Raises:
             TargetRefusedError: if the table exists without this build's marker.
             StaleTableError: if it is complete for a different digest.
-            SchemaMismatchError: if its existing schema differs from ``schema``.
         """
         ident = _qualified(self._subset, table)
         existing = {f"{r.dataset}.{r.table}" for r in self._project.list_tables()}
@@ -879,13 +915,11 @@ class SpiralSink:
                     )
                 self.skipped_rows = int(status.get("rows", 0))
                 return "skip"
-            current = t.schema().to_arrow()
-            if current.names != keys.names and stored_schema(current) != stored_schema(
-                schema
-            ):
-                raise SchemaMismatchError(
-                    f"{ident} exists with schema {current}, expected {schema}"
-                )
+            # An incomplete table may hold rows of an earlier attempt (its data
+            # committed, its status did not), possibly for another subset: start over.
+            self._project.drop_table(ident)
+            t = self._project.create_table(ident, key_schema=keys)
+            t.set_metadata({MARKER_KEY: self._marker})
             action = "rewrite"
         else:
             t = self._project.create_table(ident, key_schema=keys)
@@ -987,9 +1021,16 @@ def _run(
             continue
         mode = subset.tables[name]
         spec = nmap.tables[name]
-        src_schema = source.table(_qualified(subset, name)).schema().to_arrow()
+        src_table = source.table(_qualified(subset, name))
+        src_schema = src_table.schema().to_arrow()
         result = TableResult(name)
         try:
+            src_keys = list(src_table.key_schema.to_arrow().names)
+            if src_keys != list(spec.keys):
+                raise SchemaMismatchError(
+                    f"source key columns {src_keys} differ from the map's "
+                    f"{list(spec.keys)}"
+                )
             schema = target_schema(src_schema, spec, allow_pending=allow_pending)
             keys = key_schema(schema, spec.keys)
             result.action = sink.open_table(
@@ -1006,6 +1047,11 @@ def _run(
                     sink.write(out)
                     result.rows += out.num_rows
                     result.nbytes += out.nbytes
+                if not result.rows:
+                    raise ToolError(
+                        "the selection holds no rows; an empty table means the subset "
+                        "is wrong"
+                    )
             except BaseException:
                 sink.abort()
                 raise
@@ -1338,9 +1384,11 @@ def verify(
                 f"{name}: schema {got} differs from expected {stored_schema(want)}"
             )
         got_keys = t.key_schema.to_arrow()
-        if got_keys.names != list(spec.keys):
+        src_keys = source.table(_qualified(subset, name)).key_schema.to_arrow().names
+        if got_keys.names != list(spec.keys) or got_keys.names != src_keys:
             problems.append(
-                f"{name}: key columns {got_keys.names} != {list(spec.keys)}"
+                f"{name}: key columns {got_keys.names}; the map's {list(spec.keys)}, "
+                f"the source's {src_keys}"
             )
         mode = subset.tables[name]
         expected = (
@@ -1352,6 +1400,7 @@ def verify(
         def observed(
             batches: Iterable[pa.RecordBatch], table: str = name
         ) -> Iterator[pa.RecordBatch]:
+            """Yield ``batches`` unchanged, counting rows and recording their keys."""
             for b in batches:
                 actual_batches[0] += b.num_rows
                 integrity.observe(nmap, table, b)
@@ -1421,11 +1470,13 @@ def identical(a: pa.Array[Any], b: pa.Array[Any]) -> bool:
     """
     if a.type != b.type or len(a) != len(b):
         return False
-    if a.equals(b):
-        return True
+    t = a.type
+    if not (pa.types.is_floating(t) or pa.types.is_struct(t) or _is_list(t)):
+        # Arrow's equals treats -0.0 as 0.0 and NaN as unequal to itself, so only
+        # types that cannot hold a float take it.
+        return a.equals(b)
     if a.null_count != b.null_count or not a.is_null().equals(b.is_null()):
         return False
-    t = a.type
     if pa.types.is_floating(t):
         valid = np.asarray(a.is_valid().to_numpy(zero_copy_only=False), dtype=bool)
         return bool(np.array_equal(_float_bits(a)[valid], _float_bits(b)[valid]))
@@ -1435,15 +1486,9 @@ def identical(a: pa.Array[Any], b: pa.Array[Any]) -> bool:
         return all(
             identical(x, y) for x, y in zip(sa.flatten(), sb.flatten(), strict=True)
         )
-    if (
-        pa.types.is_list(t)
-        or pa.types.is_large_list(t)
-        or pa.types.is_fixed_size_list(t)
-    ):
-        if not pc.list_value_length(a).equals(pc.list_value_length(b)):
-            return False
-        return identical(pc.list_flatten(a), pc.list_flatten(b))
-    return False
+    if not pc.list_value_length(a).equals(pc.list_value_length(b)):
+        return False
+    return identical(pc.list_flatten(a), pc.list_flatten(b))
 
 
 def _compare_streams(
@@ -1587,6 +1632,7 @@ def annotate(
 
 
 def _declared_nullable(spec: TableSpec, column: str) -> bool | None:
+    """Return the nullability ``spec`` declares for ``column`` (``None`` if unknown)."""
     if column in spec.columns:
         return spec.columns[column].nullable
     if column in spec.groups:
@@ -1702,8 +1748,12 @@ def probe_nullability(
     t = project.create_table(
         PROBE_TABLE, key_schema=pa.schema([pa.field("k", pa.int64(), False)])
     )
+    # Marked like every table this build writes, so a probe killed before its
+    # cleanup leaves a table the next command accepts and the next probe drops.
+    t.set_metadata({MARKER_KEY: project.table(MARKER_TABLE).get_metadata()[MARKER_KEY]})
 
     def state() -> dict[str, Any]:
+        """Return the probe table's Spiral and Arrow schemas, scan schema and rows."""
         return {
             "spiral_schema": repr(t.schema()),
             "arrow_schema": str(t.schema().to_arrow()),
@@ -1856,6 +1906,11 @@ def apply_decisions(
     out = json.loads(json.dumps(raw))
 
     def nullable(choice: str) -> bool:
+        """Return whether ``choice`` means nullable.
+
+        Raises:
+            ToolError: if ``choice`` is neither ``"required"`` nor ``"nullable"``.
+        """
         if choice not in ("required", "nullable"):
             raise ToolError(f"expected 'required' or 'nullable', got {choice!r}")
         return choice == "nullable"
@@ -1926,6 +1981,7 @@ def derive_map(
         def column(
             field: pa.Field[Any], row: dict[str, Any] | None, *, is_key: bool
         ) -> dict[str, Any]:
+            """Return the map entry for ``field``, recording any spec difference."""
             if row is None:
                 if in_spec:
                     out["mismatches"].append(f"{table}.{field.name}: not in the spec")
@@ -2022,6 +2078,7 @@ def render_map(nmap: NullabilityMap) -> str:
         lines.append("| --- | --- | --- | --- | --- |")
 
         def row(col: str, c: ColumnSpec) -> str:
+            """Return the Markdown table row for column ``col``."""
             declared = (
                 "pending"
                 if c.nullable is None
@@ -2081,6 +2138,16 @@ def connect() -> Any:
 def _source_schemas(
     client: Any, project_id: str, dataset: str
 ) -> dict[str, tuple[pa.Schema, list[str]]]:
+    """Return the schema and key column names of each table in ``dataset``.
+
+    Args:
+        client: The Spiral client.
+        project_id: The project to read.
+        dataset: The dataset whose tables are returned.
+
+    Returns:
+        Table name (without the dataset) to ``(schema, key column names)``.
+    """
     project = client.project(project_id)
     out = {}
     for r in project.list_tables():
@@ -2092,6 +2159,7 @@ def _source_schemas(
 
 
 def _parser() -> argparse.ArgumentParser:
+    """Build the command-line parser and its subcommands."""
     p = argparse.ArgumentParser(
         prog="edi_tutorial_dataset.py",
         description="Build the workshop Spiral project from the V1 EDI sample.",

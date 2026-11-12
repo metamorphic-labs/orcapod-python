@@ -33,6 +33,7 @@ SOURCE = "edi-sample-v1-855632"
 
 
 def _load_tool() -> ModuleType:
+    """Import the tool script as the ``edi_tutorial_dataset`` module."""
     spec = importlib.util.spec_from_file_location("edi_tutorial_dataset", TOOL)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -150,6 +151,7 @@ def _nullable(types: dict[str, pa.DataType]) -> pa.Schema:
 
 
 def _table(types: dict[str, pa.DataType], rows: list[dict[str, Any]]) -> pa.Table:
+    """Return an Arrow table of ``rows`` with every column nullable."""
     return pa.Table.from_pylist(rows, schema=_nullable(types))
 
 
@@ -342,6 +344,7 @@ SUBSET_JSON = {
 
 
 def _source_schemas(client: FakeSpiral) -> dict[str, tuple[pa.Schema, list[str]]]:
+    """Return each source table's schema and key columns, for ``derive_map``."""
     project = client.project(SOURCE)
     return {
         r.table: (
@@ -372,6 +375,7 @@ def decide(raw: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture
 def client() -> FakeSpiral:
+    """Return a fake Spiral client holding the synthetic source project."""
     c = FakeSpiral()
     build_source(c)
     return c
@@ -379,15 +383,18 @@ def client() -> FakeSpiral:
 
 @pytest.fixture
 def nmap(client: FakeSpiral):
+    """Return the derived map with every pending decision resolved."""
     return tool.parse_map(decide(derived_map(client)))
 
 
 @pytest.fixture
 def subset():
+    """Return the test subset."""
     return tool.parse_subset(SUBSET_JSON)
 
 
 def make_target(client: FakeSpiral) -> str:
+    """Create a marked target project and return its ID."""
     return tool.create_project(
         client,
         id_prefix="edi-sample-tutorial",
@@ -399,6 +406,7 @@ def make_target(client: FakeSpiral) -> str:
 
 
 def run_copy(client: FakeSpiral, target: str, nmap: Any, subset: Any, **kw: Any):
+    """Copy ``subset`` from the source into ``target``, allowing writes to it."""
     return tool.copy(
         client,
         source_project=SOURCE,
@@ -411,6 +419,7 @@ def run_copy(client: FakeSpiral, target: str, nmap: Any, subset: Any, **kw: Any)
 
 
 def writes_to(client: FakeSpiral, project: str) -> list[tuple[str, str, str]]:
+    """Return the logged mutating calls on ``project``."""
     return [entry for entry in client.log if entry[0] == project]
 
 
@@ -418,6 +427,8 @@ def writes_to(client: FakeSpiral, project: str) -> list[tuple[str, str, str]]:
 
 
 class TestDeriveMap:
+    """``derive_map``, ``apply_decisions`` and ``render_map``."""
+
     def test_spec_nullability_and_keys(self, client):
         raw = derived_map(client)
         session = raw["tables"]["session"]["columns"]
@@ -503,6 +514,8 @@ class TestDeriveMap:
 
 
 class TestTargetGuards:
+    """The guards that refuse to create or write an unsafe target project."""
+
     def test_allow_writes_must_repeat_the_target(self, client, nmap, subset):
         target = make_target(client)
         with pytest.raises(tool.TargetRefusedError, match="allow-writes"):
@@ -590,6 +603,8 @@ class TestTargetGuards:
 
 
 class TestCopy:
+    """``copy``: what it writes, how it enforces the map, and how it re-runs."""
+
     def test_copies_the_subset_and_never_writes_the_source(self, client, nmap, subset):
         target = make_target(client)
         report = run_copy(client, target, nmap, subset)
@@ -829,6 +844,8 @@ class TestCopy:
 
 
 class TestVerify:
+    """``verify``: a clean copy passes; changed data, schemas and references fail."""
+
     def test_passes_after_copy(self, client, nmap, subset):
         target = make_target(client)
         run_copy(client, target, nmap, subset)
@@ -972,6 +989,8 @@ class TestVerify:
 
 
 class TestCommittedFiles:
+    """The committed map and subset, and the command-line entry point."""
+
     def test_map_and_subset_load_and_agree(self):
         nm = tool.load_map()
         sub = tool.load_subset()
@@ -998,16 +1017,23 @@ class TestCommittedFiles:
 
 
 class _StubSource:
+    """Stands in for an Orcapod source: only ``output_schema`` is used."""
+
     def __init__(self, tags: dict[str, Any], data: dict[str, Any]) -> None:
+        """Hold the tag and data schemas to return."""
         self._schemas = (tags, data)
 
     def output_schema(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return the ``(tag schema, data schema)`` pair."""
         return self._schemas
 
 
 class TestOrcapodCheck:
+    """``orcapod_check``: column types against the map's nullability."""
+
     def test_plain_types_for_required_and_optional_for_nullable(self, nmap, subset):
         def make(project: str, table: str, dataset: str) -> _StubSource:
+            """Return a stub source with plain types for required columns."""
             if table == "session":
                 return _StubSource(
                     {"subject_id": str, "session_start_datetime": datetime.datetime},
@@ -1021,6 +1047,7 @@ class TestOrcapodCheck:
 
     def test_a_required_column_seen_as_optional_is_a_problem(self, nmap, subset):
         def make(project: str, table: str, dataset: str) -> _StubSource:
+            """Return a stub source that types a required key column as optional."""
             if table == "session":
                 return _StubSource(
                     {
@@ -1038,6 +1065,8 @@ class TestOrcapodCheck:
 
 
 class TestProbe:
+    """``probe_nullability``: writes only a scratch table, on a marked target."""
+
     def test_probe_writes_only_a_scratch_table_and_drops_it(self, client):
         target = make_target(client)
         result = tool.probe_nullability(
@@ -1072,6 +1101,8 @@ UNIT_KEYS = ["subject_id", "session_start_datetime", "unit_id"]
 
 
 class TestReplace:
+    """``copy`` with ``replace``: dropping and copying chosen tables again."""
+
     def test_a_source_fix_is_picked_up_by_replacing_one_table(self, client, subset):
         # the source's unit table first lacks unit 3 (an accepted exception), then the
         # owner adds it back, as with atlas_label 'White Matter' live
@@ -1141,10 +1172,12 @@ class _RecordWriter:
     """Stands in for Orcapod's ``write_nullability_record`` (ITL-936, not on main)."""
 
     def __init__(self) -> None:
+        """Start with no calls and no recorded schemas."""
         self.calls: list[tuple[Any, pa.Schema]] = []
         self.current: dict[int, pa.Schema] = {}
 
     def __call__(self, table: Any, schema: pa.Schema) -> bool:
+        """Record ``schema`` on ``table``; return whether the record changed."""
         self.calls.append((table, schema))
         key = id(table._stored)
         changed = self.current.get(key) != schema
@@ -1155,7 +1188,10 @@ class _RecordWriter:
 
 
 class TestAnnotate:
+    """``annotate``: recording the written nullability in table metadata."""
+
     def _annotate(self, client, target, nmap, subset, writer):
+        """Run ``annotate`` on ``target`` with ``writer`` as the record writer."""
         return tool.annotate(
             client,
             source_project=SOURCE,
@@ -1217,6 +1253,7 @@ class TestFloatComparison:
     """
 
     def _with_nans(self, client: FakeSpiral) -> None:
+        """Put NaN (and -0.0) values in the source's float and float-list columns."""
         data = client.rows(SOURCE, "default.spike_event")
         i = data.schema.get_field_index("spike_amplitude_uv")
         values = [
@@ -1242,6 +1279,7 @@ class TestFloatComparison:
         )
 
     def _verify(self, client: FakeSpiral, target: str, nmap: Any, subset: Any):
+        """Run ``verify`` on ``target``."""
         return tool.verify(
             client,
             source_project=SOURCE,
@@ -1345,6 +1383,7 @@ class TestNullabilityRecordChecks:
         assert "booth" in session and "session_notes" not in session
 
     def _verify(self, client, target, nmap, subset, reader):
+        """Run ``verify`` on ``target``, reading nullability records with ``reader``."""
         return tool.verify(
             client,
             source_project=SOURCE,
@@ -1360,6 +1399,7 @@ class TestNullabilityRecordChecks:
         written = client.written_schemas
 
         def no_record(metadata: Any) -> Any:
+            """Report that no table carries a nullability record."""
             return None
 
         report = self._verify(client, target, nmap, subset, no_record)
@@ -1373,6 +1413,7 @@ class TestNullabilityRecordChecks:
                 ).encode()
 
         def reader(metadata: Any) -> Any:
+            """Read the record the test stores under ``rec``."""
             raw = metadata.get("rec")
             return None if raw is None else frozenset(map(tuple, json.loads(raw)))
 
@@ -1384,3 +1425,81 @@ class TestNullabilityRecordChecks:
         )
         with pytest.raises(tool.VerificationError, match="session: nullability record"):
             self._verify(client, target, nmap, subset, reader)
+
+
+class TestReviewRound1:
+    """Fixes from the first CodeRabbit round on PR #307."""
+
+    def test_an_incomplete_table_is_rebuilt_without_old_rows(
+        self, client, nmap, subset
+    ):
+        # data committed but the status did not; a retry with another subset must not
+        # keep the earlier attempt's rows
+        target = make_target(client)
+        run_copy(client, target, nmap, subset)
+        del client._projects[target]["default.spike_event"].metadata[tool.STATUS_KEY]
+        narrower = tool.parse_subset({**SUBSET_JSON, "unit_ids": [1]})
+        report = run_copy(client, target, nmap, narrower, tables=["spike_event"])
+        assert [r.action for r in report.tables] == ["rewrite"]
+        units = client.rows(target, "default.spike_event").column("unit_id").to_pylist()
+        assert set(units) == {1}
+
+    def test_an_empty_selection_fails_and_is_not_marked_complete(self, client, nmap):
+        target = make_target(client)
+        empty = tool.parse_subset({**SUBSET_JSON, "unit_ids": [99]})
+        with pytest.raises(tool.ToolError, match="no rows"):
+            run_copy(client, target, nmap, empty)
+        meta = client.project(target).table("default.spike_event").get_metadata()
+        assert tool.STATUS_KEY not in meta
+
+    def test_source_key_columns_must_match_the_map(self, client, nmap, subset):
+        data = client.rows(SOURCE, "default.session")
+        client.add_table(
+            SOURCE, "default.session", data, ["session_start_datetime", "subject_id"]
+        )
+        target = make_target(client)
+        with pytest.raises(tool.SchemaMismatchError, match="source key columns"):
+            run_copy(client, target, nmap, subset)
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (pa.array([-0.0], pa.float32()), pa.array([0.0], pa.float32())),
+            (
+                pa.array([[1.0, -0.0]], pa.list_(pa.float64())),
+                pa.array([[1.0, 0.0]], pa.list_(pa.float64())),
+            ),
+            (
+                pa.array([{"x": -0.0}], pa.struct([("x", pa.float32())])),
+                pa.array([{"x": 0.0}], pa.struct([("x", pa.float32())])),
+            ),
+        ],
+        ids=["top-level", "list", "struct"],
+    )
+    def test_negative_zero_differs_without_nan(self, left, right):
+        assert left.equals(right)  # Arrow's own equality would accept it
+        assert not tool.identical(left, right)
+        assert tool.identical(left, left)
+
+    def test_a_leftover_probe_table_is_accepted_and_dropped(self, client):
+        # a probe killed before its cleanup leaves its table, marked like the others
+        target = make_target(client)
+        project = client.project(target)
+        marker = project.table(tool.MARKER_TABLE).get_metadata()[tool.MARKER_KEY]
+        leftover = project.create_table(
+            tool.PROBE_TABLE, key_schema=pa.schema([pa.field("k", pa.int64(), False)])
+        )
+        leftover.set_metadata({tool.MARKER_KEY: marker})
+        tool.probe_nullability(
+            client, target_project=target, allow_writes=target, source_project=SOURCE
+        )
+        assert {f"{r.dataset}.{r.table}" for r in project.list_tables()} == {
+            tool.MARKER_TABLE
+        }
+
+    def test_the_probe_table_carries_the_marker(self, client):
+        target = make_target(client)
+        tool.probe_nullability(
+            client, target_project=target, allow_writes=target, source_project=SOURCE
+        )
+        assert (target, "set_metadata", tool.PROBE_TABLE) in client.log
