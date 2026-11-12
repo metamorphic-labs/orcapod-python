@@ -50,9 +50,9 @@ uv run python scripts/assemble_changelog.py --check
 
 fails if a file in this directory other than `README.md` is not named `<ISSUE-ID>.md`, is
 empty, has text before its first category heading, has a heading that is not one of the
-categories above (`####` and deeper are fine), repeats a category, or leaves a category
-empty. `tests/test_changelog_fragments.py` runs the same check, so CI rejects a malformed
-fragment.
+categories above (`####` and deeper are fine), repeats a category, leaves a category empty,
+or has a code fence that is never closed. `tests/test_changelog_fragments.py` runs the same
+check, so CI rejects a malformed fragment.
 
 ## At release
 

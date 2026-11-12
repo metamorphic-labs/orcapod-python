@@ -74,4 +74,4 @@ own `changelog.d/` so CI rejects a malformed fragment.
 
 ## Notes for a successor
 
-(progress notes go here)
+- PR #320 open. CodeRabbit round 1 (2 findings: fence matching, unclosed fence) accepted by coordinator and fixed.

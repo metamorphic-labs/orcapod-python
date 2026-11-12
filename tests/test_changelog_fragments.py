@@ -176,6 +176,47 @@ def test_check_ignores_heading_like_lines_inside_a_code_fence(
     assert result.returncode == 0, result.stderr
 
 
+def test_check_keeps_a_shorter_fence_inside_a_longer_one(
+    workspace: tuple[Path, Path],
+) -> None:
+    """A three-backtick line does not close a four-backtick block."""
+    _, fragments = workspace
+    (fragments / "ITL-7.md").write_text(
+        "### Added\n\n- Thing:\n\n````markdown\n```\n### Nope\n```\n````\n",
+        encoding="utf-8",
+    )
+    result = _check(fragments)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````text"])
+def test_check_rejects_an_unclosed_code_fence(
+    workspace: tuple[Path, Path], fence: str
+) -> None:
+    _, fragments = workspace
+    (fragments / "ITL-7.md").write_text(
+        f"### Added\n\n- Thing:\n\n{fence}\nx = 1\n", encoding="utf-8"
+    )
+    result = _check(fragments)
+    assert result.returncode == 1
+    assert "ITL-7.md" in result.stderr
+    assert "never closed" in result.stderr
+
+
+def test_fold_refuses_a_fragment_with_an_unclosed_code_fence(
+    workspace: tuple[Path, Path],
+) -> None:
+    changelog, fragments = workspace
+    (fragments / "ITL-7.md").write_text(
+        "### Added\n\n- Thing:\n\n```\nx = 1\n", encoding="utf-8"
+    )
+    result = _fold(changelog, fragments)
+    assert result.returncode == 1
+    assert "never closed" in result.stderr
+    assert changelog.read_text(encoding="utf-8") == CHANGELOG
+    assert (fragments / "ITL-7.md").exists()
+
+
 def test_check_reports_every_problem(workspace: tuple[Path, Path]) -> None:
     _, fragments = workspace
     (fragments / "ITL-7.md").write_text("", encoding="utf-8")

@@ -37,7 +37,7 @@ CATEGORIES = (
 README_NAME = "README.md"
 _FRAGMENT_NAME = re.compile(r"^([A-Z][A-Z0-9]*)-([0-9]+)\.md$")
 _HEADING = re.compile(r"^(#{1,6})\s")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _BULLET = re.compile(r"^[-*+] ")
 
 
@@ -53,17 +53,46 @@ class FragmentError(ValueError):
         self.problems = tuple(problems)
 
 
+def _scan_fences(lines: Sequence[str]) -> tuple[list[bool], bool]:
+    """Find the fenced code blocks in Markdown lines.
+
+    A block is closed only by a fence of the same character that is at least as long
+    as the one that opened it, so a three-backtick line inside a four-backtick block
+    is part of the block.
+
+    Args:
+        lines: The lines of a Markdown text.
+
+    Returns:
+        A mask that is true for each line outside every fenced code block (fence
+        lines themselves are inside), and whether the last block is never closed.
+    """
+    mask: list[bool] = []
+    opener: str | None = None
+    for line in lines:
+        fence = _FENCE.match(line)
+        if opener is None:
+            # A backtick fence cannot have a backtick in its info string.
+            if fence and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
+                opener = fence.group(1)
+                mask.append(False)
+            else:
+                mask.append(True)
+            continue
+        mask.append(False)
+        if (
+            fence
+            and fence.group(1)[0] == opener[0]
+            and len(fence.group(1)) >= len(opener)
+            and not fence.group(2).strip()
+        ):
+            opener = None
+    return mask, opener is not None
+
+
 def _outside_fences(lines: Sequence[str]) -> list[bool]:
     """Mark the lines that are not inside (or delimiting) a fenced code block."""
-    mask: list[bool] = []
-    in_fence = False
-    for line in lines:
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            mask.append(False)
-        else:
-            mask.append(not in_fence)
-    return mask
+    return _scan_fences(lines)[0]
 
 
 def _strip_blank_edges(lines: Sequence[str]) -> list[str]:
@@ -88,7 +117,8 @@ def parse_fragment(text: str) -> dict[str, list[str]]:
     Raises:
         FragmentError: If the fragment is empty, has text before its first category
             heading, has a level 1 or 2 heading, has an unknown or repeated category
-            heading, or has a category with no text.
+            heading, has a category with no text, or has a code fence that is never
+            closed.
     """
     if not text.strip():
         raise FragmentError(["is empty"])
@@ -97,7 +127,10 @@ def parse_fragment(text: str) -> dict[str, list[str]]:
     problems: list[str] = []
     categories: dict[str, list[str]] = {}
     current: list[str] | None = None
-    for line, is_markdown in zip(lines, _outside_fences(lines), strict=True):
+    mask, unclosed_fence = _scan_fences(lines)
+    if unclosed_fence:
+        problems.append("has a code fence that is never closed")
+    for line, is_markdown in zip(lines, mask, strict=True):
         heading = _HEADING.match(line) if is_markdown else None
         level = len(heading.group(1)) if heading else 0
         if level in (1, 2):
