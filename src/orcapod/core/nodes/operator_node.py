@@ -1358,22 +1358,16 @@ class OperatorJobNode(OperatorNodeBase):
     def _head_from_store(self, n: int, config: ColumnConfig) -> StreamHead:
         """Return the first ``n`` of this node's stored rows.
 
-        Reads the node's whole stored slice (no bounded read exists yet) and keeps
-        nothing on the node.
+        Reads the node's whole stored slice (no bounded read exists yet) through the
+        same path as ``as_table`` and keeps nothing on the node.
+
+        Raises:
+            RuntimeError: If the node was loaded and its cache table is absent from
+                the attached store (the wrong store).
         """
-        records = self._read_stored_records()
-        if records is None or records.num_rows == 0:
+        stream = self._load_cached_stream_from_db()
+        if stream is None or stream.as_table().num_rows == 0:
             return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
-        records = records.drop(
-            [
-                c
-                for c in (constants.NODE_CONTENT_HASH_COL, self.HASH_COLUMN_NAME)
-                if c in records.column_names
-            ]
-        )
-        stream = ArrowTableStream(
-            records, tag_columns=self.keys()[0], data_context=self.data_context
-        )
         return stream.head(n, columns=config).for_stream(self, origin="stored")
 
     # ------------------------------------------------------------------

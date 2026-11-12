@@ -18,12 +18,18 @@ import pytest
 from orcapod import function_pod
 from orcapod.core.function_pod import FunctionPodStream
 from orcapod.core.operators import GroupBy, Join, PolarsFilter, SelectDataColumns
-from orcapod.core.sources import ArrowTableSource, CachedSource, DictSource, ListSource
+from orcapod.core.sources import (
+    ArrowTableSource,
+    CachedSource,
+    DerivedSource,
+    DictSource,
+    ListSource,
+)
 from orcapod.core.sources.polling_source import PollingSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.streams import HeadStatus, StreamHead
 from orcapod.side_effects import SideEffectPod
-from orcapod.types import ColumnConfig, Cursor
+from orcapod.types import ColumnConfig, Cursor, Schema
 
 ALL_COLUMNS = ColumnConfig(
     meta=True, context=True, source=True, system_tags=True, content_hash=True
@@ -58,6 +64,7 @@ def _source(rows: int = 25, label: str = "readings") -> ArrowTableSource:
 
 
 def test_source_head_is_the_first_rows_with_the_exact_total() -> None:
+    """A source's head is the first rows of its table, with the exact row count."""
     source = _source()
     head = source.head()
     assert isinstance(head, StreamHead)
@@ -69,12 +76,14 @@ def test_source_head_is_the_first_rows_with_the_exact_total() -> None:
 
 
 def test_head_of_a_short_source_says_all_rows() -> None:
+    """A source no longer than n says it shows all of its rows."""
     head = _source(rows=3).head()
     assert len(head) == 3
     assert head.header() == "ArrowTableSource[readings] — all 3 rows"
 
 
 def test_head_with_every_column_group_is_the_prefix_of_as_table() -> None:
+    """With every column group, head is the prefix of as_table, in stream order."""
     source = _source()
     head = source.head(4, columns=ALL_COLUMNS)
     assert head.table.equals(source.as_table(columns=ALL_COLUMNS).slice(0, 4))
@@ -85,6 +94,7 @@ def test_head_with_every_column_group_is_the_prefix_of_as_table() -> None:
 
 
 def test_head_refuses_negative_n_and_sorting() -> None:
+    """A negative n and sort_by_tags are refused."""
     source = _source()
     with pytest.raises(ValueError, match="n"):
         source.head(-1)
@@ -93,6 +103,7 @@ def test_head_refuses_negative_n_and_sorting() -> None:
 
 
 def test_head_of_zero_rows_keeps_the_columns() -> None:
+    """head(0) has no rows and keeps the columns."""
     head = _source().head(0)
     assert head.status is HeadStatus.ROWS
     assert head.table.column_names == ["id", "x"]
@@ -112,6 +123,7 @@ def test_head_of_zero_rows_keeps_the_columns() -> None:
     ids=["dict", "list"],
 )
 def test_other_in_memory_sources_serve_their_first_rows(make: Any) -> None:
+    """Dict and list sources serve the first rows they hold."""
     source = make()
     head = source.head(5)
     assert head.status is HeadStatus.ROWS
@@ -120,6 +132,7 @@ def test_other_in_memory_sources_serve_their_first_rows(make: Any) -> None:
 
 
 def test_preview_is_the_rendered_head() -> None:
+    """The notebook preview is head() rendered."""
     source = _source()
     html = source._repr_html_()
     assert "ArrowTableSource[readings] — first 10 of 25 rows" in html
@@ -141,6 +154,7 @@ def _counting_pod(calls: list[int]) -> Any:
 
 
 def test_function_pod_stream_is_not_computed_by_head_or_preview() -> None:
+    """Neither head nor the preview calls the function of an uncomputed stream."""
     calls: list[int] = []
     stream = _counting_pod(calls).pod(_source(), label="triple")
     head = stream.head()
@@ -154,6 +168,7 @@ def test_function_pod_stream_is_not_computed_by_head_or_preview() -> None:
 
 
 def test_function_pod_stream_shows_rows_computed_so_far() -> None:
+    """After an incomplete iteration, head shows the rows computed so far."""
     calls: list[int] = []
     stream = _counting_pod(calls).pod(_source())
     rows = stream.iter_data()
@@ -167,6 +182,7 @@ def test_function_pod_stream_shows_rows_computed_so_far() -> None:
 
 
 def test_function_pod_stream_shows_its_computed_rows() -> None:
+    """After as_table, head shows the computed rows without calling the function."""
     calls: list[int] = []
     stream = _counting_pod(calls).pod(_source())
     table = stream.as_table()
@@ -180,6 +196,7 @@ def test_function_pod_stream_shows_its_computed_rows() -> None:
 
 
 def test_function_pod_stream_rows_from_iteration_only() -> None:
+    """After a full iteration, head is the prefix of as_table with every column group."""
     calls: list[int] = []
     stream = _counting_pod(calls).pod(_source())
     _ = list(stream.iter_data())
@@ -238,6 +255,7 @@ OPERATOR_CASES = {
 
 @pytest.mark.parametrize("case", list(OPERATOR_CASES), ids=list(OPERATOR_CASES))
 def test_operator_stream_is_not_run_by_head_or_preview(case: str) -> None:
+    """Neither head nor the preview runs the operator; its kept result is shown."""
     operator_class, build = OPERATOR_CASES[case]
     stream = build()
     original = operator_class.static_process
@@ -259,6 +277,7 @@ def test_operator_stream_is_not_run_by_head_or_preview(case: str) -> None:
 
 
 def test_an_empty_operator_result_is_not_not_computed() -> None:
+    """A computed empty result is ROWS with no rows, not NOT_COMPUTED."""
     stream = PolarsFilter(constraints={"x": -1})(_source())
     _ = stream.as_table()
     head = stream.head()
@@ -268,6 +287,7 @@ def test_an_empty_operator_result_is_not_not_computed() -> None:
 
 
 def test_operator_stream_with_changed_inputs_is_not_computed() -> None:
+    """A kept result whose input changed is not shown."""
     calls: list[int] = []
     fn_stream = _counting_pod(calls).pod(_source())
     assert isinstance(fn_stream, FunctionPodStream)
@@ -285,6 +305,7 @@ def test_operator_stream_with_changed_inputs_is_not_computed() -> None:
 
 
 def test_side_effect_stream_preview_never_delivers() -> None:
+    """Showing a side-effect stream delivers nothing."""
     delivered: list[int] = []
 
     def deliver(x: int) -> None:
@@ -301,9 +322,10 @@ def test_side_effect_stream_preview_never_delivers() -> None:
 class _FakeDynamicSource:
     """A ``DynamicSourceProtocol`` double that records every poll and fetch."""
 
-    def __init__(self) -> None:
+    def __init__(self, declared: Schema | None = None) -> None:
         self.polls = 0
         self.fetches = 0
+        self.declared = declared
 
     def identity(self) -> Any:
         return "fake"
@@ -316,7 +338,7 @@ class _FakeDynamicSource:
         raise NotImplementedError
 
     def schema(self) -> Any:
-        return None
+        return self.declared
 
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
         self.polls += 1
@@ -334,6 +356,7 @@ class _FakeDynamicSource:
 
 
 def test_polling_source_head_never_polls() -> None:
+    """A polling source's head shows polled rows only and never polls."""
     fake = _FakeDynamicSource()
     source = PollingSource(fake, tag_columns="id")
     head = source.head()
@@ -349,7 +372,50 @@ def test_polling_source_head_never_polls() -> None:
     assert after.table.column("val").to_pylist() == [7]
 
 
+def test_polling_source_head_shows_declared_system_tags_without_polling() -> None:
+    """A declared schema answers head's columns, system tags included, without a poll."""
+    fake = _FakeDynamicSource(declared=Schema({"id": int, "val": int}))
+    source = PollingSource(fake, tag_columns="id")
+    head = source.head(columns={"system_tags": True})
+    assert (fake.polls, fake.fetches) == (0, 0)
+    tag_schema, data_schema = source.output_schema(columns={"system_tags": True})
+    assert head.table.column_names == [*tag_schema, *data_schema]
+    assert any(name.startswith("_tag") for name in head.table.column_names)
+
+
+def test_derived_source_over_a_polling_source_never_polls() -> None:
+    """A derived source's head asks its origin for its head, so nothing is polled."""
+    fake = _FakeDynamicSource()
+    origin = PollingSource(fake, tag_columns="id")
+    # Building the derived source reads the origin's columns, which polls it once.
+    derived = DerivedSource(origin, tags_as_data={"id": "id_value"})
+    seen = (fake.polls, fake.fetches)
+    head = derived.head()
+    _ = derived._repr_html_()
+    assert (fake.polls, fake.fetches) == seen
+    assert head.status is HeadStatus.ROWS
+    assert head.table.column("id_value").to_pylist() == [1]
+
+
+def test_downstream_of_an_unpolled_source_never_polls() -> None:
+    """A stream over a source whose columns are known only by polling shows none."""
+    fake = _FakeDynamicSource()
+    source = PollingSource(fake, tag_columns="id")
+
+    def deliver(val: int) -> None:
+        raise AssertionError("delivered")
+
+    stream = SideEffectPod(deliver)(source)
+    head = stream.head()
+    _ = stream._repr_html_()
+    assert (fake.polls, fake.fetches) == (0, 0)
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.table.num_columns == 0
+    assert "columns not known until its source is polled" in head.header()
+
+
 def test_cached_source_head_writes_nothing() -> None:
+    """A cached source's head writes nothing to its cache store."""
     store = InMemoryArrowDatabase()
     source = CachedSource(_source(), cache_database=store)
     head = source.head(3)
@@ -364,6 +430,7 @@ def test_cached_source_head_writes_nothing() -> None:
 
 
 def test_preview_summarises_large_cells_and_head_keeps_them() -> None:
+    """The preview summarises large cells; head's table keeps the full values."""
     source = DictSource(
         [
             {
@@ -388,11 +455,13 @@ def test_preview_summarises_large_cells_and_head_keeps_them() -> None:
 
 
 def test_text_form_has_the_header() -> None:
+    """The text form of a head starts with its header."""
     text = str(_source().head(2))
     assert text.startswith("ArrowTableSource[readings] — first 2 of 25 rows")
 
 
 def test_cached_function_pod_stream_does_not_read_its_result_store() -> None:
+    """A cached pod's stream shows only computed rows and never calls the function."""
     from orcapod.core.cached_function_pod import CachedFunctionPod
 
     calls: list[int] = []

@@ -21,7 +21,7 @@ import contextlib
 import logging
 import uuid
 from abc import abstractmethod
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
@@ -573,13 +573,22 @@ class FunctionNodeBase(StreamBase):
 
     def _head_of_pairs(
         self,
-        pairs: list[tuple[TagProtocol, DataProtocol]],
+        pairs: "Sequence[tuple[TagProtocol, DataProtocol | None]]",
         n: int,
         config: ColumnConfig,
         origin: str,
     ) -> StreamHead:
-        """Return the first ``n`` of ``pairs`` as this node's head."""
-        shown = pairs[:n]
+        """Return the first ``n`` of ``pairs`` as this node's head.
+
+        A ``None`` output (a filtered input) is not a row. An ``EmptyData`` placeholder
+        (a result kept in an ephemeral store that is gone) has no values to show: it is
+        left out and counted in the note.
+        """
+        rows = [
+            (t, d) for t, d in pairs if d is not None and not isinstance(d, EmptyData)
+        ]
+        missing = sum(1 for _, d in pairs if isinstance(d, EmptyData))
+        shown = rows[:n]
         table = self._shape_table(
             self._table_from_pairs(shown),
             config,
@@ -588,12 +597,19 @@ class FunctionNodeBase(StreamBase):
                 type=pa.large_string(),
             ),
         )
+        note = None
+        if missing:
+            note = (
+                f"{missing:,} {'result' if missing == 1 else 'results'} not shown: "
+                "kept in an ephemeral store that is gone"
+            )
         return StreamHead.of_rows(
             self,
             table,
             tag_columns=self.keys(columns=config)[0],
-            total_rows=len(pairs),
+            total_rows=len(rows),
             origin=origin,
+            note=note,
         )
 
     def __repr__(self) -> str:
@@ -2953,10 +2969,9 @@ class FunctionJobNode(FunctionNodeBase):
             )
         current = status == LoadStatus.CACHE_ONLY or not self.is_stale
         if current and self._cached_output_datas:
-            pairs = [
-                (t, d) for t, d in self._cached_output_datas.values() if d is not None
-            ]
-            return self._head_of_pairs(pairs, n, config, origin="held")
+            return self._head_of_pairs(
+                list(self._cached_output_datas.values()), n, config, origin="held"
+            )
         return self._head_from_store(n, config)
 
     def _head_from_store(self, n: int, config: ColumnConfig) -> StreamHead:
@@ -2977,14 +2992,10 @@ class FunctionJobNode(FunctionNodeBase):
             return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
         if self._cached_function_pod is None:
             return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
-        pairs = [
-            (tag, data)
-            for tag, data in self._load_cached_entries().values()
-            if data is not None
-        ]
-        if not pairs:
+        entries = list(self._load_cached_entries().values())
+        if not any(data is not None for _, data in entries):
             return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
-        return self._head_of_pairs(pairs, n, config, origin="stored")
+        return self._head_of_pairs(entries, n, config, origin="stored")
 
     # ------------------------------------------------------------------
     # Iteration

@@ -1158,18 +1158,18 @@ class FunctionPodStream(StreamBase):
             return self._head_without_rows(
                 config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        tag_columns = self.keys(columns=config)[0]
-
-        computed = self._computed_prefix()
-        shown = computed[:n]
-
-        def shown_content_hashes() -> pa.Array[Any]:
-            return pa.array(
-                [data.content_hash().to_string() for _, data in shown],
-                type=pa.large_string(),
-            )
-
+        # Rows exist only once the input was read, so the schema is known without I/O.
+        tag_columns = self.keys(columns=config)[0] if has_results else ()
         if self._cached_output_table is not None:
+            # A complete computation: its table holds the rows; only the shown rows'
+            # data are read, and only when their content hashes are asked for.
+            def shown_content_hashes() -> pa.Array[Any]:
+                shown, _ = self._computed_prefix(n)
+                return pa.array(
+                    [data.content_hash().to_string() for _, data in shown],
+                    type=pa.large_string(),
+                )
+
             return StreamHead.of_rows(
                 self,
                 self._shape_table(
@@ -1180,42 +1180,59 @@ class FunctionPodStream(StreamBase):
                 origin="computed",
             )
         finished = not self._needs_iterator and self._cached_input_iterator is None
-        if not finished and not computed:
+        if not finished and not self._cached_output_datas:
             return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+        shown, total = self._computed_prefix(n)
+        status = HeadStatus.ROWS if finished else HeadStatus.PARTIAL
         if not shown:
-            # Nothing to show (an empty result, or n == 0): the declared columns.
+            # Nothing to show (an empty result, inputs that all gave no output so far,
+            # or n == 0): the declared columns.
             empty = self._head_without_rows(config, HeadStatus.ROWS)
             return dataclasses.replace(
-                empty,
-                status=HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
-                total_rows=len(computed),
-                origin="computed",
+                empty, status=status, total_rows=total, origin="computed"
             )
         return StreamHead.of_rows(
             self,
             self._shape_table(
-                self._table_from_pairs(shown), config, shown_content_hashes
+                self._table_from_pairs(shown),
+                config,
+                lambda: pa.array(
+                    [data.content_hash().to_string() for _, data in shown],
+                    type=pa.large_string(),
+                ),
             ),
             tag_columns=tag_columns,
-            total_rows=len(computed),
-            status=HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
+            total_rows=total,
+            status=status,
             origin="computed",
         )
 
-    def _computed_prefix(self) -> list[tuple[TagProtocol, DataProtocol]]:
-        """Return the output rows computed so far, in order, as iteration yields them.
+    def _computed_prefix(
+        self, limit: int
+    ) -> tuple[list[tuple[TagProtocol, DataProtocol]], int]:
+        """Return the first ``limit`` output rows computed so far, and how many there are.
 
-        They are the contiguous run of computed inputs from the first; an input whose
-        output is ``None`` (filtered out) is skipped, as iteration skips it.
+        The rows are the contiguous run of computed inputs from the first, in the order
+        iteration yields them; an input whose output is ``None`` (filtered out) is
+        skipped, as iteration skips it. Only the first ``limit`` rows are collected.
+
+        Args:
+            limit: The largest number of rows to return.
+
+        Returns:
+            The rows, and the number of output rows in the whole computed run.
         """
-        computed: list[tuple[TagProtocol, DataProtocol]] = []
+        shown: list[tuple[TagProtocol, DataProtocol]] = []
+        total = 0
         index = 0
         while index in self._cached_output_datas:
             tag, data = self._cached_output_datas[index]
             if data is not None:
-                computed.append((tag, data))
+                if total < limit:
+                    shown.append((tag, data))
+                total += 1
             index += 1
-        return computed
+        return shown, total
 
     def _table_from_pairs(
         self, pairs: list[tuple[TagProtocol, DataProtocol]]

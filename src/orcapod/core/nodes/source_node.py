@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
+from orcapod.core.streams.base import schema_requires_io
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
@@ -617,6 +618,10 @@ class SourceJobNode(SourceNodeBase):
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         return self._bound_source.iter_data()
+
+    def _schema_requires_io(self) -> bool:
+        """Whether reading the schema would poll: as for the bound source."""
+        return self._bound_source is not None and schema_requires_io(self._bound_source)
 
     def head(
         self,

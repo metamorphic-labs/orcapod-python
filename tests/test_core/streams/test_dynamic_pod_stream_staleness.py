@@ -36,6 +36,7 @@ def _source() -> ArrowTableSource:
 
 
 def test_operator_stream_reruns_after_upstream_is_modified() -> None:
+    """A kept operator result is recomputed once an upstream changed."""
     fn_stream = double.pod(_source())
     assert isinstance(fn_stream, FunctionPodStream)
     out = SelectDataColumns(["y"])(fn_stream)

@@ -62,6 +62,14 @@ _DEFAULT_NOTES = {
     HeadStatus.UNAVAILABLE: "no rows available",
 }
 
+SCHEMA_NEEDS_POLL_NOTE = "columns not known until its source is polled"
+
+
+def default_note(status: HeadStatus) -> str:
+    """Return the note shown for a head with ``status`` and no rows of its own."""
+    return _DEFAULT_NOTES[status]
+
+
 # Words naming the rows of a ``ROWS`` head, by where they came from.
 _ORIGIN_NOUNS = {
     "held": "rows",
@@ -292,17 +300,18 @@ def _summarise(column: pa.ChunkedArray[Any]) -> list[str | None] | None:
     if isinstance(arrow_type, pa.ExtensionType):
         return _summarise_extension(column, arrow_type)
     if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
-        return [
-            None if v is None else f"bytes ({_size(len(v))})"
-            for v in column.to_pylist()
-        ]
+        return _byte_summaries(column, "bytes")
     if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
-        values = column.to_pylist()
-        if all(v is None or len(v) <= _MAX_TEXT for v in values):
+        # Lengths come from Arrow; only the shortened text becomes Python strings.
+        lengths: list[int | None] = pc.utf8_length(column).to_pylist()
+        if all(n is None or n <= _MAX_TEXT for n in lengths):
             return None
+        heads: list[str | None] = pc.utf8_slice_codeunits(
+            column, 0, _MAX_TEXT - 3
+        ).to_pylist()
         return [
-            v if v is None or len(v) <= _MAX_TEXT else v[: _MAX_TEXT - 3] + "…"
-            for v in values
+            None if n is None or head is None else head + "…" if n > _MAX_TEXT else head
+            for head, n in zip(heads, lengths)
         ]
     if (
         pa.types.is_list(arrow_type)
@@ -339,12 +348,18 @@ def _summarise_extension(
             ]
         return [None if v is None else f"<{short_name}>" for v in values]
     if pa.types.is_binary(storage_type) or pa.types.is_large_binary(storage_type):
-        return [
-            None if v is None else f"{short_name} ({_size(len(v))})"
-            for array in column.chunks
-            for v in cast("pa.ExtensionArray[Any]", array).storage.to_pylist()
-        ]
+        storage = pa.chunked_array(
+            [cast("pa.ExtensionArray[Any]", array).storage for array in column.chunks],
+            type=storage_type,
+        )
+        return _byte_summaries(storage, short_name)
     return None
+
+
+def _byte_summaries(column: pa.ChunkedArray[Any], name: str) -> list[str | None]:
+    """Return ``name (size)`` for each binary cell; sizes come from Arrow, not the bytes."""
+    lengths: list[int | None] = pc.binary_length(column).to_pylist()
+    return [None if n is None else f"{name} ({_size(n)})" for n in lengths]
 
 
 def _struct_fields(
@@ -378,14 +393,14 @@ def _summarise_list(
     lengths: list[int | None] = pc.list_value_length(column).to_pylist()
     if simple_items and all(n is None or n <= _MAX_LIST_ITEMS for n in lengths):
         return None
-    values = column.to_pylist() if simple_items else [None] * len(lengths)
     item = "list" if pa.types.is_nested(value_type) else None
     out: list[str | None] = []
-    for value, length in zip(values, lengths):
+    for index, length in enumerate(lengths):
         if length is None:
             out.append(None)
         elif simple_items and length <= _MAX_LIST_ITEMS:
-            out.append(repr(value))
+            # Only a short list is converted to Python, to show its items.
+            out.append(repr(column[index].as_py()))
         else:
             out.append(f"list (len {length})" + (f" of {item}" if item else ""))
     return out

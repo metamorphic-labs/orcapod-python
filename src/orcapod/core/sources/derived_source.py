@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -14,6 +15,7 @@ from orcapod.core.streams.head import (
 from orcapod.core.streams.base import (
     check_head_size,
     head_column_config,
+    schema_requires_io,
 )
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
@@ -395,6 +397,17 @@ class DerivedSource(RootSource):
         has_rows = table is not None
         if table is None:
             table = self._empty_origin_table()
+        return self._derive_from(table, tags_as_data), has_rows
+
+    def _derive_from(
+        self, table: "pa.Table", tags_as_data: Mapping[str, str]
+    ) -> ArrowTableStream:
+        """Append the tag copies to the origin rows ``table`` and enrich it as a source.
+
+        Args:
+            table: Rows of the origin.
+            tags_as_data: Maps a tag column of the origin to the name of its copy.
+        """
         for tag, name in tags_as_data.items():
             # The copy is the tag's own Arrow column under a renamed field, so its
             # type, nullability and field metadata are the tag's exactly.
@@ -408,7 +421,7 @@ class DerivedSource(RootSource):
             source_id=self.source_id,
             record_id_column=self._record_id_column,
         )
-        return result.stream, has_rows
+        return result.stream
 
     def _get_stream(self) -> ArrowTableStream:
         if self._tags_as_data is not None:
@@ -430,6 +443,10 @@ class DerivedSource(RootSource):
         tag_keys = self._origin.keys()[0]
         return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
 
+    def _schema_requires_io(self) -> bool:
+        """Whether reading the schema would poll: as for the origin."""
+        return schema_requires_io(self._origin)
+
     def head(
         self,
         n: int = 10,
@@ -439,27 +456,38 @@ class DerivedSource(RootSource):
     ) -> StreamHead:
         """Return the first rows of the origin's records, without computing.
 
-        The records are the ones this source already read, or else the origin's
-        records read now (a job node's stored rows) and not kept. An origin job node
-        that has not run gives no rows.
+        The records are the ones this source already read. Otherwise, an origin source
+        gives its own ``head(n)`` (so a polling or caching origin is never polled or
+        written), and an origin job node gives its stored rows, read now and not kept.
+        An origin job node that has not run gives no rows.
         """
         check_head_size(n)
         config = head_column_config(columns, all_info)
-        if self._tags_as_data is not None:
-            if self._cached_stream is not None:
-                stream, has_rows = self._cached_stream, True
-            else:
-                stream, has_rows = self._build_derived_stream(self._tags_as_data)
-        else:
-            table = self._cached_table
-            if table is None:
-                table = self._origin_records()
-            has_rows = table is not None and table.num_rows > 0
-            if table is None:
-                table = self._empty_origin_table()
-            stream = ArrowTableStream(table, tag_columns=self._origin.keys()[0])
-        origin = "held" if isinstance(self._origin, RootSource) else "stored"
-        if not has_rows and origin == "stored":
+        origin_kind = "held" if isinstance(self._origin, RootSource) else "stored"
+        if self._tags_as_data is not None and self._cached_stream is not None:
+            return self._cached_stream.head(n, columns=config).for_stream(
+                self, origin=origin_kind
+            )
+        if self._tags_as_data is None and self._cached_table is not None:
+            stream = ArrowTableStream(
+                self._cached_table, tag_columns=self._origin.keys()[0]
+            )
+            return stream.head(n, columns=config).for_stream(self, origin=origin_kind)
+        if isinstance(self._origin, RootSource):
+            origin_head = self._origin.head(n)
+            if origin_head.status is not HeadStatus.ROWS:
+                return origin_head.for_stream(self)
+            stream = self._stream_over(origin_head.table)
+            return dataclasses.replace(
+                stream.head(n, columns=config).for_stream(self),
+                total_rows=origin_head.total_rows,
+                total_is_estimate=origin_head.total_is_estimate,
+                origin=origin_head.origin,
+                note=origin_head.note,
+            )
+        records = self._origin_records()
+        if records is None or records.num_rows == 0:
+            stream = self._stream_over(self._empty_origin_table())
             return StreamHead.without_rows(
                 self,
                 HeadStatus.NOTHING_STORED,
@@ -467,7 +495,17 @@ class DerivedSource(RootSource):
                 tag_columns=stream.keys(columns=config)[0],
                 note="nothing stored: its origin has not run",
             )
-        return stream.head(n, columns=config).for_stream(self, origin=origin)
+        return (
+            self._stream_over(records)
+            .head(n, columns=config)
+            .for_stream(self, origin="stored")
+        )
+
+    def _stream_over(self, table: "pa.Table") -> ArrowTableStream:
+        """Return this source's stream over the origin rows ``table``."""
+        if self._tags_as_data is not None:
+            return self._derive_from(table, self._tags_as_data)
+        return ArrowTableStream(table, tag_columns=self._origin.keys()[0])
 
     def iter_data(self):
         return self._get_stream().iter_data()

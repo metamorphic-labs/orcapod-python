@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.head import (
+    SCHEMA_NEEDS_POLL_NOTE,
     HeadStatus,
     StreamHead,
+    default_note,
     render_error_html,
 )
 from orcapod.protocols.core_protocols import (
@@ -37,6 +39,15 @@ else:
 # from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
+
+
+def schema_requires_io(stream: object) -> bool:
+    """Whether reading ``stream``'s schema would read or poll a source.
+
+    A stream that does not say (``_schema_requires_io``) is taken not to.
+    """
+    check = getattr(stream, "_schema_requires_io", None)
+    return bool(check()) if callable(check) else False
 
 
 def check_head_size(n: int) -> None:
@@ -530,7 +541,19 @@ class StreamBase(TraceableBase):
         status: HeadStatus,
         note: str | None = None,
     ) -> StreamHead:
-        """Return a head with no rows: the stream's columns from its declared schema."""
+        """Return a head with no rows: the stream's columns from its declared schema.
+
+        When reading the schema would poll a source (``schema_requires_io``), the head
+        has no columns either, and the note says so.
+        """
+        if schema_requires_io(self):
+            return StreamHead.without_rows(
+                self,
+                status,
+                pa.table({}),
+                tag_columns=(),
+                note=f"{note or default_note(status)}; {SCHEMA_NEEDS_POLL_NOTE}",
+            )
         tag_schema, data_schema = self.output_schema(columns=config)
         table = arrow_utils.make_empty_table(
             {**tag_schema, **data_schema}, self.data_context.type_converter
@@ -538,6 +561,14 @@ class StreamBase(TraceableBase):
         return StreamHead.without_rows(
             self, status, table, tag_columns=tuple(tag_schema.keys()), note=note
         )
+
+    def _schema_requires_io(self) -> bool:
+        """Whether reading this stream's schema would read or poll a source.
+
+        True when an upstream's would: a ``PollingSource`` that declared no schema and
+        has not polled yet answers its schema only by polling.
+        """
+        return any(schema_requires_io(upstream) for upstream in self.upstreams)
 
     def _repr_html_(self) -> str:
         """Render ``head()`` for a notebook; never computes."""

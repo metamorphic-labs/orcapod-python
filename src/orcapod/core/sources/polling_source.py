@@ -444,6 +444,12 @@ class PollingSource(RootSource, Generic[T]):
         self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
 
+    def _schema_requires_io(self) -> bool:
+        """True while no schema was declared and nothing was polled: only a poll
+        tells the columns then."""
+        no_schema = self._tag_schema is None or self._data_schema is None
+        return no_schema and not self._batches
+
     def head(
         self,
         n: int = 10,
@@ -461,11 +467,15 @@ class PollingSource(RootSource, Generic[T]):
         if self._batches:
             return self._get_combined_stream().head(n, columns=config).for_stream(self)
         if self._tag_schema is not None and self._data_schema is not None:
-            table = arrow_utils.make_empty_table(
-                {**self._tag_schema, **self._data_schema},
-                self.data_context.type_converter,
+            # The declared schema answers without a fetch, system tags included; the
+            # column groups that need data (source info, context, ...) are left out.
+            tag_schema, data_schema = self.output_schema(
+                columns=ColumnConfig(system_tags=config.system_tags)
             )
-            tag_columns = tuple(self._tag_schema.keys())
+            table = arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, self.data_context.type_converter
+            )
+            tag_columns = tuple(tag_schema.keys())
         else:
             table = pa.table({})
             tag_columns = ()

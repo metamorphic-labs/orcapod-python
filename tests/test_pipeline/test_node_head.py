@@ -74,11 +74,24 @@ def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
 
 
 def test_nodes_before_a_run_show_no_rows_and_compute_nothing() -> None:
+    """Before a run, nodes show no rows and run neither the function nor the operator."""
     job = _job(InMemoryArrowDatabase())
-    fn_head = job.nodes["triple"].head()
-    op_head = job.nodes["sel"].head()
-    _ = job.nodes["triple"]._repr_html_()
-    _ = job.nodes["sel"]._repr_html_()
+    # The operator must not run: either entry point raises if it is called.
+    with (
+        mock.patch.object(
+            SelectDataColumns, "process", side_effect=AssertionError("process ran")
+        ),
+        mock.patch.object(
+            SelectDataColumns,
+            "static_process",
+            side_effect=AssertionError("static_process ran"),
+        ),
+    ):
+        fn_head = job.nodes["triple"].head()
+        op_head = job.nodes["sel"].head()
+        _ = job.nodes["triple"]._repr_html_()
+        op_html = job.nodes["sel"]._repr_html_()
+    assert "could not read" not in op_html
     assert CALLS == []
     assert fn_head.status is HeadStatus.NOTHING_STORED
     assert fn_head.table.column_names == ["id", "y"]
@@ -91,6 +104,7 @@ def test_nodes_before_a_run_show_no_rows_and_compute_nothing() -> None:
 def test_nodes_after_a_run_show_their_first_rows(
     orchestrator: str, store_kind: str, tmp_path: Path
 ) -> None:
+    """Right after a run, nodes show their first rows from memory."""
     store = _store(store_kind, tmp_path)
     job = _job(store)
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
@@ -113,6 +127,7 @@ def test_nodes_after_a_run_show_their_first_rows(
 def test_a_new_job_over_a_filled_store_reads_stored_rows_without_computing(
     store_kind: str, tmp_path: Path
 ) -> None:
+    """A new job over a filled store shows stored rows without computing."""
     store = _store(store_kind, tmp_path)
     _ = _job(store).run()
     CALLS.clear()
@@ -128,6 +143,7 @@ def test_a_new_job_over_a_filled_store_reads_stored_rows_without_computing(
 
 
 def test_a_loaded_job_shows_stored_rows_and_never_raises(tmp_path: Path) -> None:
+    """A loaded job's nodes show stored rows, or say why there are none."""
     store = DeltaTableDatabase(base_path=tmp_path / "store")
     job = _job(store)
     _ = job.run()
@@ -146,6 +162,7 @@ def test_a_loaded_job_shows_stored_rows_and_never_raises(tmp_path: Path) -> None
 
 
 def test_blueprint_nodes_are_unavailable() -> None:
+    """Blueprint nodes have no rows to show."""
     job = _job(InMemoryArrowDatabase())
     for label in ("triple", "sel"):
         blueprint = job.nodes[label].as_node()
@@ -155,6 +172,7 @@ def test_blueprint_nodes_are_unavailable() -> None:
 
 
 def test_source_nodes() -> None:
+    """Input slots and unbound source nodes show no rows; bound ones delegate."""
     slot = SourceNode(
         name="nums", tag_schema=Schema({"id": int}), data_schema=Schema({"x": int})
     )
@@ -183,6 +201,7 @@ def _operator_node(
 
 
 def test_operator_node_cache_modes() -> None:
+    """Operator nodes show stored rows in REPLAY and none in LOG before a run."""
     store = InMemoryArrowDatabase()
     assert _operator_node(CacheMode.REPLAY, store).head().status is (
         HeadStatus.NOTHING_STORED

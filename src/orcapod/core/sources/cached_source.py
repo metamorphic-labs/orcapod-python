@@ -8,6 +8,7 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.base import schema_requires_io
 from orcapod.core.streams.head import StreamHead
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
@@ -405,6 +406,10 @@ class CachedSource(RootSource):
         self._ensure_stream()
         assert self._cached_stream is not None
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
+
+    def _schema_requires_io(self) -> bool:
+        """Whether reading the schema would poll: as for the wrapped source."""
+        return schema_requires_io(self._source)
 
     def head(
         self,
