@@ -928,6 +928,14 @@ not fail. It writes and uses `arrow_v0.2` rows; `arrow_v0.1` rows stay in the sa
 untouched and distinguishable by the label in their values, so that they can be migrated
 later. A read of a whole table must use rows of the current label only.
 
+### 6.1 Consequences found while implementing "do not fail" (ITL-910 worker, November 11, 2026)
+
+| # | Consequence | Why | Options |
+|---|---|---|---|
+| 1 | **Side effects are delivered again.** On the first v0.3 run against a v0.2 store, every side effect (an upload, a notification) repeats. Verified by the ITL-910 worker | the side-effect log is read only by key, and the key starts with the Arrow label, so `arrow_v0.1` completions are not found | accept and document (provisional), or keep an explicit failure for side-effect logs only |
+| 2 | **Two table kinds carry no Orcapod label in their rows**: the operator cache and the cached-source table. Their row key `_record_hash` is bare hex; `__node_content_hash` is the same under both labels when `source_id` is given | 1.2: hashes stored bare | the branch filters by starfix's own prefix (`000001` / `000002`). A future Arrow label that keeps starfix format 2 would be indistinguishable there unless a label is stored, which changes those tables' layout |
+| 3 | **Old results look absent until v0.3 writes.** Reading a node on a v0.2 store before any v0.3 run returns no rows; a job saved by v0.2 and loaded by v0.3 shows no rows | reads use current-label rows only | report, once per table, how many rows of another label were skipped |
+
 ## Part 7. Before the v0.3 tag, and after (to be decided)
 
 _Filled in during the discussion._
