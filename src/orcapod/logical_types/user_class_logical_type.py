@@ -1,9 +1,10 @@
 """Shared logical type and factory for user classes (dataclasses and pydantic models).
 
 A user class's logical type name and Arrow extension name are its *identity string*
-(``user_class_identity.identity_string``): the name, kind and field types, so two
-classes with the same name and different fields are different types with different
-tables (ITL-881). The Arrow extension metadata carries the full identity record, which
+(``user_class_identity.identity_string``): the name, kind and the fields' names and
+types in declared order, so two classes with the same name and different fields, or
+the same fields in another order, are different types with different tables
+(ITL-881). The Arrow extension metadata carries the full identity record, which
 the read path uses to find the class and to describe a mismatch.
 
 Write path (``create_for_python_type``):
@@ -46,11 +47,11 @@ class UserClassLogicalType(BaseLogicalType):
     """Logical type binding a user class to its Arrow extension type.
 
     The logical type name and Arrow extension name are the class's identity string;
-    the storage type is a ``pa.struct`` of the stored fields. Subclasses set
-    ``category``.
+    the storage type is a ``pa.struct`` of the stored fields in declared order.
+    Subclasses set ``category``.
 
     Args:
-        logical_name: The identity string (e.g. ``"Point@9117beaaf7ebe3ab"``).
+        logical_name: The identity string (e.g. ``"Point@76d961e4..."``).
         python_type: The class.
         storage_type: The Arrow ``pa.StructType`` of the stored fields.
         field_annotations: ``(field_name, python_annotation)`` pairs matching the
@@ -259,10 +260,10 @@ class UserClassLogicalTypeFactory:
 
         arrow_fields = []
         field_annotations: list[tuple[str, Any]] = []
-        tokens: dict[str, str] = {}
-        # Sorted by name: field order is not part of the identity, so it must not
-        # change the storage type either (same identity, same struct).
-        for field_name in sorted(self.stored_field_names(python_type)):
+        tokens: list[tuple[str, str]] = []
+        # Declared order: it is part of the identity, and the storage struct follows
+        # it, so one identity always has one struct.
+        for field_name in self.stored_field_names(python_type):
             annotation = hints.get(field_name, Any)
             try:
                 arrow_type = converter.register_python_class(annotation)
@@ -277,7 +278,7 @@ class UserClassLogicalTypeFactory:
                 arrow_type = arrow_type.storage_type
             arrow_fields.append(pa.field(field_name, arrow_type))
             field_annotations.append((field_name, annotation))
-            tokens[field_name] = uci.type_token(annotation, converter)
+            tokens.append((field_name, uci.type_token(annotation, converter)))
 
         record = uci.identity_record(self.kind, name, tokens)
         return record, pa.struct(arrow_fields), field_annotations
@@ -321,7 +322,11 @@ class UserClassLogicalTypeFactory:
             )
         name = record.get("name")
         kind = record.get("kind")
-        if kind != self.kind or not isinstance(name, str):
+        if (
+            kind != self.kind
+            or not isinstance(name, str)
+            or not isinstance(record.get("fields"), list)
+        ):
             raise TypeIdentityError(
                 f"Stored column type {arrow_extension_name!r} has an invalid identity "
                 f"record for category {self.category!r}: {record!r}."
@@ -377,9 +382,9 @@ class UserClassLogicalTypeFactory:
             f"as {name!r} before it is first used, e.g. "
             f"op.register_type(<class>, name={name!r})."
             if renamable
-            else " A class with the same name but different fields is a different "
-            "type; restore the stored fields, or use the class with the new fields "
-            "to compute new results."
+            else " A class with the same name but different fields, or the same fields "
+            "in another order, is a different type; restore the stored fields and "
+            "their order, or use the class as it is now to compute new results."
         )
         raise TypeIdentityError(
             f"Stored values of {uci.describe_record(record)} do not match the classes "

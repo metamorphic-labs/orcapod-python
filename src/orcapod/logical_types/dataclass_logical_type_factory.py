@@ -26,7 +26,7 @@ class DataclassLogicalType(UserClassLogicalType):
 
     Example:
         >>> lt = DataclassLogicalType(
-        ...     "Point@c0a75f0c39b86873", Point,
+        ...     "Point@76d961e4...", Point,
         ...     pa.struct([pa.field("x", pa.int64()), pa.field("y", pa.int64())]),
         ...     [("x", int), ("y", int)],
         ... )

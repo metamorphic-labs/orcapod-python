@@ -32,43 +32,48 @@ def _make_class(module: str, qualname: str = "Point") -> type:
 
 class TestIdentityString:
     def test_documented_example(self) -> None:
-        record = uci.identity_record("dataclass", "Point", {"x": "int", "y": "float"})
+        record = uci.identity_record(
+            "dataclass", "Point", [("x", "int"), ("y", "float")]
+        )
         assert uci.identity_string(record) == (
-            "Point@9117beaaf7ebe3ab0bd25de9448c92eb64aa070a58611517bd1e470a544584d8"
+            "Point@76d961e40619a836535e3fdebdead7ea65aa9413955a889f3d5b51a7a94b65eb"
         )
 
-    def test_canonical_json_is_sorted_and_compact(self) -> None:
-        record = uci.identity_record("pydantic", "P", {"b": "int", "a": "str"})
+    def test_canonical_json_is_compact_and_keeps_field_order(self) -> None:
+        record = uci.identity_record("pydantic", "P", [("b", "int"), ("a", "str")])
         assert (
             uci.canonical_json(record)
-            == '{"fields":{"a":"str","b":"int"},"kind":"pydantic","name":"P"}'
+            == '{"fields":[["b","int"],["a","str"]],"kind":"pydantic","name":"P"}'
         )
 
-    def test_field_order_does_not_matter(self) -> None:
-        a = uci.identity_record("dataclass", "P", {"x": "int", "y": "str"})
-        b = uci.identity_record("dataclass", "P", {"y": "str", "x": "int"})
-        assert uci.identity_string(a) == uci.identity_string(b)
+    def test_field_order_is_part_of_the_identity(self) -> None:
+        a = uci.identity_record("dataclass", "P", [("x", "int"), ("y", "str")])
+        b = uci.identity_record("dataclass", "P", [("y", "str"), ("x", "int")])
+        assert uci.identity_string(a) != uci.identity_string(b)
 
     @pytest.mark.parametrize(
         "other",
         [
-            ("pydantic", "Point", {"x": "int", "y": "float"}),
-            ("dataclass", "Point2", {"x": "int", "y": "float"}),
-            ("dataclass", "Point", {"x": "int", "y": "int"}),
-            ("dataclass", "Point", {"x": "int", "z": "float"}),
-            ("dataclass", "Point", {"x": "int"}),
+            ("pydantic", "Point", [("x", "int"), ("y", "float")]),
+            ("dataclass", "Point2", [("x", "int"), ("y", "float")]),
+            ("dataclass", "Point", [("x", "int"), ("y", "int")]),
+            ("dataclass", "Point", [("x", "int"), ("z", "float")]),
+            ("dataclass", "Point", [("x", "int")]),
+            ("dataclass", "Point", [("y", "float"), ("x", "int")]),
         ],
     )
     def test_each_component_changes_the_identity(
-        self, other: tuple[str, str, dict[str, str]]
+        self, other: tuple[str, str, list[tuple[str, str]]]
     ) -> None:
-        base = uci.identity_record("dataclass", "Point", {"x": "int", "y": "float"})
+        base = uci.identity_record("dataclass", "Point", [("x", "int"), ("y", "float")])
         assert uci.identity_string(base) != uci.identity_string(
             uci.identity_record(*other)
         )
 
-    def test_describe_fields(self) -> None:
-        assert uci.describe_fields({"y": "float", "x": "int"}) == "{x: int, y: float}"
+    def test_describe_fields_keeps_the_given_order(self) -> None:
+        assert (
+            uci.describe_fields([["y", "float"], ["x", "int"]]) == "{y: float, x: int}"
+        )
 
 
 class TestTypeTokens:

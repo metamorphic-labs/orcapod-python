@@ -1,7 +1,7 @@
 """Registering your own data types (dataclasses and pydantic models).
 
 Orcapod identifies a dataclass or pydantic model by its **name**, its **kind**
-(dataclass or pydantic) and its **fields** (names and types, in any order). Two classes
+(dataclass or pydantic) and its **fields** (names and types, in declared order). Two classes
 that agree on all three are the same type: results stored with one are found again with
 the other. See ``docs/concepts/your-own-data-types.md``.
 

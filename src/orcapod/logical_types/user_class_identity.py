@@ -6,8 +6,10 @@ spec ``superpowers/specs/2026-11-10-user-class-identity-v0.3.md``):
 - ``kind``: ``"dataclass"`` or ``"pydantic"``.
 - ``name``: a declared name; otherwise ``__qualname__`` for a class defined in
   ``__main__`` (a notebook or script) and ``module.qualname`` for a module class.
-- ``fields``: a mapping from each stored field's name to its *type token*. It is
-  serialized with sorted keys, so field order never enters the identity.
+- ``fields``: the stored fields as ``[name, type token]`` pairs in declared order.
+  Order is part of the identity: a dataclass compares its fields as an ordered tuple,
+  and a pydantic model dumps and iterates in declared order, so two classes with the
+  same fields in another order are different types.
 
 The *identity string* ``f"{name}@{fingerprint}"`` is the class's logical type name and
 Arrow extension name. ``identity_string`` is the only place that defines its format.
@@ -28,6 +30,7 @@ import typing
 import unicodedata
 import warnings
 import weakref
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.utils.canonical_type_names import canonical_type_name
@@ -379,22 +382,33 @@ def _import_dotted(name: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def identity_record(kind: str, name: str, fields: dict[str, str]) -> dict[str, Any]:
+def identity_record(
+    kind: str, name: str, fields: Iterable[tuple[str, str]]
+) -> dict[str, Any]:
     """Build the identity record of a user class.
 
     Args:
         kind: ``"dataclass"`` or ``"pydantic"``.
         name: The name component.
-        fields: Stored field name to type token.
+        fields: ``(stored field name, type token)`` pairs in declared order.
 
     Returns:
-        ``{"kind": kind, "name": name, "fields": fields}`` with the fields sorted.
+        ``{"kind": kind, "name": name, "fields": [[field, token], ...]}``. The fields
+        keep the given order, which is part of the identity.
     """
-    return {"kind": kind, "name": name, "fields": dict(sorted(fields.items()))}
+    return {
+        "kind": kind,
+        "name": name,
+        "fields": [[field, token] for field, token in fields],
+    }
 
 
 def canonical_json(obj: Any) -> str:
-    """Serialize ``obj`` as canonical JSON (sorted keys, no whitespace)."""
+    """Serialize ``obj`` as canonical JSON (sorted object keys, no whitespace).
+
+    Arrays keep their order, so the ``fields`` of an identity record stay in declared
+    order.
+    """
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -409,15 +423,15 @@ def identity_string(record: dict[str, Any]) -> str:
         record: An identity record from ``identity_record``.
 
     Returns:
-        The identity string, e.g. ``"Point@9117beaaf7ebe3ab"``.
+        The identity string, e.g. ``"Point@76d961e4..."``.
     """
     digest = hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
     return f"{record['name']}@{digest[:FINGERPRINT_HEX_DIGITS]}"
 
 
-def describe_fields(fields: dict[str, str]) -> str:
-    """Render a field mapping for messages, e.g. ``{x: int, y: float}``."""
-    return "{" + ", ".join(f"{k}: {v}" for k, v in sorted(fields.items())) + "}"
+def describe_fields(fields: Iterable[Iterable[str]]) -> str:
+    """Render ``[name, type token]`` pairs in their order, e.g. ``{x: int, y: float}``."""
+    return "{" + ", ".join(": ".join(pair) for pair in fields) + "}"
 
 
 def describe_record(record: dict[str, Any]) -> str:

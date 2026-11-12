@@ -108,6 +108,21 @@ def table_paths(root):
     )
 
 
+def stored_fields(root, column):
+    """Return the field names of each stored struct column ``column``, as written."""
+    import deltalake
+    import pyarrow as pa
+
+    found = []
+    for rel in table_paths(root):
+        schema = pa.schema(deltalake.DeltaTable(str(Path(root) / rel)).schema().to_arrow())
+        if column in schema.names:
+            stored = schema.field(column).type
+            stored = getattr(stored, "storage_type", stored)
+            found.append([field.name for field in stored])
+    return sorted(found)
+
+
 def make_pod(point_cls):
     """Return ``(pod, calls)`` for ``shift(p: point_cls) -> point_cls``."""
     calls = []
@@ -139,7 +154,10 @@ def run_job(point_cls, pod_and_calls=None, rows=None):
         "calls": len(calls) - before,
         "rows": node.as_table().num_rows,
         "q_class_is_point": all(type(v) is point_cls for v in values),
+        "values": sorted(repr(v) for v in values),
+        "stored_fields": stored_fields(db_root, "q"),
         "pod_pipeline_hash": pod.pod.pipeline_hash().to_string(),
+        "pod_uri": list(pod.pod.uri),
         "node_identity_path": list(node.node_identity_path),
         "table_paths": table_paths(db_root),
         "extension_name": getattr(

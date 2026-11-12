@@ -441,7 +441,7 @@ def test_factory_reconstruct_from_arrow_invalid_fqcn():
                 "identity": {
                     "kind": "dataclass",
                     "name": "nonexistent.module.NoSuchClass",
-                    "fields": {"x": "int"},
+                    "fields": [["x", "int"]],
                 },
             },
             converter,

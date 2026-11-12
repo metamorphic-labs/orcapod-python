@@ -27,6 +27,8 @@ CELLS = {
     "setup": "import wsjob\nfrom dataclasses import dataclass\nimport orcapod as op\n",
     "define": "@dataclass\nclass Point:\n    x: int\n    y: int\n",
     "define_reordered": "@dataclass\nclass Point:\n    y: int\n    x: int\n",
+    "define_added": "@dataclass\nclass Point:\n    x: int\n    y: int\n    z: int = 0\n",
+    "define_model_reordered": "import pydantic\nclass Point(pydantic.BaseModel):\n    y: int\n    x: int\n",
     "define_float": "@dataclass\nclass Point:\n    x: int\n    y: float\n",
     "define_model": "import pydantic\nclass Point(pydantic.BaseModel):\n    x: int\n    y: int\n",
     "import_mod": "from wsmodels import Point\n",
@@ -89,6 +91,118 @@ def _script(workdir: Path, code: str, **env: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Subclasses, whatever the registration order (audit ITL-942, finding R)
+# ---------------------------------------------------------------------------
+
+WSFAMILY = """
+from dataclasses import dataclass
+
+import pydantic
+
+
+@dataclass
+class Base:
+    x: int
+
+
+@dataclass
+class Child(Base):
+    z: int = 0
+
+
+class BaseModel(pydantic.BaseModel):
+    x: int
+
+
+class ChildModel(BaseModel):
+    z: int = 0
+"""
+
+FAMILY_SCRIPT = """
+import os
+
+import wsfamily
+import wsjob
+from child_harness import report
+from orcapod.sources import DictSource
+
+base = getattr(wsfamily, os.environ["WS_BASE"])
+child = getattr(wsfamily, os.environ["WS_CHILD"])
+
+
+def use_base():
+    source = DictSource(data=[{"k": "a", "p": base(x=1)}], tag_columns=["k"])
+    return source.as_table().schema.field("p").type.extension_name
+
+
+def use_child():
+    return wsjob.run_job(child, rows=[{"x": 1, "z": 10}, {"x": 2, "z": 20}])
+
+
+out = {}
+if os.environ["WS_ORDER"] == "base_first":
+    out["base_name"] = use_base()
+    out["child"] = use_child()
+else:
+    out["child"] = use_child()
+    out["base_name"] = use_base()
+report(out)
+"""
+
+
+@pytest.mark.parametrize(
+    ("base", "child"),
+    [("Base", "Child"), ("BaseModel", "ChildModel")],
+    ids=["dataclass", "pydantic"],
+)
+def test_subclass_identity_and_fields_do_not_depend_on_registration_order(
+    workdir: Path, base: str, child: str
+) -> None:
+    """A subclass keeps its own identity and all its fields in both orders.
+
+    Each order runs in a fresh process against a fresh store. On ``main`` the subclass
+    was stored as its base when the base was registered first: its extra field was
+    dropped, and the pod's hash and stored path depended on the order.
+    """
+    write_files(workdir, {"wsfamily.py": WSFAMILY})
+    out: dict[str, Any] = {}
+    for order in ("base_first", "sub_first"):
+        (workdir / order).mkdir()
+        out[order] = run_child(
+            ["-c", FAMILY_SCRIPT],
+            cwd=workdir,
+            env={
+                "WS_DB": str(workdir / order),
+                "WS_ORDER": order,
+                "WS_BASE": base,
+                "WS_CHILD": child,
+            },
+        )
+
+    for order, result in out.items():
+        run = result["child"]
+        assert (run["calls"], run["rows"]) == (2, 2), order
+        assert run["q_class_is_point"], order
+        assert run["extension_name"].split("@")[0] == f"wsfamily.{child}", order
+        assert run["extension_name"] != result["base_name"], order
+        assert run["stored_fields"] == [["x", "z"]], order
+        assert run["values"] == [f"{child}(x=1, z=10)", f"{child}(x=2, z=20)"], order
+
+    first, second = out["base_first"], out["sub_first"]
+    assert first["base_name"] == second["base_name"]
+    for key in (
+        "extension_name",
+        "pod_pipeline_hash",
+        "pod_uri",
+        "node_identity_path",
+        "table_paths",
+        "stored_fields",
+        "values",
+    ):
+        assert first["child"][key] == second["child"][key], key
+
+
+# ---------------------------------------------------------------------------
 # Notebook cell re-runs in one kernel
 # ---------------------------------------------------------------------------
 
@@ -115,11 +229,46 @@ def test_w1_run_all_twice(workdir: Path) -> None:
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
 
 
-def test_field_order_does_not_change_identity(workdir: Path) -> None:
-    log = _kernel(workdir, ["setup", "define", "run", "define_reordered", "run"])
-    first, second = _runs(log)
-    assert second["calls"] == 0
-    assert first["extension_name"] == second["extension_name"]
+@pytest.mark.parametrize(
+    ("define", "reordered"),
+    [("define", "define_reordered"), ("define_model", "define_model_reordered")],
+    ids=["dataclass", "pydantic"],
+)
+def test_reordered_fields_are_a_new_type(
+    workdir: Path, define: str, reordered: str
+) -> None:
+    """Declared field order is identity: the reordered class computes into new tables."""
+    log = _kernel(workdir, ["setup", define, "run", reordered, "run", define, "run"])
+    first, second, third = _runs(log)
+    assert (second["calls"], second["rows"]) == (2, 2)
+    assert second["q_class_is_point"]
+    assert first["extension_name"] != second["extension_name"]
+    assert first["pod_pipeline_hash"] != second["pod_pipeline_hash"]
+    assert first["pod_uri"] != second["pod_uri"]
+    assert set(first["table_paths"]) < set(second["table_paths"])
+    assert first["stored_fields"] == [["x", "y"]]
+    assert second["stored_fields"] == [["x", "y"], ["y", "x"]]
+    # The first order's results are untouched and found again.
+    assert (third["calls"], third["rows"]) == (0, 2)
+    assert third["pod_pipeline_hash"] == first["pod_pipeline_hash"]
+
+
+def test_class_redefined_with_an_added_field_is_a_new_type(workdir: Path) -> None:
+    """An added field (even with a default) makes a new type with its own tables."""
+    log = _kernel(
+        workdir, ["setup", "define", "run", "define_added", "run", "define", "run"]
+    )
+    first, second, third = _runs(log)
+    assert (second["calls"], second["rows"]) == (2, 2)
+    assert second["q_class_is_point"]
+    assert first["extension_name"] != second["extension_name"]
+    assert first["pod_pipeline_hash"] != second["pod_pipeline_hash"]
+    assert set(first["table_paths"]) < set(second["table_paths"])
+    assert second["stored_fields"] == [["x", "y"], ["x", "y", "z"]]
+    assert second["values"] == ["Point(x=1, y=1, z=1)", "Point(x=2, y=2, z=2)"]
+    # The two-field results are untouched and found again.
+    assert (third["calls"], third["rows"]) == (0, 2)
+    assert third["values"] == first["values"]
 
 
 def test_w2_rerun_with_changed_fields_is_a_new_type(workdir: Path) -> None:
@@ -261,8 +410,8 @@ def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
                 @op.register_type(name="Point")
                 @dataclass
                 class Point:
-                    y: int
                     x: int
+                    y: int
             """,
         },
     )
