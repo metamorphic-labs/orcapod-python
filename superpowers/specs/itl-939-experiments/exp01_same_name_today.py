@@ -58,7 +58,10 @@ def dup_name_source():
         names=["subject_id", "session_start_datetime", "session_start_datetime"],
     )
     src = ArrowTableSource(
-        dup, tag_columns=["subject_id", "session_start_datetime"], source_id="session", infer_nullable=True
+        dup,
+        tag_columns=["subject_id", "session_start_datetime"],
+        source_id="session",
+        infer_nullable=True,
     )
     return src.keys()
 
@@ -156,7 +159,9 @@ probe(
 
 # 9. A pod parameter named after a tag: can a pod read a tag today?
 @function_pod(output_keys="elapsed_s")
-def elapsed(session_start_datetime: dt.datetime, session_end_datetime: dt.datetime) -> float:
+def elapsed(
+    session_start_datetime: dt.datetime, session_end_datetime: dt.datetime
+) -> float:
     return (session_end_datetime - session_start_datetime).total_seconds()
 
 

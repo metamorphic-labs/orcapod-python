@@ -44,7 +44,11 @@ def session_table() -> pa.Table:
             "subject_id": pa.array(["m1", "m1", "m2"], pa.large_string()),
             "session_start_datetime": pa.array([S1, S2, S3], TS),
             "session_end_datetime": pa.array(
-                [S1 + dt.timedelta(hours=2), S2 + dt.timedelta(hours=2), S3 + dt.timedelta(hours=1)],
+                [
+                    S1 + dt.timedelta(hours=2),
+                    S2 + dt.timedelta(hours=2),
+                    S3 + dt.timedelta(hours=1),
+                ],
                 TS,
             ),
             "booth": pa.array(["A", "B", "A"], pa.large_string()),
@@ -73,7 +77,9 @@ KEYS_EXPERIMENT = ["subject_id", "session_start_datetime", "experiment_index"]
 
 
 def src(table: pa.Table, tags: list[str], source_id: str) -> ArrowTableSource:
-    return ArrowTableSource(table, tag_columns=tags, source_id=source_id, infer_nullable=True)
+    return ArrowTableSource(
+        table, tag_columns=tags, source_id=source_id, infer_nullable=True
+    )
 
 
 session = src(session_table(), KEYS_SESSION, "session")
@@ -83,7 +89,9 @@ def show(label: str, stream) -> None:
     print(f"\n=== {label}")
     tags, data = stream.keys()
     print("keys():", tags, "|", data)
-    sys_cols = [c for c in stream.as_table(all_info=True).column_names if c.startswith("_tag_")]
+    sys_cols = [
+        c for c in stream.as_table(all_info=True).column_names if c.startswith("_tag_")
+    ]
     print("system tag columns:", sys_cols)
     print("pipeline_hash:", stream.pipeline_hash().to_hex(16))
     print("content_hash: ", stream.content_hash().to_hex(16))
@@ -103,23 +111,26 @@ show("baseline: experiment, primary keys as tags", baseline)
 # W1. Choose tag_columns so session_start_datetime stays data.
 # ----------------------------------------------------------------------------------------
 @function_pod(output_keys="elapsed_s")
-def elapsed_s(session_start_datetime: dt.datetime, experiment_start_timestamp: int) -> float:
+def elapsed_s(
+    session_start_datetime: dt.datetime, experiment_start_timestamp: int
+) -> float:
     return experiment_start_timestamp / 1e6 - session_start_datetime.timestamp()
 
 
 w1_src = src(experiment_table(), ["subject_id", "experiment_index"], "experiment")
 show("W1 source: tag_columns without session_start_datetime", w1_src)
-try:
-    w1 = elapsed_s.pod(w1_src.select_data_columns(["session_start_datetime", "experiment_start_timestamp"]))
-    print("W1 pod output:")
-    rows(w1, ["subject_id", "experiment_index", "elapsed_s"])
-except Exception as exc:  # noqa: BLE001
-    print(f"W1 pod RAISES {type(exc).__name__}: {exc}")
+w1 = elapsed_s.pod(
+    w1_src.select_data_columns(["session_start_datetime", "experiment_start_timestamp"])
+)
+print("W1 pod output:")
+rows(w1, ["subject_id", "experiment_index", "elapsed_s"])
 # Downstream: Join with session on the shared keys. W1's tags lack session_start_datetime.
 try:
     j = Join()(w1, session)
     print("W1 Join keys():", j.keys())
-    print("W1 Join rows:", j.as_table().num_rows, "(5 experiments; correct answer is 5)")
+    print(
+        "W1 Join rows:", j.as_table().num_rows, "(5 experiments; correct answer is 5)"
+    )
     rows(j, ["subject_id", "experiment_index", "session_start_datetime", "elapsed_s"])
 except Exception as exc:  # noqa: BLE001
     print(f"W1 Join RAISES {type(exc).__name__}: {exc}")
@@ -141,7 +152,9 @@ t = experiment_table()
 t = t.append_column("session_start", t["session_start_datetime"])  # the one extra line
 w2_src = src(t, KEYS_EXPERIMENT, "experiment")
 show("W2 source: column copied to 'session_start' before the source", w2_src)
-w2 = elapsed_s2.pod(w2_src.select_data_columns(["session_start", "experiment_start_timestamp"]))
+w2 = elapsed_s2.pod(
+    w2_src.select_data_columns(["session_start", "experiment_start_timestamp"])
+)
 print("W2 pod output:")
 rows(w2, ["subject_id", "session_start_datetime", "experiment_index", "elapsed_s"])
 j2 = Join()(w2, session)
@@ -155,7 +168,9 @@ print("W2 Join rows:", j2.as_table().num_rows, "(correct answer is 5)")
 mid = Join()(baseline, session)  # some upstream work
 mt = mid.as_table()
 mt = mt.append_column("session_start", mt["session_start_datetime"])
-w2b_src = ArrowTableSource(mt, tag_columns=KEYS_EXPERIMENT, source_id="rerooted", infer_nullable=True)
+w2b_src = ArrowTableSource(
+    mt, tag_columns=KEYS_EXPERIMENT, source_id="rerooted", infer_nullable=True
+)
 show("W2' re-rooted mid-pipeline (lineage to 'experiment'/'session' is cut)", w2b_src)
 print("W2' upstreams of the new source:", w2b_src.upstreams)
 
@@ -163,14 +178,25 @@ print("W2' upstreams of the new source:", w2b_src.upstreams)
 # ----------------------------------------------------------------------------------------
 # W3. Read the source twice: once keyed normally, once with the column as data, then join.
 # ----------------------------------------------------------------------------------------
-second = src(experiment_table(), ["subject_id", "experiment_index"], "experiment_as_data")
-second = MapData({"session_start_datetime": "session_start"}, drop_unmapped=True)(second)
+second = src(
+    experiment_table(), ["subject_id", "experiment_index"], "experiment_as_data"
+)
+second = MapData({"session_start_datetime": "session_start"}, drop_unmapped=True)(
+    second
+)
 try:
     j3 = Join()(baseline, second)
     print("\n=== W3: Join(keys-as-tags read, column-as-data read)")
     print("W3 Join keys():", j3.keys())
-    print("W3 Join rows:", j3.as_table().num_rows, "(5 experiments; >5 means a wrong pairing)")
-    rows(j3, ["subject_id", "session_start_datetime", "experiment_index", "session_start"])
+    print(
+        "W3 Join rows:",
+        j3.as_table().num_rows,
+        "(5 experiments; >5 means a wrong pairing)",
+    )
+    rows(
+        j3,
+        ["subject_id", "session_start_datetime", "experiment_index", "session_start"],
+    )
 except Exception as exc:  # noqa: BLE001
     print(f"W3 Join RAISES {type(exc).__name__}: {exc}")
 
@@ -184,6 +210,9 @@ from orcapod.operators import MapTags  # noqa: E402
 
 try:
     MapTags({"session_start_datetime": "session_start"})(baseline).keys()
-    print("\nW4 MapTags keys():", MapTags({"session_start_datetime": "session_start"})(baseline).keys())
+    print(
+        "\nW4 MapTags keys():",
+        MapTags({"session_start_datetime": "session_start"})(baseline).keys(),
+    )
 except Exception as exc:  # noqa: BLE001
     print(f"W4 MapTags RAISES {type(exc).__name__}: {exc}")

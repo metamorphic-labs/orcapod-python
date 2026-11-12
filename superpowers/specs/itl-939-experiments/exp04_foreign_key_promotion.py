@@ -41,8 +41,12 @@ probe = pa.table(
 )
 PK = ["subject_id", "session_start_datetime", "recording_index", "probe_index"]
 
-pen_pk = ArrowTableSource(penetration, tag_columns=PK, source_id="penetration", infer_nullable=True)
-probe_src = ArrowTableSource(probe, tag_columns=["probe_id"], source_id="probe", infer_nullable=True)
+pen_pk = ArrowTableSource(
+    penetration, tag_columns=PK, source_id="penetration", infer_nullable=True
+)
+probe_src = ArrowTableSource(
+    probe, tag_columns=["probe_id"], source_id="probe", infer_nullable=True
+)
 
 print("=== F1. primary keys only: Join(penetration, probe) shares no tag")
 try:
@@ -54,7 +58,10 @@ except Exception as exc:  # noqa: BLE001
 
 print("\n=== F2. today's recipe: list probe_id among the tag_columns at the source")
 pen_fk = ArrowTableSource(
-    penetration, tag_columns=[*PK, "probe_id"], source_id="penetration", infer_nullable=True
+    penetration,
+    tag_columns=[*PK, "probe_id"],
+    source_id="penetration",
+    infer_nullable=True,
 )
 j2 = Join()(pen_fk, probe_src)
 print("keys():", j2.keys())
