@@ -40,6 +40,12 @@ def ignore_metadata(names: list[str]) -> bytes:
     ).encode()
 
 
+EXTENSION_NAME = "orcapod.numpy.ndarray"
+"""Arrow extension name of the array type (developer, November 12, 2026)."""
+
+LEADING_TYPE_TEXT = EXTENSION_NAME
+"""Leading text of the value hash preimage: the extension name (proposed)."""
+
 OPTIONS = ("byte_order", "memory_order", "struct_layout")
 
 BASE = np.arange(6, dtype=np.float32).reshape(2, 3)
@@ -78,7 +84,7 @@ def reference_digest(
     p += b"".join(struct.pack("<q", d) for d in shape)
     p += struct.pack("<Q", len(data)) + data
     element_digest = hashlib.sha256(p).digest()
-    q = _lp("numpy.ndarray") + element_digest + bytes([memory_order])
+    q = _lp(LEADING_TYPE_TEXT) + element_digest + bytes([memory_order])
     q += _lp(byte_order_text) + _lp(struct_layout_text)
     return hashlib.sha256(q).hexdigest()
 
@@ -87,7 +93,7 @@ def _context_ignoring(tmp_path: Path, names: list[str]) -> DataContext:
     """Build a data context whose ndarray ignore list is ``names``."""
     shipped = Path(contexts_package.__file__).parent / "logical_types.json"
     registration = json.loads(shipped.read_text())
-    registration["hash_ignore"]["numpy.ndarray"] = names
+    registration["hash_ignore"][EXTENSION_NAME] = names
     custom = tmp_path / f"logical_types_{'_'.join(names) or 'strict'}.json"
     custom.write_text(json.dumps(registration))
     return JSONDataContextRegistry(logical_types_file=custom).get_context()
@@ -229,9 +235,9 @@ def test_hash_is_unchanged_by_storage(name: str) -> None:
 
 
 def test_column_is_npy_bytes_under_the_default_identifier() -> None:
-    """An array column is ``numpy.ndarray`` over ``large_binary`` holding ``.npy`` files."""
+    """An array column is ``orcapod.numpy.ndarray`` over ``large_binary`` holding ``.npy`` files."""
     field = _source({"a": BASE}).as_table().schema.field("x")
-    assert field.type.extension_name == "numpy.ndarray"
+    assert field.type.extension_name == EXTENSION_NAME
     assert field.type.storage_type == pa.large_binary()
     assert field.type.__arrow_ext_serialize__() == ignore_metadata([])
     cell = _source({"a": BASE}).as_table().column("x").chunk(0).storage[0].as_py()

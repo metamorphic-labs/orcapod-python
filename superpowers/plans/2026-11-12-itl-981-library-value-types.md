@@ -22,6 +22,11 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
   `hash_table` (`SemanticHashingVisitor.hashed_field`) inside ITL-981, with a test, AFTER
   sign-off; say in the PR body that no stored or golden value moves (design note viii).
   (c) Finding posted as a comment on Linear ITL-980.
+  (d) FINAL naming (supersedes (a)): `orcapod.numpy.ndarray`. v0.2's `numpy.ndarray` is then
+  not a registered name, so the "foreign type" is dropped: the registered Arrow class
+  dispatches valid lists and raises `LogicalTypeIdentifierError` for anything else, as every
+  built-in type does. The Linear comment on ITL-980 could not be posted from this session
+  (permission denied); the coordinator posts it.
   STILL WAITING for the developer's sign-off of the whole design: no library code, no push.
 - Nothing is pushed. The design note, this plan and the failing tests are local commits.
 
@@ -37,7 +42,7 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
    list. Polars extension keeps `metadata_str`.
 4. [ ] Context loader (`contexts/registry.py`): `hash_ignore` of `logical_types.json` into
    the reference table as `hash_ignore:<extension name>` before anything is built.
-   `logical_types.json`: `"hash_ignore": {"numpy.ndarray": []}` and the two `_ref`s.
+   `logical_types.json`: `"hash_ignore": {"orcapod.numpy.ndarray": []}` and the two `_ref`s.
 5. [ ] `numpy_type.py`: storage `large_binary`, `.npy` format 3.0 write
    (`numpy.lib.format.write_array`, `allow_pickle=False`), read after checking the magic;
    refusals (masked, object, StringDType, longdouble, unit-less datetimes, titles,
