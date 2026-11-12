@@ -546,6 +546,8 @@ def test_a_failed_commit_of_writes_pending_before_the_run_stops_it_first(
     """If writes left pending before the run cannot be committed, nothing is computed."""
     calls_before = len(_DOUBLE_CALLS)
     store = FailingCommits(DeltaTableDatabase(tmp_path), {"calls": 0, "ok": 0})
+    leftover = pa.table({"v": pa.array([1], pa.int64())})
+    store.add_record(("leftover",), b"left-1", leftover)  # pending, never committed
     job = PipelineJob(name="batched", store=store)  # pyright: ignore[reportArgumentType]  # failing wrapper of a real store
     with job:
         counted_double.pod(
@@ -558,3 +560,7 @@ def test_a_failed_commit_of_writes_pending_before_the_run_stops_it_first(
     notes = getattr(info.value, "__notes__", [])
     assert any("left pending in the store before this run started" in n for n in notes)
     assert len(_DOUBLE_CALLS) == calls_before
+    # Nothing was written: the leftover row is still pending, and no table exists.
+    assert not list(tmp_path.rglob("_delta_log"))
+    pending = store.get_record_by_id(("leftover",), b"left-1")
+    assert pending is not None and pending.column("v").to_pylist() == [1]
