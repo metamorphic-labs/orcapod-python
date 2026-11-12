@@ -27,6 +27,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from orcapod.hashing.semantic_hashing.encoded import Encoded
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
 
@@ -136,12 +137,14 @@ class GenericAliasHandler:
             return f"generic_alias:{obj!r}"
         if origin is typing.Union:
             hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-            return {"__type__": "union", "args": hashed_args}
-        return {
-            "__type__": "generic_alias",
-            "origin": hasher.hash_object(origin).to_string(),
-            "args": [hasher.hash_object(arg).to_string() for arg in args],
-        }
+            return Encoded("union", {"args": hashed_args})
+        return Encoded(
+            "generic_alias",
+            {
+                "origin": hasher.hash_object(origin).to_string(),
+                "args": [hasher.hash_object(arg).to_string() for arg in args],
+            },
+        )
 
 
 class UnionTypeHandler:
@@ -150,7 +153,7 @@ class UnionTypeHandler:
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         args = getattr(obj, "__args__", None) or ()
         hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-        return {"__type__": "union", "args": hashed_args}
+        return Encoded("union", {"args": hashed_args})
 
 
 class ArrowTableHandler:

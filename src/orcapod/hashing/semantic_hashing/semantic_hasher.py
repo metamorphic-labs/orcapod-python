@@ -72,6 +72,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
+from orcapod.hashing.semantic_hashing.encoded import TYPE_KEY, Encoded
 from orcapod.protocols import hashing_protocols as hp
 from orcapod.types import ContentHash
 from orcapod.utils.canonical_type_names import canonical_module_name
@@ -184,6 +185,11 @@ class SemanticAwarePythonHasher:
                 type(handler).__name__,
             )
             result = handler.handle(obj, self)
+            if isinstance(result, Encoded):
+                # The only route to a trusted tagged object: a handler's own result.
+                return self._hash_to_content_hash(
+                    self._expand_encoded(result, resolver=resolver)
+                )
             return self.hash_object(result, resolver=resolver)
 
         # Structures: expand into a tagged tree, then hash the tree.
@@ -325,12 +331,14 @@ class SemanticAwarePythonHasher:
     ) -> dict:
         """Expand a dict/Mapping into a JSON tree that keeps its keys' types.
 
-        A mapping whose keys are all ``str`` becomes a native JSON object (type
-        handlers rely on this for their own ``{"__type__": ...}`` trees). Any other
-        mapping becomes ``{"__type__": "dict", "items": [[key, value], ...]}``, so
-        ``{1: "x"}`` and ``{"1": "x"}`` differ and keys that share a ``str()``
-        never collapse into one (ITL-942). Insertion order never matters: object
-        keys are sorted by the serialiser, pairs by their canonical JSON text.
+        A mapping whose keys are all ``str``, none of them ``"__type__"``, becomes
+        a native JSON object. Any other mapping becomes
+        ``{"__type__": "dict", "items": [[key, value], ...]}``, so ``{1: "x"}``
+        and ``{"1": "x"}`` differ, keys that share a ``str()`` never collapse into
+        one, and no mapping can spell out the hasher's own encoding of another
+        value (ITL-942); a type handler that wants a tagged object returns an
+        ``Encoded``. Insertion order never matters: object keys are sorted by the
+        serialiser, pairs by their canonical JSON text.
         """
         expanded = [
             (
@@ -339,10 +347,21 @@ class SemanticAwarePythonHasher:
             )
             for k, v in obj.items()
         ]
-        if all(isinstance(k, str) for k in obj):
+        if all(isinstance(k, str) and k != TYPE_KEY for k in obj):
             return dict(expanded)
         pairs = sorted(([k, v] for k, v in expanded), key=_canonical_json)
         return {"__type__": "dict", "items": pairs}
+
+    def _expand_encoded(
+        self,
+        encoded: Encoded,
+        resolver: Callable[[Any], ContentHash] | None = None,
+    ) -> dict:
+        """Expand a handler's ``Encoded`` result into ``{"__type__": tag, **fields}``."""
+        tree: dict[str, Any] = {TYPE_KEY: encoded.tag}
+        for key, value in encoded.fields.items():
+            tree[key] = self._expand_element(value, frozenset(), resolver=resolver)
+        return tree
 
     def _expand_namedtuple(
         self,

@@ -194,9 +194,21 @@ How containers expand (canonical JSON: sorted object keys, no whitespace, UTF-8)
 | `list` | JSON array | order |
 | `tuple` | `{"__type__": "tuple", "items": [...]}` | order |
 | `set`, `frozenset` | `{"__type__": "set", "items": [...]}`, items sorted by their canonical JSON text | membership only; never iteration order or `PYTHONHASHSEED` (ITL-942: before v0.3, items were sorted by `str()`, so `{1, "1"}` hashed differently per process) |
-| `dict` with only `str` keys | JSON object | keys and values, not insertion order |
+| `dict` with only `str` keys, none of them `"__type__"` | JSON object | keys and values, not insertion order |
 | any other `dict` | `{"__type__": "dict", "items": [[key, value], ...]}`, pairs sorted by canonical JSON | key types: `{1: "x"}` and `{"1": "x"}` differ (ITL-942: before v0.3, keys went through `str()` and could collapse) |
 | namedtuple | `{"__type__": "namedtuple", "name": ..., "fields": {...}}` | class name, field names and values |
+| a type handler's `Encoded(tag, fields)` | `{"__type__": tag, **fields}` | the handler's tag and fields |
+
+**Only the hasher writes `"__type__"`.** A JSON object with a `"__type__"` key comes either
+from the hasher's own encodings (tags `tuple`, `set`, `dict`, `namedtuple`, `hash`) or from a
+type handler that returned an `Encoded` value (`generic_alias`, `union`). A mapping that has a
+`"__type__"` key is hashed in the pair-list form, so a user value such as
+`{"__type__": "tuple", "items": [1, 2]}` never shares the hash of `(1, 2)` (ITL-942). For
+authors of a `PythonTypeHandlerProtocol`: return
+`orcapod.hashing.semantic_hashing.Encoded(tag, fields)` to produce a tagged object; a plain
+dict with a `"__type__"` key is hashed as an ordinary mapping. `Encoded` rejects the hasher's
+own tags and a `"__type__"` field, and is trusted only as a handler's return value: an
+`Encoded` inside a user value has no handler and is refused by the strict hasher.
 
 **Resolver pattern:** The resolver callback is threaded through the entire recursive hash computation to ensure one consistent context per call:
 

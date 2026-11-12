@@ -12,7 +12,7 @@ import subprocess
 import sys
 import textwrap
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 import pyarrow as pa
 import pytest
@@ -229,6 +229,70 @@ class TestDictKeysKeepTheirType:
         assert hasher.hash_object(both) != hasher.hash_object({"1": "b"})
         assert hasher.hash_object(both) != hasher.hash_object({1: "a"})
 
+    @pytest.mark.parametrize(
+        ("value", "literal"),
+        [
+            ((1, 2), lambda h: {"__type__": "tuple", "items": [1, 2]}),
+            (frozenset({1}), lambda h: {"__type__": "set", "items": [1]}),
+            ({1: "x"}, lambda h: {"__type__": "dict", "items": [[1, "x"]]}),
+            (
+                list[int],
+                lambda h: {
+                    "__type__": "generic_alias",
+                    "origin": h.hash_object(list).to_string(),
+                    "args": [h.hash_object(int).to_string()],
+                },
+            ),
+            (
+                int | None,
+                lambda h: {
+                    "__type__": "union",
+                    "args": sorted(
+                        h.hash_object(a).to_string() for a in (int, type(None))
+                    ),
+                },
+            ),
+        ],
+        ids=["tuple", "set", "int_key_dict", "generic_alias", "union"],
+        # namedtuple and the nested-hash tag are covered by their own tests below
+    )
+    def test_encoded_values_differ_from_literal_type_dicts(
+        self, value: Any, literal: Any
+    ) -> None:
+        # A user dict spelling out the hasher's own encoding of another value must
+        # not share that value's hash.
+        hasher = _semantic_hasher()
+        assert hasher.hash_object(value) != hasher.hash_object(literal(hasher))
+
+    def test_namedtuple_differs_from_literal_type_dict(self) -> None:
+        from collections import namedtuple
+
+        hasher = _semantic_hasher()
+        point = namedtuple("Point", ["x", "y"])
+        literal = {
+            "__type__": "namedtuple",
+            "name": "Point",
+            "fields": {"x": 1, "y": 2},
+        }
+        assert hasher.hash_object(point(1, 2)) != hasher.hash_object(literal)
+
+    def test_nested_hash_differs_from_literal_hash_dict(self) -> None:
+        # The nested-hash tag 'hash' is written by ITL-945 (PR #314):
+        # {"__type__": "hash", "digest": <hex>}. Before that branch lands a nested
+        # hash enters as its string; either way a user dict spelling out the tag
+        # must not share the nested hash's hash. Keep this test when the branches
+        # meet.
+        hasher = _semantic_hasher()
+        nested = hasher.hash_object("x")
+        literal = {"__type__": "hash", "digest": nested.to_hex()}
+        assert hasher.hash_object([nested]) != hasher.hash_object([literal])
+
+    def test_dict_with_type_key_differs_from_same_dict_without(self) -> None:
+        hasher = _semantic_hasher()
+        assert hasher.hash_object({"__type__": "a", "b": 1}) != hasher.hash_object(
+            {"b": 1}
+        )
+
     def test_str_keyed_dict_insertion_order_still_ignored(self) -> None:
         hasher = _semantic_hasher()
         assert hasher.hash_object({"a": 1, "b": 2}) == hasher.hash_object(
@@ -237,6 +301,65 @@ class TestDictKeysKeepTheirType:
         assert hasher.hash_object({1: "a", 2: "b"}) == hasher.hash_object(
             {2: "b", 1: "a"}
         )
+
+
+class TestEncodedValues:
+    """Only a type handler can produce a tagged value (ITL-942, mechanism M2)."""
+
+    def test_user_supplied_encoded_is_refused(self) -> None:
+        from orcapod.hashing.semantic_hashing import Encoded
+
+        hasher = _semantic_hasher()
+        forged = Encoded("tuple_like", {"items": [1, 2]})
+        with pytest.raises(TypeError):
+            hasher.hash_object(forged)
+        with pytest.raises(TypeError):
+            hasher.hash_object([forged])
+
+    @pytest.mark.parametrize("tag", ["tuple", "set", "dict", "namedtuple", "hash", ""])
+    def test_reserved_and_empty_tags_are_rejected(self, tag: str) -> None:
+        from orcapod.hashing.semantic_hashing import Encoded
+
+        with pytest.raises(ValueError):
+            Encoded(tag, {})
+
+    def test_type_key_cannot_be_a_field(self) -> None:
+        from orcapod.hashing.semantic_hashing import Encoded
+
+        with pytest.raises(ValueError):
+            Encoded("custom", {"__type__": "tuple"})
+
+    def test_tags_are_unique_across_hasher_and_builtin_handlers(self) -> None:
+        from orcapod.hashing.semantic_hashing import Encoded
+        from orcapod.hashing.semantic_hashing.builtin_handlers import (
+            GenericAliasHandler,
+            UnionTypeHandler,
+        )
+        from orcapod.hashing.semantic_hashing.encoded import HASHER_TAGS
+
+        hasher = _semantic_hasher()
+        handler_results = [
+            GenericAliasHandler().handle(list[int], hasher),
+            GenericAliasHandler().handle(Optional[int], hasher),
+            UnionTypeHandler().handle(int | None, hasher),
+        ]
+        assert all(isinstance(r, Encoded) for r in handler_results)
+        handler_tags = {r.tag for r in handler_results}
+        assert handler_tags == {"generic_alias", "union"}
+        assert handler_tags.isdisjoint(HASHER_TAGS)
+
+    def test_plain_str_keyed_dicts_are_unchanged(self) -> None:
+        # A str-keyed dict without a '__type__' key stays a native JSON object, so
+        # its hash equals the sha256 of its canonical JSON (the pre-ITL-942 form).
+        import hashlib
+        import json
+
+        hasher = _semantic_hasher()
+        value = {"b": [1, 2], "a": "x"}
+        expected = hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        ).digest()
+        assert hasher.hash_object(value).digest == expected
 
 
 # ---------------------------------------------------------------------------
