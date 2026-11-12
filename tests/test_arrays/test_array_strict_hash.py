@@ -124,6 +124,17 @@ def _layout(dtype: np.dtype[Any]) -> Any:
     ]
 
 
+def _value_bytes(array: npt.NDArray[Any]) -> bytes:
+    """The bytes of every scalar field in memory order, without padding bytes.
+
+    Padding between structured fields is not compared: NumPy does not define its
+    content and does not always copy it.
+    """
+    if array.dtype.names is None:
+        return array.tobytes("A")
+    return b"".join(_value_bytes(array[name]) for name in array.dtype.names)
+
+
 # --- the hash is strict by default ------------------------------------------------
 
 
@@ -213,7 +224,7 @@ def test_array_reads_back_exactly(name: str) -> None:
     assert got.shape == expected.shape
     assert got.flags.c_contiguous == expected.flags.c_contiguous
     assert got.flags.f_contiguous == expected.flags.f_contiguous
-    assert got.tobytes("A") == expected.tobytes("A")
+    assert _value_bytes(got) == _value_bytes(expected)
     assert got.flags.writeable
 
 

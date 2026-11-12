@@ -44,7 +44,8 @@ Never in the hash (no option):
    bites: a strided view hashes like its C-contiguous copy.
 8. The `align=True` flag of a structured dtype: never / no (measured: `isalignedstruct`
    reads back `False`; the offsets it produced are kept, property 6).
-9. Padding bytes between structured fields: never / yes. They round-trip but NumPy does not
+9. Padding bytes between structured fields: never / not reliably (corrected after CI: on
+   Linux a stored aligned array came back with zeroed padding). NumPy does not
    define them (`np.empty` leaves garbage, field assignment does not copy them), so they
    cannot be hashed deterministically.
 10. Subclass (`np.matrix`, `np.recarray`, `np.memmap`): never / no (measured: all read back
