@@ -19,11 +19,15 @@ column order (sync; async once the cache is warm).
 `hash_table_ordered` of the positionally renamed `from_pandas` table: the same semantic
 preprocessing as `hash_table`, then starfix 0.5's `ordered_columns` and
 `ordered_struct_fields` options. Both entry points share one private starfix call. The
-descriptor is an Orcapod-owned grammar of typed labels, `columns.names`, index levels and
-pandas dtypes (`orcapod.hashing.pandas_value_hash`; `docs/reference/hashing.md` section 10).
-The identity matches the default `assert_frame_equal` / `assert_series_equal`, except `flags`
-(storage drops it) and `-0.0` vs `0.0`. Every pandas value hash moved once, before the v0.3
-tag; stored values and the logical type identifiers (`{"version":1}`) are unchanged. The
-investigation and the developer's approval (November 11 and 12, 2026) are in
-`superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`. `pa.Table` values (same rule)
-are not included and remain order independent.
+descriptor is an Orcapod-owned grammar of `attrs`, typed labels, `columns.names`, index
+levels and pandas dtypes (`orcapod.hashing.pandas_value_hash`; `docs/reference/hashing.md`
+section 10). Storage and hashing are separate and the hash is strict (developer, November 11
+and 12, 2026): every property of a value counts, `attrs` included, except what storage does
+not restore (`flags`, RangeIndex kind, index `freq`, unused MultiIndex levels, string
+storage, the `object` dtype of a column that reads back typed), which never counts, so
+`hash(read(write(v))) == hash(v)`. `PANDAS_IDENTITY_PROPERTIES` is the one list of these in
+code. The logical types were renamed `orcapod.pandas.dataframe` / `orcapod.pandas.series`
+(`{"version":1}`); the old names are no longer registered. Every pandas value hash moved
+once, before the v0.3 tag; stored bytes are unchanged. The investigation is in
+`superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`. `pa.Table` values (same
+rule) are not included and remain order independent.
