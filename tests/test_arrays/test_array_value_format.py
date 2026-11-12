@@ -642,7 +642,7 @@ def test_merge_join_keeps_memory_order_and_byte_order_of_each_side() -> None:
     right = DictSource(
         data=[{"k": "a", "x": fortran_big}], tag_columns=["k"], source_id="r"
     )
-    got = next(d.as_dict()["x"] for _, d in MergeJoin()(left, right).iter_data())
+    got: Any = next(d.as_dict()["x"] for _, d in MergeJoin()(left, right).iter_data())
     assert sorted(x.dtype.str for x in got) == ["<f4", ">f4"]
     assert sorted(bool(x.flags.f_contiguous) for x in got) == [False, True]
 

@@ -526,6 +526,7 @@ class TestSchemaHashFieldRule:
 
         context = get_default_context()
         hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
         for python_type in (op.File, np.ndarray):
             extension = context.type_converter.python_type_to_arrow_type(python_type)
             assert isinstance(extension, pa.ExtensionType)
@@ -549,6 +550,7 @@ class TestSchemaHashFieldRule:
 
         context = get_default_context()
         hasher = context.arrow_hasher
+        assert isinstance(hasher, StarfixArrowHasher)
         extension = context.type_converter.python_type_to_arrow_type(Path)
         assert isinstance(extension, pa.ExtensionType)
         assert hasher.hash_schema(

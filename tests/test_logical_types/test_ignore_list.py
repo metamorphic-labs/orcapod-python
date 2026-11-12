@@ -17,6 +17,7 @@ import orcapod.contexts as contexts_package
 from orcapod.contexts.core import ContextValidationError, DataContext
 from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.errors import TypeIdentityError
+from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.ignore_list import (
     checked_ignore,
@@ -171,9 +172,12 @@ def test_two_lists_are_two_types(tmp_path: Path) -> None:
             [_table(strict, Labelled(1, "a")), _table(lenient, Labelled(1, "a"))]
         )
     # The type hash and the schema hash take the identifier, which holds the list.
-    assert strict.arrow_hasher.hash_schema(
+    strict_hasher, lenient_hasher = strict.arrow_hasher, lenient.arrow_hasher
+    assert isinstance(strict_hasher, StarfixArrowHasher)
+    assert isinstance(lenient_hasher, StarfixArrowHasher)
+    assert strict_hasher.hash_schema(
         pa.schema([("x", strict_type)])
-    ) != lenient.arrow_hasher.hash_schema(pa.schema([("x", lenient_type)]))
+    ) != lenient_hasher.hash_schema(pa.schema([("x", lenient_type)]))
     assert strict.semantic_hasher.hash_object(
         Labelled
     ) != lenient.semantic_hasher.hash_object(Labelled)

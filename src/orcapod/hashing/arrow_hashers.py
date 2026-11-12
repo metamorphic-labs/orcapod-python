@@ -165,10 +165,10 @@ class StarfixArrowHasher:
         hashed.
         """
         visitor = SemanticHashingVisitor(self._type_converter, self._semantic_hasher)
-        schema = pa.schema(
-            [visitor.hashed_field(field) for field in schema],
-            metadata=schema.metadata,
-        )
+        hashed = pa.schema([visitor.hashed_field(field) for field in schema])
+        if schema.metadata is not None:
+            hashed = hashed.with_metadata(dict(schema.metadata))
+        schema = hashed
         schema = normalize_extension_columns(schema.empty_table()).schema
         include_meta = has_extension_metadata(schema) or has_extension_type(schema)
         if include_meta:
