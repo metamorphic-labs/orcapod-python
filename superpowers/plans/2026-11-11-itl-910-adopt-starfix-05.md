@@ -211,3 +211,39 @@ Where stored table paths are constructed (main + this branch; all relative to th
 Labels/versions currently embedded in path components: "semantic_v0.1:" (pipeline/content hashes in schema:/instance: and output_data_schema_hash), "v{major}", "python.function.v0", "pdb_v1"/"rdb_v1"/"tdb_v1". No path component carries the Arrow label; the D1 check (this branch) is isolated in hashing/stored_hash_labels.py plus one check_stored_hash_labels() method per table owner (FunctionJobNode, _ResultDatabaseReader, ResultCache/CachedFunctionPod, OperatorJobNode, SideEffectJobNode, CachedSource) and a pre-flight loop in PipelineJob.run, in its own commits (feat(store) ..., fix(store) ...).
 
 Status 2026-11-11: D implemented and isolated; PR to be opened as DRAFT, v0.2-store handling awaits ITL-938.
+
+## Worker report (2026-11-11)
+
+PR: https://github.com/metamorphic-labs/orcapod-python/pull/309 (DRAFT; v0.2-store handling awaits ITL-938). CI green on
+3.11/3.12/3.13, ruff, typecheck, license; CodeRabbit skipped the draft (not triggered; needs `@coderabbitai review` or
+ready-for-review).
+
+Verification: full suite 7695 passed / 96 skipped / 18 xfailed / 0 failed on each of 3.11, 3.12, 3.13 (skips: SpiralDB
+integration, S3/MinIO, Graphviz, PostgreSQL opt-in); basedpyright exit 0; ruff clean; uv lock --check ok.
+
+Golden: 184 values changed (arrow 53/53, datagram 40/171, pipeline 68/305, schema 22/92, semantic 1/64 =
+value.dataframe.basic), 21 added (arrow.json), 0 removed; all changed values Arrow-derived. Golden files touched:
+tests/test_hashing/golden/data/{arrow,datagram,pipeline,schema,semantic}.json, golden/cases.py,
+golden/generate_golden_hashes.py.
+
+Perf (100k rows, StarfixArrowHasher): numeric 50.7 -> 0.7 ms, large_string 44 -> 31 ms, large_list 4437 -> 500 ms,
+struct 540 -> 534 ms; one-row hash 36 -> 43 us (+20%). Hashing-heavy tests 27.6 s vs 27.8 s.
+
+PR #305 note: its `_unhashable_columns` wrapper (stream_builder.py) catches NotImplementedError; after both merge,
+starfix raises ValueError naming column and type and fixed_size_list hashes: remove the wrapper (or catch ValueError) and
+drop #305's 'fixed_size_list cannot be hashed' text; map stays unsupported.
+
+Out-of-scope findings (not filed):
+1. Function pods cannot declare tuple[T, T] / fixed-size-list parameters or outputs ('Unsupported annotation'), so
+   fixed_size_list columns reach pods only via operators (ITL-927 'runs through a pipeline' is partial).
+2. _checked_pdb_paths / _checked_rdb_paths (legacy v0 schema checks) key on the relative path only: two stores in one
+   process share entries, so the second store's v0 check is skipped.
+3. Operator-node and CachedSource record hashes store no label (only starfix's format prefix): a future label bump on the
+   same starfix format is undetectable there.
+4. Content-hash-scoped tables (table_scope='content_hash', CachedSource with default source_id) move paths, so their v0.2
+   rows are neither found nor refused.
+5. A projected/limited read on ArrowDatabaseProtocol would make the label check cheap (now one full read per table per run).
+6. MetadataCapableProtocol (per-table metadata) is implemented by none of the main backends.
+7. Tutorial notebook 01 still shows arrow_v0.1 values in two outputs (not re-executed).
+8. The PipelineJob.run pre-flight also checks OFF-mode operator tables.
+9. Correction to my first plan message: golden count is 184 (not 186) and tuple pods are not newly hashable.
