@@ -5,9 +5,11 @@ Generic visitor pattern for traversing Arrow types and data simultaneously.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import struct
 import typing
 from typing import TYPE_CHECKING, Any
 
+from orcapod.logical_types.identifier import arrow_type_identifier
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -160,6 +162,36 @@ class SemanticHashingError(Exception):
     pass
 
 
+_U64 = struct.Struct("<Q")
+_NULL_ELEMENT = b"\x00"
+_PRESENT_ELEMENT = b"\x01"
+
+
+def _encode_container_elements(elements: "list[Any]") -> bytes:
+    """Encode the hashed elements of a list/set cell without ambiguity.
+
+    Layout: ``u64le(element count)``, then for each element either the byte
+    ``00`` (a null element) or the byte ``01``, ``u64le(token length)`` and
+    the token. Every field is counted or length-prefixed, so two different
+    element lists never encode to the same bytes; in particular an empty
+    list, ``[None]`` and ``[None, None]`` differ.
+
+    Args:
+        elements: The per-element hash tokens (``bytes``), with ``None`` for a
+            null element.
+
+    Returns:
+        The encoded bytes.
+    """
+    parts = [_U64.pack(len(elements))]
+    for element in elements:
+        if element is None:
+            parts.append(_NULL_ELEMENT)
+        else:
+            parts.append(_PRESENT_ELEMENT + _U64.pack(len(element)) + element)
+    return b"".join(parts)
+
+
 class SemanticHashingVisitor(ArrowTypeDataVisitor):
     """Visitor that replaces extension-typed columns with their content hashes.
 
@@ -170,11 +202,12 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
        convert the storage value to a Python object and hash it, replacing the
        column with a ``pa.large_binary()`` value of the form::
 
-           <type_name_bytes> + b"::" + content_hash.digest
+           <identifier_text_bytes> + b"::" + content_hash.digest
 
-       where ``type_name`` is the extension name with dots replaced by colons
-       (e.g. ``"orcapod.path"`` → ``"orcapod:path"``). The label of the value
-       hash is not part of the bytes.
+       where the identifier text is the logical type's whole identifier,
+       ``"<extension name>;<lowercase hex of the extension metadata>"``
+       (``LogicalTypeIdentifier.text``). The label of the value hash is not
+       part of the bytes.
     3. If no hasher is registered (or the converter doesn't know the type),
        return the extension type and storage value unchanged. The downstream
        ``StarfixArrowHasher`` / ``ArrowDigester`` will see the full extension
@@ -342,17 +375,17 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
                     virtual_list_type, storage_value
                 )
 
-                # Fold the outer extension name into the result, the same way the
-                # scalar path does.  This ensures list[T] and set[T] with identical
-                # contents produce distinct hashes.
-                type_name = extension_type.extension_name.replace(".", ":")
+                # Fold the outer type's identifier (extension name and metadata)
+                # into the result, the same way the scalar path does, so list[T]
+                # and set[T] with identical contents produce distinct hashes.
+                # The elements follow as a count and, per element, a null marker
+                # or a length-prefixed token, so [] and [None] and [None, None]
+                # (and any two different element lists) never share an encoding.
+                type_name = arrow_type_identifier(extension_type).text
                 combined = (
                     type_name.encode("utf-8")
                     + b"::"
-                    + b"\x00".join(
-                        elem if isinstance(elem, bytes) else b""
-                        for elem in (list_data or [])
-                    )
+                    + _encode_container_elements(list_data or [])
                 )
                 return pa.large_binary(), combined
 
@@ -368,11 +401,13 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         python_obj = self._type_converter.storage_to_python(storage_value, python_type)
         content_hash = self._python_hasher.hash_object(python_obj)
 
-        # Encode as binary: "<type_name>::<digest>"
-        # Dots in the extension name → colons (e.g. "orcapod.path" → "orcapod:path").
-        # Only the digest of the value hash is fed in, never its label: a label names
-        # the algorithm and is not part of any hash input.
-        type_name = extension_type.extension_name.replace(".", ":")
+        # Encode as binary: "<identifier text>::<digest>", where the identifier text
+        # is "<extension name>;<hex of extension metadata>"
+        # (``LogicalTypeIdentifier.text``): the cell commits to the whole identifier
+        # of its logical type, so a changed identifier moves the row hash. Only the
+        # digest of the value hash is fed in, never its label: a label names the
+        # algorithm and is not part of any hash input.
+        type_name = arrow_type_identifier(extension_type).text
         hash_bytes = type_name.encode("utf-8") + b"::" + content_hash.digest
         return pa.large_binary(), hash_bytes
 

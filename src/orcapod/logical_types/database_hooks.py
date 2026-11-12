@@ -24,8 +24,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+from orcapod.logical_types.identifier import require_readable
 from orcapod.logical_types.registry import LogicalTypeRegistry
-from orcapod.logical_types.schema_walker import walk_schema
+from orcapod.logical_types.schema_walker import walk_field
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -54,6 +56,9 @@ def register_discovered_logical_types(
             in which case this call is a no-op.
 
     Raises:
+        LogicalTypeIdentifierError: If a column's stored identifier (extension
+            name and metadata) is not one the registered logical type reads. The
+            error names the column.
         ValueError: Propagated from the converter if an extension type's metadata
             has no registered factory or is malformed.
     """
@@ -63,23 +68,23 @@ def register_discovered_logical_types(
         )
         return
 
-    found = walk_schema(schema)
-    if not found:
-        logger.debug("register_discovered_logical_types: no extension types in schema")
-        return
-    logger.debug(
-        "register_discovered_logical_types: found %d extension type(s) in schema: %s",
-        len(found),
-        [info.extension_name for info in found],
-    )
-    for info in found:
-        # Bottom-up resolve the storage type first, then register the extension
-        resolved_storage = converter.register_storage_type(info.storage_type)
-        converter.register_logical_type_from_arrow_metadata(
-            info.extension_name,
-            info.extension_metadata,
-            resolved_storage,
-        )
+    for field in schema:
+        for info in walk_field(field):
+            logger.debug(
+                "register_discovered_logical_types: found extension type %r in column %r",
+                info.extension_name,
+                field.name,
+            )
+            try:
+                # Bottom-up resolve the storage type first, then register the extension
+                resolved_storage = converter.register_storage_type(info.storage_type)
+                converter.register_logical_type_from_arrow_metadata(
+                    info.extension_name,
+                    info.extension_metadata,
+                    resolved_storage,
+                )
+            except LogicalTypeIdentifierError as exc:
+                raise exc.for_column(field.name) from exc
 
 
 def apply_logical_types(
@@ -102,6 +107,12 @@ def apply_logical_types(
 
     Columns whose field has no ``ARROW:extension:name`` metadata (plain Arrow
     types) are left untouched.
+
+    A column is wrapped only when its stored extension metadata is one the
+    registered logical type declares readable
+    (``readable_extension_metadata``); otherwise ``LogicalTypeIdentifierError``
+    is raised, naming the column. The wrapped column has the type's current
+    identifier.
 
     Args:
         table: Arrow table whose columns may contain extension type metadata
@@ -163,6 +174,12 @@ def _apply_field(
         ext_name = ext_name_bytes.decode("utf-8")
         lt = registry.get_by_arrow_extension_name(ext_name)
         if lt is not None:
+            # The stored metadata is half of the type's identifier: wrap the
+            # column only when the registered type declares it can read it.
+            try:
+                require_readable(lt, field_meta.get(b"ARROW:extension:metadata", b""))
+            except LogicalTypeIdentifierError as exc:
+                raise exc.for_column(field.name) from exc
             ext_type = lt.get_arrow_extension_type()
             wrapped_chunks = [
                 pa.ExtensionArray.from_storage(ext_type, chunk) for chunk in col.chunks

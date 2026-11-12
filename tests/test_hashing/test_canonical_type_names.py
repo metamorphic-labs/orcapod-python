@@ -133,7 +133,10 @@ class TestCanonicalAnnotationStrings:
 
     def test_registered_logical_type_still_wins(self):
         tc = get_default_context().type_converter
-        assert canonical_annotation_str(P.Path, tc) == "orcapod.path"
+        assert (
+            canonical_annotation_str(P.Path, tc)
+            == "orcapod.path;7b2276657273696f6e223a317d"
+        )
         assert canonical_annotation_str(P.PurePath, tc) == "pathlib.PurePath"
 
 

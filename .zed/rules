@@ -233,6 +233,30 @@ commands (pytest on Python 3.11, 3.12 and 3.13; the others on 3.11):
 - The Graphviz `dot` binary is optional. The tests that render a graph to an image skip
   when `dot` is not on `PATH` and run when it is.
 
+## Logical type identifiers
+
+A logical type's identifier is its Arrow extension name plus its Arrow extension metadata
+(developer, November 11, 2026, ITL-935/ITL-938); see `docs/concepts/logical-type-identifiers.md`.
+
+- The identifier is declared in one place, the extension type returned by
+  `get_arrow_extension_type()`, and read through `logical_types/identifier.py`
+  (`logical_type_identifier`, `LogicalTypeIdentifier.text`). Never put a logical type's bare
+  name into a hash input: use the identifier text.
+- Change a type's identifier when, and only when, an existing value would be stored or hashed
+  differently. It is not a package version. Built-in types use `version_metadata(N)`
+  (`{"version":N}`); a new built-in type must write one, never empty metadata.
+- A changed identifier is a schema change: it moves stored paths and golden values of that
+  type. Treat it like any other hash change (developer approval, migration assessment).
+- The native containers `list[T]` / `set[T]` of a logical type (`ListLogicalType`) have no
+  version of their own, by design: never add a `"version"` key to their metadata. Their
+  identifier is the container kind plus the element's identifier; the type hash treats them
+  like any generic alias (origin and arguments). A change to how they are stored or hashed is
+  a data context (global hash version) change, not a logical type change.
+- On read, stored metadata must be one of the type's `readable_extension_metadata()`;
+  otherwise raise `LogicalTypeIdentifierError`. Never wrap a stored column by name alone and
+  never fall back to the storage type. List an older value in `also_reads` only when the
+  current code decodes that layout.
+
 ## Golden hash values
 
 Hash values must stay identical across releases (developer, November 10, 2026). Every hash

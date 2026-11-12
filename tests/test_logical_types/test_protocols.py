@@ -22,6 +22,9 @@ class _StubLogicalType:
     def python_type(self) -> type:
         return str
 
+    def readable_extension_metadata(self):
+        return (self.get_arrow_extension_type().__arrow_ext_serialize__(),)
+
     def get_arrow_extension_type(self) -> pa.ExtensionType:
         return self._ArrowExtClass()
 
@@ -114,6 +117,9 @@ def test_logical_type_python_to_storage_accepts_converter():
         @property
         def python_type(self):
             return str
+
+        def readable_extension_metadata(self):
+            return (b"",)
 
         def get_arrow_extension_type(self):
             pass

@@ -19,6 +19,13 @@ will be auto-registered on pod declaration.
 
 from __future__ import annotations
 
+from .identifier import (
+    LogicalTypeIdentifier,
+    LogicalTypeIdentifierError,
+    arrow_type_identifier,
+    logical_type_identifier,
+    version_metadata,
+)
 from .protocols import LogicalTypeProtocol, LogicalTypeFactoryProtocol
 from .registry import (
     LogicalTypeRegistry,
@@ -54,6 +61,12 @@ __all__ = [
     "LogicalTypeRegistry",
     "make_arrow_extension_type",
     "make_polars_extension_type",
+    # ITL-935
+    "LogicalTypeIdentifier",
+    "LogicalTypeIdentifierError",
+    "arrow_type_identifier",
+    "logical_type_identifier",
+    "version_metadata",
     # PLT-1654
     "ExtensionTypeInfo",
     "walk_schema",

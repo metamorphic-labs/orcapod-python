@@ -10,6 +10,7 @@ import pytest
 from pathlib import Path
 
 from orcapod.logical_types.file_type import File
+from orcapod.logical_types.identifier import arrow_type_identifier
 from orcapod.logical_types.builtin_logical_types import LogicalPath
 from orcapod.logical_types.list_logical_type_factory import ListLogicalType
 from orcapod.hashing.visitors import SemanticHashingVisitor
@@ -129,8 +130,8 @@ class TestSemanticHashingVisitorExtension:
 
         assert b"::" in hash_bytes
         type_prefix, hash_part = hash_bytes.split(b"::", 1)
-        # Extension name "orcapod.file" → dots replaced with colons
-        assert type_prefix == b"orcapod:file"
+        # Extension name "orcapod.file" → then ';' and the extension metadata in hex
+        assert type_prefix == b"orcapod.file;7b2276657273696f6e223a317d"
         # hash_part is the raw digest of the value hash; its label is not included
         assert hash_part == ctx.semantic_hasher.hash_object(File(file)).digest
 
@@ -303,14 +304,18 @@ class TestListExtensionHashing:
         # Combined format: b"<outer_type_name>::<elem_hashes>"
         assert b"::" in new_data
         type_prefix, _ = new_data.split(b"::", 1)
-        assert type_prefix == b"list[orcapod:file]"
+        # The outer prefix is the wrapper's whole identifier (name and metadata).
+        assert type_prefix == arrow_type_identifier(list_ext_type).text.encode()
+        assert type_prefix.startswith(b"list[orcapod.file];")
 
     def test_list_file_extension_embeds_per_element_scalar_hashes(self, ctx, tmp_path):
         """The combined list hash embeds each element's scalar hash.
 
-        Combined format: b"<outer_type_name>::<h0>\\x00<h1>"
-        where h0 and h1 are the scalar visit results for the same files.
-        Splitting the suffix by \\x00 recovers individual element hashes.
+        Combined format: the outer type's identifier text, ``::``, the element
+        count as an 8-byte little-endian integer, then per element the byte
+        ``01``, the token length (8 bytes, little-endian) and the token, where
+        the tokens are the scalar visit results for the same files (a null
+        element is the single byte ``00``).
         """
         f0 = tmp_path / "contract0.txt"
         f0.write_text("content zero")
@@ -324,16 +329,24 @@ class TestListExtensionHashing:
 
         visitor = SemanticHashingVisitor(ctx.type_converter, ctx.semantic_hasher)
 
-        # Scalar hashes — b"orcapod:file::<method>:<digest>" each
+        # Scalar hashes — b"<identifier text of orcapod.file>::<method>:<digest>" each
         _, h0_bytes = visitor.visit(scalar_ext_type, s0)
         _, h1_bytes = visitor.visit(scalar_ext_type, s1)
 
-        # List hash — b"list[orcapod:file]::<h0>\x00<h1>"
         _, combined = visitor.visit(list_ext_type, [s0, s1])
 
-        # Strip outer type prefix and split to recover per-element hashes
-        suffix = combined.split(b"::", 1)[1]  # b"<h0>\x00<h1>"
-        elem_hashes = suffix.split(b"\x00")
+        # Strip the outer type prefix and decode the counted, length-prefixed elements.
+        suffix = combined.split(b"::", 1)[1]
+        count = int.from_bytes(suffix[:8], "little")
+        assert count == 2
+        elem_hashes = []
+        offset = 8
+        for _ in range(count):
+            assert suffix[offset : offset + 1] == b"\x01"
+            length = int.from_bytes(suffix[offset + 1 : offset + 9], "little")
+            elem_hashes.append(suffix[offset + 9 : offset + 9 + length])
+            offset += 9 + length
+        assert offset == len(suffix)
         assert elem_hashes[0] == h0_bytes, (
             "Embedded element 0 must equal the scalar hash of file 0"
         )
@@ -435,8 +448,11 @@ class TestListExtensionHashing:
 
         assert new_type == pa.large_binary()
         assert isinstance(new_data, bytes)
-        # Outer type name is "set[orcapod:file]" (dots replaced with colons)
-        assert new_data.startswith(b"set[orcapod:file]::")
+        # The outer prefix is the wrapper's whole identifier (name and metadata).
+        assert new_data.startswith(
+            arrow_type_identifier(set_ext_type).text.encode() + b"::"
+        )
+        assert new_data.startswith(b"set[orcapod.file];")
 
     def test_list_and_set_file_extension_produce_distinct_hashes(self, ctx, tmp_path):
         """list[File] and set[File] with identical contents must hash differently.
@@ -554,4 +570,4 @@ class TestListExtensionHashing:
         )
         files_combined = new_data["files"]
         assert isinstance(files_combined, bytes)
-        assert files_combined.startswith(b"list[orcapod:file]::")
+        assert files_combined.startswith(b"list[orcapod.file];")

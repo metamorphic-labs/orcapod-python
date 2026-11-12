@@ -1523,27 +1523,27 @@ class TestTypeObjectHandlerWithRegistry:
         import orcapod as op
 
         result = handler.handle(op.File, hasher)
-        assert result == "type:orcapod.file"
+        assert result == "type:orcapod.file;7b2276657273696f6e223a317d"
 
     def test_registered_directory_returns_canonical_name(self, handler, hasher):
         import orcapod as op
 
         result = handler.handle(op.Directory, hasher)
-        assert result == "type:orcapod.directory"
+        assert result == "type:orcapod.directory;7b2276657273696f6e223a317d"
 
     def test_registered_path_returns_canonical_name(self, handler, hasher):
         """pathlib.Path (op.Path) resolves to 'type:orcapod.path', not 'type:pathlib.Path'."""
         from pathlib import Path
 
         result = handler.handle(Path, hasher)
-        assert result == "type:orcapod.path"
+        assert result == "type:orcapod.path;7b2276657273696f6e223a317d"
 
     def test_registered_uuid_returns_canonical_name(self, handler, hasher):
         """uuid.UUID (op.UUID) resolves to 'type:orcapod.uuid', not 'type:uuid.UUID'."""
         import uuid
 
         result = handler.handle(uuid.UUID, hasher)
-        assert result == "type:orcapod.uuid"
+        assert result == "type:orcapod.uuid;7b2276657273696f6e223a317d"
 
     def test_unregistered_type_falls_back_to_module_qualname(self, handler, hasher):
         result = handler.handle(int, hasher)

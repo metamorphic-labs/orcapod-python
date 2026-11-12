@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from orcapod.hashing.semantic_hashing.encoded import Encoded
+from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
 
@@ -86,8 +87,12 @@ class TypeObjectHandler:
     """Hasher for type objects (classes passed as values).
 
     Resolves types registered in the ``LogicalTypeRegistry`` exposed by
-    *type_converter* to their stable ``logical_type_name``
-    (e.g. ``"type:orcapod.file"`` for ``op.File``).
+    *type_converter* to their logical type identifier, the Arrow extension name
+    and extension metadata, written as ``LogicalTypeIdentifier.text``
+    (``"type:orcapod.file;7b2276657273696f6e223a317d"`` for ``op.File``:
+    the name, ``;``, then the metadata ``{"version":1}`` in hex). A change of
+    either part of the identifier therefore changes every type, schema,
+    function and pipeline hash the type takes part in.
     Falls back to ``"type:<module>.<qualname>"`` for unregistered types or
     when no ``type_converter`` is provided. The module is the canonical one
     from ``canonical_type_name``, so standard-library types that moved into a
@@ -97,7 +102,7 @@ class TypeObjectHandler:
     Args:
         type_converter: Optional ``TypeConverterProtocol``.  When provided,
             ``type_converter.get_logical_type(obj)`` is called to resolve
-            registered logical types to their stable canonical name.  When
+            registered logical types to their identifier.  When
             ``None`` (the default), the fallback ``"type:<module>.<qualname>"``
             serialisation is always used.
     """
@@ -113,7 +118,7 @@ class TypeObjectHandler:
         if self._type_converter is not None:
             lt = self._type_converter.get_logical_type(obj)
             if lt is not None:
-                return f"type:{lt.logical_type_name}"
+                return f"type:{logical_type_identifier(lt).text}"
         return f"type:{canonical_type_name(obj)}"
 
 
@@ -209,8 +214,8 @@ class SchemaHandler:
 
     Canonical, explicit path for schema hashing. For each field, hashes the Python
     type via ``hasher.hash_object`` (which dispatches to ``TypeObjectHandler``, using
-    the stable ``logical_type_name`` / Arrow extension name for registered types and the
-    stable ``builtins.*`` / stdlib path for native types). Field names are sorted so the
+    the logical type identifier, Arrow extension name and metadata, for registered types
+    and the stable ``builtins.*`` / stdlib path for native types). Field names are sorted so the
     hash is deterministic regardless of insertion order.
 
     This produces the same hash as the previous accidental path through ``_expand_mapping``
