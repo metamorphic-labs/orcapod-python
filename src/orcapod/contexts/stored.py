@@ -21,11 +21,10 @@ the path, up to the name of the function or pod, holds no hash: the tables under
 are listed (``list_table_paths``), and a table whose last path component is not one of
 the current layouts (``CURRENT_LAYOUTS``) was written before v0.3 (ITL-954).
 
-To list the data contexts a stored table holds::
-
-    from orcapod.contexts import stored_data_contexts
-
-    stored_data_contexts(store, record_path)  # {"std:v1:default": 3}
+Example:
+    To list the data contexts a stored table holds, call
+    ``stored_data_contexts(store, record_path)`` (from ``orcapod.contexts``); it
+    returns, for example, ``{"std:v1:default": 3}``.
 """
 
 from __future__ import annotations
@@ -277,13 +276,35 @@ class _RecordStore(Protocol):
     """The part of ``ArrowDatabaseProtocol`` this module needs (no import cycle)."""
 
     @property
-    def base_path(self) -> tuple[str, ...]: ...
+    def base_path(self) -> tuple[str, ...]:
+        """Path of this store's view from the root of the underlying store."""
+        ...
 
-    def table_exists(self, record_path: tuple[str, ...]) -> bool: ...
+    def table_exists(self, record_path: tuple[str, ...]) -> bool:
+        """Return whether a table is stored at ``record_path``.
+
+        Args:
+            record_path: Path of the table, relative to ``base_path``.
+
+        Returns:
+            True if the store holds a table at that path.
+        """
+        ...
 
     def get_all_records(
         self, record_path: tuple[str, ...], record_id_column: str | None = None
-    ) -> "pa.Table | None": ...
+    ) -> "pa.Table | None":
+        """Return every row of the table at ``record_path``.
+
+        Args:
+            record_path: Path of the table, relative to ``base_path``.
+            record_id_column: Name of a column to add holding each row's record
+                id; no such column when ``None``.
+
+        Returns:
+            The rows as an Arrow table, or ``None`` if there are none.
+        """
+        ...
 
 
 class StaleTable(NamedTuple):

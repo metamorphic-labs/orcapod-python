@@ -64,15 +64,18 @@ def build_job(
 
     @function_pod(output_keys="m")
     def plus_one(n: int) -> int:
+        """Return ``n + 1`` and record ``n`` in ``COMPUTED``."""
         COMPUTED.append(n)
         return n + 1
 
     @function_pod(output_keys="p")
     def plus_two(m: int) -> int:
+        """Return ``m + 2``."""
         return m + 2
 
     @function_pod(output_keys="sent", ctx_arg="ctx")
     def notify(m: int, ctx: Any) -> int:
+        """Record ``m`` in ``NOTIFIED`` and return it; takes the invocation context."""
         NOTIFIED.append(m)
         return m
 

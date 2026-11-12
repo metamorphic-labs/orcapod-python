@@ -875,7 +875,17 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     """
 
     def __init__(self, data_function: DataFunctionProtocol, **kwargs) -> None:
+        """Wrap ``data_function``.
+
+        Args:
+            data_function: The data function to wrap.
+            **kwargs: Passed on to ``DataFunctionBase``. Without a ``data_context``
+                the wrapper works under the wrapped function's data context, so
+                that what it hashes and stores agrees with the function's data.
+        """
         self._data_function = data_function
+        if kwargs.get("data_context") is None:
+            kwargs["data_context"] = getattr(data_function, "data_context", None)
         super().__init__(**kwargs)
 
     def computed_label(self) -> str | None:

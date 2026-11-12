@@ -840,7 +840,7 @@ class OperatorJobNode(OperatorNodeBase):
                 f"column {col_name!r} has type {col_type!r}, expected large_binary. "
                 "This table was written by an older version of the code that stored "
                 "this column as large_string. Drop and recreate the affected pipeline "
-                "DB tables (see DESIGN_ISSUES.md ON1)."
+                "DB tables (see design_issues/ ON1)."
             )
         own_hash = self.content_hash().to_prefixed_digest()
         mask = pc.equal(table.column(col_name), own_hash)
@@ -1362,6 +1362,13 @@ class OperatorJobNode(OperatorNodeBase):
             # OFF or LOG: delegate to operator, forward results downstream
             intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
             should_collect = self._cache_mode == CacheMode.LOG
+            if should_collect:
+                # Rows are forwarded while the operator runs, so an input this node
+                # will refuse to store must be refused before the first row leaves.
+                for input_stream in self._input_streams:
+                    require_same_data_context(
+                        input_stream.data_context_key, self.data_context_key
+                    )
             collected: list[tuple[TagProtocol, DataProtocol]] = []
 
             async def forward() -> None:

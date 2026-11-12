@@ -87,9 +87,13 @@ def _s3fs_options(storage_options: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _list_local_directory(directory: str) -> list[str]:
-    """Return the names of the subdirectories of a local directory."""
+    """Return the names of the subdirectories of a local directory.
+
+    A symbolic link to a directory is not a subdirectory here: following one that
+    points at an ancestor would send the table walk in circles.
+    """
     with os.scandir(directory) as entries:
-        return [entry.name for entry in entries if entry.is_dir()]
+        return [entry.name for entry in entries if entry.is_dir(follow_symlinks=False)]
 
 
 def _join_local_path(directory: str, name: str) -> str:
@@ -103,14 +107,22 @@ def _join_cloud_path(directory: str, name: str) -> str:
 
 
 def _stored_component(directory_name: str) -> str:
-    """Return the path component a directory name stands for.
+    """Return the path component a local directory name stands for.
 
     The inverse of ``DeltaTableDatabase._sanitize_path_component``: on Windows a
-    ``:`` is stored as ``!``.
+    ``:`` is stored as ``!``. Cloud paths are stored unchanged and need no inverse.
     """
     if sys.platform == "win32":
         return directory_name.replace("!", ":")
     return directory_name
+
+
+def _allows_http(storage_options: Mapping[str, str]) -> bool:
+    """Return whether deltalake's ``AWS_ALLOW_HTTP`` option is switched on."""
+    for key, value in storage_options.items():
+        if key.lower() in ("aws_allow_http", "allow_http"):
+            return str(value).strip().lower() in ("true", "1", "yes", "on")
+    return False
 
 
 def _comparable_storage_type(arrow_type: pa.DataType) -> pa.DataType:
@@ -635,6 +647,7 @@ class DeltaTableDatabase:
             start = self._root_uri.split("://", 1)[1].rstrip("/")
             start = "/".join((start,) + full_prefix)
             join = _join_cloud_path
+            component = str
         else:
             list_directory = _list_local_directory
             start = str(
@@ -643,6 +656,7 @@ class DeltaTableDatabase:
                 )
             )
             join = _join_local_path
+            component = _stored_component
 
         found: list[tuple[str, ...]] = []
         # Directories still to visit, each with its path below ``prefix``.
@@ -664,9 +678,7 @@ class DeltaTableDatabase:
                 if name == _DELTA_LOG_DIRECTORY:
                     found.append(prefix + below)
                 else:
-                    to_visit.append(
-                        (join(directory, name), below + (_stored_component(name),))
-                    )
+                    to_visit.append((join(directory, name), below + (component(name),)))
         return sorted(found)
 
     def _cloud_directory_lister(self) -> "Callable[[str], list[str]]":
@@ -685,6 +697,22 @@ class DeltaTableDatabase:
         scheme = self._root_uri.split("://", 1)[0].lower()
         protocol = "s3" if scheme == "s3a" else scheme
         options = _s3fs_options(self._storage_options) if protocol == "s3" else {}
+        endpoint = str(options.get("client_kwargs", {}).get("endpoint_url", ""))
+        if protocol == "s3" and not endpoint:
+            # Without an endpoint in the storage options the file system takes it
+            # from the environment: fsspec's setting first, then the AWS one.
+            endpoint = os.environ.get("FSSPEC_S3_ENDPOINT_URL") or os.environ.get(
+                "AWS_ENDPOINT_URL", ""
+            )
+        if endpoint.lower().startswith("http://") and not _allows_http(
+            self._storage_options
+        ):
+            # deltalake refuses a plain-HTTP endpoint unless AWS_ALLOW_HTTP is set;
+            # the listing follows the same rule and sends no credentials over it.
+            raise TableListingNotSupportedError(
+                f"The Delta store at {self._root_uri!r} cannot list its tables: its "
+                "endpoint uses plain HTTP and AWS_ALLOW_HTTP is not set."
+            )
         try:
             # No listing cache: tables written since the last call must be seen.
             file_system = fsspec.filesystem(
@@ -698,6 +726,7 @@ class DeltaTableDatabase:
             ) from exc
 
         def list_directory(directory: str) -> list[str]:
+            """Return the names of the subdirectories of a cloud directory."""
             entries = file_system.ls(directory, detail=True)
             return [
                 str(entry["name"]).rstrip("/").rsplit("/", 1)[-1]

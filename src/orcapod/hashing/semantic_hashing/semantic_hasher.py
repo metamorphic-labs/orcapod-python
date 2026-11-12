@@ -113,22 +113,18 @@ _MEMADDR_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
 class SemanticAwarePythonHasher:
-    """
-    Content-based recursive hasher.
+    """Content-based recursive hasher.
 
-    Parameters
-    ----------
-    hasher_id:
-        The label (``ContentHash.method``) of every hash produced. Defaults to
-        ``SEMANTIC_HASH_LABEL``, the label of this algorithm; pass another value
-        only for a hasher that is not the data context's (a test hasher).
-    type_handler_registry:
-        ``HandlerRegistryProtocol`` for MRO-aware lookup of
-        ``PythonTypeHandlerProtocol`` instances.
-        If None, the default registry is used.
-    strict:
-        When True (default) raises TypeError for unhandled types.
-        When False falls back to a best-effort string representation.
+    Args:
+        hasher_id: The label (``ContentHash.method``) of every hash produced.
+            Defaults to ``SEMANTIC_HASH_LABEL``, the label of this algorithm; pass
+            another value only for a hasher that is not the data context's (a test
+            hasher).
+        type_handler_registry: ``HandlerRegistryProtocol`` for MRO-aware lookup of
+            ``PythonTypeHandlerProtocol`` instances. If None, the default registry
+            is used.
+        strict: When True (default) raises TypeError for unhandled types. When
+            False falls back to a best-effort string representation.
     """
 
     def __init__(

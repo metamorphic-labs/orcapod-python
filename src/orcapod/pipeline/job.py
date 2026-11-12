@@ -415,7 +415,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)
 
-    def _report_unclaimed_tables_written_before_v03(self) -> None:
+    def _report_unclaimed_tables_written_before_v03(
+        self, excluded_hashes: set[str]
+    ) -> None:
         """Report, once per run, the pre-v0.3 tables no node of this job reports itself.
 
         A function or side-effect node looks under its own name in the store and
@@ -424,12 +426,19 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         a change of hashes, and a node that left the job has no node to report it.
         This lists the tables stored under the job's name once and reports one
         total of what is left (ITL-954). The tables are not read.
+
+        Args:
+            excluded_hashes: Keys of the nodes this run leaves out (an unbound
+                source and everything downstream of it). Such a node does not
+                run, so it reports nothing itself and claims no table.
         """
         if self._store is None:
             return
         pipeline_db = self._store.at(*self._name)
         claimed: set[tuple[str, ...]] = set()
-        for node in (self._persistent_node_map or {}).values():
+        for node_hash, node in (self._persistent_node_map or {}).items():
+            if node_hash in excluded_hashes:
+                continue
             if isinstance(node, FunctionJobNode):
                 name_path = node.node_name_path
                 if name_path:
@@ -883,8 +892,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "original pipeline definition."
             )
 
-        self._report_unclaimed_tables_written_before_v03()
-
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         hash_dag: OrcaDAG[str] = OrcaDAG()
         for u, v in self._graph_edges:
@@ -903,6 +910,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 excluded_hashes.add(node_hash)
             elif any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
                 excluded_hashes.add(node_hash)
+
+        self._report_unclaimed_tables_written_before_v03(excluded_hashes)
 
         # --- Build execution OrcaDAG from existing node objects (no cloning) ---
         exec_dag: OrcaDAG = OrcaDAG()

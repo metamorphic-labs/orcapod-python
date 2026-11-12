@@ -67,7 +67,7 @@ Where a hash appears, and in which form:
 | Labelled value | `__input_data_hash`, `__output_data_hash`, `__node_content_hash`, `__pipeline_base_entry_id`, the pipeline table's record id, the side-effect log's `record_id` and `record_id_hash`, the record id (`_record_hash`) of operator-node and cached-source tables, the `_content_hash` column, the hashes in a saved job file, `InvocationContext.invocation_hash` |
 | Bare digest in a name | the function `uri` (its second component), the path components `schema:<pipeline digest>`, `instance:<content digest>` and `node:<content digest>`, system-tag column names, the operator `uri`, the default source id built from a table hash, the function `uri` at the start of a function output's source-info token |
 | Labelled hash inside a source id | the default source id of a `DerivedSource` (`derived:<label>:<hex>`) and of `node.as_source()` (`<node path>:<label>:<hex>`) |
-| Digest only, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "digest": "<hex>"}`; an extension-typed cell in a table: `b"<extension name>::" + digest`; the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the leaf digests of the run snapshot hash (site 13) |
+| Digest only, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "digest": "<hex>"}`; an extension-typed cell in a table: `b"<extension name>;<hex of the extension metadata>::" + digest` (the logical type's whole identifier, which the hashed field also keeps as its extension name and metadata, so the type is part of the hash of a column with no value too); the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the leaf digests of the run snapshot hash (site 13) |
 
 A function node's table in v0.3, with the values it stores:
 
@@ -743,7 +743,7 @@ produced it. The label is not part of any hash input (see
 A `numpy.ndarray` value is hashed by value (since v0.3, ITL-888). The semantic hasher's
 `NumpyArrayHandler` returns `ContentHash(method="ndarray_v1", digest=D)`, where `D` is the
 version-1 array digest of the array's stored row. Inside a table hash, an array cell becomes
-the token `b"orcapod:ndarray::" + D`: the extension name, then the digest, without the label. The stored row, the dtype tags and the canonical form are described in
+the token `b"orcapod.ndarray;7b2276657273696f6e223a317d::" + D`: the logical type's identifier (the extension name, `;`, the extension metadata `{"version":1}` in hex), then the digest, without the label. The stored row, the dtype tags and the canonical form are described in
 [NumPy Arrays](../concepts/arrays.md).
 
 For a stored row with dtype tag `T`, shape `(d0, ..., dn-1)` and data bytes `B`:

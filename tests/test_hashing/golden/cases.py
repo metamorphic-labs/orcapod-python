@@ -1152,3 +1152,140 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Group: arrow — value-hashed logical types in a column that holds no value
+# ---------------------------------------------------------------------------
+
+
+@case("arrow", "extension_no_values")
+def arrow_extension_columns_without_values() -> dict[str, Any]:
+    """Table hashes of value-hashed logical-type columns with zero rows or nulls only.
+
+    Such a column has no cell token, so its logical type enters the hash through
+    the hashed field alone (ITL-967). Every entry differs from every other and from
+    the plain ``large_binary`` entries.
+    """
+    import orcapod as op
+
+    ctx = _ctx()
+    types: dict[str, Any] = {
+        "uuid": uuid.UUID,
+        "file": op.File,
+        "directory": op.Directory,
+        "ndarray": np.ndarray,
+        "dataframe": pd.DataFrame,
+        "series": pd.Series,
+        "list_of_file": list[op.File],
+        "set_of_uuid": set[uuid.UUID],
+    }
+    entries: dict[str, Any] = {}
+    for rows, label in ((0, "zero_rows"), (2, "all_null")):
+        for name, python_type in types.items():
+            arrow_type = ctx.type_converter.python_type_to_arrow_type(python_type)
+            storage = pa.array([None] * rows, arrow_type.storage_type)
+            column = pa.ExtensionArray.from_storage(arrow_type, storage)
+            entries[f"{label}.{name}"] = ctx.arrow_hasher.hash_table(
+                pa.table({"c": column})
+            ).to_string()
+        entries[f"{label}.plain_large_binary"] = ctx.arrow_hasher.hash_table(
+            pa.table({"c": pa.array([None] * rows, pa.large_binary())})
+        ).to_string()
+    return entries
+
+
+def _nullable_readings() -> Any:
+    """A source with a nullable tag and two nullable data columns, each with a null."""
+    from orcapod.sources import ArrowTableSource
+
+    table = pa.table(
+        {
+            "k": pa.array(["r1", "r2", "r3", "r4"], pa.large_string()),
+            "site": pa.array(["a", "b", "c", None], pa.large_string()),
+            "x": pa.array([1, None, 3, 4], pa.int64()),
+            "y": pa.array([1.5, 2.5, None, 4.5], pa.float64()),
+        },
+        schema=pa.schema(
+            [
+                pa.field("k", pa.large_string(), nullable=False),
+                pa.field("site", pa.large_string(), nullable=True),
+                pa.field("x", pa.int64(), nullable=True),
+                pa.field("y", pa.float64(), nullable=True),
+            ]
+        ),
+    )
+    return ArrowTableSource(
+        table, tag_columns=["k", "site"], source_id="golden_nullable"
+    )
+
+
+@case("pipeline", "drop_nulls")
+def pipeline_drop_nulls() -> dict[str, Any]:
+    """Pin ``DropNulls``: the operator's own identity and the narrowed rows."""
+    from orcapod.operators import DropNulls
+
+    out = _prefixed("source", stream_summary(_nullable_readings()))
+    out["operator[x].content_hash"] = DropNulls("x").content_hash().to_string()
+    out["operator[x,y].content_hash"] = DropNulls(["y", "x"]).content_hash().to_string()
+    out.update(_prefixed("data", stream_summary(DropNulls("x")(_nullable_readings()))))
+    out.update(
+        _prefixed(
+            "data_many", stream_summary(DropNulls(["x", "y"])(_nullable_readings()))
+        )
+    )
+    out.update(
+        _prefixed("tag", stream_summary(_nullable_readings().drop_nulls("site")))
+    )
+    return out
+
+
+@case("pipeline", "drop_nulls_all")
+def pipeline_drop_nulls_all() -> dict[str, Any]:
+    """Pin the no-argument ``DropNulls``: its fixed identity and the narrowed rows."""
+    from orcapod.operators import DropNulls
+
+    out: dict[str, Any] = {}
+    out["operator[all].content_hash"] = DropNulls().content_hash().to_string()
+    out["operator[all].pipeline_hash"] = DropNulls().pipeline_hash().to_string()
+    out.update(_prefixed("all", stream_summary(DropNulls()(_nullable_readings()))))
+    out.update(_prefixed("method", stream_summary(_nullable_readings().drop_nulls())))
+    return out
+
+
+@case("pipeline", "drop_nulls_job")
+def pipeline_drop_nulls_job() -> dict[str, Any]:
+    """Record a job with ``DropNulls`` upstream of a pod with non-optional parameters."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="golden_drop_null_job", store=db)
+    with job:
+        present = (
+            _nullable_readings()
+            .drop_nulls(["x", "y"], label="present")
+            .map_data({"x": "age", "y": "weight"}, label="renamed")
+        )
+        golden_ratio.pod(present, label="ratio")
+    job.run()
+
+    out: dict[str, Any] = {}
+    for label in sorted(job.nodes):
+        out.update(_prefixed(f"node[{label}]", stream_summary(job.nodes[label])))
+    paths = sorted(db.list_sources())
+    out["table_paths"] = ["/".join(p) for p in paths]
+    for path in paths:
+        name = "/".join(path)
+        records = db.get_all_records(path, record_id_column="__golden_record_id")
+        assert records is not None
+        if "__input_data_hash" in records.column_names and "_result" in path:
+            # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
+            out[f"table[{name}].input_data_hashes"] = sorted(
+                _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        else:
+            out[f"table[{name}].record_ids"] = sorted(
+                _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
+            )
+    return out

@@ -55,6 +55,7 @@ def make_store(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[], S
     shared = InMemoryArrowDatabase()
 
     def make() -> Store:
+        """Return a new store object over the same underlying storage."""
         if request.param == "in_memory":
             return shared
         if request.param == "delta":
@@ -65,11 +66,17 @@ def make_store(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[], S
 
 
 class TestEveryBackend:
+    """Listing behaviour that every store from the ``make_store`` fixture shares."""
+
     def test_lists_every_table_sorted(self, make_store: Callable[[], Store]):
+        """Without a prefix, a second store object lists every written path in sorted
+        order.
+        """
         _fill(make_store())
         assert make_store().list_table_paths() == sorted(PATHS)
 
     def test_prefix_keeps_the_tables_below_it(self, make_store: Callable[[], Store]):
+        """A prefix lists only the tables under it, at any depth."""
         _fill(make_store())
         assert make_store().list_table_paths(("job", "double")) == [
             ("job", "double", "h1"),
@@ -80,6 +87,7 @@ class TestEveryBackend:
     def test_a_table_at_the_prefix_itself_is_listed(
         self, make_store: Callable[[], Store]
     ):
+        """A table whose path equals the prefix is listed with the tables below it."""
         _fill(make_store())
         assert make_store().list_table_paths(("job", "double", "h1")) == [
             ("job", "double", "h1"),
@@ -87,16 +95,19 @@ class TestEveryBackend:
         ]
 
     def test_prefix_without_tables_gives_nothing(self, make_store: Callable[[], Store]):
+        """A prefix with no table under it gives an empty list."""
         _fill(make_store())
         assert make_store().list_table_paths(("job", "missing")) == []
 
     def test_empty_store_gives_nothing(self, make_store: Callable[[], Store]):
+        """A store with no table gives an empty list, with or without a prefix."""
         assert make_store().list_table_paths() == []
         assert make_store().list_table_paths(("job",)) == []
 
     def test_scoped_view_lists_relative_to_its_base_path(
         self, make_store: Callable[[], Store]
     ):
+        """A view made with ``at`` lists paths without its base path components."""
         _fill(make_store())
         scoped = make_store().at("job")
         assert scoped.list_table_paths(("double",)) == [
@@ -107,11 +118,13 @@ class TestEveryBackend:
         assert scoped.at("_result").list_table_paths() == [("double", "h1", "rdb_v2")]
 
     def test_every_listed_path_is_a_table(self, make_store: Callable[[], Store]):
+        """``table_exists`` is true for every listed path."""
         _fill(make_store())
         store = make_store()
         assert all(store.table_exists(path) for path in store.list_table_paths())
 
     def test_listing_changes_nothing(self, make_store: Callable[[], Store]):
+        """The records of every table are the same before and after a listing."""
         _fill(make_store())
         store = make_store()
         before = {
@@ -123,19 +136,28 @@ class TestEveryBackend:
 
 
 class TestInMemory:
+    """Listing behaviour specific to ``InMemoryArrowDatabase``."""
+
     def test_tables_not_flushed_yet_are_listed(self):
+        """A table with a record added but not flushed is listed."""
         store = InMemoryArrowDatabase()
         store.add_record(("job", "f", "pdb_v2"), b"r", pa.table({"x": [1]}))
         assert store.list_table_paths(("job",)) == [("job", "f", "pdb_v2")]
 
 
 class TestDelta:
+    """Listing behaviour specific to ``DeltaTableDatabase``, local and cloud."""
+
     def test_hash_components_come_back_unchanged(self, tmp_path: Path):
+        """Path components containing ``:`` and ``.`` are listed exactly as written."""
         path = ("job", "f", "semantic_v0.1:ab12", "v0", "python.function.v0", "rdb_v1")
         _fill(DeltaTableDatabase(tmp_path), [path])
         assert DeltaTableDatabase(tmp_path).list_table_paths(("job", "f")) == [path]
 
     def test_directories_that_are_not_tables_are_not_listed(self, tmp_path: Path):
+        """A plain directory and a stray file under the root are left out of the
+        listing.
+        """
         _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v2")])
         (tmp_path / "job" / "f" / "notes").mkdir()
         (tmp_path / "job" / "stray.txt").write_text("x")
@@ -143,7 +165,16 @@ class TestDelta:
             ("job", "f", "pdb_v2")
         ]
 
+    def test_a_directory_symlink_is_not_followed(self, tmp_path: Path):
+        """A link to an ancestor does not send the walk in circles."""
+        _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v2")])
+        (tmp_path / "job" / "loop").symlink_to(tmp_path, target_is_directory=True)
+        assert DeltaTableDatabase(tmp_path).list_table_paths() == [
+            ("job", "f", "pdb_v2")
+        ]
+
     def test_missing_root_gives_nothing(self, tmp_path: Path):
+        """A store whose root directory does not exist gives an empty list."""
         assert DeltaTableDatabase(tmp_path / "absent").list_table_paths() == []
 
     @pytest.mark.skipif(
@@ -151,6 +182,7 @@ class TestDelta:
         reason="gcsfs is installed, so gs:// can be listed",
     )
     def test_cloud_store_without_a_file_system_package_cannot_list(self):
+        """A ``gs://`` store raises ``TableListingNotSupportedError`` naming ``gs``."""
         store = DeltaTableDatabase("gs://bucket/root")
         with pytest.raises(TableListingNotSupportedError, match="gs"):
             store.list_table_paths(("job",))
@@ -171,6 +203,7 @@ class TestDeltaOnCloudStorage:
         calls: list[dict[str, Any]] = []
 
         def filesystem(protocol: str, **options: object) -> DirFileSystem:
+            """Record the call and return a local file system rooted at ``tmp_path``."""
             calls.append({"protocol": protocol, **options})
             return DirFileSystem(path=str(tmp_path), fs=LocalFileSystem())
 
@@ -179,6 +212,9 @@ class TestDeltaOnCloudStorage:
         return calls
 
     def test_tables_and_nested_tables_are_listed(self, bucket: list[dict[str, Any]]):
+        """An ``s3://`` store lists tables under a prefix, through a scoped view, and
+        none for an absent prefix.
+        """
         store = DeltaTableDatabase("s3://bucket/root")
         assert store.list_table_paths(("job", "double")) == [
             ("job", "double", "h1"),
@@ -193,6 +229,9 @@ class TestDeltaOnCloudStorage:
     def test_s3fs_gets_the_credentials_of_the_storage_options(
         self, bucket: list[dict[str, Any]]
     ):
+        """The AWS storage options are passed to ``fsspec.filesystem`` as s3fs
+        arguments.
+        """
         store = DeltaTableDatabase(
             "s3a://bucket/root",
             storage_options={
@@ -218,13 +257,64 @@ class TestDeltaOnCloudStorage:
             }
         ]
 
+    def test_an_http_endpoint_is_listed_only_when_http_is_allowed(
+        self, bucket: list[dict[str, Any]]
+    ):
+        """Without ``AWS_ALLOW_HTTP`` the credentials are not sent over plain HTTP."""
+        options = {
+            "AWS_ACCESS_KEY_ID": "key-id",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "AWS_ENDPOINT_URL": "http://localhost:9000",
+        }
+        store = DeltaTableDatabase("s3://bucket/root", storage_options=options)
+        with pytest.raises(TableListingNotSupportedError, match="AWS_ALLOW_HTTP"):
+            store.list_table_paths()
+        assert bucket == []  # no file system was built, nothing was sent
+
+        allowed = DeltaTableDatabase(
+            "s3://bucket/root", storage_options={**options, "aws_allow_http": "TRUE"}
+        )
+        assert allowed.list_table_paths(("absent",)) == []
+        https = DeltaTableDatabase(
+            "s3://bucket/root",
+            storage_options={**options, "AWS_ENDPOINT_URL": "https://example.test"},
+        )
+        assert https.list_table_paths(("absent",)) == []
+
+    def test_an_http_endpoint_from_the_environment_follows_the_same_rule(
+        self, bucket: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ):
+        """An endpoint the file system would take from the environment is checked too."""
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "http://localhost:9000")
+        store = DeltaTableDatabase("s3://bucket/root")
+        with pytest.raises(TableListingNotSupportedError, match="AWS_ALLOW_HTTP"):
+            store.list_table_paths()
+        assert bucket == []
+
+        allowed = DeltaTableDatabase(
+            "s3://bucket/root", storage_options={"AWS_ALLOW_HTTP": "true"}
+        )
+        assert allowed.list_table_paths(("absent",)) == []
+        # An endpoint given in the storage options wins over the environment.
+        https = DeltaTableDatabase(
+            "s3://bucket/root",
+            storage_options={"AWS_ENDPOINT_URL": "https://example.test"},
+        )
+        assert https.list_table_paths(("absent",)) == []
+
     def test_a_listing_that_fails_means_the_store_cannot_list(
         self, monkeypatch: pytest.MonkeyPatch
     ):
+        """An error from the file system's ``ls`` is raised as
+        ``TableListingNotSupportedError`` with its message.
+        """
         import fsspec
 
         class Unreachable:
+            """A file system whose listing always fails."""
+
             def ls(self, path: str, detail: bool = True) -> list[dict[str, Any]]:
+                """Raise ``PermissionError`` for every listing."""
                 raise PermissionError("access denied")
 
         monkeypatch.setattr(fsspec, "filesystem", lambda *a, **k: Unreachable())
@@ -234,7 +324,12 @@ class TestDeltaOnCloudStorage:
 
 
 class TestConnector:
+    """Listing behaviour specific to ``ConnectorArrowDatabase``."""
+
     def test_components_after_the_prefix_come_back_sanitized(self, tmp_path: Path):
+        """Listed components are the sanitized names, and the sanitized path reads the
+        same table.
+        """
         store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "s.db")))
         path = ("job", "f", "semantic_v0.1:ab12", "v0", "python.function.v0", "rdb_v1")
         _fill(store, [path])
@@ -248,6 +343,9 @@ class TestConnector:
         assert records is not None and records.num_rows == 1
 
     def test_the_last_component_is_the_layout(self, tmp_path: Path):
+        """The last listed component is the sanitized last component of the written
+        path.
+        """
         store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "s.db")))
         _fill(
             store,
@@ -263,7 +361,10 @@ class TestConnector:
 
 
 class TestWrappers:
+    """Listing through ``ExtensionAwareDatabase`` and ``NoOpArrowDatabase``."""
+
     def test_extension_aware_database_delegates(self):
+        """The wrapper lists the same paths as the store it wraps."""
         inner = InMemoryArrowDatabase()
         _fill(inner)
         wrapper = ExtensionAwareDatabase(inner, UniversalTypeConverter())
@@ -272,6 +373,7 @@ class TestWrappers:
         )
 
     def test_no_op_database_holds_no_table(self):
+        """A ``NoOpArrowDatabase`` lists nothing even after a record is added."""
         store = NoOpArrowDatabase()
         store.add_record(("job", "f", "pdb_v2"), b"r", pa.table({"x": [1]}))
         assert store.list_table_paths() == []
@@ -280,6 +382,9 @@ class TestWrappers:
 
 @pytest.mark.minio
 def test_s3_lists_tables_and_nested_tables(s3_base_uri, s3_storage_options):
+    """A Delta store on a real S3 endpoint lists the tables under a prefix, nested ones
+    included.
+    """
     store = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
     _fill(store)
     listed = DeltaTableDatabase(

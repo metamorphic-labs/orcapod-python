@@ -9,9 +9,33 @@ with itself; hash labels inside names are left out for the same reason.
 Cause notation: `ITL-xxx(what)` where `what` is `digest` (the value's digest moved),
 `label` (only the label text in front of the digest), `layout` (only a table layout
 component inside the value) or `key` (the entry's name, which embeds a hash).
-ITL-954 moves nothing.
+ITL-954 moves nothing. Entries that ITL-939 and ITL-943 added on `main` after the six branches
+were cut have no per-merge states; their change under the hash step is listed as one step.
 
 ## `arrow.json`
+
+### `extension_no_values`
+
+| Entry | Entries | Status | Cause |
+|---|---|---|---|
+| `extension_no_values.all_null.dataframe` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.directory` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.file` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.list_of_file` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.ndarray` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.plain_large_binary` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.series` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.set_of_uuid` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.all_null.uuid` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.dataframe` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.directory` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.file` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.list_of_file` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.ndarray` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.plain_large_binary` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.series` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.set_of_uuid` | 1 | added | ITL-942 follow-up (ITL-967) |
+| `extension_no_values.zero_rows.uuid` | 1 | added | ITL-942 follow-up (ITL-967) |
 
 ### `extension_schema`
 
@@ -31,7 +55,7 @@ ITL-954 moves nothing.
 | `extension_table.extension.canonical_uuid` | 1 | added | ITL-910 |
 | `extension_table.extension.path` | 1 | value changed | ITL-910(digest), ITL-945(label), ITL-935(digest) |
 | `extension_table.extension.unregistered_passthrough` | 1 | value changed | ITL-910(digest), ITL-945(label) |
-| `extension_table.extension.uuid` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `extension_table.extension.uuid` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 
 ### `schema`
 
@@ -230,10 +254,10 @@ Unchanged in `arrow.json`: 0 entries.
 | `dataframe.pipeline_hash` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 | `dataframe.row[{"k":"r1"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `dataframe.row[{"k":"r1"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `dataframe.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `dataframe.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `dataframe.row[{"k":"r2"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `dataframe.row[{"k":"r2"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `dataframe.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `dataframe.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `dataframe.system_tag_columns` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 
 ### `list_path`
@@ -258,10 +282,10 @@ Unchanged in `arrow.json`: 0 entries.
 | `ndarray.pipeline_hash` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 | `ndarray.row[{"k":"r1"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `ndarray.row[{"k":"r1"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `ndarray.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `ndarray.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `ndarray.row[{"k":"r2"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `ndarray.row[{"k":"r2"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `ndarray.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `ndarray.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `ndarray.system_tag_columns` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 
 ### `nested`
@@ -342,10 +366,10 @@ Unchanged in `arrow.json`: 0 entries.
 | `set_uuid.pipeline_hash` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 | `set_uuid.row[{"k":"r1"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `set_uuid.row[{"k":"r1"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `set_uuid.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `set_uuid.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `set_uuid.row[{"k":"r2"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `set_uuid.row[{"k":"r2"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `set_uuid.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `set_uuid.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `set_uuid.system_tag_columns` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 
 ### `uuid`
@@ -356,10 +380,10 @@ Unchanged in `arrow.json`: 0 entries.
 | `uuid.pipeline_hash` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 | `uuid.row[{"k":"r1"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `uuid.row[{"k":"r1"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `uuid.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `uuid.row[{"k":"r1"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `uuid.row[{"k":"r2"}]._tag_record_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
 | `uuid.row[{"k":"r2"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key), ITL-935(key) |
-| `uuid.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest) |
+| `uuid.row[{"k":"r2"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(digest), ITL-935(digest), ITL-942 follow-up (ITL-967)(digest) |
 | `uuid.system_tag_columns` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 
 Unchanged in `datagram.json`: 0 entries.
@@ -425,6 +449,130 @@ Unchanged in `datagram.json`: 0 entries.
 | `column_selection.select_tag.row[{"cohort":"b"}]._tag_source_id::<H>` | 1 | key renamed only | ITL-945(key) |
 | `column_selection.select_tag.row[{"cohort":"b"}].data_hash` | 1 | value changed | ITL-910(digest), ITL-945(label) |
 | `column_selection.select_tag.system_tag_columns` | 1 | value changed | ITL-945(digest) |
+
+### `drop_nulls`
+
+| Entry | Entries | Status | Cause |
+|---|---|---|---|
+| `drop_nulls.data.content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data.pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data.row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data.row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data.row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data.row[{"k":"r3","site":"c"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data.row[{"k":"r3","site":"c"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data.row[{"k":"r3","site":"c"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data.row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data.row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data.row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data.system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data_many.content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data_many.pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data_many.row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data_many.row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data_many.row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data_many.row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data_many.row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.data_many.row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.data_many.system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.operator[x,y].content_hash` | 1 | label/layout text only | hash step on entries ITL-943 added on main(label) |
+| `drop_nulls.operator[x].content_hash` | 1 | label/layout text only | hash step on entries ITL-943 added on main(label) |
+| `drop_nulls.source.content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.source.pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.source.row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.source.row[{"k":"r2","site":"b"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r2","site":"b"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r2","site":"b"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.source.row[{"k":"r3","site":"c"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r3","site":"c"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r3","site":"c"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.source.row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.source.row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.source.system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.tag.content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.tag.pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.tag.row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.tag.row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.tag.row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.tag.row[{"k":"r2","site":"b"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.tag.row[{"k":"r2","site":"b"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.tag.row[{"k":"r2","site":"b"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.tag.row[{"k":"r3","site":"c"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.tag.row[{"k":"r3","site":"c"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls.tag.row[{"k":"r3","site":"c"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls.tag.system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+
+### `drop_nulls_all`
+
+| Entry | Entries | Status | Cause |
+|---|---|---|---|
+| `drop_nulls_all.all.content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.all.pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.all.row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_all.all.row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_all.all.row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.all.system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.method.content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.method.pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.method.row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_all.method.row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_all.method.row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.method.system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_all.operator[all].content_hash` | 1 | label/layout text only | hash step on entries ITL-943 added on main(label) |
+| `drop_nulls_all.operator[all].pipeline_hash` | 1 | label/layout text only | hash step on entries ITL-943 added on main(label) |
+
+### `drop_nulls_job`
+
+| Entry | Entries | Status | Cause |
+|---|---|---|---|
+| `drop_nulls_job.node[golden_nullable].content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[golden_nullable].pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r2","site":"b"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r2","site":"b"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r2","site":"b"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r3","site":"c"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r3","site":"c"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r3","site":"c"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[golden_nullable].row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[golden_nullable].system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[present].content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[present].pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[present].row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[present].row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[present].row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[present].row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[present].row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[present].row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[present].system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[ratio].content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[ratio].pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[ratio].row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[ratio].row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[ratio].row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[ratio].row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[ratio].row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[ratio].row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[ratio].system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[renamed].content_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[renamed].pipeline_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[renamed].row[{"k":"r1","site":"a"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[renamed].row[{"k":"r1","site":"a"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[renamed].row[{"k":"r1","site":"a"}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[renamed].row[{"k":"r4","site":null}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[renamed].row[{"k":"r4","site":null}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-943 added on main(key) |
+| `drop_nulls_job.node[renamed].row[{"k":"r4","site":null}].data_hash` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.node[renamed].system_tag_columns` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
+| `drop_nulls_job.table[golden_drop_null_job/_result/golden_ratio/<H>/v0/python.function.v0/rdb_vN].input_data_hashes` | 1 | value changed, key renamed | hash step on entries ITL-943 added on main(digest+key) |
+| `drop_nulls_job.table[golden_drop_null_job/golden_ratio/<H>/v0/python.function.v0/schema:<H>/pdb_vN].record_ids` | 1 | value changed, key renamed | hash step on entries ITL-943 added on main(digest+key) |
+| `drop_nulls_job.table_paths` | 1 | value changed | hash step on entries ITL-943 added on main(digest) |
 
 ### `group_by`
 
@@ -762,6 +910,49 @@ Unchanged in `pipeline.json`: 1 entries.
 | `compute_schema_hash.chars_16` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 | `compute_schema_hash.full` | 1 | value changed | ITL-945(digest), ITL-935(digest) |
 
+### `derived_source_tags_as_data`
+
+| Entry | Entries | Status | Cause |
+|---|---|---|---|
+| `derived_source_tags_as_data.default_source_id.content_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.default_source_id.pipeline_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s1"}]._tag_record_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s1"}]._tag_source_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s1"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s2"}]._tag_record_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s2"}]._tag_source_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s2"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s3"}]._tag_record_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s3"}]._tag_source_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.default_source_id.row[{"subject":"s3"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.default_source_id.source_id` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.default_source_id.system_tag_columns` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.named_source_id.content_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.named_source_id.pipeline_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s1"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-939 added on main(key) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s1"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-939 added on main(key) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s1"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s2"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-939 added on main(key) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s2"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-939 added on main(key) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s2"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s3"}]._tag_record_id::<H>` | 1 | key renamed only | hash step on entries ITL-939 added on main(key) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s3"}]._tag_source_id::<H>` | 1 | key renamed only | hash step on entries ITL-939 added on main(key) |
+| `derived_source_tags_as_data.named_source_id.row[{"subject":"s3"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.named_source_id.system_tag_columns` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.content_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.pipeline_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s1"}]._tag_record_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s1"}]._tag_source_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s1"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s2"}]._tag_record_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s2"}]._tag_source_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s2"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s3"}]._tag_record_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s3"}]._tag_source_id::<H>` | 1 | value changed, key renamed | hash step on entries ITL-939 added on main(digest+key) |
+| `derived_source_tags_as_data.record_id_column.row[{"subject":"s3"}].data_hash` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.source_id` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+| `derived_source_tags_as_data.record_id_column.system_tag_columns` | 1 | value changed | hash step on entries ITL-939 added on main(digest) |
+
 ### `multi_field`
 
 | Entry | Entries | Status | Cause |
@@ -852,7 +1043,7 @@ Unchanged in `pipeline.json`: 1 entries.
 | `source_stream_builder.record_id_column.system_tag_columns` | 1 | value changed | ITL-945(digest) |
 | `source_stream_builder.record_id_column.table_hash` | 1 | value changed | ITL-910(digest), ITL-945(label) |
 
-Unchanged in `schema.json`: 20 entries.
+Unchanged in `schema.json`: 21 entries.
 
 ## `semantic.json`
 

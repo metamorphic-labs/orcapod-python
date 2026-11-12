@@ -1,8 +1,9 @@
 ## ITL-935 — Logical type identifiers
 
 ### LTI1 — Logical type identifiers
-
-**Status:** resolved (v0.3)
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-935
 
 **Problem:** A logical type was identified in hashes by its name alone, and most built-in
 types wrote empty Arrow extension metadata, so there was no way to change a type's stored
