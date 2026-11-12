@@ -1701,18 +1701,31 @@ class DeltaTableDatabase:
                 assert base.ids is not None
                 incoming_ids = self._non_null_ids(combined_table)
                 inserted_ids = incoming_ids - base.ids
-                if len(inserted_ids) == len(incoming_ids) and self._stores_as_is(
-                    delta_table, combined_table
-                ):
-                    # Every pending id is new in the version just loaded and the rows
-                    # have the stored schema: append (ITL-919). A MERGE reads the whole
-                    # stored table on each commit; it remains for every other batch.
-                    deltalake.write_deltalake(
-                        table_uri,
-                        combined_table,
-                        mode="append",
-                        storage_options=self._storage_options or None,
-                    )
+                if self._stores_as_is(delta_table, combined_table):
+                    # The rows have the stored schema: append (ITL-919). A MERGE reads
+                    # the whole stored table on each commit; it remains for every
+                    # other batch. A row whose id is stored already is left out, as
+                    # the MERGE leaves it (ITL-984: the MERGE cannot take a large
+                    # list of large binary, so a batch holding stored ids is not
+                    # handed to it); a row with no id never matches, so it is kept.
+                    if len(inserted_ids) == len(incoming_ids):
+                        new_rows = combined_table
+                    else:
+                        is_stored = pc.is_in(
+                            combined_table[self.RECORD_ID_COLUMN],
+                            value_set=pa.array(
+                                sorted(base.ids),
+                                type=combined_table[self.RECORD_ID_COLUMN].type,
+                            ),
+                        )
+                        new_rows = combined_table.filter(pc.invert(is_stored))
+                    if new_rows.num_rows:
+                        deltalake.write_deltalake(
+                            table_uri,
+                            new_rows,
+                            mode="append",
+                            storage_options=self._storage_options or None,
+                        )
                 else:
                     # Some pending ids are stored already: insert only the others.
                     delta_table.merge(
@@ -1796,8 +1809,18 @@ class DeltaTableDatabase:
         Returns:
             Whether an append stores ``batch`` exactly as the MERGE would.
         """
+        # Delta stores a logical column as its storage type (ITL-984): compare that,
+        # or a batch with a logical list never equals the stored plain list.
+        schema = pa.schema(
+            [
+                f.with_type(f.type.storage_type)
+                if isinstance(f.type, pa.ExtensionType)
+                else f
+                for f in batch.schema
+            ]
+        )
         try:
-            incoming = _as_delta_writer_stores(batch.schema)
+            incoming = _as_delta_writer_stores(schema)
         except Exception:
             # A type Delta cannot store directly (null): leave it to the MERGE.
             return False
