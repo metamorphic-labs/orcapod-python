@@ -33,7 +33,14 @@ regeneration). Relative to `c4b1e4a7`:
   0 failed (3.12; 3.11 and 3.13 were green at the previous merge, 8593 passed each); ruff
   check and format clean; basedpyright exit 0; changelog fragments OK.
 
-**Left:** CI and the CodeRabbit round on the PR; `worker_done`.
+**Round 1 (PR #323, CodeRabbit review 5871552520 on `3ed0d418`):** 30 findings, all in the
+review body. Two were on this PR's files (missing docstrings in
+`test_function_default_hashing.py` and `test_function_info_extractors.py`): fixed. The other
+28 are on ITL-967 files and were routed to the coordinator. Then merged ITL-967 at `9743004d`
+(main with #317): golden data still differs from that tip by the same 5 added entries only;
+3.12 suite 8696 passed, 0 failed; ruff clean; basedpyright exit 0.
+
+**Left:** CI and CodeRabbit on the pushed head, the signed top-level comment, `worker_done`.
 
 **Decisions that supersede the text further down:**
 
