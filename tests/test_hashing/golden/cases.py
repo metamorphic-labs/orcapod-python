@@ -357,6 +357,17 @@ SEMANTIC_VALUES: dict[str, Any] = {
     "dict.type_key": {"__type__": "tuple", "items": [1, 2]},
     "namedtuple.xy": _POINT_XY(x=1, y=2),
     "namedtuple.yx": _POINT_YX(y=2, x=1),
+    # Added by ITL-897: pandas value hashes (pandas_dataframe_v1 / pandas_series_v1).
+    "dataframe.reordered": pd.DataFrame({"b": ["x", "y"], "a": [1, 2]}),
+    "dataframe.categorical": pd.DataFrame(
+        {"c": pd.Categorical(["x", "y", "x"], categories=["y", "x", "z"])}
+    ),
+    "dataframe.multiindex": pd.DataFrame(
+        {"a": [1, 2]},
+        index=pd.MultiIndex.from_tuples([(0, "p"), (1, "q")], names=["i", "j"]),
+    ),
+    "series.named": pd.Series([1.5, 2.5], name="metric"),
+    "series.unnamed": pd.Series([1, 2, 3]),
 }
 
 
