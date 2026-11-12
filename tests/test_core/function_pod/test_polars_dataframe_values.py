@@ -140,6 +140,17 @@ class TestPodValues:
         _assert_exact(got["b"], _frame(3).with_row_index("row", offset=0))
 
 
+def _stored_frames(column: pa.ChunkedArray[Any]) -> list[pl.DataFrame]:
+    """Decode a stored ``polars.dataframe`` column with its logical type."""
+    logical_type = LogicalPolarsDataFrame()
+    assert column.type == logical_type.get_arrow_extension_type()
+    extension_array = cast("pa.ExtensionArray[Any]", column.combine_chunks())
+    return [
+        logical_type.storage_to_python(value)
+        for value in extension_array.storage.to_pylist()
+    ]
+
+
 class _FrameSubclass(pl.DataFrame):
     """A user subclass of ``pl.DataFrame``."""
 
@@ -187,8 +198,7 @@ class TestReturnedValueMustBeOfTheDeclaredType:
         table = sub.pod(_int_source()).as_table()
         logical_type = LogicalPolarsDataFrame()
         assert table.schema.field("df").type == logical_type.get_arrow_extension_type()
-        stored = table.column("df").combine_chunks().storage.to_pylist()
-        heights = sorted(logical_type.storage_to_python(v).height for v in stored)
+        heights = sorted(frame.height for frame in _stored_frames(table.column("df")))
         assert heights == [1, 3]
 
 
@@ -418,14 +428,13 @@ class TestPipelineStores:
         assert (
             records.schema.field("df").type == logical_type.get_arrow_extension_type()
         )
-        frames = {
-            k: logical_type.storage_to_python(v)
-            for k, v in zip(
+        frames = dict(
+            zip(
                 records.column("k").to_pylist(),
-                records.column("df").combine_chunks().storage.to_pylist(),
+                _stored_frames(records.column("df")),
                 strict=True,
             )
-        }
+        )
         _assert_exact(frames["a"], _frame(1))
         _assert_exact(frames["b"], _frame(3))
 
