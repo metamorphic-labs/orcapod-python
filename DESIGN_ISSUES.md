@@ -2509,3 +2509,36 @@ Known limits, follow-ups:
 - Tables placed under a content hash (`table_scope="content_hash"`, `CachedSource` without an
   explicit `source_id`) move to new paths when the content hash moves, so their v0.2 rows are
   in another table.
+
+## ITL-935 — Logical type identifiers
+
+**Status:** resolved (v0.3)
+
+**Problem:** A logical type was identified in hashes by its name alone, and most built-in
+types wrote empty Arrow extension metadata, so there was no way to change a type's stored
+layout or hashing without old and new data looking alike. On read, a column loaded as plain
+storage was wrapped as the registered type by name, whatever its stored metadata said (a
+possible silent misread).
+
+**Fix:** A logical type's identifier is its Arrow extension name plus extension metadata
+(developer, November 11, 2026, ITL-938 design). Every built-in type writes `{"version":1}`
+(`logical_types/identifier.version_metadata`); list/set wrappers add `"version": 1`. The
+identifier text `<name>;<hex metadata>` (`LogicalTypeIdentifier.text`) replaces the bare name
+in the type hash (`TypeObjectHandler`), in function signatures (`canonical_annotation_str`)
+and at the start of a value-hashed cell token (`hashing/visitors.py`). On read the stored
+metadata must be one of `readable_extension_metadata()`; otherwise
+`LogicalTypeIdentifierError`. The built-in types that used to write empty metadata read it
+as version 1.
+
+Known limits, follow-ups:
+- When pyarrow itself resolves the extension type while reading a file, the error is raised
+  inside pyarrow and does not name the column (it names the stored identifier and what is
+  readable).
+- The Polars extension classes accept any metadata (`ext_from_params` ignores it); the check
+  happens on the Arrow side.
+- Dataclass and pydantic types keep `{"category": ...}` metadata with no version; their
+  identity is reworked in PR #292.
+- A `DataContext` object passed to a source or pod is replaced by the registered context of
+  the same key in parts of the pipeline, so a custom context with extra logical types cannot
+  drive a whole pipeline; the path-level effect of a metadata-only change is therefore
+  tested at the hash level.
