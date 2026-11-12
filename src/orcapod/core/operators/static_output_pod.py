@@ -374,6 +374,12 @@ class _RowsOfStream(ArrowTableStream):
 
         It was computed by the operator node with the hasher of its data
         context, so it is returned whatever ``hasher`` is given.
+
+        Args:
+            hasher: Not used.
+
+        Returns:
+            The input pipeline hash the operator node passed.
         """
         return self._input_pipeline_hash
 
