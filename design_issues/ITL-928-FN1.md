@@ -20,6 +20,10 @@ table from Python values too (typed with the tag's own Arrow schema), so only a 
 
 **Fix:** both build their tag table from each row's own Arrow table (`tag.as_table()`), and the
 node its data table from `data.as_table()` (source info and context, no meta columns),
-concatenated by name. No stored value, record id or hash changes. The zero-row table of a
+concatenated by name; rows that disagree on a column's Arrow type raise
+`InputValidationError` naming the column and both types, never a widened type. No stored value, record id or hash changes. The zero-row table of a
 node that has not run is still built from the Python output schema (the ITL-912 problem, for
 function nodes).
+The Delta store's own type changes (unsigned to signed, `timestamp[s/ms/ns]` to `[us]`, a zone
+to UTC) are the second part of ITL-928; until they are fixed, rows read from a Delta store and
+rows computed in the same run can disagree, which now raises.

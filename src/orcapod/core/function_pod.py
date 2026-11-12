@@ -1103,7 +1103,7 @@ class FunctionPodStream(StreamBase):
         all_info: bool = False,
     ) -> pa.Table:
         if self._cached_output_table is None:
-            tag_tables = []
+            tag_tables: list[pa.Table] = []
             all_data = []
             data_schema = None
             for tag, data in self.iter_data():

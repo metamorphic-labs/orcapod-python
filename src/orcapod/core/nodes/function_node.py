@@ -132,6 +132,36 @@ def _build_record_id_preimage(
     )
 
 
+def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
+    """Concatenate one-row tables by column name, refusing a column whose types differ.
+
+    Rows never make a column of a type one of them does not have: two rows whose
+    Arrow types for one column differ (other than by their large variants) are an
+    error, never widened or cast.
+
+    Args:
+        tables: The rows' tables, in row order; not empty.
+
+    Returns:
+        The concatenated table, with the first table's column order.
+
+    Raises:
+        InputValidationError: If two rows give one column different Arrow types,
+            naming the column and both types.
+    """
+    first_types = dict(zip(tables[0].schema.names, tables[0].schema.types))
+    for table in tables[1:]:
+        for name, row_type in zip(table.schema.names, table.schema.types):
+            expected = first_types.get(name)
+            if (
+                expected is not None
+                and arrow_utils.shared_arrow_type(expected, row_type) is None
+            ):
+                message = f"Rows disagree on the Arrow type of column {name!r}: {expected} and {row_type}"
+                raise InputValidationError(message)
+    return arrow_utils.concat_tables_by_name(tables)
+
+
 def _bare_digest(hash_string: str) -> str:
     """Return the bare hex digest of a stored ``"<label>:<hex>"`` hash string.
 
@@ -477,15 +507,20 @@ class FunctionNodeBase(StreamBase):
                 # A row's meta columns (a computed row's ``__computed`` flag) are its
                 # own bookkeeping, not part of the node's output, as for the pod's
                 # stream outside a job.
-                tag_table = arrow_utils.concat_tables_by_name(
-                    [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
-                )
-                data_table = arrow_utils.concat_tables_by_name(
-                    [
-                        data.as_table(columns={"source": True, "context": True})
-                        for _, data in rows
-                    ]
-                )
+                try:
+                    tag_table = _concat_row_tables(
+                        [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
+                    )
+                    data_table = _concat_row_tables(
+                        [
+                            data.as_table(columns={"source": True, "context": True})
+                            for _, data in rows
+                        ]
+                    )
+                except InputValidationError as exc:
+                    raise InputValidationError(
+                        f"Function node {self.label!r}: {exc}"
+                    ) from exc
                 self._cached_output_table = arrow_utils.hstack_tables(
                     tag_table, data_table
                 )

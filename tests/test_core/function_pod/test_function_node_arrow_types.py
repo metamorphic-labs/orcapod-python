@@ -23,6 +23,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import resolve_context
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import ArrowTableSource
 from orcapod.utils import arrow_utils
@@ -270,3 +271,25 @@ def test_store_read_back_keeps_tag_type(
     tag, _ = next(iter(fresh.iter_data()))
     assert tag.as_table().schema.field("k").type == _expected(name)
     assert fresh.as_table().schema.field("k").type == _expected(name)
+
+
+def test_rows_disagreeing_on_a_tag_type_raise_naming_the_column(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Rows of one node never make a column of a type none of them has.
+
+    Until part B, a Delta store gives a ``uint32`` tag back as ``int32``: rows served
+    from the store and rows computed now then disagree, and the node says so instead
+    of picking a type. Part B makes this case agree (the store keeps ``uint32``).
+    """
+    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    job.run()
+
+    with pytest.raises(InputValidationError) as raised:
+        job.nodes["double"].as_table()
+
+    message = str(raised.value)
+    assert "'k'" in message
+    assert "int32" in message
+    assert "uint32" in message
