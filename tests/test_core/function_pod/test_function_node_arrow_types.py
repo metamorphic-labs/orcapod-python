@@ -183,7 +183,20 @@ def test_as_table_after_run_keeps_tag_type(
     assert table.num_rows == 3
 
 
-@pytest.mark.parametrize("name", ["int64", "uint32", "timestamp[us]"])
+@pytest.mark.parametrize("name", list(TAG_COLUMNS))
+def test_pod_stream_outside_a_job_keeps_tag_type(name: str) -> None:
+    """The same pod outside a job: its stream's table keeps the tag type too."""
+    stream = double.pod(
+        ArrowTableSource(_source_table(name), tag_columns=["k"], source_id="src")
+    )
+
+    table = stream.as_table()
+
+    assert table.schema.field("k").type == _expected(name)
+    assert table.num_rows == 3
+
+
+@pytest.mark.parametrize("name", ["int64", "uint32", "timestamp[us]", "uuid", "Path"])
 def test_as_table_all_info_matches_the_pod_outside_a_job(name: str) -> None:
     """With every column group, the node's table equals the pod's stream outside a job."""
     table = _source_table(name)
