@@ -27,8 +27,17 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
   dispatches valid lists and raises `LogicalTypeIdentifierError` for anything else, as every
   built-in type does. The Linear comment on ITL-980 could not be posted from this session
   (permission denied); the coordinator posts it.
-  STILL WAITING for the developer's sign-off of the whole design: no library code, no push.
-- Nothing is pushed. The design note, this plan and the failing tests are local commits.
+  (e) DEVELOPER SIGN-OFF received November 12, 2026 (through the coordinator): design approved
+  as recommended. Label stays `ndarray_v1`; a column under another ignore list is refused on
+  read; unit-less datetimes and field titles stay refused; metadata keys sorted; the leading
+  type text of the value hash is the extension name; names are `orcapod.<library>.<type>`.
+  (f) Mechanism pushed at `64c63bfe` for the torch, Polars and pandas workers; the public
+  names of design note (vi) are stable from that commit.
+  (g) Implemented and pushed: NumPy `.npy` storage and strict hash, tests, golden (22 values
+  moved, 8 system-tag entries renamed, 4 added, array entries only), docs, changelog
+  fragment, design-issue entry, CLAUDE.md and `.zed/rules`. Full suite on 3.12: 10092 passed,
+  109 skipped, 23 xfailed; array, hashing, logical type and context tests also pass on 3.11
+  and 3.13. Left: independent review findings, PR, CodeRabbit rounds.
 
 ## Steps
 
@@ -36,39 +45,39 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
 2. [x] Failing tests through the public interface:
    `tests/test_arrays/test_array_strict_hash.py`. They fail on `main`'s code (the hash
    ignores memory order and byte order, storage is the struct).
-3. [ ] `src/orcapod/logical_types/ignore_list.py`: `ignore_metadata`,
+3. [x] `src/orcapod/logical_types/ignore_list.py`: `ignore_metadata`,
    `parse_ignore_metadata`, `checked_ignore`, `IgnoreListLogicalType`, `IgnoreListHandler`;
    one Arrow extension class per (name, list), the registered class deserialising any valid
    list. Polars extension keeps `metadata_str`.
-4. [ ] Context loader (`contexts/registry.py`): `hash_ignore` of `logical_types.json` into
+4. [x] Context loader (`contexts/registry.py`): `hash_ignore` of `logical_types.json` into
    the reference table as `hash_ignore:<extension name>` before anything is built.
    `logical_types.json`: `"hash_ignore": {"orcapod.numpy.ndarray": []}` and the two `_ref`s.
-5. [ ] `numpy_type.py`: storage `large_binary`, `.npy` format 3.0 write
+5. [x] `numpy_type.py`: storage `large_binary`, `.npy` format 3.0 write
    (`numpy.lib.format.write_array`, `allow_pickle=False`), read after checking the magic;
    refusals (masked, object, StringDType, longdouble, unit-less datetimes, titles,
    out-of-order or overlapping offsets, header over 10,000 bytes); `storage_sort_key` is the
    strict `D` of the decoded value. `array_format.py`: drop the storage struct and its
    metadata constant, keep `array_digest_v1`.
-6. [ ] `NumpyArrayHandler` as an `IgnoreListHandler` computing `D`;
+6. [x] `NumpyArrayHandler` as an `IgnoreListHandler` computing `D`;
    `SemanticHashingVisitor.visit_extension` passes the column's list
    (`handler.hash_ignoring`).
-6b. [ ] `StarfixArrowHasher.hash_schema`: apply `SemanticHashingVisitor.hashed_field` to each
+6b. [x] `StarfixArrowHasher.hash_schema`: apply `SemanticHashingVisitor.hashed_field` to each
    field before hashing (same rule as `hash_table`); test that a value-hashed type's schema
    hash does not depend on its storage type and that no golden value moves.
-7. [ ] Rewrite the ITL-888 tests that assert the struct row and layout independence
+7. [x] Rewrite the ITL-888 tests that assert the struct row and layout independence
    (`tests/test_arrays/test_array_value_format.py`, `array_cases.py`
    (`assert_arrays_identical` requires C order today), `tests/test_logical_types/test_array_format.py`,
    `test_numpy_type.py`, `tests/test_hashing/test_numpy_handler.py`,
    `tests/test_hashing/test_hash_label_rule.py` if it names the constant).
-8. [ ] Golden: add `value.ndarray.{fortran,big_endian,aligned_struct,strided_view}` to
+8. [x] Golden: add `value.ndarray.{fortran,big_endian,aligned_struct,strided_view}` to
    `tests/test_hashing/golden/cases.py`; regenerate; check the diff moves only the 32 values
    listed in the design note (iii) and list each by cause in the PR.
-9. [ ] Docs: `docs/concepts/arrays.md`, `docs/reference/hashing.md` section 8,
+9. [x] Docs: `docs/concepts/arrays.md`, `docs/reference/hashing.md` section 8,
    `docs/concepts/logical-type-identifiers.md`; "superseded" line in
    `superpowers/specs/2026-11-10-array-format-v0.3.md`; CLAUDE.md and `.zed/rules` if a rule
    changes (logical type identifiers: the ignore-list metadata shape).
-10. [ ] `changelog.d/ITL-981.md`, `design_issues/ITL-981-LV1.md`.
-11. [ ] Checks: `uv run ruff format .`, `uv run ruff check .`,
+10. [x] `changelog.d/ITL-981.md`, `design_issues/ITL-981-LV1.md`.
+11. [x] Checks: `uv run ruff format .`, `uv run ruff check .`,
     `uv run --with basedpyright basedpyright` (exit code), `uv run pytest tests/`.
 12. [ ] Merge `origin/main` if it moved, push, PR against `main` (`Fixes ITL-981`),
     `orca linear attach`, `orca worktree set --worktree current --pr <n>`, `worker_done`.
