@@ -12,10 +12,10 @@ Remove `register_type`, declared names and equivalence for exact classes.
 
 **Tech Stack:** Python 3.11–3.13, pyarrow, polars, pydantic, deltalake, pytest, `uv run`.
 
-**Design:** `superpowers/specs/2026-11-12-itl-972-user-class-kinds.md`. **Status: waiting for
-approval of the design (sent through `ask`). No code before the reply.** Task detail below
-is at file and test level; test code is written in each task's first step, after approval,
-because open points O1–O7 change assertions.
+**Design:** `superpowers/specs/2026-11-12-itl-972-user-class-kinds.md`, approved with changes
+by the developer on November 12, 2026 (its section "Answers to the open points"). The
+decisions removed the pod-input conversion and the `P(other)` form from the tasks below and
+added structural equality.
 
 ---
 
@@ -38,6 +38,17 @@ because open points O1–O7 change assertions.
   tests in `tests/test_user_types/test_exact_classes.py` that fail by design.
   `tests/test_user_types/test_measured_case.py` does not import yet (`op.dataclass`).
 
+- November 12, later: developer's answers applied (no automatic conversion, `from_instance`
+  only, structural `__eq__`, subclass column accepted at a base parameter). Implemented:
+  `logical_types/user_class_identity.py` (kinds, names, structured tokens, record),
+  `logical_types/structural_class.py` (rebuild from metadata, equality, `from_instance`),
+  `logical_types/structural_logical_type_factory.py`, `orcapod/structural.py` (decorator).
+  ITL-967 tip 9743004d and `main` (#321, #310, #311) merged. Golden regenerated once: 25
+  moved entries, listed in the design, section e. Checks: ruff, basedpyright exit 0, suite
+  green except `tests/test_design_issues.py`, which fails on `design_issues/ITL-935-LTI1.md`
+  and `ITL-942-WH1.md` (files of the ITL-967 branch, to be fixed there).
+- `P.from_instance` is added at run time, so static type checkers do not see it.
+
 ## Files
 
 | File | Change |
@@ -45,10 +56,10 @@ because open points O1–O7 change assertions.
 | `src/orcapod/logical_types/user_class_identity.py` | kinds (`dataclass`, `pydantic`, `structural`); names (module path; structural marker); structured tokens; record; token → annotation; remove `declare`, `_declared`, `default_name(qualified_name=)`, the `__main__` notice; `equivalent_hints` becomes exact for exact classes, by record for structural |
 | `src/orcapod/logical_types/user_class_logical_type.py` | exact-class value check on write; read path by module lookup for exact classes |
 | `src/orcapod/logical_types/structural_logical_type_factory.py` (new) | `StructuralLogicalType`, factory, category `orcapod.structural`, synthesis on read |
-| `src/orcapod/structural.py` (new) | `dataclass` decorator, `from_instance`, `__init__` wrapper, `convert_argument(value, annotation)` |
+| `src/orcapod/structural.py` (new) | `dataclass` decorator |
+| `src/orcapod/logical_types/structural_class.py` (new) | class from a stored record (synthesis), `structural_eq`, `from_instance` |
 | `src/orcapod/user_types.py` | deleted |
 | `src/orcapod/__init__.py` | export `dataclass`; drop `register_type` |
-| `src/orcapod/core/data_function.py` | one helper that assembles call arguments and applies `convert_argument`; used by the four call sites |
 | `src/orcapod/utils/schema_utils.py` | `_accepts`: `is` for exact classes, record equality for structural |
 | `src/orcapod/logical_types/registry.py`, `database_hooks.py`, `databases/delta_lake_databases.py` | merge resolutions; rebinding without the cross-module warning |
 | `src/orcapod/contexts/logical_types.json` | register the structural factory |

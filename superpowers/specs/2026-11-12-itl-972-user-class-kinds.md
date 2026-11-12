@@ -367,6 +367,24 @@ The new category `orcapod.structural` is registered in `contexts/logical_types.j
 | New fixtures | Added keys only: structural classes (default name, explicit name, nested, container and optional fields, field-order twins with different values, two classes of one identity with equal values), an ordinary subclass, an ordinary class with a structural field. |
 | Stored extension names and metadata | Exact classes: `module.qualname` becomes `module.qualname@<digest>`, metadata gains `identity`. Structural: new. A column written by v0.2.0 or by the ITL-967 branch read directly raises `TypeIdentityError` (no identity record), as in PR #292. |
 
+**Measured (November 12, 2026)**, golden files regenerated once, compared with the files of
+the ITL-967 tip 9743004d merged with `main` at #311. Before regenerating, the golden test
+failed on exactly the 25 entries below (plus the unpinned additions).
+
+| File | Changed values | Replaced keys | Added keys |
+|---|---|---|---|
+| `semantic.json` | 2: `type.dataclass`, `type.pydantic` | 0 | 10: `type.{structural, structural_nested, structural_with_array, structural_twin_ab, structural_twin_ba, structural_same_identity, pydantic_optional, dataclass_subclass, dataclass_with_structural, list_dataclass}` |
+| `schema.json` | 5: `multi_field.logical_mix`, `single_field.{dataclass,pydantic}.{arrow_type,schema_hash}` | 0 | 20: `single_field.<the 10 fixtures above>.{arrow_type,schema_hash}` |
+| `datagram.json` | 10: `{dataclass,pydantic}.{content_hash, pipeline_hash, system_tag_columns}` and both rows' `data_hash` | 8: `{dataclass,pydantic}.row[r1/r2]._tag_record_id::<pipeline hash>` and `._tag_source_id::<pipeline hash>` (the key embeds the moved pipeline hash; 8 keys disappear, 8 appear) | 89: the 8 replacement keys and 9 new fixtures × 9 keys |
+| `arrow.json` | 0 | 0 | 0 |
+| `pipeline.json` | 0 | 0 | 109: all `drop_nulls*` entries of ITL-943 (#311), pinned for the first time under the v0.3 hash step; not caused by this change |
+
+Cause of all 25 moved entries: the identity record (kind, module-path name, ordered fields)
+enters the identifier of `GoldenPoint` and `GoldenModel`. `structural` and
+`structural_same_identity` (two classes of one identity) pin equal type, schema, pipeline
+and row data hashes and equal system-tag column names (their source and record ids differ,
+because each fixture's source has its own id); the field-order twins pin different values.
+
 **Relative to PR #292** (never merged, so no stored data exists): every user-class
 identifier moves, for three causes: `__main__` classes are named `__main__.X` instead of
 `X`; tokens are structured, a nested class embeds its record, and a logical-type field uses
