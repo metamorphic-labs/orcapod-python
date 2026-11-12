@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import collections
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -35,6 +36,7 @@ import pandas as pd
 import pyarrow as pa
 import pydantic
 
+from orcapod import dataclass as structural_dataclass
 from orcapod import function_pod
 
 CaseFn = Callable[[], dict[str, Any]]
@@ -197,11 +199,104 @@ class GoldenModel(pydantic.BaseModel):
     count: int
 
 
+@structural_dataclass(name="golden.Declared")
+class GoldenDeclared:
+    """Structural class (ITL-972) with an optional field."""
+
+    label: str
+    score: float | None
+
+
+class GoldenDeclaredModel(pydantic.BaseModel):
+    """Pydantic model with the same fields as ``GoldenDeclared``: another type."""
+
+    label: str
+    score: float | None
+
+
+@structural_dataclass(name="golden.Inner")
+class GoldenInner:
+    """Structural class nested in ``GoldenOuter``; its record enters the outer one."""
+
+    value: int
+
+
+@structural_dataclass(name="golden.Outer")
+class GoldenOuter:
+    """Structural class with a nested structural field and a container field."""
+
+    inner: GoldenInner
+    tags: list[str]
+
+
+@structural_dataclass(name="golden.WithArray")
+class GoldenWithArray:
+    """Structural class with a NumPy array field; the array's identifier enters its identity."""
+
+    label: str
+    values: np.ndarray  # pyright: ignore[reportMissingTypeArgument]  # the bare class is the annotation Orcapod stores
+
+
+@structural_dataclass(name="golden.Twin")
+class GoldenTwinAB:
+    """Structural ``golden.Twin``; same fields as ``GoldenTwinBA`` in another order.
+
+    Declared field order is part of the identity (ITL-881), so the twins are two types
+    and must pin different values.
+    """
+
+    a: int
+    b: str
+
+
+@structural_dataclass(name="golden.Twin")
+class GoldenTwinBA:
+    """Structural ``golden.Twin``; must pin values different from ``GoldenTwinAB``'s."""
+
+    b: str
+    a: int
+
+
+@structural_dataclass(name="golden.Declared")
+class GoldenDeclaredAgain:
+    """A second class of the type ``golden.Declared``: must pin ``GoldenDeclared``'s values."""
+
+    label: str
+    score: float | None
+
+
+@dataclasses.dataclass
+class GoldenChild(GoldenPoint):
+    """Ordinary subclass of ``GoldenPoint``: its own type, with its own field."""
+
+    z: int = 0
+
+
+@dataclasses.dataclass
+class GoldenHolder:
+    """Ordinary dataclass with a structural field; the inner record enters its identity."""
+
+    inner: GoldenInner
+    note: str
+
+
 def register_logical_classes() -> None:
     """Register the dataclass and pydantic fixtures with the default type converter."""
     tc = _ctx().type_converter
     tc.register_python_class(GoldenPoint)
     tc.register_python_class(GoldenModel)
+    for cls in (
+        GoldenDeclared,
+        GoldenDeclaredModel,
+        GoldenOuter,
+        GoldenWithArray,
+        GoldenTwinAB,
+        GoldenTwinBA,
+        GoldenDeclaredAgain,
+        GoldenChild,
+        GoldenHolder,
+    ):
+        tc.register_python_class(cls)
 
 
 PATH_A = Path("/golden/data/a.txt")
@@ -213,6 +308,10 @@ UUID_B = uuid.UUID("87654321-4321-8765-4321-876543218765")
 # ---------------------------------------------------------------------------
 # Group: semantic — BaseSemanticHasher on Python values and type objects
 # ---------------------------------------------------------------------------
+
+# Added by ITL-942 (finding T): field order is part of a namedtuple's hash.
+_POINT_XY = collections.namedtuple("Point", ["x", "y"])
+_POINT_YX = collections.namedtuple("Point", ["y", "x"])
 
 SEMANTIC_VALUES: dict[str, Any] = {
     "int.zero": 0,
@@ -251,6 +350,13 @@ SEMANTIC_VALUES: dict[str, Any] = {
     "ndarray.float64": np.array([[0.5, 1.5], [2.5, 3.5]], dtype=np.float64),
     "ndarray.empty": np.zeros((0,), dtype=np.float32),
     "dataframe.basic": pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}),
+    # Added by ITL-942: set order, dict keys and '__type__' dicts.
+    "set.mixed_str_equal": {1, "1", 2, "2"},
+    "dict.int_keys": {1: "x", 2: "y"},
+    "dict.str_keys_like_ints": {"1": "x", "2": "y"},
+    "dict.type_key": {"__type__": "tuple", "items": [1, 2]},
+    "namedtuple.xy": _POINT_XY(x=1, y=2),
+    "namedtuple.yx": _POINT_YX(y=2, x=1),
 }
 
 
@@ -258,6 +364,64 @@ SEMANTIC_VALUES: dict[str, Any] = {
 def semantic_values() -> dict[str, Any]:
     hasher = _ctx().semantic_hasher
     return {k: hasher.hash_object(v).to_string() for k, v in SEMANTIC_VALUES.items()}
+
+
+def golden_fn_plain(a: int, b: str) -> float:
+    """Function hashed as a value by the semantic group (ITL-953). DO NOT MOVE."""
+    return float(a)
+
+
+def golden_fn_defaults(
+    a: int,
+    b: str = "x",
+    c: int | None = None,
+    d: tuple[int, ...] = (1, 2),
+    e: frozenset[str] = frozenset({"p", "q", "r"}),
+    f: dict[str, list[int]] = {"k": [1, 2], "j": []},  # noqa: B006  (never mutated)
+) -> float:
+    """Function with default values, hashed as a value (ITL-953). DO NOT MOVE."""
+    return float(a)
+
+
+def golden_fn_kinds(a: int, /, b: int, *, c: int = 0) -> int:
+    """Function with every parameter kind, hashed as a value (ITL-953). DO NOT MOVE."""
+    return a + b + c
+
+
+def golden_scaled(age: int, factor: float = 2.0) -> float:
+    """Data function with a default, pinned by its stored signature hash. DO NOT MOVE."""
+    return age * factor
+
+
+@case("semantic", "function")
+def semantic_functions() -> dict[str, Any]:
+    """Pin the hash of a function used as a value and the stored signature hash.
+
+    A default value enters as the semantic hasher's hash of the value and each
+    parameter carries its kind (ITL-953).
+
+    Returns:
+        The function-value hashes, and the ``function_signature_hash`` a data
+        function stores with every result row.
+    """
+    from orcapod.core.data_function import PythonDataFunction
+
+    hasher = _ctx().semantic_hasher
+    out: dict[str, Any] = {
+        "value.plain": hasher.hash_object(golden_fn_plain).to_string(),
+        "value.defaults": hasher.hash_object(golden_fn_defaults).to_string(),
+        "value.kinds": hasher.hash_object(golden_fn_kinds).to_string(),
+    }
+    data_functions = {
+        "ratio": golden_ratio.pod.data_function,
+        "scaled": PythonDataFunction(golden_scaled, output_keys="scaled"),
+    }
+    for name, data_function in data_functions.items():
+        variation = data_function.get_function_variation_data()
+        out[f"stored_signature.{name}"] = _bytes_text(
+            variation["function_signature_hash"]
+        )
+    return out
 
 
 def _semantic_types() -> dict[str, Any]:
@@ -280,6 +444,16 @@ def _semantic_types() -> dict[str, Any]:
         "set_uuid": set[uuid.UUID],
         "dataclass": GoldenPoint,
         "pydantic": GoldenModel,
+        "structural": GoldenDeclared,
+        "pydantic_optional": GoldenDeclaredModel,
+        "structural_nested": GoldenOuter,
+        "structural_with_array": GoldenWithArray,
+        "structural_twin_ab": GoldenTwinAB,
+        "structural_twin_ba": GoldenTwinBA,
+        "structural_same_identity": GoldenDeclaredAgain,
+        "dataclass_subclass": GoldenChild,
+        "dataclass_with_structural": GoldenHolder,
+        "list_dataclass": list[GoldenPoint],
     }
 
 
@@ -405,7 +579,7 @@ def schema_source_stream_builder() -> dict[str, Any]:
     builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
     out: dict[str, Any] = {}
     for variant, kwargs in {
-        "default_source_id": {},
+        "default_source_id": {"source_kind": "arrow_table"},
         "named_source_id": {"source_id": "golden_source"},
         "record_id_column": {
             "source_id": "golden_source",
@@ -418,6 +592,39 @@ def schema_source_stream_builder() -> dict[str, Any]:
         out[f"{variant}.source_id"] = result.source_id
         out[f"{variant}.system_tag_columns"] = list(result.system_tag_columns)
         out.update(_prefixed(variant, stream_summary(result.stream)))
+    return out
+
+
+@case("schema", "derived_source_tags_as_data")
+def schema_derived_source_tags_as_data() -> dict[str, Any]:
+    """Pin a source derived from another source with a tag also offered as data (ITL-939).
+
+    Three variants: the default source id (``tags_as_data:<label>:<hex>``, the derivation
+    hash), an explicit source id, and the default source id with a ``record_id_column``
+    (which enters the derivation hash).
+
+    Returns:
+        Each variant's source id and stream summary.
+    """
+    from orcapod.core.sources import ArrowTableSource, DerivedSource
+
+    origin = ArrowTableSource(
+        _builder_table(),
+        tag_columns=["subject"],
+        source_id="golden_source",
+        data_context=_ctx(),
+    )
+    out: dict[str, Any] = {}
+    for variant, kwargs in {
+        "default_source_id": {},
+        "named_source_id": {"source_id": "golden_derived"},
+        "record_id_column": {"record_id_column": "subject"},
+    }.items():
+        derived = DerivedSource(
+            origin, tags_as_data={"subject": "subject_value"}, **kwargs
+        )
+        out[f"{variant}.source_id"] = derived.source_id
+        out.update(_prefixed(variant, stream_summary(derived)))
     return out
 
 
@@ -497,6 +704,54 @@ def _arrow_tables() -> dict[str, pa.Table]:
         }
     )
     tables["empty.zero_rows"] = pa.table({"a": pa.array([], pa.int64())})
+    # Added with starfix hash format 2 (ITL-910): inputs format 1 could not hash or
+    # hashed alike (ITL-848, ITL-927).
+    tables["fixed_size_list.float32_2"] = pa.table(
+        {"a": pa.array([[0.5, 1.5], [2.5, 3.5]], pa.list_(pa.float32(), 2))}
+    )
+    tables["fixed_size_list.null_slot"] = pa.table(
+        {"a": pa.array([[1, 2], None], pa.list_(pa.int64(), 2))}
+    )
+    list3 = pa.large_list(pa.large_list(pa.large_list(pa.int64())))
+    tables["collision.list_lengths_a"] = pa.table(
+        {"a": pa.array([[[[1]], [[2], [3]]]], list3)}
+    )
+    tables["collision.list_lengths_b"] = pa.table(
+        {"a": pa.array([[[[1], [2]], [[3]]]], list3)}
+    )
+    tables["collision.null_struct"] = pa.table(
+        {"a": pa.array([None], pa.struct([("x", pa.int64())]))}
+    )
+    tables["collision.struct_of_nulls"] = pa.table(
+        {"a": pa.array([{"x": None}], pa.struct([("x", pa.int64())]))}
+    )
+    tables["bool.chunked"] = pa.Table.from_batches(
+        tables["bool"].to_batches(max_chunksize=1)
+    )
+    # Added by ITL-942 (finding I): nested nullability is part of the hash whether or
+    # not the column holds data.
+    non_null_struct = pa.struct([pa.field("x", pa.int64(), nullable=False)])
+    nullable_struct = pa.struct([pa.field("x", pa.int64(), nullable=True)])
+    non_null_list = pa.large_list(pa.field("item", pa.int64(), nullable=False))
+    for label, struct_t, list_t in (
+        ("non_null", non_null_struct, non_null_list),
+        ("nullable", nullable_struct, pa.large_list(pa.int64())),
+    ):
+        tables[f"nested_nullability.struct_{label}.data"] = pa.table(
+            {"a": pa.array([{"x": 1}], struct_t)}
+        )
+        tables[f"nested_nullability.struct_{label}.zero_rows"] = pa.table(
+            {"a": pa.array([], struct_t)}
+        )
+        tables[f"nested_nullability.struct_{label}.all_null"] = pa.table(
+            {"a": pa.array([None], struct_t)}
+        )
+        tables[f"nested_nullability.list_{label}.data"] = pa.table(
+            {"a": pa.array([[1]], list_t)}
+        )
+        tables[f"nested_nullability.list_{label}.zero_rows"] = pa.table(
+            {"a": pa.array([], list_t)}
+        )
     return tables
 
 
@@ -525,6 +780,22 @@ def _extension_tables() -> dict[str, pa.Table]:
     tables["extension.unregistered_passthrough"] = pa.table(
         {"c": pa.ExtensionArray.from_storage(GoldenOpaqueType(), storage)}
     )
+    # pyarrow's canonical extension types, hashable with their identity since ITL-910.
+    tables["extension.canonical_uuid"] = pa.table(
+        {
+            "c": pa.ExtensionArray.from_storage(
+                pa.uuid(), pa.array([UUID_A.bytes, UUID_B.bytes], pa.binary(16))
+            )
+        }
+    )
+    tables["extension.canonical_fixed_shape_tensor"] = pa.table(
+        {
+            "c": pa.ExtensionArray.from_storage(
+                pa.fixed_shape_tensor(pa.float32(), [2]),
+                pa.array([[0.5, 1.5], [2.5, 3.5]], pa.list_(pa.float32(), 2)),
+            )
+        }
+    )
     return tables
 
 
@@ -542,8 +813,6 @@ def arrow_extension_table_hashes() -> dict[str, Any]:
 
 @case("arrow", "schema")
 def arrow_schema_hashes() -> dict[str, Any]:
-    # hash_schema is not reachable for extension-typed schemas yet (ITL-848), so only
-    # extension-free schemas are pinned here.
     hasher = _ctx().arrow_hasher
     return {
         k: hasher.hash_schema(t.schema).to_string() for k, t in _arrow_tables().items()
@@ -576,6 +845,16 @@ def arrow_dict_order_hashes() -> dict[str, Any]:
         ),
     }
     return {k: hasher.hash_table(t).to_string() for k, t in tables.items()}
+
+
+@case("arrow", "extension_schema")
+def arrow_extension_schema_hashes() -> dict[str, Any]:
+    """Schema hashes of extension columns, hashed with their identity (ITL-910, ITL-846)."""
+    hasher = _ctx().arrow_hasher
+    return {
+        k: hasher.hash_schema(t.schema).to_string()
+        for k, t in _extension_tables().items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +893,42 @@ def _datagram_rows() -> dict[str, list[dict[str, Any]]]:
         ],
         "list_path": [{"k": "r1", "c": [PATH_A, PATH_B]}, {"k": "r2", "c": []}],
         "set_uuid": [{"k": "r1", "c": {UUID_A, UUID_B}}, {"k": "r2", "c": {UUID_A}}],
+        "structural": [
+            {"k": "r1", "c": GoldenDeclared("a", 0.5)},
+            {"k": "r2", "c": GoldenDeclared("b", None)},
+        ],
+        "pydantic_optional": [
+            {"k": "r1", "c": GoldenDeclaredModel(label="a", score=0.5)},
+            {"k": "r2", "c": GoldenDeclaredModel(label="b", score=None)},
+        ],
+        "structural_nested": [
+            {"k": "r1", "c": GoldenOuter(GoldenInner(1), ["x", "y"])},
+            {"k": "r2", "c": GoldenOuter(GoldenInner(2), [])},
+        ],
+        "structural_with_array": [
+            {"k": "r1", "c": GoldenWithArray("a", np.arange(3, dtype=np.float32))},
+            {"k": "r2", "c": GoldenWithArray("b", np.zeros((2, 2), dtype=np.int64))},
+        ],
+        "structural_twin_ab": [
+            {"k": "r1", "c": GoldenTwinAB(1, "x")},
+            {"k": "r2", "c": GoldenTwinAB(2, "y")},
+        ],
+        "structural_twin_ba": [
+            {"k": "r1", "c": GoldenTwinBA("x", 1)},
+            {"k": "r2", "c": GoldenTwinBA("y", 2)},
+        ],
+        "structural_same_identity": [
+            {"k": "r1", "c": GoldenDeclaredAgain("a", 0.5)},
+            {"k": "r2", "c": GoldenDeclaredAgain("b", None)},
+        ],
+        "dataclass_subclass": [
+            {"k": "r1", "c": GoldenChild(1, 0.5, 7)},
+            {"k": "r2", "c": GoldenChild(2, 1.5)},
+        ],
+        "dataclass_with_structural": [
+            {"k": "r1", "c": GoldenHolder(GoldenInner(1), "a")},
+            {"k": "r2", "c": GoldenHolder(GoldenInner(2), "b")},
+        ],
     }
 
 
@@ -764,6 +1079,26 @@ def pipeline_pod() -> dict[str, Any]:
     return stream_summary(golden_ratio.pod(_subjects()))
 
 
+@case("pipeline", "pod_default_version")
+def pipeline_pod_default_version() -> dict[str, Any]:
+    """Pin one uri for one function whatever the entry point (ITL-942 finding N).
+
+    ``FunctionPod.from_fn`` and ``@function_pod`` both default to version ``v0.0``,
+    so the same function gets the same uri, and therefore the same table paths.
+
+    Returns:
+        The uri of the pod built each way.
+    """
+    from orcapod import FunctionPod
+
+    built = FunctionPod.from_fn(
+        golden_ratio,
+        output_keys="ratio",
+        name="golden_ratio",
+    )
+    return {"from_fn.uri": list(built.uri), "decorator.uri": list(golden_ratio.pod.uri)}
+
+
 @case("pipeline", "join_pod")
 def pipeline_join_pod() -> dict[str, Any]:
     from orcapod.operators import Join
@@ -862,6 +1197,22 @@ def pipeline_column_selection() -> dict[str, Any]:
         _prefixed(
             "drop_tag", stream_summary(DropTagColumns(columns=["subject"])(_grouped()))
         )
+    )
+    # Added by ITL-942 (finding F): every spelling of one set of names has one
+    # identity; these equal the sorted-list entries.
+    for spelling, columns in {
+        "tuple": ("weight", "age"),
+        "set": {"weight", "age"},
+        "unsorted": ["weight", "age"],
+    }.items():
+        stream = SelectDataColumns(columns=columns)(_subjects())
+        out[f"select_data_spelling.{spelling}.pipeline_hash"] = (
+            stream.pipeline_hash().to_string()
+        )
+    out["select_data_spelling.sorted.pipeline_hash"] = (
+        SelectDataColumns(columns=["age", "weight"])(_subjects())
+        .pipeline_hash()
+        .to_string()
     )
     return out
 
@@ -996,4 +1347,188 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
             out[f"table[{name}].record_ids"] = sorted(
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
             )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Group: arrow — value-hashed logical types in a column that holds no value
+# ---------------------------------------------------------------------------
+
+
+@case("arrow", "extension_no_values")
+def arrow_extension_columns_without_values() -> dict[str, Any]:
+    """Table hashes of value-hashed logical-type columns with zero rows or nulls only.
+
+    Such a column has no cell token, so its logical type enters the hash through
+    the hashed field alone (ITL-967). Every entry differs from every other and from
+    the plain ``large_binary`` entries.
+    """
+    import orcapod as op
+
+    ctx = _ctx()
+    types: dict[str, Any] = {
+        "uuid": uuid.UUID,
+        "file": op.File,
+        "directory": op.Directory,
+        "ndarray": np.ndarray,
+        "dataframe": pd.DataFrame,
+        "series": pd.Series,
+        "list_of_file": list[op.File],
+        "set_of_uuid": set[uuid.UUID],
+    }
+    entries: dict[str, Any] = {}
+    for rows, label in ((0, "zero_rows"), (2, "all_null")):
+        for name, python_type in types.items():
+            arrow_type = ctx.type_converter.python_type_to_arrow_type(python_type)
+            storage = pa.array([None] * rows, arrow_type.storage_type)
+            column = pa.ExtensionArray.from_storage(arrow_type, storage)
+            entries[f"{label}.{name}"] = ctx.arrow_hasher.hash_table(
+                pa.table({"c": column})
+            ).to_string()
+        entries[f"{label}.plain_large_binary"] = ctx.arrow_hasher.hash_table(
+            pa.table({"c": pa.array([None] * rows, pa.large_binary())})
+        ).to_string()
+    return entries
+
+
+def _nullable_readings() -> Any:
+    """A source with a nullable tag and two nullable data columns, each with a null."""
+    from orcapod.sources import ArrowTableSource
+
+    table = pa.table(
+        {
+            "k": pa.array(["r1", "r2", "r3", "r4"], pa.large_string()),
+            "site": pa.array(["a", "b", "c", None], pa.large_string()),
+            "x": pa.array([1, None, 3, 4], pa.int64()),
+            "y": pa.array([1.5, 2.5, None, 4.5], pa.float64()),
+        },
+        schema=pa.schema(
+            [
+                pa.field("k", pa.large_string(), nullable=False),
+                pa.field("site", pa.large_string(), nullable=True),
+                pa.field("x", pa.int64(), nullable=True),
+                pa.field("y", pa.float64(), nullable=True),
+            ]
+        ),
+    )
+    return ArrowTableSource(
+        table, tag_columns=["k", "site"], source_id="golden_nullable"
+    )
+
+
+@case("pipeline", "drop_nulls")
+def pipeline_drop_nulls() -> dict[str, Any]:
+    """Pin ``DropNulls``: the operator's own identity and the narrowed rows."""
+    from orcapod.operators import DropNulls
+
+    out = _prefixed("source", stream_summary(_nullable_readings()))
+    out["operator[x].content_hash"] = DropNulls("x").content_hash().to_string()
+    out["operator[x,y].content_hash"] = DropNulls(["y", "x"]).content_hash().to_string()
+    out.update(_prefixed("data", stream_summary(DropNulls("x")(_nullable_readings()))))
+    out.update(
+        _prefixed(
+            "data_many", stream_summary(DropNulls(["x", "y"])(_nullable_readings()))
+        )
+    )
+    out.update(
+        _prefixed("tag", stream_summary(_nullable_readings().drop_nulls("site")))
+    )
+    return out
+
+
+@case("pipeline", "drop_nulls_all")
+def pipeline_drop_nulls_all() -> dict[str, Any]:
+    """Pin the no-argument ``DropNulls``: its fixed identity and the narrowed rows."""
+    from orcapod.operators import DropNulls
+
+    out: dict[str, Any] = {}
+    out["operator[all].content_hash"] = DropNulls().content_hash().to_string()
+    out["operator[all].pipeline_hash"] = DropNulls().pipeline_hash().to_string()
+    out.update(_prefixed("all", stream_summary(DropNulls()(_nullable_readings()))))
+    out.update(_prefixed("method", stream_summary(_nullable_readings().drop_nulls())))
+    return out
+
+
+@case("pipeline", "drop_nulls_job")
+def pipeline_drop_nulls_job() -> dict[str, Any]:
+    """Record a job with ``DropNulls`` upstream of a pod with non-optional parameters."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="golden_drop_null_job", store=db)
+    with job:
+        present = (
+            _nullable_readings()
+            .drop_nulls(["x", "y"], label="present")
+            .map_data({"x": "age", "y": "weight"}, label="renamed")
+        )
+        golden_ratio.pod(present, label="ratio")
+    job.run()
+
+    out: dict[str, Any] = {}
+    for label in sorted(job.nodes):
+        out.update(_prefixed(f"node[{label}]", stream_summary(job.nodes[label])))
+    paths = sorted(db.list_sources())
+    out["table_paths"] = ["/".join(p) for p in paths]
+    for path in paths:
+        name = "/".join(path)
+        records = db.get_all_records(path, record_id_column="__golden_record_id")
+        assert records is not None
+        if "__input_data_hash" in records.column_names and "_result" in path:
+            # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
+            out[f"table[{name}].input_data_hashes"] = sorted(
+                _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        else:
+            out[f"table[{name}].record_ids"] = sorted(
+                _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
+            )
+    return out
+
+
+@case("pipeline", "default_source_ids")
+def pipeline_default_source_ids() -> dict[str, Any]:
+    """Pin the default source ids built from a hash (ITL-957).
+
+    A source built with no ``source_id`` is named ``<source kind>:<algorithm
+    label>:<hex>``; a source made with ``node.as_source()`` is named
+    ``derived:<algorithm label>:<hex>``.
+    """
+    import polars as pl
+
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import Join
+    from orcapod.sources import (
+        ArrowTableSource,
+        DataFrameSource,
+        DictSource,
+        ListSource,
+    )
+
+    sources: dict[str, Any] = {
+        "arrow_table": ArrowTableSource(_builder_table(), tag_columns=["subject"]),
+        "dict": DictSource(data=SUBJECT_ROWS, tag_columns=["subject"]),
+        "list": ListSource("weight", [20.5, 22.25, 19.0]),
+        "data_frame": DataFrameSource(
+            pl.DataFrame(SUBJECT_ROWS), tag_columns=["subject"]
+        ),
+    }
+    out: dict[str, Any] = {}
+    for name, source in sources.items():
+        out[f"{name}.source_id"] = source.source_id
+        out[f"{name}.content_hash"] = source.content_hash().to_string()
+
+    job = PipelineJob(name="golden_default_source_ids", store=InMemoryArrowDatabase())
+    with job:
+        joined = Join(label="joined")(_subjects(), _scans())
+        golden_adjust.pod(joined, label="adjust")
+    job.run()
+    out["as_source[operator_node].source_id"] = (
+        job.nodes["joined"].as_source().source_id
+    )
+    out["as_source[function_node].source_id"] = (
+        job.nodes["adjust"].as_source().source_id
+    )
     return out

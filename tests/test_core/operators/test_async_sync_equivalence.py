@@ -31,6 +31,7 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
+    DropNulls,
     DropTagColumns,
     GroupBy,
     Index,
@@ -312,6 +313,15 @@ CASES = [
     ),
     Case("index", lambda: Index("l8", 0), lambda: (source_a(),)),
     Case("pick", lambda: Pick("d", "q"), lambda: (source_a(),)),
+    Case("drop_nulls", lambda: DropNulls("nul"), lambda: (source_a(),)),
+    Case(
+        "drop_nulls_many",
+        # A nullable column with a null, one without, a tag, a non-nullable list.
+        lambda: DropNulls(["nul", "s", "ta", "l8"]),
+        lambda: (source_a(),),
+    ),
+    # No names: every tag and data column, among them struct, logical and list ones.
+    Case("drop_nulls_all", lambda: DropNulls(), lambda: (source_a(),)),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 
@@ -323,6 +333,57 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
     assert_equivalent(
         sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
     )
+
+
+def test_drop_nulls_without_tag_columns() -> None:
+    """A stream without tag columns: the async path drops the same rows, in order.
+
+    Outside the matrix, whose pairing needs unique tag rows.
+    """
+    source = _source(
+        {
+            "x": pa.array([1, None, 3], pa.int8()),
+            "s": pa.array(["a", "b", "c"], pa.string()),
+        },
+        tags=(),
+        source_id="tagless",
+        nullable=("x", "s"),
+    )
+    expected = sync_rows(DropNulls("x"), source)
+    actual = async_rows(DropNulls("x"), source)
+    assert [data.as_dict() for _, data in actual] == [
+        {"x": 1, "s": "a"},
+        {"x": 3, "s": "c"},
+    ]
+    assert len(actual) == len(expected)
+    for (tag, data), (sync_tag, sync_data) in zip(actual, expected):
+        assert data.arrow_schema() == sync_data.arrow_schema()
+        assert data.content_hash() == sync_data.content_hash()
+        assert data.source_info() == sync_data.source_info()
+        assert tag.arrow_schema(columns={"system_tags": True}) == sync_tag.arrow_schema(
+            columns={"system_tags": True}
+        )
+        assert list(tag.system_tags().items()) == list(sync_tag.system_tags().items())
+
+    # No names: both data columns are tested and narrowed on both paths.
+    source = _source(
+        {
+            "x": pa.array([1, None, 3], pa.int8()),
+            "s": pa.array(["a", "b", None], pa.string()),
+        },
+        tags=(),
+        source_id="tagless",
+        nullable=("x", "s"),
+    )
+    expected = sync_rows(DropNulls(), source)
+    actual = async_rows(DropNulls(), source)
+    assert [data.as_dict() for _, data in actual] == [{"x": 1, "s": "a"}]
+    assert len(actual) == len(expected) == 1
+    for (_, data), (_, sync_data) in zip(actual, expected):
+        assert data.arrow_schema() == sync_data.arrow_schema()
+        assert [f.nullable for f in data.arrow_schema()] == [False, False]
+        assert data.content_hash() == sync_data.content_hash()
+        assert data.source_info() == sync_data.source_info()
 
 
 # Pre-existing provenance defects, not type re-inference: out of scope for
@@ -347,6 +408,26 @@ PROVENANCE_CASES = [
 ]
 
 
+def test_group_by_keeps_non_key_tags_as_tags_on_both_paths() -> None:
+    """Neither path moves a non-key tag into the data (ITL-955).
+
+    ``source_a`` has tags ``k`` and ``ta``; grouping by ``ta`` leaves ``k`` a
+    list-valued tag, and the data of every row holds only the input's data
+    columns.
+    """
+    _, data_keys = source_a().keys()
+    for rows in (
+        sync_rows(GroupBy(["ta"]), source_a()),
+        async_rows(GroupBy(["ta"]), source_a()),
+    ):
+        members = sorted(tuple(cast(list[int], tag.as_dict()["k"])) for tag, _ in rows)
+        assert members == [(1, 2), (3,)]
+        for tag, data in rows:
+            assert set(tag.keys()) == {"k", "ta"}
+            assert set(data.keys()) == set(data_keys)
+            assert tag.as_table().schema.field("k").type == pa.large_list(pa.int16())
+
+
 @pytest.mark.parametrize("case", PROVENANCE_CASES)
 def test_async_provenance_equals_sync(case: Case) -> None:
     """The async path carries the sync path's per-row source info."""
@@ -362,18 +443,18 @@ def test_semijoin_with_nested_columns() -> None:
     assert_equivalent(sync_rows(SemiJoin(), *sources), async_rows(SemiJoin(), *sources))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "ITL-846: ArrowHasher.hash_schema passes live extension types to starfix, "
-        "which cannot hash them (hash_table normalizes them first)."
-    ),
-)
 def test_arrow_hasher_hash_schema_with_extension_type() -> None:
-    """``hash_schema`` hashes a schema with a logical (extension) column."""
-    schema = pa.schema([pa.field("p", _logical_column([Path("/a")], Path).type)])
-    _ = get_default_context().arrow_hasher.hash_schema(schema)  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+    """``hash_schema`` hashes a logical (extension) column with its identity (ITL-846).
+
+    The extension name and metadata are part of the hash, so the schema does not hash like
+    one holding the extension's storage type.
+    """
+    ext_type = _logical_column([Path("/a")], Path).type
+    assert isinstance(ext_type, pa.ExtensionType)
+    hasher = get_default_context().arrow_hasher
+    ext_hash = hasher.hash_schema(pa.schema([pa.field("p", ext_type)]))  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+    storage_hash = hasher.hash_schema(pa.schema([pa.field("p", ext_type.storage_type)]))  # pyright: ignore[reportAttributeAccessIssue]  # concrete hasher method, not on the protocol
+    assert ext_hash != storage_hash
 
 
 # ── Data meta columns (ITL-854) ─────────────────────────────────────────────
@@ -546,22 +627,23 @@ def _narrow_source(column: str, source_id: str) -> ArrowTableSource:
 
 
 # Recorded from the sync path on main (ab544982) before the ITL-837 fix. The sync
-# path must not change; the async path must now produce the same values.
+# path must not change; the async path must now produce the same values. Row hashes
+# re-recorded in starfix hash format 2 (arrow_v1, ITL-910); the stream hashes did not move.
 PINNED_ROW_HASHES = {
     1: (
-        "arrow_v0.1:000001515f1eb3674534e0226bbe2aada98adb5137a0f8829ee815fdb994809ac001fa",
-        "arrow_v0.1:00000119d2a6630f08dd30ef49c4a298862b7d129d2169d84963ea4f801eb8248e99e4",
+        "arrow_v1:0000027e1a4693c531d4411fafa68a1ac623a0ed3f04a6402de0fb8f040f0aba717ae8",
+        "arrow_v1:0000025c4232f42a6012b104827b2c4731e143af6044e010e9a37ae5ffa82fe3ae7153",
     ),
     2: (
-        "arrow_v0.1:000001ea3d721d986f7382996ef41ded3d1a43baf41a543fde471b20c71190b45dbf98",
-        "arrow_v0.1:000001fa7bf20e72872ffc6860a21d75ad93c38bd54753fa9eb325502acc783b693d43",
+        "arrow_v1:000002e3b4cd9f773e0263ba270d251b90058702fa282e129feebdbc428d832080752e",
+        "arrow_v1:00000218de95b54e8987999a339fe1726957da66219b529c4699be853334833e71f60e",
     ),
 }
 PINNED_STREAM_CONTENT_HASH = (
-    "semantic_v0.1:ac7c70563c06d9ba54adb890bb52a886e6005937bd3d5df265cd3f6817e988bd"
+    "semantic_v1:1ff5a58dbf661279f4fe767477adcc7d95f6f4f6ee47c5ccb53a6a7ab1a2306f"
 )
 PINNED_STREAM_PIPELINE_HASH = (
-    "semantic_v0.1:929efa4256930fda2d02ad359106db279fc888ff155d9500d47cef194137e744"
+    "semantic_v1:8f8d1f2e44624b0e42a55ad513a38626d54012d783e1f2c7cdcd706e22ea709a"
 )
 
 

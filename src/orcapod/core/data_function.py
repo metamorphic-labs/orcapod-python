@@ -7,6 +7,7 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
+import types
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
@@ -14,11 +15,11 @@ from uuid_utils import uuid7
 
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
+from orcapod.contexts.stored import require_same_data_context
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.hashing.hash_utils import (
     get_function_components,
-    get_function_signature,
 )
 from orcapod.core.result_cache import ResultCache
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
@@ -111,6 +112,52 @@ def parse_function_outputs(
 E = TypeVar("E", bound=DataFunctionExecutorProtocol)
 
 
+def _declared_ndarray_type(declared: Any) -> type | None:
+    """Return the ndarray class a declared output type requires, if any.
+
+    Handles ``np.ndarray`` (or a subclass), parameterized aliases such as
+    ``npt.NDArray[np.float32]``, and ``Optional``/``| None`` of either.
+    NumPy is never imported here: a class counts as an ndarray when its MRO
+    contains ``numpy.ndarray``.
+    """
+    candidates = [declared]
+    if typing.get_origin(declared) in (typing.Union, types.UnionType):
+        candidates = [a for a in typing.get_args(declared) if a is not type(None)]
+    for candidate in candidates:
+        # A parameterized alias such as npt.NDArray[np.float32] has origin np.ndarray.
+        candidate = typing.get_origin(candidate) or candidate
+        if isinstance(candidate, type) and any(
+            base.__module__ == "numpy" and base.__qualname__ == "ndarray"
+            for base in candidate.__mro__
+        ):
+            return candidate
+    return None
+
+
+def _check_declared_ndarray_outputs(
+    output_data: dict[str, Any], output_schema: Schema
+) -> None:
+    """Refuse a non-array returned for an output declared as a NumPy array (ITL-883).
+
+    A NumPy scalar (for example ``x * 2`` on a 0-d array) is not an array, and
+    Orcapod never wraps one implicitly.
+
+    Raises:
+        TypeError: Naming the output key, the declared type and the returned type.
+    """
+    for key, value in output_data.items():
+        if value is None:
+            continue
+        required = _declared_ndarray_type(output_schema.get(key))
+        if required is not None and not isinstance(value, required):
+            raise TypeError(
+                f"Output {key!r} is declared as {required.__module__}.{required.__qualname__}"
+                f" but the function returned {type(value).__module__}."
+                f"{type(value).__qualname__} ({value!r}); return an array, for example"
+                " with np.asarray(...)"
+            )
+
+
 class DataFunctionBase(TraceableBase, Generic[E]):
     """Abstract base class for DataFunctionProtocol.
 
@@ -171,18 +218,20 @@ class DataFunctionBase(TraceableBase, Generic[E]):
 
     @property
     def output_data_schema_hash(self) -> str:
-        """Return the hash of the output data schema as a string.
+        """Return the hash of the output data schema as a bare hex digest.
 
-        The hash is computed lazily on first access and cached for subsequent calls.
+        The digest is part of the function ``uri`` and so of table paths and source-info
+        tokens: a hash inside a name carries no label. It is computed lazily on first
+        access and cached for subsequent calls.
 
         Returns:
-            The hash string of the output data schema.
+            The hex digest of the output data schema hash, without a label.
         """
         if self._output_data_schema_hash is None:
             self._output_data_schema_hash = (
                 self.data_context.semantic_hasher.hash_object(
                     self.output_data_schema
-                ).to_string()
+                ).to_hex()
             )
         return self._output_data_schema_hash
 
@@ -469,8 +518,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         self._git_hash = git_hash
 
         semantic_hasher = self.data_context.semantic_hasher
+        # The signature hash is the hash of the function used as a value: one
+        # structured description of the signature (module, name, each parameter's
+        # name, kind, annotation and default, return annotation), with every default
+        # hashed by the semantic hasher (ITL-953).
         self._function_signature_hash = semantic_hasher.hash_object(
-            get_function_signature(function)
+            function
         ).to_prefixed_digest()
         self._function_content_hash = semantic_hasher.hash_object(
             get_function_components(self._function)
@@ -482,9 +535,14 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return self._function_name
 
     def get_function_variation_data(self) -> dict[str, Any]:
-        """Raw data defining function variation - system computes hash"""
+        """Raw data defining function variation, stored with every result row.
+
+        ``function_version`` is the full version string the function was declared
+        with (``"v3.7"``); only its major part is in the table path.
+        """
         return {
             "function_name": self._function_name,
+            "function_version": self._version,
             "function_signature_hash": self._function_signature_hash,
             "function_content_hash": self._function_content_hash,
             "git_hash": self._git_hash,
@@ -495,6 +553,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return Schema(
             {
                 "function_name": str,
+                "function_version": str,
                 "function_signature_hash": bytes,
                 "function_content_hash": bytes,
                 "git_hash": str,
@@ -576,6 +635,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             A Data containing the parsed outputs with source info.
         """
         output_data = parse_function_outputs(self._output_keys, values)
+        _check_declared_ndarray_outputs(output_data, self.output_data_schema)
 
         def combine(*components: tuple[str, ...]) -> str:
             inner_parsed = [":".join(component) for component in components]
@@ -816,7 +876,17 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     """
 
     def __init__(self, data_function: DataFunctionProtocol, **kwargs) -> None:
+        """Wrap ``data_function``.
+
+        Args:
+            data_function: The data function to wrap.
+            **kwargs: Passed on to ``DataFunctionBase``. Without a ``data_context``
+                the wrapper works under the wrapped function's data context, so
+                that what it hashes and stores agrees with the function's data.
+        """
         self._data_function = data_function
+        if kwargs.get("data_context") is None:
+            kwargs["data_context"] = getattr(data_function, "data_context", None)
         super().__init__(**kwargs)
 
     def computed_label(self) -> str | None:
@@ -961,6 +1031,8 @@ class CachedDataFunction(DataFunctionWrapper):
             result_database=result_database,
             record_path=record_path_prefix + self.uri,
             auto_flush=True,
+            # The first uri component is the function's name; no hash before it.
+            name_path=record_path_prefix + self.uri[:1],
         )
 
     def _build_metadata_datagrams(self) -> tuple[Datagram, Datagram]:
@@ -1002,11 +1074,21 @@ class CachedDataFunction(DataFunctionWrapper):
         the underlying function.  They are intentionally excluded from the
         cache key — such arguments are deterministic per row and pod, so the
         same input data always produces the same output.
+
+        Raises:
+            InputValidationError: If ``data`` is of another data context than this
+                function's; the wrapped function has not been called then, whatever
+                ``skip_cache_lookup`` and ``skip_cache_insert`` are.
         """
+        # Checked before anything else: with ``skip_cache_lookup`` the lookup, which
+        # checks it too, does not run, and the function must not be called.
+        require_same_data_context(data.data_context_key, self.data_context_key)
         output_data = None
         if not skip_cache_lookup:
             module_logger.info("Checking for cache...")
-            output_data = self._cache.lookup(data)
+            output_data = self._cache.lookup(
+                data, data_context_key=self.data_context_key
+            )
             if output_data is not None:
                 module_logger.info(f"Cache hit for {data}!")
                 return output_data
@@ -1014,7 +1096,13 @@ class CachedDataFunction(DataFunctionWrapper):
         if output_data is not None:
             if not skip_cache_insert:
                 var_dg, exec_dg = self._build_metadata_datagrams()
-                self._cache.store(data, output_data, var_dg, exec_dg)
+                self._cache.store(
+                    data,
+                    output_data,
+                    var_dg,
+                    exec_dg,
+                    data_context_key=self.data_context_key,
+                )
             output_data = output_data.with_meta_columns(
                 **{self.RESULT_COMPUTED_FLAG: True}
             )
@@ -1029,11 +1117,21 @@ class CachedDataFunction(DataFunctionWrapper):
         skip_cache_insert: bool = False,
         **kwargs: Any,
     ) -> DataProtocol | None:
-        """Async counterpart of ``call`` with cache check and recording."""
+        """Async counterpart of ``call`` with cache check and recording.
+
+        Raises:
+            InputValidationError: If ``data`` is of another data context than this
+                function's; the wrapped function has not been called then.
+        """
+        # Checked before anything else: with ``skip_cache_lookup`` the lookup, which
+        # checks it too, does not run, and the function must not be called.
+        require_same_data_context(data.data_context_key, self.data_context_key)
         output_data = None
         if not skip_cache_lookup:
             module_logger.info("Checking for cache...")
-            output_data = self._cache.lookup(data)
+            output_data = self._cache.lookup(
+                data, data_context_key=self.data_context_key
+            )
             if output_data is not None:
                 module_logger.info(f"Cache hit for {data}!")
                 return output_data
@@ -1043,7 +1141,13 @@ class CachedDataFunction(DataFunctionWrapper):
         if output_data is not None:
             if not skip_cache_insert:
                 var_dg, exec_dg = self._build_metadata_datagrams()
-                self._cache.store(data, output_data, var_dg, exec_dg)
+                self._cache.store(
+                    data,
+                    output_data,
+                    var_dg,
+                    exec_dg,
+                    data_context_key=self.data_context_key,
+                )
             output_data = output_data.with_meta_columns(
                 **{self.RESULT_COMPUTED_FLAG: True}
             )
@@ -1059,7 +1163,7 @@ class CachedDataFunction(DataFunctionWrapper):
         Returns:
             The cached output data, or ``None`` if no entry was found.
         """
-        return self._cache.lookup(input_data)
+        return self._cache.lookup(input_data, data_context_key=self.data_context_key)
 
     def record_data(
         self,
@@ -1075,6 +1179,7 @@ class CachedDataFunction(DataFunctionWrapper):
             var_dg,
             exec_dg,
             skip_duplicates=skip_duplicates,
+            data_context_key=self.data_context_key,
         )
         return output_data
 
@@ -1091,5 +1196,6 @@ class CachedDataFunction(DataFunctionWrapper):
             A PyArrow table of cached results, or ``None`` if empty.
         """
         return self._cache.get_all_records(
-            include_system_columns=include_system_columns
+            self.data_context_key,
+            include_system_columns=include_system_columns,
         )

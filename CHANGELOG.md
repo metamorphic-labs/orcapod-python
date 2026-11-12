@@ -4,39 +4,51 @@
 
 ### Breaking changes and migration
 
-#### A `dict` or `set` value hashes the same whatever order it was built in (ITL-905)
+#### NumPy arrays: new storage format and new hashes, no automatic migration (ITL-888, ITL-883)
 
-A `dict[K, V]` value is stored as `large_list<struct<key, value>>` and a plain `set[T]`
-(element type without a logical type) as `large_list<T>`. Both were stored in Python
-iteration order, so `{"a": 1, "b": 2}` and `{"b": 2, "a": 1}` had different row hashes,
-and the same `set[str]` had a different row hash in every process (`PYTHONHASHSEED`).
-Orcapod now stores dict entries sorted by key and set elements sorted, wherever a Python
-value becomes Arrow; see the hashing reference, section 1d, for the order. A NaN key or
-element, values that cannot be compared, and two keys that convert to the same stored
-value raise `CanonicalOrderError` (a `ValueError`) naming the column. A datagram built from
-Python values (and values set with `update` or `with_columns`) holds its dicts in the same
-order, so a newly computed pod output and one served from a `0.3.0` cache iterate alike (an
-output served from a `0.2.0` cache keeps its stored order, see below). An Arrow table is still hashed exactly as stored: a key/value list that arrives in
-Arrow form is never re-sorted.
+**The array format and every array hash changed in v0.3.** A store written by v0.2 that holds
+`numpy.ndarray` columns is **not migrated**. Every node that handles arrays gets new tables,
+so its v0.2 results are no longer found; and since every Arrow-derived hash changed too
+(ITL-910, below), no v0.2 result is reused at all: v0.3 ignores the rows a v0.2 store holds and
+computes every input again. Nothing written by v0.2 is changed or deleted, and those tables stay
+readable with v0.2. A migration is planned after v0.3 (ITL-889).
 
-Which released hashes move: only those of values holding a dict whose insertion order was
-not key order, or a `set[T]` of two or more elements whose iteration order was not sorted
-(for `str` and `bytes` that order changed with every process, so it had no stable value).
-For such a row, its data hash moves, and with it the function pod cache key, the pipeline
-record and entry ids, and the default `source_id` (with its per-row record ids) of a
-source built without an explicit `source_id`. Schema hashes, `pipeline_hash` values and
-explicit `source_id`s do not move, and a dict already built in key order is stored
-byte-for-byte as before. In the golden hash suite exactly two entries moved:
-`pipeline:index_pick.index.row[{"subject":"s1"}].data_hash` and `...s2...`, whose rows hold
-`meta={"k": ..., "j": ...}`.
-
-What a `0.2.0` store sees (checked against a Delta store written by `0.2.0`): table paths
-are unchanged, so every stored row is still found. An input holding an out-of-order dict
-gets a new hash, misses the cache once, and is recomputed; the new row is written next to
-the old one, which stays (a store-wide read shows both, nothing is dropped). A cache hit
-whose stored output holds an out-of-order dict is served as stored, with its `0.2.0` order
-and hash, until that entry is recomputed. To start clean, drop the old rows or use a new
-store; Orcapod does not rewrite stored rows.
+- **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
+  `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
+  data: large_binary>`: an Orcapod dtype tag, the shape, and the elements in C order,
+  little-endian, packed. It replaces the `.npy` file under `numpy.ndarray`; that name is no
+  longer registered or written.
+- **Identity.** An array is its dtype, shape and element bits. A structured dtype's field
+  names, types and order are part of the dtype, at every nesting depth. Memory layout, byte
+  order, structured offsets and padding, and subclass are not part of it. Arrays read back
+  canonical: C order, little-endian (`>f4` reads back `<f4`), structured fields packed in
+  their declared order, as plain `np.ndarray`.
+- **Hash.** `NumpyArrayHandler` returns `ContentHash("ndarray_v1", digest)`. The digest is
+  SHA-256 over a length-prefixed encoding of the stored row (`docs/reference/hashing.md`,
+  section 8), and the label replaces the bare `sha256`. Because the logical type name is now
+  `orcapod.ndarray`, the type, schema and pipeline hashes of anything with an array column
+  change too, and so do the table paths of those nodes. Pipeline hashes are chained, so the
+  pipeline and operator tables of every node downstream of an array column move as well,
+  even when it has no array column itself. A pod whose inputs and outputs hold no array
+  keeps its function result table, and nodes with no array column upstream keep their tables;
+  but an array-free pod does **not** reuse its v0.2 results: every Arrow-derived hash changed
+  as well (ITL-910, below) and every table moved to a new layout (ITL-944, below), so the
+  v0.2 tables are not read and the inputs are computed again.
+- **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
+  the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
+  NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
+  `clongdouble`, datetimes and timedeltas without a unit, and structured dtypes with titles
+  (whether to accept these last three kinds later is tracked in ITL-911).
+- **Function pods.** A pod declared `-> np.ndarray` that returns something other than an array,
+  such as a NumPy scalar, now raises `TypeError` naming the output.
+- **MergeJoin** orders merged arrays by their stored `(dtype tag, shape, data)`, and lists of
+  arrays (an array column after `GroupBy` or `Batch`) by their elements' keys, in order.
+- **Pick** on a column whose logical type has no keyed access (an array, a dataclass, a
+  pydantic model) raises `InputValidationError` naming the column, instead of
+  `NotImplementedError` (ITL-883).
+- `LogicalTypeRegistry.get_by_python_type` now picks the most specific registered class along
+  the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
+  subclasses, whatever the registration order.
 
 #### A changed column type is refused when appending to a Delta table (ITL-884)
 

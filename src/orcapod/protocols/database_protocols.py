@@ -116,6 +116,53 @@ class ArrowDatabaseProtocol(Protocol):
         """
         ...
 
+    def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+        """List the paths of the tables stored under ``prefix``.
+
+        A table is listed when its path starts with every component of ``prefix``
+        (a table at ``prefix`` itself included). Tables stored below another table
+        are listed too. Paths are relative to ``self.base_path``, like the
+        ``record_path`` of every other method, and each begins with ``prefix``.
+        The listing opens no table and loads no record.
+
+        Orcapod uses it to find tables written by an earlier version, whose paths
+        it cannot compute because the hashes inside them changed (ITL-954).
+
+        What each database of Orcapod can list:
+
+        - ``InMemoryArrowDatabase``: every table, flushed or not, exactly.
+        - ``DeltaTableDatabase`` on a local directory: every flushed table, exactly
+          (a directory walk; a directory holding ``_delta_log`` is a table).
+        - ``DeltaTableDatabase`` on ``s3://`` or ``s3a://``: the same walk through
+          ``s3fs``, one list request per directory. On ``gs://``, ``az://`` and
+          ``abfs://`` only when the matching ``fsspec`` package is installed and
+          can reach the store with its default credentials. A cloud store that
+          cannot be listed raises ``TableListingNotSupportedError``.
+        - ``ConnectorArrowDatabase`` (SQLite, PostgreSQL, SpiralDB): the tables
+          whose name in the backend starts with the name ``prefix`` maps to. A
+          table name does not keep the path it was made from, so the components
+          after ``prefix`` come back as the backend stores them: every character
+          other than letters, digits and ``_`` is ``_``, and a component that
+          holds ``__`` comes back as two. Such a path still names the same
+          table. The last component of a path is exact unless it holds ``__``.
+        - ``ExtensionAwareDatabase``: what the database it wraps lists.
+        - ``NoOpArrowDatabase``: nothing; it stores no table.
+
+        Args:
+            prefix: Leading path components, relative to ``self.base_path``. The
+                empty prefix lists every table of this database view.
+
+        Returns:
+            The table paths, sorted. Empty when there is none.
+
+        Raises:
+            TableListingNotSupportedError: If this store cannot enumerate its
+                tables.
+            StoreReadError: If the store can list its tables but the listing
+                failed.
+        """
+        ...
+
     def to_config(self) -> dict[str, Any]:
         """Serialize database configuration to a JSON-compatible dict.
 
@@ -157,6 +204,27 @@ class ArrowDatabaseWithMetadataProtocol(
     """A protocol that combines ArrowDatabaseProtocol with metadata capabilities."""
 
     pass
+
+
+class TableCommittingDatabaseProtocol(Protocol):
+    """A database that commits table by table (ITL-919).
+
+    Such a database (``DeltaTableDatabase``) can commit one table's pending writes
+    on its own, and commits a table by itself once that table holds ``batch_size``
+    pending rows. A function node uses ``flush_batch`` to commit its results before
+    its pipeline records; ``PipelineJob.run`` keeps ``commit_every_rows`` below
+    ``batch_size``. A wrapper satisfies this protocol only when the database it
+    wraps does. Check with ``orcapod.databases.utils.as_table_committing``.
+    """
+
+    @property
+    def batch_size(self) -> int:
+        """Pending rows of one table at which the database commits that table."""
+        ...
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Commit the pending writes of the table at ``record_path`` only."""
+        ...
 
 
 @runtime_checkable
