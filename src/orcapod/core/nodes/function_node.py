@@ -2065,6 +2065,11 @@ class FunctionJobNode(FunctionNodeBase):
             output_data_hash: Content hash of the output, if any.
         """
         pipeline_database = self._require_pipeline_database()
+        # The row key combines the input's hash with this node's hasher: an input
+        # of another data context would be stored under a mixed key.
+        require_same_data_context(
+            input_data.data_context_key, self._stored_data_context_key
+        )
         self._account_for_stale_tables()
 
         # Determine the next recomputation index by querying all existing rows

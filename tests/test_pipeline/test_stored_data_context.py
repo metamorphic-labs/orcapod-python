@@ -1122,6 +1122,26 @@ class TestInputOfAnotherDataContext:
         assert calls == []
         assert reopened(store).list_sources() == []
 
+    def test_add_pipeline_record_refuses_an_input_of_another_data_context(
+        self, store: Store
+    ):
+        """The public record writer does not store a row under a mixed key."""
+        import uuid
+
+        node = FunctionJobNode(
+            function_pod=double.pod,  # pyright: ignore[reportArgumentType]  # the decorator types .pod as the pod base class
+            input_stream=DictSource(data=ROWS, tag_columns=["k"], source_id="src"),
+            pipeline_database=store,
+            result_database=store,
+        )
+        tag, data = next(iter(_other_context_stream().iter_data()))
+
+        with pytest.raises(InputValidationError) as info:
+            node.add_pipeline_record(tag, data, uuid.uuid4(), computed=True)
+
+        _assert_names_both_contexts(info.value)
+        assert reopened(store).list_sources() == []
+
     def test_cached_function_raises_before_calling_it(
         self, store: Store, other_context: contexts.DataContext
     ):
