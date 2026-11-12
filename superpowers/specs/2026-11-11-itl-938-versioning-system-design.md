@@ -153,11 +153,22 @@ tables**, and their rows are separated by `__node_content_hash`.
 | Source content identity | `(class name, schemas, source_id)` | `semantic_v0.1:d644c803…` for `source_id="source1"`; `…9da643df…` for `source_id="other_name"` with the same rows | every downstream content hash; `__node_content_hash`; saved job file |
 | `source_id` | given by the user (`"source1"`), or when absent the bare Arrow hash of the whole table (`000001883080da70…`) | — | source content identity; values of `_tag_source_id::…`; the front of every source-info token and of every record id |
 
+The contract (developer, November 11, 2026): a source decides whether its identity reflects
+its exact content or is an *address* for it, such as a repository. Inside a source, each entry
+carries a unique and reliable record id. Orcapod trusts that the same `source_id` and the same
+record id mean exactly the same data entry.
+
+```
+ source_id      = which repository          "source1"            -> content identity, _tag_source_id
+ record id      = which entry inside it     uuid5("source1::row_2") -> _tag_record_id, entry id
+ source-info    = which value of the entry  "source1::row_2::x"  -> _source_x
+```
+
 Two measured consequences:
 
-- With a user-given `source_id`, the source's content hash does **not** cover its data:
-  changing one value (`x: 5` to `x: 99`) leaves it at `semantic_v0.1:d644c803…`. The changed
-  row is still distinguished downstream, by its row data hash.
+- With a user-given `source_id`, the source's content hash does **not** cover its data, by
+  design: changing one value (`x: 5` to `x: 99`) leaves it at `semantic_v0.1:d644c803…`. The
+  changed row is still distinguished downstream, by its row data hash.
 - With no `source_id`, the source's content hash depends on the **Arrow hasher** through the
   default id: the same rows give `semantic_v0.1:d8eb49fa…` on main and `…5b6ae6d2…` on
   ITL-910. This is the one place where an Arrow-hasher change leaks into the structure-hash
@@ -839,6 +850,7 @@ Decisions made in this discussion:
 | Nov 11, 2026 | "Anything that ends up changing the schema of the results (changes the column name/dtype or adds more columns to results / tags table) should have itself reflected in the path of the table." |
 | Nov 11, 2026 | "Even if the schema/column doesn't change but the meaning of the columns change, we should critically evaluate whether that should be present as entirely different path or if it should just be reflected in a column that keeps that info." |
 | Nov 11, 2026 | Asked for the identity chains (pipeline versus content identity, source identity, source entry identity), system tags and source columns to be laid out explicitly, and for every hash computation site to state precisely what affects its result (sections 1.2.1, 1.2.2, Appendix A). |
+| Nov 11, 2026 | **Source identity contract.** "Whether source identity precisely reflects the exact content OR whether it is meant to just serve as the 'address' of how to (supposedly reliably) refer to the very source is up to the design / decision of the source. This is intentional as sometimes we want to treat the 'repository' as the source identity (e.g. a github repo address). Within the repo, we expect distinct entries to carry unique and reliable record/entry ID which will be used for source columns but as far as source ID is concerned, it's just the repo. We trust that the source will maintain that if source ID and record/entry ID is the same, then we are talking about exactly the same data entry." Also: the content hash is the Merkle chain that includes the identity of the bound sources; the pipeline hash captures only schema and the chain of steps. |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
 Open questions for the developer:
@@ -853,7 +865,6 @@ Open questions for the developer:
    a per-row rules name (the data context key, made meaningful), or both?
 5. Operator behaviour (IV3): should a change be recorded, and where?
 6. Which of the wrong-hash findings in A.9 are fixed before the v0.3 tag?
-7. Is finding A (content hash does not cover data under a given `source_id`) intended?
 
 ---
 
@@ -1162,8 +1173,8 @@ These came out of the audit. Each was reproduced a second time.
 
 | # | Finding | Why it matters here |
 |---|---|---|
-| A | With a user-given `source_id`, **data is in no content hash anywhere down the chain**: a changed value, an added row and reordered rows leave every stage's content hash unchanged. The row filter `__node_content_hash` therefore does not separate two runs of different data under one `source_id`; their rows are separated only by the entry id | "content hash" does not mean what its name says; the system must name what it actually covers |
-| B | File and database sources default `source_id` to a name, so two SQLite files with a table `t`, or two Delta tables named `tbl` in different directories, have identical hashes | same |
+| A | **Intended (developer, November 11, 2026).** Content identity is *source identity*, not data content: with a user-given `source_id`, a changed value, an added row and reordered rows leave every stage's content hash unchanged. A source decides whether its identity reflects its exact content or is an address for it; see the source identity contract in Part 9. Rows are still told apart by the entry id (record id + row data hash). `CLAUDE.md` describes `content_hash()` as "data-inclusive, changes when data changes", which should be reworded | the system must name what the content hash covers: the pipeline bound to named sources |
+| B | File and database sources default `source_id` to a name: the CSV path, the table name, the Delta directory name. Two SQLite files with a table `t`, or two Delta tables named `tbl` in different directories, have identical hashes. Under the contract this is the source's choice, but here the user stated nothing and the default address is not unique | candidate follow-up: is a bare table or directory name a good enough default address |
 | C | The stored Arrow type of a column is in no structure hash. Only its Python type name is | type rules (axes II1, II2) cannot reach a path through any existing hash |
 | D | An operator's identity is its class name; nothing about its behaviour or version | axis IV3 has no hook |
 | E | `MergeJoin(m1, m1b)`, same `source_id` and different data, equals `MergeJoin(m1, m1)` on both hashes (`S:57f303d7`, `S:69ff5b2e`), and its **pipeline** hash differs from `MergeJoin(m1, m2)` (`S:a91c53db`) although all three inputs share one schema | the pipeline hash is not purely schema plus topology: unordered inputs are de-duplicated by content |
