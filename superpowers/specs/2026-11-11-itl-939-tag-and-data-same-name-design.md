@@ -3,7 +3,8 @@
 **Status:** proposal, awaiting the developer's decisions (section 6).
 **Issue:** ITL-939. **Related:** ITL-929 (record ids from primary keys), ITL-938 (versioning).
 **Date:** November 11, 2026.
-**Experiments:** `superpowers/specs/itl-939-experiments/` (each `expNN_*.py` has its captured
+**Experiments:** `superpowers/specs/itl-939-experiments/` (exp01 today's rules, exp02 today's
+workarounds, exp03 copy-operator prototype, exp04 foreign keys, exp05 hashes and divergence; each `expNN_*.py` has its captured
 output next to it as `expNN_*.out.txt`; rerun with `uv run python <script>`).
 
 ## 1. Summary
@@ -35,7 +36,7 @@ output next to it as `expNN_*.out.txt`; rerun with `uv run python <script>`).
   `Join(penetration, probe)` into a silently wrong cross product. Also not recommended: pods
   that read tags (D). The result cache keys on the input data hash only, so such a pod
   would get wrong cache hits.
-* **Related defects found** (outside this issue, see section 7): `Join`/`MergeJoin` miss a
+* **Related defects found** (filed as ITL-940, see section 7): `Join`/`MergeJoin` miss a
   tag-vs-data name collision across inputs. A pod output key may equal a tag name. Both
   surface as late, unclear errors. The first one hits a natural EDI join (`penetration` with
   `probe` on `probe_id`).
@@ -250,11 +251,32 @@ workshop. Defer.
 read-only arguments. No column model changes. But:
 
 * It is the exception the principle forbids: "function pods never inspect tags".
-* Caching breaks. `ResultCache.lookup` matches on `input_data.content_hash()`, so two rows
-  with equal data and different session starts share one cached result (exp03 #4). Fixing
-  that means putting the declared tag values into the cache key and into the input identity.
-  That is design C done inside the pod, with a new cache-key layout to version under ITL-938.
+* Caching breaks (below).
 * After `Batch`, tags are lists, so the parameter type depends on the upstream.
+
+**Why the cache problem makes D unsafe.** A pod's computed result is cached by its input:
+`ResultCache.lookup` matches on `input_data.content_hash()` and nothing else
+(`result_cache.py:186`). That is correct today only because a pod's output depends on its data
+alone. Under D the output also depends on the tag values the pod reads. Those values are not
+in the data hash, so two rows with equal data and different tags look like the same input, and
+the second row is served the first row's result. Nothing signals the mistake. The `FunctionNode`
+pipeline record would still be per row (its preimage includes the tags), but the value it
+records would be the cached one. exp03 section 4 builds that case: two `experiment` rows with
+the same `experiment_start_timestamp` and different `session_start_datetime` tags.
+
+```text
+=== 4. two rows, same data, different tags -> same input data hash
+data hashes: ['00000138a40c4de2', '00000138a40c4de2']
+-> a pod that read session_start_datetime from the TAG would get one cached result
+   for both rows (ResultCache keys on the input data hash only).
+with the copy, data hashes: ['00000162e219798e', '000001ed3ee152c9']
+```
+
+The elapsed time differs between the two rows (different session starts), yet a D pod with a
+result database would return one elapsed time for both. Making D safe means adding the declared
+tag values to the cache key and the input identity. That is design C carried out inside the pod,
+plus a new cache-key layout to version under ITL-938. With C the value is in the data, so the
+cache key already covers it, as the last line shows.
 
 Not recommended.
 
@@ -281,6 +303,50 @@ Not recommended.
   `InputValidationError` naming the column. Copying a list-valued tag (after `Batch`) gives a
   list-valued data column.
 
+### 5.1 Hashes compared with the W2 recipe (exp05)
+
+Both routes run the same elapsed-time pod on the same rows. Route W2 copies the column before
+the source; route C applies `CopyTagsToData` to the unchanged source.
+
+| Hash | W2 vs C | Why |
+|---|---|---|
+| Per-row input data `content_hash` (the pod's result-cache key) | **equal** | the data columns, their values and their Arrow types are the same; source info does not enter the data hash |
+| Per-row output data `content_hash` | **equal** | same inputs, same pod |
+| Stream `content_hash` (pod input and output streams) | differ (`139b…` vs `a343…`; `0ada…` vs `1f9c…`) | W2's chain starts at a source with an extra column; C's chain is the original source plus an operator node |
+| `pipeline_hash` (pod input and output) | differ (`5a1e…` vs `df45…`; `9708…` vs `a473…`) | W2's source has another schema hash; C adds an operator node |
+| Record-id preimage values: `source_id`, `record_id`, input data hash | **equal** (`experiment`, `3a75a398…`, `…4862a684…`) | both routes read the same source rows under the same `source_id` |
+| Record-id preimage column names | differ: `_tag_source_id::8b20…` vs `::2f50…` | the system-tag column name carries the source's schema hash, and W2's schema has an extra column |
+| `FunctionNode` base entry id (arrow hash of the preimage) | differ (`000001a5ca3e…` vs `000001996248…`) | the preimage is hashed with its column names |
+
+So the two routes share cached pod **results** (same input data hash), but they are different
+pipelines: different node tables (paths come from `pipeline_hash`) and different pipeline
+record ids. That is expected, because two different graphs produce the rows. A user who
+switches from the recipe to the operator recomputes nothing, but gets new pipeline records once.
+For the source itself, C changes nothing: the source keeps its schema hash, its system-tag
+column names and its stored tables. W2 changes all three.
+
+### 5.2 Can the copied value diverge from the tag?
+
+Yes, and that is acceptable. At copy time the two values are equal. After that the copy is an
+ordinary data column. A pod may output a new value under the same name, `MapData` may rename
+it, `Drop` may remove it, `GroupBy` and `Batch` turn it into a list. exp05 shows a pod that
+truncates the copy to the day:
+
+```text
+tag: 2026-01-05 09:00:00+00:00 | data session_start: 2026-01-05 00:00:00+00:00
+after MapData the tag is unchanged: (('subject_id', 'session_start_datetime', 'experiment_index'), ('experiment_start_timestamp', 'task_id', 't0'))
+```
+
+What it means: the copy has no tie to the tag after creation. Nothing re-checks equality, and
+nothing should. It is acceptable because the two values play different roles. The tag
+identifies the row, and no pod can change it, since pods never write tags. The copy is an
+input to computation, and computation may transform it like any other value. Row identity,
+joins and record ids follow the tag only, so a diverged copy can never mis-identify or mis-join
+a row. The only risk is a reader assuming the two are still equal. The names make the
+difference visible (`session_start_datetime` is the key, `session_start` the input), and the
+docs should call the copy a snapshot. Design B carries the same divergence (exp01 #10) under a
+single name, which is where it does become confusing.
+
 ## 6. Recommendation
 
 ### 6.1 For the workshop: `CopyTagsToData`
@@ -294,29 +360,58 @@ stream.copy_tags_to_data({"session_start_datetime": "session_start"})
 CopyTagsToData({"session_start_datetime": "session_start"})(stream)
 ```
 
-Before (today, EDI `experiment` from SpiralDB, correct but leaves the DB source):
+The same elapsed-time computation, before and after. Shared by both:
 
 ```python
-raw = SpiralDBTableSource(PROJECT, "experiment", dataset="edi_sample_v1").as_table()
-raw = raw.append_column("session_start", raw["session_start_datetime"])
-experiment = ArrowTableSource(raw, tag_columns=EXPERIMENT_KEYS, source_id="experiment")
-```
+from datetime import datetime
 
-After:
+from orcapod import function_pod
+from orcapod.sources import SpiralDBTableSource
 
-```python
-experiment = SpiralDBTableSource(PROJECT, "experiment", dataset="edi_sample_v1")
+PROJECT, DATASET = "...", "edi_sample_v1"
+EXPERIMENT_KEYS = [
+    "experiment_preprocessing_hash", "subject_id", "session_start_datetime", "experiment_index",
+]
 
+session = SpiralDBTableSource(PROJECT, "session", dataset=DATASET)
+
+# EDI keys and columns are nullable in the DB schema, so the parameters are Optional.
 @function_pod(output_keys="onset_s")
 def onset_s(session_start: datetime | None, experiment_start_timestamp: int | None) -> float | None:
-    ...
+    if session_start is None or experiment_start_timestamp is None:
+        return None
+    return experiment_start_timestamp / 1e6 - session_start.timestamp()
+```
+
+**Before** (today: the W2 recipe, see 6.2 for its drawbacks):
+
+```python
+from orcapod.sources import ArrowTableSource
+
+raw = SpiralDBTableSource(PROJECT, "experiment", dataset=DATASET).as_table()
+raw = raw.append_column("session_start", raw["session_start_datetime"])
+experiment = ArrowTableSource(raw, tag_columns=EXPERIMENT_KEYS, source_id="experiment")
+
+onsets = onset_s.pod(experiment.select_data_columns(["session_start", "experiment_start_timestamp"]))
+result = onsets.join(session)  # keyed on subject_id, session_start_datetime
+```
+
+**After** (`CopyTagsToData`):
+
+```python
+experiment = SpiralDBTableSource(PROJECT, "experiment", dataset=DATASET)
 
 onsets = onset_s.pod(
     experiment.copy_tags_to_data({"session_start_datetime": "session_start"})
     .select_data_columns(["session_start", "experiment_start_timestamp"])
 )
-onsets.join(session)  # keyed on subject_id, session_start_datetime as before
+result = onsets.join(session)  # keyed on subject_id, session_start_datetime
 ```
+
+The pod is the same in both. The "after" version keeps the DB source (it reloads from its
+config, and `source_id`, nullability and record ids come from the source as usual) and works at
+any point in a pipeline, not only at the source. The unit of `experiment_start_timestamp`
+(microseconds since the epoch here) is an assumption to confirm against the EDI data.
 
 Scope: one operator file, a stream method, `__all__`, sync and async paths, `to_config`,
 tests (public interface; schema prediction against `static_process`; async/sync equivalence;
@@ -332,9 +427,37 @@ the source. It is one line, and it is what exp02 W2 shows is correct:
 t = t.append_column("session_start", t["session_start_datetime"])
 ```
 
-For `SpiralDBTableSource`, use the three-line "before" block above. Pass `source_id`
-explicitly, and accept that the pipeline cannot be reloaded from its config. **Never**
-recommend W1 or W3. Both give wrong joins without any error.
+For `SpiralDBTableSource`, the recipe in full (the shared block in 6.1 defines `PROJECT`,
+`DATASET`, `EXPERIMENT_KEYS`, `session` and `onset_s`):
+
+```python
+from orcapod.sources import ArrowTableSource, SpiralDBTableSource
+
+# 1. Load the DB table and take its Arrow table (user columns; types and nullability kept).
+raw = SpiralDBTableSource(PROJECT, "experiment", dataset=DATASET).as_table()
+# 2. Copy the key under a second name, which becomes a data column.
+raw = raw.append_column("session_start", raw["session_start_datetime"])
+# 3. Re-root as an in-memory source with the same keys as tags and an explicit source_id.
+experiment = ArrowTableSource(raw, tag_columns=EXPERIMENT_KEYS, source_id="experiment")
+
+onsets = onset_s.pod(experiment.select_data_columns(["session_start", "experiment_start_timestamp"]))
+result = onsets.join(session)
+```
+
+It gives correct results (exp02 W2: 5 rows, as expected). It has two drawbacks:
+
+1. **The pipeline cannot be reloaded.** The source is now an `ArrowTableSource`, whose
+   `to_config()` records only metadata. `ArrowTableSource.from_config` raises
+   `NotImplementedError` ("the in-memory Arrow table is not serializable"). A saved pipeline
+   no longer knows the data came from SpiralDB `experiment`. This matters if the workshop saves
+   and reloads pipelines; in a notebook run top to bottom it does not.
+2. **`source_id` must be passed by hand.** Without it, the source id defaults to the table's
+   content hash. Record ids (`source_id` plus row position) then change whenever any value in
+   the table changes, and stored pipeline records no longer match on re-run. The DB source
+   defaults `source_id` to the table name. The recipe must repeat that, under the same name,
+   in every notebook.
+
+**Never** recommend W1 or W3. Both give wrong joins without any error.
 
 ### 6.3 What waits
 
@@ -359,15 +482,15 @@ and can diverge later. The docs should say the copy is a snapshot.
    `tag_columns=[*primary_keys, fk]` at the source for the workshop. File an issue only if a
    post-pod foreign-key join turns up.
 5. **Reject designs A, B and D** and record why (sections 4.2, 4.3, 4.5). Recommendation: reject.
-6. **Fix the `Join`/`MergeJoin` tag-vs-data collision** so it raises `InputValidationError` at
+6. **Fix the `Join`/`MergeJoin` tag-vs-data collision** (filed as ITL-940) so it raises `InputValidationError` at
    graph-build time, naming the column and which input has it as a tag and which as data,
    instead of a raw `KeyError` at materialisation. Recommendation: yes, as a separate issue
    before the workshop, because `Join(penetration, probe)` hits it.
-7. **Reject a pod whose output key equals a tag name** when the pod is applied (today
+7. **Reject a pod whose output key equals a tag name** (filed as ITL-940) when the pod is applied (today
    `keys()` accepts it, `as_table()` fails and `iter_data()` yields diverging values).
    Recommendation: yes, a separate issue, after the workshop.
 
-## 7. Related defects found (not fixed here)
+## 7. Related defects found (filed as ITL-940, not fixed here)
 
 * **J1.** `Join` and `MergeJoin` check data-vs-data overlap but not a name that is a tag in one
   input and data in another (`join.py:103-118`). `keys()`/`output_schema()` predict the name
