@@ -8,6 +8,7 @@ computes. These tests run jobs on both orchestrators and both stores, and load s
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 import pyarrow as pa
 import pytest
@@ -90,12 +91,17 @@ def test_nodes_before_a_run_show_no_rows_and_compute_nothing() -> None:
 def test_nodes_after_a_run_show_their_first_rows(
     orchestrator: str, store_kind: str, tmp_path: Path
 ) -> None:
-    job = _job(_store(store_kind, tmp_path))
+    store = _store(store_kind, tmp_path)
+    job = _job(store)
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     assert len(CALLS) == 25
     for label in ("triple", "sel"):
         node = job.nodes[label]
-        head = node.head()
+        # Right after a run the rows are in memory: the store is not read at all.
+        with mock.patch.object(
+            type(store), "get_all_records", side_effect=AssertionError("store read")
+        ):
+            head = node.head()
         assert head.status is HeadStatus.ROWS, label
         assert head.total_rows == 25
         assert head.table.equals(node.as_table().slice(0, 10)), label
