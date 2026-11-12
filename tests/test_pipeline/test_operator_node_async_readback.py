@@ -404,6 +404,66 @@ MERGE_JOIN_AFTER_OPERATOR = Case(
 )
 
 
+def _no_match(stream: StreamProtocol) -> StreamProtocol:
+    """``stream`` behind a filter that matches no row."""
+    return PolarsFilter(constraints={"grp": "none"})(stream)
+
+
+AFTER_NO_ROWS_CASES = [
+    Case(
+        "group_by_after_no_rows",
+        lambda a, b, c: GroupBy(by=["grp"])(_no_match(a), label="op"),
+        0,
+    ),
+    Case(
+        "polars_filter_after_no_rows",
+        lambda a, b, c: PolarsFilter(constraints={"grp": "g1"})(
+            _no_match(a), label="op"
+        ),
+        0,
+    ),
+    Case(
+        "batch_after_no_rows",
+        lambda a, b, c: Batch(batch_size=2)(_no_match(a), label="op"),
+        0,
+    ),
+    Case(
+        "batch_all_after_no_rows", lambda a, b, c: Batch()(_no_match(a), label="op"), 0
+    ),
+    # Both inputs empty: a zero-row operator node reads back types built from Python
+    # types (ITL-912), so one empty and one non-empty input disagree on ``id`` on sync.
+    Case(
+        "merge_join_after_no_rows",
+        lambda a, b, c: MergeJoin()(_no_match(a), _no_match(c), label="op"),
+        0,
+    ),
+    Case(
+        "function_pod_after_no_rows",
+        lambda a, b, c: double_x.pod(_no_match(c), label="op"),
+        0,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case", AFTER_NO_ROWS_CASES, ids=[case.name for case in AFTER_NO_ROWS_CASES]
+)
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_node_after_an_input_with_no_rows_completes_the_run(
+    case: Case, orchestrator: str, tmp_path: Path
+) -> None:
+    """A filter that matches no row upstream: the job completes with zero rows (ITL-865).
+
+    On the async path a barrier operator whose input delivered no rows emits none, as the
+    sync path returns an empty stream; it does not raise.
+    """
+    job = _run_job(case, orchestrator, "in_memory", tmp_path)
+    node: object = job.nodes["op"]
+    assert isinstance(node, StreamProtocol)
+    assert list(node.iter_data()) == []
+    assert node.as_table().num_rows == 0
+
+
 def _sync_and_async_nodes(
     case: Case, tmp_path: Path
 ) -> tuple[OperatorJobNode, OperatorJobNode]:

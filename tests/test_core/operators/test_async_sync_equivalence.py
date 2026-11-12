@@ -511,6 +511,62 @@ def test_barrier_async_rejects_wrong_number_of_pipeline_hashes(case: Case) -> No
         asyncio.run(run())
 
 
+# ── inputs that deliver no rows (ITL-865) ───────────────────────────────────
+
+
+def no_rows(source: StreamProtocol) -> StreamProtocol:
+    """``source`` behind a filter that matches no row (every source has ``k`` in 1..3)."""
+    stream = PolarsFilter(constraints={"k": 0})(source)
+    assert list(stream.iter_data()) == []
+    return stream
+
+
+def _zero_row_cases() -> list[Any]:
+    """Every case with all inputs empty, and each multi-input case with one input empty."""
+    params: list[Any] = []
+    for case in CASES:
+        n_inputs = len(case.make_sources())
+        empty_sets = [tuple(range(n_inputs))]
+        if n_inputs > 1:
+            empty_sets += [(i,) for i in range(n_inputs)]
+        for empty in empty_sets:
+
+            def make_sources(
+                case: Case = case, empty: tuple[int, ...] = empty
+            ) -> tuple[StreamProtocol, ...]:
+                return tuple(
+                    no_rows(s) if i in empty else s
+                    for i, s in enumerate(case.make_sources())
+                )
+
+            suffix = "all" if len(empty) == n_inputs else f"input_{empty[0]}"
+            params.append(
+                pytest.param(
+                    Case(case.label, case.make_op, make_sources),
+                    id=f"{case.label}-empty_{suffix}",
+                )
+            )
+    return params
+
+
+@pytest.mark.parametrize("case", _zero_row_cases())
+def test_async_rows_equal_sync_rows_when_an_input_has_no_rows(case: Case) -> None:
+    """An input with no rows gives the sync path's rows on the async path, never an error.
+
+    The operator is applied to its inputs first, ``op(...)``, as an operator node does when
+    the graph is built: ``SemiJoin`` with an empty right input reads the common keys that
+    application recorded, because a channel with no rows says nothing about its columns
+    (ITL-858).
+    """
+    sources = case.make_sources()
+    expected = sync_rows(case.make_op(), *sources)
+    op = case.make_op()
+    _ = op(*sources)
+    actual = async_rows(op, *sources)
+    assert len(actual) == len(expected)
+    assert_equivalent(expected, actual)
+
+
 def test_drop_nulls_without_tag_columns() -> None:
     """A stream without tag columns: the async path drops the same rows, in order.
 
