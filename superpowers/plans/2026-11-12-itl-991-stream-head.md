@@ -176,3 +176,7 @@ Header wording (exact; #333 depends on the estimate line):
 
 - 2026-11-12: spec 70639010 pushed; design ask answered (D3, D5 approved; D1/D2/D4 pending
   with developer). Plan saved.
+- 2026-11-12 (later): D1, D2, D4 approved by the developer. Tasks 1-7 implemented and
+  pushed: F1 fix, StreamHead, sources, operator/function streams, cached pod stream, nodes,
+  docs ("Looking at data" in docs/concepts/streams.md), changelog fragment, design issue
+  ITL-991-PV1. Next: full suite, merge main, PR, CodeRabbit.

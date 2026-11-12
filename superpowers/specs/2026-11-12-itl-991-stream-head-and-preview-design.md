@@ -1,6 +1,7 @@
 # ITL-991: `head()` and a notebook preview that never computes
 
-Status: design, awaiting developer approval (November 12, 2026).
+Status: approved (developer, November 12, 2026: "agreed with all 3 recs"; D3 and D5 approved by the coordinator).
+Implementation notes at the end record where the code differs from the text below.
 Issue: ITL-991. Related: ITL-186 / PR #333 (Spiral source), ITL-990 (workshop notebook).
 
 ## Rulings this design implements (developer, November 12, 2026)
@@ -367,3 +368,18 @@ renders `SpiralDBTableSource[spike_event] — first 10 rows of about 63,349`.
   earlier runs are stored but not replayed (recommended, matches `as_table`), or show them.
 - **D4** Remove `view()` / `StreamView` (recommended) or keep `view()` as an alias of `head`.
 - **D5** Fix F1 in this PR (recommended) or file it separately.
+
+## Implementation notes (November 12, 2026)
+
+- Tag columns come first; the line above the table names them (`tags: id, grp`). Polars'
+  HTML shows each column's dtype, so there is no separate schema line.
+- Struct cells are left to Polars' rendering (the per-field rules are not applied).
+- A loaded `FunctionJobNode` whose attached store lacks the records its saved run stored (the
+  wrong store) still raises from `head()`; the preview shows that error as "could not read".
+  Every other loaded-node state returns a head without raising.
+- `check_head_size` and `head_column_config` live in `core/streams/base.py`, and `StreamHead`
+  / `HeadStatus` in `core/streams/head.py`, which imports nothing from `orcapod.types`: that
+  keeps `StreamProtocol.head` free of a new import cycle.
+- `head()` is part of `StreamProtocol`.
+- `_CachedFunctionPodStream` (added on main by ITL-988) drops stored meta columns in head as
+  in `as_table`.
