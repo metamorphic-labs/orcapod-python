@@ -120,6 +120,7 @@ def test_parse_returns_what_was_written() -> None:
         b'{"ignore":[],"version":"1"}',
         b'{"ignore":[],"version":0}',
         b"not json",
+        b'{"ignore":' + b"[" * 100000 + b"]" * 100000 + b',"version":1}',
         b"\xff\xfe",
         b"[]",
     ],
@@ -300,3 +301,38 @@ def test_a_column_stored_under_another_list_is_refused_naming_both(
         _converter(lenient).apply_logical_types(plain)["x"].type
         == stored.schema.field("x").type
     )
+
+
+def test_concurrent_first_use_gives_one_type_per_list() -> None:
+    """Threads that first ask for a list at the same time all get the same Arrow type."""
+    import sys
+    import threading
+
+    from orcapod.logical_types.ignore_list import IgnoreListLogicalType
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for trial in range(30):
+
+            class Racy(IgnoreListLogicalType):
+                EXTENSION_NAME = f"orcapod.test.racy{trial}"
+                STORAGE_TYPE = pa.large_string()
+                VERSION = 1
+                OPTIONS = frozenset({"a"})
+
+            barrier = threading.Barrier(8)
+            seen: list[pa.ExtensionType] = []
+
+            def ask(logical_type: type[IgnoreListLogicalType] = Racy) -> None:
+                barrier.wait()
+                seen.append(logical_type(["a"]).get_arrow_extension_type())
+
+            threads = [threading.Thread(target=ask) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert len({id(t) for t in seen}) == 1
+    finally:
+        sys.setswitchinterval(interval)
