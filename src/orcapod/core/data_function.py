@@ -7,7 +7,6 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
-import types
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
@@ -22,12 +21,17 @@ from orcapod.hashing.hash_utils import (
     get_function_components,
 )
 from orcapod.core.result_cache import ResultCache
+from orcapod.errors import OutputTypeError
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types.output_conformance import (
+    check_conformance,
+    normalize_output_numbers,
+)
 from orcapod.types import DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
@@ -38,6 +42,9 @@ from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 
 if TYPE_CHECKING:
+    from orcapod.logical_types.protocols import (
+        TypeConverterProtocol as LogicalTypeConverterProtocol,
+    )
     import pyarrow as pa
     import pyarrow.compute as pc
 else:
@@ -111,76 +118,6 @@ def parse_function_outputs(
 
 
 E = TypeVar("E", bound=DataFunctionExecutorProtocol)
-
-
-_ARRAY_CLASSES: dict[tuple[str, str], str] = {
-    ("numpy", "ndarray"): "return an array, for example with np.asarray(...)",
-    ("torch", "Tensor"): "return a tensor, for example with torch.as_tensor(...)",
-}
-"""Array classes whose declared outputs are checked, by ``(module, qualname)``, with a hint."""
-
-
-def _declared_array_type(declared: Any) -> tuple[type, str] | None:
-    """Return the array class a declared output type requires, if any.
-
-    Handles ``np.ndarray`` and ``torch.Tensor`` (or a subclass), parameterized
-    aliases such as ``npt.NDArray[np.float32]``, and ``Optional``/``| None`` of
-    either. Neither NumPy nor torch is imported here: a class counts as an array
-    class when its MRO contains ``numpy.ndarray`` or ``torch.Tensor``.
-
-    Args:
-        declared: The declared output type.
-
-    Returns:
-        ``(declared_class, hint)`` where ``hint`` tells the user how to return
-        one, or ``None`` when the declared type is not an array class.
-    """
-    candidates = [declared]
-    if typing.get_origin(declared) in (typing.Union, types.UnionType):
-        candidates = [a for a in typing.get_args(declared) if a is not type(None)]
-    for candidate in candidates:
-        # A parameterized alias such as npt.NDArray[np.float32] has origin np.ndarray.
-        candidate = typing.get_origin(candidate) or candidate
-        if not isinstance(candidate, type):
-            continue
-        for base in candidate.__mro__:
-            hint = _ARRAY_CLASSES.get((base.__module__, base.__qualname__))
-            if hint is not None:
-                return candidate, hint
-    return None
-
-
-def _check_declared_array_outputs(
-    output_data: dict[str, Any], output_schema: Schema
-) -> None:
-    """Refuse a value that is not an instance of its declared array class.
-
-    Covers ``np.ndarray`` (ITL-883) and ``torch.Tensor`` (ITL-871). The returned
-    value must be an instance of the declared class; a subclass instance is
-    accepted. A NumPy scalar (for example ``x * 2`` on a 0-d array), a Python
-    number or an ndarray returned where a tensor is declared is not, and Orcapod
-    never wraps or converts one implicitly.
-
-    Args:
-        output_data: The parsed outputs, by output key.
-        output_schema: The declared output types.
-
-    Raises:
-        TypeError: Naming the output key, the declared type and the returned type.
-    """
-    for key, value in output_data.items():
-        if value is None:
-            continue
-        declared = _declared_array_type(output_schema.get(key))
-        if declared is None:
-            continue
-        required, hint = declared
-        if not isinstance(value, required):
-            raise TypeError(
-                f"Output {key!r} is declared as {required.__module__}.{required.__qualname__}"
-                f" but the function returned {type(value).__module__}."
-                f"{type(value).__qualname__} ({value!r}); {hint}"
-            )
 
 
 class DataFunctionBase(TraceableBase, Generic[E]):
@@ -473,7 +410,6 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
 
         self._function = function
         self._is_async = inspect.iscoroutinefunction(function)
-
         # Reject functions with variadic parameters -- PythonDataFunction maps
         # data keys to named parameters, so the full parameter set must be fixed.
         _sig = inspect.signature(function)
@@ -655,15 +591,45 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     def _build_output_data(self, values: Any) -> DataProtocol:
         """Build an output Data from raw function return values.
 
+        Every returned value is checked against its declared output type and validated
+        against Arrow storage eagerly. Numeric exceptions are normalized; compatible
+        subclass and structural objects pass unchanged in memory. The declared logical
+        type controls their stored representation (ITL-895).
+        Without the check pyarrow would coerce some mismatches silently, for example
+        truncating ``1.5`` returned for ``-> int``. The shared conformance policy
+        permits only value-preserving numeric exceptions.
+
         Args:
             values: Raw return value from the wrapped function.
 
         Returns:
             A Data containing the parsed outputs with source info.
+
+        Raises:
+            OutputTypeError: If a returned value does not conform to its declared type,
+                or cannot be converted to it.
         """
         output_data = parse_function_outputs(self._output_keys, values)
-        _check_declared_array_outputs(output_data, self.output_data_schema)
+        output_schema = self.output_data_schema
         for key, value in output_data.items():
+            mismatch = check_conformance(
+                value,
+                output_schema[key],
+                # DataContext's legacy protocol omits the logical-type operations.
+                typing.cast(
+                    "LogicalTypeConverterProtocol",
+                    typing.cast(object, self.data_context.type_converter),
+                ),
+            )
+            if mismatch is not None:
+                raise OutputTypeError(
+                    self.canonical_function_name,
+                    key,
+                    output_schema[key],
+                    value,
+                    mismatch.describe(),
+                    mismatch.hint,
+                )
             conversions = tensor_conversions(value)
             if conversions:
                 warn_once(
@@ -685,13 +651,68 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             k: combine(self.uri, (new_record_uuid.hex,), (k,)) for k in output_data
         }
 
+        if not output_data:
+            return Data(
+                output_data,
+                source_info=source_info,
+                record_uuid=new_record_uuid,
+                python_schema=output_schema,
+                data_context=self.data_context,
+            )
+        # Validate storage eagerly, but retain compatible user-class instances. Reading
+        # the table back here would rebind structural objects to the registry's class.
+        self._convert_outputs(output_data, output_schema)
+        normalized = {
+            key: typing.cast(
+                DataValue, normalize_output_numbers(value, output_schema[key])
+            )
+            for key, value in output_data.items()
+        }
         return Data(
-            output_data,
+            normalized,
+            python_schema=output_schema,
             source_info=source_info,
             record_uuid=new_record_uuid,
-            python_schema=self.output_data_schema,
             data_context=self.data_context,
         )
+
+    def _convert_outputs(
+        self, output_data: dict[str, DataValue], output_schema: Schema
+    ) -> pa.Table:
+        """Convert checked outputs to a one-row Arrow table with the declared types.
+
+        Args:
+            output_data: The parsed outputs, already checked against ``output_schema``.
+            output_schema: The declared output types.
+
+        Returns:
+            The one-row table, typed by the declared schema.
+
+        Raises:
+            OutputTypeError: If an output cannot be converted, for example an integer
+                out of range for its declared width; it names that output.
+        """
+        converter = self.data_context.type_converter
+        try:
+            return converter.python_dicts_to_arrow_table(
+                [output_data], python_schema=output_schema
+            )
+        except Exception as exc:
+            # Find the output that fails on its own, so the error can name it.
+            for key, value in output_data.items():
+                try:
+                    _ = converter.python_dicts_to_arrow_table(
+                        [{key: value}], python_schema={key: output_schema[key]}
+                    )
+                except Exception:
+                    raise OutputTypeError(
+                        self.canonical_function_name,
+                        key,
+                        output_schema[key],
+                        value,
+                        type(exc).__name__,
+                    ) from None
+            raise
 
     def _call_async_function_sync(self, data: DataProtocol, **kwargs: Any) -> Any:
         """Run the wrapped async function synchronously.
