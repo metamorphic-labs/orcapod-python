@@ -431,6 +431,41 @@ def test_third_party_type_reads_only_what_it_declares() -> None:
     assert read.schema.field("c").type.__arrow_ext_serialize__() == b'{"v":2}'
 
 
+def _typed_thing_column(metadata: bytes) -> pa.Table:
+    """A table whose column ``c`` already has the extension type ``thirdparty.thing``."""
+    foreign_cls: Any = make_arrow_extension_type(
+        "thirdparty.thing", pa.large_string(), metadata
+    )
+    storage = pa.array(["a"], pa.large_string())
+    return pa.table({"c": pa.ExtensionArray.from_storage(foreign_cls(), storage)})
+
+
+def test_extension_typed_column_with_an_unreadable_identifier_is_refused() -> None:
+    """A column that arrives already extension-typed is checked like a stored one."""
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+    table = _typed_thing_column(b'{"v":1}')
+
+    with pytest.raises(LogicalTypeIdentifierError) as excinfo:
+        strict.load_logical_types(table)
+    assert "'c'" in str(excinfo.value)
+    with pytest.raises(LogicalTypeIdentifierError):
+        strict.register_storage_type(table.schema.field("c").type)
+
+
+def test_extension_typed_column_with_a_readable_older_identifier_is_read() -> None:
+    """An older identifier the type declares readable comes back as the current type."""
+    lenient = _converter(
+        _fresh_context(_thing_logical_type(b'{"v":2}', also_reads=(b'{"v":1}',)))
+    )
+    table = _typed_thing_column(b'{"v":1}')
+
+    read = lenient.load_logical_types(table)
+    assert read.schema.field("c").type.__arrow_ext_serialize__() == b'{"v":2}'
+    assert read.column("c").to_pylist() == table.column("c").to_pylist()
+    registered = lenient.register_storage_type(table.schema.field("c").type)
+    assert registered.__arrow_ext_serialize__() == b'{"v":2}'
+
+
 def test_list_wrapper_written_before_identifiers_is_read() -> None:
     converter = _converter()
     current = _extension_type(list[pathlib.Path])

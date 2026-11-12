@@ -143,6 +143,14 @@ class TestDelta:
             ("job", "f", "pdb_v2")
         ]
 
+    def test_a_directory_symlink_is_not_followed(self, tmp_path: Path):
+        """A link to an ancestor does not send the walk in circles."""
+        _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v2")])
+        (tmp_path / "job" / "loop").symlink_to(tmp_path, target_is_directory=True)
+        assert DeltaTableDatabase(tmp_path).list_table_paths() == [
+            ("job", "f", "pdb_v2")
+        ]
+
     def test_missing_root_gives_nothing(self, tmp_path: Path):
         assert DeltaTableDatabase(tmp_path / "absent").list_table_paths() == []
 
@@ -217,6 +225,30 @@ class TestDeltaOnCloudStorage:
                 },
             }
         ]
+
+    def test_an_http_endpoint_is_listed_only_when_http_is_allowed(
+        self, bucket: list[dict[str, Any]]
+    ):
+        """Without ``AWS_ALLOW_HTTP`` the credentials are not sent over plain HTTP."""
+        options = {
+            "AWS_ACCESS_KEY_ID": "key-id",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "AWS_ENDPOINT_URL": "http://localhost:9000",
+        }
+        store = DeltaTableDatabase("s3://bucket/root", storage_options=options)
+        with pytest.raises(TableListingNotSupportedError, match="AWS_ALLOW_HTTP"):
+            store.list_table_paths()
+        assert bucket == []  # no file system was built, nothing was sent
+
+        allowed = DeltaTableDatabase(
+            "s3://bucket/root", storage_options={**options, "aws_allow_http": "TRUE"}
+        )
+        assert allowed.list_table_paths(("absent",)) == []
+        https = DeltaTableDatabase(
+            "s3://bucket/root",
+            storage_options={**options, "AWS_ENDPOINT_URL": "https://example.test"},
+        )
+        assert https.list_table_paths(("absent",)) == []
 
     def test_a_listing_that_fails_means_the_store_cannot_list(
         self, monkeypatch: pytest.MonkeyPatch

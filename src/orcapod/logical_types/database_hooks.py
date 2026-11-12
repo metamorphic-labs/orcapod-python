@@ -166,8 +166,25 @@ def _apply_field(
     ext_name_bytes = field_meta.get(b"ARROW:extension:name")
 
     # ── Case 1: field is already an extension type (registered at read time) ──
-    if hasattr(field.type, "extension_name"):
-        return col, field
+    if isinstance(field.type, pa.ExtensionType):
+        lt = registry.get_by_arrow_extension_name(field.type.extension_name)
+        if lt is None:
+            return col, field
+        # The column's metadata is half of its identifier: keep the column only
+        # when the registered type declares it can read it.
+        try:
+            require_readable(lt, field.type.__arrow_ext_serialize__())
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(field.name) from exc
+        ext_type = lt.get_arrow_extension_type()
+        if field.type == ext_type:
+            return col, field
+        # A readable older identifier: the same storage under the current type.
+        rewrapped = [
+            pa.ExtensionArray.from_storage(ext_type, chunk.storage)
+            for chunk in col.chunks
+        ]
+        return pa.chunked_array(rewrapped, type=ext_type), field.with_type(ext_type)
 
     # ── Case 2: field has extension metadata and a matching registered type ───
     if ext_name_bytes is not None:
