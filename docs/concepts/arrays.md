@@ -170,7 +170,8 @@ A `torch.Tensor` can be a data value too. PyTorch is an optional dependency. Ten
 works whenever PyTorch can be imported, however it was installed: `pip install "orcapod[torch]"`
 installs it from PyPI, or install the build that suits your hardware yourself (see
 pytorch.org; on Linux the PyPI build includes CUDA, and pytorch.org also offers smaller
-CPU-only builds). Orcapod needs PyTorch 2.6 or later and is tested with PyTorch 2.15. Orcapod
+CPU-only builds). Orcapod needs PyTorch 2.6 or later, the first version whose restricted
+loader (below) reads `uint16`, `uint32` and `uint64` tensors, and is tested with PyTorch 2.15. Orcapod
 hashes a tensor's elements through NumPy (`Tensor.numpy()`), so your PyTorch build must
 support the NumPy version you have installed: some older builds cannot use NumPy 2 and fail
 with "Numpy is not available". If you see that error, upgrade PyTorch or install a NumPy

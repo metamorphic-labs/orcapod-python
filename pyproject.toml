@@ -51,7 +51,8 @@ spiraldb = [
     "pyspiral>=0.16.33",
 ]
 # Convenience extra that installs PyTorch. Orcapod's torch.Tensor support depends only on
-# torch being importable, however it was installed (ITL-871).
+# torch being importable, however it was installed (ITL-871). 2.6 is the first version whose
+# restricted loader (torch.load(weights_only=True)) reads uint16, uint32 and uint64 tensors.
 torch = ["torch>=2.6"]
 all = [
     "orcapod[redis]",
