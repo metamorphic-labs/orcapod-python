@@ -120,7 +120,8 @@ def test_stored_struct_lists_fields_in_declared_order(
     value: Any, names: list[str]
 ) -> None:
     storage = _column_type(value).storage_type
-    assert [field.name for field in storage] == names
+    assert isinstance(storage, pa.StructType)
+    assert storage.names == names
 
 
 def test_values_of_both_orders_read_back_as_their_own_class(
