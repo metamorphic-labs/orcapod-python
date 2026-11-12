@@ -394,3 +394,39 @@ class TestNonNullableColumns:
         records = loaded.nodes["double"].get_all_records()
         assert records is not None
         assert sorted(records.column("trials_x2").to_pylist()) == [20, 40]
+
+
+@pytest.mark.parametrize("source_id", [None, "shared"])
+def test_same_table_in_different_datasets(tmp_path, source_id):
+    """Dataset names isolate default identity; explicit IDs deliberately share it."""
+    with fake_pyspiral.install(tmp_path / "spiral"):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        for dataset in ("first", "second"):
+            table = project.create_table(
+                f"{dataset}.subject", key_schema=[("subject_id", pa.string())]
+            )
+            table.write(pa.table({"subject_id": ["m1"], "sex": ["F"]}))
+        first, second = [
+            SpiralDBTableSource("p", "subject", dataset=dataset, source_id=source_id)
+            for dataset in ("first", "second")
+        ]
+        assert first.pipeline_hash() == second.pipeline_hash()
+        identities = [TestSourceId._identity(source) for source in (first, second)]
+        if source_id is None:
+            assert first.source_id == "p/first/subject"
+            assert second.source_id == "p/second/subject"
+            assert all(a != b for a, b in zip(*identities, strict=True))
+        else:
+            assert first.source_id == second.source_id == source_id
+            assert identities[0] == identities[1]
+
+
+def test_validation_error_keeps_original_cause_and_location(spiral_root):
+    with pytest.raises(ValueError) as info:
+        SpiralDBTableSource(_PROJECT, "session", tag_columns=["missing"])
+    assert isinstance(info.value.__cause__, ValueError)
+    assert str(info.value).startswith(
+        f"SpiralDB project {_PROJECT!r}, dataset 'default': "
+    )
+    assert str(info.value.__cause__) in str(info.value)
+    assert "missing" in str(info.value)

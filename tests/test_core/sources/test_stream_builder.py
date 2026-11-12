@@ -298,3 +298,84 @@ class TestUnhashableColumnTypes:
         monkeypatch.setattr(hasher, "hash_table", counting)
         ArrowTableSource(self._table(), tag_columns=["k"])
         assert len(calls) == 1
+
+
+class TestProvenanceBoundaries:
+    @pytest.mark.parametrize("record_column", [None, "id"])
+    def test_chunked_ids_match_contiguous_table(self, record_column):
+        """Chunk boundaries must not reset positional tokens or lose null IDs."""
+        table = pa.table(
+            {
+                "id": pa.chunked_array([["b", None], [], ["a", "d"]], pa.string()),
+                "v": pa.chunked_array([[10], [20, 30, 40]], pa.int64()),
+            }
+        )
+        options = dict(
+            tag_columns=["id"], record_id_column=record_column, source_id="chunked"
+        )
+        actual = ArrowTableSource(table, **options).as_table(all_info=True)
+        expected = ArrowTableSource(table.combine_chunks(), **options).as_table(
+            all_info=True
+        )
+        assert actual.equals(expected)
+        tokens = (
+            ["id=b", "id=None", "id=a", "id=d"]
+            if record_column
+            else ["row_0", "row_1", "row_2", "row_3"]
+        )
+        assert actual.sort_by("v").column("_source_v").to_pylist() == [
+            f"chunked::{token}::v" for token in tokens
+        ]
+
+    @pytest.mark.parametrize("record_column", [None, "id"])
+    def test_zero_rows_preserve_provenance_schema(self, record_column):
+        table = pa.table(
+            {"id": pa.array([], pa.string()), "v": pa.array([], pa.int64())}
+        )
+        source = ArrowTableSource(
+            table, tag_columns=["id"], record_id_column=record_column, source_id="empty"
+        )
+        result = source.as_table(all_info=True)
+        assert result.num_rows == 0
+        assert result.schema.field("_source_v").type == pa.large_string()
+        assert any(name.startswith("_tag_record_id") for name in result.column_names)
+
+
+class TestHashFailurePropagation:
+    def test_table_only_failure_is_reraised_unchanged(self, monkeypatch):
+        """Do not blame a column when only whole-table hashing is unsupported."""
+        from orcapod.contexts import resolve_context
+
+        hasher = resolve_context(None).arrow_hasher
+        original = hasher.hash_table
+        error = NotImplementedError("unsupported table combination")
+        probes = []
+
+        def hash_table(table):
+            probes.append(table.column_names)
+            if table.num_columns > 1:
+                raise error
+            return original(table)
+
+        monkeypatch.setattr(hasher, "hash_table", hash_table)
+        with pytest.raises(NotImplementedError) as info:
+            ArrowTableSource(pa.table({"id": [1], "v": [2]}), tag_columns=["id"])
+        assert info.value is error
+        assert probes == [["id", "v"], ["id"], ["v"]]
+
+    def test_other_hash_errors_are_not_relabelled(self, monkeypatch):
+        from orcapod.contexts import resolve_context
+
+        hasher = resolve_context(None).arrow_hasher
+        error = ValueError("invalid hash input")
+        calls = []
+
+        def hash_table(table):
+            calls.append(table.column_names)
+            raise error
+
+        monkeypatch.setattr(hasher, "hash_table", hash_table)
+        with pytest.raises(ValueError) as info:
+            ArrowTableSource(pa.table({"id": [1], "v": [2]}), tag_columns=["id"])
+        assert info.value is error
+        assert calls == [["id", "v"]]
