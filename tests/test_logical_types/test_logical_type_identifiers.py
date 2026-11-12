@@ -603,7 +603,7 @@ class _ParameterizedThingType(pa.ExtensionType):
     @classmethod
     def __arrow_ext_deserialize__(
         cls, storage_type: pa.DataType, serialized: bytes
-    ) -> "_ParameterizedThingType":
+    ) -> _ParameterizedThingType:
         """Rebuild the type from its serialized metadata."""
         return cls(serialized)
 
@@ -614,8 +614,14 @@ class _ParameterizedThingType(pa.ExtensionType):
         lambda member: pa.struct([pa.field("t", member)]),
         lambda member: pa.large_list(pa.struct([pa.field("t", member)])),
         lambda member: pa.map_(pa.large_string(), pa.struct([pa.field("t", member)])),
+        lambda member: pa.dense_union(
+            [pa.field("i", pa.int64()), pa.field("t", member)]
+        ),
+        lambda member: pa.sparse_union(
+            [pa.field("i", pa.int64()), pa.field("t", member)]
+        ),
     ],
-    ids=["struct", "list_of_struct", "map_of_struct"],
+    ids=["struct", "list_of_struct", "map_of_struct", "dense_union", "sparse_union"],
 )
 def test_python_type_of_an_unreadable_member_is_refused_after_a_readable_one(
     container: Callable[[pa.DataType], pa.DataType],
@@ -638,6 +644,71 @@ def test_python_type_of_an_unreadable_member_is_refused_after_a_readable_one(
     with pytest.raises(LogicalTypeIdentifierError) as excinfo:
         _ = strict.arrow_schema_to_python_schema(pa.schema([pa.field("c", unreadable)]))
     assert "'c'" in str(excinfo.value)
+
+
+def _parameterized_thing_column(metadata: bytes) -> "pa.Array[Any]":
+    """One ``thirdparty.thing`` value typed by ``_ParameterizedThingType(metadata)``."""
+    return pa.ExtensionArray.from_storage(
+        _ParameterizedThingType(metadata), pa.array(["a"], pa.large_string())
+    )
+
+
+def _struct_column(member: "pa.Array[Any]") -> "pa.Array[Any]":
+    """A struct column with ``member`` as its field ``t``."""
+    return pa.StructArray.from_arrays([member], fields=[pa.field("t", member.type)])
+
+
+def _list_of_struct_column(member: "pa.Array[Any]") -> "pa.Array[Any]":
+    """A one-row list column whose element is a struct with ``member`` as field ``t``."""
+    return pa.LargeListArray.from_arrays(
+        pa.array([0, 1], pa.int64()), _struct_column(member)
+    )
+
+
+@pytest.mark.parametrize(
+    "column",
+    [_struct_column, _list_of_struct_column],
+    ids=["struct", "list_of_struct"],
+)
+def test_values_of_an_unreadable_member_are_not_decoded_after_a_readable_one(
+    column: Callable[["pa.Array[Any]"], "pa.Array[Any]"],
+) -> None:
+    """A value converter remembered for a readable identifier never decodes values
+    stored under an unreadable one (ITL-975): the two columns' types are equal to Arrow.
+    """
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+    readable = pa.table({"c": column(_parameterized_thing_column(b'{"v":2}'))})
+    unreadable = pa.table({"c": column(_parameterized_thing_column(b'{"v":1}'))})
+    assert readable.schema.field("c").type == unreadable.schema.field("c").type
+
+    # The readable table is converted first, so its converter is remembered.
+    assert len(strict.arrow_table_to_python_dicts(readable)) == 1
+
+    with pytest.raises(LogicalTypeIdentifierError):
+        _ = strict.arrow_table_to_python_dicts(unreadable)
+    with pytest.raises(LogicalTypeIdentifierError):
+        _ = strict.get_arrow_to_python_converter(unreadable.schema.field("c").type)
+
+
+@pytest.mark.parametrize("mode", ["dense", "sparse"])
+def test_value_converter_of_an_unreadable_union_member_is_refused_after_a_readable_one(
+    mode: str,
+) -> None:
+    """The same holds for a member of a union type (ITL-975)."""
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+
+    def union(metadata: bytes) -> pa.DataType:
+        """A union of ``int64`` and a ``thirdparty.thing`` carrying ``metadata``."""
+        fields = [
+            pa.field("i", pa.int64()),
+            pa.field("t", _ParameterizedThingType(metadata)),
+        ]
+        return pa.dense_union(fields) if mode == "dense" else pa.sparse_union(fields)
+
+    _ = strict.get_arrow_to_python_converter(union(b'{"v":2}'))
+
+    with pytest.raises(LogicalTypeIdentifierError):
+        _ = strict.get_arrow_to_python_converter(union(b'{"v":1}'))
 
 
 def test_python_type_of_a_readable_older_identifier_is_the_current_class() -> None:

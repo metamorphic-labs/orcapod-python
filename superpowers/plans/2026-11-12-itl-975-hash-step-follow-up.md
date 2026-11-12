@@ -164,3 +164,13 @@ def test_python_type_of_a_readable_older_identifier_is_the_current_class() -> No
   before the cache lookup (`_require_readable_members`), keep the check in
   `_convert_arrow_to_python`. Stop rule after this push: repeats, base findings and style
   notes are answered without a further push.
+- 2026-11-12, CodeRabbit round 2 (head ce97810a, after merging origin/main): three threads.
+  (1) the walk skipped unions: it now visits every nested type (`num_fields` / `field(i)`,
+  extension storage, dictionary values). (2) base finding, included on the coordinator's
+  decision: `get_arrow_to_python_converter` returned a cached value converter before the
+  readable check; the walk now runs before that cache too. (3) unquoted annotation.
+  Sweep of caches keyed by an Arrow type in `universal_converter.py`:
+  `_arrow_to_python_types` (walk before lookup), `_arrow_to_python_converters` (walk before
+  lookup), `_struct_signature_to_typeddict` (reached only from `_convert_arrow_to_python`,
+  behind `arrow_type_to_python_type`'s walk). The other caches are keyed by Python types.
+  After this push the stop rule applies.
