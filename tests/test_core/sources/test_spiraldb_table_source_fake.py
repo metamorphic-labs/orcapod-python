@@ -261,10 +261,16 @@ class TestSourceId:
             table.column("_source_sex")[0].as_py(),
         )
 
-    def test_default_source_id_is_project_dataset_table(self, two_projects):
+    # The row token of subject "m1": the Arrow hash of its primary key (ITL-186).
+    _M1 = "arrow_v1:00000290f26c354e2b6a1683a500d4a3dd8dc0a10d8db76aa7d2c804fc908bd44f749e"
+
+    def test_default_source_id_is_project_dataset_table_and_table_id(
+        self, two_projects
+    ):
         source = SpiralDBTableSource("edi-sample-a", "subject")
-        assert source.source_id == "edi-sample-a/default/subject"
-        assert self._identity(source)[2] == "edi-sample-a/default/subject::row_0::sex"
+        expected = f"edi-sample-a/default.subject@{source.table_id}"
+        assert source.source_id == expected
+        assert self._identity(source)[2] == f"{expected}::{self._M1}::sex"
 
     def test_same_table_in_two_projects_does_not_collide(self, two_projects):
         a = SpiralDBTableSource("edi-sample-a", "subject")
@@ -278,6 +284,9 @@ class TestSourceId:
         # column nullable, as SpiralDB reports it. The values were pinned at 49956a6a,
         # before the record existed, and re-recorded once for the v0.3 hash step
         # (ITL-967: starfix 0.5 and the hash label rule move every one of them).
+        # ITL-186 moved the record id and the row token only (from the row's position to
+        # the hash of its primary key); the token is the same with and without a
+        # nullability record, because key fields are hashed as non-nullable.
         source = SpiralDBTableSource("edi-sample-a", "unrecorded", source_id="subject")
         assert source.output_schema() == (
             Schema({"subject_id": str | None}),
@@ -285,8 +294,8 @@ class TestSourceId:
         )
         assert self._identity(source) == (
             "semantic_v1:896d8f323df90ee26e6a38f1eb730be7a9de343fd1c852dbf0f7655b360bc7ff",
-            "18d1efa53fbc52b6a40f406eca35ca81",
-            "subject::row_0::sex",
+            "1493a9f4caa95b7ca33dcf61e15d5eca",
+            f"subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
             "semantic_v1:cc6c553ba26af325cd96432edb5bc4ea5453427594965cca7e85a66a420e87f1"
@@ -306,8 +315,8 @@ class TestSourceId:
         source = SpiralDBTableSource("edi-sample-a", "subject", source_id="subject")
         assert self._identity(source) == (
             "semantic_v1:a06a417294cabb0625e47a9357ebf9cc8183576b17498282901bd68d0f02e820",
-            "18d1efa53fbc52b6a40f406eca35ca81",
-            "subject::row_0::sex",
+            "1493a9f4caa95b7ca33dcf61e15d5eca",
+            f"subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
             "semantic_v1:2e5095e09a558132e652e106af1dca4abf8654285409fc4db63a66ddc63a9f94"
