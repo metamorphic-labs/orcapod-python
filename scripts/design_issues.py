@@ -37,7 +37,7 @@ NO_ISSUE = "NOISSUE"
 _ISSUE_ID = r"[A-Z][A-Z0-9]*-[0-9]+"
 # An optional "-<n>" after the entry id tells apart two entries that share prefix and id.
 _ENTRY_NAME = re.compile(
-    rf"^({NO_ISSUE}|{_ISSUE_ID})-([A-Z][A-Z0-9]*)(?:-[0-9]+)?\.md$"
+    rf"^({NO_ISSUE}|{_ISSUE_ID})-([A-Z][A-Z0-9]*)(?:-([0-9]+))?\.md$"
 )
 # Entries older than this check that have no severity; their text is kept as written.
 _NO_SEVERITY_ALLOWED = frozenset({"NOISSUE-PF1.md"})
@@ -222,7 +222,7 @@ def _file_problems(name: str, entry: Entry) -> list[str]:
     """Check an entry against the name of the file that holds it."""
     match = _ENTRY_NAME.match(name)
     assert match is not None  # callers pass only entry file names
-    prefix, entry_id = match.groups()
+    prefix, entry_id, _ = match.groups()
     problems: list[str] = []
     if entry.severity is None and name not in _NO_SEVERITY_ALLOWED:
         problems.append("has no '**Severity:**' line directly under the status line")
@@ -264,13 +264,23 @@ def load_entries(entries_dir: Path) -> tuple[list[tuple[Path, Entry]], list[str]
     for path in sorted(entries_dir.iterdir()):
         if path.name == README_NAME or path.name.startswith("."):
             continue
-        if not path.is_file() or not _ENTRY_NAME.match(path.name):
+        name = _ENTRY_NAME.match(path.name)
+        if not path.is_file() or name is None:
             problems.append(
                 f"{path}: not an entry file name; expected "
                 "<LINEAR-ISSUE-ID>-<ENTRY-ID>.md, for example ITL-955-GB1.md "
                 f"({NO_ISSUE}-<ENTRY-ID>.md for an old entry with no Linear issue)"
             )
             continue
+        prefix, entry_id, number = name.groups()
+        first = f"{prefix}-{entry_id}.md"
+        if number is not None and not (
+            int(number) >= 2 and (entries_dir / first).is_file()
+        ):
+            problems.append(
+                f"{path}: a '-<n>' after the entry id (2 or more) is only for a "
+                f"second entry with the same name, and there is no {first}"
+            )
         try:
             entry = parse_entry(path.read_text(encoding="utf-8"))
         except EntryError as error:
@@ -284,12 +294,16 @@ def load_entries(entries_dir: Path) -> tuple[list[tuple[Path, Entry]], list[str]
     return entries, problems
 
 
-def _entry_order(entry: Entry) -> tuple[str, str, int, str]:
-    """Sort key: area text without Markdown marks, then id letters, then id number."""
+def _entry_order(entry: Entry) -> tuple[str, str, str, int, str]:
+    """Sort key: area text without Markdown marks, the area heading, then the id.
+
+    The heading itself keeps the entries of one area together when two headings
+    differ only in their marks; the id orders by its letters, then its number.
+    """
     area = re.sub(r"[`*_]", "", entry.area.removeprefix("## ")).casefold()
     parts = _ID_PARTS.match(entry.entry_id)
     assert parts is not None  # an entry id starts with a capital letter
-    return area, parts.group(1), int(parts.group(2) or 0), parts.group(3)
+    return area, entry.area, parts.group(1), int(parts.group(2) or 0), parts.group(3)
 
 
 def format_index(named: Sequence[tuple[str, Entry]]) -> str:

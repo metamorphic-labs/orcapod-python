@@ -251,6 +251,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     counts = {"created": 0, "updated": 0, "unchanged": 0}
     for name, piece in entries:
         path = args.out / name
+        if path.is_symlink():
+            print(f"{path}: is a symbolic link; not written", file=sys.stderr)
+            return 1
         new = entry_file_text(piece).encode("utf-8")
         if not path.exists():
             outcome = "created"

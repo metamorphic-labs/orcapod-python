@@ -106,6 +106,20 @@ def test_check_accepts_a_numbered_name_for_a_repeated_entry_id(entries: Path) ->
     assert "2 design issues" in result.stdout
 
 
+@pytest.mark.parametrize("name", ["ITL-7-AB1-2.md", "ITL-7-AB1-1.md"])
+def test_check_rejects_a_numbered_name_that_tells_nothing_apart(
+    entries: Path, name: str
+) -> None:
+    """``-2`` needs the unnumbered file beside it, and ``-1`` is never a second."""
+    if name.endswith("-1.md"):
+        _write(entries, "ITL-7-AB1.md", ENTRY)
+    _write(entries, name, ENTRY)
+    result = _check(entries)
+    assert result.returncode == 1
+    assert name in result.stderr
+    assert "ITL-7-AB1.md" in result.stderr
+
+
 @pytest.mark.parametrize(
     "issue_line",
     ["ITL-7, ITL-9 (first case only)", "PLT-4816 (related: ITL-7)"],
@@ -267,6 +281,21 @@ def test_index_lists_every_entry_by_area(log: Path) -> None:
     ]
     assert lines[4].endswith("A title with `code`")
     assert lines[5] == "3 design issues: 1 open, 1 in progress, 1 resolved"
+
+
+def test_full_keeps_an_area_together_when_headings_differ_only_in_marks(
+    entries: Path,
+) -> None:
+    for number, area in ((1, "## Foo"), (2, "## `Foo`"), (3, "## Foo")):
+        _write(
+            entries,
+            f"ITL-7-AB{number}.md",
+            ENTRY.replace("## `src/x.py` — things", area).replace("AB1", f"AB{number}"),
+        )
+    result = _run(SCRIPT, "--dir", entries, "--full")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("## Foo\n") == 1
+    assert result.stdout.count("## `Foo`\n") == 1
 
 
 def test_index_filters_by_status(log: Path) -> None:
@@ -439,3 +468,15 @@ def test_migration_refuses_a_source_with_no_entry(source: Path) -> None:
         result = _migrate(source, *extra)
         assert result.returncode == 1
         assert "no '### ' entry" in result.stderr
+
+
+def test_migration_refuses_to_write_through_a_symbolic_link(source: Path) -> None:
+    out = source.parent / "out"
+    out.mkdir()
+    target = source.parent / "elsewhere.md"
+    target.write_text("keep\n", encoding="utf-8")
+    (out / "ITL-5-A2.md").symlink_to(target)
+    result = _migrate(source)
+    assert result.returncode == 1
+    assert "ITL-5-A2.md" in result.stderr
+    assert target.read_text(encoding="utf-8") == "keep\n"
