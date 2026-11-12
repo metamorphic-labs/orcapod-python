@@ -1010,7 +1010,7 @@ class TestGlobalSingletons:
         assert isinstance(get_default_semantic_hasher(), SemanticAwarePythonHasher)
 
     def test_get_default_semantic_hasher_has_versioned_id(self):
-        assert get_default_semantic_hasher().hasher_id == "semantic_v0.1"
+        assert get_default_semantic_hasher().hasher_id == "semantic_v1"
 
     def test_get_default_type_handler_registry_is_singleton(self):
         r1 = get_default_python_type_handler_registry()
@@ -1301,7 +1301,9 @@ class TestResolver:
         expected_resolver = calling_hasher.hash_object([inner_via_calling])
         assert resolver_result == expected_resolver
 
-        assert no_resolver_result != resolver_result
+        # The two inner hashes differ only in their label, and a label never enters
+        # a hash input (ITL-945), so the enclosing hashes are equal.
+        assert no_resolver_result == resolver_result
 
     def test_resolver_propagates_through_tuple(self):
         """Resolver is applied to CI objects nested inside a tuple."""
@@ -1422,13 +1424,15 @@ class TestUniformHasherPropagation:
         )
         assert result == expected_uniform
 
-        # Verify: result differs from a mixed computation (inner uses its own hasher_a)
+        # A mixed computation (inner uses its own hasher_a) differs from the uniform
+        # one only in the label of the inner hash. A label never enters a hash input
+        # (ITL-945), so both give the same digest.
         inner_with_own_hasher = inner.content_hash()  # uses hasher_a
         assert inner_with_own_hasher.method == "hasher_a"
         mixed_result = hasher_b.hash_object(
             {"label": "outer", "inner": inner_with_own_hasher}
         )
-        assert result != mixed_result
+        assert result == mixed_result
 
     def test_three_level_chain_uses_entry_hasher_throughout(self):
         """In a three-level chain A→B→C, calling C.content_hash() uses C's hasher

@@ -566,7 +566,7 @@ def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
 class TestIdentityPinned:
     """Values recorded on ``main`` at ab544982, before the fix.
 
-    Re-recorded under starfix hash format 2 (``arrow_v0.2``, ITL-910): the node content
+    Re-recorded under starfix hash format 2 (``arrow_v1``, ITL-910): the node content
     hash and the record hashes are Arrow-derived; the pipeline hash is not.
 
     The node's identity, the output data and the row-0 record hash (whose
@@ -586,10 +586,10 @@ class TestIdentityPinned:
         _ = node.execute(src)
 
         assert node.pipeline_hash().to_string() == (
-            "semantic_v0.1:1f533cfa7293bad96debd5cda622e04bc39d72970ce6827dcd6e890a7428823c"
+            "semantic_v1:62bd560f1fa945b5cac83f3eb99b6f8bb0fea607ce7e9503c987df4c36134da4"
         )
         assert node.content_hash().to_string() == (
-            "semantic_v0.1:36a4b61a5ed690ffa95ff31ba0c19a43e31b5b2ac51e1e5848d4b184e4b9ccf7"
+            "semantic_v1:4560867b554ece10a4be5ad2f85b5ec9c74b923a98bfae067796ca63e746983f"
         )
         ids = _record_ids(node)
         assert ids["a"] == ROW_ZERO_RECORD_ID
@@ -612,16 +612,23 @@ class TestIdentityPinned:
 
 # ``_record_hash`` of rows a, b, c stored by the pinned node before the fix (ab544982).
 # Row a's source-info token was already right, so the fix leaves its record hash.
-# Re-recorded in starfix hash format 2 (ITL-910) by reproducing the pre-fix broadcast
-# with ``_broadcast_row_zero``.
-ROW_ZERO_RECORD_ID = (
-    b"000002016f74f387a07874a088c8c44f1b85ff70a395680158b6a87520085c95439ec4"
+# Re-recorded in starfix hash format 2 (ITL-910) and again as labelled digests
+# (``b"arrow_v1:" + digest``, ITL-945) by reproducing the pre-fix broadcast with
+# ``_broadcast_row_zero``.
+ROW_ZERO_RECORD_ID = b"arrow_v1:" + bytes.fromhex(
+    "000002f3a7e7119b3d11ec89f0d46a708da003c1c3c96cfc0612063dc6337014e3c045"
 )
 PRE_FIX_RECORD_IDS = frozenset(
     {
         ROW_ZERO_RECORD_ID,
-        b"000002de01a6a62bba3ec3ec7cb9c64a8bf4a7da8f0ab959fca01dcfd2d162f91e9cf6",
-        b"00000270703c99569d9ffb213ac4a8825f880e6ffe25eb1b30019da118752a73996acc",
+        b"arrow_v1:"
+        + bytes.fromhex(
+            "000002cfa40faafdbd4ccb9a91199be62f481af307060e1a37d47f2f4190567985ce24"
+        ),
+        b"arrow_v1:"
+        + bytes.fromhex(
+            "000002f0889561abdea82e996a2ffcde43cdff54ee89ef8f6c461f0a43334c38ffb605"
+        ),
     }
 )
 

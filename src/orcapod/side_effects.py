@@ -215,7 +215,7 @@ def _execute_side_effect_row(
     of ``0``.  The preimage covers:
 
     * tag system-tag columns,
-    * ``INPUT_DATA_HASH_COL`` (binary ``data.content_hash().to_prefixed_digest()``), and
+    * ``INPUT_DATA_HASH_COL`` (the raw digest of ``data.content_hash()``, no label), and
     * ``_SIDE_EFFECT_RECOMPUTATION_INDEX_COL`` fixed at ``0`` (side effects
       never recompute).
 
@@ -871,7 +871,7 @@ class SideEffectJobNode(SideEffectNode):
         """Attach or detach the pipeline database.
 
         Called by ``PipelineJob._distribute_databases()``. The table path is
-        ``self.node_uri + (f"schema:{self.pipeline_hash().to_string()}", TRACKING_DB_SCHEMA_VERSION)``
+        ``self.node_uri + (f"schema:{self.pipeline_hash().to_hex()}", TRACKING_DB_SCHEMA_VERSION)``
         — scoped by pipeline hash and tdb schema version.
 
         Args:
@@ -882,7 +882,7 @@ class SideEffectJobNode(SideEffectNode):
         self._log_contexts_checked = False
         if pipeline_database is not None:
             self._table_path = self.node_uri + (
-                f"schema:{self.pipeline_hash().to_string()}",
+                f"schema:{self.pipeline_hash().to_hex()}",
                 TRACKING_DB_SCHEMA_VERSION,
             )
         else:

@@ -19,6 +19,17 @@ if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
 
 
+ARROW_HASH_LABEL = "arrow_v1"
+"""``ContentHash.method`` of an Arrow table or schema hash: the single definition.
+
+It names the whole procedure of ``StarfixArrowHasher``: the replacement of
+extension-typed cells by their value digests, then the starfix digest (hash format 2,
+starfix 0.5). A change that gives an existing table a different digest takes a new
+label (``arrow_v2``). The number is not kept equal to the starfix hash format number.
+The data context file names the hasher class and does not repeat the label.
+"""
+
+
 class StarfixArrowHasher:
     """Arrow table hasher backed by the starfix-python ``ArrowDigester``.
 
@@ -57,15 +68,15 @@ class StarfixArrowHasher:
         ``SemanticHasherProtocol`` used to hash Python objects extracted
         from extension-typed columns.
     hasher_id:
-        String identifier embedded in every ``ContentHash`` produced by this
-        hasher.
+        The label (``ContentHash.method``) of every hash produced. Defaults to
+        ``ARROW_HASH_LABEL``, the label of this algorithm.
     """
 
     def __init__(
         self,
         type_converter: "UniversalTypeConverter",
         semantic_hasher: "SemanticHasherProtocol",
-        hasher_id: str,
+        hasher_id: str = ARROW_HASH_LABEL,
     ) -> None:
         self._type_converter = type_converter
         self._semantic_hasher = semantic_hasher

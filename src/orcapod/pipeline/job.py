@@ -925,9 +925,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         effective_observer = observer or NoOpObserver()
         run_id = uuid.uuid4().hex[:16]
 
-        # Snapshot hash: SHA-256 of sink-node content hashes for the run URI.
+        # Snapshot hash: SHA-256 of sink-node content digests for the run URI.
+        # Digests only: a hash label is never part of a hash input.
         leaf_hashes = sorted(
-            node.content_hash().to_string()
+            node.content_hash().to_hex()
             for node in exec_dag.nodes()
             if not exec_dag.successors(node) and hasattr(node, "content_hash")
         )

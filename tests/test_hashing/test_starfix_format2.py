@@ -1,4 +1,4 @@
-"""Arrow hashing on starfix hash format 2 under the label ``arrow_v0.2`` (ITL-910).
+"""Arrow hashing on starfix hash format 2 under the label ``arrow_v1`` (ITL-910).
 
 starfix 0.5 replaced hash format 1 (prefix ``00 00 01``) with the lossless format 2 (prefix
 ``00 00 02``). These tests pin what that fixes in Orcapod (the collisions of ITL-848), what it
@@ -17,7 +17,7 @@ from orcapod.contexts import get_default_context
 from orcapod.core.operators import Join
 
 # Non-public on purpose: the label constant itself is under test.
-from orcapod.hashing.versioned_hashers import _CURRENT_ARROW_HASHER_ID
+from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
 from orcapod.sources import ArrowTableSource
 from orcapod.types import ContentHash
 
@@ -55,19 +55,19 @@ def _non_nullable(name: str, column: pa.Array[Any]) -> pa.Table:
 
 class TestLabel:
     def test_current_arrow_label_is_arrow_v0_2(self):
-        assert _CURRENT_ARROW_HASHER_ID == "arrow_v0.2"
+        assert ARROW_HASH_LABEL == "arrow_v1"
 
     def test_default_context_uses_arrow_v0_2(self):
-        assert get_default_context().arrow_hasher.hasher_id == "arrow_v0.2"
+        assert get_default_context().arrow_hasher.hasher_id == "arrow_v1"
 
     def test_table_hash_is_format_2(self):
         result = _hash_table(pa.table({"x": pa.array([1, 2], pa.int64())}))
-        assert result.method == "arrow_v0.2"
+        assert result.method == "arrow_v1"
         assert result.digest[:3] == FORMAT_2_PREFIX
 
     def test_row_data_hash_carries_new_label(self):
         hashes = _row_hashes(pa.array([1], pa.int64()))
-        assert hashes[0].startswith("arrow_v0.2:000002")
+        assert hashes[0].startswith("arrow_v1:000002")
 
 
 # ---------------------------------------------------------------------------

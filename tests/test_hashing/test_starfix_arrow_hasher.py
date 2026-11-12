@@ -16,7 +16,7 @@ Coverage
 - Empty table: hash_table handles a table with zero rows
 - Schema-only vs data hash: hash_schema and hash_table differ for the same schema
 - versioned_hashers factory: get_versioned_semantic_arrow_hasher returns a
-  StarfixArrowHasher with hasher_id == _CURRENT_ARROW_HASHER_ID
+  StarfixArrowHasher with hasher_id == ARROW_HASH_LABEL
 - Context integration: the v1 context wires up StarfixArrowHasher
 - Stability (golden values): fully-pinned 35-byte digests catch accidental
   algorithm changes in both schema and table hashing
@@ -26,9 +26,8 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from orcapod.hashing.arrow_hashers import StarfixArrowHasher
+from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL, StarfixArrowHasher
 from orcapod.hashing.versioned_hashers import (
-    _CURRENT_ARROW_HASHER_ID,
     get_versioned_semantic_arrow_hasher,
 )
 from orcapod.types import ContentHash
@@ -38,7 +37,7 @@ from orcapod.types import ContentHash
 # Helpers
 # ---------------------------------------------------------------------------
 
-HASHER_ID = "arrow_v0.2"
+HASHER_ID = "arrow_v1"
 
 _DIGEST_LEN = 35  # 3 version bytes + 32 SHA-256 bytes
 
@@ -304,11 +303,11 @@ class TestVersionedHashersFactory:
 
     def test_hasher_id_matches_current_constant(self):
         hasher = get_versioned_semantic_arrow_hasher()
-        assert hasher.hasher_id == _CURRENT_ARROW_HASHER_ID
+        assert hasher.hasher_id == ARROW_HASH_LABEL
 
     def test_current_hasher_id_is_arrow_v0_2(self):
         """Pin the current version constant to detect accidental version drifts."""
-        assert _CURRENT_ARROW_HASHER_ID == "arrow_v0.2"
+        assert ARROW_HASH_LABEL == "arrow_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +326,7 @@ class TestContextIntegration:
         from orcapod.contexts import resolve_context
 
         ctx = resolve_context("v1")
-        assert ctx.arrow_hasher.hasher_id == "arrow_v0.2"
+        assert ctx.arrow_hasher.hasher_id == "arrow_v1"
 
     def test_context_hash_table_functional(self):
         from orcapod.contexts import resolve_context
@@ -350,7 +349,7 @@ _COMMENT_KEY = b"comment"
 class TestHashSchemaExtensionAware:
     def test_extension_free_golden_value_unchanged(self):
         """Stability invariant: extension-free schema hash is byte-identical to
-        the starfix format-2 (arrow_v0.2) golden value (include_metadata=False is the default)."""
+        the starfix format-2 (arrow_v1) golden value (include_metadata=False is the default)."""
         schema = pa.schema(
             [
                 pa.field("id", pa.int32(), nullable=False),
@@ -442,7 +441,7 @@ class TestHashSchemaExtensionAware:
 class TestHashTableExtensionAware:
     def test_extension_free_table_golden_value_unchanged(self):
         """Stability invariant: extension-free table hash is byte-identical to
-        the starfix format-2 (arrow_v0.2) golden value."""
+        the starfix format-2 (arrow_v1) golden value."""
         table = pa.table(
             {
                 "id": pa.array([1, 2, 3], type=pa.int32()),

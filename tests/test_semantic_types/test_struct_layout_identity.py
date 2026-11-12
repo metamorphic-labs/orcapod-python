@@ -50,10 +50,10 @@ def _tables() -> dict[str, pa.Table]:
 
 
 _FLAT_HASHES: dict[str, object] = {
-    "stream_content": "4f561b44f3fb2bf6e9743adab48651ba8cf39b48da9869855ddaa6daec121fa2",
-    "stream_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
-    "source_content": "7263fb2ff4346ac025631fd34c7204971478d83165084f9a748e61acc5e9f919",
-    "source_pipeline": "34209011cc4048b6425d8b01c9c11e20dfc27a6f45b40a9948389bced49a76e4",
+    "stream_content": "120355d59d2b66595077ec82a04233d28823cbfd693598aa9ab749822cd1b8d4",
+    "stream_pipeline": "2de99c2b86b7549f70f1e9979b31b8c5ddd1ab9040a2df9451d5aec358aebdd9",
+    "source_content": "127e1faf2a01bcff447441f5b4260512343b752022e79db82896967c2c4f3994",
+    "source_pipeline": "2de99c2b86b7549f70f1e9979b31b8c5ddd1ab9040a2df9451d5aec358aebdd9",
     "data_rows": [
         "000002a3b465dfc79ea3f32b39f55417f4c2372d7a3cc7ad63aef00aa9108b21b76b9c",
         "000002e540dc3b59a01d14edc26eebff96453fb1de9018c351676cef8d1f67ee3346b2",
@@ -61,25 +61,25 @@ _FLAT_HASHES: dict[str, object] = {
 }
 
 # Hashes on main (365a5f74), before the converter change; the stream content and per-row
-# data hashes re-recorded in starfix hash format 2 (arrow_v0.2, ITL-910).
+# data hashes re-recorded in starfix hash format 2 (arrow_v1, ITL-910).
 MAIN_HASHES: dict[str, dict[str, object]] = {
     "small": _FLAT_HASHES,
     "large": _FLAT_HASHES,
     "nested": {
-        "stream_content": "6966147a47464a25810cfc5ab4686724a6623121637a7826b84ba70e71a996f0",
-        "stream_pipeline": "f8745264f2422bf76eaec06120aa00b510cafa0ee3abdfac3d5396a614afb3a1",
-        "source_content": "2ee725a65a6050703c4164f901ac06e2137a0e2c71f7cf7b636423a1e1ac2a9b",
-        "source_pipeline": "f8745264f2422bf76eaec06120aa00b510cafa0ee3abdfac3d5396a614afb3a1",
+        "stream_content": "76ab0714414fff9661a79a3cc3b7aa77cd57a2561aa4f35dbc1948c1006f2e26",
+        "stream_pipeline": "bb128873919dea74c0708a58b36cb01cee6d3fdd33df5b4ccc8738c911edfd7c",
+        "source_content": "961b6ebdeeb64d6515b718afd46b31868db52a277699fa2d3b9788df6d61c43d",
+        "source_pipeline": "bb128873919dea74c0708a58b36cb01cee6d3fdd33df5b4ccc8738c911edfd7c",
         "data_rows": [
             "000002b734209953036fae7ee935c232f7949f4874dc22dca2af4ecfa2882e5ddaf457",
             "0000024d11adcf6077042679df69776a748d71f2818fc47042913d83fa1fbebca67ad9",
         ],
     },
     "list_of_struct": {
-        "stream_content": "9fefd7ef3c1a043bdf2a36e9fbfcabca7db940307a883e76a644ca9ecb10978e",
-        "stream_pipeline": "85b8d45d79762e42d1edf56c3853379193c21d5879a30166fcf3bc3c8e56a733",
-        "source_content": "19a5d5780cd84af633704022bf8f7a80ba72555533390ee5e69c487f4ec253cf",
-        "source_pipeline": "85b8d45d79762e42d1edf56c3853379193c21d5879a30166fcf3bc3c8e56a733",
+        "stream_content": "83fd99287fd5370735a65ec6d405e71b6d76f317c1b737569c5b6f2c6ea6af96",
+        "stream_pipeline": "feb2e8255a96f47b1a76017278fe43bccf9cdba9a55b247401f1227e0dc3f926",
+        "source_content": "4905b10d4d1b0e000a5192f13a2c5d3b4fa4d0b6eac6379418d31e20ba2dfa8e",
+        "source_pipeline": "feb2e8255a96f47b1a76017278fe43bccf9cdba9a55b247401f1227e0dc3f926",
         "data_rows": [
             "000002c262cfe3995378fe521abbc19b8cd14f10f626b5e5b1259a20f6d4277677fb87",
             "000002188277589a87f65b49271c1a2cf461ebed48ddd2fd3cb943198f420fced6862a",

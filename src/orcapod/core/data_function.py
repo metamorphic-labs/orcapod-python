@@ -218,18 +218,20 @@ class DataFunctionBase(TraceableBase, Generic[E]):
 
     @property
     def output_data_schema_hash(self) -> str:
-        """Return the hash of the output data schema as a string.
+        """Return the hash of the output data schema as a bare hex digest.
 
-        The hash is computed lazily on first access and cached for subsequent calls.
+        The digest is part of the function ``uri`` and so of table paths and source-info
+        tokens: a hash inside a name carries no label. It is computed lazily on first
+        access and cached for subsequent calls.
 
         Returns:
-            The hash string of the output data schema.
+            The hex digest of the output data schema hash, without a label.
         """
         if self._output_data_schema_hash is None:
             self._output_data_schema_hash = (
                 self.data_context.semantic_hasher.hash_object(
                     self.output_data_schema
-                ).to_string()
+                ).to_hex()
             )
         return self._output_data_schema_hash
 

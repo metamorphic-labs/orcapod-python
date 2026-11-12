@@ -133,4 +133,25 @@ For each merge:
 
 ## Progress notes
 
-- Nov 11: plan written; nothing merged yet.
+- Nov 11: plan approved by the coordinator. #301 (ITL-905) is LEFT OUT (two developer
+  decisions still open: key-ordered in-memory dict copy, raising on NaN / colliding keys).
+- Merge 1 #309 (c4490d5a): function_node.py imports (both kept), DESIGN_ISSUES.md (union).
+- Merge 2 #313 (81da9736): function_node._add_pipeline_record keeps main's ITL-919 signature
+  with #313's `_account_for_stale_tables()` in place of the removed `_ensure_pdb_schema()`.
+- Merge 3 #318 (8b291c9d): three additive conflicts against main's ITL-919 code.
+- Merge 4 #314 (3192a8a7): files #313 deleted stay deleted; `v1.json` and
+  `context_schema.json` lose `hasher_id`, `v1.json` `changes` gains the label-rule entries;
+  `operator_node._read_stored_records`, `cached_source._read_cached_records`, the
+  `SideEffectLogDataContextError` docstring and the "older store" docs take #313/#318's text;
+  the labelled row keys and bare path digests of #314 are in (auto-merged). Fragment
+  `ITL-945.md` and `docs/reference/hashing.md` corrected for the combined result (`pdb_v2`;
+  v0.2 tables are found by name). Tests adjusted for the layout component
+  (`test_hash_label_rule.py`, `test_cached_source.py`).
+- PINS TO RE-RECORD after all merges (not golden files), with cause:
+  - `tests/test_semantic_types/test_struct_layout_identity.py` (stream/source content and
+    pipeline hashes: ITL-944 x ITL-945)
+  - `tests/test_core/sources/test_spiraldb_table_source_fake.py::TestSourceId` two tests
+    pinned on main with `semantic_v0.1:` / `arrow_v0.1:` values (ITL-910, ITL-945)
+- OPEN: `tests/test_core/sources/test_stream_builder.py::TestUnhashableColumnTypes` (main,
+  ITL-926) expects NotImplementedError naming the columns; starfix 0.5 hashes
+  fixed_size_list and raises ValueError for map. Asked the coordinator.

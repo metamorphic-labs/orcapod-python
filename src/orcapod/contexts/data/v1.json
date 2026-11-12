@@ -193,7 +193,6 @@
     "semantic_hasher": {
         "_class": "orcapod.hashing.semantic_hashing.semantic_hasher.SemanticAwarePythonHasher",
         "_config": {
-            "hasher_id": "semantic_v0.1",
             "type_handler_registry": {
                 "_ref": "python_type_handler_registry"
             }
@@ -202,7 +201,6 @@
     "arrow_hasher": {
         "_class": "orcapod.hashing.arrow_hashers.StarfixArrowHasher",
         "_config": {
-            "hasher_id": "arrow_v0.2",
             "type_converter": {
                 "_ref": "type_converter"
             },
@@ -237,6 +235,18 @@
         {
             "definition": "arrow_hasher",
             "change": "starfix hash format 1 (starfix 0.4) to hash format 2 (starfix 0.5): every Arrow-derived hash value (ITL-910)"
+        },
+        {
+            "definition": "semantic_hasher",
+            "change": "hash label rule: a nested hash enters its parent as its digest only, never with its label, so every structure hash that contains a nested hash moves; labels are <algorithm>_v1 (semantic_v1, arrow_v1, directory_v1, ndarray_v1, polars_expr_v1; the file hash keeps sha256), each defined once in code beside its algorithm and not in this file (ITL-945)"
+        },
+        {
+            "definition": "arrow_hasher",
+            "change": "hash label rule: the token of a value-hashed extension cell holds the extension name and the raw digest, no label (ITL-945)"
+        },
+        {
+            "definition": "entry_id",
+            "change": "hash label rule: the input data hash enters the entry-id table, and the node content hash enters the operator-cache row key, as raw digests without a label; names (function uri, path components) hold bare hex digests (ITL-945)"
         }
     ]
 }

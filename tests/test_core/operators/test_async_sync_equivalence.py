@@ -547,22 +547,22 @@ def _narrow_source(column: str, source_id: str) -> ArrowTableSource:
 
 # Recorded from the sync path on main (ab544982) before the ITL-837 fix. The sync
 # path must not change; the async path must now produce the same values. Row hashes
-# re-recorded in starfix hash format 2 (arrow_v0.2, ITL-910); the stream hashes did not move.
+# re-recorded in starfix hash format 2 (arrow_v1, ITL-910); the stream hashes did not move.
 PINNED_ROW_HASHES = {
     1: (
-        "arrow_v0.2:0000027e1a4693c531d4411fafa68a1ac623a0ed3f04a6402de0fb8f040f0aba717ae8",
-        "arrow_v0.2:0000025c4232f42a6012b104827b2c4731e143af6044e010e9a37ae5ffa82fe3ae7153",
+        "arrow_v1:0000027e1a4693c531d4411fafa68a1ac623a0ed3f04a6402de0fb8f040f0aba717ae8",
+        "arrow_v1:0000025c4232f42a6012b104827b2c4731e143af6044e010e9a37ae5ffa82fe3ae7153",
     ),
     2: (
-        "arrow_v0.2:000002e3b4cd9f773e0263ba270d251b90058702fa282e129feebdbc428d832080752e",
-        "arrow_v0.2:00000218de95b54e8987999a339fe1726957da66219b529c4699be853334833e71f60e",
+        "arrow_v1:000002e3b4cd9f773e0263ba270d251b90058702fa282e129feebdbc428d832080752e",
+        "arrow_v1:00000218de95b54e8987999a339fe1726957da66219b529c4699be853334833e71f60e",
     ),
 }
 PINNED_STREAM_CONTENT_HASH = (
-    "semantic_v0.1:ac7c70563c06d9ba54adb890bb52a886e6005937bd3d5df265cd3f6817e988bd"
+    "semantic_v1:1ff5a58dbf661279f4fe767477adcc7d95f6f4f6ee47c5ccb53a6a7ab1a2306f"
 )
 PINNED_STREAM_PIPELINE_HASH = (
-    "semantic_v0.1:929efa4256930fda2d02ad359106db279fc888ff155d9500d47cef194137e744"
+    "semantic_v1:8f8d1f2e44624b0e42a55ad513a38626d54012d783e1f2c7cdcd706e22ea709a"
 )
 
 

@@ -30,7 +30,7 @@ process, whatever ``PYTHONHASHSEED`` is. A value that differs by interpreter is 
 fix, never something to pin per version.
 
 Not pinned, because starfix rejects their data (ITL-848): ``null``-typed and map columns.
-Since starfix 0.5 (hash format 2, label ``arrow_v0.2``, ITL-910), ``hash_schema`` on extension
+Since starfix 0.5 (hash format 2, label ``arrow_v1``, ITL-910), ``hash_schema`` on extension
 columns, the canonical ``arrow.uuid`` and ``arrow.fixed_shape_tensor`` types, and
 fixed-size-list values are hashable and pinned.
 

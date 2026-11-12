@@ -27,7 +27,7 @@ recursive with ``_expand_structure``:
   - Primitive elements  → passed through as-is (become leaves in the tree)
   - Nested structures   → recurse via ``_expand_structure``
   - Everything else     → call ``hash_object``, embed the resulting
-                          ContentHash.to_string() as a string leaf
+                          the tagged digest of the ContentHash (no label)
 
 The boundary between the two functions encodes a key semantic distinction:
 a ContentIdentifiableProtocol object X whose identity_structure returns [A, B]
@@ -78,6 +78,35 @@ from orcapod.utils.canonical_type_names import canonical_module_name
 logger = logging.getLogger(__name__)
 
 _CIRCULAR_REF_SENTINEL = "CircularRef"
+
+SEMANTIC_HASH_LABEL = "semantic_v1"
+"""``ContentHash.method`` of a structure hash: the single definition of the label.
+
+It names the whole procedure of this module: the expansion of a Python structure
+into a tagged JSON tree and the SHA-256 digest of its canonical JSON text. A change
+that gives an existing structure a different digest takes a new label
+(``semantic_v2``). The data context file names the hasher class and does not repeat
+the label.
+"""
+
+
+def _nested_hash(content_hash: ContentHash) -> dict[str, str]:
+    """Return the form in which a hash enters the structure that contains it.
+
+    Only the digest is fed into the enclosing hash. The label names the algorithm that
+    produced the digest and is never part of a hash input, so renaming a label changes
+    no hash. The tag keeps a nested hash apart from a string that happens to equal its
+    hex digest.
+
+    Args:
+        content_hash: The hash of a nested element.
+
+    Returns:
+        ``{"__type__": "hash", "digest": "<hex digest>"}``.
+    """
+    return {"__type__": "hash", "digest": content_hash.to_hex()}
+
+
 _MEMADDR_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
@@ -88,8 +117,9 @@ class SemanticAwarePythonHasher:
     Parameters
     ----------
     hasher_id:
-        A short string identifying this hasher version/configuration.
-        Embedded in every ContentHash produced.
+        The label (``ContentHash.method``) of every hash produced. Defaults to
+        ``SEMANTIC_HASH_LABEL``, the label of this algorithm; pass another value
+        only for a hasher that is not the data context's (a test hasher).
     type_handler_registry:
         ``HandlerRegistryProtocol`` for MRO-aware lookup of
         ``PythonTypeHandlerProtocol`` instances.
@@ -101,7 +131,7 @@ class SemanticAwarePythonHasher:
 
     def __init__(
         self,
-        hasher_id: str,
+        hasher_id: str = SEMANTIC_HASH_LABEL,
         type_handler_registry: "hp.HandlerRegistryProtocol | None" = None,
         strict: bool = True,
     ) -> None:
@@ -228,7 +258,7 @@ class SemanticAwarePythonHasher:
         namedtuple).  Within nested structures this function recurses into
         itself for container elements and calls ``hash_object`` for all
         non-container, non-primitive elements, embedding the resulting
-        ContentHash.to_string() as a string leaf.
+        the tagged digest of the ContentHash (no label).
 
         Primitives are passed through as-is.
 
@@ -245,9 +275,9 @@ class SemanticAwarePythonHasher:
         if isinstance(obj, (type(None), bool, int, float, str)):
             return obj
 
-        # ContentHash is a terminal leaf -- embed as its string form.
+        # ContentHash is a terminal leaf -- embed its digest, never its label.
         if isinstance(obj, ContentHash):
-            return obj.to_string()
+            return _nested_hash(obj)
 
         # Circular-reference guard for containers.
         obj_id = id(obj)
@@ -302,7 +332,7 @@ class SemanticAwarePythonHasher:
 
         - Primitives and ContentHash → handled by _expand_structure (leaf)
         - Nested structures → recurse via _expand_structure
-        - Everything else → call hash_object, embed to_string() as leaf
+        - Everything else → call hash_object, embed its tagged digest as leaf
         """
         if isinstance(obj, (type(None), bool, int, float, str, ContentHash)):
             return self._expand_structure(obj, _visited, resolver=resolver)
@@ -310,8 +340,8 @@ class SemanticAwarePythonHasher:
         if _is_structure(obj):
             return self._expand_structure(obj, _visited, resolver=resolver)
 
-        # Non-structure, non-primitive: hash independently and embed token.
-        return self.hash_object(obj, resolver=resolver).to_string()
+        # Non-structure, non-primitive: hash independently and embed the digest.
+        return _nested_hash(self.hash_object(obj, resolver=resolver))
 
     def _expand_mapping(
         self,

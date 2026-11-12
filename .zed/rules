@@ -247,6 +247,34 @@ checked by `tests/test_hashing/golden/test_golden_hashes.py`.
 - Never move or rename the fixtures in `tests/test_hashing/golden/cases.py`: function pods,
   dataclasses and pydantic models hash with their module path.
 
+## Hash labels
+
+One rule holds for every hash label (developer, November 11, 2026; ITL-945; stated with
+examples in `docs/reference/hashing.md`, "The hash label rule").
+
+- A label names the algorithm that produced a digest (the whole procedure: canonical form,
+  preparation, encoding, digest function) and nothing else. Format `<algorithm>_v<N>`,
+  integer `N`: `semantic_v1`, `arrow_v1`, `directory_v1`, `ndarray_v1`, `polars_expr_v1`. The
+  file content hash keeps `sha256`, the only exception. A logical type's implementer picks
+  its label.
+- Change a label only when its algorithm would give an existing input a different digest.
+- Define each label in exactly one place, as a constant beside its algorithm. Never write a
+  label literal anywhere else in code, and never in a data context file.
+- Never feed a label into a hash computation. Feed a nested hash's digest only: never put
+  `to_string()`, `str(hash)` or `to_prefixed_digest()` into an identity structure, a preimage
+  table or a digest input. Inside a structure, return the `ContentHash` object and let the
+  structure hasher embed it.
+- A hash inside a name (path component, column name, `uri`) is the bare hex digest:
+  `to_hex()`. Exception (developer, November 11, 2026): a source id is the source's name. A
+  default source id built from a hash keeps a source-kind prefix and the hash's label
+  (`derived:<label>:<hex>`, via `to_string()`, never a label literal) and is used as it is in
+  the `source_id` system tag and in source-info values.
+- A hash stored as a value in its own column or field carries its label: `to_string()` as
+  text, `to_prefixed_digest()` in a binary column.
+- A record id is an identifier built by a recipe, not a hash, and carries no label.
+- `tests/test_hashing/test_hash_label_rule.py` recomputes every golden value under renamed
+  labels; a value that moves there means a label reached a hash input.
+
 ## Testing conventions
 
 Tests use the **public interface** wherever possible (developer, November 10, 2026): drive an

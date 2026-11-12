@@ -261,9 +261,10 @@ class OperatorNodeBase(StreamBase):
             return self._stored_pipeline_path
         if self._node_identity_path_cache is not None:
             return self._node_identity_path_cache
-        path = self.node_uri + (f"schema:{self.pipeline_hash().to_string()}",)
+        # Hashes inside a path are bare hex digests: a label never enters a name.
+        path = self.node_uri + (f"schema:{self.pipeline_hash().to_hex()}",)
         if self._table_scope != "pipeline_hash":
-            path += (f"instance:{self.content_hash().to_string()}",)
+            path += (f"instance:{self.content_hash().to_hex()}",)
         self._node_identity_path_cache = path
         return path
 
@@ -875,10 +876,17 @@ class OperatorJobNode(OperatorNodeBase):
         # In content_hash scope each run has its own isolated table so the column
         # is present in storage but filtering is never applied on reads.
         n_rows = output_table.num_rows
+        node_content_hash = self.content_hash()
+        # The row that is hashed carries the node content hash as its raw digest:
+        # a hash label is never part of a hash input. The stored column is labelled.
+        hashed_table = output_table.append_column(
+            constants.NODE_CONTENT_HASH_COL,
+            pa.array([node_content_hash.digest] * n_rows, type=pa.large_binary()),
+        )
         output_table = output_table.append_column(
             constants.NODE_CONTENT_HASH_COL,
             pa.array(
-                [self.content_hash().to_prefixed_digest()] * n_rows,
+                [node_content_hash.to_prefixed_digest()] * n_rows,
                 type=pa.large_binary(),
             ),
         )
@@ -886,16 +894,17 @@ class OperatorJobNode(OperatorNodeBase):
         # Per-row record hashes for dedup: hash(tag + data + system_tags + node_content_hash).
         arrow_hasher = self.data_context.arrow_hasher
         record_hashes = []
-        for batch in output_table.to_batches():
+        for batch in hashed_table.to_batches():
             for i in range(len(batch)):
+                # A hash stored as a value carries its label: b"<label>:<digest>".
                 record_hashes.append(
-                    arrow_hasher.hash_table(batch.slice(i, 1)).to_hex()
+                    arrow_hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
                 )
 
         output_table = output_table.add_column(
             0,
             self.HASH_COLUMN_NAME,
-            pa.array([h.encode() for h in record_hashes], type=pa.large_binary()),
+            pa.array(record_hashes, type=pa.large_binary()),
         )
 
         # Store — record IDs are run-scoped (NODE_CONTENT_HASH_COL is included in
@@ -1267,6 +1276,8 @@ class OperatorJobNode(OperatorNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         path_str = "/".join(self.node_identity_path)
+        # A source id is the source's name: a default built from a hash keeps the
+        # hash's label (developer, November 11, 2026).
         source_id = f"{path_str}:{self.content_hash().to_string()}"
         return DerivedSource(
             origin=self,

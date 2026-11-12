@@ -111,20 +111,37 @@ def _build_record_id_preimage(
     single-row Arrow table.  ``NODE_CONTENT_HASH_COL`` is intentionally excluded —
     it is redundant (fully determined by the table path + system tags).
 
+    The input data hash enters as its raw digest, without its label: a label names
+    the algorithm that produced a digest and is never part of a hash input, so
+    renaming the Arrow label changes no entry id. The stored ``INPUT_DATA_HASH_COL``
+    column of the pipeline and result tables keeps the labelled form.
+
     Args:
         tag: The tag datagram for the input row.
         input_data: The data datagram for the input row.
 
     Returns:
         A single-row ``pa.Table`` with system-tag columns and
-        ``INPUT_DATA_HASH_COL`` (``large_binary``).
+        ``INPUT_DATA_HASH_COL`` (``large_binary``, the raw digest).
     """
     return tag.as_table(columns={"system_tags": True}).append_column(
         constants.INPUT_DATA_HASH_COL,
-        pa.array(
-            [input_data.content_hash().to_prefixed_digest()], type=pa.large_binary()
-        ),
+        pa.array([input_data.content_hash().digest], type=pa.large_binary()),
     )
+
+
+def _bare_digest(hash_string: str) -> str:
+    """Return the bare hex digest of a stored ``"<label>:<hex>"`` hash string.
+
+    Args:
+        hash_string: A hash as stored in a saved job, or ``""`` when absent.
+
+    Returns:
+        The hex digest without its label, or ``""`` for an empty string.
+    """
+    if not hash_string:
+        return ""
+    return ContentHash.from_string(hash_string).to_hex()
 
 
 # Private meta-column name stamped into tags routed to the compute channel.
@@ -356,9 +373,10 @@ class FunctionNodeBase(StreamBase):
         if self._node_identity_path_cache is not None:
             return self._node_identity_path_cache
         pf = self._function_pod
-        path = pf.uri + (f"schema:{self.pipeline_hash().to_string()}",)
+        # Hashes inside a path are bare hex digests: a label never enters a name.
+        path = pf.uri + (f"schema:{self.pipeline_hash().to_hex()}",)
         if self._table_scope != "pipeline_hash":
-            path += (f"instance:{self.content_hash().to_string()}",)
+            path += (f"instance:{self.content_hash().to_hex()}",)
         self._node_identity_path_cache = path
         return path
 
@@ -1139,9 +1157,10 @@ class FunctionJobNode(FunctionNodeBase):
         # resolves to the correct DB path.  This mirrors the live computation:
         #   path = function_pod.uri + (f"schema:{pipeline_hash}",)
         # Since node_uri == function_pod.uri (same fields), we reconstruct it here.
+        # The descriptor stores hashes as labelled values; a path holds bare digests.
         pipeline_hash_str = descriptor.get("pipeline_hash", "")
         node._stored_pipeline_path = node._stored_node_uri + (
-            f"schema:{pipeline_hash_str}",
+            f"schema:{_bare_digest(pipeline_hash_str)}",
         )
         if raw_table_scope != "pipeline_hash":
             # Use _stored_content_hash (already set to job_content_hash when
@@ -1149,7 +1168,9 @@ class FunctionJobNode(FunctionNodeBase):
             # descriptor) so the instance fragment matches the DB path written
             # during the original run for table_scope="content_hash".
             content_hash_str = node._stored_content_hash or ""
-            node._stored_pipeline_path += (f"instance:{content_hash_str}",)
+            node._stored_pipeline_path += (
+                f"instance:{_bare_digest(content_hash_str)}",
+            )
 
         # FunctionJobNode — stream-level caching state
         node._cached_output_datas = {}
@@ -2179,6 +2200,8 @@ class FunctionJobNode(FunctionNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         path_str = "/".join(self.node_identity_path)
+        # A source id is the source's name: a default built from a hash keeps the
+        # hash's label (developer, November 11, 2026).
         source_id = f"{path_str}:{self.content_hash().to_string()}"
         return DerivedSource(
             origin=self,

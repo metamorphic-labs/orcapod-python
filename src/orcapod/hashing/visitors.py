@@ -170,11 +170,11 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
        convert the storage value to a Python object and hash it, replacing the
        column with a ``pa.large_binary()`` value of the form::
 
-           <type_name_bytes> + b"::" + content_hash.to_prefixed_digest()
+           <type_name_bytes> + b"::" + content_hash.digest
 
        where ``type_name`` is the extension name with dots replaced by colons
-       (e.g. ``"orcapod.path"`` → ``"orcapod:path"``), and
-       ``to_prefixed_digest()`` = ``method_bytes + b":" + digest``.
+       (e.g. ``"orcapod.path"`` → ``"orcapod:path"``). The label of the value
+       hash is not part of the bytes.
     3. If no hasher is registered (or the converter doesn't know the type),
        return the extension type and storage value unchanged. The downstream
        ``StarfixArrowHasher`` / ``ArrowDigester`` will see the full extension
@@ -302,13 +302,12 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         python_obj = self._type_converter.storage_to_python(storage_value, python_type)
         content_hash = self._python_hasher.hash_object(python_obj)
 
-        # Encode as binary: "<type_name>::<method>:<digest>"
+        # Encode as binary: "<type_name>::<digest>"
         # Dots in the extension name → colons (e.g. "orcapod.path" → "orcapod:path").
-        # The "::" separator is unambiguous because to_prefixed_digest() uses only ":".
+        # Only the digest of the value hash is fed in, never its label: a label names
+        # the algorithm and is not part of any hash input.
         type_name = extension_type.extension_name.replace(".", ":")
-        hash_bytes = (
-            type_name.encode("utf-8") + b"::" + content_hash.to_prefixed_digest()
-        )
+        hash_bytes = type_name.encode("utf-8") + b"::" + content_hash.digest
         return pa.large_binary(), hash_bytes
 
     def visit_struct(

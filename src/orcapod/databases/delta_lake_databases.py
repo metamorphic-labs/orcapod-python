@@ -545,7 +545,7 @@ class DeltaTableDatabase:
 
             # Check for filesystem-unsafe characters.
             # Note: ':' is handled by _sanitize_path_component (replaced with '!' on Windows)
-            # and is allowed here so that semantic-version hash paths (e.g. "semantic_v0.1:abc123")
+            # and is allowed here so that prefixed path components (e.g. "schema:<hex digest>")
             # can be stored cross-platform.
             unsafe_chars = ["/", "\\", "*", "?", '"', "<", ">", "|", "\0"]
             if any(char in component for char in unsafe_chars):

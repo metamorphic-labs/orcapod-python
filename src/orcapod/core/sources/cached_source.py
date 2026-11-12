@@ -204,7 +204,7 @@ class CachedSource(RootSource):
             return self._explicit_cache_path
         return self._cache_path_prefix + (
             "source",
-            f"node:{self._source.content_hash().to_string()}",
+            f"node:{self._source.content_hash().to_hex()}",
         )
 
     @property
@@ -278,18 +278,19 @@ class CachedSource(RootSource):
         # their data columns but originate from different positions in the source
         # will have different record_ids and must be stored as distinct entries.
         arrow_hasher = self.data_context.arrow_hasher
-        record_hashes: list[str] = []
+        record_hashes: list[bytes] = []
         for batch in live_table.to_batches():
             for i in range(len(batch)):
+                # A hash stored as a value carries its label: b"<label>:<digest>".
                 record_hashes.append(
-                    arrow_hasher.hash_table(batch.slice(i, 1)).to_hex()
+                    arrow_hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
                 )
 
         # Store in DB with hash as record ID (skip_duplicates deduplicates)
         live_with_hash = live_table.add_column(
             0,
             self.HASH_COLUMN_NAME,
-            pa.array([h.encode() for h in record_hashes], type=pa.large_binary()),
+            pa.array(record_hashes, type=pa.large_binary()),
         )
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.

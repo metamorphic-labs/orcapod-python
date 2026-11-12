@@ -1,7 +1,7 @@
 """A v0.2 store under v0.3: its tables are not read, inputs are recomputed (ITL-888, ITL-944).
 
 The array format changed in v0.3 without a migration (ITL-888), and so did every Arrow-derived
-hash (starfix hash format 2, label ``arrow_v0.2``, ITL-910). v0.3 stores every table at a new
+hash (starfix hash format 2, label ``arrow_v1``, ITL-910). v0.3 stores every table at a new
 layout (``pdb_v2``, ``rdb_v2``), with the data context of each row in ``__data_context``
 (ITL-944). The tables a v0.2 store holds are at the old layout: v0.3 does not refuse the
 store and does not read those tables as results. It computes every input again into its own
