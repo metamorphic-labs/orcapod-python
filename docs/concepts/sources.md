@@ -117,8 +117,9 @@ table id, which takes about a second whatever the table's size. `output_schema()
 `content_hash()` and `pipeline_hash()` read no rows either. Rows are read when you ask for
 them, and every read scans the table again:
 
-- `iter_data()` and a pipeline job read the table in batches of at most `batch_rows` rows
-  (default 8,192) and hold one batch at a time.
+- `iter_data()` and a pipeline job hand the rows on in batches of at most `batch_rows`
+  rows (default 8,192). SpiralDB sends a scan in batches that follow its stored fragments,
+  whose sizes cannot be chosen; one of them is held while its rows are handed on.
 - `as_table()`, `as_df()`, `as_polars_df()`, `as_pandas_df()` and `as_lazy_frame()` read
   the rows into memory and return them all.
 
@@ -141,7 +142,11 @@ print(first.row_count_estimate)  # rows in the whole table, without reading any
 
 **The row cap.** One read returns at most `max_rows` rows (default 100,000). A read that
 would return more raises `SourceTooLargeError`, which gives the row count and the ways out:
-`limit=`, `where=`, or a larger `max_rows` (`max_rows=None` removes the cap). The cap is there
+`limit=`, `where=`, or a larger `max_rows` (`max_rows=None` removes the cap). When nothing
+but `limit=` bounds the read, the source decides before reading any row, from the row count
+SpiralDB records for the table. That count can include deleted rows that are not yet
+compacted, so a table near the cap can be refused although a scan would return fewer rows;
+the error says so. The cap is there
 because a pipeline job keeps every row it processes in memory, about 5 KB per row for each
 node, so 100,000 rows cost about 0.5 GB per node. A table of millions of rows can be iterated
 with `max_rows=None`, but it cannot yet be run through a job on a laptop.

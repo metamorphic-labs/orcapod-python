@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 from pathlib import Path
 from typing import cast
 
@@ -16,6 +17,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
+from orcapod.databases.spiraldb_connector import _serialize_arrow_metadata
 from orcapod.errors import SourceTooLargeError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.serialization import resolve_source_from_config
@@ -107,6 +109,28 @@ class TestNoRowIsReadUntilAsked:
         empty = nothing.as_table(all_info=True)
         assert empty.num_rows == 0
         assert empty.schema == rows.as_table(all_info=True).schema
+
+    def test_a_metadata_change_after_construction_is_refused(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        marked = _rows([1]).cast(
+            pa.schema(
+                [
+                    pa.field("subject_id", pa.string()),
+                    pa.field("timestamp", pa.uint64()),
+                    pa.field("amplitude", pa.float32(), metadata={"unit": "uV"}),
+                ]
+            )
+        )
+        # About the connector's non-public metadata encoding: it is how a table's
+        # field metadata is stored, and the test changes only that.
+        kv = _serialize_arrow_metadata(marked)  # pyright: ignore[reportPrivateUsage]
+        assert kv is not None
+        project.table("default.event").set_metadata(kv)
+
+        with pytest.raises(
+            ValueError, match="column 'amplitude'.*build the source again"
+        ):
+            source.as_table()
 
     def test_a_table_with_key_columns_only_is_refused(self, project):
         project.create_table("default.never_written", key_schema=_KEYS)
@@ -217,6 +241,11 @@ class TestRestrictions:
         with pytest.raises(ValueError, match="batch_rows"):
             SpiralDBTableSource(_PROJECT, "event", batch_rows=0)
 
+    @pytest.mark.parametrize("name", ["limit", "max_rows", "batch_rows"])
+    def test_a_bool_is_not_a_size(self, project, name):
+        with pytest.raises(ValueError, match=name):
+            SpiralDBTableSource(_PROJECT, "event", **{name: True})
+
     def test_every_read_of_one_source_uses_the_version_it_was_built_at(self, project):
         table = project.table("default.event")
         version = table.last_modified_at()
@@ -236,6 +265,14 @@ class TestRestrictions:
         assert fake_pyspiral.scan_log[-1].kwargs["asof"] == 1
         assert source.to_config()["asof"] == 1
 
+    def test_a_given_version_zero_is_used(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event", asof=0)
+
+        source.as_table()
+
+        assert fake_pyspiral.scan_log[-1].kwargs["asof"] == 0
+        assert source.to_config()["asof"] == 0
+
 
 class TestRowCap:
     def test_a_read_over_the_cap_is_refused_before_scanning(self, project):
@@ -246,7 +283,9 @@ class TestRowCap:
 
         assert fake_pyspiral.scan_log == []
         message = str(raised.value)
-        assert "5 rows" in message and "max_rows=3" in message
+        assert "up to 5 rows" in message and "max_rows=3" in message
+        assert "records about 5 rows" in message
+        assert "deleted rows not yet compacted" in message
         assert "limit=" in message and "where=" in message
         with pytest.raises(SourceTooLargeError):
             list(source.iter_data())
@@ -404,6 +443,19 @@ class TestSaveAndLoad:
         loaded = SpiralDBTableSource.from_config(source.to_config())
 
         assert loaded.as_table().num_rows == 1
+
+    def test_bytes_in_where_survive_a_json_round_trip(self, project):
+        keys = pa.schema([pa.field("blob", pa.binary())])
+        project.create_table("default.blobs", key_schema=keys).write(
+            pa.table({"blob": pa.array([b"\x00\xff", b"\x01"]), "n": [1, 2]})
+        )
+        source = SpiralDBTableSource(_PROJECT, "blobs", where={"blob": b"\x00\xff"})
+
+        saved = json.loads(json.dumps(source.to_config()))
+        loaded = SpiralDBTableSource.from_config(saved)
+
+        assert loaded.to_config() == saved
+        assert loaded.as_table().column("n").to_pylist() == [1]
 
     def test_loading_refuses_a_name_that_now_leads_to_another_table(self, project):
         config = SpiralDBTableSource(_PROJECT, "event").to_config()

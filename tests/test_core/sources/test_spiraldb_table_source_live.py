@@ -3,8 +3,9 @@
 Skipped unless ``ORCAPOD_SPIRAL_LIVE_PROJECT`` names a project the saved ``spiral login``
 can read, with a ``default.spike_event`` table (the workshop project is
 ``edi-tutorial-v1-841226``). Every test is read-only except
-``test_rows_appended_between_runs_are_the_only_ones_computed``, which also needs
-``ORCAPOD_SPIRAL_LIVE_WRITE=1`` and writes only to a table it creates and drops in the
+``test_rows_appended_between_runs_are_the_only_ones_computed`` and
+``test_a_source_reads_the_version_it_was_built_at``, which also need
+``ORCAPOD_SPIRAL_LIVE_WRITE=1`` and write only to a table each creates and drops in the
 project's ``scratch`` dataset.
 
     ORCAPOD_SPIRAL_LIVE_PROJECT=edi-tutorial-v1-841226 \\
@@ -141,5 +142,30 @@ def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
         table.write(pa.table({"k": [1], "v": [10]}))
         run()
         assert calls == [10]
+    finally:
+        project.drop_table(f"scratch.{name}")
+
+
+@pytest.mark.skipif(
+    not WRITE, reason="Set ORCAPOD_SPIRAL_LIVE_WRITE=1 to write a scratch table"
+)
+def test_a_source_reads_the_version_it_was_built_at():
+    import spiral  # pyright: ignore[reportMissingImports]  # spiraldb extra, absent in the type-check job
+
+    name = f"itl186_asof_{uuid.uuid4().hex[:8]}"
+    project = spiral.Spiral().project(PROJECT)
+    table = project.create_table(f"scratch.{name}", key_schema=[("k", pa.int64())])
+
+    def keys(source: SpiralDBTableSource) -> list[int]:
+        return source.as_table().column("k").to_pylist()
+
+    try:
+        table.write(pa.table({"k": [1, 2], "v": [10, 20]}))
+        before = SpiralDBTableSource(PROJECT, name, dataset="scratch")
+        table.write(pa.table({"k": [3], "v": [30]}))
+
+        assert keys(before) == [1, 2]
+        assert [tag.as_dict()["k"] for tag, _ in before.iter_data()] == [1, 2]
+        assert keys(SpiralDBTableSource(PROJECT, name, dataset="scratch")) == [1, 2, 3]
     finally:
         project.drop_table(f"scratch.{name}")

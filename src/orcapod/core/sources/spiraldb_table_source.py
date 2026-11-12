@@ -2,8 +2,8 @@
 
 The source is built from the table's metadata alone (schema, key columns, SpiralDB's
 table id): no row is read until one is asked for. Rows then arrive in batches, so a
-read holds one batch at a time whatever the table's size. The table's primary-key
-(key-schema) columns are the tag columns by default.
+read holds one of SpiralDB's batches at a time whatever the table's size. The table's
+primary-key (key-schema) columns are the tag columns by default.
 
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is handled externally — run ``spiral login`` once; pyspiral keeps
@@ -60,19 +60,22 @@ DEFAULT_BATCH_ROWS = 8_192
 # The most rows a notebook display of the source reads.
 PREVIEW_ROWS = 10
 
-# How a datetime or date value of ``where`` is written in a saved config.
+# How a datetime, date or bytes value of ``where`` is written in a saved config.
 _DATETIME_KEY = "datetime"
 _DATE_KEY = "date"
+_BYTES_KEY = "bytes"
 
 
 def _locationto_config(where: Mapping[str, object]) -> dict[str, Any]:
-    """Return ``where`` with its date and datetime values in a JSON form."""
+    """Return ``where`` with its date, datetime and bytes values in a JSON form."""
     out: dict[str, Any] = {}
     for column, value in where.items():
         if isinstance(value, datetime.datetime):
             out[column] = {_DATETIME_KEY: value.isoformat()}
         elif isinstance(value, datetime.date):
             out[column] = {_DATE_KEY: value.isoformat()}
+        elif isinstance(value, bytes):
+            out[column] = {_BYTES_KEY: value.hex()}
         else:
             out[column] = value
     return out
@@ -86,9 +89,36 @@ def _locationfrom_config(saved: Mapping[str, Any]) -> dict[str, object]:
             out[column] = datetime.datetime.fromisoformat(value[_DATETIME_KEY])
         elif isinstance(value, dict) and set(value) == {_DATE_KEY}:
             out[column] = datetime.date.fromisoformat(value[_DATE_KEY])
+        elif isinstance(value, dict) and set(value) == {_BYTES_KEY}:
+            out[column] = bytes.fromhex(value[_BYTES_KEY])
         else:
             out[column] = value
     return out
+
+
+def _is_positive_int(value: object) -> bool:
+    """Return whether ``value`` is an integer of at least 1 (``True`` is not)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
+    """Describe how a scanned batch's columns differ from the ones the source expects."""
+    if found.names != expected.names:
+        return (
+            f"a scan returned columns {found.names} but the source was built with "
+            f"{expected.names}"
+        )
+    for got, want in zip(found, expected, strict=True):
+        if not got.equals(want, check_metadata=True):
+            return (
+                f"a scan returned column {got.name!r} as {got} with metadata "
+                f"{got.metadata} but the source was built with {want} with metadata "
+                f"{want.metadata}"
+            )
+    return (
+        f"a scan returned schema metadata {found.metadata} but the source was built "
+        f"with {expected.metadata}"
+    )
 
 
 class SpiralDBTableSource(RootSource):
@@ -100,8 +130,10 @@ class SpiralDBTableSource(RootSource):
     ``content_hash``, ``pipeline_hash`` and ``to_config`` never read a row either.
 
     Rows are read when asked for (``iter_data``, ``async_iter_data``, ``as_table`` and
-    the dataframe methods). Each read is one scan of the table in key order, taken in
-    batches of at most ``batch_rows`` rows, so iterating holds one batch at a time.
+    the dataframe methods). Each read is one scan of the table in key order. SpiralDB
+    sends it in batches whose sizes follow its stored fragments (they cannot be
+    chosen); the source hands each on in slices of at most ``batch_rows`` rows, so
+    iterating holds one SpiralDB batch, and the slice being processed, at a time.
     ``as_table`` and the dataframe methods hold every row they return. Nothing is
     cached: every read scans again.
 
@@ -139,7 +171,8 @@ class SpiralDBTableSource(RootSource):
             removes the cap. A read that would return more raises
             ``SourceTooLargeError``. A pipeline job keeps every row it processes in
             memory, about 5 KB per row and node.
-        batch_rows: The most rows held at once while iterating (default 8,192).
+        batch_rows: The most rows handed on at once while iterating (default 8,192).
+            A SpiralDB batch larger than this is held while its slices are handed on.
         source_id: Canonical source name for the registry and provenance tokens.
             Defaults to ``"<project_id>/<dataset>.<table_name>@<table id>"``.
         label: Human-readable label for this source node.
@@ -178,11 +211,11 @@ class SpiralDBTableSource(RootSource):
         overrides: dict[str, str] | None = None,
     ) -> None:
         for name, value in (("limit", limit), ("max_rows", max_rows)):
-            if value is not None and (not isinstance(value, int) or value < 1):
+            if value is not None and not _is_positive_int(value):
                 raise ValueError(
                     f"{name} must be a positive integer or None, got {value!r}"
                 )
-        if not isinstance(batch_rows, int) or batch_rows < 1:
+        if not _is_positive_int(batch_rows):
             raise ValueError(
                 f"batch_rows must be a positive integer, got {batch_rows!r}"
             )
@@ -216,11 +249,13 @@ class SpiralDBTableSource(RootSource):
                 )
             self._table_id = connector.get_spiral_table_id(table_name)
             schema = connector.get_arrow_schema(table_name)
-            # One version for every read of this source object. A table that was
-            # never written has no version to pin.
+            # One version for every read of this source object. A given version is
+            # used as it is; a table that was never written has no version to pin.
             self._asof = (
-                asof if asof is not None else connector.get_table_version(table_name)
-            ) or None
+                asof
+                if asof is not None
+                else (connector.get_table_version(table_name) or None)
+            )
 
         resolved_tags = (
             list(self._key_columns)
@@ -345,6 +380,8 @@ class SpiralDBTableSource(RootSource):
     def _batch_streams(self) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once and yield its rows as streams of at most ``batch_rows`` rows.
 
+        Each SpiralDB batch is held while its slices are yielded.
+
         Raises:
             SourceTooLargeError: If the read would return, or returns, more than
                 ``max_rows`` rows.
@@ -371,15 +408,23 @@ class SpiralDBTableSource(RootSource):
                 key column holds a null.
         """
         with self._connector() as connector:
-            if max_rows is not None and not self._where:
-                # Nothing but limit bounds the read, so its size is known up front:
-                # the limit, or the table's recorded row count when that is smaller.
-                expected = limit
-                if expected is None or expected > max_rows:
-                    recorded = connector.get_row_count_estimate(self._table_name)
-                    expected = recorded if expected is None else min(expected, recorded)
-                if expected > max_rows:
-                    raise self._too_large(f"the read would return {expected:,} rows")
+            if (
+                max_rows is not None
+                and not self._where
+                and (limit is None or limit > max_rows)
+            ):
+                # Nothing but limit bounds the read, and the limit does not keep it
+                # under the cap: the table's recorded row count decides, before any
+                # row is read (so no row reaches a function of a job that would fail).
+                # The count can be above the rows a scan returns, never below.
+                recorded = connector.get_row_count_estimate(self._table_name)
+                bound = recorded if limit is None else min(limit, recorded)
+                if bound > max_rows:
+                    raise self._too_large(
+                        f"the read may return up to {bound:,} rows: the table records "
+                        f"about {recorded:,} rows (SpiralDB's count, which can include "
+                        "deleted rows not yet compacted)"
+                    )
             seen = 0
             for batch in connector.scan_batches(
                 self._table_name,
@@ -391,11 +436,14 @@ class SpiralDBTableSource(RootSource):
                     rows = arrow_utils.drop_system_columns(
                         pa.Table.from_batches([batch.slice(start, self._batch_rows)])
                     )
-                    if not rows.schema.equals(self._table_schema):
+                    # Metadata too: field metadata is how a column's logical type is
+                    # recorded, and the schema hash was computed at construction.
+                    if not rows.schema.equals(self._table_schema, check_metadata=True):
                         raise ValueError(
-                            f"SpiralDB table {self._qualified!r} returned columns "
-                            f"{rows.schema} but the source was built with "
-                            f"{self._table_schema}."
+                            f"SpiralDB table {self._qualified!r}: "
+                            f"{_schema_difference(rows.schema, self._table_schema)}. "
+                            "The table changed after the source was built; build the "
+                            "source again to read it as it is now."
                         )
                     seen += rows.num_rows
                     if max_rows is not None and seen > max_rows:

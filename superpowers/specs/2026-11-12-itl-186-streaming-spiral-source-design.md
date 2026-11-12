@@ -94,8 +94,9 @@ Options for where the table id lives:
 * **C: readable source id, table id only in `identity_structure`.** Rejected: the content hash
   is unique, but record ids and tokens of a recreated table collide with the old table's.
 
-Under A and B a table dropped and recreated under the same name is a different source and
-nothing cached is reused. Under B only, a renamed table keeps its identity.
+Under A and B a table dropped and recreated under the same name is a different source: its
+pipeline records are entered again, and function results are still reused for rows whose
+content is unchanged, because they are found by row content. Under B only, a renamed table keeps its identity.
 
 A `source_id=` given by the user is used as it is, as for every source.
 
