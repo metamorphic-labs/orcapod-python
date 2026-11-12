@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import hashlib
 import json
 import os
 import subprocess
@@ -25,14 +26,28 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import polars as pl
+import pyarrow as pa
 import pytest
+from starfix import ArrowDigester
 
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.databases import DeltaTableDatabase
-from orcapod.logical_types.polars_type import polars_dtype_descriptor
+from orcapod.logical_types.identifier import (
+    LogicalTypeIdentifier,
+    arrow_type_identifier,
+)
+from orcapod.logical_types.polars_type import (
+    POLARS_DATAFRAME_HASH_LABEL,
+    POLARS_SERIES_HASH_LABEL,
+    LogicalPolarsDataFrame,
+    LogicalPolarsSeries,
+    polars_dtype_descriptor,
+)
 from orcapod.sources import DictSource
+from orcapod.types import ContentHash
 
 
 def _data_hash(value: pl.DataFrame | pl.Series) -> str:
@@ -365,17 +380,139 @@ class TestSeriesHashing:
 
 
 class TestHashLabel:
-    """The method label names the hash definition and is its only version marker."""
+    """Each label names its algorithm and is defined once, beside it (the hash label rule)."""
 
     def test_dataframe_hash_label(self) -> None:
         hasher = get_default_context().semantic_hasher
         frame_hash = hasher.hash_object(pl.DataFrame({"a": [1]}))
-        assert frame_hash.method == "polars_dataframe_v1"
+        assert frame_hash.method == POLARS_DATAFRAME_HASH_LABEL == "polars_dataframe_v1"
 
     def test_series_hash_label(self) -> None:
         hasher = get_default_context().semantic_hasher
         series_hash = hasher.hash_object(pl.Series("a", [1]))
-        assert series_hash.method == "polars_series_v1"
+        assert series_hash.method == POLARS_SERIES_HASH_LABEL == "polars_series_v1"
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+class TestHashDefinition:
+    """The hash is ``sha256(descriptor + NUL + starfix ordered digest of the values)``.
+
+    Recomputed here from the documented definition for values whose Arrow export needs no
+    projection (no ``Null``, ``Array`` or dictionary column). starfix runs in its ordered
+    mode (column order and struct field order, ITL-898).
+    """
+
+    _STRUCT = pl.Struct({"u": pl.Int8, "v": pl.String})
+
+    def _frame(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "x": pl.Series([1, 2, 3], dtype=pl.Int64),
+                "s": pl.Series(
+                    [{"u": 1, "v": "a"}, None, {"u": None, "v": None}],
+                    dtype=self._STRUCT,
+                ),
+            }
+        )
+
+    @staticmethod
+    def _ordered_digest(frame: pl.DataFrame) -> bytes:
+        return ArrowDigester.hash_table(
+            frame.to_arrow(compat_level=pl.CompatLevel.oldest()),
+            ordered_columns=True,
+            ordered_struct_fields=True,
+        )
+
+    def test_frame(self) -> None:
+        frame = self._frame()
+        descriptor = _canonical_json(
+            {
+                "kind": "polars.dataframe",
+                "height": 3,
+                "columns": [
+                    ["x", "int64"],
+                    ["s", {"struct": [["u", "int8"], ["v", "string"]]}],
+                ],
+            }
+        )
+        expected = hashlib.sha256(
+            descriptor + b"\x00" + self._ordered_digest(frame)
+        ).digest()
+        got = get_default_context().semantic_hasher.hash_object(frame)
+        assert got == ContentHash(POLARS_DATAFRAME_HASH_LABEL, expected)
+
+    def test_series(self) -> None:
+        series = self._frame()["s"]
+        descriptor = _canonical_json(
+            {
+                "kind": "polars.series",
+                "name": "s",
+                "height": 3,
+                "dtype": {"struct": [["u", "int8"], ["v", "string"]]},
+            }
+        )
+        expected = hashlib.sha256(
+            descriptor + b"\x00" + self._ordered_digest(series.to_frame())
+        ).digest()
+        got = get_default_context().semantic_hasher.hash_object(series)
+        assert got == ContentHash(POLARS_SERIES_HASH_LABEL, expected)
+
+
+class TestLogicalTypeIdentifier:
+    """The identifier is the extension name plus ``{"version":1}`` (ITL-935)."""
+
+    @pytest.mark.parametrize(
+        ("python_type", "name"),
+        [(pl.DataFrame, "polars.dataframe"), (pl.Series, "polars.series")],
+    )
+    def test_identifier(self, python_type: type, name: str) -> None:
+        converter = get_default_context().type_converter
+        arrow_type = converter.python_type_to_arrow_type(python_type)
+        assert isinstance(arrow_type, pa.ExtensionType)
+        assert arrow_type_identifier(arrow_type) == LogicalTypeIdentifier(
+            name, b'{"version":1}'
+        )
+
+    @pytest.mark.parametrize(
+        "logical_type", [LogicalPolarsDataFrame(), LogicalPolarsSeries()]
+    )
+    def test_polars_extension_carries_the_same_metadata(
+        self, logical_type: LogicalPolarsDataFrame | LogicalPolarsSeries
+    ) -> None:
+        polars_ext = logical_type.get_polars_extension_type()
+        assert polars_ext.ext_metadata() == '{"version":1}'
+
+    @pytest.mark.parametrize("rows", [0, 2], ids=["zero_rows", "all_null"])
+    def test_column_without_values_hashes_as_its_type(self, rows: int) -> None:
+        """A column holding no value still hashes as its logical type (ITL-967).
+
+        Such a column has no cell token, so the type enters through the hashed field.
+        """
+        context = get_default_context()
+
+        def column_hash(arrow_type: pa.DataType) -> str:
+            storage_type = (
+                arrow_type.storage_type
+                if isinstance(arrow_type, pa.ExtensionType)
+                else arrow_type
+            )
+            column: pa.Array[Any] = pa.array([None] * rows, storage_type)
+            if isinstance(arrow_type, pa.ExtensionType):
+                column = pa.ExtensionArray.from_storage(arrow_type, column)
+            return context.arrow_hasher.hash_table(pa.table({"c": column})).to_string()
+
+        converter = context.type_converter
+        hashes = [
+            column_hash(converter.python_type_to_arrow_type(python_type))
+            for python_type in (pl.DataFrame, pl.Series, pd.DataFrame, pd.Series)
+        ]
+        hashes.append(column_hash(pa.large_binary()))
+        assert len(set(hashes)) == len(hashes)
 
 
 class TestHashTimeRejection:

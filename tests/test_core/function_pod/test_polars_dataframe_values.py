@@ -16,7 +16,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import pandas as pd
 import polars as pl
+import pyarrow as pa
 import pytest
 from polars.testing import assert_frame_equal
 
@@ -27,6 +29,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
+from orcapod.logical_types import LogicalPolarsDataFrame
 from orcapod.operators import Batch, GroupBy, Join, SemiJoin
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -137,6 +140,58 @@ class TestPodValues:
         _assert_exact(got["b"], _frame(3).with_row_index("row", offset=0))
 
 
+class _FrameSubclass(pl.DataFrame):
+    """A user subclass of ``pl.DataFrame``."""
+
+
+class TestReturnedValueMustBeOfTheDeclaredType:
+    """A pod's returned value is an instance of the declared type, or it is refused."""
+
+    @pytest.mark.parametrize(
+        "returned",
+        [
+            pd.DataFrame({"i": [1]}),
+            pl.Series("i", [1]),
+            pl.DataFrame({"i": [1]}).lazy(),
+            pa.table({"i": [1]}),
+            {"i": [1]},
+        ],
+        ids=["pandas_frame", "polars_series", "lazy_frame", "arrow_table", "dict"],
+    )
+    def test_wrong_type_for_dataframe_is_refused(self, returned: object) -> None:
+        @function_pod(output_keys="df")
+        def wrong(n: int) -> pl.DataFrame:
+            return cast(pl.DataFrame, returned)
+
+        with pytest.raises(TypeError, match="DataFrame"):
+            wrong.pod(_int_source()).as_table()
+
+    @pytest.mark.parametrize(
+        "returned",
+        [pl.DataFrame({"i": [1]}), pd.Series([1], name="i"), [1, 2]],
+        ids=["polars_frame", "pandas_series", "list"],
+    )
+    def test_wrong_type_for_series_is_refused(self, returned: object) -> None:
+        @function_pod(output_keys="column")
+        def wrong(n: int) -> pl.Series:
+            return cast(pl.Series, returned)
+
+        with pytest.raises(TypeError, match="Series"):
+            wrong.pod(_int_source()).as_table()
+
+    def test_subclass_instance_is_accepted(self) -> None:
+        @function_pod(output_keys="df")
+        def sub(n: int) -> pl.DataFrame:
+            return _FrameSubclass({"i": pl.Series(list(range(n)), dtype=pl.Int8)})
+
+        table = sub.pod(_int_source()).as_table()
+        logical_type = LogicalPolarsDataFrame()
+        assert table.schema.field("df").type == logical_type.get_arrow_extension_type()
+        stored = table.column("df").combine_chunks().storage.to_pylist()
+        heights = sorted(logical_type.storage_to_python(v).height for v in stored)
+        assert heights == [1, 3]
+
+
 class TestOperators:
     def test_batch_over_frame_column(self) -> None:
         stream = Batch(batch_size=2)(_frame_source())
@@ -235,6 +290,35 @@ def _order_source() -> DictSource:
     )
 
 
+_NULLABLE_STRUCT = pl.Struct({"u": pl.Int8, "v": pl.String})
+
+
+def _null_struct_frame(*, whole_struct_null: bool) -> pl.DataFrame:
+    """One row: a null struct, or a struct whose two fields are null."""
+    value = None if whole_struct_null else {"u": None, "v": None}
+    return pl.DataFrame({"s": pl.Series([value], dtype=_NULLABLE_STRUCT)})
+
+
+@function_pod(output_keys="df")
+def make_null_struct_frame(whole_struct_null: bool) -> pl.DataFrame:
+    return _null_struct_frame(whole_struct_null=whole_struct_null)
+
+
+@function_pod(output_keys="is_null")
+def struct_is_null(df: pl.DataFrame) -> bool:
+    return bool(df["s"].is_null()[0])
+
+
+def _null_struct_source() -> DictSource:
+    return DictSource(
+        [
+            {"k": "null_struct", "whole_struct_null": True},
+            {"k": "struct_of_nulls", "whole_struct_null": False},
+        ],
+        tag_columns=["k"],
+    )
+
+
 _STORES: dict[str, Callable[[Path], ArrowDatabaseProtocol]] = {
     "in_memory": lambda _: InMemoryArrowDatabase(),
     "delta": lambda tmp: DeltaTableDatabase(tmp / "delta"),
@@ -295,6 +379,55 @@ class TestPipelineStores:
             "fields": "a/v",
             "both": "b/v",
         }
+
+    @pytest.mark.parametrize("store_name", list(_STORES))
+    @pytest.mark.parametrize("orchestrator_name", list(_ORCHESTRATORS))
+    def test_null_struct_and_struct_of_nulls_are_distinct_cache_keys(
+        self, store_name: str, orchestrator_name: str, tmp_path: Path
+    ) -> None:
+        """A cached pod reading ``is_null()`` computes for each of the two frames."""
+        job = PipelineJob(name="nulls", store=_STORES[store_name](tmp_path))
+        with job:
+            frames = make_null_struct_frame.pod(_null_struct_source(), label="make")
+            struct_is_null.pod(frames, label="is_null")
+        job.run(orchestrator=_ORCHESTRATORS[orchestrator_name]())
+
+        got = {tag["k"]: data["df"] for tag, data in job.nodes["make"].iter_data()}
+        for k, whole in (("null_struct", True), ("struct_of_nulls", False)):
+            _assert_exact(got[k], _null_struct_frame(whole_struct_null=whole))
+        is_null = {
+            tag["k"]: data["is_null"] for tag, data in job.nodes["is_null"].iter_data()
+        }
+        assert is_null == {"null_struct": True, "struct_of_nulls": False}
+
+    def test_saved_job_loads_with_the_frame_column(self, tmp_path: Path) -> None:
+        """A saved job loads back; its node names the logical type and reads its records."""
+        store_path = tmp_path / "delta"
+        job = PipelineJob(name="frames", store=DeltaTableDatabase(store_path))
+        with job:
+            make_frame.pod(_int_source(), label="make")
+        job.run()
+        saved = tmp_path / "job.json"
+        job.save(str(saved))
+
+        loaded = PipelineJob.load(str(saved), store=DeltaTableDatabase(store_path))
+        node = loaded.nodes["make"]
+        logical_type = LogicalPolarsDataFrame()
+        records = node.get_all_records()
+        assert records is not None
+        assert (
+            records.schema.field("df").type == logical_type.get_arrow_extension_type()
+        )
+        frames = {
+            k: logical_type.storage_to_python(v)
+            for k, v in zip(
+                records.column("k").to_pylist(),
+                records.column("df").combine_chunks().storage.to_pylist(),
+                strict=True,
+            )
+        }
+        _assert_exact(frames["a"], _frame(1))
+        _assert_exact(frames["b"], _frame(3))
 
     @pytest.mark.xfail(
         strict=True,

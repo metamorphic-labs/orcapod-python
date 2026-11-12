@@ -1361,6 +1361,26 @@ for _name in ("polars_dataframe", "polars_series"):
     case("datagram", _name)(_make_polars_datagram_case(_name))
 
 
+@case("arrow", "polars_extension_no_values")
+def arrow_polars_extension_columns_without_values() -> dict[str, Any]:
+    """Table hashes of Polars-typed columns with zero rows or nulls only.
+
+    The Polars counterpart of ``arrow:extension_no_values``: such a column has no cell
+    token, so its logical type enters the hash through the hashed field alone (ITL-967).
+    """
+    ctx = _ctx()
+    entries: dict[str, Any] = {}
+    for rows, label in ((0, "zero_rows"), (2, "all_null")):
+        for name, python_type in _polars_types().items():
+            arrow_type = ctx.type_converter.python_type_to_arrow_type(python_type)
+            storage = pa.array([None] * rows, arrow_type.storage_type)
+            column = pa.ExtensionArray.from_storage(arrow_type, storage)
+            entries[f"{label}.{name}"] = ctx.arrow_hasher.hash_table(
+                pa.table({"c": column})
+            ).to_string()
+    return entries
+
+
 def _polars_exprs() -> dict[str, Any]:
     """Build representative Polars expression predicates, keyed by name."""
     from datetime import date, datetime, timezone

@@ -31,15 +31,15 @@ metadata, vary for equal frames), so the content hash is computed from the frame
     sha256(descriptor + b"\\x00" + starfix_digest)
 
 under the ``ContentHash`` method label ``"polars_dataframe_v1"`` (a frame) or
-``"polars_series_v1"`` (a Series). The label names this whole definition (descriptor grammar
-plus digest) and is its only version marker: the bytes produced under a label never change,
-and a new definition gets a new label, so old and new hashes can be told apart by inspection.
+``"polars_series_v1"`` (a Series). Each label names its algorithm (descriptor grammar plus
+digest) and changes only if that algorithm would give an existing value a different digest
+(the hash label rule, ``docs/reference/hashing.md``).
 
 ``starfix_digest`` is ``starfix.ArrowDigester.hash_table`` of a hash-only Arrow projection of
-the values (see ``_hash_projection``). starfix ignores column order and struct field order and
-hashes a dictionary-encoded column by its values; the descriptor carries the orders. starfix
-also hashes a null struct like a struct whose fields are all null, so the projection makes
-each struct's validity one of its values (``_with_struct_validity``).
+the values (see ``_hash_projection``), taken in starfix's ordered mode
+(``ordered_columns=True, ordered_struct_fields=True``), so column order and struct field
+order at every depth are part of the digest. starfix hashes a dictionary-encoded column by
+its values and tells a null struct from a struct whose fields are all null.
 
 ``descriptor`` is canonical JSON (keys sorted, separators ``","`` and ``":"``, UTF-8) that
 carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``repr`` or its
@@ -87,6 +87,7 @@ from starfix import ArrowDigester
 
 from orcapod.logical_types.arrow_ipc import ipc_bytes_to_table, table_to_ipc_bytes
 from orcapod.logical_types.base_logical_type import BaseLogicalType
+from orcapod.logical_types.identifier import version_metadata
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
@@ -99,11 +100,15 @@ if TYPE_CHECKING:
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
-POLARS_DATAFRAME_HASH_METHOD = "polars_dataframe_v1"
+POLARS_DATAFRAME_HASH_LABEL = "polars_dataframe_v1"
 """``ContentHash`` method label of a ``pl.DataFrame`` hash; names the whole definition."""
 
-POLARS_SERIES_HASH_METHOD = "polars_series_v1"
+POLARS_SERIES_HASH_LABEL = "polars_series_v1"
 """``ContentHash`` method label of a ``pl.Series`` hash; names the whole definition."""
+
+_IDENTIFIER_METADATA = version_metadata(1)
+"""Extension metadata of the types in this module: version 1 of their stored layout and
+value hash. Never stored without it, so there is no older layout to read."""
 
 _UNSTORABLE_DTYPES: tuple[type[pl.DataType], ...] = (pl.Object, pl.Int128, pl.UInt128)
 
@@ -191,9 +196,6 @@ def _ordered_pairs(pairs: Iterable[tuple[str, Any]]) -> list[list[Any]]:
     The one place where column order and struct field order enter the descriptor: a JSON
     list keeps its order under ``sort_keys``, a JSON object would not.
 
-    TODO(ITL-898): once starfix hashes column and struct field order itself, this order is
-    redundant with the values digest; the names and dtypes stay.
-
     Args:
         pairs: ``(name, dtype descriptor)`` pairs in the value's own order.
 
@@ -263,9 +265,9 @@ def polars_dtype_descriptor(dtype: PolarsDataType) -> Any:
 def _hash_projection_type(arrow_type: pa.DataType) -> pa.DataType:
     """Map a nested Arrow type to the type starfix hashes it as.
 
-    ``fixed_size_list`` (Polars ``Array``) becomes ``large_list`` and a nested ``null``
-    becomes an all-null ``bool``, because starfix supports neither; a dictionary becomes its
-    value type. The descriptor records the real dtypes, so nothing is lost. Field names and
+    ``fixed_size_list`` (Polars ``Array``) becomes ``large_list``, a nested ``null`` becomes
+    an all-null ``bool`` (starfix does not hash ``null``), and a dictionary becomes its value
+    type. The descriptor records the real dtypes, so nothing is lost. Field names and
     nullability are kept.
 
     Args:
@@ -292,85 +294,6 @@ def _hash_projection_type(arrow_type: pa.DataType) -> pa.DataType:
     return arrow_type
 
 
-def _struct_validity_type(arrow_type: pa.DataType) -> pa.DataType:
-    """The type ``_with_struct_validity`` gives an array of ``arrow_type``.
-
-    Args:
-        arrow_type: A type already mapped by ``_hash_projection_type``.
-
-    Returns:
-        ``arrow_type`` with every struct, at any depth, replaced by
-        ``struct<valid: bool not null, fields: struct<...>>``.
-    """
-    if isinstance(arrow_type, pa.LargeListType):
-        item = arrow_type.value_field
-        return pa.large_list(item.with_type(_struct_validity_type(item.type)))
-    if isinstance(arrow_type, pa.StructType):
-        fields = pa.struct(
-            [
-                field.with_type(_struct_validity_type(field.type))
-                for field in _struct_fields(arrow_type)
-            ]
-        )
-        return pa.struct(
-            [pa.field("valid", pa.bool_(), nullable=False), pa.field("fields", fields)]
-        )
-    return arrow_type
-
-
-def _struct_fields(arrow_type: pa.StructType) -> list[pa.Field[Any]]:
-    """The fields of ``arrow_type``, in order."""
-    return [arrow_type.field(i) for i in range(arrow_type.num_fields)]
-
-
-def _with_struct_validity(array: pa.Array[Any]) -> pa.Array[Any]:
-    """Make every struct's own validity part of its values, at any depth.
-
-    starfix hashes a null struct like a struct whose fields are all null, but Polars tells
-    them apart (``is_null()``). Each struct becomes a non-null
-    ``struct<valid: bool, fields: struct<...>>``, where ``valid`` is the struct's validity
-    and ``fields`` holds its children with the parent's nulls propagated into them
-    (``StructArray.flatten``), so the bytes under a null struct never reach the digest.
-
-    Args:
-        array: An array whose type was mapped by ``_hash_projection_type``.
-
-    Returns:
-        The array with type ``_struct_validity_type(array.type)``.
-    """
-    if isinstance(array, pa.LargeListArray):
-        return pa.LargeListArray.from_arrays(
-            array.offsets,
-            _with_struct_validity(array.values),
-            type=_struct_validity_type(array.type),
-            mask=array.is_null() if array.null_count else None,
-        )
-    if isinstance(array, pa.StructArray):
-        children = [_with_struct_validity(child) for child in array.flatten()]
-        if children:
-            fields = pa.StructArray.from_arrays(
-                children,
-                fields=[
-                    field.with_type(child.type)
-                    for field, child in zip(
-                        _struct_fields(array.type), children, strict=True
-                    )
-                ],
-            )
-        else:  # a zero-field struct: from_arrays would infer length 0
-            # A None validity buffer means "no nulls"; the stub types buffers as Buffer only.
-            no_validity: list[Any] = [None]
-            fields = pa.Array.from_buffers(
-                pa.struct([]), len(array), no_validity, children=[]
-            )
-        wrapped_type = _struct_validity_type(array.type)
-        assert isinstance(wrapped_type, pa.StructType)
-        return pa.StructArray.from_arrays(
-            [array.is_valid(), fields], fields=_struct_fields(wrapped_type)
-        )
-    return array
-
-
 def _hash_projection(df: pl.DataFrame) -> pa.Table:
     """Build the Arrow table whose starfix digest stands for the frame's values.
 
@@ -392,42 +315,22 @@ def _hash_projection(df: pl.DataFrame) -> pa.Table:
     return table.cast(target)
 
 
-def _with_table_struct_validity(table: pa.Table) -> pa.Table:
-    """Apply ``_with_struct_validity`` to every column of ``table``.
-
-    Args:
-        table: A table produced by ``_hash_projection``.
-
-    Returns:
-        The table with each struct, at any depth, carrying its own validity.
-    """
-    columns = [
-        _with_struct_validity(column.combine_chunks()) for column in table.columns
-    ]
-    schema = pa.schema(
-        [field.with_type(_struct_validity_type(field.type)) for field in table.schema]
-    )
-    return pa.Table.from_arrays(columns, schema=schema)
-
-
 def _values_digest(df: pl.DataFrame) -> bytes:
     """The starfix digest of a frame's values: the only call into starfix.
 
-    Everything that depends on starfix's behaviour is here: the projection of types starfix
-    does not support (``_hash_projection``) and the struct-validity workaround
-    (``_with_table_struct_validity``), needed because starfix hashes a null struct like a
-    struct of nulls.
-
-    TODO(ITL-898): switch to starfix's ordered mode (column and struct field order) when it
-    is released. That changes the hash definition and the pinned ``polars_*`` golden values.
+    starfix runs in its ordered mode, so column order and struct field order at every depth
+    are part of the digest, as they are part of the descriptor.
 
     Args:
         df: The frame to hash. Its dtypes must already be inside the grammar.
 
     Returns:
-        ``ArrowDigester.hash_table`` of the projected table.
+        ``ArrowDigester.hash_table`` of the projected table, with ``ordered_columns`` and
+        ``ordered_struct_fields`` on.
     """
-    return ArrowDigester.hash_table(_with_table_struct_validity(_hash_projection(df)))
+    return ArrowDigester.hash_table(
+        _hash_projection(df), ordered_columns=True, ordered_struct_fields=True
+    )
 
 
 def _content_hash(
@@ -481,7 +384,7 @@ def polars_frame_content_hash(df: pl.DataFrame) -> ContentHash:
         "height": df.height,
         "columns": _ordered_pairs(columns),
     }
-    return _content_hash(descriptor, df, POLARS_DATAFRAME_HASH_METHOD)
+    return _content_hash(descriptor, df, POLARS_DATAFRAME_HASH_LABEL)
 
 
 def polars_series_content_hash(series: pl.Series) -> ContentHash:
@@ -510,7 +413,7 @@ def polars_series_content_hash(series: pl.Series) -> ContentHash:
         "height": series.len(),
         "dtype": dtype_descriptor,
     }
-    return _content_hash(descriptor, series.to_frame(), POLARS_SERIES_HASH_METHOD)
+    return _content_hash(descriptor, series.to_frame(), POLARS_SERIES_HASH_LABEL)
 
 
 def _frame_to_ipc_bytes(df: pl.DataFrame) -> bytes:
@@ -576,10 +479,12 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         {'x': Int8}
     """
 
-    _arrow_ext_class = make_arrow_extension_type("polars.dataframe", pa.large_binary())
+    _arrow_ext_class = make_arrow_extension_type(
+        "polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA
+    )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "polars.dataframe", pa.large_binary()
+        "polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA.decode()
     )
     _polars_ext: pl.BaseExtension | None = None
 
@@ -667,9 +572,13 @@ class LogicalPolarsSeries(BaseLogicalType):
         ('m', UInt8)
     """
 
-    _arrow_ext_class = make_arrow_extension_type("polars.series", pa.large_binary())
+    _arrow_ext_class = make_arrow_extension_type(
+        "polars.series", pa.large_binary(), _IDENTIFIER_METADATA
+    )
     _arrow_ext: pa.ExtensionType | None = None
-    _polars_ext_class = make_polars_extension_type("polars.series", pa.large_binary())
+    _polars_ext_class = make_polars_extension_type(
+        "polars.series", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+    )
     _polars_ext: pl.BaseExtension | None = None
 
     logical_type_name: str = "polars.series"

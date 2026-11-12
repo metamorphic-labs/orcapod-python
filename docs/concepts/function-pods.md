@@ -434,7 +434,7 @@ type.
 | `uuid.UUID` | `orcapod.uuid` | `large_binary` |
 | `orcapod.File` | `orcapod.file` | `large_string` |
 | `orcapod.Directory` | `orcapod.directory` | `large_string` |
-| `numpy.ndarray` | `numpy.ndarray` | `large_binary` (`.npy` bytes) |
+| `numpy.ndarray` | `orcapod.ndarray` | `struct` of dtype tag, shape and element bytes (see [Arrays](arrays.md)) |
 | `pandas.DataFrame` | `pandas.dataframe` | `large_binary` (Arrow IPC stream) |
 | `pandas.Series` | `pandas.series` | `large_binary` (Arrow IPC stream) |
 | `polars.DataFrame` | `polars.dataframe` | `large_binary` (Arrow IPC stream) |
@@ -454,7 +454,7 @@ values. So a pod that depends on column order, such as one returning `df.columns
 separate cache entry for each order. Physical properties are not part of the hash: chunking
 (`n_chunks()`) and sortedness flags (`Series.flags`, which are not stored either). A pod must
 not depend on them, because equal frames that differ only there share a cache entry. See
-[Logical-typed values](../reference/hashing.md#1c-logical-typed-values-inside-a-data-column)
+[Polars DataFrame and Series values](../reference/hashing.md#1e-polars-dataframe-and-series-values)
 for the exact scheme.
 
 ```python

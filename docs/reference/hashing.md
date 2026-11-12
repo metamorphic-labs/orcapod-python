@@ -58,6 +58,8 @@ The labels of v0.3:
 | `directory_v1` | the directory hash: a SHA-256 Merkle tree over the entries | `DIRECTORY_HASH_LABEL`, `hashing/directory_hashers.py` |
 | `ndarray_v1` | the array value digest (§8) | `NumpyArrayHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
+| `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `POLARS_DATAFRAME_HASH_LABEL`, `logical_types/polars_type.py` |
+| `polars_series_v1` | the Polars Series value hash (§1e) | `POLARS_SERIES_HASH_LABEL`, `logical_types/polars_type.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
 Where a hash appears, and in which form:
@@ -478,38 +480,33 @@ function pod's identity does **not** use it: the pod's `uri`, its `pipeline_hash
 schema (see [Data Function URI Hash](#5-data-function-uri-hash)), so changing a default
 moves no path.
 
-### 1c. Logical-typed values inside a data column
+### 1e. Polars DataFrame and Series values
 
-When `StarfixArrowHasher` hashes a table, a column whose logical type has a registered
-semantic handler is replaced, value by value, by the token
-`<extension name with "." as ":">::<method>:<digest>` (for example
-`polars:dataframe::polars_dataframe_v1:…`), where the digest is the handler's hash of the
-Python value. Other extension columns are hashed as their storage with the extension name kept
-in the field metadata.
+A `polars.DataFrame` or `polars.Series` is a value-hashed logical type
+(`PolarsDataFrameHandler`, `PolarsSeriesHandler`; the algorithm is defined in
+`orcapod.logical_types.polars_type`). Inside a table its cell token is, like every
+value-hashed type's (see [the hash label rule](#the-hash-label-rule)),
+`b"polars.dataframe;7b2276657273696f6e223a317d::" + digest`: the logical type's identifier,
+then the digest, without the label.
 
-**Versioned labels.** A per-type value hash carries a method label `<type>_v<N>` (for example
-`polars_dataframe_v1`). The label names the whole definition: what is hashed and how the digest
-is computed. The bytes produced under an existing label never change. A new definition gets a
-new label (`<type>_v<N+1>`), so a hash made under the old definition and one made under the
-new one can be told apart by inspection.
-
-**`polars.DataFrame` and `polars.Series`** (`PolarsDataFrameHandler`, `PolarsSeriesHandler`,
-defined in `orcapod.logical_types.polars_type`). The stored Arrow IPC bytes are not hashed:
-they vary for equal frames (the bytes under null slots, Polars' own field metadata). The hash
-is
+The stored Arrow IPC bytes are not hashed: they vary for equal frames (the bytes under null
+slots, Polars' own field metadata). The hash is
 
 ```text
-sha256(descriptor + b"\x00" + starfix.ArrowDigester.hash_table(values))
+sha256(descriptor + b"\x00" + starfix.ArrowDigester.hash_table(
+    values, ordered_columns=True, ordered_struct_fields=True))
 ```
 
-under the label `polars_dataframe_v1` for a frame and `polars_series_v1` for a Series.
+under the label `polars_dataframe_v1` for a frame and `polars_series_v1` for a Series (a
+Series is hashed as its one-column frame, with its own descriptor).
 
 `values` is the frame exported with `compat_level=oldest`, with top-level `Null` columns left
 out, `Array` cast to `large_list`, nested `Null` cast to an all-null `bool` and dictionaries
-decoded, and each struct turned into `struct<valid: bool, fields: struct<...>>`, its validity
-plus its children with the parent's nulls propagated, for hashing only. starfix ignores column
-order and struct field order and hashes a null struct like a struct of nulls; the descriptor
-carries the orders and `valid` the struct's own nulls. `descriptor` is canonical JSON (keys
+decoded, for hashing only. starfix runs in its ordered mode, so column order and struct field
+order at every depth are part of the digest, and it tells a null struct from a struct whose
+fields are all null. The descriptor carries what the Arrow values cannot (Enum categories, a
+`Categorical`'s `Categories`, `Array` size, `Null` columns, the row count, a Series' name),
+and states names, order and dtypes again in Orcapod's own terms. `descriptor` is canonical JSON (keys
 sorted, compact separators, UTF-8) in a grammar Orcapod owns, never Polars' `repr`:
 
 ```text
@@ -546,10 +543,13 @@ Physical properties are not identity: chunking (`n_chunks()`) and rechunking, sl
 the bytes under null slots, sortedness flags (`Series.flags`, which storage does not keep: a
 frame read back has them cleared), physical `Categorical` codes (`to_physical()`) and the
 contents of the process-wide category registry, which depend on what the process saw before,
-the Arrow layout Polars exports (string views, large or small offsets) and memory size. The labels are
-the only version marker: a change to the grammar or the digest is a new definition under new
-labels (`polars_dataframe_v2`, `polars_series_v2`). A dtype outside the grammar raises
-`ValueError` naming the column.
+the Arrow layout Polars exports (string views, large or small offsets) and memory size.
+Supporting a new dtype adds to the grammar without changing any existing hash; only a change
+that would give an existing value a different digest needs new labels (`polars_dataframe_v2`,
+`polars_series_v2`). A dtype outside the grammar raises `ValueError` naming the column.
+
+A `pandas.DataFrame` is hashed differently: as the `arrow_v1` hash of its Arrow table, which
+ignores column order. A Polars frame and the equal pandas frame never share a hash.
 
 ---
 
