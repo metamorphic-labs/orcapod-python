@@ -1,10 +1,17 @@
 # ITL-939 design spike: a value that is both a tag and data
 
-**Status:** proposal, awaiting the developer's decisions (section 6).
+**Status:** the developer has decided the form (November 11, 2026). Design C, the operator
+`CopyTagsToData`, is **rejected**: "if we have CopyTagToData that cannot be treated as an
+operator as that is actively introducing new data into data." The chosen direction is the
+**DerivedSource form**: "CopyTagsToData should be taken as what I call 'DerivedSource' -- a
+data source that in itself derives from other pods." Section 8 is the design addendum for that
+form and holds the open decisions. Sections 1 to 7 are the original spike, kept for its
+analysis; where they recommend the operator, section 8 replaces them.
 **Issue:** ITL-939. **Related:** ITL-929 (record ids from primary keys), ITL-938 (versioning).
 **Date:** November 11, 2026.
 **Experiments:** `superpowers/specs/itl-939-experiments/` (exp01 today's rules, exp02 today's
-workarounds, exp03 copy-operator prototype, exp04 foreign keys, exp05 hashes and divergence; each `expNN_*.py` has its captured
+workarounds, exp03 copy-operator prototype, exp04 foreign keys, exp05 hashes and divergence,
+exp06 today's `DerivedSource`, exp07 derived-source prototype; each `expNN_*.py` has its captured
 output next to it as `expNN_*.out`; rerun with `uv run python <script>`).
 
 ## 1. Summary
@@ -24,7 +31,7 @@ output next to it as `expNN_*.out`; rerun with `uv run python <script>`).
   reading the table twice and joining, gives silently wrong joins: 9 rows instead of 5 on the
   sample. For a `SpiralDBTableSource` the correct recipe means leaving the DB source for an
   in-memory `ArrowTableSource`, which loses save and reload.
-* **Recommendation:** the smallest safe feature is design C. It is an operator,
+* **Recommendation (superseded, see the status above and section 8):** the smallest safe feature is design C. It is an operator,
   `CopyTagsToData`, that copies named tags into the data group under new names. The tags stay
   where they are. There is no new column model, no change to any existing hash, path or
   stored schema, and it fits the operator boundary: operators may read tags, and `GroupBy`
@@ -200,7 +207,13 @@ This matches the developer's "more simply" option, and per-row datagrams already
 Not recommended. The benefit (the pod parameter can keep the key's name) does not justify a
 cross-cutting change before the public v0.3.
 
-### 4.4 Design C: a copy operator (recommended)
+### 4.4 Design C: a copy operator (rejected by the developer, November 11, 2026)
+
+> **Rejected as an operator.** The developer: "if we have CopyTagToData that cannot be treated
+> as an operator as that is actively introducing new data into data." Operators never put new
+> content into the data group. The same copy is to be offered by a source instead: see
+> section 8. The analysis below is kept because its findings on types, hashes and divergence
+> carry over.
 
 `CopyTagsToData({"session_start_datetime": "session_start"})` appends one data column per entry:
 
@@ -356,7 +369,7 @@ difference visible (`session_start_datetime` is the key, `session_start` the inp
 docs should call the copy a snapshot. Design B carries the same divergence (exp01 #10) under a
 single name, which is where it does become confusing.
 
-## 6. Recommendation
+## 6. Recommendation (original spike; the operator in 6.1 is rejected, see section 8)
 
 ### 6.1 For the workshop: `CopyTagsToData`
 
@@ -445,7 +458,12 @@ from orcapod.sources import ArrowTableSource, SpiralDBTableSource
 # 1. Load the DB table and take its Arrow table (user columns; types and nullability kept).
 raw = SpiralDBTableSource(PROJECT, "experiment", dataset=DATASET).as_table()
 # 2. Copy the key under a second name, which becomes a data column.
-raw = raw.append_column("session_start", raw["session_start_datetime"])
+#    (Pass the field, not just a name, when the key is NOT NULL: a bare name makes the
+#    copy nullable, and a pod with a non-optional parameter then rejects it. exp07 #8.)
+raw = raw.append_column(
+    raw.schema.field("session_start_datetime").with_name("session_start"),
+    raw["session_start_datetime"],
+)
 # 3. Re-root as an in-memory source with the same keys as tags and an explicit source_id.
 experiment = ArrowTableSource(raw, tag_columns=EXPERIMENT_KEYS, source_id="experiment")
 
@@ -508,3 +526,285 @@ and can diverge later. The docs should say the copy is a snapshot.
 * **P1.** A function pod whose output key equals an input tag name is accepted. `as_table()`
   raises `Duplicate column name`, and `iter_data()` yields a tag and a data value with the same
   name and different values (exp01 #5, #10).
+
+## 8. Addendum: the DerivedSource form (November 11, 2026)
+
+The developer's decisions, binding:
+
+1. The copy is **not an operator**. Operators never put new content into the data group, and
+   function pods never see tags.
+2. The copy belongs to a **source that derives from other pods**. A source defines its own tag
+   and data columns, so it may expose a tag's value as a data column.
+3. The need is narrow (`session_start_datetime`), and the feature is wanted for the workshop
+   (November 17, 2026) or shortly after.
+
+Evidence: exp06 (today's `DerivedSource`) and exp07 (an out-of-tree prototype of the proposal).
+No library code has changed.
+
+### 8.1 Summary of the proposal
+
+`DerivedSource` gains one argument:
+
+```python
+DerivedSource(experiment, tags_as_data={"session_start_datetime": "session_start"})
+```
+
+The result is a new root source. Its tags are the origin's tags. Its data columns are the
+origin's data columns plus one copy per entry. It gets source provenance of its own, exactly as
+if the rows had been handed to `ArrowTableSource`. It stores nothing, changes no existing hash,
+and can be saved and reloaded whenever its origin can.
+
+In effect it is the hand-written recipe (section 6.2) made into a class: with the same
+`source_id`, its table equals the recipe's column for column and value for value, and
+downstream nodes get the same `pipeline_hash` (exp07 #6).
+
+### 8.2 (a) Today's `DerivedSource` and what the developer means
+
+The developer's meaning is a concept: a source whose rows come from other pods. Today's class
+is one narrow case of it: a re-read of the stored records of one node of a `PipelineJob`.
+Measured in exp06:
+
+| Question | Today's `DerivedSource` |
+|---|---|
+| What can be its origin? | Only a database-backed job node (`FunctionJobNode`, `OperatorNode`), through `node.as_source()`. A source has no `as_source` (`AttributeError`). An in-memory pod stream has none either. `DerivedSource(origin=<a source>)` fails on first read: the source has no `get_all_records`. |
+| Does it need a database and a completed run? | Yes. `as_source()` raises `RuntimeError` without a database. Before the origin has run it shows zero rows. |
+| Can its tag/data assignment differ from the origin's? | No. `keys()` and `output_schema()` delegate to the origin, and the constructor takes no column arguments (`TypeError` on `tag_columns=`). |
+| Provenance | It carries **no system-tag columns** (the origin has two; `get_all_records` drops them), and its `_source_*` values are null. Its `source_id` is set but appears in no row. So it neither starts provenance afresh nor carries the origin's. |
+| Identity | `content_hash` from the origin's content hash. `pipeline_hash` from the schema only, so it differs from the origin's: `as_source()` cuts the chain on purpose (`tests/test_pipeline/test_pipeline.py`, "detaching via .as_source() breaks chain"). |
+| In a second `PipelineJob` | Runs with both orchestrators (5 rows in, 5 out, 5 stored records). |
+| Save and load | It has no `to_config`. A saved job loads with this source unbound. |
+
+So today's class cannot serve the workshop case, which is a `SpiralDBTableSource` whose keys
+are tags: it accepts no source as origin, cannot add a column, and cannot be reloaded.
+
+Two more things seen, reported and not changed: a `DerivedSource` created before the origin
+ran keeps showing zero rows after the run (it caches the empty table; a new `as_source()` call
+shows the rows), and the missing system tags above.
+
+### 8.3 (b) The smallest change
+
+**API.** One new keyword on the existing class, and the same keyword on the existing
+`node.as_source()`:
+
+```python
+from orcapod.sources import DerivedSource
+
+DerivedSource(origin, tags_as_data={"<tag column>": "<new data column>"}, source_id=None,
+              record_id_column=None)
+node.as_source(tags_as_data={...})
+```
+
+The map is explicit; no default naming. The origin may be any source (including a
+`CachedSource`) or a job node. Arbitrary in-memory streams are left out for now (decision 3).
+
+Validation when the source is built: every key must be a user tag column of the origin; every
+new name must be unused in both groups, distinct from the others, and must not start with `_`.
+Otherwise `InputValidationError` naming the column.
+
+**Before and after, on a Spiral source.** Shared by both (as in section 6.1):
+
+```python
+session = SpiralDBTableSource(PROJECT, "session", dataset=DATASET)
+
+@function_pod(output_keys="onset_s")
+def onset_s(session_start: datetime | None, experiment_start_timestamp: int | None) -> float | None:
+    if session_start is None or experiment_start_timestamp is None:
+        return None
+    return experiment_start_timestamp / 1e6 - session_start.timestamp()
+```
+
+Before (the recipe; cannot be reloaded, `source_id` and nullability handled by hand):
+
+```python
+raw = SpiralDBTableSource(PROJECT, "experiment", dataset=DATASET).as_table()
+raw = raw.append_column(
+    raw.schema.field("session_start_datetime").with_name("session_start"),
+    raw["session_start_datetime"],
+)
+experiment = ArrowTableSource(raw, tag_columns=EXPERIMENT_KEYS, source_id="experiment")
+```
+
+After:
+
+```python
+experiment = DerivedSource(
+    SpiralDBTableSource(PROJECT, "experiment", dataset=DATASET),
+    tags_as_data={"session_start_datetime": "session_start"},
+)
+```
+
+Then, the same in both:
+
+```python
+onsets = onset_s.pod(experiment.select_data_columns(["session_start", "experiment_start_timestamp"]))
+result = onsets.join(session)  # keyed on subject_id, session_start_datetime
+```
+
+On the EDI-shaped in-memory tables the "after" line is the same with an `ArrowTableSource` as
+origin. exp07 #4 runs it: 5 rows, the correct answer.
+
+**What the derived source is** (exp07 #1 to #3, #6):
+
+| Aspect | Proposal |
+|---|---|
+| Tag columns | the origin's, unchanged |
+| Data columns | the origin's, then the copies in map order |
+| Copy's Arrow type | the tag's field exactly: same type, same nullability, logical types kept. Not null stays not null (`timestamp[us, tz=UTC] not null`); a nullable tag gives `datetime \| None`. The column is the tag's Arrow column, never rebuilt from Python values. |
+| System tags | its own pair, named with its own schema hash (`_tag_source_id::8b20…`, where the origin has `::2f50…`). It starts provenance afresh, as every source does. |
+| Record ids | from its `source_id` and a per-row token, by the standard source rule: `record_id_column` if given, otherwise the row position. |
+| Source-info | one token per data column, pointing at the derived source: `derived:experiment::row_0::session_start` for the copy, `derived:experiment::row_0::task_id` for an original column. The origin's own tokens are not carried. |
+| Default `source_id` | `derived:<origin source_id>` (decision 5) |
+| `upstreams`, `producer` | `()` and `None`: it is a root |
+| Data context | the origin's |
+
+**Identity.**
+
+* `content_hash`: the origin's content hash, the sorted copies and the `source_id`. A
+  `DerivedSource` made without the new argument keeps today's identity, `(origin content
+  hash,)`, so no existing hash moves.
+* `pipeline_hash`: schema only, as for every root source and as `DerivedSource` already does.
+  **This is a decision (decision 6).** "Derives from other pods" could be read as "the
+  upstream's pipeline hash should enter". If it did, the derived source would stop being a
+  root: it would be a link in the origin's chain, which is what an operator node is. Schema
+  only keeps it a source: two derived sources with the same schema share downstream tables,
+  like any two sources with the same schema, and rows stay apart by their record ids. The
+  origin is still recorded, in the saved config.
+
+**Rows and storage.** It needs no store. Its schema and keys come from the origin's schema
+without reading rows. Rows are built on first use: read the origin's table, append the copies
+(Arrow shares the buffers; nothing is copied), run the standard source enrichment. Nothing is
+written anywhere.
+
+**Before the origin has run.** A source origin always has rows. A job-node origin behaves as
+today: zero rows with the right schema until the node has run.
+
+**Orchestrators and `PipelineJob`.** exp07 #7: a job over a file-backed DB table source runs
+with the sync and the async orchestrator and gives the same rows. Only the derived source is a
+node of the job; its origin sits inside it, as the inner source of a `CachedSource` does. The
+origin and the derived source can both be used in one job (exp07 #7b), because their default
+`source_id`s differ.
+
+**Save and load.** `to_config()` holds `source_type: "derived"`, the origin's own config, the
+map and the `source_id`. `from_config()` rebuilds the origin first. exp07 #7: the saved job
+loads with no unbound source, the reloaded source has the same `content_hash`, and the
+downstream node has the same `pipeline_hash`. The recipe, saved the same way, loads with its
+source unbound (exp07 #8). A derived source over a job node stays not reloadable, as today
+(decision 8).
+
+**Large tables and ITL-186.** The copy is a per-row step, so it can stream: read the origin's
+batches, append the column to each, number the rows as they pass. The default `source_id` does
+not depend on a table hash, so nothing needs the whole table. Until sources stream, it reads
+the origin's table once, as every source does today.
+
+**Not run here:** a live SpiralDB table. `pyspiral` and its credentials are not on this
+machine. `SQLiteTableSource` stood in: like `SpiralDBTableSource` it is a `DBTableSource`
+whose primary keys become tags and which reloads from its config.
+
+### 8.4 (c) How this differs from the rejected operator
+
+* **Where the boundary is crossed.** Only when a source is defined. A source decides which of
+  its columns are tags and which are data; that is its job. No operator and no pod is
+  involved, so "operators never add data" and "pods never see tags" both hold without
+  exception.
+* **What downstream sees.** An ordinary source. Nothing downstream can tell that
+  `session_start` began as a copy of a key. There is no operator node in the graph and no new
+  node type.
+* **Identity.** The operator was a link in the origin's chain. The derived source is a new
+  root with its own system tags, tokens and schema-only `pipeline_hash`.
+* **`Join` with the original.** Both have the same tags, so they match row for row. Joined
+  whole, they raise `InputValidationError`, because both carry the origin's data columns.
+  After selecting only the copy, `Join(derived[copy], original)` gives the 5 rows (exp07 #5).
+  The normal use is to take the derived source instead of the original, not beside it.
+* **Can the copy later differ from the tag?** Yes, as section 5.2 found for the operator, and
+  for the same reason it is acceptable. The values are equal when the source is read. After
+  that the copy is plain data: a pod may replace it, `MapData` may rename it. Row identity and
+  `Join` matching follow the tags only, so a changed copy cannot mis-identify or mis-join a
+  row.
+
+### 8.5 (d) `GroupBy`: a question for the developer, nothing changed
+
+Facts. `GroupBy(by=[...])` keeps the group keys as scalar tags and turns every **non-key tag**
+into a list-valued **data** column (its own docstring: "`probe` becomes a list-valued data
+column, so a consumer can tell which member each list element came from"). The promoted
+column's `_source_*` value is null. `Batch` does not do this: its tags stay tags, as lists.
+
+By the developer's principle this is tag content entering the data group through an operator.
+It is how spike-train timestamps reach a pod today (section 3, item 5). Is it an accepted
+exception, on the grounds that the grouping would otherwise lose which member is which, or
+should it be revisited (decision 9)?
+
+### 8.6 (e) The inverse: a data column also as a tag
+
+Under the source form it nearly falls out: a `data_as_tags={...}` argument would append the
+same kind of copy and list it among the tags, and a source is entitled to do that. The
+principle is not strained, since a source chooses its tags.
+
+Recommendation: **out of scope** for this change. The workshop need is covered at the source
+(`tag_columns=[*primary_keys, "probe_id"]`), the developer is cautious about the feature, and
+it would double the tests (and raises what a null in a tag column means for `Join`). The
+constructor is shaped so the argument can be added later without changing anything.
+
+### 8.7 (f) Hashes and stored schemas
+
+* **New:** the identity of a `DerivedSource` built with `tags_as_data`, and the config key
+  `source_type: "derived"` in a saved job. Both exist only for pipelines that use the feature.
+* **Moves:** nothing. A `DerivedSource` without the argument keeps its `content_hash`,
+  `pipeline_hash` and `source_id`. No source, operator, pod or node changes. The golden hash
+  tests must pass unchanged.
+* **Stored schemas:** none. The derived source writes no table. Downstream nodes store the
+  copy as any data column.
+* **Versioning rules (ITL-938):** no path changes, because no stored schema changes. No
+  algorithm is added, so there is no new label: the system-tag names, record ids and schema
+  hash come from the existing source rule. The data context is the origin's. Nothing here
+  writes a table, so the `__data_context` column of ITL-944 is not involved.
+
+### 8.8 (g) Size and risk
+
+About one day: the argument on `DerivedSource` (roughly 120 lines), `to_config`/`from_config`
+and the registry entry, tests through the public interface (columns, exact types and
+nullability, provenance, `Join`, both orchestrators, save and load, validation errors, the
+unchanged identity of the plain form), a docs section with an executed example, CHANGELOG.
+It can ship before November 17.
+
+Risk is low: the change is additive and one class wide. The main risk is the choice of
+defaults (decisions 4 to 6), which become stored record ids once people run pipelines.
+
+**Fallback if it does not ship:** the recipe in section 6.2, now corrected to copy the field
+rather than only the name. exp07 #8 found that `append_column("name", column)` makes the copy
+nullable even when the key is not null, and a pod with a non-optional parameter then rejects
+the stream. The recipe still cannot be reloaded.
+
+### 8.9 (h) Decisions for the developer
+
+1. **One class or two?** Extend `DerivedSource` with `tags_as_data`, or add a separate class.
+   Recommendation: extend. It is the class the developer named, and the plain form is
+   untouched.
+2. **API surface.** Constructor `DerivedSource(origin, tags_as_data={tag: data_name})` plus
+   the same keyword on `node.as_source()`; no new method on sources or streams.
+   Recommendation: yes. A method can be added once the feature has proved itself.
+3. **Origins.** Sources and job nodes now; arbitrary in-memory streams later.
+   Recommendation: yes. A stream has no config to reload from, and inside a job its pods would
+   run once as nodes and once more for the derived source.
+4. **Provenance.** Fresh, by the standard source rule (own system tags, own tokens, record ids
+   from `source_id` and row token), or carry the origin's system tags and tokens.
+   Recommendation: fresh. It is what "a new source" means, it adds no new rule, and it equals
+   the recipe exactly.
+5. **Default `source_id`.** `derived:<origin source_id>`, or the origin's own.
+   Recommendation: `derived:<origin source_id>`. With the origin's id, the record ids equal
+   the origin's, but a job using both raises `InconsistentSourceError` (exp07 #7b), and the
+   copy's token `experiment::row_0::session_start` would name a column the source called
+   `experiment` does not have.
+6. **`pipeline_hash`.** Schema only, or include the origin's pipeline hash.
+   Recommendation: schema only (see 8.3). Including it would make the derived source an
+   operator node in all but name.
+7. **`content_hash`.** Origin's content hash, copies and `source_id`; the plain form unchanged.
+   Recommendation: yes.
+8. **Today's plain `node.as_source()`** has no system tags, null tokens, no `to_config`, and
+   caches an empty result. Leave it alone in this change, or bring it under the same source
+   rule? Recommendation: leave it alone now, because changing it moves the record ids of
+   existing two-stage pipelines; file an issue to decide it separately.
+9. **`GroupBy` moving non-key tags into data** (8.5): accepted exception, or revisit?
+   Recommendation: accept; the alternative loses which member is which.
+10. **The inverse (`data_as_tags`)**. Recommendation: out of scope (8.6).
+11. **Ship before the workshop?** Recommendation: yes, about a day, with a live check against
+    a SpiralDB table before November 17, since none was possible here.

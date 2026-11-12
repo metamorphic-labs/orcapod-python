@@ -79,3 +79,19 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 - PR #310 open (https://github.com/metamorphic-labs/orcapod-python/pull/310), attached to
   ITL-939 and the worktree. Next: CI + CodeRabbit rounds, then worker_done. Keep the session
   alive afterwards: the coordinator may dispatch the CopyTagsToData implementation.
+
+## Continuation (dispatch ctx_0b661d657a04): the DerivedSource form
+
+Developer rejected the operator (design C) and chose a source derived from other pods.
+
+- [x] exp06: probe today's `DerivedSource` (origins, columns, provenance, identity, job, save/load).
+- [x] exp07: out-of-tree prototype `ProtoDerivedSource` (tags_as_data), compared with the recipe.
+- [x] Design doc: status and 4.4 mark C rejected; section 8 addendum (a)-(h) with 11 decisions.
+- [ ] `ask` the coordinator with the addendum; record the answers here.
+- [ ] Step 2 (NOT in this dispatch): implement on a new branch from origin/main named by the
+      coordinator: `tags_as_data` on `DerivedSource`, tests first, docs, CHANGELOG, DESIGN_ISSUES.
+
+Notes for a successor: no library code changed. pyspiral is not installed here; SQLite stood
+in for the DB table source. Findings to report, not fix: plain `DerivedSource` has no system
+tags and no `to_config`, and caches an empty table if created before the origin ran;
+`append_column(name, col)` in the recipe makes the copy nullable.

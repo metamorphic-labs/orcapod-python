@@ -2457,6 +2457,9 @@ A name cannot be in both the tag and the data group, so a key that a pod needs a
 and two of the obvious workarounds (keeping the column out of `tag_columns`, or reading the
 table twice and joining) give silently wrong joins. Nothing checks the rule at graph-build time:
 `Join`/`MergeJoin` across a tag-vs-data name, and a pod output key equal to a tag name, are
-accepted by `keys()` and fail only at materialisation. Design spike and recommendation (a
-`CopyTagsToData` operator) in `superpowers/specs/2026-11-11-itl-939-tag-and-data-same-name-design.md`,
-awaiting the developer's decisions.
+accepted by `keys()` and fail only at materialisation. Design spike in
+`superpowers/specs/2026-11-11-itl-939-tag-and-data-same-name-design.md`. The developer rejected
+the spike's `CopyTagsToData` operator (November 11, 2026: an operator must not put new content
+into the data group) and chose a source derived from other pods (`DerivedSource`) that exposes
+chosen tags also as data. Section 8 of the document is the design addendum for that form; its
+decisions are with the developer, and no library code has changed yet.
