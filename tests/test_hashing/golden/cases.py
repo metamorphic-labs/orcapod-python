@@ -228,8 +228,20 @@ class GoldenOuter:
 
 
 @dataclasses.dataclass
+class GoldenWithArray:
+    """Dataclass with a NumPy array field; the array's logical type enters its identity."""
+
+    label: str
+    values: np.ndarray
+
+
+@dataclasses.dataclass
 class GoldenTwinAB:
-    """Declared ``golden.Twin``; same fields as ``GoldenTwinBA`` in another order."""
+    """Declared ``golden.Twin``; same fields as ``GoldenTwinBA`` in another order.
+
+    Declared field order is part of the identity (ITL-881), so the twins are two types
+    and must pin different values.
+    """
 
     a: int
     b: str
@@ -237,7 +249,7 @@ class GoldenTwinAB:
 
 @dataclasses.dataclass
 class GoldenTwinBA:
-    """Declared ``golden.Twin``; must pin the same values as ``GoldenTwinAB``."""
+    """Declared ``golden.Twin``; must pin values different from ``GoldenTwinAB``'s."""
 
     b: str
     a: int
@@ -253,6 +265,7 @@ def _declare_golden_names() -> None:
     register_type(GoldenDeclaredModel, name="golden.Declared")
     register_type(GoldenInner, name="golden.Inner")
     register_type(GoldenOuter, name="golden.Outer")
+    register_type(GoldenWithArray, name="golden.WithArray")
     register_type(GoldenTwinAB, name="golden.Twin")
     register_type(GoldenTwinBA, name="golden.Twin")
 
@@ -269,6 +282,7 @@ def register_logical_classes() -> None:
         GoldenDeclared,
         GoldenDeclaredModel,
         GoldenOuter,
+        GoldenWithArray,
         GoldenTwinAB,
         GoldenTwinBA,
     ):
@@ -354,6 +368,7 @@ def _semantic_types() -> dict[str, Any]:
         "dataclass_declared": GoldenDeclared,
         "pydantic_declared": GoldenDeclaredModel,
         "dataclass_nested": GoldenOuter,
+        "dataclass_with_array": GoldenWithArray,
         "dataclass_twin_ab": GoldenTwinAB,
         "dataclass_twin_ba": GoldenTwinBA,
         "list_dataclass": list[GoldenPoint],
@@ -674,6 +689,10 @@ def _datagram_rows() -> dict[str, list[dict[str, Any]]]:
         "dataclass_nested": [
             {"k": "r1", "c": GoldenOuter(GoldenInner(1), ["x", "y"])},
             {"k": "r2", "c": GoldenOuter(GoldenInner(2), [])},
+        ],
+        "dataclass_with_array": [
+            {"k": "r1", "c": GoldenWithArray("a", np.arange(3, dtype=np.float32))},
+            {"k": "r2", "c": GoldenWithArray("b", np.zeros((2, 2), dtype=np.int64))},
         ],
         "dataclass_twin_ab": [
             {"k": "r1", "c": GoldenTwinAB(1, "x")},
