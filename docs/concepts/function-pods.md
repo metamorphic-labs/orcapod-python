@@ -27,6 +27,12 @@ Key points:
 - **Function parameters** must match the input stream's data columns exactly: one data
   column per parameter, with the same names. A parameter with a default value may be left out
   of the stream, and the default is used. See [Input columns must match exactly](#input-columns-must-match-exactly).
+- **Default values** are part of the function's signature hash, so a default must be a value
+  Orcapod can hash: `None`, numbers, strings, `bytes`, and lists, tuples, sets and dicts of
+  them. A default of another type, such as a `Path`, an `Enum` member, a `datetime` or a
+  dataclass instance, raises `TypeError` when the pod is created, naming the parameter. Use
+  a hashable default and build the object inside the function, or supply the value as an
+  input column. See [Function values and parameter defaults](../reference/hashing.md#1d-function-values-and-parameter-defaults).
 - **Parameter types** are used to validate schema compatibility. Give each parameter a type
   annotation, or supply its type through the decorator's `input_schema` mapping. A parameter
   with neither raises `ValueError` when the pod is created.
@@ -248,6 +254,52 @@ print("function calls:", len(calls))
     flush tries them again. A flush that fails for any other reason raises `RuntimeError`,
     with the first failure as its cause.
 
+### When results are committed
+
+Inside `job.run()`, each function node commits its results and pipeline records to the
+store in batches: every `commit_every_rows` rows (default 100), when the node finishes,
+before a failed run raises, and when the job ends. Committing in batches keeps a run's time
+linear in its rows; on a `DeltaTableDatabase` each commit is one Delta version per table, so
+a 1,000-row node writes 10 versions per table instead of 1,000.
+
+```python
+job.run(commit_every_rows=500)  # fewer, larger commits
+```
+
+`commit_every_rows=1` commits after every row. A node or a cached pod used on its own,
+outside `job.run()`, also commits after every row. On a `DeltaTableDatabase`,
+`commit_every_rows` must be smaller than the store's `batch_size` (default 1000):
+the store commits every pending table by itself once one table holds that many pending
+rows, which would not keep the order described below, so `job.run()` refuses a larger value
+with `ValueError`. Create the store with a larger `batch_size` to commit less often. For the same reason, `job.run()` first commits
+whatever such a store already holds pending (writes made without a flush, or the batches of a
+run that failed); if that fails, the run stops before computing anything.
+
+**Memory.** A `DeltaTableDatabase` keeps the committed rows of every table it looks rows up
+in (each function node's result and pipeline-record tables) in memory for as long as the
+store object lives, so that a lookup never re-reads the table. These copies are held
+together, so plan memory for all of them at once: for a function returning one `int`, about
+1.6 KB per stored row per function node (result and pipeline-record tables together), more
+for larger outputs. Before, each lookup read one whole table and released it. To release
+the copies, use a new store object, for example one per job.
+
+**What a hard crash loses.** If the process dies without raising (power loss, `kill -9`,
+the machine restarts), a durable store such as `DeltaTableDatabase` keeps every batch
+committed before the crash; at most the rows the running node processed since its last
+commit are lost, and nothing stored is damaged. Run the job again: it computes only the rows
+whose results were not committed. A node commits its results before their pipeline records,
+so a crash between those two commits leaves results stored without pipeline records. Reading
+the node (`as_table()`, `get_all_records()`) does not show those rows until the next run,
+which finds their results in the store, computes nothing for them and writes their pipeline
+records.
+
+**Reads see the version this process loaded.** A `DeltaTableDatabase` keeps the committed
+rows of each table it has read in memory and answers lookups from them, extending them with
+its own commits. Rows another process commits to the same table are not seen by a store
+object that has already loaded the table until its own next commit to that table reloads it;
+a new `DeltaTableDatabase` object reads them at once. This was already the case before
+batching; only the re-reading per lookup is gone.
+
 A node from a job that has run also provides:
 
 - **`get_all_records()`** -- every record this step of the job has stored, as a PyArrow
@@ -263,13 +315,20 @@ A node from a job that has run also provides:
 A failed write to the store always fails the run. If a node's results or records cannot be
 stored -- the disk is full, the connection drops, or the database cannot hold one of the
 output types -- `job.run()` raises `StoreWriteError` (from `orcapod.errors`) at the first
-failed write, on both the synchronous and the asynchronous orchestrator. The error names the
-node, the row being stored and the table, and the database's own exception is chained as its
-cause. When committing pending writes fails, the error has `flush=True` and names the store
-instead of a row and table: every view of a store shares its pending writes, so the write
-that failed may belong to an earlier row or another table. A run that returns normally has
-stored every result that could be turned into a record; a result rejected before that is a
-row failure (see below).
+failed write, on both the synchronous and the asynchronous orchestrator. A row's write that
+fails names the node, the row being stored and the table, and the database's own exception
+is chained as its cause. When committing pending writes fails, the error has `flush=True`
+and names the node and the store instead of a row and table: a commit holds a batch of rows
+(see *When results are committed*), and every view of a store shares its pending writes, so
+the write that failed may belong to any row of the batch or another table. A run that
+returns normally has stored every result that could be turned into a record; a result
+rejected before that is a row failure (see below).
+
+With batched commits, a store failure that only committing reveals (an unreadable table, a
+full disk) surfaces at the node's next commit point, not at the row that caused it: the rows
+the node computed since its last commit are not stored and are computed again on the next
+run. `job.run(commit_every_rows=1)` commits after every row, so such a failure surfaces at
+its row, at the cost of one commit per row.
 
 This holds whatever `error_policy` the orchestrator was given. `error_policy="continue"` (the
 default) skips rows whose *function* raised and keeps going; it never skips a row because it
@@ -285,8 +344,10 @@ first in the pipeline, the one the synchronous orchestrator would have stopped a
 failures are logged and noted on it. A node whose failure the asynchronous orchestrator
 cancelled before it happened is not reported.
 
-After the failure, rows stored before it are kept: `job.run()` commits the writes that
-succeeded before it re-raises, and nothing already stored is rewritten. Once the cause is
+After the failure, rows stored before it are kept: every batch committed before the failure
+stays, and `job.run()` tries once more to commit the writes still pending before it
+re-raises (a failed commit's batch stays pending, so this is its one retry; if it fails
+again, that is noted on the error), and nothing already stored is rewritten. Once the cause is
 fixed, run the job again: stored function results are not recomputed, only the missing ones
 are. An operator with `cache_mode=LOG` recomputes its output on every run, as it always does.
 A side effect is different: if its delivery completed but the write to its invocation log
@@ -344,9 +405,11 @@ as before.
 - A function node's `as_table()`, `iter_data()` and `get_all_records()` return the rows the
   saved run stored, with the types they were stored with. Rows come in the order the store
   returns them; sort them if order matters.
-- A `PipelineJob` does not store operator outputs (a join, a filter), so reading an operator
-  node of a loaded job raises. Read its input nodes instead (an in-memory input source must be
-  bound first, see below).
+- Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
+  A loaded operator without a readable cache raises from `as_table()` and `iter_data()`.
+  Read its input nodes instead (an in-memory input source must be bound first, see below).
+  Saved descriptors do not yet preserve all runtime identity and cache configuration needed
+  for operator readback without reconstruction (follow-up ITL-977).
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
@@ -356,6 +419,63 @@ as before.
   `PipelineJob.load(path, store=...)` if the store has moved. If the store you give lacks
   results the saved run stored, reading the node raises an error naming the store, instead
   of returning no rows.
+
+Logical types in saved schema text carry their complete identifier, written as
+`extension<name;hex-metadata>`, including inside nested containers. The loader checks the
+identifier against the registered type. Known types such as `Path`, `File`, UUID and arrays
+keep downstream operators available; a user class must be registered in the loading process.
+An unknown type is reported with its node and column, and affected operators become read-only
+stubs. An incompatible identifier raises `LogicalTypeIdentifierError` instead of using a stub.
+Stored data independently validates its full identifier when values are read.
+
+Older files containing name-only extension type text cannot be loaded by this reader: the
+error says the file was saved by an earlier version. Use that version to read the old file,
+and save a new job from the original pipeline under this version. Files with only supported
+primitive schema types still load; results from pre-v0.3 table layouts remain excluded as
+described below. This changes saved schema text only, not stored tables or hashes.
+
+### A store written by an older version
+
+Every row Orcapod stores names the **data context** that wrote it, in the column
+`__data_context`: `std:v1:default` since v0.3. The data context is one key for the whole of
+Orcapod's hashing, so rows that share it were keyed in exactly the same way (see
+[The data context of a stored row](../reference/hashing.md#the-data-context-of-a-stored-row)).
+Tables written before v0.3 have no such column and are stored at an older table layout
+(`pdb_v1`, `rdb_v1`). Orcapod **does not read them as results**: it does not refuse the
+store, and it does not reuse those rows.
+
+- The first run of v0.3 on a store written by v0.2 computes every input again and stores the
+  rows in its own tables (`pdb_v2`, `rdb_v2`).
+- Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
+  current data context only: nothing before that first run, one row per input after it.
+- The old tables are never changed or deleted. They stay readable with the version that
+  wrote them and are kept for a later migration. To see which data contexts a table holds,
+  use `orcapod.contexts.stored_data_contexts`.
+- When Orcapod finds a table at an older layout, it logs one warning with the number of
+  rows: `Found 3 rows in stored table '...' written by an earlier version of Orcapod (older
+  table layout, data context std:v0.1:default). They are not used and are left unchanged;
+  they can be migrated later.`
+- The hashes in a table path can differ between versions, so older tables are looked for
+  by name: Orcapod lists the tables stored under the job and function name and treats every
+  table that is not at a current layout as written by an earlier version. Tables found this
+  way are reported once per node, without a number of rows; a table of another function
+  with the same name in the same job is included. A job run also reports one total of the
+  older tables that belong to none of its function nodes (operator caches, cached sources,
+  nodes that left the job).
+- Nodes that perform side effects are the exception: side-effect pods, and function pods
+  that take the invocation context (`ctx_arg`). A side effect is an external action, and
+  completions stored by v0.2 cannot be matched with current inputs, so running the node
+  would do everything a second time. Instead the node raises
+  `SideEffectLogDataContextError` (from `orcapod.errors`, a `StoreError`), naming the
+  tables, before it does anything. Every older table under the node's function or pod name
+  in the job counts. Keep using the version that wrote them. A fresh store is not a safe
+  way around the error: it holds no completions, so on it the node performs every side
+  effect again; use one only when a repeated delivery is acceptable. If the store cannot
+  list its tables, the node warns that it could not check, and runs.
+
+Each result row also records the full version string of the function that produced it, in
+the column `__pf_var_function_version` (for example `v3.7`); only the major part is in the
+table path.
 
 ## Multiple input streams
 
@@ -405,3 +525,5 @@ primary user-facing APIs.
 - [Operators](operators.md) handle structural transforms (the complement of function pods)
 - Function pods participate in the [identity chain](identity.md) -- each pod's hash includes
   the function's identity and its upstream pipeline hashes
+- Function pods can take and return dataclasses and pydantic models; see
+  [Your Own Data Types](your-own-data-types.md) for when two classes count as the same type

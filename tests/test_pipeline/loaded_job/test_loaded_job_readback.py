@@ -169,7 +169,7 @@ def test_datetime_output_with_nothing_stored_returns_typed_zero_rows(
 def test_logical_type_output_schema_fails_naming_the_column_and_saved_type(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A ``Path`` output's schema cannot be restored yet: the error says which column."""
+    """A registered ``Path`` output restores its Python schema and stored logical rows."""
 
     @function_pod(output_keys="p")
     def to_path(x: int) -> pathlib.Path:
@@ -181,14 +181,7 @@ def test_logical_type_output_schema_fails_naming_the_column_and_saved_type(
         _ = to_path.pod(_dict_source(), label="paths")
 
     node = PipelineJob.load(_save_small_job(tmp_path, record)).nodes["paths"]
-    with pytest.raises(ValueError) as excinfo:
-        _ = node.output_schema()
-    message = str(excinfo.value)
-    assert message.startswith(
-        "Cannot restore the output schema of loaded node 'paths': Column 'p' has the "
-        "saved type 'extension<orcapod.path"
-    )
-    assert message.endswith("which cannot be restored to a Python type.")
+    assert node.output_schema()[1]["p"] is pathlib.Path
     # The stored rows are still readable, with their stored logical type.
     table = node.as_table()
     assert table.num_rows == 2
@@ -198,6 +191,28 @@ def test_logical_type_output_schema_fails_naming_the_column_and_saved_type(
 # ---------------------------------------------------------------------------
 # Function nodes: stored rows
 # ---------------------------------------------------------------------------
+
+
+def test_path_output_feeding_join_still_allows_job_load(tmp_path: pathlib.Path) -> None:
+    """An unrestorable input schema must not prevent reading stored function rows."""
+
+    @function_pod(output_keys="p")
+    def to_path(x: int) -> pathlib.Path:
+        """Return a path derived from the input."""
+        return pathlib.Path(f"/data/{x}")
+
+    def record() -> None:
+        """Record a Path-returning function feeding a Join."""
+        paths = to_path.pod(_dict_source(), label="paths")
+        other = DictSource(
+            [{"id": 0, "y": 1}, {"id": 1, "y": 2}],
+            tag_columns=["id"],
+            source_id="other",
+        )
+        Join()(paths, other, label="joined")
+
+    loaded = PipelineJob.load(_save_small_job(tmp_path, record))
+    assert loaded.nodes["paths"].as_table().num_rows == 2
 
 
 @pytest.mark.parametrize("label", FUNCTION_NODES)
@@ -327,6 +342,34 @@ def _record_double() -> None:
     _ = double.pod(_dict_source(), label="dbl")
 
 
+@pytest.mark.parametrize("read_method", ["as_table", "iter_data", "get_all_records"])
+def test_other_context_records_do_not_satisfy_saved_expectation(
+    tmp_path: pathlib.Path, read_method: str
+) -> None:
+    """Matching node hashes from another context cannot hide missing saved results."""
+    path = _save_small_job(tmp_path, _record_double)
+    written = DeltaTableDatabase(str(tmp_path / "store"))
+    other = InMemoryArrowDatabase()
+    for table_path in written.list_sources():
+        rows = written.get_all_records(table_path, record_id_column="__rid")
+        assert rows is not None
+        index = rows.schema.get_field_index("__data_context")
+        field = rows.schema.field(index)
+        rows = rows.set_column(
+            index,
+            field,
+            pa.array(["std:v0.9:other"] * rows.num_rows, type=field.type),
+        )
+        other.add_records(table_path, rows, record_id_column="__rid")
+    other.flush()
+
+    node = PipelineJob.load(path, store=other).nodes["dbl"]
+    with pytest.raises(RuntimeError, match="saved run stored results.*has none"):
+        result = getattr(node, read_method)()
+        if read_method == "iter_data":
+            list(result)
+
+
 def test_recomputed_entry_is_read_once_with_its_latest_result(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -406,6 +449,34 @@ def test_loaded_node_with_ephemeral_results_does_not_crash(
         "store, which is not saved with the job, so they cannot be read into a table. "
         "iter_data() yields them as EmptyData placeholders."
     )
+
+
+def test_newer_unavailable_result_does_not_expose_old_persistent_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A later ephemeral recomputation wins even after its ephemeral store is gone."""
+    from orcapod.system_constants import constants
+
+    path = _save_small_job(tmp_path, _record_double)
+    store = DeltaTableDatabase(str(tmp_path / "store"))
+    (table_path,) = [p for p in store.list_sources() if p[-1] == "pdb_v2"]
+    records = store.get_all_records(table_path, record_id_column="__rid")
+    assert records is not None
+    # Public database writes reproduce historical recomputations without executing a pod.
+    for column, values in {
+        "__rid": [uuid.uuid4().bytes for _ in range(records.num_rows)],
+        constants.IS_EPHEMERAL_COL: [True] * records.num_rows,
+        "__pipeline_recomputation_index": [1] * records.num_rows,
+    }.items():
+        index = records.schema.get_field_index(column)
+        field = records.schema.field(index)
+        records = records.set_column(index, field, pa.array(values, type=field.type))
+    store.add_records(table_path, records, record_id_column="__rid", flush=True)
+
+    node = PipelineJob.load(path).nodes["dbl"]
+    assert [type(data).__name__ for _, data in node.iter_data()] == ["EmptyData"] * 2
+    with pytest.raises(RuntimeError, match="ephemeral store"):
+        node.as_table()
 
 
 # ---------------------------------------------------------------------------
@@ -583,8 +654,8 @@ def test_loaded_job_still_cannot_run(saved: pathlib.Path) -> None:
         _ = _load(saved).run()
 
 
-def test_loaded_operator_only_job_cannot_run(tmp_path: pathlib.Path) -> None:
-    """A loaded job whose operators were rebuilt and sources bound still never runs."""
+def _loaded_operator_only_job(tmp_path: pathlib.Path) -> PipelineJob:
+    """Load a job whose two CSV inputs can both be reconstructed."""
     from orcapod.sources import CSVSource
 
     (tmp_path / "a.csv").write_text("id,a\n0,1\n1,2\n")
@@ -598,8 +669,40 @@ def test_loaded_operator_only_job_cannot_run(tmp_path: pathlib.Path) -> None:
 
     job = PipelineJob.load(_save_small_job(tmp_path, record))
     assert job.unbound_sources == []
+    return job
+
+
+def test_loaded_operator_only_job_cannot_run(tmp_path: pathlib.Path) -> None:
+    """A loaded job whose operators were rebuilt and sources bound still never runs."""
+    job = _loaded_operator_only_job(tmp_path)
     with pytest.raises(RuntimeError, match="cannot execute a loaded job"):
         _ = job.run()
+
+
+@pytest.mark.parametrize("method", ["run", "execute", "async_execute"])
+def test_loaded_operator_rejects_direct_execution(
+    tmp_path: pathlib.Path, method: str
+) -> None:
+    """Every operator execution entry point respects the loaded-job read-only contract."""
+    import asyncio
+    from orcapod.channels import Channel
+
+    job = _loaded_operator_only_job(tmp_path)
+    node = job.nodes["joined"]
+    if method == "async_execute":
+        output: Channel[Any] = Channel()
+
+        async def run() -> list[Any]:
+            """Reject before consuming inputs and close the output on rejection."""
+            with pytest.raises(RuntimeError, match="loaded.*cannot compute"):
+                await node.async_execute([], output.writer)
+            return [item async for item in output.reader]
+
+        assert asyncio.run(asyncio.wait_for(run(), timeout=5)) == []
+    else:
+        args = (job.nodes["a"], job.nodes["b"]) if method == "execute" else ()
+        with pytest.raises(RuntimeError, match="loaded.*cannot compute"):
+            getattr(node, method)(*args)
 
 
 def test_loaded_job_without_a_store_cannot_run(
@@ -658,8 +761,8 @@ def test_loaded_operator_node_raises_instead_of_returning_empty(
     """A loaded operator node, with nothing stored, raises and names its inputs."""
     node = _load(saved).nodes["joined"]
     expected = (
-        "OperatorJobNode 'joined' has no stored results: a PipelineJob does not store "
-        "operator outputs, so a loaded job cannot show them. Read the stored results of "
+        "OperatorJobNode 'joined' has no stored results available for this read. "
+        "Operator outputs require a stored cache and replay configuration. Read the stored results of "
         "its input nodes ('dbl', 'asrc') instead; an input source whose data was not "
         "saved must be bound first with job.bind(sources=...)."
     )

@@ -9,6 +9,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from orcapod.types import Schema
+from orcapod.logical_types.identifier import (
+    LogicalTypeIdentifier,
+    LogicalTypeIdentifierError,
+    arrow_type_identifier,
+    require_readable,
+)
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
@@ -139,6 +145,7 @@ def _build_source_registry() -> dict[str, type]:
     from orcapod.core.sources.csv_source import CSVSource
     from orcapod.core.sources.data_frame_source import DataFrameSource
     from orcapod.core.sources.delta_table_source import DeltaTableSource
+    from orcapod.core.sources.derived_source import DerivedSource
     from orcapod.core.sources.dict_source import DictSource
     from orcapod.core.sources.list_source import ListSource
     from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
@@ -148,11 +155,12 @@ def _build_source_registry() -> dict[str, type]:
     return {
         "csv": CSVSource,
         "delta_table": DeltaTableSource,
-        "dict": DictSource,
-        "list": ListSource,
-        "data_frame": DataFrameSource,
-        "arrow_table": ArrowTableSource,
+        DictSource.SOURCE_KIND: DictSource,
+        ListSource.SOURCE_KIND: ListSource,
+        DataFrameSource.SOURCE_KIND: DataFrameSource,
+        ArrowTableSource.SOURCE_KIND: ArrowTableSource,
         "cached": CachedSource,
+        "derived": DerivedSource,
         "spiraldb_table": SpiralDBTableSource,
         "sqlite_table": SQLiteTableSource,
         "postgresql_table": PostgreSQLTableSource,
@@ -168,6 +176,7 @@ def _build_operator_registry() -> dict[str, type]:
     from orcapod.core.operators import (
         Batch,
         DropDataColumns,
+        DropNulls,
         DropTagColumns,
         GroupBy,
         Join,
@@ -193,6 +202,7 @@ def _build_operator_registry() -> dict[str, type]:
         "MapTags": MapTags,
         "MapData": MapData,
         "PolarsFilter": PolarsFilter,
+        "DropNulls": DropNulls,
     }
 
 
@@ -580,14 +590,53 @@ def register_data_function(type_id: str, cls: type) -> None:
 # ---------------------------------------------------------------------------
 
 
+class SavedSchemaVersionError(ValueError):
+    """A saved schema predates complete logical type identifiers."""
+
+
+def _serialize_arrow_type(arrow_type: Any) -> str:
+    """Render a schema type, preserving complete logical identifiers at every depth."""
+    import pyarrow as pa
+
+    if isinstance(arrow_type, pa.ExtensionType):
+        return f"extension<{arrow_type_identifier(arrow_type).text}>"
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        field = arrow_type.value_field
+        child = _serialize_arrow_type(field.type)
+        nullable = "" if field.nullable else " not null"
+        outer = "large_list" if pa.types.is_large_list(arrow_type) else "list"
+        return f"{outer}<{field.name}: {child}{nullable}>"
+    if pa.types.is_fixed_size_list(arrow_type):
+        field = arrow_type.value_field
+        nullable = "" if field.nullable else " not null"
+        return (
+            f"fixed_size_list<{field.name}: {_serialize_arrow_type(field.type)}"
+            f"{nullable}>[{arrow_type.list_size}]"
+        )
+    if pa.types.is_struct(arrow_type):
+        fields = [
+            f"{field.name}: {_serialize_arrow_type(field.type)}"
+            + ("" if field.nullable else " not null")
+            for field in arrow_type
+        ]
+        return "struct<" + ", ".join(fields) + ">"
+    if pa.types.is_map(arrow_type):
+        ordered = ", keys_sorted" if arrow_type.keys_sorted else ""
+        return (
+            f"map<{_serialize_arrow_type(arrow_type.key_type)}, "
+            f"{_serialize_arrow_type(arrow_type.item_type)}{ordered}>"
+        )
+    return str(arrow_type)
+
+
 def serialize_schema(schema: Any, type_converter: Any | None = None) -> dict[str, str]:
     """Convert a Schema mapping to JSON-serializable Arrow type strings.
 
     The result contains human-readable Arrow type strings for each field
     (e.g. ``"int64"``, ``"large_string"``, ``"list<item: int64>"``).
-    These strings follow Arrow's canonical format and can be parsed back
-    by `deserialize_schema` in any language that implements the
-    Arrow type grammar.
+    Primitive/container strings follow Arrow's format. Logical types use
+    ``extension<name;hex-metadata>`` with the canonical full identifier, including
+    nested positions; the reader validates it against the registered type.
 
     Args:
         schema: A Schema-like mapping from field name to data type.
@@ -604,11 +653,16 @@ def serialize_schema(schema: Any, type_converter: Any | None = None) -> dict[str
         for k, v in schema.items():
             try:
                 arrow_type = type_converter.python_type_to_arrow_type(v)
-                result[k] = str(arrow_type)
+                result[k] = _serialize_arrow_type(arrow_type)
             except Exception:
                 result[k] = str(v)
         return result
-    return {k: str(v) for k, v in schema.items()}
+    import pyarrow as pa
+
+    return {
+        k: _serialize_arrow_type(v) if isinstance(v, pa.DataType) else str(v)
+        for k, v in schema.items()
+    }
 
 
 def deserialize_schema(
@@ -640,8 +694,12 @@ def deserialize_schema(
     result: dict[str, Any] = {}
     for name, type_str in schema_dict.items():
         try:
-            arrow_type = parse_arrow_type_string(type_str)
+            arrow_type = parse_arrow_type_string(type_str, type_converter)
             result[name] = type_converter.arrow_type_to_python_type(arrow_type)
+        except LogicalTypeIdentifierError as exc:
+            raise exc.for_column(name) from exc
+        except SavedSchemaVersionError:
+            raise
         except Exception:
             result[name] = type_str
     return result
@@ -665,7 +723,7 @@ def deserialize_output_schema(
 
     Raises:
         ValueError: If a column's saved type cannot be restored to a Python type,
-            such as a logical (extension) type like ``Path``. The message names
+            such as an unregistered logical type. The message names
             the column and its saved type string.
     """
 
@@ -673,8 +731,12 @@ def deserialize_output_schema(
         restored: dict[str, Any] = {}
         for name, type_str in columns.items():
             try:
-                arrow_type = parse_arrow_type_string(type_str)
+                arrow_type = parse_arrow_type_string(type_str, type_converter)
                 restored[name] = type_converter.arrow_type_to_python_type(arrow_type)
+            except LogicalTypeIdentifierError as exc:
+                raise exc.for_column(name) from exc
+            except SavedSchemaVersionError as exc:
+                raise SavedSchemaVersionError(f"Column {name!r}: {exc}") from exc
             except Exception as exc:
                 raise ValueError(
                     f"Column {name!r} has the saved type {type_str!r}, which cannot "
@@ -685,7 +747,7 @@ def deserialize_output_schema(
     return restore(output_schema.get("tag", {})), restore(output_schema.get("data", {}))
 
 
-def parse_arrow_type_string(type_str: str) -> Any:
+def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) -> Any:
     """Parse an Arrow type string into a ``pa.DataType``.
 
     Handles both primitive types (``"int64"``, ``"large_string"``) and
@@ -696,6 +758,8 @@ def parse_arrow_type_string(type_str: str) -> Any:
 
     Args:
         type_str: Arrow type string to parse.
+        type_converter: The saved node's converter for resolving logical identifiers.
+            If omitted, logical types use the default context's converter.
 
     Returns:
         The corresponding ``pa.DataType``.
@@ -706,6 +770,49 @@ def parse_arrow_type_string(type_str: str) -> Any:
     import pyarrow as pa
 
     type_str = type_str.strip()
+
+    if type_str.startswith("fixed_size_list<"):
+        import re
+
+        match = re.fullmatch(r"fixed_size_list<(.*)>\[(\d+)\]", type_str)
+        if match is None:
+            raise ValueError(f"Malformed fixed-size list: {type_str!r}")
+        return pa.list_(
+            _parse_arrow_field(match.group(1), type_converter), int(match.group(2))
+        )
+
+    if type_str.startswith("extension<"):
+        if not type_str.endswith(">"):
+            raise LogicalTypeIdentifierError(LogicalTypeIdentifier(type_str, b""), ())
+        identifier = type_str[len("extension<") : -1]
+        name, separator, metadata_text = identifier.partition(";")
+        if not name:
+            raise LogicalTypeIdentifierError(
+                LogicalTypeIdentifier(name, metadata_text.encode()), ()
+            )
+        if not separator:
+            raise SavedSchemaVersionError(
+                "This file was saved by an earlier version without a full logical "
+                "type identifier; read it with that version and save it again with "
+                "the original pipeline under the current version."
+            )
+        try:
+            metadata = bytes.fromhex(metadata_text)
+        except ValueError as exc:
+            error = LogicalTypeIdentifierError(
+                LogicalTypeIdentifier(name, metadata_text.encode()), ()
+            )
+            error.add_note("Saved logical type metadata is not hexadecimal.")
+            raise error from exc
+        if type_converter is None:
+            from orcapod.contexts import resolve_context
+
+            type_converter = resolve_context(None).type_converter
+        logical_type = type_converter.get_logical_type_by_arrow_extension_name(name)
+        if logical_type is None:
+            raise ValueError(f"Unregistered extension type: {name!r}")
+        require_readable(logical_type, metadata)
+        return logical_type.get_arrow_extension_type()
 
     # Primitive types — try direct lookup via pa.<name>()
     if "<" not in type_str:
@@ -724,8 +831,7 @@ def parse_arrow_type_string(type_str: str) -> Any:
 
     if outer in ("list", "large_list"):
         # "list<item: int64>" or "list<item: struct<...>>"
-        child_type_str = _strip_field_name(inner)
-        child_type = parse_arrow_type_string(child_type_str)
+        child_type = _parse_arrow_field(inner, type_converter)
         return (
             pa.large_list(child_type) if outer == "large_list" else pa.list_(child_type)
         )
@@ -733,26 +839,44 @@ def parse_arrow_type_string(type_str: str) -> Any:
     if outer == "struct":
         # "struct<a: int64, b: string>" — split on top-level commas
         fields = _split_struct_fields(inner)
-        pa_fields = []
-        for field_str in fields:
-            colon_pos = field_str.index(":")
-            field_name = field_str[:colon_pos].strip()
-            field_type_str = field_str[colon_pos + 1 :].strip()
-            pa_fields.append(
-                pa.field(field_name, parse_arrow_type_string(field_type_str))
-            )
+        pa_fields = [
+            _parse_arrow_field(field_str, type_converter) for field_str in fields
+        ]
         return pa.struct(pa_fields)
 
     if outer == "map":
         # "map<large_string, int64>" — split on first top-level comma
-        parts = _split_top_level(inner, ",", max_splits=1)
+        parts = _split_top_level(inner, ",")
+        keys_sorted = len(parts) == 3 and parts[-1].strip() == "keys_sorted"
+        if keys_sorted:
+            parts = parts[:-1]
         if len(parts) != 2:
             raise ValueError(f"Cannot parse map type: {type_str!r}")
-        key_type = parse_arrow_type_string(parts[0].strip())
-        value_type = parse_arrow_type_string(parts[1].strip())
-        return pa.map_(key_type, value_type)
+        key_type = parse_arrow_type_string(parts[0].strip(), type_converter)
+        value_type = parse_arrow_type_string(parts[1].strip(), type_converter)
+        if keys_sorted:
+            return pa.map_(key_type, value_type, True)
+        return pa.map_(key_type, value_type, False)
 
     raise ValueError(f"Unknown nested Arrow type: {type_str!r}")
+
+
+def _parse_arrow_field(text: str, type_converter: Any | None) -> Any:
+    """Restore a nested field's type and nullability from schema text."""
+    import pyarrow as pa
+
+    name, separator, type_text = text.strip().partition(":")
+    if not separator:
+        name, type_text = "item", text
+    type_text = type_text.strip()
+    nullable = not type_text.endswith(" not null")
+    if not nullable:
+        type_text = type_text[: -len(" not null")]
+    return pa.field(
+        name.strip(),
+        parse_arrow_type_string(type_text, type_converter),
+        nullable=nullable,
+    )
 
 
 def _parse_parameterized_type(type_str: str) -> Any | None:

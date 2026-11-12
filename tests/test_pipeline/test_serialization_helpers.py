@@ -20,8 +20,31 @@ from orcapod.pipeline.serialization import (
     serialize_schema,
 )
 from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
+from orcapod.hashing.semantic_hashing.semantic_hasher import SEMANTIC_HASH_LABEL
 from orcapod.core.operators import Join, Batch
 from orcapod.types import Schema
+
+
+@pytest.mark.parametrize("container", ["list", "struct", "map", "fixed_list"])
+def test_nested_logical_identifiers_round_trip(container: str) -> None:
+    """Schema text preserves logical identifiers inside Arrow containers."""
+    from pathlib import Path
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.identifier import arrow_type_identifier
+
+    converter = get_default_context().type_converter
+    extension = converter.python_type_to_arrow_type(Path)
+    assert isinstance(extension, pa.ExtensionType)
+    field = pa.field("value", extension, nullable=False)
+    nested = {
+        "list": pa.large_list(field),
+        "struct": pa.struct([field]),
+        "map": pa.map_(pa.large_string(), extension),
+        "fixed_list": pa.list_(field, 2),
+    }[container]
+    text = serialize_schema({"payload": nested})["payload"]
+    assert arrow_type_identifier(extension).text in text
+    assert parse_arrow_type_string(text, converter) == nested
 
 
 def test_database_registry_register_returns_key():
@@ -733,15 +756,15 @@ def test_source_proxy_from_node_descriptor_fields():
 
     source_config = {"source_type": "dict", "source_id": "my_src"}
     node_descriptor = {
-        "content_hash": "semantic_v0.1:abc123",
-        "pipeline_hash": "semantic_v0.1:def456",
+        "content_hash": f"{SEMANTIC_HASH_LABEL}:abc123",
+        "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def456",
         "output_schema": {
             "tag": {"x": "int64"},
             "data": {"result": "int64"},
         },
     }
     proxy = _source_proxy_from_config(source_config, node_descriptor=node_descriptor)
-    assert proxy.content_hash().to_string() == "semantic_v0.1:abc123"
+    assert proxy.content_hash().to_string() == f"{SEMANTIC_HASH_LABEL}:abc123"
 
 
 def test_source_proxy_from_config_backward_compat():
@@ -751,13 +774,13 @@ def test_source_proxy_from_config_backward_compat():
     source_config = {
         "source_type": "dict",
         "source_id": "my_src",
-        "content_hash": "semantic_v0.1:abc123",
-        "pipeline_hash": "semantic_v0.1:def456",
+        "content_hash": f"{SEMANTIC_HASH_LABEL}:abc123",
+        "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def456",
         "tag_schema": {"x": "int64"},
         "data_schema": {"result": "int64"},
     }
     proxy = _source_proxy_from_config(source_config)
-    assert proxy.content_hash().to_string() == "semantic_v0.1:abc123"
+    assert proxy.content_hash().to_string() == f"{SEMANTIC_HASH_LABEL}:abc123"
 
 
 # ---------------------------------------------------------------------------
@@ -800,12 +823,12 @@ def test_function_node_stored_node_uri_from_descriptor():
     descriptor = {
         "node_type": "function",
         "label": "fn",
-        "content_hash": "semantic_v0.1:abc",
-        "pipeline_hash": "semantic_v0.1:def",
+        "content_hash": f"{SEMANTIC_HASH_LABEL}:abc",
+        "pipeline_hash": f"{SEMANTIC_HASH_LABEL}:def",
         "table_scope": "pipeline_hash",
         "node_uri": ["add_one", "v0", "python.function.v0", "schema_repr"],
         "output_schema": {"tag": {"x": "int64"}, "data": {"result": "int64"}},
-        "data_context_key": "std:v0.1:default",
+        "data_context_key": "std:v1:default",
     }
     node = FunctionNode.from_descriptor(
         descriptor, function_pod=None, input_stream=None, databases={}

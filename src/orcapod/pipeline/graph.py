@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from orcapod.contexts import resolve_saved_context
 from orcapod.core.nodes import (
     FunctionNode,
     GraphNode,
@@ -286,6 +287,31 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             if descriptor is None:
                 continue
 
+            from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+            from orcapod.pipeline.serialization import (
+                SavedSchemaVersionError,
+                deserialize_output_schema,
+            )
+
+            # Validate even a leaf node's saved identifiers before exposing the job.
+            context = resolve_saved_context(descriptor.get("data_context_key"))
+            try:
+                deserialize_output_schema(
+                    descriptor.get("output_schema", {}), context.type_converter
+                )
+            except (LogicalTypeIdentifierError, SavedSchemaVersionError) as exc:
+                exc.args = (
+                    f"Cannot restore the output schema of loaded node "
+                    f"{descriptor.get('label')!r}: {exc}",
+                )
+                raise
+            except ValueError as exc:
+                logger.warning(
+                    "Cannot restore the output schema of loaded node %r: %s",
+                    descriptor.get("label"),
+                    exc,
+                )
+
             node_type = descriptor.get("node_type")
             source_config = descriptor.get("source_config") or {}
 
@@ -315,7 +341,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         name=node_name,
                         tag_schema=tag_schema,
                         data_schema=data_schema,
-                        data_context=descriptor.get("data_context_key"),
+                        data_context=resolve_saved_context(
+                            descriptor.get("data_context_key")
+                        ),
                     )
                     # Restore label from descriptor if set explicitly
                     stored_label = descriptor.get("label")
@@ -362,6 +390,25 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             op_config.get("class_name"),
                             exc,
                         )
+                if operator is not None:
+                    from orcapod.logical_types.identifier import (
+                        LogicalTypeIdentifierError,
+                    )
+                    from orcapod.pipeline.serialization import SavedSchemaVersionError
+
+                    try:
+                        for upstream in upstream_nodes:
+                            upstream.output_schema()
+                    except (LogicalTypeIdentifierError, SavedSchemaVersionError):
+                        raise
+                    except ValueError as exc:
+                        logger.warning(
+                            "Cannot reconstruct operator node %r because an input "
+                            "schema cannot be restored; keeping a read-only stub: %s",
+                            descriptor.get("label"),
+                            exc,
+                        )
+                        operator = None
                 node = OperatorNode.from_descriptor(
                     descriptor,
                     operator=operator,
