@@ -674,10 +674,14 @@ data. The rules:
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on
   every execution path (sync and async).
-  Function-output rule (developer, November 12, 2026): the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base and is stored as the base.
+  Function-output rule (developer, November 12, 2026): the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base.
+  What is stored for a subclass instance is decided by the logical type of the declared
+  class (developer, November 12, 2026, ITL-871): a plain user class is stored as the base
+  (the declared class's fields only; subclass-only fields are omitted and do not enter the
+  stored row hash), while the tensor type keeps the class (an `nn.Parameter` returned for
+  `-> torch.Tensor` is stored, read back and hashed as an `nn.Parameter`).
   Structural classes additionally accept equivalent structural identities. Numeric
-  narrowing and unrelated container types require explicit conversion. Base storage
-  omits subclass-only fields, and those fields do not enter the stored row hash.
+  narrowing and unrelated container types require explicit conversion.
 
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
