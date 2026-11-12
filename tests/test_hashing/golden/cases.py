@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import collections
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -214,6 +215,10 @@ UUID_B = uuid.UUID("87654321-4321-8765-4321-876543218765")
 # Group: semantic — BaseSemanticHasher on Python values and type objects
 # ---------------------------------------------------------------------------
 
+# Added by ITL-942 (finding T): field order is part of a namedtuple's hash.
+_POINT_XY = collections.namedtuple("Point", ["x", "y"])
+_POINT_YX = collections.namedtuple("Point", ["y", "x"])
+
 SEMANTIC_VALUES: dict[str, Any] = {
     "int.zero": 0,
     "int.one": 1,
@@ -256,6 +261,8 @@ SEMANTIC_VALUES: dict[str, Any] = {
     "dict.int_keys": {1: "x", 2: "y"},
     "dict.str_keys_like_ints": {"1": "x", "2": "y"},
     "dict.type_key": {"__type__": "tuple", "items": [1, 2]},
+    "namedtuple.xy": _POINT_XY(x=1, y=2),
+    "namedtuple.yx": _POINT_YX(y=2, x=1),
 }
 
 

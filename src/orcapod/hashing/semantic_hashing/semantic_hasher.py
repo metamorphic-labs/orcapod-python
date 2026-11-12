@@ -49,7 +49,7 @@ structurally similar but type-distinct containers produce different hashes:
   set        → {"__type__": "set",       "items": [...]}   # items sorted by canonical JSON
   frozenset  → {"__type__": "set",       "items": [...]}   # same tag as set
   namedtuple → {"__type__": "namedtuple","name": "T",
-                "fields": {...}}                            # sorted by field name
+                "fields": [[name, value], ...]}             # declared field order
 
 This means a ``list`` and a ``tuple`` with the same elements will hash
 differently (the tuple carries a type tag), while a plain ``list`` and a
@@ -368,19 +368,26 @@ class SemanticAwarePythonHasher:
         obj: Any,
         _visited: frozenset[int],
         resolver: Callable[[Any], ContentHash] | None = None,
-    ) -> dict:
-        """Expand a namedtuple into a tagged dict preserving field names."""
+    ) -> dict[str, Any]:
+        """Expand a namedtuple into a tagged dict of its fields in declared order.
+
+        A namedtuple compares as an ordered tuple, so its field order is part of
+        its identity: ``fields`` is a list of ``[name, value]`` pairs in declared
+        order, never sorted by name (ITL-942 T).
+        """
         fields: tuple[str, ...] = obj._fields
-        expanded_fields = {
-            field: self._expand_element(
-                getattr(obj, field), _visited, resolver=resolver
-            )
-            for field in fields
-        }
         return {
             "__type__": "namedtuple",
             "name": type(obj).__name__,
-            "fields": dict(sorted(expanded_fields.items())),
+            "fields": [
+                [
+                    field,
+                    self._expand_element(
+                        getattr(obj, field), _visited, resolver=resolver
+                    ),
+                ]
+                for field in fields
+            ],
         }
 
     # ------------------------------------------------------------------

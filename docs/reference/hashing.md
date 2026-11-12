@@ -196,7 +196,7 @@ How containers expand (canonical JSON: sorted object keys, no whitespace, UTF-8)
 | `set`, `frozenset` | `{"__type__": "set", "items": [...]}`, items sorted by their canonical JSON text | membership only; never iteration order or `PYTHONHASHSEED` (ITL-942: before v0.3, items were sorted by `str()`, so `{1, "1"}` hashed differently per process) |
 | `dict` with only `str` keys, none of them `"__type__"` | JSON object | keys and values, not insertion order |
 | any other `dict` | `{"__type__": "dict", "items": [[key, value], ...]}`, pairs sorted by canonical JSON | key types: `{1: "x"}` and `{"1": "x"}` differ (ITL-942: before v0.3, keys went through `str()` and could collapse) |
-| namedtuple | `{"__type__": "namedtuple", "name": ..., "fields": {...}}` | class name, field names and values |
+| namedtuple | `{"__type__": "namedtuple", "name": ..., "fields": [[name, value], ...]}` | class name, field names and values, in declared order (ITL-942: before v0.3 fields were sorted by name, so `Point(x=1, y=2)` and a `Point` declared `(y, x)` holding `y=2, x=1` shared a hash) |
 | a type handler's `Encoded(tag, fields)` | `{"__type__": tag, **fields}` | the handler's tag and fields |
 
 **Only the hasher writes `"__type__"`.** A JSON object with a `"__type__"` key comes either

@@ -363,6 +363,31 @@ class TestEncodedValues:
 
 
 # ---------------------------------------------------------------------------
+# T. A namedtuple's field order is part of its hash
+# ---------------------------------------------------------------------------
+
+
+class TestNamedtupleFieldOrder:
+    def test_declared_field_order_is_identity(self) -> None:
+        from collections import namedtuple
+
+        hasher = _semantic_hasher()
+        xy = namedtuple("Point", ["x", "y"])
+        yx = namedtuple("Point", ["y", "x"])
+        # Unequal tuples ((1, 2) versus (2, 1)) with the same name-to-value mapping.
+        assert xy(x=1, y=2) != yx(y=2, x=1)
+        assert hasher.hash_object(xy(x=1, y=2)) != hasher.hash_object(yx(y=2, x=1))
+
+    def test_equal_namedtuples_share_a_hash(self) -> None:
+        from collections import namedtuple
+
+        hasher = _semantic_hasher()
+        first = namedtuple("Point", ["x", "y"])
+        second = namedtuple("Point", ["x", "y"])
+        assert hasher.hash_object(first(1, 2)) == hasher.hash_object(second(1, 2))
+
+
+# ---------------------------------------------------------------------------
 # F. Column selection identity is the set of names
 # ---------------------------------------------------------------------------
 

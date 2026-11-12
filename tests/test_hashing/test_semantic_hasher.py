@@ -1123,10 +1123,11 @@ class TestJsonNormalizationConsistency:
         return {"__type__": "tuple", "items": items}
 
     def _namedtuple_tree(self, name: str, fields: dict) -> dict:
+        # Fields in declared order (the dict's insertion order), ITL-942 T.
         return {
             "__type__": "namedtuple",
             "name": name,
-            "fields": dict(sorted(fields.items())),
+            "fields": [[k, v] for k, v in fields.items()],
         }
 
     # ------------------------------------------------------------------
@@ -1158,7 +1159,7 @@ class TestJsonNormalizationConsistency:
         assert h.hash_object(structure) == _sha256_json(expected_tree, self.HASHER_ID)
 
     def test_namedtuple(self, h):
-        """A namedtuple -- fields sorted alphabetically, name preserved."""
+        """A namedtuple -- fields in declared order, name preserved."""
         Coord = namedtuple("Coord", ["y", "x"])
         structure = Coord(y=4, x=3)
         expected_tree = self._namedtuple_tree("Coord", {"y": 4, "x": 3})
