@@ -19,17 +19,31 @@ When adding or changing any instruction, update BOTH:
 
 ## Design issues log
 
-`DESIGN_ISSUES.md` at the project root is the canonical log of known design problems, bugs, and
-code quality issues.
+`design_issues/` at the project root is the canonical log of known design problems, bugs, and
+code quality issues: one file per entry (developer, November 11, 2026; ITL-968). There is no
+`DESIGN_ISSUES.md`; never bring it back, and never put two entries in one file.
+
+- An entry is the file `design_issues/<LINEAR-ISSUE-ID>-<ENTRY-ID>.md` (e.g.
+  `design_issues/ITL-955-GB1.md`). Its first line is the `## <area heading>` it belongs
+  under, then a blank line, `### <ENTRY-ID> — <title>`, the `**Status:**` (`open`,
+  `in progress` or `resolved`), `**Severity:**` and `**Issue:**` lines, a blank line and the
+  body.
+- Read the log with `uv run python scripts/design_issues.py` (index by area; `--status open`
+  filters; `--full` prints every entry). Find one entry by id: `ls design_issues/*-GB1.md`.
+- Check the files with `uv run python scripts/design_issues.py --check`
+  (`tests/test_design_issues.py` runs it in CI).
+- `design_issues/README.md` is the full statement of the convention, with the severity
+  guide.
 
 When fixing a bug or addressing a design problem:
-1. Check `DESIGN_ISSUES.md` first — if a matching issue exists, update its status to
-   `in progress` while working and `resolved` once done, adding a brief **Fix:** note.
-2. If no matching issue exists, ask the user whether it should be added before proceeding.
-   If yes, add it (status `open` or `in progress` as appropriate).
+1. Check `design_issues/` first — if a matching entry exists, edit its file: update its
+   status to `in progress` while working and `resolved` once done, adding a brief **Fix:**
+   note.
+2. If no matching entry exists, ask the user whether it should be added before proceeding.
+   If yes, add it as a new file (status `open` or `in progress` as appropriate).
 
 When discovering a new issue that won't be fixed immediately, ask the user whether it should be
-logged in `DESIGN_ISSUES.md` before adding it.
+logged in `design_issues/` before adding it.
 
 ## Superpowers artifacts
 
@@ -49,6 +63,15 @@ Just change the code and update all references directly.
 
 Never manipulate `sys.modules` directly (e.g. `sys.modules.setdefault`). If a subpackage
 import path doesn't work, create a proper re-export package with an `__init__.py` instead.
+
+## No message-only parameters
+
+Never pass a value into a function only so that the function can put it in an error or log
+message (developer, November 11, 2026). If the function does not use the value to do its job,
+it must not receive it: the function raises what it knows, and the caller, which has the
+context, catches and wraps or annotates the error (path, row, column, node label). A helper
+whose job is to report or record (log a suppressed failure, attach a note) legitimately takes
+the label and context it records.
 
 ## Docstrings
 
@@ -183,6 +206,27 @@ Examples:
 - `test(function_pod): add schema validation tests`
 - `refactor(schema_utils): use Schema.optional_fields directly`
 
+## Changelog
+
+A pull request never edits `CHANGELOG.md` (developer, November 11, 2026; ITL-961). It adds
+exactly one file, `changelog.d/<ISSUE-ID>.md` (e.g. `changelog.d/ITL-955.md`; a PR that
+resolves several issues uses its primary issue's id).
+
+- The file holds only the text that would have gone under the release heading in
+  `CHANGELOG.md`: the same category headings `CHANGELOG.md` uses
+  (`### Breaking changes and migration`, `### Added`, `### Changed`, `### Fixed`,
+  `### Known limitations`), each followed by its text: bullet lines, or `####` sub-headings
+  with paragraphs, as `CHANGELOG.md` itself has. No version heading, no date, no other
+  `#`, `##` or `###` heading, and no empty category.
+- If your branch already edits `CHANGELOG.md`, restore `CHANGELOG.md` to its state on the
+  branch's base and move that text, unchanged, into the fragment.
+- Check a fragment with `uv run python scripts/assemble_changelog.py --check`
+  (`tests/test_changelog_fragments.py` runs it in CI).
+- Only the release PR changes `CHANGELOG.md`: it folds the fragments in with
+  `uv run python scripts/assemble_changelog.py --version X.Y.Z`, which also deletes them
+  (see `RELEASING.md`). Entries already in `CHANGELOG.md` on `main` stay there.
+- `changelog.d/README.md` is the full statement of the convention.
+
 ## Lint, format and type checks
 
 Every pull request must pass the metamorphic-labs required CI, which runs exactly these
@@ -216,6 +260,61 @@ uv run pytest tests/
 - The Graphviz `dot` binary is optional. The tests that render a graph to an image skip
   when `dot` is not on `PATH` and run when it is.
 
+## Logical type identifiers
+
+A logical type's identifier is its Arrow extension name plus its Arrow extension metadata
+(developer, November 11, 2026, ITL-935/ITL-938); see `docs/concepts/logical-type-identifiers.md`.
+
+- The identifier is declared in one place, the extension type returned by
+  `get_arrow_extension_type()`, and read through `logical_types/identifier.py`
+  (`logical_type_identifier`, `LogicalTypeIdentifier.text`). Never put a logical type's bare
+  name into a hash input: use the identifier text.
+- Change a type's identifier when, and only when, an existing value would be stored or hashed
+  differently. It is not a package version. Built-in types use `version_metadata(N)`
+  (`{"version":N}`); a new built-in type must write one, never empty metadata.
+- A changed identifier is a schema change: it moves stored paths and golden values of that
+  type. Treat it like any other hash change (developer approval, migration assessment).
+- The native containers `list[T]` / `set[T]` of a logical type (`ListLogicalType`) have no
+  version of their own, by design: never add a `"version"` key to their metadata. Their
+  identifier is the container kind plus the element's identifier; the type hash treats them
+  like any generic alias (origin and arguments). A change to how they are stored or hashed is
+  a data context (global hash version) change, not a logical type change.
+- On read, stored metadata must be one of the type's `readable_extension_metadata()`;
+  otherwise raise `LogicalTypeIdentifierError`. Never wrap a stored column by name alone and
+  never fall back to the storage type. List an older value in `also_reads` only when the
+  current code decodes that layout.
+
+## User classes: exact and structural
+
+A class a user defines is one of two kinds (developer, November 12, 2026, ITL-972; see
+`docs/concepts/your-own-data-types.md`).
+
+- An ordinary `@dataclass` or a pydantic model is an **exact** class: named by module path
+  and qualified name, and one type only with itself. Never make two different exact classes
+  equivalent (no declared names, no equivalence by description). Python subclassing still
+  applies at a pod input: a subclass column is accepted at a base-class parameter, and the
+  subclass keeps its own identity and fields.
+- A class made with `orcapod.dataclass` is **structural**: identified by its name (default
+  the class name) and its fields in declared order. Two structural classes with equal
+  identity records are compatible in the schema check and their instances compare equal.
+  Equality and hashing of a structural class cover exactly its stored fields; never let a
+  per-field `compare=` or `hash=` choice through, because a class rebuilt from metadata
+  cannot know it. Pydantic has no structural kind (ITL-973).
+- **No automatic conversion.** Orcapod checks compatibility and passes a value as it is. A
+  function annotated with a structural class may receive another class of the same
+  identity; a structural class promises its fields, not its methods. `from_instance` is the
+  only conversion, and Orcapod never calls it.
+- A value is stored only as its own class (`UserClassLogicalType.accepts_instance`); never
+  store a subclass instance or a look-alike object in another class's column.
+- The identity record (`logical_types/user_class_identity.py`) is `{kind, name, fields}`
+  with JSON type tokens. The Arrow extension name is `name@<SHA-256 of the record>` and the
+  record is the extension metadata; together they are the logical type identifier. A nested
+  class embeds its whole record and a logical-type field the whole identifier text, so a
+  structural class can be rebuilt from metadata alone. A change to the record or token
+  format moves every user-class identifier: treat it as a hash change.
+- Arrow-backed data carries the identifier, not a class object: the registry binds an
+  identifier to the newest class object with that identity, and data is read as that class.
+
 ## Golden hash values
 
 Hash values must stay identical across releases (developer, November 10, 2026). Every hash
@@ -229,6 +328,34 @@ checked by `tests/test_hashing/golden/test_golden_hashes.py`.
   approved together with a migration assessment.
 - Never move or rename the fixtures in `tests/test_hashing/golden/cases.py`: function pods,
   dataclasses and pydantic models hash with their module path.
+
+## Hash labels
+
+One rule holds for every hash label (developer, November 11, 2026; ITL-945; stated with
+examples in `docs/reference/hashing.md`, "The hash label rule").
+
+- A label names the algorithm that produced a digest (the whole procedure: canonical form,
+  preparation, encoding, digest function) and nothing else. Format `<algorithm>_v<N>`,
+  integer `N`: `semantic_v1`, `arrow_v1`, `directory_v1`, `ndarray_v1`, `polars_expr_v1`. The
+  file content hash keeps `sha256`, the only exception. A logical type's implementer picks
+  its label.
+- Change a label only when its algorithm would give an existing input a different digest.
+- Define each label in exactly one place, as a constant beside its algorithm. Never write a
+  label literal anywhere else in code, and never in a data context file.
+- Never feed a label into a hash computation. Feed a nested hash's digest only: never put
+  `to_string()`, `str(hash)` or `to_prefixed_digest()` into an identity structure, a preimage
+  table or a digest input. Inside a structure, return the `ContentHash` object and let the
+  structure hasher embed it.
+- A hash inside a name (path component, column name, `uri`) is the bare hex digest:
+  `to_hex()`. Exception (developer, November 11, 2026): a source id is the source's name. A
+  default source id built from a hash keeps a source-kind prefix and the hash's label
+  (`derived:<label>:<hex>`, via `to_string()`, never a label literal) and is used as it is in
+  the `source_id` system tag and in source-info values.
+- A hash stored as a value in its own column or field carries its label: `to_string()` as
+  text, `to_prefixed_digest()` in a binary column.
+- A record id is an identifier built by a recipe, not a hash, and carries no label.
+- `tests/test_hashing/test_hash_label_rule.py` recomputes every golden value under renamed
+  labels; a value that moves there means a label reached a hash input.
 
 ## Testing conventions
 
@@ -284,7 +411,8 @@ src/orcapod/
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
 │       ├── column_selection.py # Select/Drop Tag/Data columns
 │       ├── mappers.py          # MapTags, MapData (rename columns)
-│       └── filters.py          # PolarsFilter
+│       ├── filters.py          # PolarsFilter
+│       └── drop_nulls.py       # DropNulls (drop rows with a null in named or all columns, T | None → T)
 ├── hashing/
 │   └── semantic_hashing/       # BaseSemanticHasher, type handlers
 ├── semantic_types/             # Type conversion (Python ↔ Arrow)
@@ -356,22 +484,58 @@ FunctionNode.
 
 | | Operator | Function Pod |
 |---|---|---|
-| Inspects data content | Never | Yes |
+| Inspects data content | Never, except filters (see below) | Yes |
 | Inspects / uses tags | Yes | No |
 | Can rename columns | Yes | No |
 | Synthesizes new values | No | Yes |
 | Stream arity | Configurable | Single in, single out |
 
-`GroupBy` is the only operator that reduces row count many→one: it collapses N rows sharing a
-tag tuple into one row with list-valued members. It still synthesizes no new data values —
-every emitted element came from an input row — and it keys only on tags, never on data.
+**No data element comes from a tag value** (developer, November 11, 2026, ITL-955). An operator
+may *use* tags (to join, filter, group or order), but tag content never becomes data: every
+element of an output data column came from an input data column, and an operator never turns a
+tag column into a data column. When adding or changing an operator, check `keys()` of the output:
+no input tag name may appear among the data columns.
+
+Two operators reduce row count many→one. `Batch` groups consecutive rows by count; `GroupBy`
+groups by tag values: it collapses the N rows sharing a tag tuple into one row with
+list-valued members. Neither synthesizes new data values — every emitted element came from an
+input row — and `GroupBy` keys only on tags, never on data. Its non-key tags stay tags,
+list-valued, as `Batch` keeps them.
+
+Filters are the operators that read data columns (ITL-943): `PolarsFilter` evaluates its
+predicate on values, and `DropNulls` reads only whether a value is present (its validity),
+never the value. A filter decides which rows exist and never synthesizes a value; no other
+operator reads data content.
+
+**Operator or derived source?** (developer, November 11, 2026) The test is: does any data
+element come from a tag value, or from anywhere other than the input's data elements? If yes,
+the step is not an operator: it is a derived source. So a tag's value is offered as data only
+by a source, `DerivedSource(origin, tags_as_data={tag: data_name})` (ITL-939), never by an
+operator. That form is a new root: fresh provenance through `SourceStreamBuilder`, schema-only
+`pipeline_hash`, and a default `source_id` of the form
+`tags_as_data:<algorithm label>:<hex>` (the kind names the operation; the config type key stays
+`derived`), the labelled content hash an operator node doing the
+derivation would have (`DerivedSource._default_source_id`, the one place that defines it;
+the string is used as-is in system-tag values and source-info tokens). `DerivedSource` without `tags_as_data` (a job node's stored records)
+keeps its old identity; do not change it (ITL-956).
 
 ### Two identity chains
 
 Every pipeline element has two parallel hashes:
 
-1. **`content_hash()`** — data-inclusive. Changes when data changes. Used for deduplication
-   and memoization.
+1. **`content_hash()`** — the pipeline bound to its named sources: schema, topology and source
+   identity. For a source it is a stable *address*, not a digest of its rows (developer,
+   November 11, 2026: "sources content hash is meant to be a stable address and is not
+   necessarily going to reflect the very data content"). A root source hashes
+   `(class name, output schema, source_id)`; given a `source_id`, changed, added or reordered
+   rows leave it unchanged. Row content enters only where a source puts it into its own
+   identity: the default `source_id` of the in-memory sources
+   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given) and the elements of a `ListSource`. A downstream stream or node hashes its
+   pod's identity plus its upstreams' content hashes; a function pod's identity is its uri,
+   not its body. Only a datagram (one row's tags or data) has a `content_hash()` that is a
+   digest of its values; that row hash, not the node's content hash, is what results are
+   memoized by. The node's content hash tells apart, inside a shared table, the rows of
+   pipelines bound to different sources (`__node_content_hash`).
 2. **`pipeline_hash()`** — schema + topology only. Ignores data content. Used for DB path
    scoping so that different sources with identical schemas share database tables.
 
@@ -394,6 +558,59 @@ The pipeline hash uses a **resolver pattern** — `PipelineElementProtocol` obje
 Prefixes are computed from `SystemConstant` in `system_constants.py`. The `constants` singleton
 (with no global prefix) is used throughout.
 
+### Stored tables: data context and layout versions
+
+Every row Orcapod stores carries `__data_context` (`constants.DATA_CONTEXT_COL`,
+`large_string`): the key of the data context that wrote it (`std:v1:default` since v0.3;
+developer, November 11, 2026, ITL-944). The key names one generation of hashing; rows of the
+current data context are the current entries.
+
+| Table | Layout (last path component) | Constant |
+|---|---|---|
+| Function pipeline | `pdb_v2` | `PIPELINE_DB_SCHEMA_VERSION` |
+| Function result | `rdb_v2` | `RESULT_DB_SCHEMA_VERSION` |
+| Side-effect log | `tdb_v2` | `TRACKING_DB_SCHEMA_VERSION` |
+| Operator cache | `odb_v1` | `OPERATOR_DB_SCHEMA_VERSION` |
+| Cached source | `sdb_v1` | `SOURCE_DB_SCHEMA_VERSION` |
+
+- A change to the bookkeeping columns of a table kind moves its layout version, so the table
+  gets a new path. Never add, rename or retype a stored column without it.
+- Every new stored table kind writes `__data_context` (`contexts/stored.with_data_context`),
+  and every read or lookup keeps rows of the current data context only
+  (`keep_rows_of_data_context`, or a lookup constraint on the column).
+- A table at an older layout is never read as current and never modified. What a node does
+  about such tables, and about rows of another data context, is decided in one place,
+  `contexts/stored.account_for_stale_tables`: count and report, or, for a node that delivers
+  side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
+  context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
+  of node goes through that function; never decide it locally.
+- A table written before v0.3 is found by NAME, never by a computed hash (ITL-954): the
+  hashes in a path differ between versions. `find_stale_tables(..., name_path=...)` lists the
+  store under the hash-free beginning of the node's path (`ArrowDatabaseProtocol.list_table_paths`;
+  `<function>`, `side_effect_function/<function>`, `side_effects/<pod>`, relative to the
+  node's database) and every table there whose last component is not in
+  `contexts/stored.CURRENT_LAYOUTS` is pre-v0.3. A new layout constant must be added to
+  `CURRENT_LAYOUTS`, and a superseded one to the `OLD_*_SCHEMA_VERSIONS` tuples. A store that
+  cannot list raises `TableListingNotSupportedError`: side-effecting nodes then warn and
+  proceed (developer, November 11, 2026). Operator caches and cached sources have no stable
+  name; `PipelineJob.run()` reports one total for them. Every database class implements
+  `list_table_paths`.
+- A released data context manifest (`contexts/data/<version>.json`) is frozen: its sha256 is
+  pinned in `contexts/released_manifests.json`. A change that moves an existing golden hash
+  value for a reason other than a logical type's own change needs a new data context version
+  with its own manifest file, never an edit of a released one.
+- In memory the data context column is still `_context_key` (`ColumnConfig(context=True)`).
+- A writer refuses an input of another data context than its own
+  (`contexts/stored.require_same_data_context`, `InputValidationError` naming both keys)
+  before anything is written; a whole-input condition is checked outside the row error
+  policy. The eventual behaviour is ITL-951.
+- `std:v0.1:default` is not shipped; saved files that name it load through
+  `contexts.resolve_saved_context`. There is no `SchemaVersionError`, `ignore_schema` or
+  `orcapod.migrations`: do not reintroduce a per-layout migration path without a decision.
+- Logical types and the value handlers that hash their Python values are registered in
+  `contexts/logical_types.json`, never in a data context manifest: a logical type is
+  versioned by its own identifier, and that file is not frozen.
+
 ### System tag evolution rules
 
 1. **Name-preserving** — single-stream ops (filter, select, map). Column name and value pass
@@ -402,14 +619,16 @@ Prefixes are computed from `SystemConstant` in `system_constants.py`. The `const
    name gets `::{pipeline_hash}:{canonical_position}` appended. Commutative operators
    canonically order inputs by `pipeline_hash` and sort system tag values per row.
 3. **Reducing** — many→one ops (`Batch`, `GroupBy`). User tag and data columns become
-   `list[T]`, and source-info columns become `list[str]` with one element per member. System
+   `list[T]` and stay in their own group (a tag stays a tag; only the scalar keys of a
+   `GroupBy` are not list-wrapped), and source-info columns become `list[str]` with one element
+   per member. System
    tag columns must stay **scalar**, because `_build_record_id_preimage`
    (`core/nodes/function_node.py`) hashes them directly to derive record identity. They fold
    to a deterministic digest via `arrow_utils.fold_system_tag_values` and their column name
    gains `::{pipeline_hash}` — a blend of rules 2 and 3.
 
-   The fold is SHA-based (`uuid5` for `record_id`, `combine_hashes` for `source_id`) and so is
-   stable across processes. Never use `hash()` or a set-based construction there: the digest
+   The fold is SHA-based (`uuid5` for `record_id`, SHA-256 of the canonical JSON member list
+   for `source_id`) and so is stable across processes. Never use `hash()` or a set-based construction there: the digest
    becomes a cache key, so a per-process value would look correct in a single-process test and
    miss the cache on every new driver run.
 
@@ -497,12 +716,22 @@ data. The rules:
 ### Important implementation details
 
 - `ArrowTableSource.__init__` raises `ValueError` if any `tag_columns` are not in the table.
+- A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
+  built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
+  `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label
+  as a literal. The kind is the class's `SOURCE_KIND` (its config type key: `arrow_table`,
+  `dict`, `list`, `data_frame`, `derived`), or names the operation that derives the source
+  (`tags_as_data`). `node.as_source()` gives no id of its own; it takes the `DerivedSource`
+  default. The origin's source id is never written into a default id, and a `source_id` given
+  by the user is never changed. `SourceStreamBuilder.build` has no bare-hash default: it
+  needs a `source_id` or a `source_kind`.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
 - `FunctionNode.iter_data()` Phase 1 returns ALL records in the shared `pipeline_path`
   DB table (not filtered to current inputs). Phase 2 skips inputs whose hash is already
   in the DB.
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
-- `DerivedSource` before `run()` → raises `ValueError` (no computed records).
+- `DerivedSource` over a job node before `run()` → presents zero rows with the origin's columns
+  (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted
   `large_list<T>` with source columns reordered to match, where `T` is the large-normalized input
@@ -515,12 +744,28 @@ data. The rules:
   `as_table()` (which legitimately differs: `ArrowTableStream.output_schema` ignores
   `columns.source`, so `_source_*`, `_content_hash`, and `_context_key` appear in the table
   but never in the schema).
+- `DropNulls` keeps the rows where every named column (tag or data) is non-null and clears
+  the nullable flag of each named field, so `T | None` becomes `T`. Only top-level validity is
+  read (not list items, struct children or NaN). Its identity is the sorted tuple of unique
+  names. Both paths apply one rule, `DropNulls._narrow_table`: an Arrow validity mask and
+  the same arrays re-wrapped under the new field flags, with no Polars round-trip and no cast
+  other than large normalization. A named column that is already non-nullable is a no-op.
+- `DropNulls()` with no argument (`columns=None`) means every user tag and data column of
+  the input (developer, November 12, 2026). The names are resolved from each input
+  (`DropNulls._target_columns`: `stream.keys()`, or the row's tag and data keys on the
+  async path) and never stored, so its identity is the fixed `("DropNulls", None)`,
+  different from any list of names. System-tag, source-info, context and meta columns are
+  never included. An explicitly empty collection is not "no argument": it raises `ValueError`.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
   stream came from `Batch` — group before batching, not after). Members are sorted by non-key
   tag values with the system `record_id` as tiebreaker, so the hashed lists are stable across
   runs. Groups themselves are emitted in key order, so a reordered input yields a
   byte-identical table.
+- `GroupBy`'s output tag columns are its input's tag columns, in input order: keys scalar,
+  every other tag `list[T]` (ITL-955). A grouped stream can be grouped again on a coarser key;
+  its list-valued tags then nest (`list[list[T]]`) and still order the members, so the member
+  sort key (`_null_last_key`) is recursive and sorts nulls last at every depth.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
