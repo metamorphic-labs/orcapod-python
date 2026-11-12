@@ -115,3 +115,18 @@ Shown red on pure `origin/main` in the dry run (34 failures) and green on the me
   until the coordinator writes again. Remaining when released: Task 5 (full suite on 3.12,
   3.11, 3.13; one push; PR; readiness). PR body draft is in this session's temp dir only;
   its content follows the coordinator decisions at the top of this plan.
+- Nov 12 (later): first hold lifted (storage and hashing are separate), then the PUSH held
+  again: what a hash ignores becomes configurable per type and is recorded in the extension
+  metadata (shared mechanism: ITL-981; not built here). Added `PANDAS_IDENTITY_PROPERTIES`
+  (one list in code, each entry checked by a test). Sent the coordinator the pandas spec
+  (properties / hash / storage). Findings awaiting a decision, NOT implemented: `attrs`
+  counting in the hash; `string[pyarrow]` and non-string `object` columns read back as
+  another dtype, so hash(read(write(v))) != hash(v) today (to be fixed by describing them by
+  what storage restores); `flags`, RangeIndex kind, index `freq`, unused MultiIndex levels
+  are not restored by storage and are never hashed.
+- Second merge of `origin/main` (25650c42; #299, #301, #303), no conflicts: 4bbe5ef0.
+  Golden diff against `main`: the 3 approved entries changed, 5 added, nothing else.
+  Full suite 3.12 / 3.11 / 3.13: 10111 passed, 109 skipped, 23 xfailed each; ruff, format,
+  basedpyright exit 0; changelog and design-issue checks OK. Still NOT pushed; waiting for
+  the coordinator's sign-off, then: PR body (draft content per the decisions above plus the
+  storage/hash sentence), one push, PR, readiness.
