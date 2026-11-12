@@ -183,3 +183,12 @@ layout test; (6) golden (local), docs section 10, changelog, design issue, PR bo
 - Remaining: wait for ITL-981's PR to merge into `main`; merge `main`; regenerate golden
   (pandas entries only); full suites; PR body (scratchpad draft is outdated: rewrite from
   the changelog fragment and this plan); ONE push; PR; readiness.
+- Dry run against ITL-981's tip (PR #328, open): 6 one-hunk conflicts, all unions of both
+  sides: `docs/concepts/logical-type-identifiers.md` (name table: their numpy row, our
+  pandas rows and paragraph), `docs/reference/hashing.md` (label table: their `ndarray_v1`
+  wording plus our two pandas rows), `contexts/logical_types.json` (`hash_ignore`: all
+  three names), `tests/test_contexts/test_data_context_v1.py` (name list:
+  `orcapod.numpy.ndarray` then the two pandas names), `tests/test_hashing/test_starfix_arrow_hasher.py`
+  (keep both test classes), `tests/test_logical_types/test_logical_type_identifiers.py`
+  (their `ALL_BUILTINS` / `BUILTIN_METADATA`; add the two pandas names to
+  `BUILTIN_METADATA` or keep our `BUILTINS_WITH_IGNORE_LIST` test).
