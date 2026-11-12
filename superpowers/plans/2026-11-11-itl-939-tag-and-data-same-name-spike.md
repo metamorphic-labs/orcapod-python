@@ -62,7 +62,7 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 
 ### Task 6: Report and PR
 
-- [ ] `ask` the coordinator with the summary; wait for the reply.
+- [x] `ask` the coordinator with the summary; wait for the reply.
 - [x] Append the DESIGN_ISSUES.md entry for ITL-939 at the end.
 - [ ] Merge origin/main, push, open docs-only PR ("Part of ITL-939"), attach to Linear,
       `orca worktree set --pr`. CodeRabbit rounds. `worker_done`.
@@ -73,4 +73,9 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 - Tasks 1-5 done (exp01-exp04 with .out.txt; design doc written). Findings: Join/MergeJoin
   tag-vs-data collision crashes late (J1), pod output key == tag name accepted (P1); W1/W3
   give 9 rows instead of 5; GroupBy already turns non-key tags into data (precedent for C).
-- Next: ask coordinator with the summary (Task 6), then PR.
+- Coordinator answered the ask: open the PR as is; decisions go to the developer; J1/P1 filed
+  as ITL-940 (not fixed here). Doc gained (a)-(e): full SpiralDB recipe, before/after, D cache
+  paragraph, hash comparison (exp05), divergence.
+- PR #310 open (https://github.com/metamorphic-labs/orcapod-python/pull/310), attached to
+  ITL-939 and the worktree. Next: CI + CodeRabbit rounds, then worker_done. Keep the session
+  alive afterwards: the coordinator may dispatch the CopyTagsToData implementation.
