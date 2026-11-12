@@ -1,8 +1,11 @@
 """Read-only live check of ``DerivedSource(tags_as_data=...)`` on SpiralDB (ITL-939).
 
 Reads the ``session`` and ``experiment`` tables of a SpiralDB project, derives a source from
-``experiment`` that also offers ``session_start_datetime`` as data, runs an elapsed-time pod
-in memory and joins the result with ``session``. It writes nothing: no database, no store, no
+``experiment`` that also offers ``session_start_datetime`` as data, runs a pod on the copy
+in memory and joins the result with ``session``. The pod only converts the copied start time
+to epoch seconds: it makes no assumption about the meaning of any other EDI column (a first
+version subtracted it from ``experiment_start_timestamp``, which in the tutorial dataset is a
+relative clock, not microseconds since the epoch). It writes nothing: no database, no store, no
 file.
 
 Needs ``pyspiral`` (the ``spiraldb`` extra) and ``spiral login`` credentials. Usage::
@@ -25,14 +28,12 @@ COPY = "session_start"
 TIMESTAMP = "experiment_start_timestamp"
 
 
-@function_pod(output_keys="onset_s")
-def onset_s(
-    session_start: datetime | None, experiment_start_timestamp: int | None
-) -> float | None:
-    """Return seconds from the session start to the experiment start."""
-    if session_start is None or experiment_start_timestamp is None:
+@function_pod(output_keys="start_epoch_s")
+def start_epoch_s(session_start: datetime | None) -> float | None:
+    """Return the session start as seconds since the epoch."""
+    if session_start is None:
         return None
-    return experiment_start_timestamp / 1e6 - session_start.timestamp()
+    return session_start.timestamp()
 
 
 def main(project: str, dataset: str) -> None:
@@ -53,12 +54,12 @@ def main(project: str, dataset: str) -> None:
     print("first token:", table[f"_source_{COPY}"][0].as_py())
     print("timestamp field:", table.schema.field(TIMESTAMP))
 
-    onsets = onset_s.pod(derived.select_data_columns([COPY, TIMESTAMP]))
-    joined = Join()(onsets, session)
+    starts = start_epoch_s.pod(derived.select_data_columns([COPY]))
+    joined = Join()(starts, session)
     result = joined.as_table()
     print("joined keys():", joined.keys())
     print("joined rows:", result.num_rows)
-    print("onset_s sample:", result["onset_s"].to_pylist()[:5])
+    print("start_epoch_s sample:", result["start_epoch_s"].to_pylist()[:5])
 
     rebuilt = DerivedSource.from_config(derived.to_config())
     print(

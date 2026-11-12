@@ -249,7 +249,7 @@ class TestArrowTypesPreserved:
 
 
 def _expected_default_source_id(origin, tags_as_data, record_id_column=None) -> str:
-    """The documented definition: ``derived:`` plus the labelled derivation hash.
+    """The documented definition: ``tags_as_data:`` plus the labelled derivation hash.
 
     The derivation hash is the content hash an operator node doing the derivation
     would have.
@@ -262,7 +262,7 @@ def _expected_default_source_id(origin, tags_as_data, record_id_column=None) -> 
         (parameters, (origin,)),
         resolver=lambda obj: obj.content_hash(hasher),
     )
-    return f"derived:{derivation_hash.to_string()}"
+    return f"tags_as_data:{derivation_hash.to_string()}"
 
 
 class TestProvenance:
@@ -271,8 +271,10 @@ class TestProvenance:
         derived = DerivedSource(origin, tags_as_data=COPY)
         assert derived.source_id == _expected_default_source_id(origin, COPY)
         kind, label, digest = derived.source_id.split(":")
-        assert kind == DerivedSource.SOURCE_KIND == "derived"
+        assert kind == DerivedSource.TAGS_AS_DATA_KIND == "tags_as_data"
+        # The config key names the class to rebuild, not the operation.
         assert derived.to_config()["source_type"] == DerivedSource.SOURCE_KIND
+        assert DerivedSource.SOURCE_KIND == "derived"
         assert label == origin.data_context.semantic_hasher.hasher_id
         assert len(digest) == 64
 
@@ -503,6 +505,7 @@ class TestValidation:
         derived = DerivedSource(origin, tags_as_data={})
         assert derived.keys() == origin.keys()
         assert derived.as_table().equals(origin.as_table())
+        assert derived.source_id.startswith("tags_as_data:")
 
     def test_record_id_column_needs_tags_as_data(self):
         job = _upper_job()

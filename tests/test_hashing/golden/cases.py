@@ -425,7 +425,7 @@ def schema_source_stream_builder() -> dict[str, Any]:
 def schema_derived_source_tags_as_data() -> dict[str, Any]:
     """Pin a source derived from another source with a tag also offered as data (ITL-939).
 
-    Three variants: the default source id (``derived:<label>:<hex>``, the derivation
+    Three variants: the default source id (``tags_as_data:<label>:<hex>``, the derivation
     hash), an explicit source id, and the default source id with a ``record_id_column``
     (which enters the derivation hash).
 

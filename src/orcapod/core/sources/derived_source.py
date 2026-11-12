@@ -128,7 +128,7 @@ class DerivedSource(RootSource):
     any source it can be wrapped with ``cached(database)``.
 
     Identity (``tags_as_data`` form):
-        - ``source_id`` defaults to ``derived:<algorithm label>:<hex digest>``,
+        - ``source_id`` defaults to ``tags_as_data:<algorithm label>:<hex digest>``,
           where label and digest are the derivation hash: the content hash an
           operator node doing this derivation over the origin would have, built
           from the origin's content hash, the sorted ``tags_as_data`` items and
@@ -174,9 +174,11 @@ class DerivedSource(RootSource):
         )
     """
 
-    # The source kind: the config type key, and the prefix of a hash-based default
-    # source id.
+    # The config type key: names the class a saved config is rebuilt with.
     SOURCE_KIND: ClassVar[str] = "derived"
+    # The kind prefix of a hash-based default source id names the operation that
+    # derives the source. One constant per operation.
+    TAGS_AS_DATA_KIND: ClassVar[str] = "tags_as_data"
 
     @classmethod
     def _default_source_id(
@@ -187,10 +189,11 @@ class DerivedSource(RootSource):
     ) -> str:
         """Return the default ``source_id`` of a source built with ``tags_as_data``.
 
-        The format is ``<source kind>:<algorithm label>:<hex digest>``, for example
-        ``derived:semantic_v0.1:01bb...``: the kind says what sort of source the id
-        names, and the label and digest are the derivation hash
-        (``_derivation_hash``) in its labelled form. This one string is the
+        The format is ``<kind>:<algorithm label>:<hex digest>``, for example
+        ``tags_as_data:semantic_v0.1:01bb...``: the kind names the operation that
+        derives the source, and the label and digest are the derivation hash
+        (``_derivation_hash``) in its labelled form. An empty mapping is still
+        this operation and gets the same kind. This one string is the
         source's name everywhere it appears: the system-tag ``source_id`` values,
         the source-info tokens, and the name of the source in a job.
 
@@ -204,7 +207,7 @@ class DerivedSource(RootSource):
             The default source id.
         """
         derivation_hash = _derivation_hash(origin, tags_as_data, record_id_column)
-        return f"{cls.SOURCE_KIND}:{derivation_hash.to_string()}"
+        return f"{cls.TAGS_AS_DATA_KIND}:{derivation_hash.to_string()}"
 
     def __init__(
         self,

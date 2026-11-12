@@ -124,7 +124,7 @@ before. Things to know:
 - It is a **new source**, not a step in the origin's pipeline: `upstreams` is empty, and it
   has provenance columns of its own, like the result of handing the same rows to
   `ArrowTableSource`. Use it in place of the origin. Its default `source_id` is
-  `derived:` followed by a labelled hash built from the origin's identity and the mapping, so
+  `tags_as_data:` followed by a labelled hash built from the origin's identity and the mapping, so
   it changes when either changes; pass `source_id=` to choose a name.
 - A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
   Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
@@ -134,7 +134,7 @@ before. Things to know:
 print(with_start.upstreams)
 # ()
 print(with_start.source_id)
-# derived:...:...
+# tags_as_data:...:...
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it

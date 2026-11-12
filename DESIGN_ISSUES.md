@@ -2463,7 +2463,7 @@ source derived from other pods.
 `node.as_source(tags_as_data=...)`: a new root source over a source or a job node whose data
 columns are the origin's plus a copy of each mapped tag, with the tag's exact Arrow type and
 nullability, fresh source provenance, a schema-only `pipeline_hash`, and a default `source_id`
-`derived:<label>:<hex>`, the content hash an operator node doing the derivation would have. Reloadable from a
+`tags_as_data:<label>:<hex>`, the content hash an operator node doing the derivation would have. Reloadable from a
 saved job when its origin is. No existing hash or stored schema changed.
 
 Left open, tracked elsewhere: the same-name collisions that fail late in `Join`/`MergeJoin`
