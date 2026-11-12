@@ -42,14 +42,12 @@ def _source(name: str, x: list[int]) -> ArrowTableSource:
             "id": pa.array([1, 2, 3, 4], type=pa.int8()),
             "grp": pa.array(["g1", "g1", "g2", "g2"], type=pa.large_string()),
             "x": pa.array(x, type=pa.int8()),
-            "s": pa.array(["p", "q", "r", "t"], type=pa.large_string()),
         },
         schema=pa.schema(
             [
                 pa.field("id", pa.int8(), nullable=False),
                 pa.field("grp", pa.large_string(), nullable=False),
                 pa.field("x", pa.int8(), nullable=False),
-                pa.field("s", pa.large_string(), nullable=False),
             ]
         ),
     )
