@@ -61,3 +61,27 @@ November 12, 2026 and stay as implemented.
   untracked deleted `migrations/` directory retained `__pycache__` and imported as a namespace
   package. Preserved that directory under `/tmp/itl905-stale-migrations-20261112`; the
   failing old-layout test now passes. Full suite will rerun after the set-update fix.
+
+### Validation checkpoint
+
+- Code/docs committed as `a32387ce`; no push yet.
+- Three public set-write regressions failed before the boundary fix and now pass.
+- Focused dict/set/golden suite: 1145 passed; no additional golden changes.
+- Full Python 3.12.15 suite: 9445 passed, 101 skipped, 19 xfailed, exit 0.
+- Ruff check/format, changelog/design checks pass; basedpyright exits 0 (0 errors).
+- Logical-set measurement: ten processes (seeds 0,1,2,42,random, twice each) agree.
+  UUID bytes and Path strings use natural sorting and match `sort_set_elements`;
+  frozen dataclass str/int fields use repr-sorted dict storage, rejected by the helper.
+- Python 3.11 first run: 9440 passed with five packaging fixture errors from sandbox DNS;
+  full rerun uses ordinary `uv run --python 3.11` with network permission.
+- Scratch reports/logs are in `.untracked/`; the preserved stale migrations bytecode directory
+  was moved there too. Developer withdrew the temporary custom-cache/environment instruction;
+  subsequent runs use ordinary uv and the worktree's `.venv`.
+- Coordinator approved replies: qualify nested-canonical unchanged-hash wording; document and
+  defer user-class reconstruction; fix Arrow-backed set updates. Twelve older threads already
+  have signed answers; two latest threads and two review-body set-update findings await replies.
+- Full ordinary-uv Python 3.11.18 rerun: 9445 passed, 101 skipped, 19 xfailed,
+  exit 0 (270.52 seconds); packaging passed. Python 3.13 full suite now running.
+
+- Full ordinary-uv Python 3.13.18 suite: 9445 passed, 101 skipped, 19 xfailed,
+  exit 0 (282.25 seconds). All three interpreter suites are green.

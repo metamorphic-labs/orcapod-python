@@ -558,8 +558,8 @@ which is also the order it is read back in. The semantic hasher (section 1a) sep
 orders the *hash input* it builds for a Python `dict` or `set` object, by each item's
 canonical JSON text (ITL-942); that order is never stored and never seen. The two rules are
 different on purpose (JSON text puts `10` before `2`; storage order is numeric) and neither
-is defined in terms of the other: changing the hasher's order would move every semantic
-hash, and changing the storage order would move row hashes and what a pod reads back.
+is defined in terms of the other: changing the hasher's order would move semantic hashes
+of affected inputs, and changing storage order would move row hashes and what a pod reads back.
 `set[T]` of a logical type (`set[Path]`, `set[UUID]`) is ordered by `ListLogicalType`, not
 by this rule.
 
