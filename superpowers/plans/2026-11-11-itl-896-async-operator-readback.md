@@ -77,3 +77,55 @@ After `clear_cache()` an operator node returns a zero-row table on both paths to
 
 - [ ] ruff check/format, basedpyright exit code, full `uv run pytest tests/`, golden hashes unchanged.
 - [ ] Merge origin/main, push, PR (Fixes ITL-896), link, CI, CodeRabbit (inline + review bodies).
+
+## November 12 refresh (Codex takeover)
+
+- [x] Preserve approved merge 69af724b: pre-forward context validation when LOG has
+  a database, unconditional row retention, conditional persistence; retain both run
+  docstring paragraphs. Changelog and OR1 now live in their per-entry files.
+- [x] Both fragment checkers pass. Prior worker established 57 readback failures
+  against main and passing targeted tests after the merge.
+- [ ] Add named-column and no-argument DropNulls to CASES (two retained rows).
+  Compare normal rows and all-info schemas; mark only the known ITL-976 metadata
+  mismatch and stop for any other difference.
+- [ ] Pin OFF, LOG with/without database, and populated REPLAY through public node
+  run/async_execute and stream reads; assert persisted rows only for LOG/REPLAY.
+  Keep existing test_stored_operator_node_raises_before_forwarding_rows_async as
+  the pre-forward LOG refusal regression.
+- [ ] Run focused readback/equivalence/stored-context tests and golden tests without
+  changing fixtures; run full suite sequentially on 3.12, 3.11, 3.13, then ruff,
+  format and basedpyright (exit zero).
+- [ ] Fetch current main before final commit; merge if needed and revalidate.
+  Update existing PR body, push once, inspect CI and all CodeRabbit review bodies
+  and GraphQL threads on the final head, route findings through coordinator ask.
+
+### Approved review follow-up
+
+Coordinator approved November 12: fix singleton exception wrapping here; defer
+data-less stream retention (sync rejects it too); clarify old LOG records remain
+readable after switching to OFF. Add an Index fail_on_miss public-execution
+regression for no database, OFF and LOG before editing library code. Catch the
+TaskGroup's ExceptionGroup and re-raise its sole exception; leave groups with
+multiple failures intact. Re-run focused tests and all three full suites after
+this change. Report the data-less reproduction in the final worker report.
+
+### Refresh verification checkpoint
+
+- Both DropNulls forms pass all eight store/materialization combinations without
+  a metadata exception. Cache-mode parity passes for all four requested cases.
+- Exception regression: 3 failures before the fix, then all pass. A concurrent
+  operator RuntimeError and output LookupError remain an ExceptionGroup of two.
+- Disposable-process test using main's async_execute: no-database exception keeps
+  its original RuntimeError; OFF/LOG wrap it. Main still loses readback in OFF
+  and requested LOG without a database (4 failures, 3 passes across new cases).
+- Affected readback/channels/stored-context tests: 542 passed, 5 known xfails.
+- Focused equivalence and golden tests before the exception-only change:
+  1386 passed, 14 known xfails. No golden files differ from main.
+- Ruff check and format pass; basedpyright exits 0 (10370 existing warnings).
+- Initial full Python 3.12 run: 9438 passed, 101 skipped, 23 xfailed; superseded
+  by the fresh full run after the exception tests were added.
+- Data-less reproduction (deferred by coordinator): one-row ArrowTableSource
+  with id tag and x data; SelectDataColumns([]) rejects sync with ValueError,
+  async forwards one row and then raises the same no-data-columns ValueError.
+- All previous review bodies/threads audited; older nitpick docstrings already
+  replied to. Three latest threads will receive approved dispositions after commit.

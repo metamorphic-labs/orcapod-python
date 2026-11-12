@@ -796,8 +796,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 ``as_table()`` and ``iter_data()`` in either case, on either
                 orchestrator. An operator node with the default
                 ``cache_mode=OFF`` (the only mode a job sets) keeps its output
-                in memory and stores nothing, so its ``get_all_records()``
-                returns ``None``.
+                in memory and stores nothing. Its ``get_all_records()`` returns
+                ``None`` when no matching records exist; records from an earlier
+                LOG run remain readable after switching to OFF.
             commit_every_rows: How many rows a function node processes between
                 commits of its results and pipeline records to the store
                 (default 100). Each node also commits when it finishes, before a

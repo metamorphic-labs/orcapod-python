@@ -9,6 +9,7 @@ An operator node in a job runs with the default ``cache_mode=OFF`` and stores no
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +21,10 @@ import pytest
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
+    DropNulls,
     DropTagColumns,
     GroupBy,
+    Index,
     Join,
     MapData,
     MapTags,
@@ -32,14 +35,16 @@ from orcapod.core.operators import (
     SemiJoin,
 )
 from orcapod import function_pod
+from orcapod.channels import Channel
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
-from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.types import CacheMode
 
 ORCHESTRATORS = {
     "sync": SyncPipelineOrchestrator,
@@ -126,6 +131,8 @@ CASES = [
         3,
     ),
     Case("drop_data_columns", lambda a, b, c: DropDataColumns(["s"])(a, label="op"), 3),
+    Case("drop_nulls_named", lambda a, b, c: DropNulls(["s"])(a, label="op"), 2),
+    Case("drop_nulls_all", lambda a, b, c: DropNulls()(a, label="op"), 2),
     Case(
         "select_tag_columns",
         lambda a, b, c: SelectTagColumns(["id"])(a, label="op"),
@@ -238,6 +245,150 @@ def test_operator_node_stores_nothing_so_get_all_records_is_none(
 
     assert node.as_table().num_rows == 3
     assert node.get_all_records() is None
+
+
+@pytest.mark.parametrize(
+    ("cache_mode", "with_database"),
+    [
+        pytest.param(CacheMode.OFF, True, id="off"),
+        pytest.param(CacheMode.LOG, True, id="log_with_database"),
+        pytest.param(CacheMode.LOG, False, id="log_without_database"),
+        pytest.param(CacheMode.REPLAY, True, id="replay"),
+    ],
+)
+def test_operator_node_cache_modes_keep_sync_async_readback_equivalent(
+    cache_mode: CacheMode, with_database: bool
+) -> None:
+    """Cache mode controls persistence; both execution paths retain emitted rows."""
+    source = _source_a()
+
+    def make_node() -> OperatorJobNode:
+        """Build a node, seeding a populated cache for REPLAY."""
+        store = InMemoryArrowDatabase() if with_database else None
+        if cache_mode == CacheMode.REPLAY:
+            seed = OperatorJobNode(
+                operator=SelectDataColumns(["x"]),
+                input_streams=[source],
+                pipeline_database=store,
+                cache_mode=CacheMode.LOG,
+            )
+            _ = seed.execute(source)
+        return OperatorJobNode(
+            operator=SelectDataColumns(["x"]),
+            input_streams=[source],
+            pipeline_database=store,
+            cache_mode=cache_mode,
+        )
+
+    sync_node, async_node = make_node(), make_node()
+    sync_rows = sync_node.execute(source)
+
+    async def run() -> list[tuple[TagProtocol, DataProtocol]]:
+        """Drive the node's public channel interface and collect forwarded rows."""
+        inputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=16)
+        outputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=16)
+        # REPLAY must emit the stored rows even with no upstream rows to compute.
+        if cache_mode != CacheMode.REPLAY:
+            for item in source.iter_data():
+                await inputs.writer.send(item)
+        await inputs.writer.close()
+        await async_node.async_execute([inputs.reader], outputs.writer)
+        return await outputs.reader.collect()
+
+    async_rows = asyncio.run(run())
+    assert len(sync_rows) == len(async_rows) == 3
+    sync_table = sync_node.as_table(all_info=True)
+    async_table = async_node.as_table(all_info=True)
+    assert async_table.schema == sync_table.schema
+    assert _table_rows(async_table) == _table_rows(sync_table)
+    assert _row_hashes(async_node) == _row_hashes(sync_node)
+    for node in (sync_node, async_node):
+        records = node.get_all_records()
+        if with_database and cache_mode in (CacheMode.LOG, CacheMode.REPLAY):
+            assert records is not None
+            assert records.num_rows == 3
+        else:
+            assert records is None
+
+
+@pytest.mark.parametrize("cache_mode", [None, CacheMode.OFF, CacheMode.LOG])
+def test_operator_failure_preserves_exception_type_and_message(
+    cache_mode: CacheMode | None,
+) -> None:
+    """A sole operator error reaches callers unchanged on either execution path."""
+    source = ArrowTableSource(
+        pa.table(
+            {"x": pa.array([[1]], type=pa.large_list(pa.int8()))},
+            schema=pa.schema([pa.field("x", pa.large_list(pa.int8()), nullable=False)]),
+        ),
+        source_id="index_failure",
+    )
+
+    def make_node() -> OperatorJobNode:
+        """Create a fresh Index node with the requested persistence mode."""
+        return OperatorJobNode(
+            operator=Index("x", 5, fail_on_miss=True),
+            input_streams=[source],
+            pipeline_database=None if cache_mode is None else InMemoryArrowDatabase(),
+            cache_mode=cache_mode or CacheMode.OFF,
+        )
+
+    with pytest.raises(RuntimeError) as sync_error:
+        _ = make_node().execute(source)
+
+    async def run() -> None:
+        """Send the source through the node's public async execution interface."""
+        inputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=16)
+        outputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=16)
+        for item in source.iter_data():
+            await inputs.writer.send(item)
+        await inputs.writer.close()
+        await make_node().async_execute([inputs.reader], outputs.writer)
+
+    with pytest.raises(RuntimeError) as async_error:
+        asyncio.run(run())
+    assert type(async_error.value) is type(sync_error.value)
+    assert str(async_error.value) == str(sync_error.value)
+
+
+def test_concurrent_operator_and_forwarding_failures_stay_grouped() -> None:
+    """Unwrapping a sole failure must never discard concurrent channel failures."""
+    source = ArrowTableSource(
+        pa.table(
+            {"x": pa.array([[1], []], type=pa.large_list(pa.int8()))},
+            schema=pa.schema([pa.field("x", pa.large_list(pa.int8()), nullable=False)]),
+        ),
+        source_id="concurrent_failure",
+    )
+    node = OperatorJobNode(
+        operator=Index("x", 0, fail_on_miss=True), input_streams=[source]
+    )
+
+    class FailingWriter:
+        """An output sink that fails when the first valid row is forwarded."""
+
+        async def send(self, item: tuple[TagProtocol, DataProtocol]) -> None:
+            """Reject the forwarded row."""
+            raise LookupError("output unavailable")
+
+        async def close(self) -> None:
+            """Allow the node to close its output even after a failure."""
+
+    async def run() -> None:
+        """Queue a valid row followed by an invalid row before starting both tasks."""
+        inputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=16)
+        for item in source.iter_data():
+            await inputs.writer.send(item)
+        await inputs.writer.close()
+        await node.async_execute([inputs.reader], FailingWriter())
+
+    with pytest.raises(ExceptionGroup) as info:
+        asyncio.run(run())
+    assert {type(error) for error in info.value.exceptions} == {
+        RuntimeError,
+        LookupError,
+    }
+    assert len(info.value.exceptions) == 2
 
 
 NO_MATCH = Case(

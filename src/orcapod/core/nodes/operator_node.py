@@ -1231,7 +1231,8 @@ class OperatorJobNode(OperatorNodeBase):
 
         Returns the stored output table with column filtering applied
         per ``ColumnConfig`` conventions.  Returns ``None`` when no
-        database is attached or no records exist.
+        database is attached or no matching records exist. Switching to OFF
+        does not remove records stored by an earlier LOG run.
         """
         if self._pipeline_database is None:
             return None
@@ -1384,15 +1385,22 @@ class OperatorJobNode(OperatorNodeBase):
                     await output.send(item)
 
             hashes = [s.pipeline_hash() for s in self._input_streams]
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(
-                    self._operator.async_execute(
-                        inputs,
-                        intermediate.writer,
-                        input_pipeline_hashes=hashes,
+            operator = cast(StaticOutputOperatorPod, self._operator)
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(
+                        operator.async_execute(
+                            inputs,
+                            intermediate.writer,
+                            input_pipeline_hashes=hashes,
+                        )
                     )
-                )
-                tg.create_task(forward())
+                    tg.create_task(forward())
+            except ExceptionGroup as exc:
+                # Preserve direct operator errors; concurrent failures stay grouped.
+                if len(exc.exceptions) == 1:
+                    raise exc.exceptions[0] from exc
+                raise
 
             # TaskGroup has completed. Keep the output on the node, as execute()
             # does, and store it in LOG mode (sync DB write, post-hoc). A run
