@@ -1239,7 +1239,7 @@ every logical type identifier written by v0.3 are commitments.
 | `orcapod-sanctuary` with the `H0` manifest and code (starfix 0.4, the old array format, the old folds) | Needed only by migration and verification |
 | Detect old-layout tables and suggest migration | The count is reported from v0.3 |
 | Tier-restricted cache lookup (`match_tier`): let a user require that a cached result also match the version, signature or body | The developer wants it back; not urgent |
-| Side-effect logs: what is recorded and how a repeat is prevented | The developer wants a separate discussion; v0.3 fails explicitly |
+| Side-effect tables: a dedicated design (6.2, issue 9) | Deferred by the developer until after the tag |
 | The stored Arrow type of a plain column is not in the path (`int32` and `int64` sources share a path; the second write fails) | Fails loudly today, not silently |
 | Default `source_id` of database and Delta sources is a bare name | The source contract allows it; a better default is a separate choice |
 | Content-derived record ids (ITL-817) | Changes row keys: a data context increment of its own |
@@ -1311,9 +1311,16 @@ registration, and the versioned file keeps only the core.
    distinguish inputs (nested lists, nullable structs, booleans) and two old rows shared a
    key. Report what could not be migrated (masked arrays, classes that changed, unavailable
    sources).
-9. **Side-effect logs across data context versions.** Decide what a side-effect log records
-   and how a delivered effect is recognised after a data context change, so that v0.3's
-   explicit failure can be replaced by recognising the old completion.
+9. **Side-effect tables: a dedicated design, after the v0.3 tag** (the developer's decision).
+   Two kinds of side-effecting node exist and they disagree (6.2): `SideEffectPod` keeps its
+   own log with a key and no tags and suppresses a repeat per entry; a function pod that takes
+   the invocation context uses the function tables, stores tags, and suppresses a repeat per
+   distinct input data, so a new entry with the same data is never delivered. Decide: what
+   "already delivered" means; what a side-effect table records (tags, input hash, function
+   version, data context) so that a completion can be recognised after a data context change;
+   what the idempotency key `ctx.invocation_hash` is built from and how it is written; how a
+   reordered source avoids repeat delivery (positional record ids); whether both kinds stay;
+   and what a user can do after an explicit failure on an older store.
 10. **The stored Arrow type of a plain column and the path.** Two sources with the same
     Python type and different Arrow types (`int32` and `int64`, `float32` and `float64`, two
     timestamp units) share a path, and the second write fails after its results were partly
