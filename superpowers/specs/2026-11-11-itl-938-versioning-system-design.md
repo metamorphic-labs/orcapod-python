@@ -1107,7 +1107,7 @@ table untouched, to be migrated.
 | 5 | User class identity (PR #292); dict and set order (PR #301) | open PRs | as in 5.2 |
 | 6 | New types follow the contract: torch (PR #300), Polars values (PR #286), pandas changes (ITL-897). No label used as a version marker | held | new entries only |
 | 7 | Golden rule in CI: an existing golden value may change only together with a data context version increment, or with the identifier of the logical type it belongs to | to file | — |
-| 8 | Function version stored as a column of the result table. Checked by reading the code and by running a function declared `version="v3.7"` on main and on `61d0f18`: no column of either table holds the version or its minor part. The major part is in the path (`…/v3/…`); the full string is only in a saved job file (`"version": "v3.7"`). The body is tracked (`__pf_var_function_content_hash`), the version is not. **History:** until November 10, 2025 the cached pod wrote a tiered pod id as columns `__pod_id_version` (the full version string), `__pod_id_signature`, `__pod_id_content`, `__pod_id_git_hash`, and a lookup could be restricted to one tier (`match_tier`). The refactor `8f5e2fa69` ("major cleanup and simplification of protocols", November 10, 2025) replaced that with `get_function_variation_data()` = name, signature hash, content hash, git hash: `version` was dropped from the stored columns, `minor_version_string` was added as a property that nothing reads, and the tier-restricted lookup was left as commented-out code | to restore | result-table layout |
+| 8 | Function version stored as a column of the result table. Checked by reading the code and by running a function declared `version="v3.7"` on main and on `61d0f18`: no column of either table holds the version or its minor part. The major part is in the path (`…/v3/…`); the full string is only in a saved job file (`"version": "v3.7"`). The body is tracked (`__pf_var_function_content_hash`), the version is not. **History:** until November 10, 2025 the cached pod wrote a tiered pod id as columns `__pod_id_version` (the full version string), `__pod_id_signature`, `__pod_id_content`, `__pod_id_git_hash`, and a lookup could be restricted to one tier (`match_tier`). The refactor `8f5e2fa69` ("major cleanup and simplification of protocols", November 10, 2025) replaced that with `get_function_variation_data()` = name, signature hash, content hash, git hash: `version` was dropped from the stored columns, `minor_version_string` was added as a property that nothing reads, and the tier-restricted lookup was left as commented-out code. Decided: restore it, as `__pf_var_function_version` holding the full version string | to file | result-table layout |
 | 9 | Documentation: `CLAUDE.md` and `docs/reference/hashing.md` (what the content hash covers, the system-tag prefix, the label rule, the path rule, the data context rule) | to file | — |
 
 All of 1 to 6 land inside the single step `H0` to `H1`. After the tag, `std:v1:default` and
@@ -1120,6 +1120,7 @@ every logical type identifier written by v0.3 are commitments.
 | Migration `H0` to `H1` (ITL-913, ITL-914): match by tags, re-derive inputs, re-key; relabel where nothing changed | Old tables stay untouched and readable by the old version; nothing is lost |
 | `orcapod-sanctuary` with the `H0` manifest and code (starfix 0.4, the old array format, the old folds) | Needed only by migration and verification |
 | Detect old-layout tables and suggest migration | The count is reported from v0.3 |
+| Tier-restricted cache lookup (`match_tier`): let a user require that a cached result also match the version, signature or body | The developer wants it back; not urgent |
 | Side-effect logs: what is recorded and how a repeat is prevented | The developer wants a separate discussion; v0.3 fails explicitly |
 | The stored Arrow type of a plain column is not in the path (`int32` and `int64` sources share a path; the second write fails) | Fails loudly today, not silently |
 | Default `source_id` of database and Delta sources is a bare name | The source contract allows it; a better default is a separate choice |
@@ -1194,7 +1195,10 @@ file or section), and the versioned file keeps only the core.
     the schema hash should cover the Arrow type.
 11. **Default `source_id` for database and Delta sources.** A bare table or directory name is
     not unique; decide a default address that is.
-12. **Documentation of the versioning system.** One reference page: the path rule, the data
+12. **Tier-restricted cache lookup.** Restore the option, lost in `8f5e2fa69`, to return a
+    cached result only when it also matches a chosen tier: version, signature, body or git
+    commit. The result cache already accepts extra constraints; no caller passes them.
+13. **Documentation of the versioning system.** One reference page: the path rule, the data
     context, logical type identifiers, labels, and what a user sees after an upgrade.
 
 ## Part 9. Decisions
