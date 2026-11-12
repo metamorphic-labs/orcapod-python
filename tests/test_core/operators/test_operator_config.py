@@ -166,11 +166,13 @@ class TestPolarsFilterConfig:
 
 class TestDropNullRowsConfig:
     def test_to_config(self):
+        """The config holds the sorted unique names."""
         config = DropNullRows(["y", "x", "y"]).to_config()
         assert config["class_name"] == "DropNullRows"
         assert config["config"] == {"columns": ["x", "y"]}
 
     def test_round_trip(self):
+        """``from_config(to_config())`` gives an operator with the same hashes."""
         op = DropNullRows(["y", "x"])
         restored = DropNullRows.from_config(op.to_config())
         assert isinstance(restored, DropNullRows)
@@ -179,6 +181,7 @@ class TestDropNullRowsConfig:
         assert restored.pipeline_hash() == op.pipeline_hash()
 
     def test_registered_for_pipeline_loading(self):
+        """Pipeline loading resolves the operator by its class name."""
         from orcapod.pipeline.serialization import resolve_operator_from_config
 
         op = DropNullRows(["y", "x"])

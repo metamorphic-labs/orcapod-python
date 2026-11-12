@@ -366,7 +366,7 @@ FunctionNode.
 
 | | Operator | Function Pod |
 |---|---|---|
-| Inspects data content | Never | Yes |
+| Inspects data content | Never, except filters (see below) | Yes |
 | Inspects / uses tags | Yes | No |
 | Can rename columns | Yes | No |
 | Synthesizes new values | No | Yes |

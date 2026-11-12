@@ -90,6 +90,12 @@ class DropNullRows(UnaryOperator):
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
+        """Return the operator's identity: its class name and the set of column names.
+
+        Returns:
+            A ``(class_name, columns)`` tuple, where ``columns`` is the sorted
+            tuple of unique names.
+        """
         return (self.__class__.__name__, self.columns)
 
     def to_config(self) -> dict[str, Any]:

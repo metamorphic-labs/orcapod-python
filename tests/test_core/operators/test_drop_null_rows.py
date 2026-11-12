@@ -57,6 +57,7 @@ def readings(nullable: Sequence[str] = ("x", "y")) -> ArrowTableSource:
 
 
 def _ids(stream: StreamProtocol) -> list[Any]:
+    """Return the ``id`` column of ``stream`` as a list, in row order."""
     return stream.as_table().column("id").to_pylist()
 
 
@@ -64,6 +65,7 @@ def _ids(stream: StreamProtocol) -> list[Any]:
 
 
 def test_drops_rows_where_the_column_is_null() -> None:
+    """Rows whose named column is null are dropped; the others pass through."""
     result = DropNullRows("x")(readings())
     assert result.as_table().to_pylist() == [
         {"id": 1, "x": 10, "y": 1.5, "note": "a"},
@@ -73,10 +75,12 @@ def test_drops_rows_where_the_column_is_null() -> None:
 
 
 def test_every_named_column_must_be_non_null() -> None:
+    """With several names, a row survives only if all of them are non-null."""
     assert _ids(DropNullRows(["x", "y"])(readings())) == [1, 4]
 
 
 def test_row_order_is_preserved() -> None:
+    """Surviving rows keep the input order; nothing is sorted."""
     source = _source(
         {
             "id": pa.array([4, 1, 3, 2], pa.int16()),
@@ -88,6 +92,7 @@ def test_row_order_is_preserved() -> None:
 
 
 def test_nan_is_not_null() -> None:
+    """A NaN is a value: its row survives and the column still becomes non-nullable."""
     source = _source(
         {
             "id": pa.array([1, 2, 3], pa.int16()),
@@ -107,6 +112,7 @@ def test_nan_is_not_null() -> None:
 
 
 def test_output_schema_narrows_only_the_named_columns() -> None:
+    """``output_schema()`` reports ``T`` for the named column and leaves the rest."""
     source = readings()
     assert source.output_schema()[1] == {
         "x": int | None,
@@ -119,6 +125,7 @@ def test_output_schema_narrows_only_the_named_columns() -> None:
 
 
 def test_table_narrows_only_the_named_columns() -> None:
+    """Only the named field loses its nullable flag; widths and other flags are kept."""
     source = readings()
     before = source.as_table(columns=ALL).schema
     after = DropNullRows("x")(source).as_table(columns=ALL).schema
@@ -133,16 +140,18 @@ def test_table_narrows_only_the_named_columns() -> None:
 
 
 def test_schema_prediction_matches_the_computed_stream() -> None:
+    """The predicted schema equals the schema of the computed stream."""
     source = readings()
     op = DropNullRows(["x", "id"])
     for config in ({}, {"system_tags": True}, {"source": True, "system_tags": True}):
         # Non-public on purpose: a prediction is verified against the static result.
-        computed = op.unary_static_process(source).output_schema(columns=config)
+        computed = op.static_process(source).output_schema(columns=config)
         assert op(source).output_schema(columns=config) == computed
         assert op.output_schema(source, columns=config) == computed
 
 
 def test_zero_surviving_rows_keep_the_narrowed_types() -> None:
+    """A result with no rows has the schema of a non-empty result."""
     source = _source(
         {
             "id": pa.array([1, 2], pa.int16()),
@@ -170,6 +179,7 @@ def test_zero_surviving_rows_keep_the_narrowed_types() -> None:
 
 
 def test_already_non_nullable_column_is_a_no_op() -> None:
+    """Naming a non-nullable column changes no schema, row or hash."""
     source = _source(
         {
             "id": pa.array([1, 2], pa.int16()),
@@ -185,6 +195,7 @@ def test_already_non_nullable_column_is_a_no_op() -> None:
 
 
 def test_applying_twice_equals_applying_once() -> None:
+    """The operator is idempotent."""
     once = DropNullRows("x")(readings())
     twice = DropNullRows("x")(once)
     assert twice.as_table(columns=ALL) == once.as_table(columns=ALL)
@@ -208,6 +219,7 @@ def keyed(nullable: Sequence[str] = ("site", "x")) -> ArrowTableSource:
 
 
 def test_tag_column_is_narrowed() -> None:
+    """A named tag column is tested and narrowed like a data column."""
     source = keyed()
     assert source.output_schema()[0] == {"site": str | None, "id": int}
     result = DropNullRows("site")(source)
@@ -222,6 +234,7 @@ def test_tag_column_is_narrowed() -> None:
 
 
 def test_tag_and_data_columns_in_one_call() -> None:
+    """Tag and data columns can be named together."""
     result = DropNullRows(["x", "site"])(keyed())
     assert _ids(result) == [1]
     assert result.output_schema() == ({"site": str, "id": int}, {"x": int})
@@ -263,6 +276,7 @@ def test_narrowed_nullable_key_joins_with_a_non_nullable_key() -> None:
 
 
 def test_stream_without_tag_columns() -> None:
+    """A stream with no tag columns is filtered and narrowed the same way."""
     source = _source(
         {
             "x": pa.array([1, None, 3], pa.int8()),
@@ -283,6 +297,7 @@ POINT = pa.struct([pa.field("a", pa.int8()), pa.field("b", pa.large_string())])
 
 
 def nested() -> ArrowTableSource:
+    """A source with a nullable list column and a nullable struct column."""
     return _source(
         {
             "id": pa.array([1, 2, 3, 4], pa.int16()),
@@ -297,6 +312,7 @@ def nested() -> ArrowTableSource:
 
 
 def test_only_the_top_level_value_is_tested_for_a_list() -> None:
+    """A null list is null; an empty list and a list holding nulls are not."""
     result = DropNullRows("items")(nested())
     # A list holding a null and an empty list are not null lists.
     assert result.as_table().column("items").to_pylist() == [[1, None], [], [4]]
@@ -309,6 +325,7 @@ def test_only_the_top_level_value_is_tested_for_a_list() -> None:
 
 
 def test_only_the_top_level_value_is_tested_for_a_struct() -> None:
+    """A null struct is null; a struct whose fields are null is not."""
     result = DropNullRows("point")(nested())
     # A struct whose children are all null is not a null struct.
     assert _ids(result) == [1, 2, 4]
@@ -318,6 +335,7 @@ def test_only_the_top_level_value_is_tested_for_a_struct() -> None:
 
 
 def logical() -> DictSource:
+    """A source with nullable ``Path`` and ``numpy.ndarray`` columns."""
     return DictSource(
         data=[
             {"k": "a", "p": Path("/a"), "arr": np.arange(3)},
@@ -330,6 +348,7 @@ def logical() -> DictSource:
 
 
 def test_logical_columns_keep_their_logical_type() -> None:
+    """A logical column keeps its extension type and becomes non-nullable."""
     source = logical()
     before = source.as_table().schema
     assert source.output_schema()[1] == {
@@ -356,11 +375,13 @@ def test_logical_columns_keep_their_logical_type() -> None:
 
 
 def test_missing_column_is_an_input_validation_error() -> None:
+    """A name that is not a column of the stream is refused at call time."""
     with pytest.raises(InputValidationError, match="nope"):
         DropNullRows(["x", "nope"])(readings())
 
 
 def test_system_and_source_columns_cannot_be_named() -> None:
+    """System-tag and source-info columns are not tag or data columns."""
     source = readings()
     hidden = [
         n
@@ -374,6 +395,7 @@ def test_system_and_source_columns_cannot_be_named() -> None:
 
 
 def test_no_column_is_an_error_at_construction() -> None:
+    """An empty collection of names is refused when the operator is built."""
     with pytest.raises(ValueError, match="at least one"):
         DropNullRows([])
 
@@ -387,6 +409,7 @@ def test_no_column_is_an_error_at_construction() -> None:
     ids=["list", "tuple", "set", "reversed", "duplicate", "frozenset"],
 )
 def test_identity_is_the_set_of_names(columns: Any) -> None:
+    """Container type, order and duplicates do not change the operator's hashes."""
     reference = DropNullRows(["x", "y"])
     op = DropNullRows(columns)
     assert op.columns == ("x", "y")
@@ -398,11 +421,13 @@ def test_identity_is_the_set_of_names(columns: Any) -> None:
 
 
 def test_a_bare_name_is_one_column() -> None:
+    """A string is one column name, never a collection of characters."""
     assert DropNullRows("note").columns == ("note",)
     assert DropNullRows("x").content_hash() == DropNullRows(["x"]).content_hash()
 
 
 def test_different_names_are_different_identities() -> None:
+    """Operators over different names hash differently, as do their outputs."""
     source = readings()
     assert DropNullRows("x").content_hash() != DropNullRows("y").content_hash()
     assert DropNullRows("x").content_hash() != DropNullRows(["x", "y"]).content_hash()
@@ -414,6 +439,7 @@ def test_different_names_are_different_identities() -> None:
 
 
 def test_the_caller_s_collection_is_not_kept_or_mutated() -> None:
+    """The operator copies the names; later changes to the list do not reach it."""
     names = ["y", "x"]
     op = DropNullRows(names)
     names.append("z")
@@ -451,6 +477,7 @@ def test_narrowed_rows_hash_as_rows_declared_non_nullable() -> None:
 
 
 def test_narrowing_a_tag_changes_the_tag_hash_only() -> None:
+    """Narrowing a tag column changes the row's tag hash and not its data hash."""
     source = keyed()
     input_rows = {tag["id"]: (tag, data) for tag, data in source.iter_data()}
     for tag, data in DropNullRows("site")(source).iter_data():
@@ -460,6 +487,7 @@ def test_narrowing_a_tag_changes_the_tag_hash_only() -> None:
 
 
 def test_system_tags_and_source_info_pass_through() -> None:
+    """System-tag and source-info columns keep their names, types and values."""
     source = readings()
     before = source.as_table(columns=ALL)
     after = DropNullRows(["x", "y"])(source).as_table(columns=ALL)
@@ -482,6 +510,7 @@ def test_system_tags_and_source_info_pass_through() -> None:
 
 
 def test_the_input_stream_is_not_changed() -> None:
+    """Running the operator leaves the input stream's schema and rows as they were."""
     source = readings()
     schema = source.as_table(columns=ALL).schema
     rows = source.as_table(columns=ALL).to_pylist()
@@ -494,6 +523,7 @@ def test_the_input_stream_is_not_changed() -> None:
 
 
 def test_stream_method_equals_the_operator() -> None:
+    """``stream.drop_null_rows`` gives the operator's rows and hashes."""
     source = readings()
     by_method = source.drop_null_rows(["x", "y"])
     by_operator = DropNullRows(["x", "y"])(source)
@@ -513,6 +543,7 @@ def double_x(x: int) -> int:
 
 
 def test_pod_with_a_non_optional_parameter_runs_only_after_the_operator() -> None:
+    """A pod taking a plain ``int`` refuses ``int | None`` and runs on the narrowed stream."""
     source = _source(
         {
             "id": pa.array([1, 2, 3], pa.int16()),
@@ -531,6 +562,7 @@ def test_pod_with_a_non_optional_parameter_runs_only_after_the_operator() -> Non
 
 
 def test_join_after_the_operator() -> None:
+    """A narrowed stream joins, and the joined column stays non-nullable."""
     weights = _source(
         {
             "id": pa.array([1, 2, 3, 4], pa.int16()),

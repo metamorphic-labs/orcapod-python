@@ -349,7 +349,8 @@ FunctionNode.
 
 ### Strict operator / function pod boundary
 
-Operators: inspect tags (never data content), can rename columns, cannot synthesize values.
+Operators: inspect tags (never data content, except filters; see below), can rename columns,
+cannot synthesize values.
 Function Pods: inspect data content (never tags), synthesize new values, cached by content.
 
 Filters are the operators that read data columns (ITL-943): PolarsFilter evaluates its
