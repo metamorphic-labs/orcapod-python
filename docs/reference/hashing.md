@@ -486,7 +486,7 @@ A `polars.DataFrame` or `polars.Series` is a value-hashed logical type
 (`PolarsDataFrameHandler`, `PolarsSeriesHandler`; the algorithm is defined in
 `orcapod.logical_types.polars_type`). Inside a table its cell token is, like every
 value-hashed type's (see [the hash label rule](#the-hash-label-rule)),
-`b"polars.dataframe;7b2276657273696f6e223a317d::" + digest`: the logical type's identifier,
+`b"orcapod.polars.dataframe;7b2276657273696f6e223a317d::" + digest`: the logical type's identifier,
 then the digest, without the label.
 
 Storage and hashing are separate. The value is stored with Polars' own `write_ipc`; the

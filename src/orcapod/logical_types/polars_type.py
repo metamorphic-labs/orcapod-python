@@ -567,9 +567,9 @@ class LogicalPolarsDataFrame(BaseLogicalType):
     Stores frames as Arrow ``large_binary`` holding what Polars' ``write_ipc`` writes (see
     the module docstring for the pinned settings and the rejected dtypes).
 
-    The extension name ``"polars.dataframe"`` is library-qualified, following the
-    ``"pandas.dataframe"`` precedent: it names the Python type users
-    annotate with, so a stored Arrow schema documents itself.
+    The extension name is ``"orcapod.polars.dataframe"``: ``orcapod.`` followed by the
+    library and the type, lower case (developer's decision, November 12, 2026), so the name
+    stays in Orcapod's namespace and still says which Python type a stored column holds.
 
     Example:
         >>> lt = LogicalPolarsDataFrame()
@@ -579,22 +579,22 @@ class LogicalPolarsDataFrame(BaseLogicalType):
     """
 
     _arrow_ext_class = make_arrow_extension_type(
-        "polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA
+        "orcapod.polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA
     )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+        "orcapod.polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA.decode()
     )
     _polars_ext: pl.BaseExtension | None = None
 
-    logical_type_name: str = "polars.dataframe"
+    logical_type_name: str = "orcapod.polars.dataframe"
     python_type: type = pl.DataFrame
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
         """Return the cached Arrow extension type for ``pl.DataFrame``.
 
         Returns:
-            A ``pa.ExtensionType`` instance with extension name ``"polars.dataframe"`` and
+            A ``pa.ExtensionType`` instance with extension name ``"orcapod.polars.dataframe"`` and
             storage type ``pa.large_binary()``.
         """
         if LogicalPolarsDataFrame._arrow_ext is None:
@@ -606,7 +606,7 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         """Return the cached Polars extension type for ``pl.DataFrame``.
 
         Returns:
-            A ``pl.BaseExtension`` instance registered under ``"polars.dataframe"``.
+            A ``pl.BaseExtension`` instance registered under ``"orcapod.polars.dataframe"``.
         """
         if LogicalPolarsDataFrame._polars_ext is None:
             ext_class = LogicalPolarsDataFrame._polars_ext_class
@@ -659,7 +659,7 @@ class LogicalPolarsSeries(BaseLogicalType):
     ``LogicalPolarsDataFrame``, so its name, dtype and values round-trip exactly
     under the same rules.
 
-    The extension name ``"polars.series"`` is library-qualified, like ``"pandas.series"``.
+    The extension name is ``"orcapod.polars.series"``, by the same rule as the frame's.
 
     Example:
         >>> lt = LogicalPolarsSeries()
@@ -670,22 +670,22 @@ class LogicalPolarsSeries(BaseLogicalType):
     """
 
     _arrow_ext_class = make_arrow_extension_type(
-        "polars.series", pa.large_binary(), _IDENTIFIER_METADATA
+        "orcapod.polars.series", pa.large_binary(), _IDENTIFIER_METADATA
     )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "polars.series", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+        "orcapod.polars.series", pa.large_binary(), _IDENTIFIER_METADATA.decode()
     )
     _polars_ext: pl.BaseExtension | None = None
 
-    logical_type_name: str = "polars.series"
+    logical_type_name: str = "orcapod.polars.series"
     python_type: type = pl.Series
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
         """Return the cached Arrow extension type for ``pl.Series``.
 
         Returns:
-            A ``pa.ExtensionType`` instance with extension name ``"polars.series"`` and
+            A ``pa.ExtensionType`` instance with extension name ``"orcapod.polars.series"`` and
             storage type ``pa.large_binary()``.
         """
         if LogicalPolarsSeries._arrow_ext is None:
@@ -697,7 +697,7 @@ class LogicalPolarsSeries(BaseLogicalType):
         """Return the cached Polars extension type for ``pl.Series``.
 
         Returns:
-            A ``pl.BaseExtension`` instance registered under ``"polars.series"``.
+            A ``pl.BaseExtension`` instance registered under ``"orcapod.polars.series"``.
         """
         if LogicalPolarsSeries._polars_ext is None:
             ext_class = LogicalPolarsSeries._polars_ext_class

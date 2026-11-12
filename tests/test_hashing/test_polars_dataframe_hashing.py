@@ -552,7 +552,10 @@ class TestLogicalTypeIdentifier:
 
     @pytest.mark.parametrize(
         ("python_type", "name"),
-        [(pl.DataFrame, "polars.dataframe"), (pl.Series, "polars.series")],
+        [
+            (pl.DataFrame, "orcapod.polars.dataframe"),
+            (pl.Series, "orcapod.polars.series"),
+        ],
     )
     def test_identifier(self, python_type: type, name: str) -> None:
         converter = get_default_context().type_converter

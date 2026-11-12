@@ -123,14 +123,14 @@ class TestLogicalPolarsDataFrameProtocol:
         assert isinstance(LogicalPolarsDataFrame(), LogicalTypeProtocol)
 
     def test_logical_type_name(self) -> None:
-        assert LogicalPolarsDataFrame().logical_type_name == "polars.dataframe"
+        assert LogicalPolarsDataFrame().logical_type_name == "orcapod.polars.dataframe"
 
     def test_python_type(self) -> None:
         assert LogicalPolarsDataFrame().python_type is pl.DataFrame
 
     def test_arrow_extension_name(self) -> None:
         ext = LogicalPolarsDataFrame().get_arrow_extension_type()
-        assert ext.extension_name == "polars.dataframe"
+        assert ext.extension_name == "orcapod.polars.dataframe"
 
     def test_arrow_storage_type_is_large_binary(self) -> None:
         ext = LogicalPolarsDataFrame().get_arrow_extension_type()
@@ -138,7 +138,7 @@ class TestLogicalPolarsDataFrameProtocol:
 
     def test_polars_extension_name(self) -> None:
         ext = LogicalPolarsDataFrame().get_polars_extension_type()
-        assert ext.ext_name() == "polars.dataframe"
+        assert ext.ext_name() == "orcapod.polars.dataframe"
 
     def test_extension_types_are_cached(self) -> None:
         a, b = LogicalPolarsDataFrame(), LogicalPolarsDataFrame()
@@ -293,12 +293,12 @@ class TestLogicalPolarsSeries:
     def test_protocol_and_names(self) -> None:
         lt = LogicalPolarsSeries()
         assert isinstance(lt, LogicalTypeProtocol)
-        assert lt.logical_type_name == "polars.series"
+        assert lt.logical_type_name == "orcapod.polars.series"
         assert lt.python_type is pl.Series
         ext = lt.get_arrow_extension_type()
-        assert ext.extension_name == "polars.series"
+        assert ext.extension_name == "orcapod.polars.series"
         assert ext.storage_type == pa.large_binary()
-        assert lt.get_polars_extension_type().ext_name() == "polars.series"
+        assert lt.get_polars_extension_type().ext_name() == "orcapod.polars.series"
 
     @pytest.mark.parametrize("name", list(_COLUMN_CASES))
     def test_round_trip_is_exact(self, name: str) -> None:

@@ -141,7 +141,7 @@ class TestPodValues:
 
 
 def _stored_frames(column: pa.ChunkedArray[Any]) -> list[pl.DataFrame]:
-    """Decode a stored ``polars.dataframe`` column with its logical type."""
+    """Decode a stored ``orcapod.polars.dataframe`` column with its logical type."""
     logical_type = LogicalPolarsDataFrame()
     assert column.type == logical_type.get_arrow_extension_type()
     extension_array = cast("pa.ExtensionArray[Any]", column.combine_chunks())

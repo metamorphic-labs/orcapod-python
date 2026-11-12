@@ -207,12 +207,12 @@ def test_logical_type_registration_is_unchanged_by_the_move() -> None:
         "orcapod.file",
         "orcapod.ndarray",
         "orcapod.path",
+        "orcapod.polars.dataframe",
+        "orcapod.polars.series",
         "orcapod.upath",
         "orcapod.uuid",
         "pandas.dataframe",
         "pandas.series",
-        "polars.dataframe",
-        "polars.series",
     ]
     assert sorted(registry._category_factories) == [
         "list",

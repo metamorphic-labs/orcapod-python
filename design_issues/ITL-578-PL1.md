@@ -8,8 +8,8 @@
 `@function_pod(output_keys="df") def f(n: int) -> pl.DataFrame` raised at decoration:
 `TypeError: No LogicalType or LogicalTypeFactory registered for <class 'polars.dataframe.frame.DataFrame'>`.
 
-**Fix:** `LogicalPolarsDataFrame` (`polars.dataframe`) and `LogicalPolarsSeries`
-(`polars.series`, a one-column frame) store the value in `large_binary` with Polars' own
+**Fix:** `LogicalPolarsDataFrame` (`orcapod.polars.dataframe`) and `LogicalPolarsSeries`
+(`orcapod.polars.series`, a one-column frame) store the value in `large_binary` with Polars' own
 `write_ipc` (Polars' defaults, pinned) and read it with `read_ipc` from memory (developer's
 decision, November 12, 2026: storage is the library's own serialization, the hash is defined
 separately from the value's content). Every supported dtype reads back exactly; chunking and

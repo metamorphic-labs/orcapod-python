@@ -517,7 +517,7 @@ def test_builtin_dataframe_round_trip(
 def test_builtin_polars_dataframe_round_trip(
     storage_backend: _StorageBackend, tmp_path: Path
 ) -> None:
-    """pl.DataFrame round-trips through storage with extension name ``polars.dataframe``.
+    """pl.DataFrame round-trips through storage with extension name ``orcapod.polars.dataframe``.
 
     The frame read back has exactly the schema it was written with (ITL-578).
     """
@@ -549,7 +549,7 @@ def test_builtin_polars_dataframe_round_trip(
     assert hasattr(field.type, "extension_name"), (
         f"Expected extension type on field 'frame', got plain type {field.type!r}"
     )
-    assert field.type.extension_name == "polars.dataframe"
+    assert field.type.extension_name == "orcapod.polars.dataframe"
 
     rows = read_converter.arrow_table_to_python_dicts(result)
     assert len(rows) == 1
