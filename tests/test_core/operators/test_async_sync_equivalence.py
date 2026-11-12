@@ -480,19 +480,43 @@ def test_reducing_operator_names_system_tags_after_its_input(
             assert all(name.endswith(f"::{suffix}") for name in names), names
 
 
+@CASE
+def test_async_execute_requires_input_pipeline_hashes(case: Case) -> None:
+    """Every operator's ``async_execute`` takes the input pipeline hashes, always.
+
+    Without them a barrier path would name system tags after a schema-only hash,
+    unlike the sync path (ITL-906), so there is no default to fall back on.
+    """
+    channels: list[Channel[Row]] = [Channel() for _ in case.make_sources()]
+    output: Channel[Row] = Channel()
+    with pytest.raises(TypeError, match="input_pipeline_hashes"):
+        case.make_op().async_execute(  # pyright: ignore[reportCallIssue, reportUnusedCoroutine]  # the missing keyword is the point
+            [channel.reader for channel in channels], output.writer
+        )
+
+
 @pytest.mark.parametrize(
     "case",
     [
         c
         for c in CASES
         if c.label
-        in ("merge_join", "batch_2", "batch_all", "group_by", "polars_filter")
+        in (
+            "join_2",
+            "join_3",
+            "merge_join",
+            "batch_2",
+            "batch_all",
+            "group_by",
+            "polars_filter",
+        )
     ],
     ids=lambda c: c.label,
 )
 def test_barrier_async_rejects_wrong_number_of_pipeline_hashes(case: Case) -> None:
-    """A barrier ``async_execute`` needs one input pipeline hash per input channel."""
+    """An ``async_execute`` that uses the hashes needs one per input channel."""
     sources = case.make_sources()
+    n_inputs = len(sources)
 
     async def run() -> None:
         channels: list[Channel[Row]] = [Channel(buffer_size=64) for _ in sources]
@@ -507,7 +531,8 @@ def test_barrier_async_rejects_wrong_number_of_pipeline_hashes(case: Case) -> No
             input_pipeline_hashes=[s.pipeline_hash() for s in sources] * 2,
         )
 
-    with pytest.raises(ValueError, match="must match inputs length"):
+    message = rf"length \({2 * n_inputs}\) must match inputs length \({n_inputs}\)"
+    with pytest.raises(ValueError, match=message):
         asyncio.run(run())
 
 
