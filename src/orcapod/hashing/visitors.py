@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 import typing
 from typing import TYPE_CHECKING, Any
 
+from orcapod.logical_types.identifier import arrow_type_identifier
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -276,10 +277,10 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
                     virtual_list_type, storage_value
                 )
 
-                # Fold the outer extension name into the result, the same way the
-                # scalar path does.  This ensures list[T] and set[T] with identical
+                # Fold the outer type's identifier (extension name and metadata)
+                # into the result, the same way the scalar path does.  This ensures list[T] and set[T] with identical
                 # contents produce distinct hashes.
-                type_name = extension_type.extension_name.replace(".", ":")
+                type_name = arrow_type_identifier(extension_type).text
                 combined = (
                     type_name.encode("utf-8")
                     + b"::"
@@ -302,10 +303,11 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         python_obj = self._type_converter.storage_to_python(storage_value, python_type)
         content_hash = self._python_hasher.hash_object(python_obj)
 
-        # Encode as binary: "<type_name>::<method>:<digest>"
-        # Dots in the extension name → colons (e.g. "orcapod.path" → "orcapod:path").
-        # The "::" separator is unambiguous because to_prefixed_digest() uses only ":".
-        type_name = extension_type.extension_name.replace(".", ":")
+        # Encode as binary: "<identifier text>::<method>:<digest>", where the
+        # identifier text is "<extension name>;<hex of extension metadata>"
+        # (``LogicalTypeIdentifier.text``): the cell commits to the whole
+        # identifier of its logical type, so a changed identifier moves the row hash.
+        type_name = arrow_type_identifier(extension_type).text
         hash_bytes = (
             type_name.encode("utf-8") + b"::" + content_hash.to_prefixed_digest()
         )

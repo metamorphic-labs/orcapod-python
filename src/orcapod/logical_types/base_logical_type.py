@@ -11,7 +11,27 @@ class BaseLogicalType:
     Provides default ``NotImplementedError`` implementations for structural
     projection methods. Logical types that support ``pick`` or ``index``
     override these methods.
+
+    Subclasses implement ``get_arrow_extension_type``; its extension name and
+    serialized metadata are the type's identifier.
     """
+
+    def readable_extension_metadata(self) -> tuple[bytes, ...]:
+        """Return every stored extension metadata value this type can read.
+
+        The default is the type's own metadata, plus the ``also_reads`` values
+        when the Arrow extension type was built by ``make_arrow_extension_type``.
+        Override to declare older identifiers whose stored layout this version
+        still decodes.
+
+        Returns:
+            The readable metadata values, the current one first.
+        """
+        extension_type = self.get_arrow_extension_type()  # pyright: ignore[reportAttributeAccessIssue]
+        declared = getattr(extension_type, "readable_metadata", None)
+        if declared is not None:
+            return tuple(declared)
+        return (extension_type.__arrow_ext_serialize__(),)
 
     def pick_field(self, key: str) -> DataType:
         """Return the Python type of field ``key``.

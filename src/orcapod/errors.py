@@ -1,5 +1,8 @@
 from collections.abc import Mapping
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
+
+if TYPE_CHECKING:
+    from orcapod.logical_types.identifier import LogicalTypeIdentifier
 
 
 class InputValidationError(Exception):
@@ -464,3 +467,50 @@ class SideEffectLogHashLabelError(StoreError):
             "using the Orcapod version that wrote this log; the logged deliveries are "
             "left in place and can be migrated to the current label later."
         )
+
+
+class LogicalTypeIdentifierError(ValueError):
+    """A stored column's logical type identifier cannot be read by this installation.
+
+    A logical type is identified by its Arrow extension name and extension
+    metadata. This error is raised when a stored column carries a name this
+    installation knows with metadata the registered logical type does not
+    declare as readable. Orcapod never falls back to the storage type or to the
+    current version of the type, because that could misread the values.
+
+    Attributes:
+        stored: The identifier found with the stored column.
+        readable: The extension metadata values this installation reads for
+            that extension name.
+        column: The column name, when the raising code knows it.
+    """
+
+    def __init__(
+        self,
+        stored: "LogicalTypeIdentifier",
+        readable: tuple[bytes, ...],
+        column: str | None = None,
+    ) -> None:
+        self.stored = stored
+        self.readable = readable
+        self.column = column
+        subject = f"Column {column!r}" if column is not None else "A column"
+        readable_text = ", ".join(repr(m) for m in readable) or "nothing"
+        super().__init__(
+            f"{subject} was stored as logical type {stored.name!r} with extension "
+            f"metadata {stored.metadata!r}, which this installation cannot read. "
+            f"For {stored.name!r} it reads extension metadata: {readable_text}. "
+            f"The data was probably written by a different version of the type; "
+            f"read it with a version that supports that identifier."
+        )
+
+    def for_column(self, column: str) -> "LogicalTypeIdentifierError":
+        """Return the same error naming ``column``.
+
+        Args:
+            column: The name of the column the identifier was stored with.
+
+        Returns:
+            A new ``LogicalTypeIdentifierError`` with ``column`` set.
+        """
+        return LogicalTypeIdentifierError(self.stored, self.readable, column)

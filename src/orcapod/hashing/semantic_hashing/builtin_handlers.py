@@ -27,6 +27,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
 
@@ -112,7 +113,7 @@ class TypeObjectHandler:
         if self._type_converter is not None:
             lt = self._type_converter.get_logical_type(obj)
             if lt is not None:
-                return f"type:{lt.logical_type_name}"
+                return f"type:{logical_type_identifier(lt).text}"
         return f"type:{canonical_type_name(obj)}"
 
 

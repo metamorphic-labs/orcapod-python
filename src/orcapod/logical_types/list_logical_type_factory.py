@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 LIST_CATEGORY = "list"
 SET_CATEGORY = "set"
 
+LIST_WRAPPER_VERSION = 1
+"""Version of the list/set wrapper's own stored layout, written as ``"version"``."""
+
 
 class ListLogicalType(BaseLogicalType):
     """Logical type for ``list[T]`` or ``set[T]`` where T maps to an Arrow extension type.
@@ -87,17 +90,31 @@ class ListLogicalType(BaseLogicalType):
         element_ext_type = element_logical_type.get_arrow_extension_type()
         element_ext_name = element_ext_type.extension_name
         raw_meta_bytes: bytes = element_ext_type.__arrow_ext_serialize__()
-        element_ext_metadata: str | None = (
-            raw_meta_bytes.decode("utf-8") if raw_meta_bytes else None
-        )
 
         category = SET_CATEGORY if is_set else LIST_CATEGORY
-        meta_dict = {
-            "category": category,
-            "element_ext_name": element_ext_name,
-            "element_ext_metadata": element_ext_metadata,
-        }
-        self._metadata_bytes: bytes = json.dumps(meta_dict).encode("utf-8")
+
+        def _wrapper_metadata(element_metadata: bytes, versioned: bool) -> bytes:
+            meta_dict: dict[str, Any] = {
+                "category": category,
+                "element_ext_name": element_ext_name,
+                "element_ext_metadata": (
+                    element_metadata.decode("utf-8") if element_metadata else None
+                ),
+            }
+            if versioned:
+                meta_dict["version"] = LIST_WRAPPER_VERSION
+            return json.dumps(meta_dict).encode("utf-8")
+
+        self._metadata_bytes: bytes = _wrapper_metadata(raw_meta_bytes, True)
+        # A stored wrapper is readable when its element is: under the current
+        # wrapper metadata, or under the form written before identifiers
+        # existed (ITL-935), which had no "version" key and the same layout.
+        element_readable = tuple(element_logical_type.readable_extension_metadata())
+        self._also_reads: tuple[bytes, ...] = tuple(
+            _wrapper_metadata(element_metadata, versioned)
+            for versioned in (True, False)
+            for element_metadata in element_readable
+        )
 
         # Derive storage type: large_list of the element's storage type (not extension type).
         element_storage = element_ext_type.storage_type
@@ -142,7 +159,7 @@ class ListLogicalType(BaseLogicalType):
         - ``extension_name``: ``"list[<element_ext_name>]"`` or ``"set[...]"``
         - ``storage_type``: ``pa.large_list(<element_storage_type>)``
         - Serialized metadata: JSON with ``category``, ``element_ext_name``,
-          and ``element_ext_metadata``
+          ``element_ext_metadata`` and ``version``
 
         Returns:
             A cached ``pa.ExtensionType`` instance.
@@ -152,6 +169,7 @@ class ListLogicalType(BaseLogicalType):
                 self._logical_type_name,
                 self._storage_type,
                 metadata=self._metadata_bytes,
+                also_reads=self._also_reads,
             )
             self._arrow_ext = arrow_ext_class()
         return self._arrow_ext

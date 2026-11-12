@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import xxhash
 from upath import UPath
 
+from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.types import ContentHash, PathLike
 from orcapod.utils.canonical_type_names import stabilize_type_names
 
@@ -74,7 +75,7 @@ def canonical_annotation_str(
     if type_converter is not None and isinstance(annotation, type):
         lt = type_converter.get_logical_type(annotation)
         if lt is not None:
-            return lt.logical_type_name
+            return logical_type_identifier(lt).text
 
     # Union types (PEP 604 X | Y and typing.Union): sort members for order-independence
     if is_union_annotation(annotation):

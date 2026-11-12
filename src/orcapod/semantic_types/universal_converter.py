@@ -705,10 +705,15 @@ class UniversalTypeConverter:
             The Arrow extension type after registration.
 
         Raises:
+            LogicalTypeIdentifierError: If the extension name is known (or was
+                reconstructed by a factory) and ``extension_metadata`` is not one
+                of the values the logical type declares readable.
             ValueError: If metadata is missing, malformed, lacks ``"category"``, or
                 no factory is registered for the category.
         """
         import json as _json
+
+        from orcapod.logical_types.identifier import require_readable
 
         if self._logical_type_registry is None:
             raise ValueError(
@@ -721,6 +726,8 @@ class UniversalTypeConverter:
             arrow_extension_name
         )
         if lt is not None:
+            # The name is known: the stored metadata must be one the type reads.
+            require_readable(lt, extension_metadata or b"")
             return lt.get_arrow_extension_type()
 
         # Missing metadata — cannot auto-register
@@ -771,6 +778,7 @@ class UniversalTypeConverter:
         logical_type = factory.reconstruct_from_arrow(
             arrow_extension_name, storage_type, metadata_dict, converter=self
         )
+        require_readable(logical_type, extension_metadata)
         self._logical_type_registry.register_logical_type(logical_type)
         return logical_type.get_arrow_extension_type()
 
