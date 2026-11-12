@@ -39,7 +39,6 @@ RECORD_ID_COL = "_tag_record_id::abc"
 _PENDING_DICT_KEYS = pytest.mark.xfail(
     strict=True, reason="ITL-942 dict keys: fix awaiting decision"
 )
-_PENDING_F = pytest.mark.xfail(strict=True, reason="ITL-942 F: fix awaiting decision")
 _PENDING_E = pytest.mark.xfail(strict=True, reason="ITL-942 E: fix awaiting decision")
 
 
@@ -268,7 +267,6 @@ def _xy_source() -> DictSource:
 
 
 class TestColumnSelectionIdentity:
-    @_PENDING_F
     @pytest.mark.parametrize("op_cls", [SelectDataColumns, DropDataColumns])
     def test_data_column_spellings_share_identity(self, op_cls: Any) -> None:
         source = _xy_source()
@@ -277,7 +275,6 @@ class TestColumnSelectionIdentity:
         assert len({s.pipeline_hash() for s in streams}) == 1
         assert len({s.content_hash() for s in streams}) == 1
 
-    @_PENDING_F
     @pytest.mark.parametrize("op_cls", [SelectTagColumns, DropTagColumns])
     def test_tag_column_spellings_share_identity(self, op_cls: Any) -> None:
         source = _xy_source()
