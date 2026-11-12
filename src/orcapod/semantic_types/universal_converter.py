@@ -987,10 +987,20 @@ class UniversalTypeConverter:
         Round-trip guarantee:
             - ``int``       → ``nullable=False`` → ``int``
             - ``int | None`` → ``nullable=True``  → ``int | None``
+
+        Raises:
+            LogicalTypeIdentifierError: If a column (or a member of one) has the
+                extension name of a registered logical type with metadata that type
+                does not read; the error names the column.
         """
+        from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+
         fields = {}
         for field in arrow_schema:
-            python_type = self.arrow_type_to_python_type(field.type)
+            try:
+                python_type = self.arrow_type_to_python_type(field.type)
+            except LogicalTypeIdentifierError as exc:
+                raise exc.for_column(field.name) from exc
             if field.nullable and python_type is not Any:
                 python_type = python_type | None
             fields[field.name] = python_type
@@ -1351,6 +1361,11 @@ class UniversalTypeConverter:
                 arrow_type.extension_name
             )
             if lt is not None:
+                # The registered class is named only for a column whose values that
+                # class reads: never by extension name alone.
+                from orcapod.logical_types.identifier import require_readable
+
+                require_readable(lt, arrow_type.__arrow_ext_serialize__())
                 return lt.python_type
 
         # Handle basic types

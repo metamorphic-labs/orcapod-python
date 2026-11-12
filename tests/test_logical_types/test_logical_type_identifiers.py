@@ -555,6 +555,46 @@ def test_values_of_an_unreadable_identifier_are_not_decoded() -> None:
         strict.arrow_table_to_python_dicts(table)
 
 
+def test_python_type_of_an_unreadable_identifier_is_refused() -> None:
+    """Mapping an Arrow type to a Python type checks the identifier (ITL-975).
+
+    The registered class is never named by extension name alone: a schema must not
+    promise ``Thing`` for a column whose values will be refused.
+    """
+    current = _thing_logical_type(b'{"v":2}')
+    strict = _converter(_fresh_context(current))
+    table = _typed_thing_column(b'{"v":1}')
+    column_type = table.schema.field("c").type
+    # The current identifier maps to the class; having mapped it changes nothing below.
+    assert strict.arrow_type_to_python_type(current.get_arrow_extension_type()) is Thing
+
+    with pytest.raises(LogicalTypeIdentifierError):
+        strict.arrow_type_to_python_type(column_type)
+    with pytest.raises(LogicalTypeIdentifierError) as excinfo:
+        strict.arrow_schema_to_python_schema(table.schema)
+    assert "'c'" in str(excinfo.value)
+    # A member of a struct column is checked like a top-level column.
+    with pytest.raises(LogicalTypeIdentifierError):
+        strict.arrow_type_to_python_type(pa.struct([pa.field("t", column_type)]))
+    with pytest.raises(LogicalTypeIdentifierError) as excinfo:
+        strict.arrow_schema_to_python_schema(
+            pa.schema([pa.field("s", pa.struct([pa.field("t", column_type)]))])
+        )
+    assert "'s'" in str(excinfo.value)
+
+
+def test_python_type_of_a_readable_older_identifier_is_the_current_class() -> None:
+    """An older identifier the type declares readable maps to the registered class."""
+    lenient = _converter(
+        _fresh_context(_thing_logical_type(b'{"v":2}', also_reads=(b'{"v":1}',)))
+    )
+    table = _typed_thing_column(b'{"v":1}')
+
+    assert lenient.arrow_type_to_python_type(table.schema.field("c").type) is Thing
+    schema = lenient.arrow_schema_to_python_schema(table.schema)
+    assert schema["c"] == Thing | None
+
+
 def test_list_wrapper_written_before_identifiers_is_read() -> None:
     """A list column whose metadata records no element metadata is read as the current
     list type.
