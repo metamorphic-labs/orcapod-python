@@ -19,7 +19,13 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.function_node import _build_record_id_preimage
 from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import StoreError, StoreReadError, StoreWriteError
+from orcapod.errors import (
+    SideEffectLogHashLabelError,
+    StoreError,
+    StoreReadError,
+    StoreWriteError,
+)
+from orcapod.hashing.stored_hash_labels import other_arrow_label
 from orcapod.invocation import (
     InvocationContext,
     InvocationHashConfig,
@@ -793,6 +799,38 @@ class SideEffectJobNode(SideEffectNode):
         )
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
+        self._log_labels_checked = False
+
+    def _refuse_log_of_another_label(self) -> None:
+        """Refuse an invocation log holding deliveries logged under another Arrow label.
+
+        A delivery already made is found by an Arrow-derived record id, so deliveries
+        logged under another label (``arrow_v0.1``, Orcapod v0.2) would not be found and
+        every side effect would be delivered again (ITL-910). Reads the log's
+        ``record_id_hash`` values once per node instance and attached database.
+
+        Raises:
+            SideEffectLogHashLabelError: If a logged delivery carries another Arrow
+                hash label; nothing has been delivered or written then.
+        """
+        if (
+            self._log_labels_checked
+            or self._pipeline_database is None
+            or self._table_path is None
+        ):
+            return
+        current_label = self._pod.data_context.arrow_hasher.hasher_id
+        stored = self._pipeline_database.get_all_records(self._table_path)
+        if stored is not None and "record_id_hash" in stored.column_names:
+            found = other_arrow_label(stored.column("record_id_hash"), current_label)
+            if found is not None:
+                raise SideEffectLogHashLabelError(
+                    self._pipeline_database.base_path + self._table_path,
+                    found,
+                    current_label,
+                    node_label=self.label,
+                )
+        self._log_labels_checked = True
 
     # ------------------------------------------------------------------
     # DB attachment
@@ -813,6 +851,7 @@ class SideEffectJobNode(SideEffectNode):
                 or ``None`` to detach.
         """
         self._pipeline_database = pipeline_database
+        self._log_labels_checked = False
         if pipeline_database is not None:
             self._table_path = self.node_uri + (
                 f"schema:{self.pipeline_hash().to_string()}",
@@ -841,7 +880,12 @@ class SideEffectJobNode(SideEffectNode):
 
         Returns:
             List of ``(tag, data)`` tuples — the pass-through rows.
+
+        Raises:
+            SideEffectLogHashLabelError: If the invocation log holds deliveries logged
+                under another Arrow hash label; nothing is delivered then.
         """
+        self._refuse_log_of_another_label()
         results = []
         for tag, data in input_stream.iter_data():
             result = _execute_side_effect_row(
@@ -903,6 +947,7 @@ class SideEffectJobNode(SideEffectNode):
         )
 
         try:
+            self._refuse_log_of_another_label()
 
             async def process_one(tag: TagProtocol, data: DataProtocol) -> None:
                 try:

@@ -362,6 +362,31 @@ at DEBUG and does not stop for `"fail_fast"` (ITL-879); this applies to these ro
 This is the contract for now. An opt-in mode that tolerates store failures may be added
 later.
 
+### A store written by an older version
+
+Stored rows are keyed by hashes of their Arrow data, and each hash carries the label of the
+scheme that produced it: `arrow_v0.1` up to Orcapod v0.2, `arrow_v0.2` since v0.3 (see
+[Arrow Table Hash](../reference/hashing.md#9-arrow-table-hash-arrow_v02)). Rows keyed under
+another label can never match current inputs, so Orcapod **ignores** them: it does not refuse
+the store, and it does not reuse those rows.
+
+- The first run of v0.3 on a store written by v0.2 computes every input again and stores the
+  new rows in the same tables, next to the old ones.
+- Reading a node (`as_table()`, `iter_data()`, `get_all_records()`) returns the rows of the
+  current label only: nothing before that first run, one row per input after it.
+- The old rows are never changed or deleted. They stay readable with the version that wrote
+  them and are kept for a later migration. To see which labels a table holds, use
+  `stored_hash_labels` (see
+  [Stores written under another label](../reference/hashing.md#stores-written-under-another-label)).
+- When a read leaves such rows out, Orcapod logs one warning with their number:
+  `Skipped 3 rows of stored table '...': written under another hash label than the current
+  one. The rows are left in place unchanged and can be migrated later.`
+- Side-effect pods are the exception. A side effect is an external action, and deliveries
+  logged by v0.2 cannot be matched with current inputs, so running the node would deliver
+  everything a second time. Instead the node raises `SideEffectLogHashLabelError` (from
+  `orcapod.errors`, a `StoreError`) before it delivers anything. Use a fresh store for that
+  node, or keep using the version that wrote the log.
+
 ## Multiple input streams
 
 If you pass multiple streams to a function pod, they are automatically joined (using

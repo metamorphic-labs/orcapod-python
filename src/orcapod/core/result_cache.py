@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import SchemaVersionError, StoreReadError, StoreWriteError
+from orcapod.hashing.stored_hash_labels import (
+    keep_rows_hashed_under,
+    report_skipped_rows,
+)
 from orcapod.protocols.core_protocols import DataProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import constants, RESULT_DB_SCHEMA_VERSION
@@ -65,6 +69,8 @@ class ResultCache:
         self._record_path = record_path
         self._auto_flush = auto_flush
         self._ignore_schema: tuple[str, ...] | None = None
+        # Set once a read has reported the stored rows it skipped.
+        self._skipped_rows_reported = False
 
     @property
     def result_database(self) -> ArrowDatabaseProtocol:
@@ -313,11 +319,17 @@ class ResultCache:
                 ) from exc
 
     def get_all_records(
-        self, include_system_columns: bool = False
+        self, current_label: str, include_system_columns: bool = False
     ) -> "pa.Table | None":
-        """Return all cached records from the result store.
+        """Return the cached records hashed under the current Arrow hash label.
+
+        Rows whose input data hash carries another Arrow hash label (written by
+        another version of Orcapod) can never match current inputs; they stay in the
+        table and are not returned (ITL-910).
 
         Args:
+            current_label: The Arrow hash label of current input data hashes
+                (``arrow_hasher.hasher_id`` of the caller's data context).
             include_system_columns: If True, include system columns
                 (e.g. record_id) in the result.
 
@@ -330,6 +342,19 @@ class ResultCache:
         result_table = self._result_database.get_all_records(
             self._versioned_record_path, record_id_column=record_id_column
         )
-        if result_table is None or result_table.num_rows == 0:
+        if result_table is None:
+            return None
+        if constants.INPUT_DATA_HASH_COL in result_table.column_names:
+            stored_rows = result_table.num_rows
+            result_table = keep_rows_hashed_under(
+                result_table, constants.INPUT_DATA_HASH_COL, current_label
+            )
+            if result_table.num_rows < stored_rows and not self._skipped_rows_reported:
+                self._skipped_rows_reported = True
+                report_skipped_rows(
+                    self._result_database.base_path + self._versioned_record_path,
+                    stored_rows - result_table.num_rows,
+                )
+        if result_table.num_rows == 0:
             return None
         return result_table

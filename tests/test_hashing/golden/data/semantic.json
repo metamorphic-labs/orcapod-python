@@ -32,7 +32,7 @@
   "value.bytearray.binary": "semantic_v0.1:d891b13714f4aec76114361fe22ebfb829f952b88c9ad49c4afa16896612ee75",
   "value.bytes.binary": "semantic_v0.1:d891b13714f4aec76114361fe22ebfb829f952b88c9ad49c4afa16896612ee75",
   "value.bytes.empty": "semantic_v0.1:12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
-  "value.dataframe.basic": "arrow_v0.1:000001b0e17dcec7cd73f09d83119c75f39a9638089533cbf9cc478de4a79e3082cdb9",
+  "value.dataframe.basic": "arrow_v0.2:000002bac72e84776fc6d62d3928f88ec11672873c07bca9de0cc5a7689cd9675800dc",
   "value.dict.ab": "semantic_v0.1:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
   "value.dict.ba": "semantic_v0.1:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
   "value.dict.empty": "semantic_v0.1:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

@@ -34,6 +34,11 @@ from orcapod.errors import (
     StoreReadError,
     StoreWriteError,
 )
+from orcapod.hashing.stored_hash_labels import (
+    current_hash_format,
+    keep_rows_hashed_under,
+    report_skipped_rows,
+)
 from orcapod.protocols.core_protocols import (
     DataProtocol,
     StreamProtocol,
@@ -536,6 +541,10 @@ class OperatorJobNode(OperatorNodeBase):
         - **REPLAY**: skip computation, flow cached results downstream.
     """
 
+    # Set once a read has reported the stored rows it skipped (rows of another Arrow
+    # hash format); a class default so nodes rebuilt from a saved descriptor start unset.
+    _skipped_rows_reported: bool = False
+
     def __init__(
         self,
         operator: OperatorPodProtocol,
@@ -867,6 +876,41 @@ class OperatorJobNode(OperatorNodeBase):
             [self.HASH_COLUMN_NAME, constants.NODE_CONTENT_HASH_COL]
         )
 
+    def _read_stored_records(self) -> "pa.Table | None":
+        """Read this node's stored rows that the current Arrow hasher wrote.
+
+        Every read of the whole stored table goes through here. Rows are narrowed to
+        the starfix hash format of the current Arrow hasher and then to this node's
+        content hash (``_filter_by_content_hash``): the stored record hashes are hex
+        digests without a label, and their first three bytes name the format, so rows
+        written by Orcapod v0.2 (format 1, ``arrow_v0.1``) are left out and stay in
+        the table untouched (ITL-910). A later Arrow hash label that keeps the starfix
+        format could not be told apart here.
+
+        Returns:
+            The stored rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL``
+            still present, or ``None`` when the table does not exist.
+        """
+        assert self._pipeline_database is not None
+        records = self._pipeline_database.get_all_records(
+            self.node_identity_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if records is None:
+            return None
+        stored_rows = records.num_rows
+        records = keep_rows_hashed_under(
+            records,
+            self.HASH_COLUMN_NAME,
+            current_hash_format(self.data_context.arrow_hasher),
+        )
+        if records.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_skipped_rows(
+                self._pipeline_database.base_path + self.node_identity_path,
+                stored_rows - records.num_rows,
+            )
+        return self._filter_by_content_hash(records)
+
     def _make_empty_table(self) -> "pa.Table":
         """Build a zero-row PyArrow table matching this node's full output schema.
 
@@ -904,7 +948,7 @@ class OperatorJobNode(OperatorNodeBase):
             return None
         if self._cache_mode != CacheMode.REPLAY:
             return None
-        records = self._pipeline_database.get_all_records(self.node_identity_path)
+        records = self._read_stored_records()
         if records is None:
             if self._operator is None:
                 # Read-only (deserialized) node with no operator: cannot derive
@@ -913,7 +957,7 @@ class OperatorJobNode(OperatorNodeBase):
                 return None
             records_table = self._make_empty_table()
         else:
-            records_table = self._filter_by_content_hash(records)
+            records_table = records
             # Drop internal columns that must not surface to stream consumers.
             cols_to_drop = [
                 c
@@ -1016,11 +1060,10 @@ class OperatorJobNode(OperatorNodeBase):
         If no cached records exist yet, produces an empty stream with
         the correct schema (zero rows, correct columns).
         """
-        records = self._pipeline_database.get_all_records(self.node_identity_path)
+        records = self._read_stored_records()
         if records is None:
             records = self._make_empty_table()
         else:
-            records = self._filter_by_content_hash(records)
             # Drop internal columns that must not surface to stream consumers.
             cols_to_drop = [
                 c
@@ -1123,11 +1166,9 @@ class OperatorJobNode(OperatorNodeBase):
         if self._pipeline_database is None:
             return None
 
-        results = self._pipeline_database.get_all_records(self.node_identity_path)
+        results = self._read_stored_records()
         if results is None:
             return None
-
-        results = self._filter_by_content_hash(results)
 
         column_config = ColumnConfig.handle_config(columns, all_info=all_info)
 

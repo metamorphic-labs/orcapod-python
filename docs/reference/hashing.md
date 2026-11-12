@@ -132,24 +132,24 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 
 | Site | Row | Value (hex) |
 |------|-----|-------------|
-| 7 | `alice` `base_entry_id` | `6172726f775f76302e313a00000113f967f1187ac2982e65b6afbf324d264d50a6efe3357a35f09b8a2b32454d61` |
-| 7 | `bob` `base_entry_id` | `6172726f775f76302e313a000001b6162a6faa76b5e065e89849acc09f41edfb5bb1a7c7ea626fd2920de6046586` |
-| 8 | `alice` `pipeline_entry_id` (idx=0) | `6172726f775f76302e313a0000016d7853d1b6b3dc62063d3982911c3f18b8a719e63cfd41429fff970137c52d9c` |
-| 8 | `bob` `pipeline_entry_id` (idx=0) | `6172726f775f76302e313a000001244dc0d59c23ec5d4a19b972a2a98f410054da09f839115841cefdf7f4851f63` |
+| 7 | `alice` `base_entry_id` | `6172726f775f76302e323a000002d147e6dfdc31690391034ed592bb75d4c4407034504165d168717c0779b64d3f` |
+| 7 | `bob` `base_entry_id` | `6172726f775f76302e323a000002250edea78c481fa87d262c5938c9288a5538a17a10636b54a6ea83a18c77eb82` |
+| 8 | `alice` `pipeline_entry_id` (idx=0) | `6172726f775f76302e323a0000028f3588b0c592a1ef02e782927fd355fa4e7887597c75d350a428647f9fc81cd9` |
+| 8 | `bob` `pipeline_entry_id` (idx=0) | `6172726f775f76302e323a0000026122df3637ef917d0f6fb996572dfab4c8b92a6539f97430054c0b2271363acc` |
 
-> The hex prefix `6172726f775f76302e31` decodes to the ASCII string `arrow_v0.1` — the
+> The hex prefix `6172726f775f76302e32` decodes to the ASCII string `arrow_v0.2` — the
 > `method` portion of the `b"{method}:{digest}"` format described in §3.
 
 #### §4 — Side-Effect Record ID & Invocation Hash
 
 | Site | Row | Value |
 |------|-----|-------|
-| 10 | `alice` `invocation_hash` | `semantic_v0.1:1f71386f47538f7b5ca97554104469650b8ec5103a824cbe811a7b776913da91::arrow_v0.1:0000016d7853d1b6b3dc62063d3982911c3f18b8a719e63cfd41429fff970137c52d9c` |
-| 10 | `bob` `invocation_hash` | `semantic_v0.1:1f71386f47538f7b5ca97554104469650b8ec5103a824cbe811a7b776913da91::arrow_v0.1:000001244dc0d59c23ec5d4a19b972a2a98f410054da09f839115841cefdf7f4851f63` |
+| 10 | `alice` `invocation_hash` | `semantic_v0.1:1f71386f47538f7b5ca97554104469650b8ec5103a824cbe811a7b776913da91::arrow_v0.2:0000028f3588b0c592a1ef02e782927fd355fa4e7887597c75d350a428647f9fc81cd9` |
+| 10 | `bob` `invocation_hash` | `semantic_v0.1:1f71386f47538f7b5ca97554104469650b8ec5103a824cbe811a7b776913da91::arrow_v0.2:0000026122df3637ef917d0f6fb996572dfab4c8b92a6539f97430054c0b2271363acc` |
 
 > Both rows share the same `semantic_v0.1:1f71386f...` component — this is the
 > `SideEffectPodStream.pipeline_hash()`, which depends only on the pod and its upstream
-> topology, not on row content. The `arrow_v0.1:...` component is the per-row `record_id`
+> topology, not on row content. The `arrow_v0.2:...` component is the per-row `record_id`
 > from site 9, which differs per row.
 
 #### §5 — Data Function URI Hash
@@ -334,7 +334,7 @@ topology suffix, encoding the full join lineage into each column name.
 | Field | Value |
 |---|---|
 | **Inputs** | Full raw Arrow table (all columns, before any system tag injection) |
-| **Algorithm** | `StarfixArrowHasher.hash_table(table).to_hex(path_n_char)` — versioned SHA-256 via the `starfix` Rust crate |
+| **Algorithm** | `StarfixArrowHasher.hash_table(table).to_hex(path_n_char)` — starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.5, byte-identical to the Rust crate) |
 | **Output format** | Truncated hex `str` (length = `path_n_char`) |
 | **Uniqueness guarantee** | Unique per raw table content; changes if any cell value changes |
 | **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. A user-supplied `source_id` bypasses this computation entirely. |
@@ -617,4 +617,110 @@ print(hasher.hash_object(np.arange(6, dtype=np.float32).reshape(2, 3)).to_string
 # ndarray_v1:318f6e503e8064e89ce6039453fce709f8e01f60c501af2b63bbbe9cf8fbf90e
 print(hasher.hash_object(np.array(2.5)).to_string())
 # ndarray_v1:47f182d862f5dd597d88836deddaed609ed94490827302e75e8364e877633cae
+```
+
+## 9. Arrow Table Hash (`arrow_v0.2`)
+
+Every Arrow-derived hash in the sites above (row data hashes, `record_id`s built from a
+default `source_id`, base and pipeline entry ids, operator and cached-source record hashes,
+`pa.Table` and pandas values) comes from `StarfixArrowHasher.hash_table`, which returns
+`ContentHash(method="arrow_v0.2", digest=D)`. `D` is 35 bytes: the starfix hash format
+number `00 00 02` followed by a SHA-256 digest, computed by `starfix` 0.5 (hash format 2) and
+byte-identical to the Rust `starfix` crate. The byte layout is specified in starfix's
+`docs/byte-layout-spec.md`.
+
+**Label rule.** The label `arrow_vX.Y` moves whenever the hash of any table can change,
+whatever the cause. Its number is not kept equal to the starfix format number; the data
+context's changelog records which starfix format each label uses.
+
+| Label | starfix | Format prefix | Orcapod |
+|---|---|---|---|
+| `arrow_v0.1` | 0.4 | `00 00 01` | up to v0.2 |
+| `arrow_v0.2` | 0.5 | `00 00 02` | v0.3 |
+
+**What is part of the hash.** Column names, Arrow types (with large and non-large layouts of
+strings, binaries and lists hashing alike), nullability, every value, row order, list element
+order, list lengths at every depth, null structs (distinct from structs whose fields are all
+null) and the row count. Column order and struct field order are not part of the hash. How a
+table is split into chunks or slices is not part of it either. A `fixed_size_list<T>[n]`
+column hashes differently from a `large_list<T>` column with the same values. Extension
+columns are hashed as their storage type plus their extension name and metadata, including
+pyarrow's canonical extension types (`arrow.uuid`, `arrow.fixed_shape_tensor`); only
+`ARROW:extension:*` metadata is hashed, all other metadata is ignored.
+
+**What cannot be hashed.** starfix raises `ValueError`, naming the column path and type, for:
+data of `null`, `map`, interval, `string_view` and `binary_view` columns (whatever the row
+count; their schemas hash); union and run-end-encoded types; two schema nodes sharing a path
+(duplicate column names, or a name containing `/` that aliases a struct child, such as a
+column `"a/b"` next to a struct column `a` with a child `b`); and a non-nullable field holding
+a null. A source whose table has such a column fails when it is constructed.
+
+#### Stores written under another label
+
+A change of the Arrow hash label changes the stored keys but not the tables they are stored
+in, so one table can hold rows of several labels. Orcapod writes and uses rows of its
+current label only. Key lookups cannot match a row of another label, and every read of a
+whole table (a node's `as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, a
+cached function's `get_all_cached_outputs()`, a stored operator node, a `CachedSource`) leaves
+the rows of another label out. Those rows are never changed or deleted: a store written by
+Orcapod v0.2 keeps its `arrow_v0.1` rows, v0.3 computes every input again and adds
+`arrow_v0.2` rows next to them, and a later migration can convert the old ones.
+
+How a stored row names its label:
+
+| Table | Key | Stored form |
+|---|---|---|
+| Function-node pipeline table | `__pipeline_base_entry_id` | `b"<label>:<digest>"` |
+| Function result table | `__input_data_hash` | `b"<label>:<digest>"` |
+| Side-effect invocation log | `record_id_hash` | `b"<label>:<digest>"` |
+| Operator-node table, cached-source table | the record id (`_record_hash`) | hex digest, no label |
+
+A hex digest starts with the starfix format number (`000001` for `arrow_v0.1`, `000002` for
+`arrow_v0.2`), which tells these two labels apart. A later label that keeps starfix hash
+format 2 could not be told apart in operator-node and cached-source tables.
+
+A read that leaves rows out logs one warning per table with their total (logger
+`orcapod.hashing.stored_hash_labels`). A side-effect invocation log is never read in full: a
+delivery is looked up by its key, so deliveries logged under another label would not be found
+and every side effect would be delivered again. A side-effect node therefore raises
+`SideEffectLogHashLabelError` before delivering anything when its log holds such rows.
+
+`stored_hash_labels(database, record_path)` reads a stored table and counts its rows by
+label. A table written by v0.2 and then run under v0.3 gives
+`{"arrow_v0.1": n, "arrow_v0.2": n}`; a starfix format whose label is not known is listed as
+`"starfix hash format <hex>"`, and rows whose key names no label are counted under `None`.
+
+```python
+from orcapod import PipelineJob, function_pod
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.hashing.stored_hash_labels import stored_hash_labels
+from orcapod.sources import DictSource
+
+
+@function_pod(output_keys="doubled")
+def double_for_labels(x: int) -> int:
+    return 2 * x
+
+
+label_store = InMemoryArrowDatabase()
+label_job = PipelineJob(name="labels_demo", store=label_store)
+with label_job:
+    rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"])
+    _ = double_for_labels.pod(rows, label="dbl")
+label_job.run()
+
+for path in sorted(label_store.list_sources()):
+    print(path[-1], stored_hash_labels(label_store, path))
+# rdb_v1 {'arrow_v0.2': 2}
+# pdb_v1 {'arrow_v0.2': 2}
+```
+
+```python
+import pyarrow as pa
+from orcapod.contexts import get_default_context
+
+hasher = get_default_context().arrow_hasher
+digest = hasher.hash_table(pa.table({"x": pa.array([1, 2, 3], pa.int64())}))
+print(digest.method, digest.digest[:3].hex())
+# arrow_v0.2 000002
 ```

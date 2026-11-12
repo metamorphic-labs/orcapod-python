@@ -40,6 +40,10 @@ from orcapod.errors import (
     StoreReadError,
     StoreWriteError,
 )
+from orcapod.hashing.stored_hash_labels import (
+    keep_rows_hashed_under,
+    report_skipped_rows,
+)
 from orcapod.utils.store_errors import commit_best_effort, keep_store_error
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
@@ -782,6 +786,10 @@ class FunctionJobNode(FunctionNodeBase):
     wrapping, pipeline records, and two-phase ``iter_data()`` / async
     execution.
     """
+
+    # Set once a read has reported the stored rows it skipped (rows of another Arrow
+    # hash label); a class default so nodes rebuilt from a saved descriptor start unset.
+    _skipped_rows_reported: bool = False
 
     def __init__(
         self,
@@ -2168,6 +2176,26 @@ class FunctionJobNode(FunctionNodeBase):
 
         if taginfo is None:
             return None
+
+        # Rows keyed under another Arrow hash label (written by another version of
+        # Orcapod) are not this node's results: they can never match current inputs
+        # and stay in the table untouched (ITL-910). Result rows are reached only
+        # through the pipeline rows kept here.
+        # A node loaded from a saved job has no function pod; its context comes from
+        # the descriptor.
+        context = (
+            self._data_context if self._function_pod is None else self.data_context
+        )
+        stored_rows = taginfo.num_rows
+        taginfo = keep_rows_hashed_under(
+            taginfo, _PIPELINE_BASE_ENTRY_ID_COL, context.arrow_hasher.hasher_id
+        )
+        if taginfo.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_skipped_rows(
+                self._pipeline_database.base_path + self._versioned_pipeline_path,
+                stored_rows - taginfo.num_rows,
+            )
 
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema

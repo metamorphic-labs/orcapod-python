@@ -8,6 +8,11 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.hashing.stored_hash_labels import (
+    current_hash_format,
+    keep_rows_hashed_under,
+    report_skipped_rows,
+)
 from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.types import ColumnConfig, Schema
@@ -49,6 +54,9 @@ class CachedSource(RootSource):
     """
 
     HASH_COLUMN_NAME = "_record_hash"
+
+    # Set once a read has reported the cached rows it skipped.
+    _skipped_rows_reported: bool = False
 
     def __init__(
         self,
@@ -246,6 +254,38 @@ class CachedSource(RootSource):
         )
         self._cache_database.flush()
 
+    def _read_cached_records(self) -> "pa.Table | None":
+        """Read the cached rows that the current Arrow hasher wrote.
+
+        Every read of the whole cache table goes through here. The cached record
+        hashes are hex digests without a label, and their first three bytes name the
+        starfix hash format, so rows cached by Orcapod v0.2 (format 1, ``arrow_v0.1``)
+        are left out and stay in the table untouched (ITL-910). A later Arrow hash
+        label that keeps the starfix format could not be told apart here.
+
+        Returns:
+            The cached rows without the record hash column, or ``None`` when the
+            cache table does not exist.
+        """
+        records = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if records is None:
+            return None
+        stored_rows = records.num_rows
+        records = keep_rows_hashed_under(
+            records,
+            self.HASH_COLUMN_NAME,
+            current_hash_format(self.data_context.arrow_hasher),
+        )
+        if records.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_skipped_rows(
+                self._cache_database.base_path + self.cache_path,
+                stored_rows - records.num_rows,
+            )
+        return records.drop([self.HASH_COLUMN_NAME])
+
     def _build_merged_stream(self) -> ArrowTableStream:
         """Ingest live data (if available), then return all cached records.
 
@@ -262,7 +302,7 @@ class CachedSource(RootSource):
                 self._source.source_id,
             )
 
-        all_records = self._cache_database.get_all_records(self.cache_path)
+        all_records = self._read_cached_records()
         if all_records is None:
             all_records = self._empty_table()
 
@@ -323,5 +363,5 @@ class CachedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table | None":
-        """Retrieve all stored records from the cache database."""
-        return self._cache_database.get_all_records(self.cache_path)
+        """Retrieve the cached records that the current Arrow hasher wrote."""
+        return self._read_cached_records()

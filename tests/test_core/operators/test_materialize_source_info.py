@@ -564,6 +564,9 @@ def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
 class TestIdentityPinned:
     """Values recorded on ``main`` at ab544982, before the fix.
 
+    Re-recorded under starfix hash format 2 (``arrow_v0.2``, ITL-910): the node content
+    hash and the record hashes are Arrow-derived; the pipeline hash is not.
+
     The node's identity, the output data and the row-0 record hash (whose
     source-info token was already right) are unchanged; only rows whose stored
     source-info token was wrong get a new record hash.
@@ -584,7 +587,7 @@ class TestIdentityPinned:
             "semantic_v0.1:1f533cfa7293bad96debd5cda622e04bc39d72970ce6827dcd6e890a7428823c"
         )
         assert node.content_hash().to_string() == (
-            "semantic_v0.1:6dc7f9c42cf4d0351d8a577bb2c72d69aadbca97e1c31d0cfc62d6a8087f3038"
+            "semantic_v0.1:36a4b61a5ed690ffa95ff31ba0c19a43e31b5b2ac51e1e5848d4b184e4b9ccf7"
         )
         ids = _record_ids(node)
         assert ids["a"] == ROW_ZERO_RECORD_ID
@@ -605,16 +608,18 @@ class TestIdentityPinned:
         }
 
 
-# ``_record_hash`` of rows a, b, c stored by the pinned node on ab544982 (pre-fix).
+# ``_record_hash`` of rows a, b, c stored by the pinned node before the fix (ab544982).
 # Row a's source-info token was already right, so the fix leaves its record hash.
+# Re-recorded in starfix hash format 2 (ITL-910) by reproducing the pre-fix broadcast
+# with ``_broadcast_row_zero``.
 ROW_ZERO_RECORD_ID = (
-    b"000001688856047a9f37112172e612834209fb07f2cf4be5db30f0fa3b7059db85905e"
+    b"000002016f74f387a07874a088c8c44f1b85ff70a395680158b6a87520085c95439ec4"
 )
 PRE_FIX_RECORD_IDS = frozenset(
     {
         ROW_ZERO_RECORD_ID,
-        b"0000016f23c92ad43ef01bb80e438f16da66d02354998351430b3237d938a340943039",
-        b"00000138599ee77c1f3dc62bf02a117150b32db27c6582db885cda2d28b7cef3964657",
+        b"000002de01a6a62bba3ec3ec7cb9c64a8bf4a7da8f0ab959fca01dcfd2d162f91e9cf6",
+        b"00000270703c99569d9ffb213ac4a8825f880e6ffe25eb1b30019da118752a73996acc",
     }
 )
 

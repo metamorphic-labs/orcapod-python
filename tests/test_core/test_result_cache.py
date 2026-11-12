@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from orcapod.contexts import get_default_context
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.core.datagrams.tag_data import EmptyData
 from orcapod.core.data_function import PythonDataFunction
@@ -20,6 +21,9 @@ from orcapod.core.result_cache import ResultCache
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
+
+# The Arrow hash label of the rows the default context writes.
+ARROW_LABEL = get_default_context().arrow_hasher.hasher_id
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +302,7 @@ class TestAutoFlush:
 class TestGetAllRecords:
     def test_empty_returns_none(self):
         cache, _ = _make_cache()
-        assert cache.get_all_records() is None
+        assert cache.get_all_records(ARROW_LABEL) is None
 
     def test_returns_stored_records(self):
         cache, _ = _make_cache()
@@ -306,7 +310,7 @@ class TestGetAllRecords:
         _compute_and_store(cache, pf, Data({"x": 10}))
         _compute_and_store(cache, pf, Data({"x": 20}))
 
-        records = cache.get_all_records()
+        records = cache.get_all_records(ARROW_LABEL)
         assert records is not None
         assert records.num_rows == 2
 
@@ -315,7 +319,7 @@ class TestGetAllRecords:
         pf = _make_pf()
         _compute_and_store(cache, pf, Data({"x": 10}))
 
-        records = cache.get_all_records(include_system_columns=True)
+        records = cache.get_all_records(ARROW_LABEL, include_system_columns=True)
         assert records is not None
         assert constants.DATA_RECORD_ID in records.column_names
 
@@ -324,7 +328,7 @@ class TestGetAllRecords:
         pf = _make_pf()
         _compute_and_store(cache, pf, Data({"x": 10}))
 
-        records = cache.get_all_records(include_system_columns=False)
+        records = cache.get_all_records(ARROW_LABEL, include_system_columns=False)
         assert records is not None
         assert constants.DATA_RECORD_ID not in records.column_names
 

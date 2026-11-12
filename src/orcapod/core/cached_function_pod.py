@@ -370,7 +370,8 @@ class CachedFunctionPod(WrappedFunctionPod):
     ) -> "pa.Table | None":
         """Return all cached records from the result store for this pod."""
         return self._cache.get_all_records(
-            include_system_columns=include_system_columns
+            self.data_context.arrow_hasher.hasher_id,
+            include_system_columns=include_system_columns,
         )
 
     def process(
