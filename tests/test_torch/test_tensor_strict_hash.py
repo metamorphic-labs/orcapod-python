@@ -86,39 +86,28 @@ def test_each_property_is_written_in_its_slot() -> None:
     """Each optional property is written with its real value in its own slot."""
     base = _base()
     element = expected_digest(base)
-    plain = {
-        "requires_grad": False,
-        "conj_bit": False,
-        "neg_bit": False,
-        "strides": c_strides(base.shape),
-        "class_name": TENSOR_CLASS,
-    }
+    contiguous = c_strides(base.shape)
 
     grad = base.clone().requires_grad_(True)
     assert semantic_hash(grad).digest == reference_value_digest(
-        element, **{**plain, "requires_grad": True}
+        element, strides=contiguous, requires_grad=True
     )
 
     transposed = base.transpose(0, 2)
     assert transposed.stride() == (1, 4, 12)
     assert semantic_hash(transposed).digest == reference_value_digest(
-        expected_digest(transposed), **{**plain, "strides": (1, 4, 12)}
+        expected_digest(transposed), strides=(1, 4, 12)
     )
 
     parameter = torch.nn.Parameter(base.clone(), requires_grad=False)
     assert semantic_hash(parameter).digest == reference_value_digest(
-        element, **{**plain, "class_name": PARAMETER_CLASS}
+        element, strides=contiguous, class_name=PARAMETER_CLASS
     )
 
     conj = _complex().conj()
     assert conj.is_conj()
     assert semantic_hash(conj).digest == reference_value_digest(
-        expected_digest(conj),
-        requires_grad=False,
-        conj_bit=True,
-        neg_bit=False,
-        strides=(1,),
-        class_name=TENSOR_CLASS,
+        expected_digest(conj), strides=(1,), conj_bit=True
     )
 
     # ``.conj().imag`` is a negative view of every second float: it does not cover
@@ -126,7 +115,7 @@ def test_each_property_is_written_in_its_slot() -> None:
     neg = _complex().conj().imag
     assert neg.is_neg()
     assert semantic_hash(neg).digest == reference_value_digest(
-        expected_digest(neg), **{**plain, "strides": (1,)}
+        expected_digest(neg), strides=(1,)
     )
 
 

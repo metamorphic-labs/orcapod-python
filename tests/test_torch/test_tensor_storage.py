@@ -47,11 +47,9 @@ def read_cell(cell: bytes) -> Any:
     table = _source(torch.zeros(1)).as_table()
     column_type = table.schema.field("x").type
     storage = pa.array([cell], type=column_type.storage_type)
-    forged = pa.table(
-        {
-            "k": table.column("k"),
-            "x": pa.ExtensionArray.from_storage(column_type, storage),
-        }
+    forged = pa.Table.from_arrays(
+        [table.column("k"), pa.ExtensionArray.from_storage(column_type, storage)],
+        names=["k", "x"],
     )
     source = ArrowTableSource(forged, tag_columns=["k"])
     return next(iter(source.iter_data()))[1].as_dict()["x"]

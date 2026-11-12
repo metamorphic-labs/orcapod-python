@@ -139,11 +139,11 @@ def c_strides(shape: Sequence[int]) -> tuple[int, ...]:
 def reference_value_digest(
     element_digest: bytes,
     *,
-    requires_grad: bool,
-    conj_bit: bool,
-    neg_bit: bool,
     strides: Sequence[int],
-    class_name: str,
+    requires_grad: bool = False,
+    conj_bit: bool = False,
+    neg_bit: bool = False,
+    class_name: str = TENSOR_CLASS,
 ) -> bytes:
     """The value hash ``D`` of a tensor, written from the spec with ``hashlib`` and ``struct``.
 
