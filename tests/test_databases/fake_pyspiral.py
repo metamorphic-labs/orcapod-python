@@ -8,7 +8,8 @@ project.
 
 Only the calls the connector makes are implemented:
 
-* ``Spiral(overrides=...)``, ``Spiral.project(id)``, ``Spiral.scan(expr)``
+* ``Spiral(overrides=...)``, ``Spiral.project(id)``, ``Spiral.scan(expr, limit=...)``
+  (each call is recorded in ``scan_log``; batches are read on demand)
 * ``Project.list_tables()`` (``TableResource`` with ``.dataset`` / ``.table``),
   ``Project.table(id)``, ``Project.create_table(id, key_schema=..., exist_ok=...)``,
   ``Project.drop_table(id)``
@@ -49,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import types
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -64,6 +66,21 @@ _BEHAVIOUR_FILE = "_behaviour.json"
 _MAX_PAIR_BYTES = 8192
 _MAX_KEY_CHARS = 255
 _MAX_ENTRIES = 1024
+
+
+@dataclass
+class ScanRecord:
+    """One ``Spiral.scan(...)`` call: the table, its keyword arguments, batches handed out."""
+
+    identifier: str
+    kwargs: dict[str, Any]
+    batches_read: int = 0
+
+
+# Every scan opened in this process, oldest first. Tests clear it and read it.
+scan_log: list[ScanRecord] = []
+# Rows per batch a scan hands out (SpiralDB's batches follow its stored fragments).
+scan_batch_rows = 2
 
 
 @dataclass(frozen=True)
@@ -332,21 +349,32 @@ class FakeExpr:
 
 
 class FakeScan:
-    """What ``Spiral.scan(table.select())`` returns: reads the whole stored table."""
+    """What ``Spiral.scan(table.select(), limit=...)`` returns."""
 
-    def __init__(self, table: FakeTable) -> None:
+    def __init__(self, table: FakeTable, record: ScanRecord, limit: int | None) -> None:
         self._table = table
+        self._record = record
+        self._limit = limit
+
+    def _rows(self) -> pa.Table:
+        rows = self._table._read_all()
+        return rows if self._limit is None else rows.slice(0, self._limit)
 
     def to_table(self) -> pa.Table:
-        """Return every stored row, in key order."""
-        return self._table._read_all()
+        """Return the scanned rows, in key order."""
+        return self._rows()
 
-    def to_record_batches(self) -> pa.RecordBatchReader:
-        """Return the stored rows in key order, as batches of at most two rows."""
-        t = self._table._read_all()
-        # SpiralDB yields more than one batch for larger tables; split to exercise that.
-        batches = t.to_batches(max_chunksize=2) if t.num_rows else []
-        return pa.RecordBatchReader.from_batches(t.schema, batches)
+    def to_record_batches(self, **kwargs: Any) -> pa.RecordBatchReader:
+        """Return the rows in key order, ``scan_batch_rows`` per batch, read on demand."""
+        rows = self._rows()
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            # SpiralDB yields more than one batch for larger tables; split to exercise that.
+            for batch in rows.to_batches(max_chunksize=scan_batch_rows):
+                self._record.batches_read += 1
+                yield batch
+
+        return pa.RecordBatchReader.from_batches(rows.schema, batches())
 
 
 class FakeTable:
@@ -597,12 +625,22 @@ class FakeSpiral:
         return FakeProject(self._store, project_id)
 
     def scan(self, *projections: Any, **kwargs: Any) -> FakeScan:
-        """Return a scan of one ``table.select()``; other projections are not modelled."""
+        """Return a scan of one ``table.select()``, restricted by ``limit`` if given.
+
+        Every call is appended to ``scan_log``. Other projections and the other
+        restrictions of ``Spiral.scan`` are not modelled.
+        """
         if len(projections) != 1 or not isinstance(projections[0], FakeExpr):
             raise NotImplementedError(
                 "fake Spiral.scan supports only scan(table.select())"
             )
-        return FakeScan(projections[0].table)
+        unsupported = {k for k, v in kwargs.items() if v is not None} - {"limit"}
+        if unsupported:
+            raise NotImplementedError(f"fake Spiral.scan: {sorted(unsupported)}")
+        table = projections[0].table
+        record = ScanRecord(table._identifier, dict(kwargs))
+        scan_log.append(record)
+        return FakeScan(table, record, kwargs.get("limit"))
 
 
 fake_spiral_module = types.SimpleNamespace(Spiral=FakeSpiral)
