@@ -130,3 +130,42 @@ Shown red on pure `origin/main` in the dry run (34 failures) and green on the me
   basedpyright exit 0; changelog and design-issue checks OK. Still NOT pushed; waiting for
   the coordinator's sign-off, then: PR body (draft content per the decisions above plus the
   storage/hash sentence), one push, PR, readiness.
+
+## Phase 2 (developer sign-off relayed by the coordinator, November 12, 2026)
+
+Decisions that apply to pandas:
+
+- Storage and hashing are separate; the hash is strict by default. A property storage cannot
+  restore never counts in the hash and has no option name.
+- Names: `orcapod.pandas.dataframe` / `orcapod.pandas.series` (rename is in this PR), also as
+  the descriptor `kind` (a type has one name everywhere). Drop `also_reads` and
+  `_LEGACY_METADATA` from the two pandas types. Metadata stays `{"version":1}` until ITL-981
+  adds the ignore list (`{"ignore":[...],"version":1}`, sorted keys).
+- `attrs` counts by default. Options offered (via ITL-981's mechanism, not built here):
+  `column_order`, `struct_field_order`, `series_name`, `attrs`.
+- Never counted (storage does not restore them): `flags`, RangeIndex kind, index `freq`,
+  unused MultiIndex levels, string storage (`string[python]` vs `string[pyarrow]`), the
+  `object` dtype of a column whose values are not strings. The last two are FIXES: today the
+  value read back hashes differently. Tests: `hash(read(write(v))) == hash(v)` through the
+  public interface.
+- Golden moves approved for the rename, on top of the 3: `arrow.json`
+  `extension_no_values.{all_null,zero_rows}.{dataframe,series}`; `schema.json`
+  `single_field.dataframe.{arrow_type,schema_hash}`; `semantic.json` `type.dataframe`;
+  `datagram.json` `dataframe.{content_hash,pipeline_hash,system_tag_columns}` and the 4
+  renamed `_tag_record_id::` / `_tag_source_id::` keys (values unchanged). The `value.*`
+  entries move once more for `kind` and attrs. Anything outside pandas values / pandas-typed
+  columns moving: stop and ask.
+- Add a test: a v0.2-layout table with a `pandas.dataframe` column is counted, not read, not
+  modified. The silent miss for stores of unreleased main builds is accepted (PR body).
+- PR body: `Fixes ITL-887`; "ITL-897 (pandas values; pa.Table values not included)".
+- NO PUSH until ITL-981's PR has merged into `main`. Before that: when the coordinator sends
+  the sha of `eywalker/itl-981-library-value-types-native-storage-strict`, merge it locally
+  and wire the pandas types to its `IgnoreListLogicalType` / `IgnoreListHandler` /
+  `hash_ignore` config (design note: worktree `itl-981-library-value-types`,
+  `superpowers/specs/`, section vi; read-only). After ITL-981 merges: merge `main`,
+  regenerate the approved pandas entries only, full suites, ONE push, PR, readiness.
+
+Tasks: (1) rename + `kind` + drop legacy reads, fix the 17 name-pin tests, docs; (2) attrs in
+the descriptor; (3) string storage and object-column fixes with round-trip tests; (4)
+`PANDAS_IDENTITY_PROPERTIES` gains the option flag and the never-counted entries; (5) v0.2
+layout test; (6) golden (local), docs section 10, changelog, design issue, PR body.
