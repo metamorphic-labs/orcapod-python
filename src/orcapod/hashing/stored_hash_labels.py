@@ -24,7 +24,7 @@ To list the labels a stored table holds::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from orcapod.utils.lazy_module import LazyModule
 
@@ -110,13 +110,18 @@ def keep_rows_hashed_under(table: "pa.Table", column: str, current: str) -> "pa.
         whose key names another label or format. Rows whose key names none are kept.
     """
     labels = hash_labels_of(table.column(column))
-    other = pc.fill_null(pc.not_equal(labels, current), False)
+    # The pyarrow stubs give comparison kernels a generic array type; the result is
+    # a Boolean array.
+    other = cast(
+        "pa.BooleanArray",
+        pc.not_equal(labels, pa.scalar(current, pa.large_string())).fill_null(False),
+    )
     if not pc.any(other).as_py():
         return table
     # The single place where stored rows of another label are left out of a read. A
     # report of the skipped rows (ITL-938, not decided) belongs here: ``other`` marks
     # them and ``labels`` names their label.
-    return table.filter(pc.invert(other))
+    return table.filter(cast("pa.BooleanArray", pc.invert(other)))  # pyright: ignore[reportCallIssue, reportArgumentType]  # the stubs type invert for Expression inputs only
 
 
 class _Digest(Protocol):
@@ -180,10 +185,12 @@ def stored_hash_labels(
         (name for name in _KEY_COLUMNS if name in table.column_names),
         _RECORD_ID_COLUMN,
     )
+    per_value = pc.value_counts(hash_labels_of(table.column(column)))
+    found_values: list[str | None] = per_value.field(0).to_pylist()
+    row_counts = cast("list[int]", per_value.field(1).to_pylist())
     counts: dict[str | None, int] = {}
-    for entry in pc.value_counts(hash_labels_of(table.column(column))).to_pylist():
-        found: str | None = entry["values"]
+    for found, rows in zip(found_values, row_counts):
         if found is not None and not found.startswith("arrow_v"):
             found = _LABEL_OF_FORMAT.get(found, f"starfix hash format {found}")
-        counts[found] = counts.get(found, 0) + entry["counts"]
+        counts[found] = counts.get(found, 0) + rows
     return counts

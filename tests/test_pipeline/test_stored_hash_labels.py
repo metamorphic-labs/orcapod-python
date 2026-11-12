@@ -158,17 +158,21 @@ def orchestrator(request: pytest.FixtureRequest) -> Orchestrator:
     ]()
 
 
-def write_v02_store(store: Store, **kwargs: bool) -> None:
+def write_v02_store(
+    store: Store, *, with_operator: bool = False, with_sink: bool = False
+) -> None:
     with writing_as_v02():
-        _ = build_job(store, **kwargs).run()
+        _ = build_job(store, with_operator=with_operator, with_sink=with_sink).run()
     calls.clear()
     delivered.clear()
 
 
-def write_both_labels(store: Store, **kwargs: bool) -> None:
+def write_both_labels(
+    store: Store, *, with_operator: bool = False, with_sink: bool = False
+) -> None:
     """A store written by v0.2 and then run by this version: both labels in every table."""
-    write_v02_store(store, **kwargs)
-    _ = build_job(store, **kwargs).run()
+    write_v02_store(store, with_operator=with_operator, with_sink=with_sink)
+    _ = build_job(store, with_operator=with_operator, with_sink=with_sink).run()
     calls.clear()
     delivered.clear()
 
