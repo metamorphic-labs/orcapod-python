@@ -40,7 +40,7 @@ Each decision is marked **CONFIRMED** (the developer decided it, November 10, 20
 A user class's identity is an **identity record** with three components:
 
 ```json
-{"fields": {"x": "int", "y": "float"}, "kind": "dataclass", "name": "Point"}
+{"fields": [["x", "int"], ["y", "float"]], "kind": "dataclass", "name": "Point"}
 ```
 
 ### Name component — CONFIRMED (decision 1)

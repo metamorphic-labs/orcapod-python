@@ -460,18 +460,16 @@ def test_factory_reconstruct_from_arrow_invalid_fqcn():
     factory = PydanticLogicalTypeFactory()
     converter = _make_full_converter()
 
+    import orcapod.logical_types.user_class_identity as uci
+
+    record = uci.identity_record(
+        "pydantic", "nonexistent.module.NoSuchClass", [("x", "int")]
+    )
     with pytest.raises(ImportError):
         factory.reconstruct_from_arrow(
-            "nonexistent.module.NoSuchModel",
+            uci.identity_string(record),
             storage,
-            {
-                "category": "orcapod.pydantic",
-                "identity": {
-                    "kind": "pydantic",
-                    "name": "nonexistent.module.NoSuchClass",
-                    "fields": [["x", "int"]],
-                },
-            },
+            {"category": "orcapod.pydantic", "identity": record},
             converter,
         )
 

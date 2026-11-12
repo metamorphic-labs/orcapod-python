@@ -370,3 +370,44 @@ def test_subclass_has_its_own_identity_and_keeps_its_fields() -> None:
     assert _type_name(Base(1)) != _type_name(Child(1, 2))
     _, data = next(iter(_source(Child(1, 2)).iter_data()))
     assert data.as_dict()["p"] == Child(1, 2)
+
+
+# ---------------------------------------------------------------------------
+# Optional nested classes
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class OptionalInner:
+    """A class nested in ``OptionalOuter`` as an optional field."""
+
+    v: int
+
+
+@dataclasses.dataclass
+class OptionalOuter:
+    """A class whose nested class may be ``None``."""
+
+    child: OptionalInner | None
+
+
+class OptionalOuterModel(pydantic.BaseModel):
+    """A pydantic model whose nested class may be ``None``."""
+
+    child: OptionalInner | None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        OptionalOuter(OptionalInner(1)),
+        OptionalOuter(None),
+        OptionalOuterModel(child=OptionalInner(1)),
+        OptionalOuterModel(child=None),
+    ],
+    ids=["dataclass-set", "dataclass-none", "pydantic-set", "pydantic-none"],
+)
+def test_optional_nested_class_reads_back(value: Any) -> None:
+    """A nested class stored as ``None`` reads back as ``None``, not a ``TypeError``."""
+    _, data = next(iter(_source(value).iter_data()))
+    assert data.as_dict()["p"] == value

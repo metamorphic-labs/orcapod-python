@@ -30,7 +30,7 @@ import typing
 import unicodedata
 import warnings
 import weakref
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.errors import RecursiveTypeError
@@ -366,35 +366,42 @@ def known_classes(kind: str, name: str) -> list[type]:
     return [c for c in reversed(classes) if c is not None]
 
 
-def candidate_classes(kind: str, name: str) -> list[type]:
-    """Return the classes that may be the class stored under ``(kind, name)``.
+def candidate_classes(kind: str, name: str) -> Iterator[type]:
+    """Yield the classes that may be the class stored under ``(kind, name)``.
 
     In order: classes registered or declared under that name in this process, a class
     reachable from ``__main__`` by that name, and a class importable by that dotted
-    name. Each candidate still has to match the stored identity.
+    name. Each candidate still has to match the stored identity. The dotted name is
+    imported only when the caller asks for a candidate beyond the earlier ones, so a
+    read that a registered class satisfies imports nothing.
 
     Args:
         kind: The stored kind.
         name: The stored name component.
 
-    Returns:
+    Yields:
         Distinct candidate classes of the right kind.
     """
-    found: list[type] = list(known_classes(kind, name))
+    seen: list[type] = []
+
+    def fresh(cls: Any) -> bool:
+        if class_kind(cls) != kind or cls in seen:
+            return False
+        seen.append(cls)
+        return True
+
+    for cls in known_classes(kind, name):
+        if fresh(cls):
+            yield cls
     for module_name in MAIN_MODULES:
         module = sys.modules.get(module_name)
         if module is not None:
             obj = _walk_attributes(module, name.split("."))
-            if obj is not None:
-                found.append(obj)
+            if fresh(obj):
+                yield obj
     obj = _import_dotted(name)
-    if obj is not None:
-        found.append(obj)
-    result: list[type] = []
-    for cls in found:
-        if class_kind(cls) == kind and cls not in result:
-            result.append(cls)
-    return result
+    if fresh(obj):
+        yield obj
 
 
 def _walk_attributes(root: Any, parts: list[str]) -> Any:

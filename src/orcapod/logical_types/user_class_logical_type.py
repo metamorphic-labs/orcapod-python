@@ -157,11 +157,13 @@ class UserClassLogicalType(BaseLogicalType):
         """Build an instance from an Arrow struct dict.
 
         Args:
-            storage_value: A dict mapping field names to Arrow storage values.
+            storage_value: A dict mapping field names to Arrow storage values, or
+                ``None`` for a null value (an optional field of this class that
+                holds ``None``).
             converter: The active converter for per-field conversion.
 
         Returns:
-            An instance of ``python_type``.
+            An instance of ``python_type``, or ``None`` for a null value.
 
         Raises:
             ValueError: If ``converter`` is ``None``.
@@ -171,6 +173,8 @@ class UserClassLogicalType(BaseLogicalType):
                 f"{type(self).__name__}.storage_to_python requires a converter — "
                 "pass a TypeConverterProtocol instance for field-level conversion."
             )
+        if storage_value is None:
+            return None
         kwargs = {
             name: converter.storage_to_python(storage_value[name], annotation)
             for name, annotation in self._field_annotations
@@ -325,19 +329,19 @@ class UserClassLogicalTypeFactory:
                 f"record for category {self.category!r}: {record!r}."
             )
 
-        kind = self.kind
-        candidates = uci.candidate_classes(kind, name)
-        if not candidates:
-            raise ImportError(
-                f"Cannot find the {kind} {name!r} to read stored values of type "
-                f"{uci.describe_record(record)}. Define the class and register it "
-                f"under that name before reading, for example "
-                f"op.register_type({name.rsplit('.', 1)[-1]}, name={name!r})."
+        if uci.identity_string(record) != arrow_extension_name:
+            raise TypeIdentityError(
+                f"Stored column type {arrow_extension_name!r} does not match its "
+                f"identity record {uci.describe_record(record)}."
             )
 
+        kind = self.kind
+        found_any = False
         mismatches: list[str] = []
         renamable = False  # a candidate has the stored fields under another name
-        for cls in candidates:
+        # Lazy: the dotted name is imported only if no registered class matches.
+        for cls in uci.candidate_classes(kind, name):
+            found_any = True
             built = uci.identity_of(cls)
             if built is not None:
                 if built != arrow_extension_name:
@@ -368,6 +372,14 @@ class UserClassLogicalTypeFactory:
             if isinstance(lt, UserClassLogicalType):
                 _check_storage(lt, storage_type, record)
                 return lt
+
+        if not found_any:
+            raise ImportError(
+                f"Cannot find the {kind} {name!r} to read stored values of type "
+                f"{uci.describe_record(record)}. Define the class and register it "
+                f"under that name before reading, for example "
+                f"op.register_type({name.rsplit('.', 1)[-1]}, name={name!r})."
+            )
 
         hint = (
             f" A class with the stored fields exists under another name: register it "
