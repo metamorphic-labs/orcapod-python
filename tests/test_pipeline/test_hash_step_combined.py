@@ -65,6 +65,38 @@ def _operator_job(store: InMemoryArrowDatabase) -> PipelineJob:
     return job
 
 
+@function_pod(output_keys="sent", ctx_arg="ctx")
+def notify(x: int, ctx: Any) -> int:
+    """Record a delivery; a function pod that takes the invocation context."""
+    delivered.append(x)
+    return x
+
+
+def _notify_job(store: InMemoryArrowDatabase) -> PipelineJob:
+    """A job whose only stored node is a function pod that takes the invocation context."""
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
+        notify.pod(source, label="notify")
+    return job
+
+
+def _add_table_written_before_v03(
+    store: InMemoryArrowDatabase, current_layout: str, old_layout: str
+) -> tuple[str, ...]:
+    """Store a table of the same pod at an older layout, under another hash."""
+    (current_path,) = [p for p in store.list_sources() if p[-1] == current_layout]
+    old_path = current_path[:-2] + ("schema:" + "0" * 64, old_layout)
+    key = pa.array([b"arrow_v0.1:00"], pa.large_binary())
+    store.add_records(
+        old_path,
+        pa.table({"__record_id": key, "record_id_hash": key}),
+        record_id_column="__record_id",
+    )
+    store.flush()
+    return old_path
+
+
 def _sink_job(store: InMemoryArrowDatabase) -> PipelineJob:
     """A job whose only stored node is a sink reading the source directly."""
     job = PipelineJob(name=JOB_NAME, store=store)
@@ -80,6 +112,7 @@ class TestStoredPathsAndKeys:
     """Layouts (ITL-944), bare digests in paths and labelled row keys (ITL-945) together."""
 
     def test_every_table_path_holds_bare_digests_and_ends_with_a_current_layout(self):
+        """Table paths end in a current layout and hold digests without a hasher label."""
         store = InMemoryArrowDatabase()
         _ = _operator_job(store).run()
 
@@ -94,6 +127,9 @@ class TestStoredPathsAndKeys:
                     assert BARE_SHA256.fullmatch(digest), path
 
     def test_operator_cache_rows_carry_a_labelled_key_and_the_data_context(self):
+        """Operator cache rows have an ``arrow_v1:`` key and name the current data
+        context.
+        """
         store = InMemoryArrowDatabase()
         _ = _operator_job(store).run()
 
@@ -113,6 +149,9 @@ class TestReadOnlyOperatorNode:
     def _read_only_node(
         self, store: InMemoryArrowDatabase, tmp_path: pathlib.Path
     ) -> OperatorJobNode:
+        """Run and save the operator job, then rebuild its ``sel`` node without an
+        operator.
+        """
         job = _operator_job(store)
         _ = job.run()
         saved = tmp_path / "job.json"
@@ -136,22 +175,48 @@ class TestReadOnlyOperatorNode:
         )
 
     def test_it_names_the_data_context_saved_with_it(self, tmp_path: pathlib.Path):
+        """The read-only node reports the current data context key."""
         node = self._read_only_node(InMemoryArrowDatabase(), tmp_path)
         assert node.data_context_key == CURRENT
 
     def test_it_reads_the_rows_stored_under_its_data_context(
         self, tmp_path: pathlib.Path
     ):
+        """The read-only node returns the rows the run stored."""
         node = self._read_only_node(InMemoryArrowDatabase(), tmp_path)
         records = node.get_all_records()
         assert records is not None
         assert sorted(cast(list[int], records["double"].to_pylist())) == [2, 4]
 
 
+class TestReadOnlyFunctionNode:
+    """A function node loaded without its pod names its data context (CodeRabbit, PR #323)."""
+
+    def test_it_names_the_data_context_saved_with_it(self, tmp_path: pathlib.Path):
+        """The key comes from the descriptor when there is no function pod to ask."""
+        from orcapod.core.nodes.function_node import FunctionJobNode
+
+        store = InMemoryArrowDatabase()
+        job = _operator_job(store)
+        _ = job.run()
+        saved = tmp_path / "job.json"
+        job.save(str(saved))
+        nodes = json.loads(saved.read_text())["pipeline"]["nodes"]
+        (descriptor,) = [d for d in nodes.values() if d.get("label") == "dbl"]
+        database = store.at(JOB_NAME)
+        node = FunctionJobNode.from_descriptor(
+            descriptor,
+            input_stream=None,
+            databases={"pipeline": database, "result": database.at("_result")},
+        )
+        assert node.data_context_key == CURRENT
+
+
 class TestSideEffectNodeChecksEveryRun:
     """A sink looks for completions it cannot match before every run (CodeRabbit, PR #315)."""
 
     def test_a_table_written_before_v03_that_appears_between_runs_is_refused(self):
+        """A sink's second run raises on an old log added after its first run."""
         store = InMemoryArrowDatabase()
         job = _sink_job(store)
         _ = job.run()
@@ -159,19 +224,7 @@ class TestSideEffectNodeChecksEveryRun:
         delivered.clear()
 
         # A log of the same pod at the layout Orcapod v0.2 wrote, under another hash.
-        (log_path,) = [p for p in store.list_sources() if p[-1] == "tdb_v2"]
-        old_path = log_path[:-2] + ("schema:" + "0" * 64, "tdb_v1")
-        store.add_records(
-            old_path,
-            pa.table(
-                {
-                    "__record_id": pa.array([b"arrow_v0.1:00"], pa.large_binary()),
-                    "record_id_hash": pa.array([b"arrow_v0.1:00"], pa.large_binary()),
-                }
-            ),
-            record_id_column="__record_id",
-        )
-        store.flush()
+        old_path = _add_table_written_before_v03(store, "tdb_v2", "tdb_v1")
 
         # The same job object runs again: the check is not remembered from the first run.
         with pytest.raises(SideEffectLogDataContextError) as info:
@@ -179,7 +232,25 @@ class TestSideEffectNodeChecksEveryRun:
         assert old_path in info.value.record_paths
         assert delivered == []
 
+    def test_a_function_pod_with_ctx_arg_checks_before_every_run_too(self):
+        """The other kind of side-effecting node refuses on its second run as well."""
+        store = InMemoryArrowDatabase()
+        job = _notify_job(store)
+        _ = job.run()
+        assert sorted(delivered) == [1, 2]
+        delivered.clear()
+        _ = job.run()  # nothing new in the store: runs, and delivers nothing again
+        assert delivered == []
+
+        old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
+
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            _ = job.run()
+        assert old_path in info.value.record_paths
+        assert delivered == []
+
     def test_the_error_does_not_offer_a_fresh_store_as_a_safe_retry(self):
+        """The error message warns that a fresh store repeats every side effect."""
         error = SideEffectLogDataContextError(
             (("j", "side_effects", "notify", "schema:abc", "tdb_v1"),),
             "std:v0.1:default",
@@ -192,3 +263,43 @@ class TestSideEffectNodeChecksEveryRun:
             "A fresh store holds no completions, so on it the node performs every "
             "side effect again" in message
         )
+
+
+class TestTablesOfNodesTheRunLeavesOut:
+    """A node the run excludes does not hide its pre-v0.3 tables (CodeRabbit, PR #324)."""
+
+    def test_job_total_counts_the_tables_of_an_excluded_node(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """A function node behind an unbound source reports nothing itself; the job does."""
+        import logging
+
+        from orcapod.core.nodes.source_node import SourceNode
+
+        store = InMemoryArrowDatabase()
+        tag_schema, data_schema = DictSource(
+            data=ROWS, tag_columns=["k"], source_id="src"
+        ).output_schema()
+        job = PipelineJob(name=JOB_NAME, store=store)
+        with job:
+            unbound = SourceNode(
+                name="src", tag_schema=tag_schema, data_schema=data_schema
+            )
+            double.pod(unbound, label="dbl")
+        key = pa.array([b"arrow_v0.1:00"], pa.large_binary())
+        old_path = (JOB_NAME, "double", "0" * 64, "v0", "python.function.v0", "pdb_v1")
+        store.add_records(
+            old_path, pa.table({"__record_id": key}), record_id_column="__record_id"
+        )
+        store.flush()
+
+        with caplog.at_level(logging.WARNING):
+            _ = job.run()
+
+        totals = [
+            record.getMessage()
+            for record in caplog.records
+            if "more table" in record.getMessage()
+        ]
+        assert len(totals) == 1, [r.getMessage() for r in caplog.records]
+        assert "/".join(old_path) in totals[0]

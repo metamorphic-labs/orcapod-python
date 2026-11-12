@@ -1294,10 +1294,15 @@ class TestResolver:
         assert no_resolver_result == expected_no_resolver
 
         # With a resolver that uses calling_hasher for inner, the token differs
+        resolved: list[object] = []
+
         def resolver(obj):
+            resolved.append(obj)
             return calling_hasher.hash_object(obj.identity_structure())
 
         resolver_result = calling_hasher.hash_object([inner], resolver=resolver)
+        # The resolver, not inner's own hasher, produced the nested hash.
+        assert resolved == [inner]
         inner_via_calling = calling_hasher.hash_object(inner.identity_structure())
         expected_resolver = calling_hasher.hash_object([inner_via_calling])
         assert resolver_result == expected_resolver
@@ -1305,6 +1310,13 @@ class TestResolver:
         # The two inner hashes differ only in their label, and a label never enters
         # a hash input (ITL-945), so the enclosing hashes are equal.
         assert no_resolver_result == resolver_result
+
+        # A resolver that gives the nested object another digest changes the
+        # enclosing hash: what the resolver returns is what gets embedded.
+        other_digest_result = calling_hasher.hash_object(
+            [inner], resolver=lambda obj: calling_hasher.hash_object("not inner")
+        )
+        assert other_digest_result != no_resolver_result
 
     def test_resolver_propagates_through_tuple(self):
         """Resolver is applied to CI objects nested inside a tuple."""
@@ -1413,10 +1425,23 @@ class TestUniformHasherPropagation:
         inner = SimpleRecord("inner", 1, semantic_hasher=hasher_a)
         outer = NestedRecord("outer", inner, semantic_hasher=hasher_b)
 
+        # Record the hasher inner is asked to hash itself with: the two hashers
+        # differ only in their label, which no digest shows (ITL-945).
+        asked_with: list[object] = []
+        inner_content_hash = inner.content_hash
+
+        def recording_content_hash(hasher=None):
+            asked_with.append(hasher)
+            return inner_content_hash(hasher)
+
+        inner.content_hash = recording_content_hash  # type: ignore[method-assign]
+
         result = outer.content_hash()
 
         # Entry point is outer (hasher_b), so the top-level result tag is hasher_b
         assert result.method == "hasher_b"
+        # ... and inner was resolved with the entry point's hasher, not its own.
+        assert asked_with == [hasher_b]
 
         # Verify: result equals computing everything with hasher_b uniformly
         expected_uniform = hasher_b.hash_object(

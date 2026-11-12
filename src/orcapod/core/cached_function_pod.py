@@ -72,15 +72,22 @@ class CachedFunctionPod(WrappedFunctionPod):
         """Return the path to the cached records in the result store (versioned)."""
         return self._cache.record_path
 
-    def stale_result_tables(self) -> StaleTables:
+    def stale_result_tables(self, include_current: bool = True) -> StaleTables:
         """Find stored results of other generations that this pod will not use.
+
+        Args:
+            include_current: Whether to read the current result table and count
+                its rows of another data context. ``False`` leaves the search to
+                tables at an older layout, which reads no current table.
 
         Returns:
             Result tables at an older layout (at this pod's path, or anywhere
             under its function's name), and, for a pod that takes the invocation
             context, rows of another data context in the current result table.
         """
-        return self._cache.stale_tables(self.data_context_key)
+        return self._cache.stale_tables(
+            self.data_context_key, include_current=include_current
+        )
 
     def set_auto_flush(self, on: bool = True) -> None:
         """Set whether each stored result is committed (flushed) right away.

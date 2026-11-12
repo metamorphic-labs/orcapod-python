@@ -23,6 +23,7 @@ class _StubLogicalType:
         return str
 
     def readable_extension_metadata(self):
+        """Return the metadata this type writes as the only metadata it can read."""
         return (self.get_arrow_extension_type().__arrow_ext_serialize__(),)
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
@@ -119,6 +120,7 @@ def test_logical_type_python_to_storage_accepts_converter():
             return str
 
         def readable_extension_metadata(self):
+            """Return empty metadata as the only metadata this type can read."""
             return (b"",)
 
         def get_arrow_extension_type(self):

@@ -213,6 +213,90 @@ class TestNestedNullabilityIsIdentity:
 _SEEDS = ("1", "2", "3", "4", "5", "6")
 
 
+def _value_hashed_types() -> dict[str, Any]:
+    """Python types whose column values the Arrow hasher replaces by a value hash."""
+    import numpy as np
+    import pandas as pd
+
+    import orcapod as op
+
+    return {
+        "uuid": uuid.UUID,
+        "file": op.File,
+        "directory": op.Directory,
+        "ndarray": np.ndarray,
+        "dataframe": pd.DataFrame,
+        "series": pd.Series,
+        "list_of_file": list[op.File],
+        "set_of_uuid": set[uuid.UUID],
+    }
+
+
+def _null_column(python_type: Any, rows: int) -> pa.Table:
+    """A one-column table of ``python_type`` holding ``rows`` nulls."""
+    arrow_type = resolve_context(None).type_converter.python_type_to_arrow_type(
+        python_type
+    )
+    assert isinstance(arrow_type, pa.ExtensionType)
+    storage = pa.array([None] * rows, arrow_type.storage_type)
+    return pa.table({"c": pa.ExtensionArray.from_storage(arrow_type, storage)})
+
+
+class TestValueHashedLogicalTypeKeepsItsIdentityWithoutValues:
+    """Follow-up to finding I: a logical type is part of the hash with or without rows.
+
+    The hasher replaces a value-hashed logical type by ``large_binary`` tokens. The
+    logical type's identifier used to live only in each token, so a column with no
+    value (zero rows, or nulls only) hashed like a plain ``large_binary`` column and
+    like every other value-hashed logical type (ITL-967).
+    """
+
+    @pytest.mark.parametrize("rows", [0, 2], ids=["zero_rows", "all_null"])
+    def test_columns_of_different_logical_types_hash_differently(
+        self, rows: int
+    ) -> None:
+        """No two value-hashed logical types share a table hash, nor one with plain binary."""
+        hasher = _arrow_hasher()
+        hashes = {
+            name: hasher.hash_table(_null_column(python_type, rows))
+            for name, python_type in _value_hashed_types().items()
+        }
+        hashes["plain_large_binary"] = hasher.hash_table(
+            pa.table({"c": pa.array([None] * rows, pa.large_binary())})
+        )
+        assert len(set(hashes.values())) == len(hashes), hashes
+
+    @pytest.mark.parametrize("rows", [0, 2], ids=["zero_rows", "all_null"])
+    def test_a_column_hashes_the_same_every_time(self, rows: int) -> None:
+        """Building the same column twice gives the same hash."""
+        hasher = _arrow_hasher()
+        for name, python_type in _value_hashed_types().items():
+            assert hasher.hash_table(
+                _null_column(python_type, rows)
+            ) == hasher.hash_table(_null_column(python_type, rows)), name
+
+    def test_zero_rows_and_all_null_rows_differ(self) -> None:
+        """The number of rows is still part of the hash."""
+        hasher = _arrow_hasher()
+        assert hasher.hash_table(_null_column(uuid.UUID, 0)) != hasher.hash_table(
+            _null_column(uuid.UUID, 2)
+        )
+
+    def test_hashed_type_is_the_same_with_and_without_data(self) -> None:
+        """Finding I's rule holds: one declared type is hashed under one type."""
+        from orcapod.types import Schema
+
+        context = resolve_context(None)
+        with_data = context.type_converter.python_dicts_to_arrow_table(
+            [{"c": uuid.UUID(int=1)}, {"c": None}],
+            python_schema=Schema({"c": Optional[uuid.UUID]}),
+        )
+        # Non-public helper: the test is about the schema the hasher hashes under.
+        hashed = context.arrow_hasher._process_table_columns  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert hashed(with_data).schema == hashed(with_data.slice(0, 0)).schema
+        assert hashed(with_data).schema == hashed(with_data.slice(1, 1)).schema
+
+
 class TestStructureHasherProcessIndependence:
     """Finding L1: set hashes do not depend on the process."""
 
@@ -476,9 +560,13 @@ class TestColumnSelectionIdentity:
         """Mutating the caller's list later does not change the operator."""
         source = _xy_source()
         columns = ["x"]
-        stream = SelectDataColumns(columns=columns)(source)
-        before = stream.pipeline_hash()
+        operator = SelectDataColumns(columns=columns)
+        before = operator(source).pipeline_hash()
         columns.append("y")
+        # The operator built before the mutation still selects "x" only.
+        after = operator(source)
+        assert after.keys()[1] == ("x",)
+        assert after.pipeline_hash() == before
         assert SelectDataColumns(columns=["x"])(source).pipeline_hash() == before
 
 
@@ -600,6 +688,7 @@ class TestRecordIdType:
         sync_node.run()
 
         async def run_async() -> tuple[Any, Any]:
+            """Run an equal node with ``async_execute``; return its database and it."""
             db = InMemoryArrowDatabase()
             node = OperatorJobNode(
                 SelectDataColumns(["x"]),

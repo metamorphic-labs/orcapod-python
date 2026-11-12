@@ -72,6 +72,16 @@ class LogicalTypeIdentifierError(ValueError):
         readable: tuple[bytes, ...],
         column: str | None = None,
     ) -> None:
+        """Build the error and its message.
+
+        Args:
+            stored: The identifier found with the stored column.
+            readable: The extension metadata values this installation reads for
+                the stored extension name; may be empty.
+            column: Name of the column, if the raising code knows it. When
+                ``None`` the message says "A column"; ``for_column`` adds the
+                name later.
+        """
         self.stored = stored
         self.readable = readable
         self.column = column

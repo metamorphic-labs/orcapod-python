@@ -1236,6 +1236,47 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Group: arrow — value-hashed logical types in a column that holds no value
+# ---------------------------------------------------------------------------
+
+
+@case("arrow", "extension_no_values")
+def arrow_extension_columns_without_values() -> dict[str, Any]:
+    """Table hashes of value-hashed logical-type columns with zero rows or nulls only.
+
+    Such a column has no cell token, so its logical type enters the hash through
+    the hashed field alone (ITL-967). Every entry differs from every other and from
+    the plain ``large_binary`` entries.
+    """
+    import orcapod as op
+
+    ctx = _ctx()
+    types: dict[str, Any] = {
+        "uuid": uuid.UUID,
+        "file": op.File,
+        "directory": op.Directory,
+        "ndarray": np.ndarray,
+        "dataframe": pd.DataFrame,
+        "series": pd.Series,
+        "list_of_file": list[op.File],
+        "set_of_uuid": set[uuid.UUID],
+    }
+    entries: dict[str, Any] = {}
+    for rows, label in ((0, "zero_rows"), (2, "all_null")):
+        for name, python_type in types.items():
+            arrow_type = ctx.type_converter.python_type_to_arrow_type(python_type)
+            storage = pa.array([None] * rows, arrow_type.storage_type)
+            column = pa.ExtensionArray.from_storage(arrow_type, storage)
+            entries[f"{label}.{name}"] = ctx.arrow_hasher.hash_table(
+                pa.table({"c": column})
+            ).to_string()
+        entries[f"{label}.plain_large_binary"] = ctx.arrow_hasher.hash_table(
+            pa.table({"c": pa.array([None] * rows, pa.large_binary())})
+        ).to_string()
+    return entries
+
+
 def _nullable_readings() -> Any:
     """A source with a nullable tag and two nullable data columns, each with a null."""
     from orcapod.sources import ArrowTableSource

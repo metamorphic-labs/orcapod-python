@@ -39,21 +39,25 @@ def _manifest_files() -> dict[str, Path]:
 
 
 def test_default_data_context_is_v1() -> None:
+    """The default data context has key ``std:v1:default`` and version ``v1``."""
     assert contexts.get_default_context_key() == "std:v1:default"
     assert contexts.get_default_context().version == "v1"
 
 
 def test_v1_resolves_by_version_and_by_key() -> None:
+    """Both ``v1`` and ``std:v1:default`` resolve to the default context object."""
     default = contexts.get_default_context()
     assert contexts.resolve_context("v1") is default
     assert contexts.resolve_context("std:v1:default") is default
 
 
 def test_every_manifest_is_listed() -> None:
+    """The pinned versions are exactly the versions that have a manifest file."""
     assert set(_pins()) == set(_manifest_files())
 
 
 def test_released_manifests_are_unchanged() -> None:
+    """Each pinned manifest file still has the sha256 recorded for it."""
     files = _manifest_files()
     for version, pinned in _pins().items():
         if pinned is None:
@@ -67,11 +71,13 @@ def test_released_manifests_are_unchanged() -> None:
 
 
 def test_only_the_default_manifest_is_open() -> None:
+    """At most one manifest has no pinned sha256, and it is the default version's."""
     open_versions = [version for version, pinned in _pins().items() if pinned is None]
     assert open_versions in ([], [contexts.get_default_context().version])
 
 
 def test_a_final_release_ships_no_open_manifest() -> None:
+    """A final release (not a prerelease or local build) pins every manifest."""
     version = Version(orcapod.__version__)
     if version.is_prerelease or version.local is not None:
         # A development build or a release candidate: the manifest may still be open.
@@ -107,10 +113,14 @@ def golden_digest() -> str:
 
 
 def test_v1_follows_the_pre_v1_data_context() -> None:
+    """The v1 manifest names ``std:v0.1:default`` as its previous context."""
     assert _v1()["previous"] == "std:v0.1:default"
 
 
 def test_v1_names_its_definitions_libraries_and_changes() -> None:
+    """The v1 manifest has named definitions, the hashing libraries, and changes that
+    each refer to a definition.
+    """
     manifest = _v1()
     definitions = manifest["definitions"]
     assert isinstance(definitions, dict) and definitions
@@ -215,12 +225,16 @@ def test_logical_type_registration_is_unchanged_by_the_move() -> None:
 
 
 def test_only_the_v1_manifest_is_shipped() -> None:
+    """The only manifest file and the only available context are ``v1``."""
     assert sorted(_manifest_files()) == ["v1"]
     assert contexts.get_available_contexts() == ["v1"]
 
 
 @pytest.mark.parametrize("name", ["std:v0.1:default", "v0.1"])
 def test_the_pre_v1_data_context_does_not_resolve(name: str) -> None:
+    """Resolving the pre-v1 context raises an error naming it, v0.3 and ``orcapod-
+    sanctuary``.
+    """
     with pytest.raises(contexts.ContextResolutionError) as info:
         _ = contexts.resolve_context(name)
     message = str(info.value)

@@ -229,15 +229,46 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         self._python_hasher = python_hasher
         self._current_field_path: list[str] = []
 
-    def hashed_type(self, arrow_type: "pa.DataType") -> "pa.DataType":
-        """Return the type a column of ``arrow_type`` is hashed under.
+    def hashed_field(self, field: "pa.Field[Any]") -> "pa.Field[Any]":
+        """Return the field a column or nested field is hashed under.
 
-        The result depends on the declared type only, never on the data, so one
-        schema always hashes one way (ITL-942 I). An extension type whose values
-        this visitor hashes (``visit_extension`` returns ``large_binary``) becomes
-        ``large_binary``; struct and list types are rebuilt around their fields
-        with ``Field.with_type``, which keeps every field's name, nullability and
-        metadata; everything else is returned unchanged.
+        The result depends on the declared field only, never on the data, so one
+        schema always hashes one way (ITL-942 I). A field whose extension type this
+        visitor hashes by value (``visit_extension`` returns ``large_binary``)
+        becomes a ``large_binary`` field that keeps the logical type's whole
+        identifier, as the ``ARROW:extension:name`` and ``ARROW:extension:metadata``
+        keys of its field metadata. The Arrow hasher hashes those keys, so two
+        logical types never share a hash, also when a column holds no value (zero
+        rows, or nulls only) and so has no cell token to carry the identifier
+        (ITL-967). Struct and list types are rebuilt around their fields, each of
+        which keeps its name, nullability and metadata; everything else is
+        returned unchanged.
+
+        Args:
+            field: The declared Arrow field of a column or of a nested member.
+
+        Returns:
+            The Arrow field of the values ``visit`` produces for ``field.type``.
+        """
+        arrow_type = field.type
+        if isinstance(arrow_type, pa.ExtensionType):
+            if not self._hashes_extension(arrow_type):
+                return field
+            identifier = arrow_type_identifier(arrow_type)
+            metadata: dict[bytes | str, bytes | str] = {
+                key: value for key, value in (field.metadata or {}).items()
+            }
+            metadata[b"ARROW:extension:name"] = identifier.name.encode("utf-8")
+            metadata[b"ARROW:extension:metadata"] = identifier.metadata
+            return field.with_type(pa.large_binary()).with_metadata(metadata)
+        return field.with_type(self.hashed_type(arrow_type))
+
+    def hashed_type(self, arrow_type: "pa.DataType") -> "pa.DataType":
+        """Return the type the members of ``arrow_type`` are hashed under.
+
+        Struct and list types are rebuilt around ``hashed_field`` of each of their
+        fields. A value-hashed extension type becomes ``large_binary``; its
+        identifier is kept by the enclosing field, see ``hashed_field``.
 
         Args:
             arrow_type: The declared Arrow type of a column or nested field.
@@ -250,22 +281,14 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
                 pa.large_binary() if self._hashes_extension(arrow_type) else arrow_type
             )
         if pa.types.is_struct(arrow_type):
-            return pa.struct(
-                [field.with_type(self.hashed_type(field.type)) for field in arrow_type]
-            )
+            return pa.struct([self.hashed_field(field) for field in arrow_type])
         if pa.types.is_large_list(arrow_type):
-            value_field = arrow_type.value_field
-            return pa.large_list(
-                value_field.with_type(self.hashed_type(value_field.type))
-            )
+            return pa.large_list(self.hashed_field(arrow_type.value_field))
         if pa.types.is_list(arrow_type):
-            value_field = arrow_type.value_field
-            return pa.list_(value_field.with_type(self.hashed_type(value_field.type)))
+            return pa.list_(self.hashed_field(arrow_type.value_field))
         if pa.types.is_fixed_size_list(arrow_type):
-            value_field = arrow_type.value_field
             return pa.list_(
-                value_field.with_type(self.hashed_type(value_field.type)),
-                arrow_type.list_size,
+                self.hashed_field(arrow_type.value_field), arrow_type.list_size
             )
         return arrow_type
 

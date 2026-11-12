@@ -1,8 +1,9 @@
 ## Hash-site audit — wrong hashes fixed before v0.3 (ITL-942)
 
 ### WH1 — Hashes that collided or depended on data, process or spelling
-
-**Status:** resolved (ITL-942)
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-942
 
 The ITL-938 hash-site audit (Appendix A.9 of its design) found values that were wrong: two
 different things shared a hash, or one thing hashed differently depending on its data, the

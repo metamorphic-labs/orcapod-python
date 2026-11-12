@@ -1362,6 +1362,13 @@ class OperatorJobNode(OperatorNodeBase):
             # OFF or LOG: delegate to operator, forward results downstream
             intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
             should_collect = self._cache_mode == CacheMode.LOG
+            if should_collect:
+                # Rows are forwarded while the operator runs, so an input this node
+                # will refuse to store must be refused before the first row leaves.
+                for input_stream in self._input_streams:
+                    require_same_data_context(
+                        input_stream.data_context_key, self.data_context_key
+                    )
             collected: list[tuple[TagProtocol, DataProtocol]] = []
 
             async def forward() -> None:

@@ -818,6 +818,7 @@ class SideEffectJobNode(SideEffectNode):
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
         self._unlisted_store_reported = False
+        self._current_log_checked = False
 
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse an invocation log holding deliveries of another data context.
@@ -829,8 +830,9 @@ class SideEffectJobNode(SideEffectNode):
         context in the current log. An older log is looked for at this node's own
         path and, because the hash in the path can differ between versions, anywhere
         under the pod's name in the store (ITL-954). Checked at the start of every
-        run, so a log that appears between two runs of one node object is found too;
-        the logs are only read.
+        run, so a log that appears between two runs of one node object is found too.
+        The current log is read and counted by data context the first time only;
+        the later runs list the store, which reads no table.
 
         Raises:
             SideEffectLogDataContextError: If such deliveries are found; nothing has
@@ -845,7 +847,7 @@ class SideEffectJobNode(SideEffectNode):
                 self._table_path[:-1] + (layout,)
                 for layout in OLD_TRACKING_DB_SCHEMA_VERSIONS
             ),
-            current=(self._table_path, current),
+            current=None if self._current_log_checked else (self._table_path, current),
             # ("side_effects", <pod name>): the part of the path that holds no hash.
             name_path=self.node_uri,
         )
@@ -862,6 +864,7 @@ class SideEffectJobNode(SideEffectNode):
         except StoreError as exc:
             exc.add_context(node_label=self.label)
             raise
+        self._current_log_checked = True
 
     # ------------------------------------------------------------------
     # DB attachment
@@ -883,6 +886,7 @@ class SideEffectJobNode(SideEffectNode):
         """
         self._pipeline_database = pipeline_database
         self._unlisted_store_reported = False
+        self._current_log_checked = False
         if pipeline_database is not None:
             self._table_path = self.node_uri + (
                 f"schema:{self.pipeline_hash().to_hex()}",

@@ -110,6 +110,19 @@ class ListLogicalType(BaseLogicalType):
         category = SET_CATEGORY if is_set else LIST_CATEGORY
 
         def _container_metadata(element_metadata: bytes) -> bytes:
+            """Return the container's extension metadata for one element metadata.
+
+            The result is UTF-8 JSON with the keys ``category`` (list or set),
+            ``element_ext_name`` and ``element_ext_metadata``.
+
+            Args:
+                element_metadata: The element type's extension metadata bytes,
+                    which must be UTF-8 text. Empty bytes are written as JSON
+                    ``null``.
+
+            Returns:
+                The JSON document, encoded as UTF-8.
+            """
             # No "version" key, by design: see "Native containers" in the module
             # docstring. The identifier is the container kind plus the element's
             # identifier, so it changes exactly when the element's does.

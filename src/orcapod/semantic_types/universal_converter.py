@@ -555,6 +555,11 @@ class UniversalTypeConverter:
             if self._logical_type_registry is not None:
                 lt = self._logical_type_registry.get_by_arrow_extension_name(ext_name)
                 if lt is not None:
+                    # The name is known: the incoming metadata must be one the
+                    # registered type reads, as on the registry-miss path.
+                    from orcapod.logical_types.identifier import require_readable
+
+                    require_readable(lt, arrow_type.__arrow_ext_serialize__())
                     return lt.get_arrow_extension_type()
             # Registry miss — extract info and register
             raw_meta = arrow_type.__arrow_ext_serialize__()
