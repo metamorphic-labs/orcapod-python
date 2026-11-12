@@ -99,3 +99,19 @@ single constants, starfix ordered mode for the values digest. One push.
 ## Progress notes
 
 (appended while working)
+
+- Merge commit 3833616a (origin/main c8e9eb21). Conformance 712a72f8, test follow-up next.
+- Hash definition after the refresh: `sha256(descriptor + 0x00 + ArrowDigester.hash_table(
+  projection, ordered_columns=True, ordered_struct_fields=True))`. starfix 0.5.0 tells a null
+  struct from a struct of nulls and hashes `fixed_size_list`; it still refuses `null`.
+- Golden: 38 keyed values added (semantic 7, schema 4, datagram 23, arrow 4), 0 changed.
+- Already conformant, tests added without a red phase: wrong-typed return (the savers raise
+  `TypeError`), saved job load (same as pandas: `get_all_records()` works, `iter_data()` needs
+  PR #303), null struct as a cache key.
+- `tests/test_contexts/test_data_context_v1.py` pins the registered handlers and logical type
+  names; the Polars entries were added there.
+- A stale `src/orcapod/migrations/__pycache__` (ignored, left by the pre-merge tree) made
+  `test_the_v0_migration_machinery_is_gone` fail locally; removed. Not a repository change.
+- Linear: the sentence for ITL-966 gap 3 could not be written from this session (the tool
+  call was denied); text is in the worker_done report.
+- Remaining: full suite 3.12 / 3.11 / 3.13, PR body, ONE push, CI, CodeRabbit round.
