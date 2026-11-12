@@ -1,0 +1,390 @@
+"""``head()`` and the notebook preview show what is readily available and never compute (ITL-991).
+
+A stream's ``head(n)`` returns at most ``n`` rows it already holds, has cached from an earlier
+computation, or can read from its table, and the preview (``_repr_html_``) renders exactly
+that. Neither calls a function, runs an operator, delivers a side effect, polls a source or
+writes a cache.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest import mock
+
+import numpy as np
+import pyarrow as pa
+import pytest
+
+from orcapod import function_pod, side_effect_pod
+from orcapod.core.operators import GroupBy, Join, PolarsFilter, SelectDataColumns
+from orcapod.core.sources import ArrowTableSource, CachedSource, DictSource, ListSource
+from orcapod.core.sources.polling_source import PollingSource
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.streams import HeadStatus, StreamHead
+from orcapod.types import ColumnConfig, Cursor
+
+ALL_COLUMNS = ColumnConfig(
+    meta=True, context=True, source=True, system_tags=True, content_hash=True
+)
+
+
+def _table(rows: int, offset: int = 0) -> pa.Table:
+    """``id`` and ``x``, both non-nullable ``int64``."""
+    return pa.table(
+        {
+            "id": list(range(offset, offset + rows)),
+            "x": [10 * i for i in range(offset, offset + rows)],
+        },
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+
+
+def _source(rows: int = 25, label: str = "readings") -> ArrowTableSource:
+    return ArrowTableSource(
+        _table(rows), tag_columns=["id"], source_id="readings", label=label
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sources and in-memory streams
+# ---------------------------------------------------------------------------
+
+
+def test_source_head_is_the_first_rows_with_the_exact_total() -> None:
+    source = _source()
+    head = source.head()
+    assert isinstance(head, StreamHead)
+    assert head.status is HeadStatus.ROWS
+    assert len(head) == 10
+    assert head.total_rows == 25
+    assert head.table.equals(source.as_table().slice(0, 10))
+    assert head.header() == "ArrowTableSource[readings] — first 10 of 25 rows"
+
+
+def test_head_of_a_short_source_says_all_rows() -> None:
+    head = _source(rows=3).head()
+    assert len(head) == 3
+    assert head.header() == "ArrowTableSource[readings] — all 3 rows"
+
+
+def test_head_with_every_column_group_is_the_prefix_of_as_table() -> None:
+    source = _source()
+    head = source.head(4, columns=ALL_COLUMNS)
+    assert head.table.equals(source.as_table(columns=ALL_COLUMNS).slice(0, 4))
+    # all_info means every column group; head returns rows in stream order.
+    assert source.head(4, all_info=True).table.equals(
+        source.as_table(columns=ALL_COLUMNS).slice(0, 4)
+    )
+
+
+def test_head_refuses_negative_n_and_sorting() -> None:
+    source = _source()
+    with pytest.raises(ValueError, match="n"):
+        source.head(-1)
+    with pytest.raises(ValueError, match="sort"):
+        source.head(columns={"sort_by_tags": True})
+
+
+def test_head_of_zero_rows_keeps_the_columns() -> None:
+    head = _source().head(0)
+    assert head.status is HeadStatus.ROWS
+    assert head.table.column_names == ["id", "x"]
+    assert head.table.num_rows == 0
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: DictSource(
+            [{"id": i, "x": i} for i in range(12)], tag_columns=["id"], label="d"
+        ),
+        lambda: ListSource(
+            name="v", data=list(range(12)), tag_function=lambda e, i: {"i": i}
+        ),
+    ],
+    ids=["dict", "list"],
+)
+def test_other_in_memory_sources_serve_their_first_rows(make: Any) -> None:
+    source = make()
+    head = source.head(5)
+    assert head.status is HeadStatus.ROWS
+    assert head.total_rows == 12
+    assert head.table.equals(source.as_table().slice(0, 5))
+
+
+def test_preview_is_the_rendered_head() -> None:
+    source = _source()
+    html = source._repr_html_()
+    assert "ArrowTableSource[readings] — first 10 of 25 rows" in html
+    assert html == source.head()._repr_html_()
+
+
+# ---------------------------------------------------------------------------
+# Function pods
+# ---------------------------------------------------------------------------
+
+
+def _counting_pod(calls: list[int]) -> Any:
+    @function_pod(output_keys="y")
+    def triple(x: int) -> int:
+        calls.append(x)
+        return 3 * x
+
+    return triple
+
+
+def test_function_pod_stream_is_not_computed_by_head_or_preview() -> None:
+    calls: list[int] = []
+    stream = _counting_pod(calls).pod(_source(), label="triple")
+    head = stream.head()
+    html = stream._repr_html_()
+    assert calls == []
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert len(head) == 0
+    assert head.table.column_names == ["id", "y"]
+    assert "not computed" in html
+    assert "FunctionPodStream[triple]" in html
+
+
+def test_function_pod_stream_shows_rows_computed_so_far() -> None:
+    calls: list[int] = []
+    stream = _counting_pod(calls).pod(_source())
+    rows = stream.iter_data()
+    for _ in range(3):
+        next(rows)
+    head = stream.head()
+    assert calls == [0, 10, 20]
+    assert head.status is HeadStatus.PARTIAL
+    assert head.table.column("y").to_pylist() == [0, 30, 60]
+    assert "computed so far" in head.header()
+
+
+def test_function_pod_stream_shows_its_computed_rows() -> None:
+    calls: list[int] = []
+    stream = _counting_pod(calls).pod(_source())
+    table = stream.as_table()
+    assert len(calls) == 25
+    head = stream.head(7)
+    assert len(calls) == 25
+    assert head.status is HeadStatus.ROWS
+    assert head.total_rows == 25
+    assert head.table.equals(table.slice(0, 7))
+    assert head.header().endswith("first 7 of 25 computed rows")
+
+
+def test_function_pod_stream_rows_from_iteration_only() -> None:
+    calls: list[int] = []
+    stream = _counting_pod(calls).pod(_source())
+    _ = list(stream.iter_data())
+    head = stream.head(4, columns=ALL_COLUMNS)
+    assert len(calls) == 25
+    assert head.status is HeadStatus.ROWS
+    assert head.table.equals(stream.as_table(columns=ALL_COLUMNS).slice(0, 4))
+    assert len(calls) == 25
+
+
+# ---------------------------------------------------------------------------
+# Operators
+# ---------------------------------------------------------------------------
+
+
+def _other_source() -> ArrowTableSource:
+    table = pa.table(
+        {"id": list(range(25)), "z": [i * i for i in range(25)]},
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field("z", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    return ArrowTableSource(table, tag_columns=["id"], source_id="other")
+
+
+def _grouped_source() -> ArrowTableSource:
+    table = pa.table(
+        {
+            "id": list(range(25)),
+            "grp": [f"g{i % 3}" for i in range(25)],
+            "x": list(range(25)),
+        },
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field("grp", pa.large_string(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    return ArrowTableSource(table, tag_columns=["id", "grp"], source_id="grouped")
+
+
+OPERATOR_CASES = {
+    "join": (Join, lambda: Join()(_source(), _other_source())),
+    "group_by": (GroupBy, lambda: GroupBy(by=["grp"])(_grouped_source())),
+    "filter": (
+        PolarsFilter,
+        lambda: PolarsFilter(constraints={"x": 20})(_source()),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(OPERATOR_CASES), ids=list(OPERATOR_CASES))
+def test_operator_stream_is_not_run_by_head_or_preview(case: str) -> None:
+    operator_class, build = OPERATOR_CASES[case]
+    stream = build()
+    original = operator_class.static_process
+    # A spy on the non-public static_process: the test is about whether it runs.
+    with mock.patch.object(
+        operator_class, "static_process", autospec=True, side_effect=original
+    ) as spy:
+        head = stream.head()
+        _ = stream._repr_html_()
+        assert spy.call_count == 0
+        assert head.status is HeadStatus.NOT_COMPUTED
+        assert len(head) == 0
+        table = stream.as_table()
+        assert spy.call_count == 1
+        after = stream.head(2)
+        assert spy.call_count == 1
+    assert after.status is HeadStatus.ROWS
+    assert after.table.equals(table.slice(0, 2))
+
+
+def test_an_empty_operator_result_is_not_not_computed() -> None:
+    stream = PolarsFilter(constraints={"x": -1})(_source())
+    _ = stream.as_table()
+    head = stream.head()
+    assert head.status is HeadStatus.ROWS
+    assert len(head) == 0
+    assert head.header().endswith("computed: no rows")
+
+
+def test_operator_stream_with_changed_inputs_is_not_computed() -> None:
+    calls: list[int] = []
+    fn_stream = _counting_pod(calls).pod(_source())
+    out = SelectDataColumns(["y"])(fn_stream)
+    _ = out.as_table()
+    fn_stream.clear_cache()
+    head = out.head()
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert "inputs changed" in head.header()
+
+
+# ---------------------------------------------------------------------------
+# Side effects, polling and caching sources
+# ---------------------------------------------------------------------------
+
+
+def test_side_effect_stream_preview_never_delivers() -> None:
+    delivered: list[int] = []
+
+    @side_effect_pod
+    def deliver(x: int) -> None:
+        delivered.append(x)
+
+    stream = deliver(_source())
+    head = stream.head()
+    html = stream._repr_html_()
+    assert delivered == []
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert "displaying never delivers side effects" in html
+
+
+class _FakeDynamicSource:
+    """A ``DynamicSourceProtocol`` double that records every poll and fetch."""
+
+    def __init__(self) -> None:
+        self.polls = 0
+        self.fetches = 0
+
+    def identity(self) -> Any:
+        return "fake"
+
+    def to_config(self) -> dict[str, Any] | None:
+        return None
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> _FakeDynamicSource:
+        raise NotImplementedError
+
+    def schema(self) -> Any:
+        return None
+
+    async def poll(self, cursor: Cursor[int] | None = None) -> bool:
+        self.polls += 1
+        return False
+
+    async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], Any]:
+        self.fetches += 1
+        return Cursor(value=1), {
+            "id": pa.array([1], type=pa.int64()),
+            "val": pa.array([7], type=pa.int64()),
+        }
+
+    async def close(self) -> None:
+        pass
+
+
+def test_polling_source_head_never_polls() -> None:
+    fake = _FakeDynamicSource()
+    source = PollingSource(fake, tag_columns="id")
+    head = source.head()
+    _ = source._repr_html_()
+    assert (fake.polls, fake.fetches) == (0, 0)
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert "nothing polled yet" in head.header()
+    _ = list(source.iter_data())
+    seen = (fake.polls, fake.fetches)
+    after = source.head()
+    assert (fake.polls, fake.fetches) == seen
+    assert after.status is HeadStatus.ROWS
+    assert after.table.column("val").to_pylist() == [7]
+
+
+def test_cached_source_head_writes_nothing() -> None:
+    store = InMemoryArrowDatabase()
+    source = CachedSource(_source(), cache_database=store)
+    head = source.head(3)
+    _ = source._repr_html_()
+    assert store.list_table_paths() == []
+    assert head.table.column("x").to_pylist() == [0, 10, 20]
+
+
+# ---------------------------------------------------------------------------
+# Rendering of large cells
+# ---------------------------------------------------------------------------
+
+
+def test_preview_summarises_large_cells_and_head_keeps_them() -> None:
+    source = DictSource(
+        [
+            {
+                "id": 1,
+                "arr": np.arange(6.0).reshape(2, 3),
+                "blob": b"xyz" * 100,
+                "text": "a" * 200,
+                "items": list(range(12)),
+            }
+        ],
+        tag_columns=["id"],
+        label="cells",
+    )
+    head = source.head()
+    html = head._repr_html_()
+    assert "ndarray float64 (2, 3)" in html
+    assert "bytes (300 B)" in html
+    assert "a" * 200 not in html
+    assert "…" in html
+    assert "list (len 12)" in html
+    assert head.table.equals(source.as_table())
+
+
+def test_text_form_has_the_header() -> None:
+    text = str(_source().head(2))
+    assert text.startswith("ArrowTableSource[readings] — first 2 of 25 rows")
