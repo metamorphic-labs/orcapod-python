@@ -380,7 +380,7 @@ class DynamicPodStream(StreamBase):
         upstream_times.append(self._pod.last_modified)
 
         if any(t is None for t in upstream_times):
-            self._cached_results = None
+            self._cached_stream = None
             self._cached_time = None
             return
 
@@ -389,7 +389,7 @@ class DynamicPodStream(StreamBase):
 
         # Invalidate cache if upstream is newer and update the cache time
         if max_upstream_time > self._cached_time:
-            self._cached_results = None
+            self._cached_stream = None
             self._cached_time = max_upstream_time
 
     def run(self, *args: Any, **kwargs: Any) -> None:
