@@ -177,7 +177,7 @@ def _rows(keys: list[int], schema: pa.Schema = _SCHEMA, **override: Any) -> pa.T
 
 
 def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
-    import spiral as sp
+    import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     from orcapod.databases import (
         SpiralDBConnector,
@@ -407,7 +407,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
 def read_mode(
     project: str, dataset: str, tables: list[str], column: str, report: dict[str, Any]
 ) -> bool:
-    import spiral as sp
+    import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     from orcapod.databases import read_nullability_record
     from orcapod.sources import SpiralDBTableSource
