@@ -335,6 +335,149 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
     )
 
 
+# ── inputs that are not root sources (ITL-906) ──────────────────────────────
+
+
+def after_operator(source: StreamProtocol) -> StreamProtocol:
+    """``source`` behind an operator that keeps every row: ``DropNulls`` on tag ``k``.
+
+    Every source of the matrix has the non-nullable tag ``k``, so the rows and columns
+    are those of ``source``; only the pipeline hash differs, as it does after any
+    operator or function pod.
+    """
+    stream = DropNulls("k")(source)
+    assert stream.pipeline_hash() != source.pipeline_hash()
+    return stream
+
+
+def _after_operator_case(case: Case) -> Case:
+    """``case`` with every input behind ``after_operator``."""
+
+    def make_sources() -> tuple[StreamProtocol, ...]:
+        return tuple(after_operator(s) for s in case.make_sources())
+
+    return Case(case.label, case.make_op, make_sources)
+
+
+def _first_after_operator_case(case: Case) -> Case:
+    """``case`` with only its first input behind ``after_operator``."""
+
+    def make_sources() -> tuple[StreamProtocol, ...]:
+        first, *rest = case.make_sources()
+        return (after_operator(first), *rest)
+
+    return Case(case.label, case.make_op, make_sources)
+
+
+AFTER_OPERATOR_CASES = [
+    pytest.param(_after_operator_case(c), id=f"{c.label}-all") for c in CASES
+] + [
+    pytest.param(_first_after_operator_case(c), id=f"{c.label}-first")
+    for c in CASES
+    if len(c.make_sources()) > 1
+]
+
+
+@pytest.mark.parametrize("case", AFTER_OPERATOR_CASES)
+def test_async_rows_equal_sync_rows_after_an_operator(case: Case) -> None:
+    """Every operator's async path equals its sync path when an input is not a source.
+
+    System-tag column names of ``MergeJoin`` (name-extending), ``Batch`` and ``GroupBy``
+    (reducing) end in the input's pipeline hash; the async path must use the hash of the
+    stream the rows came from, not that of the rows rebuilt into a table.
+    """
+    sources = case.make_sources()
+    assert_equivalent(
+        sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
+    )
+
+
+def function_pod_stream(source_id: str, offset: int) -> StreamProtocol:
+    """A function pod's output on tag ``k: int16``: ``x = a + offset`` as ``int``."""
+    source = _source(
+        {"k": pa.array([1, 2, 3], pa.int16()), "a": pa.array([1, 2, 3], pa.int8())},
+        tags=("k",),
+        source_id=source_id,
+    )
+
+    def shift(a: int) -> int:
+        return a + offset
+
+    pod = FunctionPod(
+        PythonDataFunction(shift, output_keys="x", function_name=f"shift_{source_id}")  # pyright: ignore[reportArgumentType]  # PythonDataFunction is not yet typed as matching DataFunctionProtocol (baselined in other tests); it works at runtime
+    )
+    return pod(source)
+
+
+FUNCTION_POD_CASES = [
+    Case(
+        "merge_join",
+        MergeJoin,
+        lambda: (function_pod_stream("p", 0), function_pod_stream("q", 10)),
+    ),
+    Case(
+        "merge_join_with_source",
+        MergeJoin,
+        lambda: (
+            function_pod_stream("p", 0),
+            _source(
+                {
+                    "k": pa.array([1, 2, 3], pa.int16()),
+                    "x": pa.array([7, 8, 9], pa.int64()),
+                },
+                tags=("k",),
+                source_id="r",
+            ),
+        ),
+    ),
+    Case("join", Join, lambda: (function_pod_stream("p", 0), source_b())),
+    Case("semijoin", SemiJoin, lambda: (function_pod_stream("p", 0), source_b())),
+    Case("batch_2", lambda: Batch(batch_size=2), lambda: (function_pod_stream("p", 0),)),
+    Case("batch_all", Batch, lambda: (function_pod_stream("p", 0),)),
+    Case("group_by", lambda: GroupBy(["k"]), lambda: (function_pod_stream("p", 0),)),
+    Case(
+        "polars_filter",
+        lambda: PolarsFilter(constraints={"k": 1}),
+        lambda: (function_pod_stream("p", 0),),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case", FUNCTION_POD_CASES, ids=[c.label for c in FUNCTION_POD_CASES]
+)
+def test_async_rows_equal_sync_rows_after_a_function_pod(case: Case) -> None:
+    """The async path equals the sync path when an input is a function pod's output."""
+    sources = case.make_sources()
+    assert_equivalent(
+        sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
+    )
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [lambda: Batch(batch_size=2), Batch, lambda: GroupBy(["ta"])],
+    ids=["batch_2", "batch_all", "group_by"],
+)
+def test_reducing_operator_names_system_tags_after_its_input(
+    make_op: Callable[[], StaticOutputOperatorPod],
+) -> None:
+    """A folded system-tag column name ends in the input's pipeline hash on both paths.
+
+    System tag rule 3: ``Batch`` and ``GroupBy`` append ``::{pipeline_hash}`` of their
+    input. The input here is an operator's output, whose pipeline hash is not the
+    schema-only hash of its rows.
+    """
+    op = make_op()
+    stream = after_operator(source_a())
+    suffix = stream.pipeline_hash().to_hex(op.orcapod_config.hashing.system_tag_n_char)
+    for rows in (sync_rows(make_op(), stream), async_rows(make_op(), stream)):
+        for tag, _ in rows:
+            names = list(tag.system_tags())
+            assert names
+            assert all(name.endswith(f"::{suffix}") for name in names), names
+
+
 def test_drop_nulls_without_tag_columns() -> None:
     """A stream without tag columns: the async path drops the same rows, in order.
 

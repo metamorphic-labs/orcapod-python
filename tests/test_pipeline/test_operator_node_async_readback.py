@@ -447,21 +447,48 @@ def test_operator_node_with_no_rows_keeps_columns_and_types_after_async_run(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-906: the async MergeJoin names system-tag columns from the schema-only "
-        "hash of its materialized inputs, not from its upstreams' pipeline hashes"
+AFTER_OPERATOR_CASES = [
+    MERGE_JOIN_AFTER_OPERATOR,
+    Case(
+        "batch_after_operator",
+        lambda a, b, c: Batch(batch_size=2)(SelectDataColumns(["x"])(a), label="op"),
+        2,
     ),
-)
-def test_merge_join_after_an_operator_reads_back_same_system_tags_after_async_run(
-    tmp_path: Path,
-) -> None:
-    """Async ``MergeJoin`` after an operator should name system tags as sync does."""
-    sync_node, async_node = _sync_and_async_nodes(MERGE_JOIN_AFTER_OPERATOR, tmp_path)
+    Case(
+        "group_by_after_operator",
+        lambda a, b, c: GroupBy(by=["grp"])(SelectDataColumns(["x"])(a), label="op"),
+        2,
+    ),
+    Case(
+        "group_by_after_function_pod",
+        lambda a, b, c: GroupBy(by=["grp"])(double_x.pod(a), label="op"),
+        2,
+    ),
+]
 
-    assert async_node.as_table(all_info=True).column_names == (
-        sync_node.as_table(all_info=True).column_names
+
+@pytest.mark.parametrize(
+    "case", AFTER_OPERATOR_CASES, ids=[case.name for case in AFTER_OPERATOR_CASES]
+)
+def test_operator_after_an_operator_reads_back_same_system_tags_after_async_run(
+    case: Case, tmp_path: Path
+) -> None:
+    """An async run names system tags as sync does when the input is not a source (ITL-906).
+
+    ``MergeJoin``, ``Batch`` and ``GroupBy`` put their inputs' pipeline hashes into
+    system-tag column names; the async path must use the upstream node's hash.
+    """
+    sync_node, async_node = _sync_and_async_nodes(case, tmp_path)
+
+    sync_table = sync_node.as_table(all_info=True)
+    async_table = async_node.as_table(all_info=True)
+    assert async_table.column_names == sync_table.column_names
+    assert async_table.num_rows == sync_table.num_rows == case.expected_rows
+    assert _row_hashes(async_node) == _row_hashes(sync_node)
+    assert sorted(
+        repr(sorted(tag.system_tags().items())) for tag, _ in async_node.iter_data()
+    ) == sorted(
+        repr(sorted(tag.system_tags().items())) for tag, _ in sync_node.iter_data()
     )
 
 
