@@ -28,15 +28,21 @@ copy, and commit the entry files that changed. The script uses the standard libr
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-# Run as a script, so the sibling module is importable by its file name.
-from design_issues import NO_ISSUE, EntryError, outside_fences, parse_entry
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# This one-off script stands alone: it shares no code with scripts/design_issues.py, which
+# checks the files it writes.
+NO_ISSUE = "NOISSUE"
+_ENTRY_HEADING = re.compile(r"^### ([A-Z][A-Z0-9]*) — \S")
+_ISSUE_LINE = re.compile(r"^\*\*Issue:\*\*\s*(.*)$")
+_ISSUE_ID = re.compile(r"\b[A-Z][A-Z0-9]*-[0-9]+\b")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 class LogError(ValueError):
@@ -56,6 +62,35 @@ class Piece:
 
     text: str
     area: str | None = None
+
+
+def outside_fences(lines: Sequence[str]) -> list[bool]:
+    """Mark the lines that are not inside (or delimiting) a fenced code block.
+
+    A block is closed only by a fence of the same character that is at least as long
+    as the one that opened it.
+    """
+    mask: list[bool] = []
+    opener: str | None = None
+    for line in lines:
+        fence = _FENCE.match(line)
+        if opener is None:
+            # A backtick fence cannot have a backtick in its info string.
+            if fence and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
+                opener = fence.group(1)
+                mask.append(False)
+            else:
+                mask.append(True)
+            continue
+        mask.append(False)
+        if (
+            fence
+            and fence.group(1)[0] == opener[0]
+            and len(fence.group(1)) >= len(opener)
+            and not fence.group(2).strip()
+        ):
+            opener = None
+    return mask
 
 
 def split_log(text: str) -> list[Piece]:
@@ -78,7 +113,7 @@ def split_log(text: str) -> list[Piece]:
     """
     lines = text.splitlines(keepends=True)
     bare = [line.rstrip("\r\n") for line in lines]
-    mask, _ = outside_fences(bare)
+    mask = outside_fences(bare)
 
     pieces: list[Piece] = []
     between: list[str] = []
@@ -140,8 +175,8 @@ def name_entries(pieces: Sequence[Piece]) -> list[str | None]:
         For each piece, its file name, or ``None`` for text between entries.
 
     Raises:
-        LogError: If an entry does not parse as an entry, or its ``**Issue:**`` line
-            names no Linear issue.
+        LogError: If an entry's heading is not ``### <ENTRY-ID> — <title>``, or its
+            ``**Issue:**`` line names no Linear issue.
     """
     names: list[str | None] = []
     used: dict[str, int] = {}
@@ -149,18 +184,20 @@ def name_entries(pieces: Sequence[Piece]) -> list[str | None]:
         if piece.area is None:
             names.append(None)
             continue
-        heading = piece.text.splitlines()[0]
-        try:
-            entry = parse_entry(entry_file_text(piece))
-        except EntryError as error:
-            raise LogError(f"{heading!r}: {error}") from error
-        if entry.issue is None:
+        lines = piece.text.splitlines()
+        heading = _ENTRY_HEADING.match(lines[0])
+        if heading is None:
+            raise LogError(f"{lines[0]!r}: not a '### <ENTRY-ID> — <title>' heading")
+        # The field lines stand directly under the heading, before the first blank line.
+        fields = lines[1 : lines.index("") if "" in lines else len(lines)]
+        issue = next((m.group(1) for f in fields if (m := _ISSUE_LINE.match(f))), None)
+        if issue is None:
             prefix = NO_ISSUE
-        elif entry.issue_ids:
-            prefix = entry.issue_ids[0]
+        elif found := _ISSUE_ID.search(issue):
+            prefix = found.group(0)
         else:
-            raise LogError(f"{heading!r}: no Linear issue id in {entry.issue!r}")
-        stem = f"{prefix}-{entry.entry_id}"
+            raise LogError(f"{lines[0]!r}: no Linear issue id in {issue!r}")
+        stem = f"{prefix}-{heading.group(1)}"
         used[stem] = used.get(stem, 0) + 1
         names.append(f"{stem}.md" if used[stem] == 1 else f"{stem}-{used[stem]}.md")
     return names
@@ -201,6 +238,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{args.source}: {error}", file=sys.stderr)
         return 1
     entries = [(name, piece) for name, piece in zip(names, pieces) if name is not None]
+    if not entries:
+        print(f"{args.source}: no '### ' entry found", file=sys.stderr)
+        return 1
 
     if args.verify:
         return _verify(source, pieces, names, args.out)

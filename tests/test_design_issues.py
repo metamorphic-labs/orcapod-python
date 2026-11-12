@@ -403,3 +403,11 @@ def test_migration_refuses_text_outside_every_entry(source: Path) -> None:
     assert result.returncode == 1
     assert "Stray prose." in result.stderr
     assert not (source.parent / "out").exists()
+
+
+def test_migration_refuses_a_source_with_no_entry(source: Path) -> None:
+    source.write_text("# Design issues\n\nNothing yet.\n", encoding="utf-8")
+    for extra in ([], ["--verify"]):
+        result = _migrate(source, *extra)
+        assert result.returncode == 1
+        assert "no '### ' entry" in result.stderr

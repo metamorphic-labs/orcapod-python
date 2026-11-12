@@ -18,7 +18,7 @@ validate every entry file; a test runs the validation in the normal suite. Model
 ## Facts found (origin/main d8bba28e)
 
 - `DESIGN_ISSUES.md`: 2712 lines, 14-line preamble (title, severity guide), 103 entries under
-  64 `## ` area headings. Between entries there is only glue: blank lines, `---` separators
+  50 `## ` area headings. Between entries there is only glue: blank lines, `---` separators
   and `## ` area headings (no area-level prose). Headings inside code fences (`# TODO ...`)
   must be ignored, so the parser is fence-aware.
 - 45 entries have an `**Issue:**` line, 58 have none. Nine `**Issue:**` values hold more than
@@ -53,7 +53,17 @@ validate every entry file; a test runs the validation in the normal suite. Model
 
 ## Coordinator answers
 
-(filled in after the reply)
+Approved, all as recommended (coordinator, via `ask`): (1) `NOISSUE` prefix; (2) option A,
+`NOISSUE-H1-2.md`, text unchanged, check allows an optional `-<n>` after the entry id;
+(3) remove `DESIGN_ISSUES.md`, README landing page, `scripts/design_issues.py`, a test that
+it is not recreated; (4) status must start with a valid value, one named exemption for
+`PF1`'s missing severity; (5) migration script committed; (6) references as listed.
+
+Two additions to the `CLAUDE.md` + `.zed/rules` edit: (a) correct "`GroupBy` is the only
+operator that reduces row count many→one" (`Batch` also reduces); (b) Changelog section:
+a category heading is followed by bullets or `####` sub-sections, not only "bullet lines".
+The check must accept the files other PRs already add (`ITL-939-TD1.md`, `ITL-943-DN1.md`,
+`ITL-955-GB1.md`, `ITL-881-UCI1.md`): verified, all four pass `--check`.
 
 ## File structure
 
@@ -143,4 +153,11 @@ validate every entry file; a test runs the validation in the normal suite. Model
 
 ## Notes for a successor
 
-(progress notes go here)
+- Tasks 1-4 done and pushed. `scripts/migrate_design_issues.py` stands alone (it does not
+  import `scripts/design_issues.py`: the type checker resolves `design_issues` to the
+  directory of that name).
+- `.zed/rules` has no "only operator that reduces" sentence, so addition (a) changes
+  `CLAUDE.md` only.
+- To re-run after `main` moves: `git show origin/main:DESIGN_ISSUES.md > /tmp/x.md`, then
+  `uv run python scripts/migrate_design_issues.py --source /tmp/x.md` and again with
+  `--verify`; `uv run python scripts/design_issues.py --check`.
