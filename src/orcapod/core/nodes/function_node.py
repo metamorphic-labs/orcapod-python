@@ -39,9 +39,10 @@ from orcapod.errors import (
     StoreReadError,
     StoreWriteError,
 )
-from orcapod.hashing.stored_hash_labels import (
-    keep_rows_hashed_under,
-    report_skipped_rows,
+from orcapod.contexts.stored import (
+    keep_rows_of_data_context,
+    report_old_layout_tables,
+    report_rows_of_other_data_contexts,
 )
 from orcapod.utils.store_errors import keep_store_error
 from orcapod.protocols.core_protocols import (
@@ -60,6 +61,7 @@ from orcapod.protocols.observability_protocols import (
 )
 from orcapod.system_constants import (
     constants,
+    OLD_PIPELINE_DB_SCHEMA_VERSIONS,
     PIPELINE_DB_SCHEMA_VERSION,
     RESULT_DB_SCHEMA_VERSION,
 )
@@ -785,9 +787,11 @@ class FunctionJobNode(FunctionNodeBase):
     execution.
     """
 
-    # Set once a read has reported the stored rows it skipped (rows of another Arrow
-    # hash label); a class default so nodes rebuilt from a saved descriptor start unset.
+    # Set once a read has reported the stored rows it skipped (rows of another data
+    # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
+    # Set once the pipeline tables found at an older layout have been reported.
+    _old_layout_reported: bool = False
 
     def __init__(
         self,
@@ -862,6 +866,36 @@ class FunctionJobNode(FunctionNodeBase):
         """
         return self.node_identity_path + (PIPELINE_DB_SCHEMA_VERSION,)
 
+    @property
+    def _stored_data_context_key(self) -> str:
+        """Key of the data context this node writes on its rows and reads back.
+
+        A node loaded from a saved job has no function pod; its context then comes
+        from the descriptor.
+        """
+        context = (
+            self._data_context if self._function_pod is None else self.data_context
+        )
+        return context.context_key
+
+    def _report_old_layout(self) -> None:
+        """Report, once per node object, pipeline tables found at an older layout.
+
+        A table written by an earlier version of Orcapod (``pdb_v1``) holds no
+        ``__data_context`` column. Its rows are not read as results and are left
+        unchanged; their number is reported (ITL-944).
+        """
+        if self._old_layout_reported or self._pipeline_database is None:
+            return
+        self._old_layout_reported = True
+        report_old_layout_tables(
+            self._pipeline_database,
+            tuple(
+                self.node_identity_path + (layout,)
+                for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
+            ),
+        )
+
     def _ensure_pdb_schema(self) -> None:
         """Check once per versioned path that no legacy v0 schema table is present.
 
@@ -880,6 +914,7 @@ class FunctionJobNode(FunctionNodeBase):
                 does not include ``"v0"``.
         """
         global _checked_pdb_paths
+        self._report_old_layout()
         versioned_path = self._versioned_pipeline_path
         if versioned_path in _checked_pdb_paths:
             return
@@ -1741,7 +1776,10 @@ class FunctionJobNode(FunctionNodeBase):
         # asyncio event loop this read-then-write sequence is uninterrupted.
         existing = pipeline_database.get_records_with_column_value(
             self._versioned_pipeline_path,
-            {_PIPELINE_BASE_ENTRY_ID_COL: base_entry_id},
+            {
+                _PIPELINE_BASE_ENTRY_ID_COL: base_entry_id,
+                constants.DATA_CONTEXT_COL: self._stored_data_context_key,
+            },
         )
         if existing is None or existing.num_rows == 0:
             new_index = 0
@@ -1781,8 +1819,8 @@ class FunctionJobNode(FunctionNodeBase):
                     ],
                     type=pa.large_binary(),
                 ),
-                f"{constants.META_PREFIX}input_data{constants.CONTEXT_KEY}": pa.array(
-                    [input_data.data_context_key], type=pa.large_string()
+                constants.DATA_CONTEXT_COL: pa.array(
+                    [self._stored_data_context_key], type=pa.large_string()
                 ),
                 f"{constants.META_PREFIX}computed": pa.array(
                     [computed], type=pa.bool_()
@@ -1963,22 +2001,15 @@ class FunctionJobNode(FunctionNodeBase):
         if taginfo is None:
             return None
 
-        # Rows keyed under another Arrow hash label (written by another version of
-        # Orcapod) are not this node's results: they can never match current inputs
-        # and stay in the table untouched (ITL-910). Result rows are reached only
-        # through the pipeline rows kept here.
-        # A node loaded from a saved job has no function pod; its context comes from
-        # the descriptor.
-        context = (
-            self._data_context if self._function_pod is None else self.data_context
-        )
+        # Rows written under another data context are not this node's current
+        # entries: they stay in the table untouched (ITL-944). Result rows are
+        # reached only through the pipeline rows kept here.
+        context_key = self._stored_data_context_key
         stored_rows = taginfo.num_rows
-        taginfo = keep_rows_hashed_under(
-            taginfo, _PIPELINE_BASE_ENTRY_ID_COL, context.arrow_hasher.hasher_id
-        )
+        taginfo = keep_rows_of_data_context(taginfo, context_key)
         if taginfo.num_rows < stored_rows and not self._skipped_rows_reported:
             self._skipped_rows_reported = True
-            report_skipped_rows(
+            report_rows_of_other_data_contexts(
                 self._pipeline_database.base_path + self._versioned_pipeline_path,
                 stored_rows - taginfo.num_rows,
             )
@@ -2019,6 +2050,9 @@ class FunctionJobNode(FunctionNodeBase):
                 self._cached_function_pod.record_path,
                 record_id_column=constants.DATA_RECORD_ID,
             )
+            if results is not None:
+                # The data context is taken from the pipeline rows kept above.
+                results = results.drop([constants.DATA_CONTEXT_COL])
             if results is None:
                 # Tag table has persistent entries but result DB is empty — data loss
                 logger.warning(
@@ -2062,6 +2096,7 @@ class FunctionJobNode(FunctionNodeBase):
                     )
                 )
             if eph_results is not None:
+                eph_results = eph_results.drop([constants.DATA_CONTEXT_COL])
                 if results_schema is None:
                     results_schema = eph_results.schema
                 ephemeral_df = ephemeral_taginfo_df.join(
@@ -2143,6 +2178,11 @@ class FunctionJobNode(FunctionNodeBase):
             joined = arrow_utils.restore_schema_nullability(
                 joined, taginfo_schema, results_schema
             )
+        # In memory, each row names its data context in the datagram context column.
+        joined = joined.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([context_key] * joined.num_rows, type=pa.large_string()),
+        )
         return _JoinedRecords(
             table=joined,
             taginfo_columns=taginfo_columns,

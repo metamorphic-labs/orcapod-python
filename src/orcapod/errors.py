@@ -408,59 +408,61 @@ class StoreReadError(StoreError):
         )
 
 
-class SideEffectLogHashLabelError(StoreError):
-    """Raised when a side-effect invocation log holds deliveries logged under another hash label.
+class SideEffectLogDataContextError(StoreError):
+    """Raised when a side-effect invocation log holds deliveries of another data context.
 
-    A side-effect node finds a delivery it already made by an Arrow-derived record id,
-    and each id carries the label of the hashing scheme that produced it
-    (``arrow_v0.1`` up to v0.2, ``arrow_v0.2`` since v0.3, ITL-910). Deliveries logged
-    under another label cannot be matched with current inputs, so running the node
-    would deliver every side effect again. Unlike a computed result, a side effect is
-    an external action, so the node raises this error before it delivers anything and
-    leaves the log as it is. Function, operator and source tables do not fail this
-    way: there, rows of another label are ignored and computed again.
+    A side-effect node finds a delivery it already made by a record id hashed under
+    its data context. Deliveries logged under another data context cannot be matched
+    with current inputs: a log written by Orcapod up to v0.2 (an older table layout,
+    data context ``std:v0.1:default``), or rows of another data context in the
+    current log (ITL-944). Running the node would deliver every side effect again.
+    Unlike a computed result, a side effect is an external action, so the node raises
+    this error before it delivers anything and leaves the log as it is. Function,
+    operator and source tables do not fail this way: there, such rows are reported,
+    skipped and computed again.
 
     Use a fresh store for the side-effect node, or keep using the Orcapod version
-    that wrote the log; migrating stored rows to the current label is planned.
+    that wrote the log; migrating stored rows to the current data context is planned.
 
     Attributes:
         record_path: Path of the invocation log from the root of the store.
-        found_label: Arrow hash label of logged deliveries that do not match.
-        current_label: Arrow hash label of this version of Orcapod.
+        found_context: Data context key of logged deliveries that do not match.
+        current_context: Data context key of the side-effect node.
         node_label: Label of the side-effect node.
     """
 
     def __init__(
         self,
         record_path: tuple[str, ...],
-        found_label: str,
-        current_label: str,
+        found_context: str,
+        current_context: str,
         node_label: str | None = None,
     ) -> None:
         """Create the error for one invocation log.
 
         Args:
             record_path: Path of the invocation log.
-            found_label: Arrow hash label of logged deliveries that do not match.
-            current_label: Arrow hash label of this version of Orcapod.
+            found_context: Data context key of logged deliveries that do not match.
+            current_context: Data context key of the side-effect node.
             node_label: Label of the side-effect node, if known.
         """
         self.record_path: tuple[str, ...] = tuple(record_path)
-        self.found_label: str = found_label
-        self.current_label: str = current_label
+        self.found_context: str = found_context
+        self.current_context: str = current_context
         super().__init__(
-            self.record_path, found_label, current_label, node_label=node_label
+            self.record_path, found_context, current_context, node_label=node_label
         )
 
     def __str__(self) -> str:
-        """Describe the log, both labels and the remedy."""
+        """Describe the log, both data contexts and the remedy."""
         node = f" of node {self.node_label!r}" if self.node_label else ""
         return (
             f"The side-effect invocation log {'/'.join(self.record_path)!r}{node} holds "
-            f"deliveries logged under {self.found_label!r}, but this version of Orcapod "
-            f"hashes with {self.current_label!r}. They cannot be matched with current "
-            "inputs, so running this node would deliver every side effect again; "
-            "nothing was delivered or written. Use a fresh store for this node, or keep "
-            "using the Orcapod version that wrote this log; the logged deliveries are "
-            "left in place and can be migrated to the current label later."
+            f"deliveries logged under the data context {self.found_context!r}, but this "
+            f"node runs under {self.current_context!r}. They cannot be matched with "
+            "current inputs, so running this node would deliver every side effect "
+            "again; nothing was delivered or written. Use a fresh store for this node, "
+            "or keep using the Orcapod version that wrote this log; the logged "
+            "deliveries are left in place and can be migrated to the current data "
+            "context later."
         )

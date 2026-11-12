@@ -13,13 +13,19 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import SchemaVersionError, StoreReadError, StoreWriteError
-from orcapod.hashing.stored_hash_labels import (
-    keep_rows_hashed_under,
-    report_skipped_rows,
+from orcapod.contexts.stored import (
+    keep_rows_of_data_context,
+    report_old_layout_tables,
+    report_rows_of_other_data_contexts,
+    with_data_context,
 )
 from orcapod.protocols.core_protocols import DataProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.system_constants import constants, RESULT_DB_SCHEMA_VERSION
+from orcapod.system_constants import (
+    OLD_RESULT_DB_SCHEMA_VERSIONS,
+    RESULT_DB_SCHEMA_VERSION,
+    constants,
+)
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -71,6 +77,8 @@ class ResultCache:
         self._ignore_schema: tuple[str, ...] | None = None
         # Set once a read has reported the stored rows it skipped.
         self._skipped_rows_reported = False
+        # Set once the tables found at an older layout have been reported.
+        self._old_layout_reported = False
 
     @property
     def result_database(self) -> ArrowDatabaseProtocol:
@@ -115,6 +123,24 @@ class ResultCache:
         """
         self._ignore_schema = ignore_schema
 
+    def _report_old_layout(self) -> None:
+        """Report, once per cache object, result tables found at an older layout.
+
+        A table written by an earlier version of Orcapod (``rdb_v1``) holds no
+        ``__data_context`` column. Its rows are not read as results and are left
+        unchanged; their number is reported (ITL-944).
+        """
+        if self._old_layout_reported:
+            return
+        self._old_layout_reported = True
+        report_old_layout_tables(
+            self._result_database,
+            tuple(
+                self._record_path + (layout,)
+                for layout in OLD_RESULT_DB_SCHEMA_VERSIONS
+            ),
+        )
+
     def _ensure_rdb_schema(self) -> None:
         """Check for a legacy v0 result DB on first access per path.
 
@@ -131,6 +157,7 @@ class ResultCache:
         Raises:
             SchemaVersionError: If a v0 table is detected and not ignored.
         """
+        self._report_old_layout()
         v1_path = self._versioned_record_path
         if v1_path in _checked_rdb_paths:
             return
@@ -161,10 +188,14 @@ class ResultCache:
         self,
         input_data: DataProtocol,
         additional_constraints: dict[str, Any] | None = None,
+        *,
+        data_context_key: str,
     ) -> DataProtocol | None:
         """Look up a cached output data for *input_data*.
 
-        The default match is by ``INPUT_DATA_HASH_COL`` only.
+        The default match is by ``INPUT_DATA_HASH_COL`` among the rows written under
+        the data context ``data_context_key``: a result stored under another data
+        context for the same input hash is not a match (ITL-944).
         *additional_constraints* can narrow the match further (e.g. by
         function variation hash for stricter cache invalidation).
 
@@ -177,6 +208,8 @@ class ResultCache:
                 include in the lookup query. Values may be ``bytes`` (for
                 binary hash columns) or other scalar types (e.g. ``str``
                 for ``function_name``).
+            data_context_key: Key of the caller's data context. Only rows written
+                under it are matched, and the returned data carries it.
 
         Returns:
             The cached output data with ``RESULT_COMPUTED_FLAG: False``
@@ -190,6 +223,7 @@ class ResultCache:
 
         constraints: dict[str, Any] = {
             constants.INPUT_DATA_HASH_COL: input_data.content_hash().to_prefixed_digest(),
+            constants.DATA_CONTEXT_COL: data_context_key,
         }
         if additional_constraints:
             constraints.update(additional_constraints)
@@ -231,6 +265,7 @@ class ResultCache:
             result_table,
             record_uuid=record_uuid,
             meta_info={self.RESULT_COMPUTED_FLAG: False},
+            data_context=data_context_key,
         )
 
     def store(
@@ -240,11 +275,14 @@ class ResultCache:
         variation_datagram: "DatagramProtocol",
         execution_datagram: "DatagramProtocol",
         skip_duplicates: bool = False,
+        *,
+        data_context_key: str,
     ) -> None:
         """Store an output data in the cache.
 
         Stores the output data data alongside function variation and
-        execution metadata (as Datagrams), input data hash, and a timestamp.
+        execution metadata (as Datagrams), input data hash, a timestamp and the
+        key of the data context that wrote the row (``__data_context``).
 
         Args:
             input_data: The input data (used for its content hash).
@@ -253,10 +291,11 @@ class ResultCache:
             execution_datagram: Execution environment metadata as a Datagram.
             skip_duplicates: If True, silently skip if a record with the
                 same ID already exists.
+            data_context_key: Key of the caller's data context, stored on the row.
         """
         self._ensure_rdb_schema()
 
-        data_table = output_data.as_table(columns={"source": True, "context": True})
+        data_table = output_data.as_table(columns={"source": True})
 
         # Add variation and execution columns with prefixes.
         # Use a running counter for insertion position since add_column shifts indices.
@@ -292,6 +331,7 @@ class ResultCache:
             constants.POD_TIMESTAMP,
             pa.array([datetime.now(timezone.utc)], type=pa.timestamp("us", tz="UTC")),
         )
+        data_table = with_data_context(data_table, data_context_key)
 
         try:
             self._result_database.add_record(
@@ -319,17 +359,16 @@ class ResultCache:
                 ) from exc
 
     def get_all_records(
-        self, current_label: str, include_system_columns: bool = False
+        self, data_context_key: str, include_system_columns: bool = False
     ) -> "pa.Table | None":
-        """Return the cached records hashed under the current Arrow hash label.
+        """Return the cached records written under the data context ``data_context_key``.
 
-        Rows whose input data hash carries another Arrow hash label (written by
-        another version of Orcapod) can never match current inputs; they stay in the
-        table and are not returned (ITL-910).
+        Rows written under another data context are not current entries; they stay
+        in the table and are not returned (ITL-944). The ``__data_context`` column is
+        not part of the returned table.
 
         Args:
-            current_label: The Arrow hash label of current input data hashes
-                (``arrow_hasher.hasher_id`` of the caller's data context).
+            data_context_key: Key of the caller's data context.
             include_system_columns: If True, include system columns
                 (e.g. record_id) in the result.
 
@@ -344,17 +383,14 @@ class ResultCache:
         )
         if result_table is None:
             return None
-        if constants.INPUT_DATA_HASH_COL in result_table.column_names:
-            stored_rows = result_table.num_rows
-            result_table = keep_rows_hashed_under(
-                result_table, constants.INPUT_DATA_HASH_COL, current_label
+        stored_rows = result_table.num_rows
+        result_table = keep_rows_of_data_context(result_table, data_context_key)
+        if result_table.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_rows_of_other_data_contexts(
+                self._result_database.base_path + self._versioned_record_path,
+                stored_rows - result_table.num_rows,
             )
-            if result_table.num_rows < stored_rows and not self._skipped_rows_reported:
-                self._skipped_rows_reported = True
-                report_skipped_rows(
-                    self._result_database.base_path + self._versioned_record_path,
-                    stored_rows - result_table.num_rows,
-                )
         if result_table.num_rows == 0:
             return None
-        return result_table
+        return result_table.drop([constants.DATA_CONTEXT_COL])

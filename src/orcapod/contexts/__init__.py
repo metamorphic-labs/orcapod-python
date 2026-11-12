@@ -33,6 +33,7 @@ from orcapod.protocols import semantic_types_protocols as sp
 
 from .core import ContextResolutionError, ContextValidationError, DataContext
 from .registry import JSONDataContextRegistry
+from .stored import stored_data_contexts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -399,4 +400,6 @@ __all__ = [
     # Advanced usage
     "create_registry",
     "JSONDataContextRegistry",
+    # Stored rows
+    "stored_data_contexts",
 ]

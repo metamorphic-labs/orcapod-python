@@ -34,10 +34,11 @@ from orcapod.errors import (
     StoreReadError,
     StoreWriteError,
 )
-from orcapod.hashing.stored_hash_labels import (
-    current_hash_format,
-    keep_rows_hashed_under,
-    report_skipped_rows,
+from orcapod.contexts.stored import (
+    keep_rows_of_data_context,
+    report_old_layout_tables,
+    report_rows_of_other_data_contexts,
+    with_data_context,
 )
 from orcapod.protocols.core_protocols import (
     DataProtocol,
@@ -47,7 +48,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.system_constants import constants
+from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -541,9 +542,32 @@ class OperatorJobNode(OperatorNodeBase):
         - **REPLAY**: skip computation, flow cached results downstream.
     """
 
-    # Set once a read has reported the stored rows it skipped (rows of another Arrow
-    # hash format); a class default so nodes rebuilt from a saved descriptor start unset.
+    # Set once a read has reported the stored rows it skipped (rows of another data
+    # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
+    # Set once a table found at the older layout has been reported.
+    _old_layout_reported: bool = False
+
+    @property
+    def _stored_table_path(self) -> tuple[str, ...]:
+        """Path of this node's stored table: the identity path plus the layout version.
+
+        Every read and write of the operator-cache table uses this path. The identity
+        path itself is where Orcapod up to v0.2 stored the table (the old layout).
+        """
+        return self.node_identity_path + (OPERATOR_DB_SCHEMA_VERSION,)
+
+    def _report_old_layout(self) -> None:
+        """Report, once per node object, a table found at the older layout.
+
+        A table written by an earlier version of Orcapod holds no ``__data_context``
+        column. Its rows are not read as results and are left unchanged; their number
+        is reported (ITL-944).
+        """
+        if self._old_layout_reported or self._pipeline_database is None:
+            return
+        self._old_layout_reported = True
+        report_old_layout_tables(self._pipeline_database, (self.node_identity_path,))
 
     def __init__(
         self,
@@ -857,10 +881,13 @@ class OperatorJobNode(OperatorNodeBase):
         # the hash), so rows from different runs with identical output will have
         # distinct record IDs and both be stored.  skip_duplicates=True still
         # deduplicates exact re-runs of the same node within a single run.
+        # The data context column is appended after the record hashes are computed:
+        # it names the generation of hashing that produced them and is not hashed.
+        self._report_old_layout()
         try:
             pipeline_database.add_records(
-                self.node_identity_path,
-                output_table,
+                self._stored_table_path,
+                with_data_context(output_table, self.data_context_key),
                 record_id_column=self.HASH_COLUMN_NAME,
                 skip_duplicates=True,
             )
@@ -869,7 +896,7 @@ class OperatorJobNode(OperatorNodeBase):
             raise
         except Exception as exc:
             raise StoreWriteError(
-                self.node_identity_path, node_label=self.label
+                self._stored_table_path, node_label=self.label
             ) from exc
 
         self._cached_output_table = output_table.drop(
@@ -877,39 +904,34 @@ class OperatorJobNode(OperatorNodeBase):
         )
 
     def _read_stored_records(self) -> "pa.Table | None":
-        """Read this node's stored rows that the current Arrow hasher wrote.
+        """Read this node's stored rows written under the current data context.
 
         Every read of the whole stored table goes through here. Rows are narrowed to
-        the starfix hash format of the current Arrow hasher and then to this node's
-        content hash (``_filter_by_content_hash``): the stored record hashes are hex
-        digests without a label, and their first three bytes name the format, so rows
-        written by Orcapod v0.2 (format 1, ``arrow_v0.1``) are left out and stay in
-        the table untouched (ITL-910). A later Arrow hash label that keeps the starfix
-        format could not be told apart here.
+        the current data context (``__data_context``) and then to this node's content
+        hash (``_filter_by_content_hash``). Rows of another data context stay in the
+        table untouched, and a table at the older layout is not read (ITL-944).
 
         Returns:
             The stored rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL``
-            still present, or ``None`` when the table does not exist.
+            still present and without the ``__data_context`` column, or ``None``
+            when the table does not exist.
         """
         assert self._pipeline_database is not None
+        self._report_old_layout()
         records = self._pipeline_database.get_all_records(
-            self.node_identity_path, record_id_column=self.HASH_COLUMN_NAME
+            self._stored_table_path, record_id_column=self.HASH_COLUMN_NAME
         )
         if records is None:
             return None
         stored_rows = records.num_rows
-        records = keep_rows_hashed_under(
-            records,
-            self.HASH_COLUMN_NAME,
-            current_hash_format(self.data_context.arrow_hasher),
-        )
+        records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
             self._skipped_rows_reported = True
-            report_skipped_rows(
-                self._pipeline_database.base_path + self.node_identity_path,
+            report_rows_of_other_data_contexts(
+                self._pipeline_database.base_path + self._stored_table_path,
                 stored_rows - records.num_rows,
             )
-        return self._filter_by_content_hash(records)
+        return self._filter_by_content_hash(records.drop([constants.DATA_CONTEXT_COL]))
 
     def _make_empty_table(self) -> "pa.Table":
         """Build a zero-row PyArrow table matching this node's full output schema.

@@ -96,7 +96,7 @@ class CachedFunctionPod(WrappedFunctionPod):
             The cached output ``Data`` (with ``RESULT_COMPUTED_FLAG=False``
             appended), or ``None`` if no cached result exists for this input.
         """
-        cached = self._cache.lookup(data)
+        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
         if cached is None:
             return None
         return cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
@@ -128,7 +128,7 @@ class CachedFunctionPod(WrappedFunctionPod):
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._cache.lookup(data)
+        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
         if cached is not None:
             module_logger.info("Pod-level cache hit")
             cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
@@ -149,7 +149,9 @@ class CachedFunctionPod(WrappedFunctionPod):
                 python_schema=pf.get_execution_data_schema(),
                 data_context=pf.data_context,
             )
-            self._cache.store(data, output, var_dg, exec_dg)
+            self._cache.store(
+                data, output, var_dg, exec_dg, data_context_key=self.data_context_key
+            )
             output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
 
@@ -179,7 +181,7 @@ class CachedFunctionPod(WrappedFunctionPod):
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._cache.lookup(data)
+        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
         if cached is not None:
             module_logger.info("Pod-level cache hit")
             cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
@@ -200,7 +202,9 @@ class CachedFunctionPod(WrappedFunctionPod):
                 python_schema=pf.get_execution_data_schema(),
                 data_context=pf.data_context,
             )
-            self._cache.store(data, output, var_dg, exec_dg)
+            self._cache.store(
+                data, output, var_dg, exec_dg, data_context_key=self.data_context_key
+            )
             output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
 
@@ -361,7 +365,7 @@ class CachedFunctionPod(WrappedFunctionPod):
     ) -> "pa.Table | None":
         """Return all cached records from the result store for this pod."""
         return self._cache.get_all_records(
-            self.data_context.arrow_hasher.hasher_id,
+            self.data_context_key,
             include_system_columns=include_system_columns,
         )
 
