@@ -48,9 +48,10 @@ class TestGroupByShape:
     def test_group_keys_are_scalar_tags(self, session_source):
         op = GroupBy(by=["subject", "date"])
         out = op.process(session_source)
+        in_tag_schema, _ = session_source.output_schema()
         tag_schema, _ = out.output_schema()
-        assert tag_schema["subject"] == str | None
-        assert tag_schema["date"] == str | None
+        assert tag_schema["subject"] == in_tag_schema["subject"]
+        assert tag_schema["date"] == in_tag_schema["date"]
         assert out.as_table().column("subject").to_pylist() == ["G", "G"]
         assert out.as_table().column("date").to_pylist() == ["d1", "d2"]
 
