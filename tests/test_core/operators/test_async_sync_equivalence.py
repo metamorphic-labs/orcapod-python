@@ -333,6 +333,37 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
     )
 
 
+def test_drop_null_rows_without_tag_columns() -> None:
+    """A stream without tag columns: the async path drops the same rows, in order.
+
+    Outside the matrix, whose pairing needs unique tag rows.
+    """
+    source = _source(
+        {
+            "x": pa.array([1, None, 3], pa.int8()),
+            "s": pa.array(["a", "b", "c"], pa.string()),
+        },
+        tags=(),
+        source_id="tagless",
+        nullable=("x", "s"),
+    )
+    expected = sync_rows(DropNullRows("x"), source)
+    actual = async_rows(DropNullRows("x"), source)
+    assert [data.as_dict() for _, data in actual] == [
+        {"x": 1, "s": "a"},
+        {"x": 3, "s": "c"},
+    ]
+    assert len(actual) == len(expected)
+    for (tag, data), (sync_tag, sync_data) in zip(actual, expected):
+        assert data.arrow_schema() == sync_data.arrow_schema()
+        assert data.content_hash() == sync_data.content_hash()
+        assert data.source_info() == sync_data.source_info()
+        assert tag.arrow_schema(columns={"system_tags": True}) == sync_tag.arrow_schema(
+            columns={"system_tags": True}
+        )
+        assert list(tag.system_tags().items()) == list(sync_tag.system_tags().items())
+
+
 # Pre-existing provenance defects, not type re-inference: out of scope for
 # ITL-837 and tracked elsewhere. Strict, so a fix flags them.
 _DROPPED_SOURCE_INFO = (

@@ -167,13 +167,59 @@ class DropNullRows(UnaryOperator):
     # Execution
     # ------------------------------------------------------------------
 
+    def _valid_rows(self, table: pa.Table) -> pa.ChunkedArray[Any] | None:
+        """Return the mask of rows whose named columns present in ``table`` are all non-null.
+
+        Args:
+            table: A table holding some or all of the named columns.
+
+        Returns:
+            A boolean column, one value per row, or ``None`` when ``table``
+            holds none of the named columns (every row is kept).
+        """
+        mask = None
+        for name in self.columns:
+            if name in table.column_names:
+                valid = pc.is_valid(table.column(name))
+                mask = valid if mask is None else pc.and_(mask, valid)
+        return mask
+
+    def _narrow_fields(self, table: pa.Table) -> pa.Table:
+        """Flag the named columns present in ``table`` non-nullable.
+
+        Every column takes the large-normalized form of its input type; no
+        other type, flag or value changes. The named columns must hold no null.
+
+        Args:
+            table: A table whose named columns hold no null.
+
+        Returns:
+            The same rows with the named fields non-nullable.
+        """
+        table = arrow_utils.restore_column_types(
+            table,
+            {
+                field.name: arrow_utils.normalize_to_large_types(
+                    field.type, keep_null=True
+                )
+                for field in table.schema
+            },
+        )
+        schema = table.schema
+        for name in self.columns:
+            position = schema.get_field_index(name)
+            if position >= 0:
+                schema = schema.set(  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+                    position, schema.field(position).with_nullable(False)
+                )
+        # Same arrays under new field flags: no cast, so no value or type can change.
+        return pa.Table.from_arrays(table.columns, schema=schema)
+
     def _narrow_table(self, table: pa.Table) -> pa.Table:
         """Drop the rows with a null in a named column and flag those columns non-nullable.
 
         Only the named columns present in ``table`` are considered, so the same
         rule serves a whole stream table and a single row's tag or data table.
-        Every column takes the large-normalized form of its input type; no
-        other type, flag or value changes.
 
         Args:
             table: A table holding some or all of the named columns.
@@ -181,20 +227,10 @@ class DropNullRows(UnaryOperator):
         Returns:
             The surviving rows, in order, with the named fields non-nullable.
         """
-        named = [name for name in self.columns if name in table.column_names]
-        mask = None
-        for name in named:
-            valid = pc.is_valid(table.column(name))
-            mask = valid if mask is None else pc.and_(mask, valid)
+        mask = self._valid_rows(table)
         if mask is not None:
             table = table.filter(mask)
-        table = arrow_utils.normalize_table_to_large_types(table)
-        schema = table.schema
-        for name in named:
-            position = schema.get_field_index(name)
-            schema = schema.set(position, schema.field(position).with_nullable(False))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        # Same arrays under new field flags: no cast, so no value or type can change.
-        return pa.Table.from_arrays(table.columns, schema=schema)
+        return self._narrow_fields(table)
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Return the stream's rows whose named columns are all non-null.
@@ -240,13 +276,19 @@ class DropNullRows(UnaryOperator):
                 data_table = self._narrow_table(
                     data.as_table(columns={"source": True, "meta": True})
                 )
-                if tag_table.num_rows == 0 or data_table.num_rows == 0:
+                # A table with no columns (a stream without tags) has no rows
+                # to lose, so only a table that held a named column can drop the row.
+                if (tag_table.num_columns and tag_table.num_rows == 0) or (
+                    data_table.num_columns and data_table.num_rows == 0
+                ):
                     continue
+                new_tag = (
+                    Tag(tag_table, data_context=tag.data_context_key)
+                    if tag_table.num_columns
+                    else tag
+                )
                 await output.send(
-                    (
-                        Tag(tag_table, data_context=tag.data_context_key),
-                        Data(data_table, data_context=data.data_context_key),
-                    )
+                    (new_tag, Data(data_table, data_context=data.data_context_key))
                 )
         finally:
             await output.close()

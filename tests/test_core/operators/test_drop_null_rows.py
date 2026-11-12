@@ -262,6 +262,20 @@ def test_narrowed_nullable_key_joins_with_a_non_nullable_key() -> None:
     ]
 
 
+def test_stream_without_tag_columns() -> None:
+    source = _source(
+        {
+            "x": pa.array([1, None, 3], pa.int8()),
+            "s": pa.array(["a", "b", "c"], pa.string()),
+        },
+        tags=(),
+        nullable=["x", "s"],
+    )
+    result = DropNullRows("x")(source)
+    assert result.as_table().to_pylist() == [{"x": 1, "s": "a"}, {"x": 3, "s": "c"}]
+    assert result.output_schema() == ({}, {"x": int, "s": str | None})
+
+
 # ── nested and logical columns ──────────────────────────────────────────────
 
 ITEMS = pa.large_list(pa.field("item", pa.int8(), nullable=True))

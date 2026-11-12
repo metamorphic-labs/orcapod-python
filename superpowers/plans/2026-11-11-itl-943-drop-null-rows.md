@@ -149,3 +149,25 @@ fall back to the inherited barrier path and report it.
 ## Notes / progress log
 
 (Updated as work proceeds, for a successor.)
+
+- November 11: tasks 1-5 done and pushed. Operator in
+  `src/orcapod/core/operators/drop_null_rows.py`; tests in
+  `tests/test_core/operators/test_drop_null_rows.py`,
+  `tests/test_pipeline/test_drop_null_rows_job.py`, two `Case`s plus a tagless test in
+  `test_async_sync_equivalence.py`, `TestDropNullRowsConfig` in `test_operator_config.py`.
+- Golden: cases `pipeline/drop_null_rows` and `pipeline/drop_null_rows_job` appended to
+  `cases.py`; `pipeline.json` gained 128 lines, none removed or changed.
+- The streaming async path is exactly equivalent row by row (including Data meta columns, so
+  no xfail was needed); no fallback to the barrier path.
+- Large normalization uses `normalize_to_large_types(..., keep_null=True)` per field with
+  `restore_column_types` (the table-level helper maps `null` to `large_string`).
+- Open: the NAME (developer's call). To rename: class and module `drop_null_rows.py`, stream
+  method in `core/streams/base.py` and `protocols/core_protocols/streams.py`, registry key in
+  `pipeline/serialization.py`, export in `core/operators/__init__.py`, docs, CHANGELOG,
+  DESIGN_ISSUES, CLAUDE.md, `.zed/rules`, tests and golden case names. A rename changes the
+  operator's identity hash (the class name is in `identity_structure`), so the two golden
+  cases must be regenerated with it (new entries only; nothing released yet).
+- Observation, not fixed (out of scope): a `PipelineJob` saved with an in-memory
+  `ArrowTableSource` and loaded again gives operator nodes whose pipeline hash differs from
+  the saved job's (same for `MapData`), because the source is not reconstructable.
+
