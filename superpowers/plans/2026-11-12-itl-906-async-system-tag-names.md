@@ -93,3 +93,33 @@ and GroupBy through `op(stream)` only (sync). No golden entry covers the async p
 
 - Full `uv run pytest tests/`, ruff check/format, basedpyright exit code.
 - Merge origin/main, push, PR "Fixes ITL-906" (+ ITL-885 per coordinator), CodeRabbit rounds.
+
+## Coordinator decisions (2026-11-12)
+
+- Fix approved as proposed; `Batch.async_execute`'s `**kwargs` becomes the keyword-only
+  `input_pipeline_hashes`.
+- PR says "Fixes ITL-906" and "Fixes ITL-885" (mixed-orchestrator test: source, operator and
+  function nodes, in-memory and Delta, both orders). MergeJoin source-info tie finding: out of
+  scope, minimal repro in worker_done.
+- Changelog: only stores written by an async run of an unreleased v0.3 build are at risk.
+- ITL-865 approved: same PR, its own commit(s), its own fragment `changelog.d/ITL-865.md`.
+
+## Progress
+
+- [x] ITL-906 tests (failing first), fix, changelog, design issue (commit bd450dd5).
+- [ ] ITL-865: zero rows on every input / one input for every async operator (equivalence
+  test), async PipelineJob with a no-match filter upstream of a barrier operator and of a
+  function pod; fix: barrier path emits nothing when an input has no rows; docs + changelog
+  (`### Fixed`, `### Known limitations`: no typed empty result on async until ITL-858).
+
+## ITL-865 measurements (after the ITL-906 fix)
+
+Operator level, zero rows: MergeJoin (either or both inputs empty), GroupBy, PolarsFilter
+raise `ValueError: Cannot materialize an empty list of rows`; Batch, Join, the per-row
+operators give 0 rows as sync. SemiJoin with an empty RIGHT input gives the left rows when
+the operator object was never validated (`_validated_common_keys` is set by
+`validate_inputs`, i.e. by `op(...)` / node construction): operator-state hazard, ITL-858.
+
+Job level: a sync job whose upstream operator node produced zero rows feeds a binary operator
+(Join/MergeJoin/SemiJoin) a widened table (ITL-912: int8 -> int64) and raises a type
+disagreement; out of scope (ITL-912).
