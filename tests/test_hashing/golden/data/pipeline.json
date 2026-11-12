@@ -2,10 +2,10 @@
   "batch.content_hash": "semantic_v0.1:b400f3ade0d0cf8e84684d8921967126172326aa8ef9c9ef162e64270c0cc6a2",
   "batch.pipeline_hash": "semantic_v0.1:60c337773086050f28d338eb45ebda97ab278426b7b491c996b951c31d71a078",
   "batch.row[{\"subject\":[\"s1\",\"s2\"]}]._tag_record_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956": "0843c16c912c561eb8920aa92fc21c85",
-  "batch.row[{\"subject\":[\"s1\",\"s2\"]}]._tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956": "5f85d65fa9a90d1a4266f0b684b4a2c2a040cf7835bd14dfd37cde20fc635efb",
+  "batch.row[{\"subject\":[\"s1\",\"s2\"]}]._tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956": "bcee0cac2ac80330f73416b8d8e249dd58f3b8c7089b28d6539f1550e1542eee",
   "batch.row[{\"subject\":[\"s1\",\"s2\"]}].data_hash": "arrow_v0.2:0000020b638d3ccc763f2a88e2ade9b759bb8641c55073185d4839047a3fc91276dc7d",
   "batch.row[{\"subject\":[\"s3\"]}]._tag_record_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956": "47519d093cfc58878d21a35188b10c78",
-  "batch.row[{\"subject\":[\"s3\"]}]._tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956": "e223d8ec1e6450dae88d4eb042479e5fa6104e6fd30b15add076db936b290367",
+  "batch.row[{\"subject\":[\"s3\"]}]._tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956": "9004bfa909932fc723ffc075ce862a93fa8b315fc7efc50002e6a9450acaabbb",
   "batch.row[{\"subject\":[\"s3\"]}].data_hash": "arrow_v0.2:000002928bbf5d31fadf74ea3118af85c0d2273f77d53274f492e63a955520e4fac208",
   "batch.system_tag_columns": [
     "_tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956",
@@ -46,6 +46,10 @@
     "_tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956",
     "_tag_record_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956"
   ],
+  "column_selection.select_data_spelling.set.pipeline_hash": "semantic_v0.1:b52ed0ca41bebe554e35c469132da034b399ae445662cf27a956cb538ebb9075",
+  "column_selection.select_data_spelling.sorted.pipeline_hash": "semantic_v0.1:b52ed0ca41bebe554e35c469132da034b399ae445662cf27a956cb538ebb9075",
+  "column_selection.select_data_spelling.tuple.pipeline_hash": "semantic_v0.1:b52ed0ca41bebe554e35c469132da034b399ae445662cf27a956cb538ebb9075",
+  "column_selection.select_data_spelling.unsorted.pipeline_hash": "semantic_v0.1:b52ed0ca41bebe554e35c469132da034b399ae445662cf27a956cb538ebb9075",
   "column_selection.select_tag.content_hash": "semantic_v0.1:58b161adfc66c4db157cc7ce6e0cf38f5f5e98f9d2f3c7a7b56ce91bf2c71a36",
   "column_selection.select_tag.pipeline_hash": "semantic_v0.1:7ee4cf0256ecc2c9150b67a01a71d0a6a1368f452b872bede59b60ae6fcd8073",
   "column_selection.select_tag.row[{\"cohort\":\"a\"}]._tag_record_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "37d45a37e6255cd78bb62c4c9d047ca5",
@@ -61,10 +65,10 @@
   "group_by.content_hash": "semantic_v0.1:ee6478a83847e5e9d6bea916138170139aba8c5b43c6992a22d048a07b9b4526",
   "group_by.pipeline_hash": "semantic_v0.1:5ab1cb5d5ce9b641d19045bae0d94bbb9e15703bebfe37ec57fd13b141d2a0f0",
   "group_by.row[{\"cohort\":\"a\"}]._tag_record_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "7d212ee5c358519c9e4729f4a0898aad",
-  "group_by.row[{\"cohort\":\"a\"}]._tag_source_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "bab61585da6894512c5947710f0c0d4bb46e3f0fcd511a088a4c76780f1ca5ae",
+  "group_by.row[{\"cohort\":\"a\"}]._tag_source_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "11316416683632ce9125c3a3ab58c085c03b46bc8b8b14767b70ad33d90d621f",
   "group_by.row[{\"cohort\":\"a\"}].data_hash": "arrow_v0.2:0000022b0f148a444e75daddc97429afe196d896fc41169dfe6fe9408438fde809c3ac",
   "group_by.row[{\"cohort\":\"b\"}]._tag_record_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "b7f2f8f7412a54fdb03cd96b6b0b1643",
-  "group_by.row[{\"cohort\":\"b\"}]._tag_source_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "90ffe0efe9214e2770ce632ae3146e4bb33e9d28568b55b7dd67f07862836010",
+  "group_by.row[{\"cohort\":\"b\"}]._tag_source_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4": "0e3b86a9fbf8566e5a1f4e53b501f566da56327a6d0ecf2e78f2288f76167dd7",
   "group_by.row[{\"cohort\":\"b\"}].data_hash": "arrow_v0.2:0000028b04ecd69f72beab1905bf77d8f6300e916e6a6ce3a3db61b8dd15d641a213f0",
   "group_by.system_tag_columns": [
     "_tag_source_id::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4::13d8efe7433022d8f328bbd9ea2cf66397ef44167932c3b08fb43153bc1be1d4",
@@ -252,6 +256,18 @@
   "pod.system_tag_columns": [
     "_tag_source_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956",
     "_tag_record_id::f004fc93e6b885270cb7be1a7e8e368a81c824e524081a3bc1bd3a23cb102956"
+  ],
+  "pod_default_version.decorator.uri": [
+    "golden_ratio",
+    "semantic_v0.1:6e5510afd046261efb0286a51b6c3ce3146ff457fe06c21498eaa8193cc224e5",
+    "v0",
+    "python.function.v0"
+  ],
+  "pod_default_version.from_fn.uri": [
+    "golden_ratio",
+    "semantic_v0.1:6e5510afd046261efb0286a51b6c3ce3146ff457fe06c21498eaa8193cc224e5",
+    "v0",
+    "python.function.v0"
   ],
   "polars_filter.content_hash": "semantic_v0.1:b8bfa718f96c1a20c50fe252b6569a853437cf4182e226c797d94a332059b0ea",
   "polars_filter.pipeline_hash": "semantic_v0.1:c3495e32f466d812eefc8a1af06ffb3a94e4de51a0bee266c03fc1f1539f4fb3",
