@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod.errors import RecursiveTypeError, TypeIdentityError
 import orcapod.logical_types.user_class_identity as uci
 from orcapod.logical_types.base_logical_type import BaseLogicalType
+from orcapod.logical_types.structural_class import class_for_record
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
@@ -373,7 +374,7 @@ class UserClassLogicalTypeFactory:
                 f"record for category {self.category!r}: {record!r}."
             )
         try:
-            cls = uci.class_for_record(record, converter)
+            cls = class_for_record(record, converter)
         except ImportError:
             raise
         except (TypeError, ValueError) as exc:

@@ -16,6 +16,7 @@ import pytest
 
 from orcapod.contexts import get_default_context
 from orcapod.logical_types import user_class_identity as uci
+from orcapod.logical_types.structural_class import annotation_from_token
 
 
 @pytest.fixture
@@ -159,7 +160,7 @@ class TestTypeTokens:
     ) -> None:
         """A token gives back an annotation with the same token."""
         token = uci.type_token(annotation, converter)
-        rebuilt = uci.annotation_from_token(token, converter)
+        rebuilt = annotation_from_token(token, converter)
         assert rebuilt == annotation
         assert uci.type_token(rebuilt, converter) == token
 

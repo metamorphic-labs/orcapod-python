@@ -257,6 +257,29 @@ class GoldenTwinBA:
     a: int
 
 
+@structural_dataclass(name="golden.Declared")
+class GoldenDeclaredAgain:
+    """A second class of the type ``golden.Declared``: must pin ``GoldenDeclared``'s values."""
+
+    label: str
+    score: float | None
+
+
+@dataclasses.dataclass
+class GoldenChild(GoldenPoint):
+    """Ordinary subclass of ``GoldenPoint``: its own type, with its own field."""
+
+    z: int = 0
+
+
+@dataclasses.dataclass
+class GoldenHolder:
+    """Ordinary dataclass with a structural field; the inner record enters its identity."""
+
+    inner: GoldenInner
+    note: str
+
+
 def register_logical_classes() -> None:
     """Register the dataclass and pydantic fixtures with the default type converter."""
     tc = _ctx().type_converter
@@ -269,6 +292,9 @@ def register_logical_classes() -> None:
         GoldenWithArray,
         GoldenTwinAB,
         GoldenTwinBA,
+        GoldenDeclaredAgain,
+        GoldenChild,
+        GoldenHolder,
     ):
         tc.register_python_class(cls)
 
@@ -360,12 +386,15 @@ def _semantic_types() -> dict[str, Any]:
         "set_uuid": set[uuid.UUID],
         "dataclass": GoldenPoint,
         "pydantic": GoldenModel,
-        "dataclass_declared": GoldenDeclared,
-        "pydantic_declared": GoldenDeclaredModel,
-        "dataclass_nested": GoldenOuter,
-        "dataclass_with_array": GoldenWithArray,
-        "dataclass_twin_ab": GoldenTwinAB,
-        "dataclass_twin_ba": GoldenTwinBA,
+        "structural": GoldenDeclared,
+        "pydantic_optional": GoldenDeclaredModel,
+        "structural_nested": GoldenOuter,
+        "structural_with_array": GoldenWithArray,
+        "structural_twin_ab": GoldenTwinAB,
+        "structural_twin_ba": GoldenTwinBA,
+        "structural_same_identity": GoldenDeclaredAgain,
+        "dataclass_subclass": GoldenChild,
+        "dataclass_with_structural": GoldenHolder,
         "list_dataclass": list[GoldenPoint],
     }
 
@@ -778,29 +807,41 @@ def _datagram_rows() -> dict[str, list[dict[str, Any]]]:
         ],
         "list_path": [{"k": "r1", "c": [PATH_A, PATH_B]}, {"k": "r2", "c": []}],
         "set_uuid": [{"k": "r1", "c": {UUID_A, UUID_B}}, {"k": "r2", "c": {UUID_A}}],
-        "dataclass_declared": [
+        "structural": [
             {"k": "r1", "c": GoldenDeclared("a", 0.5)},
             {"k": "r2", "c": GoldenDeclared("b", None)},
         ],
-        "pydantic_declared": [
+        "pydantic_optional": [
             {"k": "r1", "c": GoldenDeclaredModel(label="a", score=0.5)},
             {"k": "r2", "c": GoldenDeclaredModel(label="b", score=None)},
         ],
-        "dataclass_nested": [
+        "structural_nested": [
             {"k": "r1", "c": GoldenOuter(GoldenInner(1), ["x", "y"])},
             {"k": "r2", "c": GoldenOuter(GoldenInner(2), [])},
         ],
-        "dataclass_with_array": [
+        "structural_with_array": [
             {"k": "r1", "c": GoldenWithArray("a", np.arange(3, dtype=np.float32))},
             {"k": "r2", "c": GoldenWithArray("b", np.zeros((2, 2), dtype=np.int64))},
         ],
-        "dataclass_twin_ab": [
+        "structural_twin_ab": [
             {"k": "r1", "c": GoldenTwinAB(1, "x")},
             {"k": "r2", "c": GoldenTwinAB(2, "y")},
         ],
-        "dataclass_twin_ba": [
+        "structural_twin_ba": [
             {"k": "r1", "c": GoldenTwinBA("x", 1)},
             {"k": "r2", "c": GoldenTwinBA("y", 2)},
+        ],
+        "structural_same_identity": [
+            {"k": "r1", "c": GoldenDeclaredAgain("a", 0.5)},
+            {"k": "r2", "c": GoldenDeclaredAgain("b", None)},
+        ],
+        "dataclass_subclass": [
+            {"k": "r1", "c": GoldenChild(1, 0.5, 7)},
+            {"k": "r2", "c": GoldenChild(2, 1.5)},
+        ],
+        "dataclass_with_structural": [
+            {"k": "r1", "c": GoldenHolder(GoldenInner(1), "a")},
+            {"k": "r2", "c": GoldenHolder(GoldenInner(2), "b")},
         ],
     }
 

@@ -23,12 +23,9 @@ two shapes of one name apart within a process.
 
 from __future__ import annotations
 
-import ast
 import dataclasses
-import functools
 import hashlib
 import json
-import operator
 import re
 import sys
 import typing
@@ -79,26 +76,8 @@ _record_of: weakref.WeakKeyDictionary[type, dict[str, Any]] = (
 )
 # Structural classes defined in this process under each name, most recent last.
 _structural_classes: dict[str, list[weakref.ref[type]]] = {}
-# Structural classes built from stored metadata, by identity string.
-_synthesized: dict[str, type] = {}
 # Resolved type hints per class.
 _hints_of: weakref.WeakKeyDictionary[type, dict[str, Any]] = weakref.WeakKeyDictionary()
-
-_SCALARS: dict[str, Any] = {
-    "int": int,
-    "float": float,
-    "str": str,
-    "bool": bool,
-    "bytes": bytes,
-    "None": type(None),
-}
-_GENERIC_ORIGINS: dict[str, Any] = {
-    "list": list,
-    "set": set,
-    "frozenset": frozenset,
-    "tuple": tuple,
-    "dict": dict,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -530,65 +509,18 @@ def _class_token(cls: Any) -> str:
     return name.removeprefix("builtins.")
 
 
-# ---------------------------------------------------------------------------
-# Rebuilding annotations and structural classes from tokens
-# ---------------------------------------------------------------------------
+def make_structural(cls: type, name: str) -> None:
+    """Mark a dataclass as the structural class ``name``.
 
-
-def annotation_from_token(token: Any, converter: TypeConverterProtocol) -> Any:
-    """Return the Python annotation a type token describes.
+    Called through ``structural_class.finish_structural_class`` on a class that
+    ``orcapod.dataclass`` has just created or that was built from stored metadata.
 
     Args:
-        token: A type token, as ``type_token`` builds it.
-        converter: The type converter of the reading context.
-
-    Returns:
-        The annotation.
-
-    Raises:
-        ImportError: If a class named by the token cannot be imported, or a logical
-            type named by it is not registered in the reading context.
-        ValueError: If the token is malformed, or an exact class it names is defined
-            with other fields than the token records.
+        cls: A dataclass created for this purpose.
+        name: The validated declared name.
     """
-    from orcapod.logical_types.type_utils import _walk_fqcn
-
-    if isinstance(token, str):
-        if token in _SCALARS:
-            return _SCALARS[token]
-        return _walk_fqcn(token)
-    if not isinstance(token, dict):
-        raise ValueError(f"Malformed type token: {token!r}.")
-    if "logical" in token:
-        name = token["logical"].split(";", 1)[0]
-        lt = converter.get_logical_type_by_arrow_extension_name(name)
-        if lt is None:
-            raise ImportError(
-                f"The logical type {name!r} is not registered in this data context."
-            )
-        from orcapod.logical_types.identifier import logical_type_identifier
-
-        if logical_type_identifier(lt).text != token["logical"]:
-            raise ValueError(
-                f"The logical type {name!r} registered in this data context has the "
-                f"identifier {logical_type_identifier(lt).text!r}, not the stored "
-                f"{token['logical']!r}."
-            )
-        return lt.python_type
-    if "generic" in token:
-        origin = _GENERIC_ORIGINS.get(token["generic"]) or _walk_fqcn(token["generic"])
-        args = tuple(annotation_from_token(arg, converter) for arg in token["args"])
-        return origin[args] if args else origin
-    if "union" in token:
-        members = [
-            annotation_from_token(member, converter) for member in token["union"]
-        ]
-        return functools.reduce(operator.or_, members)
-    if "literal" in token:
-        return Literal[tuple(ast.literal_eval(text) for text in token["literal"])]  # pyright: ignore[reportInvalidTypeForm]  # built at run time from stored values
-    if "class" in token:
-        return class_for_record(token["class"], converter)
-    raise ValueError(f"Malformed type token: {token!r}.")
+    setattr(cls, STRUCTURAL_NAME_ATTRIBUTE, name)
+    remember_structural(name, cls)
 
 
 def find_exact_class(name: str) -> Any:
@@ -621,113 +553,6 @@ def find_exact_class(name: str) -> Any:
         return None
 
 
-def class_for_record(record: dict[str, Any], converter: TypeConverterProtocol) -> type:
-    """Return the class a stored identity record describes.
-
-    A structural record gives the most recently defined structural class with that
-    record, or a class synthesized from the record when none is defined. An exact
-    record gives the class its name refers to, which must have the stored record.
-
-    Args:
-        record: A stored identity record.
-        converter: The type converter of the reading context.
-
-    Returns:
-        The class.
-
-    Raises:
-        ImportError: If an exact class cannot be found by its name.
-        ValueError: If the record is malformed, or the exact class found is described
-            by another record.
-    """
-    kind, name = record.get("kind"), record.get("name")
-    if not isinstance(name, str) or kind not in (*EXACT_KINDS, KIND_STRUCTURAL):
-        raise ValueError(f"Malformed identity record: {record!r}.")
-    if kind == KIND_STRUCTURAL:
-        if not isinstance(record.get("fields"), list):
-            raise ValueError(f"Malformed identity record: {record!r}.")
-        for cls in structural_classes(name):
-            try:
-                if class_record(cls, converter) == record:
-                    return cls
-            except (TypeError, ValueError):
-                continue
-        return synthesize_structural_class(record, converter)
-    cls = find_exact_class(name)
-    if class_kind(cls) != kind:
-        raise ImportError(
-            f"Cannot find the {kind} {name!r} to read stored values of type "
-            f"{describe_record(record)}: no such class is defined at that module path."
-        )
-    current = class_record(cls, converter)
-    if current != record:
-        raise ValueError(
-            f"Stored values of {describe_record(record)} do not match the class "
-            f"defined now: {describe_record(current)}."
-        )
-    return cls
-
-
-def synthesize_structural_class(
-    record: dict[str, Any], converter: TypeConverterProtocol
-) -> type:
-    """Build a structural class from a stored record when no class is defined for it.
-
-    The class is a dataclass with the stored fields, named after the last component of
-    the stored name, in the module ``orcapod.synthesized``. It is built once per
-    identity in a process.
-
-    Args:
-        record: A stored structural identity record.
-        converter: The type converter of the reading context.
-
-    Returns:
-        A structural class whose record equals ``record``.
-
-    Raises:
-        ValueError: If the record cannot be turned into a class with the same record.
-    """
-    identity = identity_string(record)
-    cached = _synthesized.get(identity)
-    if cached is not None:
-        return cached
-    name = record["name"]
-    python_name = re.sub(r"\W", "_", name.rsplit(".", 1)[-1])
-    if not python_name.isidentifier():
-        python_name = f"_{python_name}"
-    fields = [
-        (field, annotation_from_token(token, converter))
-        for field, token in record["fields"]
-    ]
-    cls = dataclasses.make_dataclass(python_name, fields)
-    cls.__module__ = SYNTHESIZED_MODULE
-    cls.__doc__ = f"Structural class {name!r}, built from stored metadata."
-    from orcapod.structural import finish_structural_class
-
-    finish_structural_class(cls, name)
-    if class_record(cls, converter) != record:
-        raise ValueError(
-            f"Cannot rebuild the structural class {describe_record(record)} from its "
-            f"stored record."
-        )
-    _synthesized[identity] = cls
-    return cls
-
-
-def make_structural(cls: type, name: str) -> None:
-    """Mark a dataclass as the structural class ``name``.
-
-    Called through ``orcapod.structural.finish_structural_class`` on a class that
-    ``orcapod.dataclass`` has just created or that was built from stored metadata.
-
-    Args:
-        cls: A dataclass created for this purpose.
-        name: The validated declared name.
-    """
-    setattr(cls, STRUCTURAL_NAME_ATTRIBUTE, name)
-    remember_structural(name, cls)
-
-
 # ---------------------------------------------------------------------------
 # Same type?
 # ---------------------------------------------------------------------------
@@ -754,7 +579,9 @@ def same_user_type(a: type, b: type) -> bool:
     if record_a is None or record_b is None:
         from orcapod.contexts import get_default_context
 
-        converter = get_default_context().type_converter
+        # The context declares its converter with the semantic-types protocol; it is
+        # the same converter object the logical types use.
+        converter: Any = get_default_context().type_converter
         record_a = record_a or class_record(a, converter)
         record_b = record_b or class_record(b, converter)
     return record_a == record_b

@@ -32,6 +32,14 @@ def _extension_name(source: DictSource, key: str = "p") -> str:
     return source.as_table().schema.field(key).type.extension_name
 
 
+def _convert(cls: type, other: Any) -> Any:
+    """Return ``cls.from_instance(other)``.
+
+    ``from_instance`` is added by the decorator, which static type checkers cannot see.
+    """
+    return cls.from_instance(other)  # pyright: ignore[reportAttributeAccessIssue]  # added by op.dataclass at run time
+
+
 def _read(source: Any, key: str = "p") -> Any:
     """Return the value of data column ``key`` in the stream's only row."""
     return [data.as_dict()[key] for _, data in source.iter_data()][0]
@@ -266,7 +274,8 @@ def test_hash_agrees_with_equality() -> None:
 
     assert KeyA(1) == KeyB(1)
     assert hash(KeyA(1)) == hash(KeyB(1))
-    assert {KeyA(1): "a"}[KeyB(1)] == "a"
+    lookup: dict[Any, str] = {KeyA(1): "a"}
+    assert lookup[KeyB(1)] == "a"
 
 
 def test_eq_false_and_a_class_eq_are_left_alone() -> None:
@@ -328,14 +337,14 @@ class SegmentB:
 
 def test_from_instance_of_an_ordinary_dataclass() -> None:
     """``from_instance`` builds the class from an ordinary dataclass instance."""
-    built = PairA.from_instance(OrdinaryPair(1, 2))
+    built = _convert(PairA, OrdinaryPair(1, 2))
     assert type(built) is PairA
     assert built == PairA(1, 2)
 
 
 def test_from_instance_of_another_structural_class() -> None:
     """``from_instance`` builds the class from another structural class's instance."""
-    built = PairA.from_instance(PairReordered(y=2, x=1))
+    built = _convert(PairA, PairReordered(y=2, x=1))
     assert type(built) is PairA
     assert built == PairA(1, 2)
 
@@ -343,12 +352,12 @@ def test_from_instance_of_another_structural_class() -> None:
 def test_from_instance_converts_nested_fields() -> None:
     """Fields typed by a structural class are converted, also in lists and optionals."""
     source = SegmentB(PairB(1, 2), [PairB(3, 4)], PairB(5, 6))
-    built = Segment.from_instance(source)
+    built = _convert(Segment, source)
     assert type(built.start) is PairA
     assert [type(stop) for stop in built.stops] == [PairA]
     assert type(built.end) is PairA
     assert built == Segment(PairA(1, 2), [PairA(3, 4)], PairA(5, 6))
-    assert Segment.from_instance(SegmentB(PairB(1, 2), [])).end is None
+    assert _convert(Segment, SegmentB(PairB(1, 2), [])).end is None
 
 
 def test_from_instance_refuses_other_fields() -> None:
@@ -365,9 +374,9 @@ def test_from_instance_refuses_other_fields() -> None:
         x: int
 
     with pytest.raises(TypeError, match="z"):
-        _ = PairA.from_instance(Wider(1, 2, 3))
+        _ = _convert(PairA, Wider(1, 2, 3))
     with pytest.raises(TypeError, match="y"):
-        _ = PairA.from_instance(Narrower(1))
+        _ = _convert(PairA, Narrower(1))
 
 
 def test_from_instance_refuses_another_field_type() -> None:
@@ -379,7 +388,7 @@ def test_from_instance_refuses_another_field_type() -> None:
         y: int
 
     with pytest.raises(TypeError, match="'x'"):
-        _ = PairA.from_instance(Texts("1", 2))
+        _ = _convert(PairA, Texts("1", 2))
 
 
 def test_from_instance_refuses_what_is_not_a_dataclass_instance() -> None:
@@ -391,7 +400,7 @@ def test_from_instance_refuses_what_is_not_a_dataclass_instance() -> None:
 
     for other in (Model(x=1, y=2), {"x": 1, "y": 2}, OrdinaryPair):
         with pytest.raises(TypeError, match="dataclass"):
-            _ = PairA.from_instance(other)
+            _ = _convert(PairA, other)
 
 
 def test_constructor_is_the_plain_field_constructor() -> None:
@@ -418,9 +427,9 @@ def test_conversion_runs_post_init() -> None:
     class Raw:
         x: int
 
-    assert Checked.from_instance(Raw(1)) == Checked(1)
+    assert _convert(Checked, Raw(1)) == Checked(1)
     with pytest.raises(ValueError, match="negative"):
-        _ = Checked.from_instance(Raw(-1))
+        _ = _convert(Checked, Raw(-1))
 
 
 def test_pod_parameter_in_a_container_is_compatible_and_passed_as_is() -> None:
@@ -431,8 +440,13 @@ def test_pod_parameter_in_a_container_is_compatible_and_passed_as_is() -> None:
         """Return the sum of all ``x`` fields."""
         return str(sum(p.x for p in [*ps, maybe] if p is not None))
 
+    row: dict[str, Any] = {
+        "k": "a",
+        "ps": [PairA(1, 2), PairA(3, 4)],
+        "maybe": PairA(5, 6),
+    }
     source = DictSource(
-        data=[{"k": "a", "ps": [PairA(1, 2), PairA(3, 4)], "maybe": PairA(5, 6)}],
+        data=[row],
         tag_columns=["k"],
         source_id="s",
     )
