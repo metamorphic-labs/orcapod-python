@@ -11,7 +11,7 @@ analysis; where they recommend the operator, section 8 replaces them.
 **Date:** November 11, 2026.
 **Experiments:** `superpowers/specs/itl-939-experiments/` (exp01 today's rules, exp02 today's
 workarounds, exp03 copy-operator prototype, exp04 foreign keys, exp05 hashes and divergence,
-exp06 today's `DerivedSource`, exp07 derived-source prototype; each `expNN_*.py` has its captured
+exp06 today's `DerivedSource`, exp07 derived-source prototype, exp08 `GroupBy` and non-key tags; each `expNN_*.py` has its captured
 output next to it as `expNN_*.out`; rerun with `uv run python <script>`).
 
 ## 1. Summary
@@ -702,6 +702,10 @@ whose primary keys become tags and which reloads from its config.
 
 ### 8.4 (c) How this differs from the rejected operator
 
+* **The rule.** An operator's data elements all come from its input's data elements. A step
+  where a data element comes from a tag value, or from anywhere else, is a derived source
+  (the developer's criterion, quoted in 8.5). The copy fails that test as an operator and
+  passes as a source.
 * **Where the boundary is crossed.** Only when a source is defined. A source decides which of
   its columns are tags and which are data; that is its job. No operator and no pod is
   involved, so "operators never add data" and "pods never see tags" both hold without
@@ -721,17 +725,50 @@ whose primary keys become tags and which reloads from its config.
   `Join` matching follow the tags only, so a changed copy cannot mis-identify or mis-join a
   row.
 
-### 8.5 (d) `GroupBy`: a question for the developer, nothing changed
+### 8.5 (d) `GroupBy` checked against the developer's criterion
 
-Facts. `GroupBy(by=[...])` keeps the group keys as scalar tags and turns every **non-key tag**
-into a list-valued **data** column (its own docstring: "`probe` becomes a list-valued data
-column, so a consumer can tell which member each list element came from"). The promoted
-column's `_source_*` value is null. `Batch` does not do this: its tags stay tags, as lists.
+**The criterion** (developer, November 11, 2026), the rule that separates an operator from a
+derived source: *does any data element come from a tag value, or from anywhere other than the
+input data elements?* If yes, the step is a derived source. If no, it is an operator. In the
+developer's words: "On GroupBy -- that is still just an operator. The key is whether any data
+element has itself come from the tag or elsewhere OR not. In the case of GroupBy, grouping
+makes use of tag but tag info never directly enters into the resultant data. This makes it a
+proper operator. Whereas tag to data directly creates new data element from tag value, making
+it derived source."
 
-By the developer's principle this is tag content entering the data group through an operator.
-It is how spike-train timestamps reach a pod today (section 3, item 5). Is it an accepted
-exception, on the grounds that the grouping would otherwise lose which member is which, or
-should it be revisited (decision 9)?
+So `GroupBy` is not an open question. **But the facts do not match the description**, and the
+developer should see them. Today's `GroupBy` does put tag values into the data group. exp08,
+on the `experiment` table (tags `subject_id`, `session_start_datetime`, `experiment_index`):
+
+```text
+=== GroupBy(by=['subject_id'])
+grouped keys(): (('subject_id',), ('session_start_datetime', 'experiment_index', 'experiment_start_timestamp', 'task_id'))
+data schema: {'session_start_datetime': list[datetime.datetime], 'experiment_index': list[int], 'experiment_start_timestamp': list[int], 'task_id': list[str]}
+experiment_index: [[0, 1, 0, 1], [0]]
+_source_experiment_index: [None, None]
+a pod reads the former tag as data: [('m1', 1), ('m2', 0)]
+```
+
+The group key `subject_id` stays a tag. The two tags that are **not** group keys,
+`session_start_datetime` and `experiment_index`, leave the tag group and become list-valued
+**data** columns. Their elements are the members' tag values, and a pod can read them
+(`last_index` above takes `experiment_index: list[int]`). Their `_source_*` values are null,
+because a tag never had a provenance token. This is documented behaviour (the `GroupBy`
+docstring: "`probe` becomes a list-valued **data** column"). `Batch`, for contrast, keeps every
+tag a tag, as a list.
+
+By the criterion, then, the grouping itself is a proper operator, and the promotion of non-key
+tags into data is the part that is not: those data elements come from tag values. Nothing is
+changed here. Options for the developer, if this is to be made consistent:
+
+* keep the non-key tags as list-valued **tag** columns, as `Batch` does. The pod then no
+  longer receives them, and a pipeline that needs them (spike-train timestamps keyed as tags,
+  section 3 item 5) takes them through a derived source first;
+* or drop the non-key tags from the output;
+* or accept the promotion as a stated exception.
+
+Any of the first two changes `GroupBy`'s output schema, and with it the hashes and stored
+tables of every pipeline that groups by fewer than all tags.
 
 ### 8.6 (e) The inverse: a data column also as a tag
 
@@ -803,8 +840,12 @@ the stream. The recipe still cannot be reloaded.
    caches an empty result. Leave it alone in this change, or bring it under the same source
    rule? Recommendation: leave it alone now, because changing it moves the record ids of
    existing two-stage pipelines; file an issue to decide it separately.
-9. **`GroupBy` moving non-key tags into data** (8.5): accepted exception, or revisit?
-   Recommendation: accept; the alternative loses which member is which.
+9. **`GroupBy` promotes non-key tags into data** (8.5). The developer has ruled `GroupBy` a
+   proper operator on the understanding that tag information never enters the data. It does,
+   for tags that are not group keys (exp08). Keep them as list-valued tags like `Batch`, drop
+   them, or accept the promotion as a stated exception? Recommendation: decide it in its own
+   issue after the workshop, since the first two change `GroupBy`'s output schema and stored
+   hashes; no change in this work.
 10. **The inverse (`data_as_tags`)**. Recommendation: out of scope (8.6).
 11. **Ship before the workshop?** Recommendation: yes, about a day, with a live check against
     a SpiralDB table before November 17, since none was possible here.
