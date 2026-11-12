@@ -375,6 +375,16 @@ FunctionNode.
 tag tuple into one row with list-valued members. It still synthesizes no new data values —
 every emitted element came from an input row — and it keys only on tags, never on data.
 
+**Operator or derived source?** (developer, November 11, 2026) The test is: does any data
+element come from a tag value, or from anywhere other than the input's data elements? If yes,
+the step is not an operator: it is a derived source. So a tag's value is offered as data only
+by a source, `DerivedSource(origin, tags_as_data={tag: data_name})` (ITL-939), never by an
+operator. That form is a new root: fresh provenance through `SourceStreamBuilder`, schema-only
+`pipeline_hash`, and a default `source_id` equal to the bare hex of the content hash an
+operator node doing the derivation would have (`derived_source._derivation_hash`, the one
+place that defines it). `DerivedSource` without `tags_as_data` (a job node's stored records)
+keeps its old identity; do not change it (ITL-956).
+
 ### Two identity chains
 
 Every pipeline element has two parallel hashes:

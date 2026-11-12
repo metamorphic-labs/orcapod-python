@@ -1,6 +1,6 @@
 # DerivedSource `tags_as_data` Implementation Plan (ITL-939)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** `DerivedSource(origin, tags_as_data={tag: data_name})` — a root source derived from a
 source or a job node that exposes chosen tag columns also as data columns.
@@ -83,9 +83,9 @@ origin is a `RootSource`), plus `_identity_config()`. `from_config` rebuilds the
 
 **Files:** Create `tests/test_core/sources/test_derived_source_tags_as_data.py`
 
-- [ ] Fixtures: EDI-shaped `session` and `experiment` Arrow tables (`session_start_datetime`
+- [x] Fixtures: EDI-shaped `session` and `experiment` Arrow tables (`session_start_datetime`
       `timestamp[us, tz=UTC]`, not null; `experiment_index` `uint32`), `ArrowTableSource`s.
-- [ ] Tests: columns and schema; copy equals tag; exact Arrow field (type, not-null, nullable,
+- [x] Tests: columns and schema; copy equals tag; exact Arrow field (type, not-null, nullable,
       logical type `Path`, field metadata); fresh provenance (system-tag names differ from the
       origin's, source-id values, tokens); default `source_id` definition and its sensitivity;
       explicit `source_id`; `content_hash` / `pipeline_hash`; table equals the hand recipe's;
@@ -94,31 +94,37 @@ origin is a `RootSource`), plus `_identity_config()`. `from_config` rebuilds the
       `SQLiteTableSource` origin; not reloadable with an `ArrowTableSource` origin; node origin
       before and after run via `node.as_source(tags_as_data=...)`; zero-row origin; `.cached(db)`;
       plain `node.as_source()` identity unchanged; `record_id_column`.
-- [ ] Run `uv run pytest tests/test_core/sources/test_derived_source_tags_as_data.py -q`;
+- [x] Run `uv run pytest tests/test_core/sources/test_derived_source_tags_as_data.py -q`;
       expect failures (`TypeError: unexpected keyword argument 'tags_as_data'`). Commit.
 
 ### Task 2: implementation
 
-- [ ] `derived_source.py` as described; `as_source(tags_as_data=None)` on both nodes (pass the
+- [x] `derived_source.py` as described; `as_source(tags_as_data=None)` on both nodes (pass the
       node-path `source_id` only in plain mode); registry entry.
-- [ ] Run the new tests, then `tests/test_core/sources tests/test_pipeline tests/test_hashing`. Commit.
+- [x] Run the new tests, then `tests/test_core/sources tests/test_pipeline tests/test_hashing`. Commit.
 
 ### Task 3: docs, changelog, design issues, agent instructions
 
-- [ ] `docs/concepts/sources.md`: extend the `DerivedSource` section with an executed example
+- [x] `docs/concepts/sources.md`: extend the `DerivedSource` section with an executed example
       (every printed line as a `# ...` comment). Run `uv run pytest tests/test_docs -q`.
-- [ ] `CHANGELOG.md` Added entry; `DESIGN_ISSUES.md` TD1 resolved with a **Fix:** note;
+- [x] `CHANGELOG.md` Added entry; `DESIGN_ISSUES.md` TD1 resolved with a **Fix:** note;
       `CLAUDE.md` and `.zed/rules`: the operator / derived-source criterion.
-- [ ] Commit.
+- [x] Commit.
 
 ### Task 4: verification and PR
 
-- [ ] `uv run ruff format .`, `uv run ruff check .`, `uv run --with basedpyright basedpyright`
+- [x] `uv run ruff format .`, `uv run ruff check .`, `uv run --with basedpyright basedpyright`
       (exit code 0), `uv run pytest tests/` (one suite at a time on this machine).
-- [ ] Merge `origin/main` if it moved; push; PR against `main` ("Fixes ITL-939"); attach to
+- [x] Merge `origin/main` if it moved; push; PR against `main` ("Fixes ITL-939"); attach to
       Linear; `orca worktree set --pr`; CodeRabbit rounds; give the coordinator the read-only
       live SpiralDB command; `worker_done`.
 
 ## Progress notes
 
 (successor: read this section first)
+- Tasks 1-3 done and pushed: tests (47), implementation, docs, CHANGELOG, DESIGN_ISSUES, agent
+  instructions. Coordinator confirmed: bare 64-hex default source_id; store behaviour as every
+  source (`.cached(db)`).
+- Findings to report, not fixed: before a job node has run, the zero-row table's Arrow types
+  come from the Python schema (uint32 shows as int64), same as the plain form (ITL-956).
+- Remaining: full suite, PR, Linear attach, CodeRabbit, live SpiralDB command, worker_done.
