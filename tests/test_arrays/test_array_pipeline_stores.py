@@ -94,3 +94,46 @@ def test_pipeline_keeps_arrays_exact(tmp_path: Path, store: str, runner: str) ->
         expected = np.asarray(ARRAYS[name] * 2)
         assert_arrays_identical(doubled[name], expected)
         assert totals[name] == pytest.approx(float(np.real(expected).sum()))
+
+
+@function_pod(output_keys="parts")
+def split(x: np.ndarray) -> list[np.ndarray]:  # pyright: ignore[reportMissingTypeArgument]  # the bare np.ndarray annotation is under test
+    return [x.copy(), np.asarray(x * 2)]
+
+
+@pytest.mark.parametrize(
+    ("store", "runner"),
+    [
+        ("in_memory", "sync"),
+        ("in_memory", "async"),
+        ("delta", "sync"),
+        pytest.param(
+            "delta",
+            "async",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "ITL-984: the Delta MERGE cannot coerce large_list<large_binary> "
+                    "against the stored list<binary> under the async orchestrator"
+                ),
+            ),
+        ),
+    ],
+)
+def test_pod_output_list_of_arrays(tmp_path: Path, store: str, runner: str) -> None:
+    """A pod output ``list[np.ndarray]`` is stored and read back on every store and runner."""
+    source = DictSource(
+        data=[{"k": k, "x": ARRAYS[k]} for k in NUMERIC],
+        tag_columns=["k"],
+        source_id="numeric",
+    )
+    job = PipelineJob(name="array_lists", store=STORES[store](tmp_path))
+    with job:
+        split.pod(source, label="split")
+    RUNNERS[runner](job)
+
+    parts = _node(job, "split", "parts")
+    assert sorted(parts) == sorted(NUMERIC)
+    for name in NUMERIC:
+        assert_arrays_identical(parts[name][0], ARRAYS[name])
+        assert_arrays_identical(parts[name][1], np.asarray(ARRAYS[name] * 2))
