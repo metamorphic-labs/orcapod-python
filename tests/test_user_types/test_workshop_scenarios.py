@@ -214,6 +214,8 @@ def test_w1_rerun_define_cell_same_fields_rebinds(workdir: Path) -> None:
     assert (second["calls"], second["rows"]) == (0, 2)
     assert second["q_class_is_point"]
     assert first["pod_pipeline_hash"] == second["pod_pipeline_hash"]
+    assert first["values"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
+    assert second["values"] == first["values"]
 
 
 def test_w1_old_pod_cell_with_redefined_class(workdir: Path) -> None:
@@ -248,6 +250,9 @@ def test_reordered_fields_are_a_new_type(
     assert set(first["table_paths"]) < set(second["table_paths"])
     assert first["stored_fields"] == [["x", "y"]]
     assert second["stored_fields"] == [["x", "y"], ["y", "x"]]
+    assert first["values"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
+    assert second["values"] == ["Point(y=10, x=11)", "Point(y=20, x=21)"]
+    assert third["values"] == first["values"]
     # The first order's results are untouched and found again.
     assert (third["calls"], third["rows"]) == (0, 2)
     assert third["pod_pipeline_hash"] == first["pod_pipeline_hash"]
@@ -265,7 +270,7 @@ def test_class_redefined_with_an_added_field_is_a_new_type(workdir: Path) -> Non
     assert first["pod_pipeline_hash"] != second["pod_pipeline_hash"]
     assert set(first["table_paths"]) < set(second["table_paths"])
     assert second["stored_fields"] == [["x", "y"], ["x", "y", "z"]]
-    assert second["values"] == ["Point(x=1, y=1, z=1)", "Point(x=2, y=2, z=2)"]
+    assert second["values"] == ["Point(x=10, y=11, z=12)", "Point(x=20, y=21, z=22)"]
     # The two-field results are untouched and found again.
     assert (third["calls"], third["rows"]) == (0, 2)
     assert third["values"] == first["values"]
@@ -426,6 +431,8 @@ def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
     assert module["node_identity_path"] == notebook["node_identity_path"]
     assert module["table_paths"] == notebook["table_paths"]
     assert module["extension_name"] == notebook["extension_name"]
+    assert module["values"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
+    assert module["values"] == notebook["values"]
 
 
 def test_w11_module_without_declared_name_is_a_different_type(workdir: Path) -> None:
@@ -470,7 +477,7 @@ def test_w12_read_notebook_results_from_script_with_same_class(workdir: Path) ->
     define = "from dataclasses import dataclass\n@dataclass\nclass Point:\n    x: int\n    y: int\n"
     out = _script(workdir, READER.format(define=define))
     assert out.get("error") is None, out
-    assert out["values"] == ["Point(x=1, y=1)", "Point(x=2, y=2)"]
+    assert out["values"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
     assert out["classes"] == ["__main__.Point"]
 
 
@@ -564,7 +571,7 @@ report(out)
     assert out["first"].startswith("TypeIdentityError"), out
     assert "pkg.models.Point" in out["message"]
     assert "op.register_type(<class>, name='Point')" in out["message"]
-    assert out["second"] == ["Point(x=1, y=1)", "Point(x=2, y=2)"]
+    assert out["second"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
 
 
 NESTED_WRITER = """

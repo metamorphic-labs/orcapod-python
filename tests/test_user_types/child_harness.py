@@ -140,7 +140,8 @@ def run_job(point_cls, pod_and_calls=None, rows=None):
     pod, calls = pod_and_calls or make_pod(point_cls)
     if rows is None:
         names = list(getattr(point_cls, "model_fields", None) or point_cls.__dataclass_fields__)
-        rows = [{n: i for n in names} for i in (1, 2)]
+        # A distinct value per field, so that swapped fields would be noticed.
+        rows = [{n: 10 * i + j for j, n in enumerate(names)} for i in (1, 2)]
     data = [{"k": f"r{i}", "p": point_cls(**row)} for i, row in enumerate(rows, 1)]
     before = len(calls)
     db_root = os.environ["WS_DB"]
