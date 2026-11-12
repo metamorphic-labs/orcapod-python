@@ -19,6 +19,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod import function_pod
+from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import StoreReadError
@@ -235,11 +236,16 @@ def test_unrelated_concurrent_failure_does_not_hide_store_read_error(tmp_path):
         _ = double.pod(source, label="dbl")
         _ = triple.pod(source, label="tri")
 
-    with pytest.raises(StoreReadError) as info:
-        job.run(
-            orchestrator=AsyncPipelineOrchestrator(),
-            observer=_FailsToStartNode("tri"),
-        )
+    # This test is about the async orchestrator's exception group, so the read must
+    # fail inside the run: skip PipelineJob.run's up-front hash-label check, which
+    # would otherwise hit the damaged table first (ITL-910).
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FunctionJobNode, "check_stored_hash_labels", lambda self: None)
+        with pytest.raises(StoreReadError) as info:
+            job.run(
+                orchestrator=AsyncPipelineOrchestrator(),
+                observer=_FailsToStartNode("tri"),
+            )
 
     assert type(info.value) is StoreReadError
     assert Path(info.value.table) == result_table

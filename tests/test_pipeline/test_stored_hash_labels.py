@@ -234,6 +234,18 @@ class TestRead:
             node.get_all_records()
         assert info.value.found_label == "arrow_v0.1"
 
+    def test_reading_a_loaded_job_raises(self, store: Any, tmp_path: pathlib.Path):
+        """A job saved and stored by v0.2, loaded by this version, refuses its rows."""
+        saved = tmp_path / "job.json"
+        with writing_as_v02():
+            job = build_job(store)
+            completed = job.run()
+            completed.save(str(saved))
+        loaded = PipelineJob.load(str(saved), store=store)
+        with pytest.raises(StoreHashLabelError) as info:
+            loaded.nodes["dbl"].get_all_records()
+        assert info.value.node_label == "dbl"
+
     def test_mixed_table_raises(self, store: Any):
         """A table holding rows under both labels (built by hand) is refused."""
         old_store = InMemoryArrowDatabase()

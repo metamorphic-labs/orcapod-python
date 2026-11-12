@@ -942,7 +942,12 @@ class FunctionJobNode(FunctionNodeBase):
         """
         if self._stored_hash_labels_checked:
             return
-        current_label = self.data_context.arrow_hasher.hasher_id
+        # A node loaded from a saved job has no function pod; its context comes from
+        # the descriptor.
+        context = (
+            self._data_context if self._function_pod is None else self.data_context
+        )
+        current_label = context.arrow_hasher.hasher_id
         if self._pipeline_database is not None:
             path = self._versioned_pipeline_path
             stored = self._pipeline_database.get_all_records(path)

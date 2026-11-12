@@ -34,6 +34,8 @@ _ARROW_LABEL_PREFIX = "arrow_v"
 # whose label is known.
 _LABEL_OF_FORMAT = {"000001": "arrow_v0.1", "000002": "arrow_v0.2"}
 
+_HEX_DIGEST_PATTERN = "^[0-9a-f]{70}$"
+
 
 def foreign_arrow_label(
     values: "pa.Array | pa.ChunkedArray", current_label: str
@@ -85,7 +87,9 @@ def foreign_hash_format(
     """Return a description of a starfix hash format other than ``current_format``.
 
     Args:
-        values: A binary or string column of hex digests without a label.
+        values: A binary or string column of hex digests without a label. Values
+            that are not a full starfix digest in hex (70 lowercase hex characters)
+            are not considered.
         current_format: The format the current hasher writes, as returned by
             ``current_hash_format``.
 
@@ -97,6 +101,8 @@ def foreign_hash_format(
     if len(values) == 0:
         return None
     binary = values.cast(pa.large_binary())
+    # Only full starfix digests count: 35 bytes, 70 lowercase hex characters.
+    binary = pc.filter(binary, pc.match_substring_regex(binary, _HEX_DIGEST_PATTERN))
     formats = sorted(
         prefix.decode("ascii", errors="replace")
         for prefix in pc.unique(pc.binary_slice(binary, 0, 6)).to_pylist()
