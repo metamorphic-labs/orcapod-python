@@ -1044,22 +1044,33 @@ developer's "additive changes do not change the number" a test, not a judgement.
 
 ---
 
-## Part 6. Generation names in paths (decided: none)
+## Part 6. Paths before and after v0.3 (decided)
 
-No generation name is added to paths. The developer's question of November 11 ("Should we
-think about having explicit name so that we have path change everywhere for v0.3?") is
-answered by the logic of Part 5: a path changes when, and only when, the table's schema or
-subject changes. Path layout before and after v0.3 is therefore the same:
+No generation name is added to paths. A path changes when, and only when, the table's schema
+or subject changes (Part 5). For v0.3 every table's schema does change, because every table
+gains the data context column (5.5, option B, decided November 11, 2026). So the layout
+component of every path moves, and that is why every v0.3 table is at a new path.
 
 ```
-<job>/<function name>/<output-schema hash>/v<major>/<wrapper kind>/schema:<pipeline hash>/pdb_v1
-<job>/_result/<function name>/<output-schema hash>/v<major>/<wrapper kind>/rdb_v1
+before (H0)   <job>/<function name>/<output-schema hash>/v<major>/<wrapper kind>/schema:<pipeline hash>/pdb_v1
+              <job>/_result/<function name>/<output-schema hash>/v<major>/<wrapper kind>/rdb_v1
+              <operator class>/<operator hash>/schema:<pipeline hash>                         (no layout component)
+              source/node:<content hash>                                                      (no layout component)
+              side_effects/<name>/schema:<pipeline hash>/tdb_v1
+
+after  (H1)   …/pdb_v2        …/rdb_v2        operator cache and cached source gain a layout component        …/tdb_v2
 ```
 
-**On meeting rows of an older value-level generation** (decided November 11, 2026): v0.3 does
-not fail. It writes and uses `arrow_v0.2` rows; `arrow_v0.1` rows stay in the same table,
-untouched and distinguishable by the label in their values, so that they can be migrated
-later. A read of a whole table must use rows of the current label only.
+The hashes inside a path also move for nodes that involve a logical type, because the whole
+type identifier now enters the schema hash, and for nodes touched by the wrong-hash fixes.
+
+**On finding a table at the old layout** (decided November 11, 2026): "report total count and
+simply move on". No error, except for side-effect logs, which fail explicitly so that an
+external action is not delivered twice. A table that lacks the data context column is `H0`.
+
+**Within a layout**, rows written under the current data context are the current entries;
+reads and lookups filter on the data context column. Rows of another data context stay in the
+table untouched, to be migrated.
 
 ### 6.1 Consequences found while implementing "do not fail" (ITL-910 worker, November 11, 2026)
 
@@ -1120,7 +1131,10 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **A new global hash version is required when** "ANY existing golden hash value changes OUTSIDE of changes to logical data types". |
 | Nov 11, 2026 | **Registry**: "Agreed on current one in orcapod and all of them (all historical ones) in orcapod sanctuary." |
 | Nov 11, 2026 | Side-effect logs: "let's circle back to side effect logs after we are settled with this design decision on global hash value (we need a good name for this). Maybe data context version is fine but other ideas welcome." |
-| Nov 11, 2026 | Operator-behaviour marker: deferred until the global hash versioning strategy is confirmed. |
+| Nov 11, 2026 | **One uniform data context column on every table (option B); name stays "data context".** "I agree option B sounds right." "I agree about keeping the name data context as I see no strong need to rename." Consequence: every table's layout version moves, so every v0.3 table is at a new path. |
+| Nov 11, 2026 | **Old-layout tables are counted and skipped.** "If old layout is found, report total count and simply move on." |
+| Nov 11, 2026 | Form of the data context value: "does it even make sense to keep the naming as std:H1:default -- we could instead just turn it into much simpler and smaller u64 column with an ID ... Whatever that'd make the readout quicker would be preferable." (Integer ID proposed; exact type under discussion.) |
+| Nov 11, 2026 | Operator behaviour needs no marker of its own: it is covered by the global hash version through the golden files (5.5). |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
 Open questions for the developer:
