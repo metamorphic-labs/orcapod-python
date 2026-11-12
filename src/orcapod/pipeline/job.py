@@ -451,7 +451,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
                 name_path = node.node_name_path
-                claimed.update({name_path, ("_result",) + name_path})
+                if name_path:
+                    claimed.update({name_path, ("_result",) + name_path})
             elif isinstance(node, SideEffectJobNode):
                 claimed.add(node.node_uri)
         try:

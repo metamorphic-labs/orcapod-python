@@ -92,7 +92,7 @@ ITL-954 STEP 1 plan (no library code written yet). Reply "approved" or correctio
 - [x] 4. `contexts/stored.py`: layout rule, scan, reporting; wire the nodes, the result
       cache, the cached source and `PipelineJob.run()`. Tests pass.
 - [x] 5. Docs, CHANGELOG, CLAUDE.md and `.zed/rules`, DESIGN_ISSUES DC2.
-- [ ] 6. ruff, basedpyright (exit code), full suite on one Python version at a time,
+- [x] 6. ruff, basedpyright (exit code), full suite on one Python version at a time,
       golden hashes unchanged.
 - [ ] 7. Merge `origin/main` if it moved, push, PR against `main`, CodeRabbit rounds.
 
@@ -112,4 +112,7 @@ ITL-954 STEP 1 plan (no library code written yet). Reply "approved" or correctio
 - Measured cost (local Delta-shaped store, 4000 tables, 18000 directories, suite running in
   parallel): one node's scan 0.25 ms; the job-level listing 0.3 s per run. S3: one LIST
   request per directory, about 4.5 per table under the listed prefix.
+- Suite at the last commit, Python 3.12: `uv run pytest tests/` 7866 passed, 97 skipped,
+  18 xfailed; `test-objective/` passes; the new tests also pass on 3.11 and 3.13; ruff and
+  basedpyright (exit 0) clean; golden hashes unchanged.
 - No Docker on the worker machine: the MinIO test did not run locally.
