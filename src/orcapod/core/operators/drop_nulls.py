@@ -1,4 +1,4 @@
-"""DropNulls operator: drop rows with a null in named columns, narrow ``T | None`` to ``T``."""
+"""DropNulls operator: drop rows with a null in the chosen columns, narrow ``T | None`` to ``T``."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -53,6 +54,15 @@ class DropNulls(UnaryOperator):
     ``output_schema()``, and a non-nullable field in the Arrow table. A pod
     whose parameter is a plain ``T`` can then consume the column.
 
+    Without names (``DropNulls()``), the columns are every tag column and every
+    data column of the input stream: a row with a null in any of them is
+    dropped, and all of them are non-nullable afterwards. The names are taken
+    from each input stream when the operator is applied and are never stored,
+    so one ``DropNulls()`` works on any stream. System-tag, source-info,
+    context and meta columns are never among them. On a stream whose columns
+    are all nullable and legitimately empty in places, this form can drop most
+    rows; naming the columns is the precise form.
+
     The names may be tag columns, data columns, or both. Only the validity of
     the top-level value is read, never the value itself: a null list or a null
     struct is null, while an empty list, a list holding nulls, a struct whose
@@ -71,22 +81,36 @@ class DropNulls(UnaryOperator):
     non-nullable from the start.
 
     Args:
-        columns: One column name, or a collection of names. Duplicates and
-            order are ignored: the operator's identity is the set of names.
+        columns: One column name, a collection of names, or ``None`` (the
+            default) for every tag and data column of the input stream.
+            Duplicates and order are ignored: the operator's identity is the
+            set of names, or one fixed value when no names are given. An empty
+            collection is not "no argument" and is refused: a list of names
+            that came out empty is never read as "every column".
 
     Raises:
-        ValueError: If ``columns`` is empty.
+        ValueError: If ``columns`` is an empty collection.
     """
 
-    def __init__(self, columns: str | Collection[str], **kwargs: Any) -> None:
-        names = (columns,) if isinstance(columns, str) else tuple(columns)
-        if not names:
-            raise ValueError(
-                "DropNulls needs at least one column name; got an empty collection."
-            )
-        # A sorted tuple of unique names, so a list, a tuple and a set of the
-        # same names (in any order) are one identity.
-        self.columns: tuple[str, ...] = tuple(sorted(set(names)))
+    def __init__(
+        self, columns: str | Collection[str] | None = None, **kwargs: Any
+    ) -> None:
+        self.columns: tuple[str, ...] | None
+        if columns is None:
+            # Every tag and data column of whichever stream the operator is
+            # applied to; resolved per input, never stored.
+            self.columns = None
+        else:
+            names = (columns,) if isinstance(columns, str) else tuple(columns)
+            if not names:
+                raise ValueError(
+                    "DropNulls needs at least one column name; got an empty"
+                    + " collection. Pass no argument to mean every tag and data"
+                    + " column."
+                )
+            # A sorted tuple of unique names, so a list, a tuple and a set of the
+            # same names (in any order) are one identity.
+            self.columns = tuple(sorted(set(names)))
         super().__init__(**kwargs)
 
     def identity_structure(self) -> Any:
@@ -94,7 +118,8 @@ class DropNulls(UnaryOperator):
 
         Returns:
             A ``(class_name, columns)`` tuple, where ``columns`` is the sorted
-            tuple of unique names.
+            tuple of unique names, or ``None`` for the no-argument form (every
+            tag and data column), whatever stream it is applied to.
         """
         return (self.__class__.__name__, self.columns)
 
@@ -103,11 +128,37 @@ class DropNulls(UnaryOperator):
 
         Returns:
             A dict with ``class_name``, ``module_path``, and ``config`` keys,
-            where ``config`` contains ``columns``.
+            where ``config`` contains ``columns``: the list of names, or
+            ``None`` for the no-argument form.
         """
         config = super().to_config()
-        config["config"] = {"columns": list(self.columns)}
+        config["config"] = {
+            "columns": None if self.columns is None else list(self.columns)
+        }
         return config
+
+    def _target_columns(
+        self, tag_columns: Collection[str], data_columns: Collection[str]
+    ) -> tuple[str, ...]:
+        """Return the columns to test and narrow for an input with these columns.
+
+        Args:
+            tag_columns: The input's tag column names.
+            data_columns: The input's data column names.
+
+        Returns:
+            The operator's names, or every given tag and data column when the
+            operator was built without names. Meta columns are left out: a
+            stream built straight from a table lists them among its data
+            columns (ITL-846), and they are not user columns.
+        """
+        if self.columns is not None:
+            return self.columns
+        return tuple(
+            name
+            for name in (*tag_columns, *data_columns)
+            if not name.startswith(constants.META_PREFIX)
+        )
 
     # ------------------------------------------------------------------
     # Validation and schema prediction
@@ -122,6 +173,8 @@ class DropNulls(UnaryOperator):
         Raises:
             InputValidationError: If a named column is not a tag or data column.
         """
+        if self.columns is None:
+            return
         tag_columns, data_columns = stream.keys()
         missing = [
             name
@@ -135,13 +188,12 @@ class DropNulls(UnaryOperator):
                 + f" {list(data_columns)}."
             )
 
-    def _narrow_schema(self, schema: Schema) -> Schema:
-        """Return ``schema`` with ``None`` removed from each named column's type."""
+    @staticmethod
+    def _narrow_schema(schema: Schema, names: Collection[str]) -> Schema:
+        """Return ``schema`` with ``None`` removed from the type of each column in ``names``."""
         return Schema(
             {
-                name: _without_none(python_type)
-                if name in self.columns
-                else python_type
+                name: _without_none(python_type) if name in names else python_type
                 for name, python_type in schema.items()
             },
             optional_fields=schema.optional_fields,
@@ -156,6 +208,9 @@ class DropNulls(UnaryOperator):
     ) -> tuple[Schema, Schema]:
         """Return the input schemas with the named columns narrowed to ``T``.
 
+        Without names, every tag and data column of ``stream`` is narrowed;
+        system-tag columns included by ``columns`` are not.
+
         Args:
             stream: The upstream stream.
             columns: Column inclusion config passed through to ``output_schema``.
@@ -167,20 +222,26 @@ class DropNulls(UnaryOperator):
         tag_schema, data_schema = stream.output_schema(
             columns=columns, all_info=all_info
         )
-        return self._narrow_schema(tag_schema), self._narrow_schema(data_schema)
+        names = self._target_columns(*stream.keys())
+        return (
+            self._narrow_schema(tag_schema, names),
+            self._narrow_schema(data_schema, names),
+        )
 
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
 
-    def _narrow_fields(self, table: pa.Table) -> pa.Table:
-        """Flag the named columns present in ``table`` non-nullable.
+    @staticmethod
+    def _narrow_fields(table: pa.Table, names: Collection[str]) -> pa.Table:
+        """Flag the columns in ``names`` that are present in ``table`` non-nullable.
 
         Every column takes the large-normalized form of its input type; no
         other type, flag or value changes. The named columns must hold no null.
 
         Args:
             table: A table whose named columns hold no null.
+            names: The columns to flag.
 
         Returns:
             The same rows with the named fields non-nullable.
@@ -195,7 +256,7 @@ class DropNulls(UnaryOperator):
             },
         )
         schema = table.schema
-        for name in self.columns:
+        for name in names:
             position = schema.get_field_index(name)
             if position >= 0:
                 schema = schema.set(  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
@@ -204,26 +265,29 @@ class DropNulls(UnaryOperator):
         # Same arrays under new field flags: no cast, so no value or type can change.
         return pa.Table.from_arrays(table.columns, schema=schema)
 
-    def _narrow_table(self, table: pa.Table) -> pa.Table:
+    @staticmethod
+    def _narrow_table(table: pa.Table, names: Collection[str]) -> pa.Table:
         """Drop the rows with a null in a named column and flag those columns non-nullable.
 
-        Only the named columns present in ``table`` are considered, so the same
-        rule serves a whole stream table and a single row's tag or data table.
+        Only the columns in ``names`` that are present in ``table`` are
+        considered, so the same rule serves a whole stream table and a single
+        row's tag or data table.
 
         Args:
             table: A table holding some or all of the named columns.
+            names: The columns to test and narrow.
 
         Returns:
             The surviving rows, in order, with the named fields non-nullable.
         """
         mask = None
-        for name in self.columns:
+        for name in names:
             if name in table.column_names:
                 valid = pc.is_valid(table.column(name))
                 mask = valid if mask is None else pc.and_(mask, valid)
         if mask is not None:
             table = table.filter(mask)
-        return self._narrow_fields(table)
+        return DropNulls._narrow_fields(table, names)
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Return the stream's rows whose named columns are all non-null.
@@ -238,9 +302,10 @@ class DropNulls(UnaryOperator):
         table = stream.as_table(
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
+        tag_columns, data_columns = stream.keys()
         return ArrowTableStream(
-            self._narrow_table(table),
-            tag_columns=stream.keys()[0],
+            self._narrow_table(table, self._target_columns(tag_columns, data_columns)),
+            tag_columns=tag_columns,
             data_context=stream.data_context,  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
         )
 
@@ -254,7 +319,8 @@ class DropNulls(UnaryOperator):
 
         Each row's tag and data Arrow tables go through the rule of the sync
         path (``_narrow_table``), and a surviving row is rebuilt from those
-        tables with its own data context.
+        tables with its own data context. Without names, the columns are the
+        row's own tag and data keys.
 
         Args:
             inputs: Single-element sequence of readable channels.
@@ -263,11 +329,12 @@ class DropNulls(UnaryOperator):
         """
         try:
             async for tag, data in inputs[0]:
+                names = self._target_columns(tag.keys(), data.keys())
                 tag_table = self._narrow_table(
-                    tag.as_table(columns={"system_tags": True})
+                    tag.as_table(columns={"system_tags": True}), names
                 )
                 data_table = self._narrow_table(
-                    data.as_table(columns={"source": True, "meta": True})
+                    data.as_table(columns={"source": True, "meta": True}), names
                 )
                 # A table with no columns (a stream without tags) has no rows
                 # to lose, so only a table that held a named column can drop the row.

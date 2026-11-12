@@ -988,6 +988,19 @@ def pipeline_drop_nulls() -> dict[str, Any]:
     return out
 
 
+@case("pipeline", "drop_nulls_all")
+def pipeline_drop_nulls_all() -> dict[str, Any]:
+    """Pin the no-argument ``DropNulls``: its fixed identity and the narrowed rows."""
+    from orcapod.operators import DropNulls
+
+    out: dict[str, Any] = {}
+    out["operator[all].content_hash"] = DropNulls().content_hash().to_string()
+    out["operator[all].pipeline_hash"] = DropNulls().pipeline_hash().to_string()
+    out.update(_prefixed("all", stream_summary(DropNulls()(_nullable_readings()))))
+    out.update(_prefixed("method", stream_summary(_nullable_readings().drop_nulls())))
+    return out
+
+
 @case("pipeline", "drop_nulls_job")
 def pipeline_drop_nulls_job() -> dict[str, Any]:
     """Record a job with ``DropNulls`` upstream of a pod with non-optional parameters."""

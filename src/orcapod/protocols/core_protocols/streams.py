@@ -287,12 +287,13 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
 
     def drop_nulls(
         self,
-        columns: str | Collection[str],
+        columns: str | Collection[str] | None = None,
         label: str | None = None,
     ) -> "StreamProtocol":
         """
         Keep the rows where every named column (tag or data) is non-null, and
-        narrow each named column from ``T | None`` to ``T``.
+        narrow each named column from ``T | None`` to ``T``. Without names,
+        every tag and data column is tested and narrowed.
         """
         ...
 

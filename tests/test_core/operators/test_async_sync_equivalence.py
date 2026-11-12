@@ -320,6 +320,8 @@ CASES = [
         lambda: DropNulls(["nul", "s", "ta", "l8"]),
         lambda: (source_a(),),
     ),
+    # No names: every tag and data column, among them struct, logical and list ones.
+    Case("drop_nulls_all", lambda: DropNulls(), lambda: (source_a(),)),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 
@@ -362,6 +364,26 @@ def test_drop_nulls_without_tag_columns() -> None:
             columns={"system_tags": True}
         )
         assert list(tag.system_tags().items()) == list(sync_tag.system_tags().items())
+
+    # No names: both data columns are tested and narrowed on both paths.
+    source = _source(
+        {
+            "x": pa.array([1, None, 3], pa.int8()),
+            "s": pa.array(["a", "b", None], pa.string()),
+        },
+        tags=(),
+        source_id="tagless",
+        nullable=("x", "s"),
+    )
+    expected = sync_rows(DropNulls(), source)
+    actual = async_rows(DropNulls(), source)
+    assert [data.as_dict() for _, data in actual] == [{"x": 1, "s": "a"}]
+    assert len(actual) == len(expected) == 1
+    for (_, data), (_, sync_data) in zip(actual, expected):
+        assert data.arrow_schema() == sync_data.arrow_schema()
+        assert [f.nullable for f in data.arrow_schema()] == [False, False]
+        assert data.content_hash() == sync_data.content_hash()
+        assert data.source_info() == sync_data.source_info()
 
 
 # Pre-existing provenance defects, not type re-inference: out of scope for

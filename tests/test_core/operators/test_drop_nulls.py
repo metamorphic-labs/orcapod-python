@@ -9,6 +9,7 @@ system tags, source info and row order.
 from __future__ import annotations
 
 import math
+import typing
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -19,6 +20,7 @@ import pytest
 
 from orcapod import function_pod
 from orcapod.core.sources import ArrowTableSource, DictSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.operators import DropNulls, Join
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -573,3 +575,253 @@ def test_join_after_the_operator() -> None:
     assert joined.output_schema()[1]["x"] is int
     assert sorted(_ids(joined)) == [1, 3, 4]
     assert joined.as_table().schema.field("x").nullable is False
+
+
+# ── no argument: every tag and data column ──────────────────────────────────
+
+
+def _hidden(table: pa.Table) -> list[str]:
+    """Return the system-tag and source-info column names of ``table``."""
+    return [
+        n
+        for n in table.column_names
+        if n.startswith((constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX))
+    ]
+
+
+def test_no_argument_drops_rows_with_a_null_in_any_column() -> None:
+    """Without names, a row survives only if every tag and data column has a value."""
+    result = DropNulls()(readings())
+    assert result.as_table().to_pylist() == [{"id": 1, "x": 10, "y": 1.5, "note": "a"}]
+
+
+def test_no_argument_narrows_every_tag_and_data_column() -> None:
+    """Every tag and data column is ``T`` afterwards, in the schema and in Arrow."""
+    source = keyed()
+    assert source.output_schema() == (
+        {"site": str | None, "id": int},
+        {"x": int | None},
+    )
+    result = DropNulls()(source)
+    assert _ids(result) == [1]
+    assert result.keys() == source.keys()
+    assert result.output_schema() == ({"site": str, "id": int}, {"x": int})
+    schema = result.as_table().schema
+    assert [schema.field(n).nullable for n in ("site", "id", "x")] == [False] * 3
+
+
+def test_no_argument_equals_naming_every_column() -> None:
+    """``DropNulls()`` and ``DropNulls([every column])`` give the same rows and schema.
+
+    The operators themselves are different identities, and so are their outputs'
+    stream hashes.
+    """
+    source = keyed()
+    implicit = DropNulls()
+    named = DropNulls(["site", "id", "x"])
+    by_all, by_name = implicit(source), named(source)
+    assert by_all.as_table(columns=ALL) == by_name.as_table(columns=ALL)
+    assert by_all.as_table(columns=ALL).schema == by_name.as_table(columns=ALL).schema
+    assert by_all.output_schema() == by_name.output_schema()
+    for (tag, data), (ref_tag, ref_data) in zip(
+        by_all.iter_data(), by_name.iter_data(), strict=True
+    ):
+        assert tag.content_hash() == ref_tag.content_hash()
+        assert data.content_hash() == ref_data.content_hash()
+        assert tag.system_tags() == ref_tag.system_tags()
+
+    assert implicit.content_hash() != named.content_hash()
+    assert implicit.pipeline_hash() != named.pipeline_hash()
+    assert by_all.content_hash() != by_name.content_hash()
+    assert by_all.pipeline_hash() != by_name.pipeline_hash()
+
+
+def test_no_argument_identity_is_one_fixed_value() -> None:
+    """The no-argument operator stores no names: its identity is the same on any stream."""
+    op = DropNulls()
+    assert op.columns is None
+    before = (op.content_hash(), op.pipeline_hash())
+    assert _ids(op(readings())) == [1]
+    assert _ids(op(keyed())) == [1]
+    assert op.columns is None
+    assert (op.content_hash(), op.pipeline_hash()) == before
+    assert DropNulls(None).content_hash() == op.content_hash()
+    assert DropNulls().content_hash() == op.content_hash()
+    for names in ("x", ["id", "x", "y", "note"], ["site", "id", "x"]):
+        assert DropNulls(names).content_hash() != op.content_hash()
+
+
+@pytest.mark.parametrize("empty", [[], (), set(), frozenset()])
+def test_an_empty_collection_is_still_an_error(empty: Any) -> None:
+    """An empty collection is not "no argument": it is refused, never read as "all"."""
+    with pytest.raises(ValueError, match="at least one"):
+        DropNulls(empty)
+    with pytest.raises(ValueError, match="at least one"):
+        readings().drop_nulls(empty)
+
+
+def test_no_argument_leaves_system_and_source_columns_alone() -> None:
+    """Only user tag and data columns are tested and narrowed.
+
+    Row 1's source-info value for ``x`` is null: the row still survives, and the
+    system-tag and source-info fields keep their types, flags and values.
+    """
+    source = readings()
+    before = source.as_table(columns=ALL)
+    hidden = _hidden(before)
+    assert len(hidden) >= 2
+    source_x = f"{constants.SOURCE_PREFIX}x"
+    position = before.schema.get_field_index(source_x)
+    nullable_token = before.schema.field(position).with_nullable(True)
+    stream = ArrowTableStream(
+        before.set_column(
+            position,
+            nullable_token,
+            pa.array([None, "t2", "t3", "t4"], nullable_token.type),
+        ),
+        tag_columns=["id"],
+    )
+    given = stream.as_table(columns=ALL)
+    assert given.schema.field(source_x).nullable is True
+    result = DropNulls()(stream)
+    after = result.as_table(columns=ALL)
+    assert _ids(result) == [1]
+    assert after.column(source_x).to_pylist() == [None]
+    assert after.column_names == given.column_names
+    for name in _hidden(given):
+        assert after.schema.field(name) == given.schema.field(name)
+        assert after.column(name).to_pylist() == given.column(name).to_pylist()[:1]
+
+
+def test_no_argument_schema_prediction_matches_the_computed_stream() -> None:
+    """The predicted schema equals the computed stream's, with and without system tags."""
+    op = DropNulls()
+    for source in (readings(), keyed()):
+        for config in (
+            {},
+            {"system_tags": True},
+            {"source": True, "system_tags": True},
+        ):
+            # Non-public on purpose: a prediction is verified against the static result.
+            computed = op.static_process(source).output_schema(columns=config)
+            assert op(source).output_schema(columns=config) == computed
+            assert op.output_schema(source, columns=config) == computed
+            assert all(
+                type(None) not in typing.get_args(python_type)
+                for name, python_type in {**computed[0], **computed[1]}.items()
+                if not name.startswith(constants.SYSTEM_TAG_PREFIX)
+            )
+
+
+def test_no_argument_zero_surviving_rows_keep_the_narrowed_types() -> None:
+    """A result with no rows has the schema of a non-empty result."""
+    empty = _source(
+        {
+            "id": pa.array([1, 2], pa.int16()),
+            "x": pa.array([None, 7], pa.int8()),
+            "s": pa.array(["a", None], pa.string()),
+        },
+        nullable=["id", "x", "s"],
+    )
+    non_empty = _source(
+        {
+            "id": pa.array([1, 2], pa.int16()),
+            "x": pa.array([5, 7], pa.int8()),
+            "s": pa.array(["a", None], pa.string()),
+        },
+        nullable=["id", "x", "s"],
+    )
+    result = DropNulls()(empty)
+    table = result.as_table(columns=ALL)
+    assert table.num_rows == 0
+    assert list(result.iter_data()) == []
+    assert result.output_schema() == ({"id": int}, {"x": int, "s": str})
+    assert table.schema.field("id") == pa.field("id", pa.int16(), nullable=False)
+    assert table.schema.field("x") == pa.field("x", pa.int8(), nullable=False)
+    assert table.schema.field("s") == pa.field("s", pa.large_string(), nullable=False)
+    assert table.schema == DropNulls()(non_empty).as_table(columns=ALL).schema
+
+
+def test_no_argument_on_a_non_nullable_stream_is_a_no_op() -> None:
+    """A stream without a nullable column is unchanged, and twice equals once."""
+    source = _source(
+        {
+            "id": pa.array([1, 2], pa.int16()),
+            "x": pa.array([10, 20], pa.int8()),
+        }
+    )
+    result = DropNulls()(source)
+    assert result.output_schema() == source.output_schema()
+    assert result.as_table(columns=ALL) == source.as_table(columns=ALL)
+    for (tag, data), (in_tag, in_data) in zip(
+        result.iter_data(), source.iter_data(), strict=True
+    ):
+        assert tag.content_hash() == in_tag.content_hash()
+        assert data.content_hash() == in_data.content_hash()
+
+    once = DropNulls()(readings())
+    twice = DropNulls()(once)
+    assert twice.as_table(columns=ALL) == once.as_table(columns=ALL)
+    assert twice.output_schema() == once.output_schema()
+
+
+def test_no_argument_on_a_stream_without_tag_columns() -> None:
+    """A stream with no tag columns: every data column is tested and narrowed."""
+    source = _source(
+        {
+            "x": pa.array([1, None, 3], pa.int8()),
+            "s": pa.array(["a", "b", None], pa.string()),
+        },
+        tags=(),
+        nullable=["x", "s"],
+    )
+    result = DropNulls()(source)
+    assert result.as_table().to_pylist() == [{"x": 1, "s": "a"}]
+    assert result.output_schema() == ({}, {"x": int, "s": str})
+
+
+def test_no_argument_stream_method_equals_the_operator() -> None:
+    """``stream.drop_nulls()`` gives the no-argument operator's rows and hashes."""
+    source = readings()
+    by_method = source.drop_nulls()
+    by_operator = DropNulls()(source)
+    assert by_method.as_table(columns=ALL) == by_operator.as_table(columns=ALL)
+    assert by_method.content_hash() == by_operator.content_hash()
+    assert by_method.pipeline_hash() == by_operator.pipeline_hash()
+    assert _ids(source.drop_nulls(label="complete")) == [1]
+
+
+def test_no_argument_does_not_change_the_input_stream() -> None:
+    """Running the no-argument operator leaves the input stream as it was."""
+    source = readings()
+    schema = source.as_table(columns=ALL).schema
+    rows = source.as_table(columns=ALL).to_pylist()
+    DropNulls()(source).as_table()
+    assert source.as_table(columns=ALL).schema == schema
+    assert source.as_table(columns=ALL).to_pylist() == rows
+
+
+def test_no_argument_leaves_meta_columns_alone() -> None:
+    """A meta (``__``) column is not a data column for "every column".
+
+    A stream built straight from a table lists its meta columns among its data
+    keys (ITL-846); a null there still drops no row and the field stays nullable.
+    """
+    meta = f"{constants.META_PREFIX}note"
+    table = readings().as_table(columns=ALL)
+    table = table.append_column(
+        pa.field(meta, pa.large_string(), nullable=True),
+        pa.array([None, "m2", "m3", "m4"], pa.large_string()),
+    )
+    stream = ArrowTableStream(table, tag_columns=["id"])
+    result = DropNulls()(stream)
+    rows = list(result.iter_data())
+    assert [tag["id"] for tag, _ in rows] == [1]
+    data = rows[0][1]
+    assert data.as_dict() == {"x": 10, "y": 1.5, "note": "a"}
+    meta_field = data.arrow_schema(columns={"meta": True}).field(meta)
+    assert meta_field == pa.field(meta, pa.large_string(), nullable=True)
+    assert data.as_table(columns={"meta": True}).column(meta).to_pylist() == [None]
+    # Non-public on purpose: a prediction is verified against the static result.
+    computed = DropNulls().static_process(stream).output_schema()
+    assert DropNulls().output_schema(stream) == computed

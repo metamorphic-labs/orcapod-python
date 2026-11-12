@@ -188,3 +188,20 @@ class TestDropNullsConfig:
         restored = resolve_operator_from_config(op.to_config())
         assert isinstance(restored, DropNulls)
         assert restored.content_hash() == op.content_hash()
+
+    def test_no_argument_round_trip(self):
+        """The no-argument form serializes ``columns`` as ``None`` and round-trips."""
+        from orcapod.pipeline.serialization import resolve_operator_from_config
+
+        op = DropNulls()
+        config = op.to_config()
+        assert config["config"] == {"columns": None}
+        for restored in (
+            DropNulls.from_config(config),
+            resolve_operator_from_config(config),
+        ):
+            assert isinstance(restored, DropNulls)
+            assert restored.columns is None
+            assert restored.content_hash() == op.content_hash()
+            assert restored.pipeline_hash() == op.pipeline_hash()
+        assert op.content_hash() != DropNulls(["x", "y"]).content_hash()

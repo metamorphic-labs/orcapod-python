@@ -313,7 +313,7 @@ src/orcapod/
 │       ├── column_selection.py # Select/Drop Tag/Data columns
 │       ├── mappers.py          # MapTags, MapData (rename columns)
 │       ├── filters.py          # PolarsFilter
-│       └── drop_nulls.py       # DropNulls (drop rows with a null in named columns, T | None → T)
+│       └── drop_nulls.py       # DropNulls (drop rows with a null in named or all columns, T | None → T)
 ├── hashing/
 │   └── semantic_hashing/       # BaseSemanticHasher, type handlers
 ├── semantic_types/             # Type conversion (Python ↔ Arrow)
@@ -575,6 +575,12 @@ data. The rules:
   names. Both paths apply one rule, `DropNulls._narrow_table`: an Arrow validity mask and
   the same arrays re-wrapped under the new field flags, with no Polars round-trip and no cast
   other than large normalization. A named column that is already non-nullable is a no-op.
+- `DropNulls()` with no argument (`columns=None`) means every user tag and data column of
+  the input (developer, November 12, 2026). The names are resolved from each input
+  (`DropNulls._target_columns`: `stream.keys()`, or the row's tag and data keys on the
+  async path) and never stored, so its identity is the fixed `("DropNulls", None)`,
+  different from any list of names. System-tag, source-info, context and meta columns are
+  never included. An explicitly empty collection is not "no argument": it raises `ValueError`.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
   stream came from `Batch` — group before batching, not after). Members are sorted by non-key
