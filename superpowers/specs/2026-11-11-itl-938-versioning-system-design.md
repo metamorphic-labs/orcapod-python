@@ -1064,10 +1064,11 @@ The rule:
 | 1 | A label names the algorithm that produced that digest and nothing else. "Algorithm" is everything that amounts to the hashing: the canonical form, any preparation, the encoding and the digest function, not only the final digest function | **decided** |
 | 2 | Format `<algorithm>_v<N>`, integer `N`. **In v0.3 every label is `_v1`**: `semantic_v1`, `arrow_v1`, `ndarray_v1`, `polars_expr_v1`. "Let's let all version be simply v1 for this release since we used to have v0.1, v0.2." The labels of `H0` (`_v0.x`) and of `H1` (`_v1`) are therefore visibly different | **decided** |
 | 2a | **Stated exception: a file's hash keeps the label `sha256`.** "I'd like to keep it as one stated exception with sha256 as that's literally what we do to get hash of a file." The label is the name of the digest function applied to the file's bytes (the file hasher's algorithm is configurable, and the label follows it) | **decided** |
+| 2b | The directory hash is a procedure of its own ("folder hashing is implementation specific"), so it follows the format: `merkle_sha256` becomes `folder_v1` (exact word to confirm against the type name `orcapod.Directory`) | **decided** |
 | 3 | A label changes when its algorithm changes so that some existing input would get a different digest; an extension that leaves existing digests alone keeps it | proposed |
 | 4 | A hash stored as a value carries its label: `label:hex` in text, `label:` + raw bytes in a binary column | proposed |
 | 5 | A hash used inside a name (path component, column name, function or operator identity, source-info token) is bare hex | proposed |
-| 6 | A label never enters a hash computation: a nested hash contributes its digest only | proposed |
+| 6 | A label never enters a hash computation: a nested hash contributes its digest only. "Agree with rule 6 - it simplifies and also I don't think the extra guarantee was meaningful anyway." The guarantee given up: that two different algorithms can never feed the same text into a parent hash. With SHA-256 that needs two algorithms to hash the very same bytes, and the position and type of the value (the schema, the extension name in an Arrow cell) already tell the two apart | **decided** |
 | 7 | An identifier built by a recipe (record ids) is not a labelled hash; its recipe is named in the data context file | proposed |
 | 8 | A logical type's value hash follows the same format; its implementer picks the label | proposed |
 | 9 | Each label is defined once, next to its algorithm, and listed in the data context file | proposed |
