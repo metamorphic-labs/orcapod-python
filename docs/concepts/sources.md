@@ -149,6 +149,12 @@ refuses a write holding a null struct at any depth (a struct column, a struct fi
 struct, a struct inside a list) with `UnsupportedValueError` naming the table and the column,
 and writes nothing. Null lists, null list items and null struct fields are stored as written.
 
+Writes are not coordinated between writers: SpiralDB has no lock for them. If two writers make
+the first write to the same new table at once and one of them fails, the table can be left
+without a nullability record although rows were written. It then reads as a table without one
+(every column `T | None`); a null is never hidden. To repair it, check that the non-nullable
+columns hold no null and call `write_nullability_record` as below.
+
 Other writers give a table its nullability record with `write_nullability_record`, passing the
 Arrow schema the data was written with. It reads no data, so check first that no non-nullable
 column holds a null. The same call replaces a wrong nullability record.

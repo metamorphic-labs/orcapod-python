@@ -691,6 +691,13 @@ class SpiralDBConnector:
         rows without a record gets none: recording it is a deliberate act. A later write
         must declare exactly the recorded paths.
 
+        Writers are not coordinated: SpiralDB offers no lock, and its metadata writes
+        are not versioned. If concurrent first writes to the same new table race with a
+        failed one, the table can end up without a record although rows were written:
+        it then reads as unrecorded (``T | None``), never with a hidden null. Repair it with
+        ``write_nullability_record`` after checking the data holds no null in the
+        non-nullable columns.
+
         Limitation: "no value columns yet" stands for "no rows yet", which saves a scan
         on every first write. A table whose columns are all key columns, holding rows
         and no record, is recorded by the next write; if that write adds value columns
@@ -770,9 +777,12 @@ class SpiralDBConnector:
             try:
                 tbl.write(rows)
             except BaseException:
+                # Remove the record only while the table still has no value columns:
+                # once another writer's rows have landed, they rely on it.
                 if wrote_record:
                     try:
-                        remove_nullability_record(tbl)
+                        if set(tbl.schema().to_arrow().names) <= set(pk_cols):
+                            remove_nullability_record(tbl)
                     except Exception as cleanup_exc:
                         logger.warning(
                             "Could not remove the nullability record of %s after a "

@@ -2532,6 +2532,12 @@ wrote just before them (a record naming columns the table lacks would make every
 every result-store flush, raise). A record whose chunks were written but whose header was not
 is no record.
 
+Writers are not coordinated (SpiralDB has no lock; metadata writes are not versioned). The
+rollback removes the record only while the table still has no value columns, but if another
+writer's first rows land between that check and the removal, the table is left without a
+record: it reads as `T | None` (never a hidden null) and is repaired with
+`write_nullability_record` after checking the data.
+
 Known limitation: the connector treats "the table has no value columns yet" as "the table has
 no rows yet", to avoid a scan on every first write (a live Spiral scan costs seconds even for a
 few rows). A table whose columns are all key columns, already holding rows without a record,

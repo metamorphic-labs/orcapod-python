@@ -295,6 +295,24 @@ class TestNullabilityRecord:
         connector.upsert_records("results__fn", rows, id_column=id_column)
         assert read_nullability_record(table.get_metadata()) is not None
 
+    def test_rollback_keeps_a_record_another_writers_rows_rely_on(
+        self, fake, monkeypatch
+    ):
+        """A failed first write keeps the record if another writer's rows landed meanwhile."""
+        real = fake_pyspiral.FakeTable.write
+
+        def other_writer_then_fail(self, table, **kwargs):
+            real(self, _rows(k=[7, 8, 9]))  # a concurrent writer's rows land first
+            raise RuntimeError("network down")
+
+        with monkeypatch.context() as m:
+            m.setattr(fake_pyspiral.FakeTable, "write", other_writer_then_fail)
+            with pytest.raises(RuntimeError, match="network down"):
+                SpiralDBConnector("p").upsert_records("t", _rows(), id_column="k")
+        table = fake.table("default.t")
+        assert read_nullability_record(table.get_metadata()) is not None
+        assert not SpiralDBConnector("p").get_column_info("t")[1].nullable
+
     def test_half_written_record_counts_as_none(self, fake, monkeypatch):
         """Chunks written but not the header: no record, and the next write records."""
         real = fake_pyspiral.FakeTable.set_metadata

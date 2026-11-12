@@ -242,10 +242,14 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
         }
         report["record"] = record_report
         expected_nonnull = {"k", "x", "g", "l"}
+        expected_record = {("k",), ("x",), ("g",), ("g", "x"), ("l",), ("l", "[]")}
+        batch_schema = batches[0].schema
         record_report["ok"] = (
-            {c.name for c in info if not c.nullable} == expected_nonnull
-            and not batches[0].schema.field("g").type.field("x").nullable
-            and batches[0].schema.field("g").type.field("y").nullable
+            record == expected_record
+            and {c.name for c in info if not c.nullable} == expected_nonnull
+            and not batch_schema.field("g").type.field("x").nullable
+            and batch_schema.field("g").type.field("y").nullable
+            and not batch_schema.field("l").type.value_field.nullable
         )
         ok = ok and bool(report["record"]["ok"])
 
@@ -422,6 +426,26 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------- read mode
 
 
+def _field_at(schema: pa.Schema, path: tuple[str, ...]) -> pa.Field[Any] | None:
+    """Return the field at a recorded ``path`` of ``schema``, or ``None`` if it is absent."""
+    if path[0] not in schema.names:
+        return None
+    field = schema.field(path[0])
+    for segment in path[1:]:
+        t = field.type
+        if segment == "[]" and (
+            pa.types.is_list(t)
+            or pa.types.is_large_list(t)
+            or pa.types.is_fixed_size_list(t)
+        ):
+            field = t.value_field
+        elif pa.types.is_struct(t) and t.get_field_index(segment) >= 0:
+            field = t.field(segment)
+        else:
+            return None
+    return field
+
+
 def read_mode(
     project: str, dataset: str, tables: list[str], column: str, report: dict[str, Any]
 ) -> bool:
@@ -445,11 +469,16 @@ def read_mode(
         merged = {**dict(tag), **dict(data)}
         top = sorted(p[0] for p in record or () if len(p) == 1)
         optional = [c for c in top if "None" in str(merged.get(c))]
+        arrow_schema = source.as_table().schema
+        for path in sorted(p for p in record or () if len(p) > 1):
+            field = _field_at(arrow_schema, path)
+            if field is None or field.nullable:
+                optional.append(".".join(path))
         report[name] = {
             "recorded_top_level": top,
             "recorded_nested": sorted(".".join(p) for p in record or () if len(p) > 1),
             "output_schema": [str(tag), str(data)],
-            "recorded_but_optional": optional,
+            "recorded_but_optional": optional,  # top-level by Python type, nested by Arrow
             "ok": record is not None and not optional,
         }
         ok = ok and bool(report[name]["ok"])
