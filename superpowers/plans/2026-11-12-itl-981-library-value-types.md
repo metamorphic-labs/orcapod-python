@@ -13,6 +13,16 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
   another ignore list; (2) label `ndarray_v1` or `ndarray_v2`; (3) keep refusing unit-less
   datetimes and field titles; (4) metadata key order. The tests take (2) and (4) from two
   constants at the top of `tests/test_arrays/test_array_strict_hash.py`.
+- November 12, later: (a) developer decision relayed: extension names are `<library>.<type>`,
+  so the array type is `numpy.ndarray` (design note vii). The Arrow class registered under
+  the name must never raise for metadata it does not know (v0.2 stored `numpy.ndarray` with
+  empty metadata): it returns a "foreign" type keeping name and bytes; Orcapod refuses the
+  column when it is used. Approved by the coordinator. No `also_reads` for v0.2.
+  (b) Coordinator: take the 10-line alignment of `StarfixArrowHasher.hash_schema` with
+  `hash_table` (`SemanticHashingVisitor.hashed_field`) inside ITL-981, with a test, AFTER
+  sign-off; say in the PR body that no stored or golden value moves (design note viii).
+  (c) Finding posted as a comment on Linear ITL-980.
+  STILL WAITING for the developer's sign-off of the whole design: no library code, no push.
 - Nothing is pushed. The design note, this plan and the failing tests are local commits.
 
 ## Steps
@@ -37,6 +47,9 @@ Design note: `superpowers/specs/2026-11-12-itl-981-library-value-types-design.md
 6. [ ] `NumpyArrayHandler` as an `IgnoreListHandler` computing `D`;
    `SemanticHashingVisitor.visit_extension` passes the column's list
    (`handler.hash_ignoring`).
+6b. [ ] `StarfixArrowHasher.hash_schema`: apply `SemanticHashingVisitor.hashed_field` to each
+   field before hashing (same rule as `hash_table`); test that a value-hashed type's schema
+   hash does not depend on its storage type and that no golden value moves.
 7. [ ] Rewrite the ITL-888 tests that assert the struct row and layout independence
    (`tests/test_arrays/test_array_value_format.py`, `array_cases.py`
    (`assert_arrays_identical` requires C order today), `tests/test_logical_types/test_array_format.py`,
