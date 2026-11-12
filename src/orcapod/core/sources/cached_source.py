@@ -194,7 +194,7 @@ class CachedSource(RootSource):
             return self._explicit_cache_path
         return self._cache_path_prefix + (
             "source",
-            f"node:{self._source.content_hash().to_string()}",
+            f"node:{self._source.content_hash().to_hex()}",
         )
 
     # -------------------------------------------------------------------------

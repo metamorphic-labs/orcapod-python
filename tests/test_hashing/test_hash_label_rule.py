@@ -27,6 +27,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.sources import CachedSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.hashing import directory_hashers
 from orcapod.hashing.file_hashers import FileHasher
@@ -357,3 +358,66 @@ class TestStoredHashValuesCarryTheirLabel:
             assert value.startswith(b"arrow_v1:")
         for value in records.column("__node_content_hash").to_pylist():
             assert value.startswith(b"semantic_v1:")
+
+
+# ---------------------------------------------------------------------------
+# Rule 6 at a stream with no producer: its identity covers every column group but the
+# derived per-row content hash (whose values carry the Arrow label)
+# ---------------------------------------------------------------------------
+
+
+def _bare_stream(
+    *,
+    tag: str = "a",
+    data: int = 1,
+    system_tag: str = "s",
+    source_info: str = "origin",
+    meta: str = "m",
+    context_key: str | None = None,
+) -> ArrowTableStream:
+    columns: dict[str, pa.Array[Any]] = {
+        "id": pa.array([tag], pa.large_string()),
+        "x": pa.array([data], pa.int64()),
+        "__note": pa.array([meta], pa.large_string()),
+        "_tag::origin": pa.array([system_tag], pa.large_string()),
+    }
+    if context_key is not None:
+        columns["_context_key"] = pa.array([context_key], pa.large_string())
+    return ArrowTableStream(
+        pa.table(columns), tag_columns=["id"], source_info={"x": source_info}
+    )
+
+
+class TestProducerlessStreamIdentity:
+    def test_equal_streams_have_equal_content_hashes(self) -> None:
+        assert _bare_stream().content_hash() == _bare_stream().content_hash()
+
+    @pytest.mark.parametrize(
+        "changed",
+        [
+            {"tag": "b"},
+            {"data": 2},
+            {"system_tag": "t"},
+            {"source_info": "elsewhere"},
+            {"meta": "n"},
+            {"context_key": "std:v9:other"},
+        ],
+        ids=["tag", "data", "system_tag", "source_info", "meta", "context"],
+    )
+    def test_any_changed_value_changes_the_content_hash(
+        self, changed: dict[str, Any]
+    ) -> None:
+        assert _bare_stream().content_hash() != _bare_stream(**changed).content_hash()
+
+    def test_identity_does_not_cover_the_derived_content_hash_column(self) -> None:
+        stream = _bare_stream()
+        with_hashes = stream.as_table(all_info=True)
+        assert (
+            with_hashes.column("_content_hash").to_pylist()[0].startswith("arrow_v1:")
+        )
+        # The public identity_structure() is what content_hash() hashes.
+        _, identity_table, _ = stream.identity_structure()
+        assert "_content_hash" not in identity_table.column_names
+        assert set(with_hashes.column_names) - set(identity_table.column_names) == {
+            "_content_hash"
+        }

@@ -358,9 +358,10 @@ class FunctionNodeBase(StreamBase):
         if self._node_identity_path_cache is not None:
             return self._node_identity_path_cache
         pf = self._function_pod
-        path = pf.uri + (f"schema:{self.pipeline_hash().to_string()}",)
+        # Hashes inside a path are bare hex digests: a label never enters a name.
+        path = pf.uri + (f"schema:{self.pipeline_hash().to_hex()}",)
         if self._table_scope != "pipeline_hash":
-            path += (f"instance:{self.content_hash().to_string()}",)
+            path += (f"instance:{self.content_hash().to_hex()}",)
         self._node_identity_path_cache = path
         return path
 
@@ -1912,7 +1913,7 @@ class FunctionJobNode(FunctionNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         path_str = "/".join(self.node_identity_path)
-        source_id = f"{path_str}:{self.content_hash().to_string()}"
+        source_id = f"{path_str}:{self.content_hash().to_hex()}"
         return DerivedSource(
             origin=self,
             source_id=source_id,

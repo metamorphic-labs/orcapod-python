@@ -48,7 +48,7 @@ class DerivedSource(RootSource):
         **kwargs: Any,
     ) -> None:
         if source_id is None:
-            source_id = f"derived:{origin.content_hash().to_string()}"
+            source_id = f"derived:{origin.content_hash().to_hex()}"
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._cached_table: pa.Table | None = None

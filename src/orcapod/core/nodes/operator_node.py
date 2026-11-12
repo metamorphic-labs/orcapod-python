@@ -258,9 +258,10 @@ class OperatorNodeBase(StreamBase):
             return self._stored_pipeline_path
         if self._node_identity_path_cache is not None:
             return self._node_identity_path_cache
-        path = self.node_uri + (f"schema:{self.pipeline_hash().to_string()}",)
+        # Hashes inside a path are bare hex digests: a label never enters a name.
+        path = self.node_uri + (f"schema:{self.pipeline_hash().to_hex()}",)
         if self._table_scope != "pipeline_hash":
-            path += (f"instance:{self.content_hash().to_string()}",)
+            path += (f"instance:{self.content_hash().to_hex()}",)
         self._node_identity_path_cache = path
         return path
 
@@ -1226,7 +1227,7 @@ class OperatorJobNode(OperatorNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         path_str = "/".join(self.node_identity_path)
-        source_id = f"{path_str}:{self.content_hash().to_string()}"
+        source_id = f"{path_str}:{self.content_hash().to_hex()}"
         return DerivedSource(
             origin=self,
             source_id=source_id,
