@@ -78,11 +78,13 @@ Orcapod's own types follow the same contract as yours. Their metadata is the JSO
 | `orcapod.File` | `orcapod.file` | `{"version":1}` |
 | `orcapod.Directory` | `orcapod.directory` | `{"version":1}` |
 | `numpy.ndarray` | `orcapod.ndarray` | `{"version":1}` |
-| `torch.Tensor` (optional, needs PyTorch) | `orcapod.torch_tensor` | `{"version":1}` |
+| `torch.Tensor` (optional, needs PyTorch) | `orcapod.torch.tensor` | `{"ignore":[],"version":1}` |
 | `pandas.DataFrame` | `pandas.dataframe` | `{"version":1}` |
 | `pandas.Series` | `pandas.series` | `{"version":1}` |
 
 `{"version":N}` is the convention of the built-in types only. Your types may use any bytes.
+The tensor type's metadata also lists the properties its value hash ignores (none by
+default); see [Arrays and Tensors](arrays.md#what-counts-as-the-same-tensor).
 
 ### Native containers: `list[T]` and `set[T]`
 

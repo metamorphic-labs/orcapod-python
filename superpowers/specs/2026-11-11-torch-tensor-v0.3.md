@@ -1,5 +1,15 @@
 # `torch.Tensor` as a value type in v0.3 (ITL-871)
 
+> **SUPERSEDED (November 12, 2026).** The developer replaced the storage and the hash of this
+> spec: a tensor is stored with `torch.save` (read with
+> `torch.load(map_location="cpu", weights_only=True)`) under the extension name
+> `orcapod.torch.tensor`, and hashed with a strict, Orcapod-defined hash with five optional
+> properties. The current design is the module docstring of
+> `src/orcapod/logical_types/torch_type.py`, `docs/concepts/arrays.md` and
+> `docs/reference/hashing.md` section 8; the plan is
+> `superpowers/plans/2026-11-12-itl-871-native-storage-strict-hash.md`. What still holds
+> from this spec: the dtype list, the conversion warning, packaging and CI.
+
 **Date:** 2026-11-11
 **Issue:** ITL-871 (refs ITL-888 / PR #289, ITL-874, ITL-869, ITL-847 / PR #291)
 **Basis:** the v0.3 array format (`superpowers/specs/2026-11-10-array-format-v0.3.md`,

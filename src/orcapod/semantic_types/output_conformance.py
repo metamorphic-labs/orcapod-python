@@ -1,7 +1,9 @@
 """Function-output conformance (ITL-895, ITL-901).
 
 the returned value must be an instance of the declared type, or an exact numeric
-equivalent; a subclass stands in for its base and is stored as the base.
+equivalent; a subclass stands in for its base. What is stored for a subclass instance
+is decided by the logical type of the declared class (a user class stores the base's
+fields; the tensor type keeps an ``nn.Parameter``).
 
 Logical types retain ownership of their compatibility rules. The caller adds function
 and output context to a mismatch; this module never formats returned values.

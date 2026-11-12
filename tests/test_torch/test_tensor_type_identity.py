@@ -1,7 +1,7 @@
 """A tensor column keeps its logical type identity with and without values (ITL-871).
 
 The Arrow hasher replaces a value-hashed logical type by ``large_binary`` tokens.
-The identifier of ``orcapod.torch_tensor`` must stay on the hashed field, so a
+The identifier of ``orcapod.torch.tensor`` must stay on the hashed field, so a
 column with no value (zero rows, or nulls only) is still hashed as a tensor
 column: differently from an ndarray column, which shares its storage struct, and
 from plain binary (the regression fixed for the other types in ITL-967).

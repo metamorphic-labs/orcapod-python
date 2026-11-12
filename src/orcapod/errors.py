@@ -72,7 +72,7 @@ class MissingOptionalDependencyError(ImportError):
     """A stored value needs an optional dependency that is not installed.
 
     Raised when a column's Arrow extension type belongs to a value type that is
-    registered lazily (for example ``orcapod.torch_tensor``, which needs PyTorch)
+    registered lazily (for example ``orcapod.torch.tensor``, which needs PyTorch)
     and its library cannot be imported. The message names the extension type and
     the missing module.
     """
