@@ -127,6 +127,22 @@ read its tables as results, and computes every input again into its own tables.
     writes anything. The error names the tables. Other function, operator and source nodes
     of the same job are not refused. Use a fresh store for the node, or keep using v0.2
     for it.
+  - **Old tables are found by name, not by hash.** v0.3 computes other hashes than v0.2,
+    so a v0.2 table is at a path v0.3 does not compute. Each function and side-effect node
+    lists the tables stored under its job and function or pod name
+    (`<job>/<function>/`, `<job>/_result/<function>/`,
+    `<job>/side_effect_function/<function>/`, `<job>/side_effects/<pod>/`) and treats
+    every table that is not at a current layout as written by an earlier version. Function
+    nodes report them in one warning per node (no number of rows: the tables are not
+    read); side-effecting nodes raise the error above. A job run adds one total of the old
+    tables that none of its nodes reports: operator caches, cached sources stored under
+    the job, and nodes that left the job. Because tables are found by name, an old table
+    of another function or pod with the same name in the same job, or of another node of
+    the same function, counts too; the warning and the error name the tables. (ITL-954)
+  - A store that cannot list its tables (a Delta store on `gs://` or `az://` without the
+    matching `fsspec` package, a third-party database without `list_table_paths`) is not
+    searched by name. A side-effecting node then logs one warning that it could not check
+    for completions logged before v0.3, and runs. (ITL-954)
   - `orcapod.contexts.stored_data_contexts(store, record_path)` counts the rows of a table
     by data context, for example `{"std:v1:default": 3}`; a table without the column reports
     its rows under `std:v0.1:default`.
@@ -248,6 +264,19 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   `record_path` (the first), `found_context`, `current_context` and `node_label`. (ITL-944)
 - **`orcapod.contexts.stored_data_contexts(database, record_path)`** — counts the rows of a
   stored table by the data context that wrote them. (ITL-944)
+- **`list_table_paths(prefix=())` on every database** — a new method of
+  `ArrowDatabaseProtocol`: the sorted paths of the tables stored under a path prefix,
+  nested tables included, without opening a table. `InMemoryArrowDatabase` and
+  `DeltaTableDatabase` on a local directory list exactly; `DeltaTableDatabase` on `s3://`
+  lists through `s3fs` (one list request per directory), on `gs://` and `az://` only when
+  the matching `fsspec` package is installed; `ConnectorArrowDatabase` (SQLite,
+  PostgreSQL, SpiralDB) lists by table name, so path components come back as the backend
+  spells them (`:` and `.` as `_`); `NoOpArrowDatabase` lists nothing. A database of your
+  own that implements `ArrowDatabaseProtocol` needs this method to keep satisfying the
+  protocol; without it Orcapod still runs and treats the store as one that cannot list
+  its tables. (ITL-954)
+- **`orcapod.errors.TableListingNotSupportedError`** — a `NotImplementedError` raised by
+  `list_table_paths` when a store cannot enumerate its tables. (ITL-954)
 
 ### Fixed
 

@@ -11,11 +11,11 @@ from __future__ import annotations
 import importlib.util
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
 
-from orcapod.contexts import resolve_context
 from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
@@ -26,6 +26,7 @@ from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.errors import TableListingNotSupportedError
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
 Store = InMemoryArrowDatabase | DeltaTableDatabase | ConnectorArrowDatabase
 
@@ -159,13 +160,15 @@ class TestDeltaOnCloudStorage:
     """The cloud walk, on a local directory that stands in for the bucket."""
 
     @pytest.fixture
-    def bucket(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    def bucket(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> list[dict[str, Any]]:
         """Serve ``tmp_path`` as the file system of ``s3://``; return the calls made."""
         import fsspec
         from fsspec.implementations.dirfs import DirFileSystem
         from fsspec.implementations.local import LocalFileSystem
 
-        calls: list[dict] = []
+        calls: list[dict[str, Any]] = []
 
         def filesystem(protocol: str, **options: object) -> DirFileSystem:
             calls.append({"protocol": protocol, **options})
@@ -175,7 +178,7 @@ class TestDeltaOnCloudStorage:
         _fill(DeltaTableDatabase(tmp_path / "bucket" / "root"))
         return calls
 
-    def test_tables_and_nested_tables_are_listed(self, bucket: list[dict]):
+    def test_tables_and_nested_tables_are_listed(self, bucket: list[dict[str, Any]]):
         store = DeltaTableDatabase("s3://bucket/root")
         assert store.list_table_paths(("job", "double")) == [
             ("job", "double", "h1"),
@@ -187,7 +190,9 @@ class TestDeltaOnCloudStorage:
         ]
         assert store.list_table_paths(("absent",)) == []
 
-    def test_s3fs_gets_the_credentials_of_the_storage_options(self, bucket: list[dict]):
+    def test_s3fs_gets_the_credentials_of_the_storage_options(
+        self, bucket: list[dict[str, Any]]
+    ):
         store = DeltaTableDatabase(
             "s3a://bucket/root",
             storage_options={
@@ -219,7 +224,7 @@ class TestDeltaOnCloudStorage:
         import fsspec
 
         class Unreachable:
-            def ls(self, path: str, detail: bool = True) -> list[dict]:
+            def ls(self, path: str, detail: bool = True) -> list[dict[str, Any]]:
                 raise PermissionError("access denied")
 
         monkeypatch.setattr(fsspec, "filesystem", lambda *a, **k: Unreachable())
@@ -261,7 +266,7 @@ class TestWrappers:
     def test_extension_aware_database_delegates(self):
         inner = InMemoryArrowDatabase()
         _fill(inner)
-        wrapper = ExtensionAwareDatabase(inner, resolve_context().type_converter)
+        wrapper = ExtensionAwareDatabase(inner, UniversalTypeConverter())
         assert wrapper.list_table_paths(("job", "double")) == inner.list_table_paths(
             ("job", "double")
         )

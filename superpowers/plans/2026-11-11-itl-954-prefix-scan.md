@@ -84,18 +84,32 @@ ITL-954 STEP 1 plan (no library code written yet). Reply "approved" or correctio
 ## Tasks
 
 - [x] 0. Fixture: pods module, generator, archive generated with v0.2.0 from the tag.
-- [ ] 1. Tests (a) for `list_table_paths`; run, see them fail (no such method).
-- [ ] 2. Implement the method on the five database classes and the protocol; tests pass.
-- [ ] 3. Tests (b) to (e) on the fixture; run on this branch, record which fail and why
+- [x] 1. Tests (a) for `list_table_paths`; run, see them fail (no such method).
+- [x] 2. Implement the method on the five database classes and the protocol; tests pass.
+- [x] 3. Tests (b) to (e) on the fixture; run on this branch, record which fail and why
       (on this branch the hashes did not move, so the sibling check already finds the
       fixture's tables; the renamed-hash copy must fail before the fix).
-- [ ] 4. `contexts/stored.py`: layout rule, scan, reporting; wire the nodes, the result
+- [x] 4. `contexts/stored.py`: layout rule, scan, reporting; wire the nodes, the result
       cache, the cached source and `PipelineJob.run()`. Tests pass.
-- [ ] 5. Docs, CHANGELOG, CLAUDE.md and `.zed/rules`, DESIGN_ISSUES DC2.
+- [x] 5. Docs, CHANGELOG, CLAUDE.md and `.zed/rules`, DESIGN_ISSUES DC2.
 - [ ] 6. ruff, basedpyright (exit code), full suite on one Python version at a time,
       golden hashes unchanged.
 - [ ] 7. Merge `origin/main` if it moved, push, PR against `main`, CodeRabbit rounds.
 
 ## Notes for a successor
 
-(kept current while working)
+- Tasks 0 to 5 are done and pushed. The fixture is regenerated with
+  `tests/test_arrays/data/make_v02_full_store.py` (command in its docstring).
+- Differences from the STEP 1 plan:
+  - The unlistable warning names the path under which tables would have been looked for,
+    not the node label (the reporting function gets no label; the path holds the pod name).
+    One warning per node covers its pipeline and result prefixes.
+  - A listing that fails on cloud storage counts as "cannot list" (warn and proceed), not
+    as `StoreReadError`: the `fsspec` credentials can differ from deltalake's, and the
+    developer decided that an unlistable store only warns. A failed local directory listing
+    raises `StoreReadError`.
+  - On an unlistable store the job-level total logs at INFO, not WARNING.
+- Measured cost (local Delta-shaped store, 4000 tables, 18000 directories, suite running in
+  parallel): one node's scan 0.25 ms; the job-level listing 0.3 s per run. S3: one LIST
+  request per directory, about 4.5 per table under the listed prefix.
+- No Docker on the worker machine: the MinIO test did not run locally.

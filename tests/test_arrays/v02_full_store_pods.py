@@ -85,7 +85,8 @@ def build_job(
             notify.pod(ones, label="notify")
         SelectDataColumns(["m"])(ones, label="select")
         if with_sink:
-            sink_pod(deliver).process(ones, label="sink")
+            sink: Any = sink_pod(deliver)
+            sink.process(ones, label="sink")
     job.nodes["select"].attach_databases(
         pipeline_database=store.at(JOB_NAME),
         cache_mode=CacheMode.LOG if cache_mode is None else cache_mode,

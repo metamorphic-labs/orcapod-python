@@ -444,7 +444,7 @@ def _list_table_paths(
         raise TableListingNotSupportedError(
             f"{type(database).__name__} has no list_table_paths method"
         )
-    return list_table_paths(prefix)
+    return cast("list[tuple[str, ...]]", list_table_paths(prefix))
 
 
 def find_stale_tables(
