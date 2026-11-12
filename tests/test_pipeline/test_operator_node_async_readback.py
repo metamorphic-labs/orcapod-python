@@ -491,7 +491,7 @@ def test_operator_node_with_no_rows_reads_back_empty_after_async_run(
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "ITL-858/ITL-865: no row reaches the async node, so it reads back the table "
+        "ITL-858/ITL-912: no row reaches the async node, so it reads back the table "
         "built from the Python output schema: int8 becomes int64, and the system-tag "
         "and source-info columns are missing"
     ),

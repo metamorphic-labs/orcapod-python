@@ -311,7 +311,9 @@ class StaticOutputOperatorPod(TraceableBase):
         """Default barrier-mode async execution.
 
         Collects all inputs, runs ``static_process``, emits results.
-        Subclasses override for streaming or incremental strategies.
+        Subclasses override for streaming or incremental strategies. When an
+        input has no rows, nothing is emitted (ITL-865): an operator whose
+        result is not empty then must override this method.
 
         Args:
             inputs: Readable channels, one per upstream node.
@@ -330,6 +332,11 @@ class StaticOutputOperatorPod(TraceableBase):
                 len(inputs), input_pipeline_hashes
             )
             all_rows = await asyncio.gather(*(ch.collect() for ch in inputs))
+            if not all(all_rows):
+                # Every barrier operator that exists gives no rows when an input has
+                # none. The typed empty stream the sync path returns needs a schema
+                # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
+                return
             streams = [
                 self._materialize_to_stream(rows, pipeline_hash)
                 for rows, pipeline_hash in zip(all_rows, hashes)

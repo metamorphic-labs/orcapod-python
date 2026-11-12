@@ -119,6 +119,8 @@ class UnaryOperator(StaticOutputOperatorPod):
     ) -> None:
         """Barrier-mode: collect single input, run unary_static_process, emit.
 
+        An input with no rows emits no rows (ITL-865).
+
         Args:
             inputs: The one readable input channel.
             output: Writable channel for downstream consumption.
@@ -134,6 +136,11 @@ class UnaryOperator(StaticOutputOperatorPod):
                 len(inputs), input_pipeline_hashes
             )
             rows = await inputs[0].collect()
+            if not rows:
+                # No rows in, no rows out: an operator never synthesizes a row.
+                # The typed empty stream the sync path returns needs a schema the
+                # channel does not carry (ITL-858), so nothing is emitted (ITL-865).
+                return
             stream = self._materialize_to_stream(rows, pipeline_hash)
             result = self.static_process(stream)
             for tag, data in result.iter_data():
@@ -217,6 +224,8 @@ class BinaryOperator(StaticOutputOperatorPod):
     ) -> None:
         """Barrier-mode: collect both inputs concurrently, run binary_static_process, emit.
 
+        An input with no rows emits no rows, as an inner join does (ITL-865).
+
         Args:
             inputs: The left and right readable input channels.
             output: Writable channel for downstream consumption.
@@ -234,6 +243,12 @@ class BinaryOperator(StaticOutputOperatorPod):
             left_rows, right_rows = await asyncio.gather(
                 inputs[0].collect(), inputs[1].collect()
             )
+            if not left_rows or not right_rows:
+                # The one barrier binary operator, MergeJoin, is an inner join: an
+                # input with no rows gives no rows, as on the sync path. The typed
+                # empty stream needs a schema the channels do not carry (ITL-858),
+                # so nothing is emitted (ITL-865).
+                return
             left_stream = self._materialize_to_stream(left_rows, left_hash)
             right_stream = self._materialize_to_stream(right_rows, right_hash)
             result = self.static_process(left_stream, right_stream)
