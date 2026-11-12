@@ -21,6 +21,7 @@ from orcapod.errors import (
     InputValidationError,
     StoreReadError,
     TableListingNotSupportedError,
+    TypeIdentityError,
 )
 from orcapod.databases.storage_utils import (
     delta_to_pyarrow_dataset,
@@ -850,6 +851,9 @@ class DeltaTableDatabase:
         if snapshot.ids is None:
             try:
                 snapshot.ids = self._scan_ids(delta_table)
+            except TypeIdentityError:
+                # The table is intact; the registered class differs (ITL-881).
+                raise
             except Exception as e:
                 raise self._read_failed(record_path) from e
         return snapshot.ids
@@ -867,6 +871,9 @@ class DeltaTableDatabase:
         if snapshot.rows is None:
             try:
                 table, files, schema = self._scan_rows(delta_table)
+            except TypeIdentityError:
+                # The table is intact; the registered class differs (ITL-881).
+                raise
             except Exception as e:
                 raise self._read_failed(record_path) from e
             snapshot.rows = KeyIndex(table)
@@ -1100,6 +1107,10 @@ class DeltaTableDatabase:
             # Get Delta table schema and convert from arro3 to pyarrow
             arro3_schema = delta_table.schema().to_arrow()
             delta_schema = pa.schema(arro3_schema)  # type: ignore
+        except TypeIdentityError:
+            # Stored and registered user-class shapes disagree: never report
+            # this as missing data (ITL-881).
+            raise
         except Exception as e:
             logger.warning(f"Could not get Delta table schema: {e}")
             return table
@@ -1303,6 +1314,10 @@ class DeltaTableDatabase:
                 delta_table_data = delta_to_pyarrow_dataset(
                     delta_table, as_large_types=True
                 ).to_table()
+            except TypeIdentityError:
+                # Stored and registered user-class shapes disagree: the table is
+                # intact, so report the identity mismatch itself (ITL-881).
+                raise
             except Exception as e:
                 raise self._read_failed(record_path) from e
             if delta_table_data.num_rows > 0:

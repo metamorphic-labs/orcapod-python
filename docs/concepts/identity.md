@@ -171,6 +171,24 @@ print(step.pod(source).pipeline_hash() == original)
 When you change what a function computes, bump its major version (or rename it) so that
 stale results are not reused.
 
+## Your own classes in the identity
+
+A dataclass or pydantic model enters both chains through its **identity**: its name, its
+kind (dataclass or pydantic) and the names and types of its fields, in declared order. The
+identity is part of every schema hash, so it reaches the pipeline hash of each source,
+pod and node that uses the class, and with it the database table paths. Each stored value
+is hashed together with it, so it also reaches the content hash.
+
+Two consequences:
+
+- Two classes with the same name, kind and fields share results, wherever each is
+  defined. A class re-defined in a notebook cell with unchanged fields keeps its cache.
+- A class whose fields change or are reordered is a new type: its pods get new pipeline hashes and new
+  tables, and the results stored with the old definition stay where they are.
+
+How a class gets its name, and how to keep results when moving a class from a notebook
+into a module, is described in [Your Own Data Types](your-own-data-types.md).
+
 ## How it connects to other concepts
 
 - [Sources](sources.md) form the base case of the Merkle chain (schema-only for pipeline hash,
@@ -179,3 +197,5 @@ stale results are not reused.
 - [Operators](operators.md) contribute their own identity to the chain
 - [Function Pods](function-pods.md) run inside a `PipelineJob` use content hashes for
   memoization and pipeline hashes for DB scoping
+- [Your Own Data Types](your-own-data-types.md) explains the identity of dataclasses and
+  pydantic models
