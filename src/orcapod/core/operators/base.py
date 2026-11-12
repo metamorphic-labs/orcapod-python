@@ -117,10 +117,24 @@ class UnaryOperator(StaticOutputOperatorPod):
         *,
         input_pipeline_hashes: Sequence[ContentHash] | None = None,
     ) -> None:
-        """Barrier-mode: collect single input, run unary_static_process, emit."""
+        """Barrier-mode: collect single input, run unary_static_process, emit.
+
+        Args:
+            inputs: The one readable input channel.
+            output: Writable channel for downstream consumption.
+            input_pipeline_hashes: The input stream's pipeline hash, as a
+                one-element sequence. The rebuilt input reports it, so
+                system-tag names equal the sync path's (ITL-906).
+
+        Raises:
+            ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
+        """
         try:
+            (pipeline_hash,) = self._pair_input_pipeline_hashes(
+                len(inputs), input_pipeline_hashes
+            )
             rows = await inputs[0].collect()
-            stream = self._materialize_to_stream(rows)
+            stream = self._materialize_to_stream(rows, pipeline_hash)
             result = self.static_process(stream)
             for tag, data in result.iter_data():
                 await output.send((tag, data))
@@ -201,13 +215,27 @@ class BinaryOperator(StaticOutputOperatorPod):
         *,
         input_pipeline_hashes: Sequence[ContentHash] | None = None,
     ) -> None:
-        """Barrier-mode: collect both inputs concurrently, run binary_static_process, emit."""
+        """Barrier-mode: collect both inputs concurrently, run binary_static_process, emit.
+
+        Args:
+            inputs: The left and right readable input channels.
+            output: Writable channel for downstream consumption.
+            input_pipeline_hashes: The left and right input streams' pipeline
+                hashes. Each rebuilt input reports its own, so system-tag names
+                and canonical input order equal the sync path's (ITL-906).
+
+        Raises:
+            ValueError: If ``input_pipeline_hashes`` does not have one hash per input.
+        """
         try:
+            left_hash, right_hash = self._pair_input_pipeline_hashes(
+                len(inputs), input_pipeline_hashes
+            )
             left_rows, right_rows = await asyncio.gather(
                 inputs[0].collect(), inputs[1].collect()
             )
-            left_stream = self._materialize_to_stream(left_rows)
-            right_stream = self._materialize_to_stream(right_rows)
+            left_stream = self._materialize_to_stream(left_rows, left_hash)
+            right_stream = self._materialize_to_stream(right_rows, right_hash)
             result = self.static_process(left_stream, right_stream)
             for tag, data in result.iter_data():
                 await output.send((tag, data))

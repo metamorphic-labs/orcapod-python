@@ -461,7 +461,7 @@ AFTER_OPERATOR_CASES = [
     ),
     Case(
         "group_by_after_function_pod",
-        lambda a, b, c: GroupBy(by=["grp"])(double_x.pod(a), label="op"),
+        lambda a, b, c: GroupBy(by=["grp"])(double_x.pod(c), label="op"),
         2,
     ),
 ]

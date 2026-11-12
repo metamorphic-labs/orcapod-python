@@ -432,7 +432,9 @@ FUNCTION_POD_CASES = [
     ),
     Case("join", Join, lambda: (function_pod_stream("p", 0), source_b())),
     Case("semijoin", SemiJoin, lambda: (function_pod_stream("p", 0), source_b())),
-    Case("batch_2", lambda: Batch(batch_size=2), lambda: (function_pod_stream("p", 0),)),
+    Case(
+        "batch_2", lambda: Batch(batch_size=2), lambda: (function_pod_stream("p", 0),)
+    ),
     Case("batch_all", Batch, lambda: (function_pod_stream("p", 0),)),
     Case("group_by", lambda: GroupBy(["k"]), lambda: (function_pod_stream("p", 0),)),
     Case(
@@ -476,6 +478,37 @@ def test_reducing_operator_names_system_tags_after_its_input(
             names = list(tag.system_tags())
             assert names
             assert all(name.endswith(f"::{suffix}") for name in names), names
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        c
+        for c in CASES
+        if c.label
+        in ("merge_join", "batch_2", "batch_all", "group_by", "polars_filter")
+    ],
+    ids=lambda c: c.label,
+)
+def test_barrier_async_rejects_wrong_number_of_pipeline_hashes(case: Case) -> None:
+    """A barrier ``async_execute`` needs one input pipeline hash per input channel."""
+    sources = case.make_sources()
+
+    async def run() -> None:
+        channels: list[Channel[Row]] = [Channel(buffer_size=64) for _ in sources]
+        for stream, channel in zip(sources, channels):
+            for row in stream.iter_data():
+                await channel.writer.send(row)
+            await channel.writer.close()
+        output: Channel[Row] = Channel(buffer_size=64)
+        await case.make_op().async_execute(
+            [channel.reader for channel in channels],
+            output.writer,
+            input_pipeline_hashes=[s.pipeline_hash() for s in sources] * 2,
+        )
+
+    with pytest.raises(ValueError, match="must match inputs length"):
+        asyncio.run(run())
 
 
 def test_drop_nulls_without_tag_columns() -> None:
@@ -666,8 +699,7 @@ def _meta_case(case: Case) -> Case:
 # Join-style fix. Strict, so a fix flags them.
 _MATERIALIZE_DROPS_META = (
     "ITL-846: barrier-mode async_execute rebuilds its input with "
-    "_materialize_to_stream, which drops Data meta columns; the rebuilt stream's "
-    "pipeline hash then differs, so system-tag names and canonical order differ too"
+    "_materialize_to_stream, which drops Data meta columns"
 )
 _SYNC_DROPS_META = (
     "ITL-846: the sync path drops Data meta columns that the async path keeps (a raw "
