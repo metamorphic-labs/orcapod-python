@@ -8,6 +8,7 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.head import StreamHead
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
     require_same_data_context,
@@ -404,6 +405,28 @@ class CachedSource(RootSource):
         self._ensure_stream()
         assert self._cached_stream is not None
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first rows without reading or writing the cache.
+
+        Once the source has been used, its merged stream is in memory and this is a slice
+        of it. Before that, the rows are the wrapped source's head: the cache table is
+        read and written only on first use (``iter_data``, ``as_table``).
+        """
+        if self._cached_stream is not None and not self.is_stale:
+            return self._cached_stream.head(
+                n, columns=columns, all_info=all_info
+            ).for_stream(self)
+        return self._source.head(n, columns=columns, all_info=all_info).for_stream(
+            self,
+            note="rows of the wrapped source; the cache is read and written on first use",
+        )
 
     def get_all_records(
         self,

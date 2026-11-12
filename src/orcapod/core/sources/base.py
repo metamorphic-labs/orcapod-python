@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import StreamBase
+from orcapod.core.streams.head import StreamHead
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
@@ -185,6 +186,21 @@ class RootSource(StreamBase):
     ) -> "pa.Table":
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first ``n`` rows of the table the source holds, without computing.
+
+        A source that reads its table when it is built holds it in memory, so this is a
+        slice of it. A source that reads its table later overrides this with a bounded
+        read. See ``StreamBase.head``.
+        """
+        return self._stream.head(n, columns=columns, all_info=all_info).for_stream(self)
 
     # -------------------------------------------------------------------------
     # Convenience — caching

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
 
+    from orcapod.core.streams.head import StreamHead
     from orcapod.protocols.core_protocols.pod import PodProtocol
 
 
@@ -154,6 +155,25 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         Returns:
             pa.Table: Complete stream data as a PyArrow Table
+        """
+        ...
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "StreamHead":
+        """Return at most ``n`` readily available rows, without computing.
+
+        The rows are ones the stream already holds, has cached from an earlier
+        computation, has stored, or can read with a bounded read. It never calls a
+        function, runs an operator, delivers a side effect, polls or writes.
+
+        Returns:
+            StreamHead: The rows, and a status that tells an empty result from one
+            that is not computed.
         """
         ...
 

@@ -20,6 +20,12 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.streams.head import (
+    HeadStatus,
+    StreamHead,
+    check_head_size,
+    head_column_config,
+)
 from orcapod.errors import (
     CursorInvalidatedError,
     InputValidationError,
@@ -435,6 +441,39 @@ class PollingSource(RootSource, Generic[T]):
             return self._batches[0].keys(columns=columns, all_info=all_info)
         self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first rows already polled; never polls.
+
+        Before the first poll there are no rows. The columns are the declared schema's,
+        or none when the source declared no schema (finding it would mean polling).
+        """
+        check_head_size(n)
+        config = head_column_config(columns, all_info)
+        if self._batches:
+            return self._get_combined_stream().head(n, columns=config).for_stream(self)
+        if self._tag_schema is not None and self._data_schema is not None:
+            table = arrow_utils.make_empty_table(
+                {**self._tag_schema, **self._data_schema},
+                self.data_context.type_converter,
+            )
+            tag_columns = tuple(self._tag_schema.keys())
+        else:
+            table = pa.table({})
+            tag_columns = ()
+        return StreamHead.without_rows(
+            self,
+            HeadStatus.NOT_COMPUTED,
+            table,
+            tag_columns=tag_columns,
+            note="nothing polled yet; iterating it or a job run polls it",
+        )
 
     def iter_data(self):
         """Iterate over (tag, data) pairs from the current snapshot."""

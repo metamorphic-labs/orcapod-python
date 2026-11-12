@@ -7,6 +7,12 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.head import (
+    HeadStatus,
+    StreamHead,
+    check_head_size,
+    head_column_config,
+)
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
@@ -421,6 +427,45 @@ class DerivedSource(RootSource):
                 self._cached_table = records
         tag_keys = self._origin.keys()[0]
         return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
+
+    def head(
+        self,
+        n: int = 10,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> StreamHead:
+        """Return the first rows of the origin's records, without computing.
+
+        The records are the ones this source already read, or else the origin's
+        records read now (a job node's stored rows) and not kept. An origin job node
+        that has not run gives no rows.
+        """
+        check_head_size(n)
+        config = head_column_config(columns, all_info)
+        if self._tags_as_data is not None:
+            if self._cached_stream is not None:
+                stream, has_rows = self._cached_stream, True
+            else:
+                stream, has_rows = self._build_derived_stream(self._tags_as_data)
+        else:
+            table = self._cached_table
+            if table is None:
+                table = self._origin_records()
+            has_rows = table is not None and table.num_rows > 0
+            if table is None:
+                table = self._empty_origin_table()
+            stream = ArrowTableStream(table, tag_columns=self._origin.keys()[0])
+        origin = "held" if isinstance(self._origin, RootSource) else "stored"
+        if not has_rows and origin == "stored":
+            return StreamHead.without_rows(
+                self,
+                HeadStatus.NOTHING_STORED,
+                stream.as_table(columns=config),
+                tag_columns=stream.keys(columns=config)[0],
+                note="nothing stored: its origin has not run",
+            )
+        return stream.head(n, columns=config).for_stream(self, origin=origin)
 
     def iter_data(self):
         return self._get_stream().iter_data()

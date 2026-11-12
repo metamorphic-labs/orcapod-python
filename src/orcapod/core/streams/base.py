@@ -7,6 +7,13 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.base import TraceableBase
+from orcapod.core.streams.head import (
+    HeadStatus,
+    StreamHead,
+    check_head_size,
+    head_column_config,
+    render_error_html,
+)
 from orcapod.protocols.core_protocols import (
     DataProtocol,
     PodProtocol,
@@ -14,6 +21,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
 )
 from orcapod.types import ColumnConfig, Schema
+from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -440,41 +448,63 @@ class StreamBase(TraceableBase):
         """
         return [e for e in self.iter_data()]
 
-    def _repr_html_(self) -> str:
-        df = self.as_polars_df()
-        # reorder columns
-        new_column_order = [c for c in df.columns if c in self.keys()[0]] + [
-            c for c in df.columns if c not in self.keys()[0]
-        ]
-        df = df[new_column_order]
-        tag_map = {t: f"*{t}" for t in self.keys()[0]}
-        # TODO: construct repr html better
-        df = df.rename(tag_map)
-        return f"{self.__class__.__name__}[{self.label}]\n" + df._repr_html_()
-
-    def view(
+    def head(
         self,
+        n: int = 10,
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> "StreamView":
-        df = self.as_polars_df(
-            columns=columns,
-            all_info=all_info,
+    ) -> StreamHead:
+        """Return at most ``n`` rows that are readily available, without computing.
+
+        The rows are ones the stream already holds, has cached from an earlier
+        computation, has stored, or can read with a bounded read of its table. ``head``
+        never calls a function, runs an operator, delivers a side effect, polls a source
+        or writes anything. When rows are shown, they are the first ``n`` rows that
+        ``as_table()`` would return. The notebook preview of a stream is its ``head()``.
+
+        This default shows no rows: a stream class that can serve rows without computing
+        overrides it. The zero-row table then has the stream's columns, typed from its
+        declared (Python) schema, so a column's Arrow width can differ from the one the
+        computed stream will have (``int`` shows as ``int64``).
+
+        Args:
+            n: The largest number of rows to return.
+            columns: Column groups to include, as for ``as_table``. ``sort_by_tags`` is
+                not accepted: the rows come in stream order.
+            all_info: Include every column group, as for ``as_table`` (without sorting).
+
+        Returns:
+            A ``StreamHead`` with the rows and a ``status`` that tells an empty result
+            from one that is not computed.
+
+        Raises:
+            TypeError: If ``n`` is not an ``int``.
+            ValueError: If ``n`` is negative or ``columns`` asks for ``sort_by_tags``.
+        """
+        check_head_size(n)
+        config = head_column_config(columns, all_info)
+        return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+
+    def _head_without_rows(
+        self,
+        config: ColumnConfig,
+        status: HeadStatus,
+        note: str | None = None,
+    ) -> StreamHead:
+        """Return a head with no rows: the stream's columns from its declared schema."""
+        tag_schema, data_schema = self.output_schema(columns=config)
+        table = arrow_utils.make_empty_table(
+            {**tag_schema, **data_schema}, self.data_context.type_converter
         )
-        tag_map = {t: f"*{t}" for t in self.keys()[0]}
-        # TODO: construct repr html better
-        df = df.rename(tag_map)
-        return StreamView(self, df)
-
-
-class StreamView:
-    def __init__(self, stream: StreamBase, view_df: "pl.DataFrame") -> None:
-        self._stream = stream
-        self._view_df = view_df
+        return StreamHead.without_rows(
+            self, status, table, tag_columns=tuple(tag_schema.keys()), note=note
+        )
 
     def _repr_html_(self) -> str:
-        return (
-            f"{self._stream.__class__.__name__}[{self._stream.label}]\n"
-            + self._view_df._repr_html_()
-        )
+        """Render ``head()`` for a notebook; never computes."""
+        try:
+            head = self.head()
+        except Exception as error:  # noqa: BLE001 - a display hook must not raise
+            return render_error_html(self, error)
+        return head._repr_html_()
