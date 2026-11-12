@@ -110,4 +110,16 @@ switch, pinned by a test, developer being asked.
   (v0.3-only store with 2 rows, run with 7 inputs, same-job `get_all_records()` gives 2; a
   newly built job gives 7). `tests/test_arrays/test_array_v02_store.py` reads through a newly
   built job for that reason.
-- Remaining: full suite on 3.11 / 3.13 / 3.12 (running), PR body, `worker_done`.
+- Developer decisions relayed by the coordinator (2026-11-11), implemented in `bcd905b9`,
+  superseding the two notes above:
+  - Side effects = B: a side-effect node whose invocation log holds deliveries logged under
+    another Arrow label raises `orcapod.errors.SideEffectLogHashLabelError` before delivering
+    anything (`SideEffectJobNode._refuse_log_of_another_label`). The developer wants a separate
+    later discussion of side-effect logs.
+  - Report = yes, totals only: `report_skipped_rows(record_path, skipped)` logs one WARNING
+    per reader object and table (not per process: stored paths are relative to the store).
+  - Old results looking absent before a v0.3 run is accepted.
+  - A global hash-version identifier per row is being designed, not decided: not implemented.
+- Verification: full suite 7755 passed / 96 skipped / 18 xfailed / 0 failed on each of 3.11,
+  3.12, 3.13; ruff clean; basedpyright exit 0; golden files unchanged. PR #309 body and title
+  updated; PR stays a draft.
