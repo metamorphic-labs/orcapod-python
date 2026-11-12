@@ -19,7 +19,7 @@ import pytest
 
 from orcapod import FunctionPod, PipelineJob, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
-from orcapod.core.data_function import DataFunctionWrapper, PythonDataFunction
+from orcapod.core.data_function import DataFunctionWrapper
 from orcapod.core.function_pod import WrappedFunctionPod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -27,8 +27,11 @@ from orcapod.invocation import InvocationContext
 from orcapod.operators import Join, SelectDataColumns
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
-from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.side_effects import side_effect_pod
+from orcapod.protocols.core_protocols import (
+    PythonFunctionExecutorProtocol,
+    StreamProtocol,
+)
+from orcapod.side_effects import SideEffectPod
 from orcapod.sources import DictSource
 
 _POD_LOGGER = "orcapod.core.function_pod"
@@ -51,6 +54,19 @@ def add(x: int, y: int) -> int:
 @function_pod(output_keys="total")
 def add_default(x: int, y: int = 10) -> int:
     """Add two integers; ``y`` has a default.
+
+    Args:
+        x: First addend.
+        y: Second addend.
+
+    Returns:
+        The sum.
+    """
+    return x + y
+
+
+def _plain_add(x: int, y: int) -> int:
+    """Add two integers.
 
     Args:
         x: First addend.
@@ -446,7 +462,8 @@ def test_function_with_invocation_context_drops_unused_columns() -> None:
 def test_cached_function_pod_drops_unused_columns() -> None:
     """A pod-cached function pod has the same convenient and strict calls."""
     cached = CachedFunctionPod(
-        function_pod=add.pod, result_database=InMemoryArrowDatabase()
+        function_pod=FunctionPod.from_fn(_plain_add, output_keys="total"),
+        result_database=InMemoryArrowDatabase(),
     )
 
     automatic = cached(_wide())
@@ -486,7 +503,7 @@ def test_decorator_cached_pod_drops_unused_columns() -> None:
 
 def test_wrapped_function_pod_drops_unused_columns() -> None:
     """A wrapper around a function pod has the same convenient and strict calls."""
-    wrapped = WrappedFunctionPod(add.pod)
+    wrapped = WrappedFunctionPod(FunctionPod.from_fn(_plain_add, output_keys="total"))
 
     automatic = wrapped(_wide())
     by_hand = wrapped.process(SelectDataColumns(columns=["x", "y"])(_wide()))
@@ -504,7 +521,7 @@ def test_function_taking_arbitrary_keywords_gets_no_select() -> None:
     data function reporting ``True`` is applied exactly as ``process`` applies it.
     """
 
-    class TakesAnything(DataFunctionWrapper):
+    class TakesAnything(DataFunctionWrapper[PythonFunctionExecutorProtocol]):
         """A data function that reports it accepts arbitrary keywords."""
 
         @property
@@ -512,21 +529,8 @@ def test_function_taking_arbitrary_keywords_gets_no_select() -> None:
             """Report that any keyword is accepted."""
             return True
 
-    def plain_add(x: int, y: int) -> int:
-        """Add two integers.
-
-        Args:
-            x: First addend.
-            y: Second addend.
-
-        Returns:
-            The sum.
-        """
-        return x + y
-
-    pod = FunctionPod(
-        data_function=TakesAnything(PythonDataFunction(plain_add, output_keys="total"))
-    )
+    exact_pod = FunctionPod.from_fn(_plain_add, output_keys="total")
+    pod = FunctionPod(data_function=TakesAnything(exact_pod.data_function))
 
     assert add.pod.data_function.accepts_arbitrary_keywords is False
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
@@ -536,7 +540,6 @@ def test_function_taking_arbitrary_keywords_gets_no_select() -> None:
 def test_other_pods_take_no_strict_argument() -> None:
     """Operators and side-effect pods keep ``__call__`` as an alias of ``process``."""
 
-    @side_effect_pod
     def record(x: int, y: int, extra: int, ctx: InvocationContext) -> None:
         """Do nothing with a row.
 
@@ -547,11 +550,13 @@ def test_other_pods_take_no_strict_argument() -> None:
             ctx: The invocation context.
         """
 
+    pod = SideEffectPod(record)
+
     with pytest.raises(TypeError):
-        record(_wide(), strict=False)  # pyright: ignore[reportCallIssue]
+        pod(_wide(), strict=False)  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
         Join()(_xs(), _ys(), strict=False)
-    assert tuple(record(_wide()).keys()[1]) == ("x", "y", "extra")
+    assert tuple(pod(_wide()).keys()[1]) == ("x", "y", "extra")
 
 
 # ---------------------------------------------------------------------------
