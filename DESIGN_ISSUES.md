@@ -2527,3 +2527,17 @@ back as `g = {x: null, y: null}` with the struct valid (value and hash change). 
 null list items and null struct fields survive. The connector now refuses a null struct at any depth
 with `UnsupportedValueError` before writing, and never passes `push_down_nulls`.
 
+If the rows of a table's first write fail, the connector removes the nullability record it
+wrote just before them (a record naming columns the table lacks would make every read, and
+every result-store flush, raise). A record whose chunks were written but whose header was not
+is no record.
+
+Known limitation: the connector treats "the table has no value columns yet" as "the table has
+no rows yet", to avoid a scan on every first write (a live Spiral scan costs seconds even for a
+few rows). A table whose columns are all key columns, already holding rows without a record,
+is recorded by the next write; if that write adds value columns declared non-nullable, the
+earlier rows hold nulls there and every read raises `NullInNonNullableColumnError` (a null is
+never hidden). Follow-up idea, unverified: a manifest-only row count
+(`spiral.core.manifest_stats(snapshot).key_space_stats.total_rows`, see the ITL-186 design)
+could replace the shortcut cheaply once confirmed live.
+

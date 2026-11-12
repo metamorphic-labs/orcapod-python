@@ -18,7 +18,8 @@ may be left behind). Checks:
 2. ``record``: ``SpiralDBConnector.upsert_records`` writes the record; SpiralDB's own schema
    is all nullable; ``get_column_info`` and ``iter_batches`` restore the written nullability
    at every depth; ``SpiralDBTableSource`` gives ``T``; a pod ``x: float`` runs; a ``Join`` of
-   two recorded tables runs; a saved job loads in a fresh process with equal hashes.
+   two recorded tables runs; the saved job loads in a fresh process, with every row and
+   equal source hashes.
 3. ``refusals``: a null in a non-null struct field and a write declaring other nullability are
    refused, and the table is unchanged.
 4. ``hidden_values``: what SpiralDB stores for values under a null parent and for nullable
@@ -61,16 +62,30 @@ _REPO = Path(__file__).resolve().parents[3]
 
 
 def _schema_text(schema: pa.Schema) -> str:
+    """Return ``schema`` as text, without its metadata."""
     return schema.to_string(show_schema_metadata=False)
 
 
-def _fresh_hashes(project: str, dataset: str, table: str) -> list[str]:
-    """Return a source's content and pipeline hash computed in a new process."""
+def _fresh_load(
+    project: str, dataset: str, table: str, job_path: Path, store: Path
+) -> dict[str, Any]:
+    """Load the saved job and build ``table``'s source in a new process.
+
+    Returns:
+        The loaded ``double`` node's row count, the loaded job's unbound sources, and the
+        source's content and pipeline hash, all computed in the new process.
+    """
     script = (
         "import json\n"
+        "from orcapod import PipelineJob\n"
+        "from orcapod.databases import DeltaTableDatabase\n"
         "from orcapod.sources import SpiralDBTableSource\n"
+        f"job = PipelineJob.load({str(job_path)!r}, store=DeltaTableDatabase({str(store)!r}))\n"
+        "records = job.nodes['double'].get_all_records()\n"
         f"s = SpiralDBTableSource({project!r}, {table!r}, dataset={dataset!r})\n"
-        "print(json.dumps([s.content_hash().to_string(), s.pipeline_hash().to_string()]))\n"
+        "print(json.dumps({'rows': None if records is None else records.num_rows,\n"
+        "    'unbound': [str(u) for u in job.unbound_sources],\n"
+        "    'hashes': [s.content_hash().to_string(), s.pipeline_hash().to_string()]}))\n"
     )
     out = subprocess.run(
         [sys.executable, "-c", script],
@@ -120,31 +135,24 @@ def _workshop_path(
     rerun.run()
     path = store.parent / "job.json"
     rerun.save(path)
-    loaded = PipelineJob.load(path, store=DeltaTableDatabase(store))
-    records = loaded.nodes["double"].get_all_records()
     second_source = SpiralDBTableSource(project, second, dataset=dataset)
-    fresh = _fresh_hashes(project, dataset, second)
+    hashes = [
+        second_source.content_hash().to_string(),
+        second_source.pipeline_hash().to_string(),
+    ]
+    fresh = _fresh_load(project, dataset, second, path, store)
     return {
         "joined_tag_schema": str(job.nodes["joined"].output_schema()[0]),
         "first_run_calls": first_calls,
         "second_run_calls": len(calls),
-        "loaded_rows": None if records is None else records.num_rows,
-        "unbound_after_load": list(loaded.unbound_sources),
-        "fresh_process_hashes_equal": fresh
-        == [
-            second_source.content_hash().to_string(),
-            second_source.pipeline_hash().to_string(),
-        ],
+        "fresh_process_loaded_rows": fresh["rows"],
+        "fresh_process_unbound": fresh["unbound"],
+        "fresh_process_hashes_equal": fresh["hashes"] == hashes,
         "ok": first_calls > 0
         and not calls
-        and records is not None
-        and records.num_rows == first_calls
-        and not loaded.unbound_sources
-        and fresh
-        == [
-            second_source.content_hash().to_string(),
-            second_source.pipeline_hash().to_string(),
-        ],
+        and fresh["rows"] == first_calls
+        and not fresh["unbound"]
+        and fresh["hashes"] == hashes,
     }
 
 
@@ -164,6 +172,7 @@ _SCHEMA = pa.schema(
 
 
 def _rows(keys: list[int], schema: pa.Schema = _SCHEMA, **override: Any) -> pa.Table:
+    """Return rows of ``schema`` keyed by ``keys`` (``override`` replaces whole columns)."""
     n = len(keys)
     columns: dict[str, Any] = {
         "k": keys,
@@ -177,6 +186,11 @@ def _rows(keys: list[int], schema: pa.Schema = _SCHEMA, **override: Any) -> pa.T
 
 
 def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
+    """Run the write-mode checks in scratch tables of ``dataset``, dropping them after.
+
+    Returns:
+        Whether every check passed.
+    """
     import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     from orcapod.databases import (
@@ -386,18 +400,22 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
         report["metadata"]["ok"] = (
             report["metadata"]["two_keys_one_call"]
             and report["metadata"]["wide_record_round_trip"]
+            and "NOT" not in big
         )
         ok = ok and bool(report["metadata"]["ok"])
     except Exception:  # noqa: BLE001 - reported, then the scratch tables are dropped
         report["error"] = traceback.format_exc()
         ok = False
     finally:
+        dropped = []
         for name in created:
             try:
                 proj.drop_table(f"{dataset}.{name}")
+                dropped.append(name)
             except Exception as exc:  # noqa: BLE001 - reported
                 report.setdefault("drop_errors", []).append(f"{name}: {exc}")
-        report["dropped"] = created
+                ok = False
+        report["dropped"] = dropped
     return bool(ok)
 
 
@@ -407,6 +425,11 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
 def read_mode(
     project: str, dataset: str, tables: list[str], column: str, report: dict[str, Any]
 ) -> bool:
+    """Run the read-only checks on ``tables`` of ``dataset``.
+
+    Returns:
+        Whether every check passed.
+    """
     import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     from orcapod.databases import read_nullability_record
@@ -440,6 +463,11 @@ def read_mode(
 
 
 def main() -> int:
+    """Parse the command line, run a mode and print the JSON report.
+
+    Returns:
+        The exit status: 0 when every check passed.
+    """
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("mode", choices=["write", "read"])
     parser.add_argument("--project", required=True)
@@ -457,12 +485,14 @@ def main() -> int:
             parser.error("never write to an edi-sample-v* project")
         ok = write_mode(args.project, args.dataset or "meta", report)
     else:
+        tables = [t for t in args.tables.split(",") if t]
+        if len(tables) < 2 or not args.float_column:
+            parser.error(
+                "read mode needs --tables with at least two tables (the first two are "
+                "joined) and --float-column"
+            )
         ok = read_mode(
-            args.project,
-            args.dataset or "default",
-            [t for t in args.tables.split(",") if t],
-            args.float_column,
-            report,
+            args.project, args.dataset or "default", tables, args.float_column, report
         )
     report["ok"] = ok
     text = json.dumps(report, indent=2, default=str)

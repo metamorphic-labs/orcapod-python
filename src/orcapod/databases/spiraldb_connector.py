@@ -31,6 +31,7 @@ from orcapod.databases.spiraldb_nullability import (
     check_no_nulls,
     enforce_nullability_record,
     read_nullability_record,
+    remove_nullability_record,
     render_path,
     schema_paths,
     write_nullability_record,
@@ -686,8 +687,15 @@ class SpiralDBConnector:
         nullable, so the connector keeps the non-nullable paths of ``records.schema`` in
         the table's nullability record (``write_nullability_record``). It writes the
         record, before the rows, on the first write to a table that has no value columns
-        yet. A table that already holds rows without a record gets none: recording it is a
-        deliberate act. A later write must declare exactly the recorded paths.
+        yet, and removes it again if those rows fail to write. A table that already holds
+        rows without a record gets none: recording it is a deliberate act. A later write
+        must declare exactly the recorded paths.
+
+        Limitation: "no value columns yet" stands for "no rows yet", which saves a scan
+        on every first write. A table whose columns are all key columns, holding rows
+        and no record, is recorded by the next write; if that write adds value columns
+        declared non-nullable, the earlier rows hold nulls there and every read raises
+        ``NullInNonNullableColumnError`` (a null is never hidden).
 
         Raises:
             ValueError: If ``id_column`` is not in the table key schema (including
@@ -745,18 +753,42 @@ class SpiralDBConnector:
                     [render_path(p) for p in sorted(paths - recorded)],
                     table=qualified,
                 )
-        elif set(tbl.schema().to_arrow().names) <= set(pk_cols):
-            # A table with no value columns yet holds no rows Orcapod did not record:
-            # record first, so a failed row write never leaves unrecorded rows.
-            write_nullability_record(tbl, records.schema)
+        # A table with no value columns yet holds no rows Orcapod did not record (but see
+        # the limitation in the docstring: a table whose columns are all keys may).
+        record_first = recorded is None and set(tbl.schema().to_arrow().names) <= set(
+            pk_cols
+        )
 
         meta_kv = _serialize_arrow_metadata(records)
 
-        if not skip_existing:
-            # Always upsert-by-key: existing rows overwritten, novel rows inserted.
-            tbl.write(records)
+        def write_rows(rows: pa.Table) -> None:
+            # Record first, so rows are never stored without their record; if the rows
+            # then fail, remove the record again, since it names columns the table lacks.
+            wrote_record = record_first and write_nullability_record(
+                tbl, records.schema
+            )
+            try:
+                tbl.write(rows)
+            except BaseException:
+                if wrote_record:
+                    try:
+                        remove_nullability_record(tbl)
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Could not remove the nullability record of %s after a "
+                            "failed first write (%s: %s); reads of the table will "
+                            "raise NullabilityRecordError until a write succeeds.",
+                            qualified,
+                            type(cleanup_exc).__name__,
+                            cleanup_exc,
+                        )
+                raise
             if meta_kv is not None:
                 tbl.set_metadata(meta_kv)
+
+        if not skip_existing:
+            # Always upsert-by-key: existing rows overwritten, novel rows inserted.
+            write_rows(records)
             return
 
         # skip_existing=True: full scan → client-side key filter → write novel rows.
@@ -771,9 +803,7 @@ class SpiralDBConnector:
         )
         novel = records.filter(mask)
         if len(novel) > 0:
-            tbl.write(novel)
-            if meta_kv is not None:
-                tbl.set_metadata(meta_kv)
+            write_rows(novel)
 
     def validate_records(self, records: pa.Table) -> None:
         """No-op: ``SpiralDBConnector`` preserves Arrow field metadata via the native KV store."""

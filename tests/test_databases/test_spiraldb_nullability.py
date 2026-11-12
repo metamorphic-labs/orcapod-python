@@ -58,36 +58,44 @@ def table(tmp_path: Path):
 
 
 def _header(table: fake_pyspiral.FakeTable) -> dict[str, Any]:
+    """Return the decoded header of ``table``'s nullability record."""
     return json.loads(table.get_metadata()[_KEY])
 
 
 def _chunk_keys(table: fake_pyspiral.FakeTable) -> list[str]:
+    """Return the chunk keys of ``table``'s nullability record, sorted."""
     return sorted(k for k in table.get_metadata() if k.startswith(_KEY + "/"))
 
 
 class TestRoundTrip:
     def test_non_nullable_paths_at_every_depth(self, table):
+        """Top-level, struct-field, list-item and nested paths round-trip; maps are skipped."""
         write_nullability_record(table, _SCHEMA)
         assert read_nullability_record(table.get_metadata()) == _PATHS
 
     def test_no_record_reads_as_none(self, table):
+        """A table without a header key has no record."""
         assert read_nullability_record(table.get_metadata()) is None
 
     def test_all_nullable_schema_records_an_empty_set(self, table):
+        """A schema with no non-null field records an empty set, not no record."""
         write_nullability_record(table, pa.schema([pa.field("k", pa.int64())]))
         assert read_nullability_record(table.get_metadata()) == frozenset()
 
     def test_header_is_versioned(self, table):
+        """The header carries the format name and version 1."""
         write_nullability_record(table, _SCHEMA)
         header = _header(table)
         assert header["format"] == "orcapod.nullability"
         assert header["version"] == 1
 
     def test_unchanged_record_is_not_rewritten(self, table):
+        """Writing the same record twice writes once and returns False the second time."""
         assert write_nullability_record(table, _SCHEMA) is True
         assert write_nullability_record(table, _SCHEMA) is False
 
     def test_replacing_drops_the_old_chunks(self, table):
+        """A replacement record is read back and the earlier chunks are gone."""
         write_nullability_record(table, _SCHEMA)
         old_chunks = _chunk_keys(table)
         narrower = pa.schema([pa.field("k", pa.int64(), False)])
@@ -96,11 +104,13 @@ class TestRoundTrip:
         assert not set(old_chunks) & set(_chunk_keys(table))
 
     def test_other_metadata_is_left_alone(self, table):
+        """Writing the record keeps unrelated metadata keys."""
         table.set_metadata({"__arrow_metadata__": b"{}"})
         write_nullability_record(table, _SCHEMA)
         assert table.get_metadata()["__arrow_metadata__"] == b"{}"
 
     def test_wide_table_is_chunked_under_the_8_kib_limit(self, table):
+        """A 400-column record is split into chunks, each under SpiralDB's limits."""
         names = [f"column_with_a_long_name_{i:04d}" for i in range(400)]
         wide = pa.schema(
             [pa.field("k", pa.int64(), False)]
@@ -118,6 +128,7 @@ class TestRoundTrip:
         )
 
     def test_non_null_map_item_is_refused(self, table):
+        """A non-null map item cannot be recorded and nothing is written."""
         schema = pa.schema(
             [
                 pa.field(
@@ -139,6 +150,7 @@ class TestIntegrity:
     """A record that cannot be read in full is an error, never ignored."""
 
     def test_unknown_version(self, table):
+        """A header with an unknown version raises."""
         write_nullability_record(table, _SCHEMA)
         header = _header(table)
         header["version"] = 2
@@ -147,6 +159,7 @@ class TestIntegrity:
             read_nullability_record(table.get_metadata())
 
     def test_unknown_format(self, table):
+        """A header with an unknown format raises."""
         write_nullability_record(table, _SCHEMA)
         header = _header(table)
         header["format"] = "something.else"
@@ -155,23 +168,27 @@ class TestIntegrity:
             read_nullability_record(table.get_metadata())
 
     def test_header_not_json(self, table):
+        """A header that is not JSON raises."""
         table.set_metadata({_KEY: b"not json"})
         with pytest.raises(NullabilityRecordError):
             read_nullability_record(table.get_metadata())
 
     def test_missing_chunk(self, table):
+        """A missing chunk raises."""
         write_nullability_record(table, _SCHEMA)
         table.drop_metadata(_chunk_keys(table)[:1])
         with pytest.raises(NullabilityRecordError, match="missing"):
             read_nullability_record(table.get_metadata())
 
     def test_digest_mismatch(self, table):
+        """A chunk that does not match the header's digest raises."""
         write_nullability_record(table, _SCHEMA)
         table.set_metadata({_chunk_keys(table)[0]: b'[["v"]]'})
         with pytest.raises(NullabilityRecordError, match="digest"):
             read_nullability_record(table.get_metadata())
 
     def test_payload_not_a_list_of_paths(self, table):
+        """A payload that is not a list of string lists raises."""
         write_nullability_record(table, _SCHEMA)
         header = _header(table)
         payload = b'{"k": true}'
@@ -185,6 +202,7 @@ class TestIntegrity:
             read_nullability_record(table.get_metadata())
 
     def test_chunks_without_header_are_no_record(self, table):
+        """Chunks left without their header are no record."""
         write_nullability_record(table, _SCHEMA)
         table.drop_metadata([_KEY])
         assert read_nullability_record(table.get_metadata()) is None

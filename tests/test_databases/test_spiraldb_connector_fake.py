@@ -169,6 +169,7 @@ def _rows(schema: pa.Schema = _RECORDED, **override) -> pa.Table:
 
 
 def _with(schema: pa.Schema, name: str, nullable: bool) -> pa.Schema:
+    """Return ``schema`` with column ``name`` set to ``nullable``."""
     i = schema.get_field_index(name)
     return schema.set(i, schema.field(name).with_nullable(nullable))
 
@@ -185,6 +186,7 @@ class TestNullabilityRecord:
             yield project
 
     def _batches_schema(self, connector: SpiralDBConnector) -> pa.Schema:
+        """Return the one schema every batch of table ``t`` has."""
         batches = list(connector.iter_batches('SELECT * FROM "t"'))
         assert batches
         schemas = {b.schema for b in batches}
@@ -192,12 +194,14 @@ class TestNullabilityRecord:
         return schemas.pop()
 
     def test_spiral_itself_reports_every_column_nullable(self, fake):
+        """The fake, like SpiralDB, reports every column and struct field nullable."""
         SpiralDBConnector("p").upsert_records("t", _rows(), id_column="k")
         stored = fake.table("default.t").schema().to_arrow()
         assert all(f.nullable for f in stored)
         assert stored.field("g").type.field("x").nullable
 
     def test_first_write_records_and_both_read_paths_restore_it(self, fake):
+        """The first write records nullability; get_column_info and iter_batches restore it."""
         connector = SpiralDBConnector("p")
         connector.upsert_records("t", _rows(), id_column="k")
         expected = pa.schema(
@@ -215,6 +219,7 @@ class TestNullabilityRecord:
         ]
 
     def test_same_schema_writes_again(self, fake):
+        """A later write with the recorded nullability is accepted."""
         connector = SpiralDBConnector("p")
         connector.upsert_records("t", _rows(), id_column="k")
         connector.upsert_records("t", _rows(k=[4, 5, 6]), id_column="k")
@@ -225,6 +230,7 @@ class TestNullabilityRecord:
         [("v", True, "only_in_record"), ("w", False, "only_in_write")],
     )
     def test_disagreeing_write_is_refused(self, fake, name, nullable, attribute):
+        """A wider or narrower write is refused, naming the paths and table; nothing is written."""
         connector = SpiralDBConnector("p")
         connector.upsert_records("t", _rows(), id_column="k")
         other = _with(_RECORDED, name, nullable)
@@ -249,6 +255,7 @@ class TestNullabilityRecord:
     ):
         # SpiralDB stores a null in a non-null struct field as 0 (live, ITL-936), so the
         # connector checks every non-nullable path itself before anything is written.
+        """A null in a non-null column, struct field or list item is refused before any write."""
         connector = SpiralDBConnector("p")
         with pytest.raises(NullInNonNullableColumnError) as info:
             connector.upsert_records("t", _rows(**override), id_column="k")
@@ -258,20 +265,62 @@ class TestNullabilityRecord:
         assert table.schema().to_arrow().names == ["k"]  # no rows written
         assert read_nullability_record(table.get_metadata()) is None
 
-    def test_record_is_written_before_the_rows(self, fake, monkeypatch):
+    def test_failed_first_write_leaves_no_record(self, fake, monkeypatch):
+        """A first write whose rows fail removes the record it wrote, so a retry works."""
+        records: list[object] = []
+
         def failing_write(self, table, **kwargs):
+            # The record is written before the rows.
+            records.append(read_nullability_record(self.get_metadata()))
             raise RuntimeError("network down")
 
+        db = ConnectorArrowDatabase(SpiralDBConnector("p"))
         with monkeypatch.context() as m:
             m.setattr(fake_pyspiral.FakeTable, "write", failing_write)
+            db.add_record(_PATH, "r1", _result(1))
+            with pytest.raises(RuntimeError, match="network down"):
+                db.flush()
+        assert records and records[0] is not None
+        table = fake.table("default.results__fn")
+        assert read_nullability_record(table.get_metadata()) is None
+        assert not [k for k in table.get_metadata() if "nullability" in k]
+        connector = SpiralDBConnector("p")
+        # Without the rollback the record would name columns the table lacks, and
+        # get_column_info (which a result-store flush calls first) would raise.
+        assert [c.name for c in connector.get_column_info("results__fn")] == [
+            "__record_id"
+        ]
+        id_column = ConnectorArrowDatabase.RECORD_ID_COLUMN
+        rows = _result(1).append_column(id_column, pa.array([b"r1"], pa.large_binary()))
+        connector.upsert_records("results__fn", rows, id_column=id_column)
+        assert read_nullability_record(table.get_metadata()) is not None
+
+    def test_half_written_record_counts_as_none(self, fake, monkeypatch):
+        """Chunks written but not the header: no record, and the next write records."""
+        real = fake_pyspiral.FakeTable.set_metadata
+
+        def header_fails(self, metadata):
+            if "__orcapod_nullability__" in metadata:
+                raise RuntimeError("network down")
+            real(self, metadata)
+
+        with monkeypatch.context() as m:
+            m.setattr(fake_pyspiral.FakeTable, "set_metadata", header_fails)
             with pytest.raises(RuntimeError, match="network down"):
                 SpiralDBConnector("p").upsert_records("t", _rows(), id_column="k")
         table = fake.table("default.t")
+        assert any(
+            k.startswith("__orcapod_nullability__/") for k in table.get_metadata()
+        )
+        assert read_nullability_record(table.get_metadata()) is None
+        assert table.schema().to_arrow().names == ["k"]  # no rows written
+        connector = SpiralDBConnector("p")
+        connector.upsert_records("t", _rows(), id_column="k")
         assert read_nullability_record(table.get_metadata()) is not None
-        SpiralDBConnector("p").upsert_records("t", _rows(), id_column="k")
-        assert not SpiralDBConnector("p").get_column_info("t")[0].nullable
+        assert not connector.get_column_info("t")[1].nullable
 
     def test_table_with_rows_and_no_record_gets_none(self, fake):
+        """A table holding rows without a record is written as before and gets no record."""
         fake.table("default.t").write(_rows())  # an earlier writer, no record
         connector = SpiralDBConnector("p")
         connector.upsert_records("t", _rows(k=[4, 5, 6]), id_column="k")
@@ -282,6 +331,7 @@ class TestNullabilityRecord:
         assert schema.field("g").type.field("x").nullable
 
     def test_unreadable_record_raises_naming_the_table(self, fake):
+        """A record of an unknown version raises on every read and write path, naming the table."""
         connector = SpiralDBConnector("p")
         connector.upsert_records("t", _rows(), id_column="k")
         table = fake.table("default.t")
@@ -298,6 +348,7 @@ class TestNullabilityRecord:
             assert info.value.table == _TABLE
 
     def test_recorded_column_missing_from_table_raises(self, fake):
+        """A record naming a column the table lacks raises, naming the table."""
         table = fake.table("default.t")
         table.write(_rows())
         write_nullability_record(
@@ -309,6 +360,7 @@ class TestNullabilityRecord:
 
     def test_null_in_recorded_column_raises_on_read(self, fake):
         # A wrong record (w holds nulls) never hides a null.
+        """A null in a recorded column raises on read, naming the table and column."""
         table = fake.table("default.t")
         table.write(_rows())
         write_nullability_record(table, _with(_RECORDED, "w", False))
@@ -320,6 +372,7 @@ class TestNullabilityRecord:
 
     def test_only_recorded_tables_pay_the_per_batch_check(self, fake, monkeypatch):
         # Spies on the non-public per-batch step: the test is about when it runs.
+        """The per-batch check runs once per batch of a recorded table and never otherwise."""
         calls: list[int] = []
         real = spiraldb_connector.enforce_nullability_record
 
@@ -377,10 +430,12 @@ class TestResultStoreOnSpiral:
 
     @pytest.fixture()
     def db(self, tmp_path: Path):
+        """Provide a ConnectorArrowDatabase on a fake SpiralDB project."""
         with fake_pyspiral.install(tmp_path / "spiral"):
             yield ConnectorArrowDatabase(SpiralDBConnector("p"))
 
     def test_results_read_back_with_the_written_schema(self, db):
+        """Results flushed twice read back with the schema they were written with."""
         db.add_record(_PATH, "r1", _result(1))
         db.flush()
         db.add_record(_PATH, "r2", _result(2))
@@ -396,6 +451,7 @@ class TestResultStoreOnSpiral:
         # A result table written by an Orcapod without the record (simulated by
         # skipping it on the first flush) gets none later and reads back as SpiralDB
         # reports it: every column nullable.
+        """A result table written without a record gets none and reads back all nullable."""
         with monkeypatch.context() as m:
             m.setattr(
                 spiraldb_connector, "write_nullability_record", lambda t, s: False
@@ -414,6 +470,7 @@ class TestResultStoreOnSpiral:
     ):
         # Today's behaviour on a result table without the record: SpiralDB reports the
         # struct field nullable, so the flush-time type comparison fails.
+        """Pins today's behaviour: without a record, a struct result fails its second flush."""
         with monkeypatch.context() as m:
             m.setattr(
                 spiraldb_connector, "write_nullability_record", lambda t, s: False
@@ -438,6 +495,7 @@ class TestStructLevelNulls:
 
     @pytest.fixture()
     def fake(self, tmp_path: Path):
+        """Provide the fake project ``p`` with an empty table ``default.t`` keyed on k."""
         with fake_pyspiral.install(tmp_path / "spiral"):
             project = fake_pyspiral.FakeSpiral().project("p")
             project.create_table("default.t", key_schema=[("k", pa.int64())])
@@ -459,6 +517,7 @@ class TestStructLevelNulls:
         ],
     )
     def test_null_struct_is_refused_before_writing(self, fake, column, values, path):
+        """A null struct at the top level, nested or in a list is refused; nothing is written."""
         rows = pa.table({"k": pa.array([1, 2], pa.int64()), column: values})
         with pytest.raises(UnsupportedValueError) as info:
             SpiralDBConnector("p").upsert_records("t", rows, id_column="k")
@@ -470,6 +529,7 @@ class TestStructLevelNulls:
         assert read_nullability_record(table.get_metadata()) is None
 
     def test_struct_with_null_fields_is_written(self, fake):
+        """Null struct fields and null lists are written and read back unchanged."""
         rows = pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
@@ -485,6 +545,7 @@ class TestStructLevelNulls:
 
     def test_push_down_nulls_turns_a_null_struct_into_null_fields(self, fake):
         # What any writer passing push_down_nulls=True gets (live, ITL-936).
+        """The fake models push_down_nulls as seen live."""
         table = fake.table("default.t")
         table.write(
             pa.table(
@@ -499,6 +560,7 @@ class TestStructLevelNulls:
         assert stored.column("g").to_pylist() == [{"a": 1}, {"a": None}]
 
     def test_result_store_refuses_a_null_struct(self, tmp_path: Path):
+        """A result-store flush of a null struct raises UnsupportedValueError."""
         with fake_pyspiral.install(tmp_path / "spiral"):
             db = ConnectorArrowDatabase(SpiralDBConnector("p"))
             db.add_record(

@@ -55,11 +55,17 @@ ColumnPath = tuple[str, ...]
 class MetadataTable(Protocol):
     """The metadata methods of a pyspiral ``Table`` that the record uses."""
 
-    def get_metadata(self) -> dict[str, bytes]: ...
+    def get_metadata(self) -> dict[str, bytes]:
+        """Return the table's key-value metadata."""
+        ...
 
-    def set_metadata(self, metadata: dict[str, bytes]) -> None: ...
+    def set_metadata(self, metadata: dict[str, bytes]) -> None:
+        """Upsert entries into the table's key-value metadata."""
+        ...
 
-    def drop_metadata(self, keys: list[str]) -> None: ...
+    def drop_metadata(self, keys: list[str]) -> None:
+        """Remove keys from the table's key-value metadata."""
+        ...
 
 
 def render_path(path: ColumnPath) -> str:
@@ -99,6 +105,16 @@ def _has_non_nullable(field: pa.Field[Any]) -> bool:
 
 
 def _collect(field: pa.Field[Any], path: ColumnPath, out: set[ColumnPath]) -> None:
+    """Add the non-nullable paths at and below ``field`` to ``out``.
+
+    Args:
+        field: The field to walk.
+        path: The field's path.
+        out: The set collecting non-nullable paths.
+
+    Raises:
+        NullabilityRecordError: If a map holds a non-nullable field.
+    """
     if not field.nullable:
         out.add(path)
     t = _storage(field.type)
@@ -152,6 +168,15 @@ def _encode(paths: Iterable[ColumnPath]) -> tuple[dict[str, bytes], bytes]:
 
 
 def _chunk_key(digest: str, index: int) -> str:
+    """Return the metadata key of chunk ``index`` of the payload with SHA-256 ``digest``.
+
+    Args:
+        digest: The payload's SHA-256, as hex.
+        index: The chunk's position, from 0.
+
+    Returns:
+        ``__orcapod_nullability__/<first 16 hex digits>/<index>``.
+    """
     return f"{RECORD_KEY}/{digest[:16]}/{index}"
 
 
@@ -258,6 +283,23 @@ def write_nullability_record(table: MetadataTable, schema: pa.Schema) -> bool:
     return True
 
 
+def remove_nullability_record(table: MetadataTable) -> None:
+    """Remove ``table``'s nullability record: the header first, then every chunk.
+
+    Used by the connector to undo a record whose rows failed to write. Chunks left
+    behind by a failure after the header is gone are no record.
+
+    Args:
+        table: A pyspiral ``Table`` (anything with the ``MetadataTable`` methods).
+    """
+    metadata = table.get_metadata()
+    if RECORD_KEY in metadata:
+        table.drop_metadata([RECORD_KEY])
+    chunks = [k for k in metadata if k.startswith(RECORD_KEY + "/")]
+    if chunks:
+        table.drop_metadata(chunks)
+
+
 # ------------------------------------------------------------------- apply / enforce
 
 
@@ -320,6 +362,7 @@ def apply_nullability_record(
 
 
 def _descend(arrays: list[Any], segment: str) -> list[Any]:
+    """Return the arrays one path segment below ``arrays`` (a struct field or list items)."""
     arrays = [a.storage if isinstance(a, pa.ExtensionArray) else a for a in arrays]
     if segment == ITEM:
         return [a.flatten() for a in arrays]

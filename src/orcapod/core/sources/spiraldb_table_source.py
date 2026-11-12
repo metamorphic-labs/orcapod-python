@@ -41,6 +41,12 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
+from orcapod.errors import (
+    NullabilityRecordError,
+    NullabilityRecordMismatchError,
+    NullInNonNullableColumnError,
+    UnsupportedValueError,
+)
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
@@ -140,6 +146,14 @@ class SpiralDBTableSource(DBTableSource):
                     data_context=data_context,
                     config=config,
                 )
+            except (
+                NullabilityRecordError,
+                NullabilityRecordMismatchError,
+                NullInNonNullableColumnError,
+                UnsupportedValueError,
+            ):
+                # The connector's own errors already name the table: keep their types.
+                raise
             except ValueError as exc:
                 # DBTableSource knows only the table name; say where it looked.
                 raise ValueError(

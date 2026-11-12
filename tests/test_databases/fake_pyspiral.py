@@ -215,6 +215,7 @@ class _Store:
     """Directory-backed table store shared by every fake object."""
 
     def __init__(self, root: Path) -> None:
+        """Open the store under ``root`` and load its storage behaviour."""
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         bfile = self.root / _BEHAVIOUR_FILE
@@ -226,18 +227,22 @@ class _Store:
 
     def _path(self, project_id: str, identifier: str, suffix: str) -> Path:
         # identifiers contain a dot (``dataset.table``), so never use ``with_suffix``
+        """Return the file holding ``identifier``'s part named by ``suffix``."""
         return self.root / project_id / f"{identifier}{suffix}"
 
     def exists(self, project_id: str, identifier: str) -> bool:
+        """Return whether table ``identifier`` exists in ``project_id``."""
         return self._path(project_id, identifier, ".keys.json").exists()
 
     def identifiers(self, project_id: str) -> list[str]:
+        """Return every table identifier of ``project_id``, sorted."""
         pdir = self.root / project_id
         if not pdir.exists():
             return []
         return sorted(p.name[: -len(".keys.json")] for p in pdir.glob("*.keys.json"))
 
     def create(self, project_id: str, identifier: str, key_schema: pa.Schema) -> None:
+        """Create table ``identifier`` with ``key_schema`` and empty metadata."""
         (self.root / project_id).mkdir(parents=True, exist_ok=True)
         sink = pa.BufferOutputStream()
         pa.ipc.new_stream(sink, key_schema).close()
@@ -250,16 +255,19 @@ class _Store:
         self._path(project_id, identifier, ".kv.json").write_text("{}")
 
     def drop(self, project_id: str, identifier: str) -> None:
+        """Remove every file of table ``identifier``."""
         for suffix in (".keys.json", ".keys.arrow", ".kv.json", ".data.arrow"):
             p = self._path(project_id, identifier, suffix)
             if p.exists():
                 p.unlink()
 
     def key_schema(self, project_id: str, identifier: str) -> pa.Schema:
+        """Return table ``identifier``'s key schema."""
         raw = self._path(project_id, identifier, ".keys.arrow").read_bytes()
         return pa.ipc.open_stream(raw).schema
 
     def read(self, project_id: str, identifier: str) -> pa.Table | None:
+        """Return table ``identifier``'s rows, or ``None`` before the first write."""
         p = self._path(project_id, identifier, ".data.arrow")
         if not p.exists():
             return None
@@ -267,15 +275,18 @@ class _Store:
             return r.read_all()
 
     def write(self, project_id: str, identifier: str, table: pa.Table) -> None:
+        """Replace table ``identifier``'s rows with ``table``."""
         p = self._path(project_id, identifier, ".data.arrow")
         with pa.ipc.new_file(str(p), table.schema) as w:
             w.write_table(table)
 
     def kv(self, project_id: str, identifier: str) -> dict[str, bytes]:
+        """Return table ``identifier``'s key-value metadata."""
         raw = json.loads(self._path(project_id, identifier, ".kv.json").read_text())
         return {k: bytes.fromhex(v) for k, v in raw.items()}
 
     def set_kv(self, project_id: str, identifier: str, kv: dict[str, bytes]) -> None:
+        """Upsert ``kv`` into table ``identifier``'s key-value metadata."""
         current = self.kv(project_id, identifier)
         current.update(kv)
         self._path(project_id, identifier, ".kv.json").write_text(
@@ -283,6 +294,7 @@ class _Store:
         )
 
     def drop_kv(self, project_id: str, identifier: str, keys: list[str]) -> None:
+        """Remove ``keys`` from table ``identifier``'s key-value metadata."""
         current = self.kv(project_id, identifier)
         for key in keys:
             current.pop(key, None)
@@ -496,6 +508,7 @@ def _upsert(existing: pa.Table, incoming: pa.Table, key_names: list[str]) -> pa.
 def _cast_storage(
     col: pa.ChunkedArray[Any], target: pa.DataType
 ) -> pa.ChunkedArray[Any]:
+    """Cast ``col`` to the stored type ``target``, keeping the UTC instant of a timestamp."""
     if col.type == target:
         return col
     if pa.types.is_timestamp(col.type) and pa.types.is_timestamp(target):

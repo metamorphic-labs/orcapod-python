@@ -19,7 +19,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, NullabilityRecordError
 from orcapod.operators import Join, SelectDataColumns
 from orcapod.databases import SpiralDBConnector
 from orcapod.sources import SpiralDBTableSource
@@ -312,6 +312,29 @@ class TestSourceId:
         )
 
 
+class TestNullabilityErrors:
+    """The source keeps the nullability error types (ITL-936)."""
+
+    def test_unreadable_record_raises_its_own_type(self, tmp_path: Path):
+        """A broken nullability record surfaces as NullabilityRecordError, naming the table."""
+        with fake_pyspiral.install(tmp_path / "spiral"):
+            project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+            keys = pa.schema([pa.field("subject_id", pa.string(), False)])
+            project.create_table("default.subject", key_schema=keys)
+            SpiralDBConnector(_PROJECT).upsert_records(
+                "subject",
+                pa.table({"subject_id": ["m1"]}, schema=keys),
+                id_column="subject_id",
+            )
+            table = project.table("default.subject")
+            header = json.loads(table.get_metadata()["__orcapod_nullability__"])
+            header["version"] = 99
+            table.set_metadata({"__orcapod_nullability__": json.dumps(header).encode()})
+            with pytest.raises(NullabilityRecordError) as info:
+                SpiralDBTableSource(_PROJECT, "subject")
+            assert info.value.table == f"{_PROJECT}/default/subject"
+
+
 class TestNonNullableColumns:
     """A column written non-null arrives as ``T``, not ``T | None`` (ITL-926 C1, ITL-936).
 
@@ -387,11 +410,13 @@ class TestNonNullableColumns:
             yield root
 
     def test_schema_keeps_declared_nullability(self, strict_root):
+        """A recorded table's non-null columns arrive as T."""
         tag, data = SpiralDBTableSource(_PROJECT, "session").output_schema()
         assert dict(tag) == {"subject_id": str, "session_start_datetime": dt.datetime}
         assert dict(data) == {"total_trials": int, "weight": float, "booth": str | None}
 
     def test_unrecorded_table_is_all_optional(self, strict_root):
+        """The same rows without a record arrive as T | None."""
         tag, data = SpiralDBTableSource(_PROJECT, "session_unrecorded").output_schema()
         assert dict(tag) == {
             "subject_id": str | None,
@@ -404,6 +429,7 @@ class TestNonNullableColumns:
         }
 
     def test_arrow_fields_keep_nullability_at_every_depth(self, strict_root):
+        """Struct fields and list items keep their recorded nullability."""
         schema = SpiralDBTableSource(_PROJECT, "unit").as_table().schema
         assert not schema.field("subject_id").nullable
         assert not schema.field("spikes").nullable
@@ -415,6 +441,8 @@ class TestNonNullableColumns:
         assert quality.type.field("note").nullable
 
     def test_plain_float_pod_is_refused_on_an_unrecorded_table(self, strict_root):
+        """A pod taking x: float refuses an unrecorded column."""
+
         @function_pod(output_keys="half")
         def halve(weight: float) -> float:
             return weight / 2
@@ -425,6 +453,7 @@ class TestNonNullableColumns:
 
     def test_join_of_recorded_and_unrecorded_keys_is_refused(self, strict_root):
         # Type strictness: a key that is T on one side and T | None on the other.
+        """A T key joined with a T | None key is refused."""
         with pytest.raises(InputValidationError, match="str \\| None"):
             Join()(
                 SpiralDBTableSource(_PROJECT, "unit"),
@@ -434,6 +463,8 @@ class TestNonNullableColumns:
     def test_plain_typed_pod_runs_through_join_and_save_load(
         self, strict_root, tmp_path
     ):
+        """Plain-typed pods run over recorded tables through Join, a store and save/load."""
+
         @function_pod(output_keys="score")
         def score(total_trials: int, weight: float) -> float:
             return total_trials * weight
