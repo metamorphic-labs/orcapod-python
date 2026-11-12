@@ -152,4 +152,8 @@ def test_python_type_of_a_readable_older_identifier_is_the_current_class() -> No
 
 ## Notes for a successor
 
-(progress notes are appended here)
+- 2026-11-12: Tasks 1-8 implemented and pushed (head 988a8361). PR #326 opened against main.
+  Full suite on 3.12: 8913 passed, 101 skipped, 18 xfailed. Golden regeneration: empty diff.
+  Item 1 also names the column in `arrow_schema_to_python_schema` (caller wraps with
+  `for_column`). Item 4 clears both endpoint variables in the `bucket` fixture.
+  Remaining: CI green, CodeRabbit round(s), `worker_done` with the reviewed sha.
