@@ -62,9 +62,9 @@ EDI-shaped table (`session`, `experiment`, keys `subject_id`, `session_start_dat
 
 ### Task 6: Report and PR
 
-- [x] `ask` the coordinator with the summary; wait for the reply.
+- [ ] `ask` the coordinator with the summary; wait for the reply.
 - [x] Append the DESIGN_ISSUES.md entry for ITL-939 at the end.
-- [x] Merge origin/main, push, open docs-only PR ("Part of ITL-939"), attach to Linear,
+- [ ] Merge origin/main, push, open docs-only PR ("Part of ITL-939"), attach to Linear,
       `orca worktree set --pr`. CodeRabbit rounds. `worker_done`.
 
 ## Progress notes
