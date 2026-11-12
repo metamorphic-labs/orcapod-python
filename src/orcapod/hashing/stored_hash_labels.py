@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -49,7 +50,7 @@ _HEX_DIGEST_PATTERN = "^[0-9a-f]{70}$"
 # The Arrow hash label that used each starfix hash format. Labels move more often than
 # formats (any change to a table hash moves the label), so this maps only the formats
 # whose label is known.
-_LABEL_OF_FORMAT = {"000001": "arrow_v0.1", "000002": "arrow_v1"}
+_LABEL_OF_FORMAT = {"000001": "arrow_v0.1", "000002": ARROW_HASH_LABEL}
 
 # Columns holding an Arrow-derived key, in the order they are looked for: the base entry
 # id of function-node pipeline tables, the input data hash of function result tables and

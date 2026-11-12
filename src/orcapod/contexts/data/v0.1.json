@@ -129,7 +129,6 @@
     "semantic_hasher": {
         "_class": "orcapod.hashing.semantic_hashing.semantic_hasher.SemanticAwarePythonHasher",
         "_config": {
-            "hasher_id": "semantic_v1",
             "type_handler_registry": {
                 "_ref": "python_type_handler_registry"
             }
@@ -138,7 +137,6 @@
     "arrow_hasher": {
         "_class": "orcapod.hashing.arrow_hashers.StarfixArrowHasher",
         "_config": {
-            "hasher_id": "arrow_v1",
             "type_converter": {"_ref": "type_converter"},
             "semantic_hasher": {"_ref": "semantic_hasher"}
         }
@@ -166,7 +164,8 @@
             "Registered SchemaHandler for orcapod.types.Schema in the context registry; moved handler dispatch before _is_structure check in hash_object so SchemaHandler takes priority over _expand_mapping for Schema objects (ITL-639)",
             "Registered PolarsExprHandler for polars.Expr: hashes an expression as ContentHash('polars_expr_v1', sha256 of the canonical JSON of an Orcapod-owned expression tree parsed strictly from Expr.meta.serialize(format='json')); expressions outside the supported subset (Python functions, multi-column selectors, aggregations, alias, when/then, non-finite float literals, pl.Series literals) raise ValueError naming the expression (ITL-828)",
             "Hard cut (v0.3): numpy.ndarray moves to the value-based array format. LogicalNumpyArray stores extension orcapod.ndarray over struct<dtype, shape, data> (Orcapod dtype tag, shape, little-endian C-order packed bytes; extension metadata {\"version\":1}) and NumpyArrayHandler hashes by value with label ndarray_v1 (array_digest_v1 over the stored row). The old extension name numpy.ndarray (.npy bytes, label sha256) is no longer registered or written; v0.2 stores holding arrays are not migrated (ITL-888)",
-            "Hard cut (v0.3): the Arrow hasher label moves from arrow_v0.1 (starfix 0.4, hash format 1, prefix 000001) to arrow_v0.2 (starfix 0.5, hash format 2, prefix 000002). Format 2 is lossless (nested list lengths, null structs, Boolean row counts, chunking-independent) and hashes fixed-size lists; every Arrow-derived hash changes. Order options stay off; pyarrow canonical extension types (arrow.uuid, arrow.fixed_shape_tensor) and hash_schema on extension columns hash with their extension identity (ITL-910)"
+            "Hard cut (v0.3): the Arrow hasher moves from starfix 0.4 (hash format 1, prefix 000001, label arrow_v0.1) to starfix 0.5 (hash format 2, prefix 000002, label arrow_v1 since ITL-945). Format 2 is lossless (nested list lengths, null structs, Boolean row counts, chunking-independent) and hashes fixed-size lists; every Arrow-derived hash changes. Order options stay off; pyarrow canonical extension types (arrow.uuid, arrow.fixed_shape_tensor) and hash_schema on extension columns hash with their extension identity (ITL-910)",
+            "Hash label rule (v0.3): every label is <algorithm>_v1 (semantic_v1, arrow_v1, directory_v1, ndarray_v1, polars_expr_v1; the file hash keeps sha256) and is defined once in code beside its algorithm, so this file names the hasher classes and no longer carries hasher_id. A label never enters a hash input: a nested hash contributes its digest only. Hashes inside names (function uri, table paths, source ids) are bare hex digests; hashes stored as values carry their label (ITL-945)"
         ]
     }
 }

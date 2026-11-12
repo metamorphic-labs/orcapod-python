@@ -79,6 +79,16 @@ logger = logging.getLogger(__name__)
 
 _CIRCULAR_REF_SENTINEL = "CircularRef"
 
+SEMANTIC_HASH_LABEL = "semantic_v1"
+"""``ContentHash.method`` of a structure hash: the single definition of the label.
+
+It names the whole procedure of this module: the expansion of a Python structure
+into a tagged JSON tree and the SHA-256 digest of its canonical JSON text. A change
+that gives an existing structure a different digest takes a new label
+(``semantic_v2``). The data context file names the hasher class and does not repeat
+the label.
+"""
+
 
 def _nested_hash(content_hash: ContentHash) -> dict[str, str]:
     """Return the form in which a hash enters the structure that contains it.
@@ -107,8 +117,9 @@ class SemanticAwarePythonHasher:
     Parameters
     ----------
     hasher_id:
-        A short string identifying this hasher version/configuration.
-        Embedded in every ContentHash produced.
+        The label (``ContentHash.method``) of every hash produced. Defaults to
+        ``SEMANTIC_HASH_LABEL``, the label of this algorithm; pass another value
+        only for a hasher that is not the data context's (a test hasher).
     type_handler_registry:
         ``HandlerRegistryProtocol`` for MRO-aware lookup of
         ``PythonTypeHandlerProtocol`` instances.
@@ -120,7 +131,7 @@ class SemanticAwarePythonHasher:
 
     def __init__(
         self,
-        hasher_id: str,
+        hasher_id: str = SEMANTIC_HASH_LABEL,
         type_handler_registry: "hp.HandlerRegistryProtocol | None" = None,
         strict: bool = True,
     ) -> None:

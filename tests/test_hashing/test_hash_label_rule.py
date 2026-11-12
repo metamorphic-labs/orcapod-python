@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections.abc import Iterator
@@ -22,6 +23,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+import orcapod
 import orcapod as op
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
@@ -421,3 +423,67 @@ class TestProducerlessStreamIdentity:
         assert set(with_hashes.column_names) - set(identity_table.column_names) == {
             "_content_hash"
         }
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: each label is defined in a single place, in code beside its algorithm
+# ---------------------------------------------------------------------------
+
+SOURCE_ROOT = Path(orcapod.__file__).parent
+LABEL_DEFINITIONS = {
+    "semantic_v1": "hashing/semantic_hashing/semantic_hasher.py",
+    "arrow_v1": "hashing/arrow_hashers.py",
+    "directory_v1": "hashing/directory_hashers.py",
+    "ndarray_v1": "hashing/semantic_hashing/builtin_handlers.py",
+    "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",
+}
+
+
+def _string_literals_equal_to(label: str) -> list[str]:
+    """Return the source files, relative to the package, that spell ``label`` in code.
+
+    Only string constants equal to the label count: docstrings and comments that
+    mention a label are prose, not definitions.
+    """
+    found: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value == label:
+                found.append(path.relative_to(SOURCE_ROOT).as_posix())
+    return found
+
+
+class TestEachLabelIsDefinedOnce:
+    @pytest.mark.parametrize("label", sorted(LABEL_DEFINITIONS))
+    def test_label_is_spelled_once_in_code(self, label: str) -> None:
+        assert _string_literals_equal_to(label) == [LABEL_DEFINITIONS[label]]
+
+    def test_no_data_context_file_spells_a_hasher_label(self) -> None:
+        offenders: list[str] = []
+        for path in sorted((SOURCE_ROOT / "contexts").rglob("*.json")):
+            text = path.read_text(encoding="utf-8")
+            if '"hasher_id"' in text:
+                offenders.append(path.relative_to(SOURCE_ROOT).as_posix())
+        assert not offenders, (
+            "A data context file names the hasher class and must not repeat its "
+            f"label: {offenders}"
+        )
+
+    def test_hashers_take_their_label_from_the_definition(self) -> None:
+        from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
+        from orcapod.hashing.semantic_hashing.semantic_hasher import (
+            SEMANTIC_HASH_LABEL,
+            SemanticAwarePythonHasher,
+        )
+        from orcapod.hashing.versioned_hashers import (
+            get_versioned_semantic_arrow_hasher,
+            get_versioned_semantic_hasher,
+        )
+
+        context = get_default_context()
+        assert context.semantic_hasher.hasher_id == SEMANTIC_HASH_LABEL
+        assert context.arrow_hasher.hasher_id == ARROW_HASH_LABEL
+        assert SemanticAwarePythonHasher().hasher_id == SEMANTIC_HASH_LABEL
+        assert get_versioned_semantic_hasher().hasher_id == SEMANTIC_HASH_LABEL
+        assert get_versioned_semantic_arrow_hasher().hasher_id == ARROW_HASH_LABEL
