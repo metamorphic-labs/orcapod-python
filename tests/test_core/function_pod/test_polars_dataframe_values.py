@@ -29,6 +29,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
+from orcapod.errors import OutputTypeError
 from orcapod.logical_types import LogicalPolarsDataFrame
 from orcapod.operators import Batch, GroupBy, Join, SemiJoin
 from orcapod.pipeline import AsyncPipelineOrchestrator
@@ -174,7 +175,7 @@ class TestReturnedValueMustBeOfTheDeclaredType:
         def wrong(n: int) -> pl.DataFrame:
             return cast(pl.DataFrame, returned)
 
-        with pytest.raises(TypeError, match="DataFrame"):
+        with pytest.raises(OutputTypeError, match="DataFrame"):
             wrong.pod(_int_source()).as_table()
 
     @pytest.mark.parametrize(
@@ -187,7 +188,7 @@ class TestReturnedValueMustBeOfTheDeclaredType:
         def wrong(n: int) -> pl.Series:
             return cast(pl.Series, returned)
 
-        with pytest.raises(TypeError, match="Series"):
+        with pytest.raises(OutputTypeError, match="Series"):
             wrong.pod(_int_source()).as_table()
 
     def test_subclass_instance_is_accepted(self) -> None:
@@ -410,33 +411,36 @@ class TestPipelineStores:
         }
         assert is_null == {"null_struct": True, "struct_of_nulls": False}
 
-    def test_saved_job_loads_with_the_frame_column(self, tmp_path: Path) -> None:
-        """A saved job loads back; its node names the logical type and reads its records."""
+    def test_saved_job_loaded_back_reads_the_frames(self, tmp_path: Path) -> None:
+        """A saved job, loaded in place of the original, reads its stored frames exactly."""
         store_path = tmp_path / "delta"
         job = PipelineJob(name="frames", store=DeltaTableDatabase(store_path))
         with job:
-            make_frame.pod(_int_source(), label="make")
+            frames = make_frame.pod(_int_source(), label="make")
+            frame_height.pod(frames, label="height")
         job.run()
         saved = tmp_path / "job.json"
         job.save(str(saved))
 
         loaded = PipelineJob.load(str(saved), store=DeltaTableDatabase(store_path))
         node = loaded.nodes["make"]
-        logical_type = LogicalPolarsDataFrame()
-        records = node.get_all_records()
-        assert records is not None
-        assert (
-            records.schema.field("df").type == logical_type.get_arrow_extension_type()
-        )
-        frames = dict(
+        _, data_schema = node.output_schema()
+        assert data_schema["df"] is pl.DataFrame
+        got = {tag["k"]: data["df"] for tag, data in node.iter_data()}
+        _assert_exact(got["a"], _frame(1))
+        _assert_exact(got["b"], _frame(3))
+        stored = dict(
             zip(
-                records.column("k").to_pylist(),
-                _stored_frames(records.column("df")),
+                node.as_table().column("k").to_pylist(),
+                _stored_frames(node.as_table().column("df")),
                 strict=True,
             )
         )
-        _assert_exact(frames["a"], _frame(1))
-        _assert_exact(frames["b"], _frame(3))
+        _assert_exact(stored["a"], _frame(1))
+        heights = {
+            tag["k"]: data["height"] for tag, data in loaded.nodes["height"].iter_data()
+        }
+        assert heights == {"a": 1, "b": 3}
 
     @pytest.mark.xfail(
         strict=True,
