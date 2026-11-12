@@ -88,6 +88,7 @@ class TestGroupByTagsStayTags:
     """
 
     def test_non_key_tags_stay_list_valued_tags(self, session_source):
+        """A tag not named in ``by`` stays a tag and holds one value per member."""
         out = GroupBy(by=["subject", "date"])(session_source)
         tag_cols, data_cols = out.keys()
         assert tag_cols == ("subject", "date", "probe")
@@ -100,11 +101,13 @@ class TestGroupByTagsStayTags:
         assert out.keys()[0] == ("subject", "date", "probe")
 
     def test_no_data_column_is_an_input_tag(self, session_source):
+        """The tag and data column names are the input's: no tag moves to data."""
         in_tags, in_data = session_source.keys()
         out = GroupBy(by=["subject"])(session_source)
         assert out.keys() == (in_tags, in_data)
 
     def test_non_key_tag_schema_is_a_list_tag(self, session_source):
+        """``output_schema()`` reports a non-key tag as a list in the tag schema."""
         out = GroupBy(by=["subject", "date"])(session_source)
         tag_schema, data_schema = out.output_schema()
         assert "probe" not in data_schema
@@ -131,6 +134,7 @@ class TestGroupByTagsStayTags:
         assert f"{constants.SOURCE_PREFIX}path" in names
 
     def test_datagrams_carry_non_key_tags_on_the_tag(self, session_source):
+        """Each row's ``Tag`` holds the non-key tags; its ``Data`` holds only data."""
         out = GroupBy(by=["subject", "date"])(session_source)
         rows = list(out.iter_data())
         assert len(rows) == 2
@@ -147,6 +151,7 @@ class TestGroupByTagsStayTags:
         assert [d.as_dict()["n"] for _, d in out.iter_data()] == [2, 2]
 
     def test_list_valued_non_key_tag_still_cannot_be_a_key(self, session_source):
+        """A list-valued tag of a grouped stream is refused as a grouping key."""
         grouped = GroupBy(by=["subject", "date"])(session_source)
         with pytest.raises(InputValidationError, match="list-valued"):
             GroupBy(by=["probe"])(grouped)
@@ -477,6 +482,14 @@ class TestGroupByAsyncIsBarrier:
 # resolve.  Module scope keeps `-> Path` resolvable, matching how real pipelines
 # declare pods.
 def _count_paths(path: list[str | None]) -> int:
+    """Return the number of members in a group's ``path`` list.
+
+    Args:
+        path: The grouped ``path`` values, one per member.
+
+    Returns:
+        The member count.
+    """
     return len(path)
 
 

@@ -186,9 +186,21 @@ class _LegacyGroupBy(GroupBy):
     """
 
     def identity_structure(self):
+        """Return the identity of ``GroupBy``, so stored tables are at the same paths."""
         return ("GroupBy", self.by)
 
     def unary_static_process(self, stream):
+        """Group as ``GroupBy`` does, then declare only the ``by`` columns as tags.
+
+        The non-key tags become data columns, the shape ``GroupBy`` produced before
+        ITL-955.
+
+        Args:
+            stream: The stream to group.
+
+        Returns:
+            The grouped stream in the legacy shape.
+        """
         grouped = super().unary_static_process(stream)
         return ArrowTableStream(
             grouped.as_table(columns={"source": True, "system_tags": True}),
@@ -197,6 +209,16 @@ class _LegacyGroupBy(GroupBy):
         )
 
     def unary_output_schema(self, stream, *, columns=None, all_info=False):
+        """Predict the legacy schema: non-key tags are moved to the data schema.
+
+        Args:
+            stream: The stream to group.
+            columns: Column groups to include, as for ``GroupBy``.
+            all_info: Whether to include every column group.
+
+        Returns:
+            The ``(tag_schema, data_schema)`` pair of the legacy shape.
+        """
         tag_schema, data_schema = super().unary_output_schema(
             stream, columns=columns, all_info=all_info
         )
@@ -220,6 +242,16 @@ class TestStoreWrittenBeforeTagsStayedTags:
 
     @staticmethod
     def _run(store, source, group_by):
+        """Run ``source -> group_by -> select path -> counting pod`` on ``store``.
+
+        Args:
+            store: The database the job writes to and reads from.
+            source: The source stream.
+            group_by: The grouping operator to use.
+
+        Returns:
+            The job after its run.
+        """
         pod = FunctionPod(
             PythonDataFunction(count_paths, output_keys="n")  # pyright: ignore[reportArgumentType]  # protocol mismatch baselined elsewhere (ITL-844)
         )
@@ -236,6 +268,7 @@ class TestStoreWrittenBeforeTagsStayedTags:
         assert out.keys() == (("subject", "date"), ("probe", "path"))
 
     def test_rerun_on_old_store_does_not_recompute(self, store, session_source_factory):
+        """A store written with the legacy shape serves the new one without recomputing."""
         before = self._run(
             store, session_source_factory(), _LegacyGroupBy(by=["subject", "date"])
         )
