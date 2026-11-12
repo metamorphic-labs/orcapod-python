@@ -1,7 +1,8 @@
 # ITL-935: logical type identifiers (Arrow extension name + extension metadata)
 
-Status: **Step 1 plan, awaiting the developer's answers (sent to the coordinator November 11, 2026).**
-No library code changed yet.
+Status: **implemented (November 11, 2026); PR open against main, stacked on #309.**
+The Step 1 plan below is kept as written. Where it differs from what was built, the section
+"Decisions and outcome" at the end governs.
 
 Branch `eywalker/itl-935-design-make-the-logical-type-version`, stacked on PR #309
 (`origin/eywalker/itl-910-adopt-starfix-05-hash-format-2-in-orcapod` at `b88f7eb3`).
@@ -193,3 +194,48 @@ empty metadata handled per the approved rule; Delta round trip; plain pipeline u
 Then implementation, one golden regeneration with a per-type table, CHANGELOG (0.3.0,
 "Breaking changes and migration"), docs ("Logical type identifiers" for implementers),
 DESIGN_ISSUES entry, CLAUDE.md + `.zed/rules` if a rule is added.
+
+## Decisions and outcome (November 11, 2026)
+
+Developer's answers, through the coordinator:
+
+| Question | Answer |
+|---|---|
+| 1. Built-in metadata `{"version":1}` | yes |
+| 2. List/set wrappers get `"version": 1` | **no** (final): the native containers `list[T]` / `set[T]` carry no version of their own; their identifier is the container kind plus the element's identifier; a change to them is a data context change |
+| 3. `readable_extension_metadata()`, byte equality, `LogicalTypeIdentifierError` | yes |
+| 4. Empty metadata read as version 1 for the seven built-ins | yes |
+| 5. Cell token without metadata | **no**: the token carries the whole identifier, `utf8("<name>;<hex metadata>") + b"::" + tail`; the name is written as is (no `.` to `:`) |
+| 6. Identifier text `<name>;<hex metadata>`, always | yes; an extension name may not contain `;` |
+| 7. No special handling of v0.3 pre-release stores | yes |
+| Wrapper identifier in the Python schema hash (found during implementation) | **no**: generics keep hashing as origin and arguments. Implemented once ("Option A"), then reverted on the developer's decision |
+| `[]` vs `[None]` collision in wrapper cells (reported by the ITL-942 worker) | fixed here: element count, then per element a null marker or a length-prefixed token |
+
+Measured path of the probe pod `shift(p: Path) -> Path`:
+
+| | function hash | schema hash |
+|---|---|---|
+| before | `e7d5af653505598a…` | `1eddb0e41260879752…` |
+| after | `5b5a49597b652bdd…` | `2d2936f8871f994f…` |
+| `plain(id2: int) -> int`, before and after | `db3fd817dc7cf10d…` | `84f155b4a2ea98ab…` |
+
+Golden values moved against the #309 base (`b88f7eb3`): 70 of 771 leaves (arrow 4, datagram 44
+plus 32 keys whose name contains a moved hash, schema 14, semantic 8, pipeline 0), every one in
+a group with a logical-type column. Outside the golden directory: 6 entries of
+`tests/test_hashing/hash_samples/schema_hash_golden.json` and 3 pinned values in
+`tests/test_hashing/test_canonical_type_names.py`.
+
+Merge points with sibling branches:
+
+- ITL-945 (labels out of hash inputs) edits the tail of the scalar cell token in
+  `hashing/visitors.py` (`content_hash.to_prefixed_digest()`); this branch edits the prefix
+  line (`type_name = arrow_type_identifier(extension_type).text`) and the container element
+  encoding (`_encode_container_elements`).
+- ITL-944 (logical-type list out of the data context file): this branch does not change
+  `contexts/data/v0.1.json`.
+
+Out-of-scope findings (not fixed): a dataclass output column of a function result table is
+stored as a plain struct without extension keys; a `DataContext` object passed to a source is
+not used by the source's inner stream (it resolves the registered context of the same key),
+so a custom context with extra logical types cannot drive a pipeline; a third-party logical
+type registered for a generic alias is not in the schema hash (origin and arguments only).
