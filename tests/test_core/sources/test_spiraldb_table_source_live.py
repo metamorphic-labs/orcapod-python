@@ -49,6 +49,7 @@ def _require_a_large_table() -> None:
 
 
 def test_building_a_source_is_quick_and_names_the_table():
+    """Building a source takes under 10 seconds and names the table and its id."""
     start = time.monotonic()
     source = SpiralDBTableSource(PROJECT, "spike_event")
     elapsed = time.monotonic() - start
@@ -61,6 +62,7 @@ def test_building_a_source_is_quick_and_names_the_table():
 
 
 def test_limit_reads_the_first_rows():
+    """``limit=1000`` reads 1,000 rows with distinct record ids."""
     _require_a_large_table()
     source = SpiralDBTableSource(PROJECT, "spike_event", limit=1000)
 
@@ -76,6 +78,7 @@ def test_limit_reads_the_first_rows():
 
 
 def test_where_reads_only_matching_rows_with_the_same_record_ids():
+    """``where`` reads only matching rows, each with its unfiltered record id."""
     first = SpiralDBTableSource(PROJECT, "spike_event", limit=1).as_table(all_info=True)
     unit_id = first.column("unit_id")[0].as_py()
     source = SpiralDBTableSource(
@@ -91,6 +94,7 @@ def test_where_reads_only_matching_rows_with_the_same_record_ids():
 
 
 def test_a_whole_table_over_the_cap_is_refused_without_reading():
+    """A table over ``max_rows`` is refused within 10 seconds, without a read."""
     _require_a_large_table()
     source = SpiralDBTableSource(PROJECT, "spike_event", max_rows=10)
 
@@ -101,14 +105,17 @@ def test_a_whole_table_over_the_cap_is_refused_without_reading():
 
 
 def test_an_async_job_over_a_limited_read(tmp_path: Path):
+    """An async job computes a 500-row read once; a rerun computes nothing."""
     calls: list[float | None] = []
 
     @function_pod(output_keys="doubled")
     def double(spike_amplitude_uv: float | None) -> float | None:
+        """Return twice ``spike_amplitude_uv``, recording the call."""
         calls.append(spike_amplitude_uv)
         return None if spike_amplitude_uv is None else 2 * spike_amplitude_uv
 
     def run() -> PipelineJob:
+        """Build the job over a 500-row read and run it asynchronously."""
         job = PipelineJob(name="live", store=DeltaTableDatabase(tmp_path / "store"))
         with job:
             double.pod(
@@ -128,6 +135,7 @@ def test_an_async_job_over_a_limited_read(tmp_path: Path):
     not WRITE, reason="Set ORCAPOD_SPIRAL_LIVE_WRITE=1 to write a scratch table"
 )
 def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
+    """After rows are appended, a rerun computes only the new rows."""
     import spiral  # pyright: ignore[reportMissingImports]  # spiraldb extra, absent in the type-check job
 
     name = f"itl186_live_{uuid.uuid4().hex[:8]}"
@@ -137,10 +145,12 @@ def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
 
     @function_pod(output_keys="w")
     def double(v: int | None) -> int | None:
+        """Return twice ``v``, recording the call."""
         calls.append(v)
         return None if v is None else 2 * v
 
     def run() -> None:
+        """Build the job over the scratch table and run it."""
         job = PipelineJob(name="append", store=DeltaTableDatabase(tmp_path / "store"))
         with job:
             double.pod(
@@ -164,6 +174,7 @@ def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
     not WRITE, reason="Set ORCAPOD_SPIRAL_LIVE_WRITE=1 to write a scratch table"
 )
 def test_a_source_reads_the_version_it_was_built_at():
+    """A source, and its row cap, use the table version current when it was built."""
     import spiral  # pyright: ignore[reportMissingImports]  # spiraldb extra, absent in the type-check job
 
     name = f"itl186_asof_{uuid.uuid4().hex[:8]}"
@@ -171,6 +182,7 @@ def test_a_source_reads_the_version_it_was_built_at():
     table = project.create_table(f"scratch.{name}", key_schema=[("k", pa.int64())])
 
     def keys(source: SpiralDBTableSource) -> list[int]:
+        """Return the ``k`` key of every row ``source`` reads."""
         return cast("list[int]", source.as_table().column("k").to_pylist())
 
     try:

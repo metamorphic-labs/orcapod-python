@@ -360,6 +360,7 @@ class FakeSchema:
     """What ``Table.schema()`` returns: a wrapper whose ``to_arrow()`` gives the schema."""
 
     def __init__(self, schema: pa.Schema) -> None:
+        """Wrap ``schema``."""
         self._schema = schema
 
     def to_arrow(self) -> pa.Schema:
@@ -371,6 +372,7 @@ class FakeExpr:
     """The result of ``Table.select()``: names the table to scan."""
 
     def __init__(self, table: FakeTable) -> None:
+        """Name ``table`` as the table to scan."""
         self.table = table
 
 
@@ -378,12 +380,15 @@ class FakePredicate:
     """A ``where`` expression: every named column equals its value."""
 
     def __init__(self, equalities: list[tuple[str, Any]]) -> None:
+        """Hold the ``(column, value)`` pairs a row must all match."""
         self.equalities = equalities
 
     def __and__(self, other: FakePredicate) -> FakePredicate:
+        """Return a predicate requiring this one's equalities and ``other``'s."""
         return FakePredicate(self.equalities + other.equalities)
 
     def __repr__(self) -> str:
+        """Return the equalities as ``name == value`` terms joined by ``&``."""
         return " & ".join(f"{name} == {value!r}" for name, value in self.equalities)
 
 
@@ -391,9 +396,11 @@ class FakeColumn:
     """What ``table[name]`` returns: compare it with ``==`` to get a predicate."""
 
     def __init__(self, name: str) -> None:
+        """Name the column ``name``."""
         self._name = name
 
     def __eq__(self, value: object) -> FakePredicate:  # pyright: ignore[reportIncompatibleMethodOverride]  # as pyspiral's Expr does
+        """Return the predicate that this column equals ``value``."""
         return FakePredicate([(self._name, value)])
 
     __hash__ = None  # pyright: ignore[reportAssignmentType]  # an expression, not a value
@@ -409,12 +416,21 @@ class FakeScan:
         where: FakePredicate | None,
         limit: int | None,
     ) -> None:
+        """Prepare a scan of ``table``; no row is read until rows are asked for.
+
+        Args:
+            table: The table to scan.
+            record: The ``scan_log`` entry that counts the batches handed out.
+            where: The equalities a row must match, or ``None`` for every row.
+            limit: The most rows to return, or ``None`` for no limit.
+        """
         self._table = table
         self._record = record
         self._where = where
         self._limit = limit
 
     def _rows(self) -> pa.Table:
+        """Return the rows matching ``where``, cut to ``limit``, in key order."""
         rows = self._table._read_all()
         for name, value in self._where.equalities if self._where else []:
             rows = rows.filter(
@@ -434,6 +450,7 @@ class FakeScan:
 
         def batches() -> Iterator[pa.RecordBatch]:
             # SpiralDB yields more than one batch for larger tables; split to exercise that.
+            """Yield ``rows`` in batches, counting each in the scan record."""
             for batch in rows.to_batches(max_chunksize=scan_batch_rows):
                 self._record.batches_read += 1
                 yield batch
@@ -454,6 +471,7 @@ class FakeTable:
     """
 
     def __init__(self, store: _Store, project_id: str, identifier: str) -> None:
+        """Open table ``identifier`` of ``project_id`` in ``store``."""
         if not store.exists(project_id, identifier):
             raise ValueError(f"Table not found: {project_id}/{identifier}")
         self._store = store
@@ -631,6 +649,7 @@ class FakeProject:
     """What ``Spiral.project(id)`` returns: list, open, create and drop tables."""
 
     def __init__(self, store: _Store, project_id: str) -> None:
+        """Bind project ``project_id`` in ``store``."""
         self._store = store
         self._project_id = project_id
 
@@ -655,6 +674,23 @@ class FakeProject:
         root_uri: Any = None,
         exist_ok: bool = False,
     ) -> FakeTable:
+        """Create the table ``"<dataset>.<table>"`` with ``key_schema`` and open it.
+
+        Key columns are stored the way SpiralDB stores them, nullable under
+        ``server_nullability`` however they were declared.
+
+        Args:
+            identifier: ``"<dataset>.<table>"``.
+            key_schema: An Arrow schema, or ``(name, type)`` pairs as pyspiral accepts.
+            root_uri: Accepted for signature compatibility; unused.
+            exist_ok: Open an existing table instead of raising.
+
+        Returns:
+            The new table, or with ``exist_ok`` the existing one.
+
+        Raises:
+            ValueError: If the table exists and ``exist_ok`` is false.
+        """
         if self._store.exists(self._project_id, identifier):
             if not exist_ok:
                 raise ValueError(f"Table already exists: {identifier}")
@@ -697,6 +733,7 @@ class FakeSpiral:
     def __init__(
         self, *, config: Any = None, overrides: dict[str, str] | None = None
     ) -> None:
+        """Open the store under ``FAKE_SPIRAL_ROOT`` and record ``overrides``."""
         root = os.environ.get(_ROOT_ENV)
         if not root:
             raise RuntimeError(f"{_ROOT_ENV} is not set; call fake_pyspiral.install()")
@@ -735,6 +772,7 @@ class FakeSpiral:
         """The client's low-level handle; only ``manifest_stats`` is modelled."""
 
         def manifest_stats(snapshot: FakeTable) -> Any:
+            """Return stats whose ``key_space_stats.total_rows`` counts rows."""
             rows = snapshot._read_all().num_rows
             return types.SimpleNamespace(
                 key_space_stats=types.SimpleNamespace(total_rows=rows)
