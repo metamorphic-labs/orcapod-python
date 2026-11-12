@@ -28,9 +28,10 @@ from typing import Any, Literal
 
 import pytest
 
-from orcapod import function_pod
+from orcapod import FunctionPod, function_pod
 from orcapod.contexts import resolve_context
 from orcapod.core.data_function import PythonDataFunction
+from orcapod.sources import DictSource
 
 
 def _value_hash(fn: Callable[..., Any]) -> str:
@@ -365,3 +366,43 @@ class TestSignatureTextWithoutDefaults:
         assert "Literal['a=b', 'c']" in text
         assert "n: int" in text
         assert "= 3" not in text and "= 'c'" not in text
+
+
+# ---------------------------------------------------------------------------
+# A function pod's identity does not use the signature hash
+# ---------------------------------------------------------------------------
+
+
+class TestPodIdentityIgnoresDefaults:
+    """Changing a default moves the signature hash and nothing a path is built from."""
+
+    @staticmethod
+    def _pod_output(factor: float) -> tuple[FunctionPod, Any]:
+        def scale(x: int, factor: float = factor) -> float:
+            return x * factor
+
+        pod = FunctionPod.from_fn(scale, output_keys="scaled")
+        source = DictSource(
+            data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}],
+            tag_columns=["k"],
+            source_id="defaults_source",
+        )
+        return pod, pod(source)
+
+    def test_uri_pipeline_hash_and_content_hash_are_unchanged(self):
+        pod_two, out_two = self._pod_output(2.0)
+        pod_three, out_three = self._pod_output(3.0)
+
+        assert pod_two.uri == pod_three.uri
+        assert out_two.pipeline_hash() == out_three.pipeline_hash()
+        assert out_two.content_hash() == out_three.content_hash()
+
+    def test_stored_signature_hash_differs(self):
+        pod_two, _ = self._pod_output(2.0)
+        pod_three, _ = self._pod_output(3.0)
+
+        def signature_hash(pod: FunctionPod) -> bytes:
+            variation = pod.data_function.get_function_variation_data()
+            return variation["function_signature_hash"]
+
+        assert signature_hash(pod_two) != signature_hash(pod_three)

@@ -141,9 +141,8 @@ class FunctionHandler:
             raise TypeError(
                 f"Cannot hash the default value of parameter {entry['name']!r} of "
                 f"function {function_name}: {exc} A default value is part of the "
-                "function's hash, so it must be a value the semantic hasher can "
-                "hash. Register a handler for its type, or remove the default and "
-                "supply the value as an input."
+                "function's hash: use a default the hasher can hash, or remove the "
+                "default and supply the value as an input."
             ) from exc
         return {**entry, "default": default_hash}
 
