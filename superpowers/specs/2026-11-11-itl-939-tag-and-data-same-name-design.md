@@ -5,7 +5,7 @@
 operator as that is actively introducing new data into data." The chosen direction is the
 **DerivedSource form**: "CopyTagsToData should be taken as what I call 'DerivedSource' -- a
 data source that in itself derives from other pods." Section 8 is the design addendum for that
-form and holds the open decisions. Sections 1 to 7 are the original spike, kept for its
+form; section 8.10 records the developer's answers to its decisions. Sections 1 to 7 are the original spike, kept for its
 analysis; where they recommend the operator, section 8 replaces them.
 **Issue:** ITL-939. **Related:** ITL-929 (record ids from primary keys), ITL-938 (versioning).
 **Date:** November 11, 2026.
@@ -35,7 +35,8 @@ output next to it as `expNN_*.out`; rerun with `uv run python <script>`).
   `CopyTagsToData`, that copies named tags into the data group under new names. The tags stay
   where they are. There is no new column model, no change to any existing hash, path or
   stored schema, and it fits the operator boundary: operators may read tags, and `GroupBy`
-  already moves tags into data. It is about a day of work with tests. If the developer would
+  already moves tags into data (**not a precedent**: the developer has ruled that behaviour of
+  `GroupBy` incorrect, to be fixed in v0.3 under ITL-955; see 8.5). It is about a day of work with tests. If the developer would
   rather wait, the one-line recipe (section 6.2) is enough for the workshop on in-memory
   sources.
 * **Not recommended:** a column that belongs to both groups (A), or two same-named columns
@@ -220,7 +221,8 @@ cross-cutting change before the public v0.3.
 * It copies the tag's Arrow column unchanged: same type (large-normalized like every operator
   output), same nullability.
 * The tags, the system tags (name-preserving rule) and the existing data columns are unchanged.
-* The copy's `_source_` value is null, exactly as `GroupBy` already does for a non-key tag it
+* (`GroupBy` is not a precedent: its promotion of non-key tags into data is being fixed,
+  ITL-955.) The copy's `_source_` value is null, exactly as `GroupBy` already does for a non-key tag it
   turns into data (`group_by.py` docstring). An operator cannot know which source a tag value
   came from; after a `Join` it came from several.
 * The operator reads tags, which operators may do, and never reads data. It synthesizes no
@@ -758,28 +760,25 @@ docstring: "`probe` becomes a list-valued **data** column"). `Batch`, for contra
 tag a tag, as a list.
 
 By the criterion, then, the grouping itself is a proper operator, and the promotion of non-key
-tags into data is the part that is not: those data elements come from tag values. Nothing is
-changed here. Options for the developer, if this is to be made consistent:
+tags into data is the part that is not: those data elements come from tag values.
 
-* keep the non-key tags as list-valued **tag** columns, as `Batch` does. The pod then no
-  longer receives them, and a pipeline that needs them (spike-train timestamps keyed as tags,
-  section 3 item 5) takes them through a derived source first;
-* or drop the non-key tags from the output;
-* or accept the promotion as a stated exception.
-
-Any of the first two changes `GroupBy`'s output schema, and with it the hashes and stored
-tables of every pipeline that groups by fewer than all tags.
+**Outcome (developer, November 11, 2026):** this behaviour of `GroupBy` is incorrect and will be
+fixed in v0.3. It is filed as ITL-955 and handled separately; nothing is changed here. It
+follows that `GroupBy` is **not a precedent** for moving tag values into data, and the places
+in sections 1 to 6 that cite it as one no longer hold. A pipeline that needs a non-key tag's
+values in a pod after grouping takes them through a derived source first.
 
 ### 8.6 (e) The inverse: a data column also as a tag
 
-Under the source form it nearly falls out: a `data_as_tags={...}` argument would append the
-same kind of copy and list it among the tags, and a source is entitled to do that. The
-principle is not strained, since a source chooses its tags.
+**Outcome (developer, November 11, 2026):** "data as tags is the cheaper and trivial operator.
+We never care to track how tag has been added." By the criterion in 8.5 this direction is a
+plain **operator**, not a derived source: no data element is created, and the data column
+stays as it was. A tag gains a value that came from data, and tags carry no provenance to
+protect.
 
-Recommendation: **out of scope** for this change. The workshop need is covered at the source
-(`tag_columns=[*primary_keys, "probe_id"]`), the developer is cautious about the feature, and
-it would double the tests (and raises what a null in a tag column means for `Join`). The
-constructor is shaped so the argument can be added later without changing anything.
+It is out of scope for this change. A small follow-up operator (copy a data column into the
+tags, keeping the data) would cover the foreign-key join after a pod (section 2.3). Until
+then `tag_columns=[*primary_keys, "probe_id"]` at the source covers the workshop tables.
 
 ### 8.7 (f) Hashes and stored schemas
 
@@ -849,3 +848,41 @@ the stream. The recipe still cannot be reloaded.
 10. **The inverse (`data_as_tags`)**. Recommendation: out of scope (8.6).
 11. **Ship before the workshop?** Recommendation: yes, about a day, with a live check against
     a SpiralDB table before November 17, since none was possible here.
+
+### 8.10 The developer's answers (November 11, 2026)
+
+| # | Decision | Answer |
+|---|---|---|
+| 1 | One class or two | Extend `DerivedSource`. |
+| 2 | API | `tags_as_data` on the constructor and on `node.as_source()`. |
+| 3 | Origins | Sources and job nodes now. |
+| 4 | Provenance | Fresh. "It should also try to save the result if associated with a database just like any other source pod." |
+| 5 | Default `source_id` | Not `derived:<origin source_id>`. "It should be identified with combination of input stream/source id (origin source id) AND hash of the controlling criteria for the derived source operation (e.g. tag that's mapped) -- effectively it should be the content hash of the node I think." |
+| 6 | `pipeline_hash` | Schema only. "Pipeline hash should stay true to what it is -- hash without propagating beyond source. ... the actual provenance above is captured by how the source ID evolves/extends with the content hash of the node to serve as signature of the fact this is a derived source." |
+| 7 | `content_hash` | "Content hash should behave just like any other source -- it should include info about the source id. Just note that source id of a derived table IS what would have been an ordinary content hash invoked ON the derived source node, treating it as a downstream operator in a pipeline." |
+| 8 | Plain `node.as_source()` gaps | Leave; filed as ITL-956. |
+| 9 | `GroupBy` promoting non-key tags | Incorrect; to be fixed in v0.3 (ITL-955). Not a precedent. |
+| 10 | Inverse | A plain operator, out of scope here (8.6). |
+| 11 | Ship before November 17 | Yes. |
+
+What answers 5 to 7 change in 8.3:
+
+* **Default `source_id`** is the content hash that an operator node doing this derivation over
+  the origin would have: the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`,
+  with the origin entering through its own content hash. It is used in bare hex form, without
+  a method prefix. It changes when the origin's identity changes or the mapping changes, and
+  with nothing else. An explicit `source_id=` replaces it.
+* **`content_hash`** follows the rule of every root source: class name, output schema and
+  `source_id`. The origin and the mapping enter through the default `source_id`.
+* **`pipeline_hash`** stays schema only.
+* The plain form, `node.as_source()` without `tags_as_data`, keeps today's identity and
+  `source_id` (ITL-956).
+
+On answer 4: no source saves its rows to a job's store today. A `PipelineJob` with a store
+writes tables for its function and operator nodes only. A source is saved when the user wraps
+it, `source.cached(database)`, which writes `source/node:<content hash>`. A derived source is
+a root source, so `derived.cached(database)` works the same way. Whether more is wanted is
+with the developer.
+
+Implementation: branch `eywalker/itl-939-derived-source-tags-as-data`, a separate pull request.
+This document and its experiments stay in the design pull request (#310).

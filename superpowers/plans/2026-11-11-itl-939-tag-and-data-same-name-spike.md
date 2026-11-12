@@ -95,3 +95,7 @@ Notes for a successor: no library code changed. pyspiral is not installed here; 
 in for the DB table source. Findings to report, not fix: plain `DerivedSource` has no system
 tags and no `to_config`, and caches an empty table if created before the origin ran;
 `append_column(name, col)` in the recipe makes the copy nullable.
+- [x] Coordinator sent the developer's answers (design doc 8.10). Step 2 approved in this
+      dispatch: branch `eywalker/itl-939-derived-source-tags-as-data` from origin/main, PR
+      "Fixes ITL-939". Plan: `superpowers/plans/2026-11-11-itl-939-derived-source-tags-as-data.md`
+      on that branch. Pending asks: bare-hex source_id form; "save if associated with a database".
