@@ -32,21 +32,24 @@ import pyarrow as pa
 import pytest
 from starfix import ArrowDigester
 
+import orcapod.contexts as contexts_package
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
+from orcapod.contexts.core import DataContext
+from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.databases import DeltaTableDatabase
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
     arrow_type_identifier,
 )
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    PolarsDataFrameHandler,
+    PolarsSeriesHandler,
+)
 from orcapod.logical_types.polars_type import (
-    POLARS_DATAFRAME_HASH_LABEL,
-    POLARS_SERIES_HASH_LABEL,
     LogicalPolarsDataFrame,
     LogicalPolarsSeries,
     polars_dtype_descriptor,
-    polars_frame_content_hash,
-    polars_series_content_hash,
 )
 from orcapod.sources import DictSource
 from orcapod.types import ContentHash
@@ -387,12 +390,18 @@ class TestHashLabel:
     def test_dataframe_hash_label(self) -> None:
         hasher = get_default_context().semantic_hasher
         frame_hash = hasher.hash_object(pl.DataFrame({"a": [1]}))
-        assert frame_hash.method == POLARS_DATAFRAME_HASH_LABEL == "polars_dataframe_v1"
+        assert (
+            frame_hash.method
+            == PolarsDataFrameHandler.HASH_LABEL
+            == "polars_dataframe_v1"
+        )
 
     def test_series_hash_label(self) -> None:
         hasher = get_default_context().semantic_hasher
         series_hash = hasher.hash_object(pl.Series("a", [1]))
-        assert series_hash.method == POLARS_SERIES_HASH_LABEL == "polars_series_v1"
+        assert (
+            series_hash.method == PolarsSeriesHandler.HASH_LABEL == "polars_series_v1"
+        )
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -446,7 +455,7 @@ class TestHashDefinition:
             descriptor + b"\x00" + self._ordered_digest(frame)
         ).digest()
         got = get_default_context().semantic_hasher.hash_object(frame)
-        assert got == ContentHash(POLARS_DATAFRAME_HASH_LABEL, expected)
+        assert got == ContentHash(PolarsDataFrameHandler.HASH_LABEL, expected)
 
     def test_series(self) -> None:
         series = self._frame()["s"]
@@ -462,14 +471,25 @@ class TestHashDefinition:
             descriptor + b"\x00" + self._ordered_digest(series.to_frame())
         ).digest()
         got = get_default_context().semantic_hasher.hash_object(series)
-        assert got == ContentHash(POLARS_SERIES_HASH_LABEL, expected)
+        assert got == ContentHash(PolarsSeriesHandler.HASH_LABEL, expected)
+
+
+def _frame_hash(frame: pl.DataFrame, *ignore: str) -> str:
+    """Hash of a bare frame under an ignore list."""
+    return PolarsDataFrameHandler().hash_ignoring(frame, ignore).to_string()
+
+
+def _series_hash(series: pl.Series, *ignore: str) -> str:
+    """Hash of a bare Series under an ignore list."""
+    return PolarsSeriesHandler().hash_ignoring(series, ignore).to_string()
 
 
 class TestIgnorableProperties:
-    """The hash functions can leave out three properties; by default they leave out none.
+    """The hash is strict by default; an ignore list leaves named properties out.
 
-    Which properties a data context ignores is configured elsewhere (ITL-981); these tests
-    are about the hash functions' own parameters.
+    The option names are ``column_order`` and ``struct_field_order`` for a frame,
+    ``series_name`` and ``struct_field_order`` for a Series (developer's decision,
+    November 12, 2026; the shared mechanism is ITL-981).
     """
 
     _FIELDS = {"u": pl.Int8, "v": pl.String}
@@ -486,69 +506,109 @@ class TestIgnorableProperties:
         )
         return frame.select("b", "a") if swap_columns else frame
 
-    def test_defaults_are_the_strict_hash(self) -> None:
+    def test_option_names(self) -> None:
+        frame_options = {"column_order", "struct_field_order"}
+        series_options = {"series_name", "struct_field_order"}
+        assert PolarsDataFrameHandler.OPTIONS == frame_options
+        assert LogicalPolarsDataFrame.OPTIONS == frame_options
+        assert PolarsSeriesHandler.OPTIONS == series_options
+        assert LogicalPolarsSeries.OPTIONS == series_options
+
+    def test_unknown_option_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="series_name"):
+            PolarsDataFrameHandler(ignore=["series_name"])
+        with pytest.raises(ValueError, match="column_order"):
+            LogicalPolarsSeries(ignore=["column_order"])
+
+    def test_default_context_is_strict(self) -> None:
         frame = self._frame(swap_columns=False, swap_fields=False)
         hasher = get_default_context().semantic_hasher
-        assert polars_frame_content_hash(frame) == hasher.hash_object(frame)
-        assert polars_series_content_hash(frame["a"]) == hasher.hash_object(frame["a"])
+        assert hasher.hash_object(frame).to_string() == _frame_hash(frame)
+        assert hasher.hash_object(frame["a"]).to_string() == _series_hash(frame["a"])
 
     def test_ignoring_column_order(self) -> None:
         base = self._frame(swap_columns=False, swap_fields=False)
         swapped = self._frame(swap_columns=True, swap_fields=False)
-        assert polars_frame_content_hash(base) != polars_frame_content_hash(swapped)
-        assert polars_frame_content_hash(
-            base, ignore_column_order=True
-        ) == polars_frame_content_hash(swapped, ignore_column_order=True)
+        assert _frame_hash(base) != _frame_hash(swapped)
+        assert _frame_hash(base, "column_order") == _frame_hash(swapped, "column_order")
         # Struct field order still counts.
-        fields_swapped = self._frame(swap_columns=True, swap_fields=True)
-        assert polars_frame_content_hash(
-            base, ignore_column_order=True
-        ) != polars_frame_content_hash(fields_swapped, ignore_column_order=True)
+        both = self._frame(swap_columns=True, swap_fields=True)
+        assert _frame_hash(base, "column_order") != _frame_hash(both, "column_order")
 
     def test_ignoring_struct_field_order(self) -> None:
         base = self._frame(swap_columns=False, swap_fields=False)
         swapped = self._frame(swap_columns=False, swap_fields=True)
-        assert polars_frame_content_hash(base) != polars_frame_content_hash(swapped)
-        assert polars_frame_content_hash(
-            base, ignore_struct_field_order=True
-        ) == polars_frame_content_hash(swapped, ignore_struct_field_order=True)
+        option = "struct_field_order"
+        assert _frame_hash(base) != _frame_hash(swapped)
+        assert _frame_hash(base, option) == _frame_hash(swapped, option)
         # Column order still counts.
-        columns_swapped = self._frame(swap_columns=True, swap_fields=True)
-        assert polars_frame_content_hash(
-            base, ignore_struct_field_order=True
-        ) != polars_frame_content_hash(columns_swapped, ignore_struct_field_order=True)
+        both = self._frame(swap_columns=True, swap_fields=True)
+        assert _frame_hash(base, option) != _frame_hash(both, option)
 
     def test_ignoring_both_orders(self) -> None:
         base = self._frame(swap_columns=False, swap_fields=False)
         both = self._frame(swap_columns=True, swap_fields=True)
-        assert polars_frame_content_hash(
-            base, ignore_column_order=True, ignore_struct_field_order=True
-        ) == polars_frame_content_hash(
-            both, ignore_column_order=True, ignore_struct_field_order=True
-        )
+        options = ("column_order", "struct_field_order")
+        assert _frame_hash(base, *options) == _frame_hash(both, *options)
 
     def test_ignoring_series_name(self) -> None:
         one, other = pl.Series("m", [1, 2]), pl.Series("n", [1, 2])
-        assert polars_series_content_hash(one) != polars_series_content_hash(other)
-        assert polars_series_content_hash(
-            one, ignore_name=True
-        ) == polars_series_content_hash(other, ignore_name=True)
+        assert _series_hash(one) != _series_hash(other)
+        assert _series_hash(one, "series_name") == _series_hash(other, "series_name")
         different_values = pl.Series("n", [1, 3])
-        assert polars_series_content_hash(
-            one, ignore_name=True
-        ) != polars_series_content_hash(different_values, ignore_name=True)
+        assert _series_hash(one, "series_name") != _series_hash(
+            different_values, "series_name"
+        )
 
     def test_series_struct_field_order(self) -> None:
         one = self._frame(swap_columns=False, swap_fields=False)["a"]
         other = self._frame(swap_columns=False, swap_fields=True)["a"]
-        assert polars_series_content_hash(one) != polars_series_content_hash(other)
-        assert polars_series_content_hash(
-            one, ignore_struct_field_order=True
-        ) == polars_series_content_hash(other, ignore_struct_field_order=True)
+        option = "struct_field_order"
+        assert _series_hash(one) != _series_hash(other)
+        assert _series_hash(one, option) == _series_hash(other, option)
+
+    def test_a_data_context_with_an_ignore_list(self, tmp_path: Path) -> None:
+        """A data context that ignores column order hashes a frame column accordingly.
+
+        The list is declared once, under ``hash_ignore`` in the logical type registration
+        file, and reaches the logical type (the column's identifier) and the value handler.
+        """
+        shipped = Path(contexts_package.__file__).parent / "logical_types.json"
+        registration = json.loads(shipped.read_text())
+        name = "orcapod.polars.dataframe"
+        assert registration["hash_ignore"][name] == []
+        registration["hash_ignore"][name] = ["column_order"]
+        custom = tmp_path / "logical_types.json"
+        custom.write_text(json.dumps(registration))
+        lenient = JSONDataContextRegistry(logical_types_file=custom).get_context()
+        strict = get_default_context()
+
+        base = self._frame(swap_columns=False, swap_fields=False)
+        swapped = self._frame(swap_columns=True, swap_fields=False)
+
+        def column_hash(context: DataContext, frame: pl.DataFrame) -> str:
+            table = context.type_converter.python_dicts_to_arrow_table(
+                [{"c": frame}], python_schema={"c": pl.DataFrame}
+            )
+            return context.arrow_hasher.hash_table(table).to_string()
+
+        assert column_hash(strict, base) != column_hash(strict, swapped)
+        assert column_hash(lenient, base) == column_hash(lenient, swapped)
+        # Two lists are two logical types: the same frame hashes differently.
+        assert column_hash(strict, base) != column_hash(lenient, base)
+        # A bare value follows the context's list too.
+        assert lenient.semantic_hasher.hash_object(
+            base
+        ) == lenient.semantic_hasher.hash_object(swapped)
+        lenient_type = lenient.type_converter.python_type_to_arrow_type(pl.DataFrame)
+        assert isinstance(lenient_type, pa.ExtensionType)
+        assert arrow_type_identifier(lenient_type) == LogicalTypeIdentifier(
+            name, b'{"ignore":["column_order"],"version":1}'
+        )
 
 
 class TestLogicalTypeIdentifier:
-    """The identifier is the extension name plus ``{"version":1}`` (ITL-935)."""
+    """The identifier is the extension name plus the ignore list and version (ITL-981)."""
 
     @pytest.mark.parametrize(
         ("python_type", "name"),
@@ -562,7 +622,7 @@ class TestLogicalTypeIdentifier:
         arrow_type = converter.python_type_to_arrow_type(python_type)
         assert isinstance(arrow_type, pa.ExtensionType)
         assert arrow_type_identifier(arrow_type) == LogicalTypeIdentifier(
-            name, b'{"version":1}'
+            name, b'{"ignore":[],"version":1}'
         )
 
     @pytest.mark.parametrize(
@@ -572,7 +632,7 @@ class TestLogicalTypeIdentifier:
         self, logical_type: LogicalPolarsDataFrame | LogicalPolarsSeries
     ) -> None:
         polars_ext = logical_type.get_polars_extension_type()
-        assert polars_ext.ext_metadata() == '{"version":1}'
+        assert polars_ext.ext_metadata() == '{"ignore":[],"version":1}'
 
     @pytest.mark.parametrize("rows", [0, 2], ids=["zero_rows", "all_null"])
     def test_column_without_values_hashes_as_its_type(self, rows: int) -> None:

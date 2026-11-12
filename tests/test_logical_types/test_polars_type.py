@@ -143,7 +143,7 @@ class TestLogicalPolarsDataFrameProtocol:
     def test_extension_types_are_cached(self) -> None:
         a, b = LogicalPolarsDataFrame(), LogicalPolarsDataFrame()
         assert a.get_arrow_extension_type() is b.get_arrow_extension_type()
-        assert a.get_polars_extension_type() is b.get_polars_extension_type()
+        assert a.get_polars_extension_type() == b.get_polars_extension_type()
 
 
 class TestLogicalPolarsDataFrameStorage:

@@ -58,8 +58,8 @@ The labels of v0.3:
 | `directory_v1` | the directory hash: a SHA-256 Merkle tree over the entries | `DIRECTORY_HASH_LABEL`, `hashing/directory_hashers.py` |
 | `ndarray_v1` | the array value hash (§8) | `NumpyArrayHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `polars_expr_v1` | the Polars expression hash (§1c) | `POLARS_EXPR_HASH_LABEL`, `hashing/semantic_hashing/polars_expr.py` |
-| `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `POLARS_DATAFRAME_HASH_LABEL`, `logical_types/polars_type.py` |
-| `polars_series_v1` | the Polars Series value hash (§1e) | `POLARS_SERIES_HASH_LABEL`, `logical_types/polars_type.py` |
+| `polars_dataframe_v1` | the Polars DataFrame value hash (§1e) | `PolarsDataFrameHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
+| `polars_series_v1` | the Polars Series value hash (§1e) | `PolarsSeriesHandler.HASH_LABEL`, `hashing/semantic_hashing/builtin_handlers.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
 Where a hash appears, and in which form:
@@ -486,8 +486,10 @@ A `polars.DataFrame` or `polars.Series` is a value-hashed logical type
 (`PolarsDataFrameHandler`, `PolarsSeriesHandler`; the algorithm is defined in
 `orcapod.logical_types.polars_type`). Inside a table its cell token is, like every
 value-hashed type's (see [the hash label rule](#the-hash-label-rule)),
-`b"orcapod.polars.dataframe;7b2276657273696f6e223a317d::" + digest`: the logical type's identifier,
-then the digest, without the label.
+`b"orcapod.polars.dataframe;<hex of the extension metadata>::" + digest`: the logical type's
+identifier, then the digest, without the label. The extension metadata is
+`{"ignore":[],"version":1}`: the version and the list of properties the hash ignores, empty
+by default.
 
 Storage and hashing are separate. The value is stored with Polars' own `write_ipc`; the
 stored bytes are never hashed (they depend on the Polars version that wrote them). The hash
@@ -549,13 +551,16 @@ Supporting a new dtype adds to the grammar without changing any existing hash; o
 that would give an existing value a different digest needs new labels (`polars_dataframe_v2`,
 `polars_series_v2`). A dtype outside the grammar raises `ValueError` naming the column.
 
-The hash functions can leave three properties out (`polars_frame_content_hash(df,
-ignore_column_order=..., ignore_struct_field_order=...)`, `polars_series_content_hash(s,
-ignore_name=..., ignore_struct_field_order=...)`); the registered handlers use none of them,
-so the hash above is strict. Ignoring column order lists the descriptor's columns sorted by
-name and runs starfix with `ordered_columns=False`; ignoring struct field order does the same
-for every struct's fields with `ordered_struct_fields=False`; ignoring a Series' name drops
-`"name"` from the descriptor and hashes its values as a column named `""`.
+The hash is strict by default. An ignore list, part of the logical type's identifier, can
+leave out `column_order` and `struct_field_order` for a frame, and `series_name` and
+`struct_field_order` for a Series. A data context declares its list once, under `hash_ignore`
+in `contexts/logical_types.json` (`"orcapod.polars.dataframe": []` by default); two lists are
+two logical types, so their columns never share a hash, and a stored column whose list
+differs from the data context's is refused on read. Ignoring column order lists the
+descriptor's columns sorted by name and runs starfix with `ordered_columns=False`; ignoring
+struct field order does the same for every struct's fields with
+`ordered_struct_fields=False`; ignoring a Series' name writes `""` for `"name"` in the
+descriptor and hashes its values as a column named `""`.
 
 A `pandas.DataFrame` is hashed differently: as the `arrow_v1` hash of its Arrow table, which
 ignores column order. A Polars frame and the equal pandas frame never share a hash.

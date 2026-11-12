@@ -27,17 +27,18 @@ exactly by Polars, but the hash goes through an Arrow export that pyarrow cannot
 
 Content hash
 ------------
-The stored IPC bytes are not canonical (the bytes under null slots, and Polars' own field
-metadata, vary for equal frames), so the content hash is computed from the frame itself by
-``polars_frame_content_hash`` / ``polars_series_content_hash``, which the semantic hashers
-``PolarsDataFrameHandler`` / ``PolarsSeriesHandler`` call. The hash is::
+The value hash is computed from the value itself by ``polars_frame_digest`` /
+``polars_series_digest``, which the value handlers ``PolarsDataFrameHandler`` /
+``PolarsSeriesHandler`` call and label ``polars_dataframe_v1`` / ``polars_series_v1``
+(each label is defined on its handler). The digest is::
 
     sha256(descriptor + b"\\x00" + starfix_digest)
 
-under the ``ContentHash`` method label ``"polars_dataframe_v1"`` (a frame) or
-``"polars_series_v1"`` (a Series). Each label names its algorithm (descriptor grammar plus
-digest) and changes only if that algorithm would give an existing value a different digest
-(the hash label rule, ``docs/reference/hashing.md``).
+The hash is strict by default: every property of the value's logical content counts. Both
+types carry an ignore list in their identifier (``IgnoreListLogicalType``, ITL-981), which
+can leave out ``column_order`` and ``struct_field_order`` for a frame, ``series_name`` and
+``struct_field_order`` for a Series; the list a data context uses is declared under
+``hash_ignore`` in ``contexts/logical_types.json`` and is empty by default.
 
 ``starfix_digest`` is ``starfix.ArrowDigester.hash_table`` of a hash-only Arrow projection of
 the values (see ``_hash_projection``), taken in starfix's ordered mode
@@ -90,13 +91,7 @@ import polars as pl
 import pyarrow as pa
 from starfix import ArrowDigester
 
-from orcapod.logical_types.base_logical_type import BaseLogicalType
-from orcapod.logical_types.identifier import version_metadata
-from orcapod.logical_types.registry import (
-    make_arrow_extension_type,
-    make_polars_extension_type,
-)
-from orcapod.types import ContentHash
+from orcapod.logical_types.ignore_list import IgnoreListLogicalType
 
 if TYPE_CHECKING:
     from polars._typing import PolarsDataType
@@ -112,15 +107,9 @@ POLARS_SERIES_EXTENSION_NAME = "orcapod.polars.series"
 """Arrow extension name (and logical type name) of a stored ``pl.Series``; also the
 ``"kind"`` of its hash descriptor."""
 
-POLARS_DATAFRAME_HASH_LABEL = "polars_dataframe_v1"
-"""``ContentHash`` method label of a ``pl.DataFrame`` hash; names the whole definition."""
-
-POLARS_SERIES_HASH_LABEL = "polars_series_v1"
-"""``ContentHash`` method label of a ``pl.Series`` hash; names the whole definition."""
-
-_IDENTIFIER_METADATA = version_metadata(1)
-"""Extension metadata of the types in this module: version 1 of their stored layout and
-value hash. Never stored without it, so there is no older layout to read."""
+_VERSION = 1
+"""Version of the stored layout and value hash of both types. Never stored under another
+version, so there is no older layout to read."""
 
 _IPC_COMPRESSION = "uncompressed"
 """``compression`` of ``DataFrame.write_ipc``: Polars' default, pinned."""
@@ -384,15 +373,14 @@ def _values_digest(
     )
 
 
-def _content_hash(
+def _digest(
     descriptor: dict[str, Any],
     df: pl.DataFrame,
-    label: str,
     *,
     ignore_column_order: bool,
     ignore_struct_field_order: bool,
-) -> ContentHash:
-    """Combine a descriptor and a frame's values into the content hash.
+) -> bytes:
+    """Combine a descriptor and a frame's values into the value digest.
 
     The digest is ``sha256(descriptor_json + b"\x00" + starfix_digest)``, where
     ``descriptor_json`` is ``descriptor`` as canonical JSON (keys sorted, separators ``","``
@@ -402,12 +390,11 @@ def _content_hash(
         descriptor: The frame or Series descriptor in the module's grammar, already built
             with the same two ``ignore`` settings.
         df: The frame whose values are hashed (a Series is passed as its one-column frame).
-        label: The ``ContentHash`` label naming the hash algorithm.
         ignore_column_order: Leave column order out of the values digest.
         ignore_struct_field_order: Leave struct field order out of the values digest.
 
     Returns:
-        A ``ContentHash`` labelled ``label``.
+        The 32 digest bytes.
     """
     descriptor_bytes = json.dumps(
         descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -417,21 +404,20 @@ def _content_hash(
         ordered_columns=not ignore_column_order,
         ordered_struct_fields=not ignore_struct_field_order,
     )
-    digest = hashlib.sha256(descriptor_bytes + b"\x00" + values_digest).digest()
-    return ContentHash(method=label, digest=digest)
+    return hashlib.sha256(descriptor_bytes + b"\x00" + values_digest).digest()
 
 
-def polars_frame_content_hash(
+def polars_frame_digest(
     df: pl.DataFrame,
     *,
     ignore_column_order: bool = False,
     ignore_struct_field_order: bool = False,
-) -> ContentHash:
-    """Content hash of a ``pl.DataFrame`` (see the module docstring for the scheme).
+) -> bytes:
+    """Value digest of a ``pl.DataFrame`` (see the module docstring for the scheme).
 
-    By default the hash is strict: every property of the frame's logical content counts.
+    By default the digest is strict: every property of the frame's logical content counts.
     Each ``ignore`` parameter leaves one property out, so that frames differing only in
-    it hash equal.
+    it have equal digests.
 
     Args:
         df: The frame to hash.
@@ -442,7 +428,7 @@ def polars_frame_content_hash(
             unordered.
 
     Returns:
-        A ``ContentHash`` labelled ``polars_dataframe_v1``.
+        The 32 digest bytes; ``PolarsDataFrameHandler`` labels them.
 
     Raises:
         ValueError: If a column's dtype is outside the descriptor grammar.
@@ -463,34 +449,33 @@ def polars_frame_content_hash(
         "height": df.height,
         "columns": _ordered_pairs(columns, ignore_order=ignore_column_order),
     }
-    return _content_hash(
+    return _digest(
         descriptor,
         df,
-        POLARS_DATAFRAME_HASH_LABEL,
         ignore_column_order=ignore_column_order,
         ignore_struct_field_order=ignore_struct_field_order,
     )
 
 
-def polars_series_content_hash(
+def polars_series_digest(
     series: pl.Series,
     *,
     ignore_name: bool = False,
     ignore_struct_field_order: bool = False,
-) -> ContentHash:
-    """Content hash of a ``pl.Series``: its name, dtype and values.
+) -> bytes:
+    """Value digest of a ``pl.Series``: its name, dtype and values.
 
     Args:
         series: The Series to hash.
-        ignore_name: Leave the Series name out: the descriptor has no ``"name"`` member
-            and the values are hashed as a column named ``""``.
+        ignore_name: Leave the Series name out: the descriptor's ``"name"`` and the name of
+            the hashed column are both ``""``, whatever the Series is called.
         ignore_struct_field_order: Leave struct field order out, at every depth, as for a
             frame.
 
     Returns:
-        A ``ContentHash`` labelled ``polars_series_v1``; never equal to the hash of the
-        one-column frame holding the same Series (the labels and the descriptors'
-        ``"kind"`` differ).
+        The 32 digest bytes; ``PolarsSeriesHandler`` labels them. Never equal to the digest
+        of the one-column frame holding the same Series (the descriptors' ``"kind"``
+        differ).
 
     Raises:
         ValueError: If the dtype is outside the descriptor grammar.
@@ -503,20 +488,16 @@ def polars_series_content_hash(
         raise ValueError(
             f"Polars value: Series {series.name!r} cannot be hashed: {error}"
         ) from error
-    descriptor: dict[str, Any] = {
+    hashed = series.alias("") if ignore_name else series
+    descriptor = {
         "kind": POLARS_SERIES_EXTENSION_NAME,
+        "name": hashed.name,
         "height": series.len(),
         "dtype": dtype_descriptor,
     }
-    if ignore_name:
-        frame = series.alias("").to_frame()
-    else:
-        descriptor["name"] = series.name
-        frame = series.to_frame()
-    return _content_hash(
+    return _digest(
         descriptor,
-        frame,
-        POLARS_SERIES_HASH_LABEL,
+        hashed.to_frame(),
         ignore_column_order=False,
         ignore_struct_field_order=ignore_struct_field_order,
     )
@@ -569,7 +550,7 @@ def _ipc_bytes_to_frame(storage_value: Any) -> pl.DataFrame:
     )
 
 
-class LogicalPolarsDataFrame(BaseLogicalType):
+class LogicalPolarsDataFrame(IgnoreListLogicalType):
     """Logical type for ``pl.DataFrame``.
 
     Stores frames as Arrow ``large_binary`` holding what Polars' ``write_ipc`` writes (see
@@ -586,42 +567,11 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         {'x': Int8}
     """
 
-    _arrow_ext_class = make_arrow_extension_type(
-        POLARS_DATAFRAME_EXTENSION_NAME, pa.large_binary(), _IDENTIFIER_METADATA
-    )
-    _arrow_ext: pa.ExtensionType | None = None
-    _polars_ext_class = make_polars_extension_type(
-        POLARS_DATAFRAME_EXTENSION_NAME,
-        pa.large_binary(),
-        _IDENTIFIER_METADATA.decode(),
-    )
-    _polars_ext: pl.BaseExtension | None = None
-
-    logical_type_name: str = POLARS_DATAFRAME_EXTENSION_NAME
+    EXTENSION_NAME = POLARS_DATAFRAME_EXTENSION_NAME
+    STORAGE_TYPE = pa.large_binary()
+    VERSION = _VERSION
+    OPTIONS = frozenset({"column_order", "struct_field_order"})
     python_type: type = pl.DataFrame
-
-    def get_arrow_extension_type(self) -> pa.ExtensionType:
-        """Return the cached Arrow extension type for ``pl.DataFrame``.
-
-        Returns:
-            A ``pa.ExtensionType`` instance with extension name ``"orcapod.polars.dataframe"`` and
-            storage type ``pa.large_binary()``.
-        """
-        if LogicalPolarsDataFrame._arrow_ext is None:
-            ext_class = LogicalPolarsDataFrame._arrow_ext_class
-            LogicalPolarsDataFrame._arrow_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
-        return LogicalPolarsDataFrame._arrow_ext
-
-    def get_polars_extension_type(self) -> pl.BaseExtension:
-        """Return the cached Polars extension type for ``pl.DataFrame``.
-
-        Returns:
-            A ``pl.BaseExtension`` instance registered under ``"orcapod.polars.dataframe"``.
-        """
-        if LogicalPolarsDataFrame._polars_ext is None:
-            ext_class = LogicalPolarsDataFrame._polars_ext_class
-            LogicalPolarsDataFrame._polars_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
-        return LogicalPolarsDataFrame._polars_ext
 
     def python_to_storage(
         self, value: Any, converter: TypeConverterProtocol | None = None
@@ -662,7 +612,7 @@ class LogicalPolarsDataFrame(BaseLogicalType):
         return _ipc_bytes_to_frame(storage_value)
 
 
-class LogicalPolarsSeries(BaseLogicalType):
+class LogicalPolarsSeries(IgnoreListLogicalType):
     """Logical type for ``pl.Series``.
 
     Stores the Series as a one-column frame named after the Series, in the same form as
@@ -679,40 +629,11 @@ class LogicalPolarsSeries(BaseLogicalType):
         ('m', UInt8)
     """
 
-    _arrow_ext_class = make_arrow_extension_type(
-        POLARS_SERIES_EXTENSION_NAME, pa.large_binary(), _IDENTIFIER_METADATA
-    )
-    _arrow_ext: pa.ExtensionType | None = None
-    _polars_ext_class = make_polars_extension_type(
-        POLARS_SERIES_EXTENSION_NAME, pa.large_binary(), _IDENTIFIER_METADATA.decode()
-    )
-    _polars_ext: pl.BaseExtension | None = None
-
-    logical_type_name: str = POLARS_SERIES_EXTENSION_NAME
+    EXTENSION_NAME = POLARS_SERIES_EXTENSION_NAME
+    STORAGE_TYPE = pa.large_binary()
+    VERSION = _VERSION
+    OPTIONS = frozenset({"series_name", "struct_field_order"})
     python_type: type = pl.Series
-
-    def get_arrow_extension_type(self) -> pa.ExtensionType:
-        """Return the cached Arrow extension type for ``pl.Series``.
-
-        Returns:
-            A ``pa.ExtensionType`` instance with extension name ``"orcapod.polars.series"`` and
-            storage type ``pa.large_binary()``.
-        """
-        if LogicalPolarsSeries._arrow_ext is None:
-            ext_class = LogicalPolarsSeries._arrow_ext_class
-            LogicalPolarsSeries._arrow_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
-        return LogicalPolarsSeries._arrow_ext
-
-    def get_polars_extension_type(self) -> pl.BaseExtension:
-        """Return the cached Polars extension type for ``pl.Series``.
-
-        Returns:
-            A ``pl.BaseExtension`` instance registered under ``"orcapod.polars.series"``.
-        """
-        if LogicalPolarsSeries._polars_ext is None:
-            ext_class = LogicalPolarsSeries._polars_ext_class
-            LogicalPolarsSeries._polars_ext = ext_class()  # pyright: ignore[reportCallIssue]  # synthesized subclass takes no arguments
-        return LogicalPolarsSeries._polars_ext
 
     def python_to_storage(
         self, value: Any, converter: TypeConverterProtocol | None = None

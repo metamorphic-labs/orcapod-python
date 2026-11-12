@@ -25,8 +25,10 @@ order was not): the descriptor lists columns and struct fields in order at every
 digested by starfix 0.5 in its ordered mode (`ordered_columns`, `ordered_struct_fields`,
 ITL-898), which also tells a null struct from a struct of nulls. Physical properties stay
 out: chunking, sortedness flags (not stored), physical `Categorical` codes, Arrow layout.
-Both types carry the identifier metadata `{"version":1}` and are registered, with their value
-handlers, in `contexts/logical_types.json`. Golden values (value and data hashes, type and
+Both types carry the identifier metadata `{"ignore":[],"version":1}` (the ignore-list
+mechanism of ITL-981; the hash is strict by default and can leave out `column_order`,
+`struct_field_order` and `series_name`) and are registered, with their value handlers, in
+`contexts/logical_types.json`. Golden values (value and data hashes, type and
 `Schema` hashes, source identities, columns without values) are pinned in the shared golden
 suite, `tests/test_hashing/golden` (the `polars_*` cases). Existing hashes are unchanged:
 every pre-existing golden entry passes.

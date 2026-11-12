@@ -35,8 +35,11 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.hashing import directory_hashers
 from orcapod.hashing.file_hashers import FileHasher
 from orcapod.hashing.semantic_hashing import polars_expr
-from orcapod.hashing.semantic_hashing.builtin_handlers import NumpyArrayHandler
-from orcapod.logical_types import polars_type
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    NumpyArrayHandler,
+    PolarsDataFrameHandler,
+    PolarsSeriesHandler,
+)
 from orcapod.operators import Join
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode, ContentHash
@@ -199,11 +202,9 @@ def renamed_labels(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
         polars_expr, "POLARS_EXPR_HASH_LABEL", RENAMED["polars_expr_v1"]
     )
     monkeypatch.setattr(
-        polars_type, "POLARS_DATAFRAME_HASH_LABEL", RENAMED["polars_dataframe_v1"]
+        PolarsDataFrameHandler, "HASH_LABEL", RENAMED["polars_dataframe_v1"]
     )
-    monkeypatch.setattr(
-        polars_type, "POLARS_SERIES_HASH_LABEL", RENAMED["polars_series_v1"]
-    )
+    monkeypatch.setattr(PolarsSeriesHandler, "HASH_LABEL", RENAMED["polars_series_v1"])
     monkeypatch.setattr(
         directory_hashers, "DIRECTORY_HASH_LABEL", RENAMED["directory_v1"]
     )
@@ -569,8 +570,8 @@ LABEL_DEFINITIONS = {
     "directory_v1": "hashing/directory_hashers.py",
     "ndarray_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "polars_expr_v1": "hashing/semantic_hashing/polars_expr.py",
-    "polars_dataframe_v1": "logical_types/polars_type.py",
-    "polars_series_v1": "logical_types/polars_type.py",
+    "polars_dataframe_v1": "hashing/semantic_hashing/builtin_handlers.py",
+    "polars_series_v1": "hashing/semantic_hashing/builtin_handlers.py",
 }
 
 
