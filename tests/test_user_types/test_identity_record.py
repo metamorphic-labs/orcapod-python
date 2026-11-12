@@ -1,4 +1,4 @@
-"""Identity record, identity string, type tokens and naming policy of user classes (ITL-881).
+"""Identity record, identity string, type tokens and names of user classes (ITL-881, ITL-972).
 
 These tests target ``orcapod.logical_types.user_class_identity`` directly: they pin the
 documented identity format, which is that module's own interface.
@@ -81,7 +81,10 @@ class TestIdentityString:
     def test_describe_fields_keeps_the_given_order(self) -> None:
         """``describe_fields`` renders the fields in the order given."""
         assert (
-            uci.describe_fields([["y", "float"], ["x", "int"]]) == "{y: float, x: int}"
+            uci.describe_record(
+                uci.identity_record("dataclass", "P", [("y", "float"), ("x", "int")])
+            )
+            == "P (dataclass) {y: float, x: int}"
         )
 
 
@@ -97,74 +100,110 @@ class TestTypeTokens:
             (bytes, "bytes"),
             (float, "float"),
             (datetime.datetime, "datetime.datetime"),
-            (Path, "orcapod.path"),
-            (int | None, "int | None"),
-            (Optional[int], "int | None"),
-            (None | int, "int | None"),
-            (list[int], "list[int]"),
-            (typing.List[int], "list[int]"),  # noqa: UP006 - the typing alias is the case under test
-            (set[str], "set[str]"),
-            (dict[str, float], "dict[str, float]"),
-            (list[int | None], "list[int | None]"),
-            (Literal["b", "a"], "Literal['a', 'b']"),
+            (int | None, {"union": ["int", "None"]}),
+            (Optional[int], {"union": ["int", "None"]}),
+            (None | int, {"union": ["int", "None"]}),
+            (str | int, {"union": ["int", "str"]}),
+            (list[int], {"generic": "list", "args": ["int"]}),
+            (typing.List[int], {"generic": "list", "args": ["int"]}),  # noqa: UP006 - the typing alias is the case under test
+            (set[str], {"generic": "set", "args": ["str"]}),
+            (dict[str, float], {"generic": "dict", "args": ["str", "float"]}),
+            (
+                list[int | None],
+                {"generic": "list", "args": [{"union": ["int", "None"]}]},
+            ),
+            (Literal["b", "a"], {"literal": ["'a'", "'b'"]}),
         ],
     )
-    def test_token(self, converter, annotation: object, token: str) -> None:
+    def test_token(self, converter, annotation: object, token: object) -> None:
         """Each annotation maps to its canonical type token."""
         assert uci.type_token(annotation, converter) == token
 
+    def test_logical_type_token_is_the_whole_identifier(self, converter) -> None:
+        """A type with a logical type contributes its name and its metadata."""
+        from orcapod.logical_types.identifier import logical_type_identifier
 
-class TestNames:
-    """Name validation, default names and declared names."""
+        lt = converter.get_logical_type_for_python_type(Path)
+        assert uci.type_token(Path, converter) == {
+            "logical": logical_type_identifier(lt).text
+        }
+        assert uci.type_token(Path, converter)["logical"].startswith("orcapod.path;")
+
+    def test_nested_class_token_is_its_record(self, converter) -> None:
+        """A field typed by a user class embeds that class's whole record."""
+        inner = _make_class("pkg.models", "Inner")
+        assert uci.type_token(inner, converter) == {
+            "class": {
+                "kind": "dataclass",
+                "name": "pkg.models.Inner",
+                "fields": [["x", "int"]],
+            }
+        }
 
     @pytest.mark.parametrize(
-        "name", ["", "a@b", "a b", "orcapod.thing", "tab\tname", 3]
+        "annotation",
+        [
+            int,
+            datetime.datetime,
+            Path,
+            int | None,
+            list[int],
+            dict[str, float],
+            list[Path | None],
+            tuple[int, str],
+            Literal["a", "b"],
+        ],
+    )
+    def test_annotation_is_rebuilt_from_its_token(
+        self, converter, annotation: object
+    ) -> None:
+        """A token gives back an annotation with the same token."""
+        token = uci.type_token(annotation, converter)
+        rebuilt = uci.annotation_from_token(token, converter)
+        assert rebuilt == annotation
+        assert uci.type_token(rebuilt, converter) == token
+
+
+class TestNames:
+    """Name validation and the names of exact classes."""
+
+    @pytest.mark.parametrize(
+        "name", ["", "a@b", "a b", "a;b", "orcapod.thing", "tab\tname", 3]
     )
     def test_invalid_names_rejected(self, name: object) -> None:
-        """Empty, non-string, reserved, ``@`` and whitespace names are rejected."""
+        """Empty, non-string, reserved, ``@``, ``;`` and whitespace names are rejected."""
         with pytest.raises((ValueError, TypeError)):
             uci.validate_name(name)  # pyright: ignore[reportArgumentType]
 
     @pytest.mark.parametrize("name", ["Point", "geo.Point", "my-types.Point_2"])
     def test_valid_names_accepted(self, name: str) -> None:
         """Dotted names with letters, digits, ``-`` and ``_`` are accepted."""
-        uci.validate_name(name)
+        assert uci.validate_name(name) == name
 
-    def test_module_class_defaults_to_qualified(self) -> None:
-        """A module class is named by its module path and class name by default."""
-        assert uci.resolve_name(_make_class("pkg.models")) == "pkg.models.Point"
+    def test_names_are_nfc_normalized(self) -> None:
+        """Composed and decomposed spellings of a name are one NFC name."""
+        composed, decomposed = "Caf\u00e9", "Cafe\u0301"
+        assert uci.validate_name(decomposed) == uci.validate_name(composed) == composed
+
+    def test_exact_class_is_named_by_module_path(self) -> None:
+        """An exact class is named by its module path and class name."""
+        assert uci.class_name(_make_class("pkg.models")) == "pkg.models.Point"
 
     @pytest.mark.parametrize("module", ["__main__", "__mp_main__"])
-    def test_main_class_defaults_to_name(self, module: str) -> None:
-        """A class in ``__main__`` or ``__mp_main__`` is named by its class name."""
-        assert uci.resolve_name(_make_class(module)) == "Point"
-
-    def test_nested_main_class_uses_qualname(self) -> None:
-        """A nested ``__main__`` class is named by its qualified name."""
-        assert uci.resolve_name(_make_class("__main__", "Outer.Point")) == "Outer.Point"
-
-    def test_default_name_qualified_name_false(self) -> None:
-        """``qualified_name=False`` names a module class by its class name alone."""
+    def test_main_class_is_named_under_main(self, module: str) -> None:
+        """A class in ``__main__`` or ``__mp_main__`` is named ``__main__.<name>``."""
+        assert uci.class_name(_make_class(module)) == "__main__.Point"
         assert (
-            uci.default_name(_make_class("pkg.models"), qualified_name=False) == "Point"
+            uci.class_name(_make_class(module, "Outer.Point")) == "__main__.Outer.Point"
         )
 
-    @pytest.mark.parametrize("module", ["__main__", "__mp_main__"])
-    def test_default_name_qualified_name_true_for_main(self, module: str) -> None:
-        """``qualified_name=True`` names a main-module class ``__main__.<name>``."""
-        cls = _make_class(module)
-        assert uci.default_name(cls, qualified_name=True) == "__main__.Point"
+    def test_structural_class_is_named_by_its_declared_name(self) -> None:
+        """A structural class is named by its declared name, not its module."""
+        import orcapod as op
 
-    def test_declared_names_are_nfc_normalized(self) -> None:
-        """Composed and decomposed spellings of a name declare one NFC name."""
-        composed, decomposed = "Caf\u00e9", "Cafe\u0301"
-        first, second = _make_class("pkg.a"), _make_class("pkg.b")
-        uci.declare(first, composed)
-        uci.declare(second, decomposed)
-        assert uci.resolve_name(first) == uci.resolve_name(second) == composed
+        @op.dataclass(name="geo.Point")
+        class Point:
+            x: int
 
-    def test_declared_name_wins(self) -> None:
-        """A declared name replaces the default name."""
-        cls = _make_class("pkg.models")
-        uci.declare(cls, "geo.Point")
-        assert uci.resolve_name(cls) == "geo.Point"
+        assert uci.class_kind(Point) == "structural"
+        assert uci.class_name(Point) == "geo.Point"

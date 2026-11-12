@@ -16,16 +16,14 @@ import deltalake
 import pyarrow as pa
 import pytest
 
-import orcapod as op
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import TypeIdentityError
 from orcapod.sources import DictSource
 
 
-@op.register_type(name="itl881.StoredPoint")
 @dataclasses.dataclass
 class StoredPoint:
-    """Declared under ``itl881.StoredPoint``."""
+    """An ordinary dataclass whose stored shape the tests change."""
 
     x: int
     y: int
@@ -56,10 +54,9 @@ def test_storage_mismatch_raises_instead_of_reading_nothing(tmp_path: Path) -> N
         DeltaTableDatabase(tmp_path).get_all_records(("points",))
 
 
-@op.register_type(name="itl881.Labelled")
 @dataclasses.dataclass
 class Labelled:
-    """Declared under ``itl881.Labelled``; has a string field."""
+    """An ordinary dataclass with a string field."""
 
     label: str
     n: int

@@ -36,6 +36,7 @@ import pandas as pd
 import pyarrow as pa
 import pydantic
 
+from orcapod import dataclass as structural_dataclass
 from orcapod import function_pod
 
 CaseFn = Callable[[], dict[str, Any]]
@@ -198,47 +199,47 @@ class GoldenModel(pydantic.BaseModel):
     count: int
 
 
-@dataclasses.dataclass
+@structural_dataclass(name="golden.Declared")
 class GoldenDeclared:
-    """Dataclass declared under a name (ITL-881), with an optional field."""
+    """Structural class (ITL-972) with an optional field."""
 
     label: str
     score: float | None
 
 
 class GoldenDeclaredModel(pydantic.BaseModel):
-    """Pydantic model declared under the same name and fields as ``GoldenDeclared``."""
+    """Pydantic model with the same fields as ``GoldenDeclared``: another type."""
 
     label: str
     score: float | None
 
 
-@dataclasses.dataclass
+@structural_dataclass(name="golden.Inner")
 class GoldenInner:
-    """Dataclass nested in ``GoldenOuter``; its identity enters the outer one."""
+    """Structural class nested in ``GoldenOuter``; its record enters the outer one."""
 
     value: int
 
 
-@dataclasses.dataclass
+@structural_dataclass(name="golden.Outer")
 class GoldenOuter:
-    """Dataclass with a nested dataclass field and a container field."""
+    """Structural class with a nested structural field and a container field."""
 
     inner: GoldenInner
     tags: list[str]
 
 
-@dataclasses.dataclass
+@structural_dataclass(name="golden.WithArray")
 class GoldenWithArray:
-    """Dataclass with a NumPy array field; the array's logical type enters its identity."""
+    """Structural class with a NumPy array field; the array's identifier enters its identity."""
 
     label: str
     values: np.ndarray  # pyright: ignore[reportMissingTypeArgument]  # the bare class is the annotation Orcapod stores
 
 
-@dataclasses.dataclass
+@structural_dataclass(name="golden.Twin")
 class GoldenTwinAB:
-    """Declared ``golden.Twin``; same fields as ``GoldenTwinBA`` in another order.
+    """Structural ``golden.Twin``; same fields as ``GoldenTwinBA`` in another order.
 
     Declared field order is part of the identity (ITL-881), so the twins are two types
     and must pin different values.
@@ -248,30 +249,12 @@ class GoldenTwinAB:
     b: str
 
 
-@dataclasses.dataclass
+@structural_dataclass(name="golden.Twin")
 class GoldenTwinBA:
-    """Declared ``golden.Twin``; must pin values different from ``GoldenTwinAB``'s."""
+    """Structural ``golden.Twin``; must pin values different from ``GoldenTwinAB``'s."""
 
     b: str
     a: int
-
-
-def _declare_golden_names() -> None:
-    """Declare the names of the ITL-881 fixtures (releases before v0.3 have no names)."""
-    try:
-        from orcapod import register_type
-    except ImportError:
-        return
-    register_type(GoldenDeclared, name="golden.Declared")
-    register_type(GoldenDeclaredModel, name="golden.Declared")
-    register_type(GoldenInner, name="golden.Inner")
-    register_type(GoldenOuter, name="golden.Outer")
-    register_type(GoldenWithArray, name="golden.WithArray")
-    register_type(GoldenTwinAB, name="golden.Twin")
-    register_type(GoldenTwinBA, name="golden.Twin")
-
-
-_declare_golden_names()
 
 
 def register_logical_classes() -> None:

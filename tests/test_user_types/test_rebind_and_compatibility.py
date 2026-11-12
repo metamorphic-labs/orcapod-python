@@ -4,7 +4,7 @@ Two classes declared under one name with the same fields have one identity; the 
 definition rebinds it, as a re-run notebook cell does. These tests cover what follows a
 rebind: the schema of a list of the class, a pod parameter typed as a union with the
 class, and storage that differs from the registered class. Every test declares names under
-``itl881.rebind.`` that no other test uses, because declarations are process-wide.
+``itl972.rebind.`` that no other test uses, because declarations are process-wide.
 """
 
 from __future__ import annotations
@@ -38,18 +38,16 @@ def _read(source: Any, key: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@op.register_type(name="itl881.rebind.Point")
-@dataclasses.dataclass(frozen=True)
+@op.dataclass(name="itl972.rebind.Point", frozen=True)
 class PointV1:
-    """First definition under ``itl881.rebind.Point``."""
+    """First definition under ``itl972.rebind.Point``."""
 
     x: int
 
 
-@op.register_type(name="itl881.rebind.Point")
-@dataclasses.dataclass(frozen=True)
+@op.dataclass(name="itl972.rebind.Point", frozen=True)
 class PointV2:
-    """Second definition under ``itl881.rebind.Point``, with the same fields."""
+    """Second definition under ``itl972.rebind.Point``, with the same fields."""
 
     x: int
 
@@ -60,8 +58,7 @@ def test_list_schema_names_the_rebound_class() -> None:
     stored = first.as_table()
     assert first.output_schema()[1]["ps"] == list[PointV1]
 
-    with pytest.warns(UserWarning, match="same identity"):
-        second = _source("ps", [PointV2(1)])
+    second = _source("ps", [PointV2(1)])
     assert second.output_schema()[1]["ps"] == list[PointV2]
     assert _read(second, "ps") == [PointV2(1)]
 
@@ -71,18 +68,16 @@ def test_list_schema_names_the_rebound_class() -> None:
     assert type(_read(reread, "ps")[0]) is PointV2
 
 
-@op.register_type(name="itl881.rebind.Cell")
-@dataclasses.dataclass(frozen=True)
+@op.dataclass(name="itl972.rebind.Cell", frozen=True)
 class CellV1:
-    """First definition under ``itl881.rebind.Cell``."""
+    """First definition under ``itl972.rebind.Cell``."""
 
     x: int
 
 
-@op.register_type(name="itl881.rebind.Cell")
-@dataclasses.dataclass(frozen=True)
+@op.dataclass(name="itl972.rebind.Cell", frozen=True)
 class CellV2:
-    """Second definition under ``itl881.rebind.Cell``, with the same fields."""
+    """Second definition under ``itl972.rebind.Cell``, with the same fields."""
 
     x: int
 
@@ -91,8 +86,7 @@ def test_nested_list_schema_names_the_rebound_class() -> None:
     """A list of lists follows the rebind of its innermost class."""
     first = _source("grid", [[CellV1(1)]])
     assert first.output_schema()[1]["grid"] == list[list[CellV1]]
-    with pytest.warns(UserWarning, match="same identity"):
-        second = _source("grid", [[CellV2(1)]])
+    second = _source("grid", [[CellV2(1)]])
     assert second.output_schema()[1]["grid"] == list[list[CellV2]]
     assert _read(second, "grid") == [[CellV2(1)]]
 
@@ -102,18 +96,16 @@ def test_nested_list_schema_names_the_rebound_class() -> None:
 # ---------------------------------------------------------------------------
 
 
-@op.register_type(name="itl881.rebind.Reading")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.rebind.Reading")
 class ReadingOld:
-    """First definition under ``itl881.rebind.Reading``."""
+    """First definition under ``itl972.rebind.Reading``."""
 
     x: int
 
 
-@op.register_type(name="itl881.rebind.Reading")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.rebind.Reading")
 class ReadingNew:
-    """Second definition under ``itl881.rebind.Reading``, with the same fields."""
+    """Second definition under ``itl972.rebind.Reading``, with the same fields."""
 
     x: int
 
@@ -155,10 +147,9 @@ def test_union_parameter_still_rejects_another_type() -> None:
 # ---------------------------------------------------------------------------
 
 
-@op.register_type(name="itl881.rebind.Named")
 @dataclasses.dataclass
 class Named:
-    """Declared under ``itl881.rebind.Named``; has a string field."""
+    """An ordinary dataclass with a string field."""
 
     label: str
     n: int

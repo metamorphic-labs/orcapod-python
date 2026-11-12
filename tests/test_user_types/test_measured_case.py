@@ -1,10 +1,11 @@
-"""A structural parameter receives its own class, in memory and from a store (ITL-972).
+"""Two structural classes of one type behave the same in memory and from a store (ITL-972).
 
 The case measured on November 12, 2026: two classes of one identity, the second with a
-method the first lacks. Pod A returns the first; pod B is annotated with the second and
-calls the method. In memory B used to receive the first class's object unchanged (the
-method was missing), while through a Delta-backed job it received the second class. With
-``orcapod.dataclass`` both paths must hand B an instance of the class it is annotated with.
+method the first lacks. Pod A returns the first; pod B is annotated with the second.
+Orcapod checks that the two classes have the same structural identity and passes the
+value as it is, without converting it: in memory B receives pod A's object, from a store
+the class bound to the type. A structural class promises its fields, not its methods, so
+on both paths B can read the fields and the value equals the instance B would build.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ class QNew:
     y: int
 
     def describe(self) -> str:
-        """Return a text only this class can produce."""
+        """Return a text only this class can produce; a ``QOld`` has no such method."""
         return f"QNew({self.x}, {self.y})"
 
 
@@ -45,8 +46,8 @@ def make(x: int) -> QOld:
 
 @function_pod(output_keys="seen")
 def look(q: QNew) -> str:
-    """Return the class name of the argument and what its ``describe`` gives."""
-    return f"{type(q).__name__}:{q.describe()}"
+    """Read the fields of the argument and compare it with a ``QNew`` built here."""
+    return f"{q.x},{q.y},{q == QNew(q.x, q.y)}"
 
 
 def _source() -> DictSource:
@@ -58,36 +59,46 @@ def _source() -> DictSource:
     )
 
 
-EXPECTED = ["QNew:QNew(1, 2)", "QNew:QNew(2, 3)"]
+EXPECTED = ["1,2,True", "2,3,True"]
 
 
-def test_in_memory_chain_hands_the_annotated_class() -> None:
-    """In memory, pod B receives ``QNew`` although pod A returned ``QOld``."""
-    result = look.pod(make.pod(_source()))
-    seen = sorted(data.as_dict()["seen"] for _, data in result.iter_data())
-    assert seen == EXPECTED
-
-
-def test_stored_chain_hands_the_annotated_class(tmp_path: Path) -> None:
-    """Through a Delta-backed job, pod B receives ``QNew`` as well."""
+def _job(tmp_path: Path) -> PipelineJob:
+    """Return the two-pod job over a Delta store in ``tmp_path``, already run."""
     job = PipelineJob(name="measured", store=DeltaTableDatabase(tmp_path / "db"))
     with job:
         _ = look.pod(make.pod(_source(), label="make"), label="look")
     job.run()
-    seen = sorted(data.as_dict()["seen"] for _, data in job.nodes["look"].iter_data())
-    assert seen == EXPECTED
+    return job
 
 
-def test_stored_results_are_reused_and_still_hand_the_annotated_class(
-    tmp_path: Path,
-) -> None:
-    """A second run reads pod A's stored rows; pod B still receives ``QNew``."""
-    for _ in range(2):
-        job = PipelineJob(name="measured", store=DeltaTableDatabase(tmp_path / "db"))
-        with job:
-            _ = look.pod(make.pod(_source(), label="make"), label="look")
-        job.run()
-        seen = sorted(
-            data.as_dict()["seen"] for _, data in job.nodes["look"].iter_data()
-        )
-        assert seen == EXPECTED
+def _seen(stream: object) -> list[str]:
+    """Return the sorted ``seen`` values of a stream or node."""
+    return sorted(data.as_dict()["seen"] for _, data in stream.iter_data())  # pyright: ignore[reportAttributeAccessIssue]  # a stream or a job node
+
+
+def test_in_memory_chain_is_compatible() -> None:
+    """In memory, pod B accepts pod A's output, reads its fields and finds it equal."""
+    assert _seen(look.pod(make.pod(_source()))) == EXPECTED
+
+
+def test_stored_chain_is_compatible(tmp_path: Path) -> None:
+    """Through a Delta-backed job the result is the same."""
+    assert _seen(_job(tmp_path).nodes["look"]) == EXPECTED
+
+
+def test_second_run_reuses_stored_rows_with_the_same_result(tmp_path: Path) -> None:
+    """A second run reads the stored rows and gives the same result."""
+    assert _seen(_job(tmp_path).nodes["look"]) == EXPECTED
+    assert _seen(_job(tmp_path).nodes["look"]) == EXPECTED
+
+
+def test_values_are_passed_as_they_are() -> None:
+    """Orcapod does not convert: in memory pod B receives pod A's own object."""
+
+    @function_pod(output_keys="cls")
+    def class_name(q: QNew) -> str:
+        """Return the class name of the argument."""
+        return type(q).__name__
+
+    stream = class_name.pod(make.pod(_source()))
+    assert {data.as_dict()["cls"] for _, data in stream.iter_data()} == {"QOld"}

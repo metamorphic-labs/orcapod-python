@@ -19,7 +19,6 @@ import deltalake
 import pyarrow as pa
 import pytest
 
-import orcapod as op
 from orcapod import function_pod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
@@ -34,7 +33,6 @@ Orchestrator = SyncPipelineOrchestrator | AsyncPipelineOrchestrator
 _CALLS: list[int] = []
 
 
-@op.register_type(name="itl881.fatal.Pair")
 @dataclasses.dataclass
 class Pair:
     """The value the pod stores."""

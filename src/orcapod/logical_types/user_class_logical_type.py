@@ -43,6 +43,40 @@ else:
 logger = logging.getLogger(__name__)
 
 
+# Extension type classes per (identity string, storage type, metadata). Two class objects
+# with one identity (a class defined again, two structural classes of one type) must
+# give Arrow types that compare equal, and pyarrow compares the type's Python class.
+_EXTENSION_CLASSES: dict[tuple[str, str, str], tuple[type, type]] = {}
+
+
+def _extension_classes(
+    logical_name: str, storage_type: pa.DataType, metadata_json: str
+) -> tuple[type[pa.ExtensionType], type[pl.BaseExtension]]:
+    """Return the Arrow and Polars extension type classes of an identifier.
+
+    Args:
+        logical_name: The identity string, used as the extension name.
+        storage_type: The Arrow storage struct.
+        metadata_json: The extension metadata as canonical JSON.
+
+    Returns:
+        ``(arrow class, polars class)``, the same pair for the same arguments.
+    """
+    key = (logical_name, str(storage_type), metadata_json)
+    found = _EXTENSION_CLASSES.get(key)
+    if found is None:
+        found = (
+            make_arrow_extension_type(
+                logical_name, storage_type, metadata=metadata_json.encode("utf-8")
+            ),
+            make_polars_extension_type(
+                logical_name, storage_type, metadata=metadata_json
+            ),
+        )
+        _EXTENSION_CLASSES[key] = found
+    return found
+
+
 class UserClassLogicalType(BaseLogicalType):
     """Logical type binding a user class to its Arrow extension type.
 
@@ -86,13 +120,10 @@ class UserClassLogicalType(BaseLogicalType):
         metadata_json = uci.canonical_json(metadata)
         # ``storage_type`` never contains nested extension types (ET1 in DESIGN_ISSUES.md):
         # the factory strips each field's top-level extension type before building it.
-        self._arrow_ext_class = make_arrow_extension_type(
-            logical_name, storage_type, metadata=metadata_json.encode("utf-8")
+        self._arrow_ext_class, self._polars_ext_class = _extension_classes(
+            logical_name, storage_type, metadata_json
         )
         self._arrow_ext: pa.ExtensionType | None = None
-        self._polars_ext_class = make_polars_extension_type(
-            logical_name, storage_type, metadata=metadata_json
-        )
         self._polars_ext: pl.BaseExtension | None = None
 
     @property

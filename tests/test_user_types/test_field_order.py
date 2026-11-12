@@ -1,4 +1,4 @@
-"""Declared field order is part of a user class's identity (ITL-881).
+"""Declared field order is part of a user class's identity (ITL-881, ITL-972).
 
 A dataclass compares its fields as a tuple in declared order, and a pydantic model
 dumps, iterates and serializes in declared order, so pod code can observe the order.
@@ -6,17 +6,15 @@ Two classes with the same fields in another order are therefore different types.
 
 Identity is observed through the public interface: the Arrow type of a ``DictSource``
 column, the row's ``content_hash`` and the source's ``content_hash`` and
-``pipeline_hash``. Names under ``itl881.order.`` are used by no other test, because
-declarations are process-wide.
+``pipeline_hash``. Structural classes are compared under names ``itl972.order.``; exact
+classes (ordinary dataclass, pydantic) by defining one module path and name twice.
 """
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Any
 
 import pyarrow as pa
-import pydantic
 import pytest
 
 import orcapod as op
@@ -24,52 +22,52 @@ from orcapod import function_pod
 from orcapod.sources import DictSource
 
 
-@op.register_type(name="itl881.order.Data")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.order.Data")
 class DataXY:
-    """Dataclass declared under ``itl881.order.Data`` with fields ``x``, ``y``."""
+    """Structural class ``itl972.order.Data`` with fields ``x``, ``y``."""
 
     x: int
     y: int
 
 
-@op.register_type(name="itl881.order.Data")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.order.Data")
 class DataYX:
-    """Dataclass declared under ``itl881.order.Data`` with fields ``y``, ``x``."""
+    """Structural class ``itl972.order.Data`` with fields ``y``, ``x``."""
 
     y: int
     x: int
 
 
-@op.register_type(name="itl881.order.Model")
-class ModelXY(pydantic.BaseModel):
-    """Pydantic model declared under ``itl881.order.Model`` with fields ``x``, ``y``."""
+def _exact(kind: str, order: str) -> type:
+    """Return an exact class ``Ordered`` of this module with fields in ``order``.
 
-    x: int
-    y: int
+    Each call makes a new class object with the same module path and name, so two
+    classes that differ only in field order can be compared.
+    """
+    fields = "".join(f"    {name}: int\n" for name in order)
+    head = {
+        "dataclass": "import dataclasses\n@dataclasses.dataclass\nclass Ordered:\n",
+        "pydantic": "import pydantic\nclass Ordered(pydantic.BaseModel):\n",
+    }[kind]
+    namespace: dict[str, Any] = {"__name__": __name__}
+    exec(head + fields, namespace)
+    return namespace["Ordered"]
 
 
-@op.register_type(name="itl881.order.Model")
-class ModelYX(pydantic.BaseModel):
-    """Pydantic model declared under ``itl881.order.Model`` with fields ``y``, ``x``."""
-
-    y: int
-    x: int
+ModelXY, ModelYX = _exact("pydantic", "xy"), _exact("pydantic", "yx")
+ExactXY, ExactYX = _exact("dataclass", "xy"), _exact("dataclass", "yx")
 
 
-@op.register_type(name="itl881.order.Outer")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.order.Outer")
 class OuterOfXY:
-    """Declared under ``itl881.order.Outer``; nests ``DataXY``."""
+    """Structural class ``itl972.order.Outer``; nests ``DataXY``."""
 
     inner: DataXY
 
 
-@op.register_type(name="itl881.order.Outer")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.order.Outer")
 class OuterOfYX:
-    """Declared under ``itl881.order.Outer``; nests ``DataYX``."""
+    """Structural class ``itl972.order.Outer``; nests ``DataYX``."""
 
     inner: DataYX
 
@@ -77,6 +75,7 @@ class OuterOfYX:
 PAIRS: dict[str, tuple[Any, Any]] = {
     "dataclass": (DataXY(x=1, y=2), DataYX(x=1, y=2)),
     "pydantic": (ModelXY(x=1, y=2), ModelYX(x=1, y=2)),
+    "exact_dataclass": (ExactXY(x=1, y=2), ExactYX(x=1, y=2)),
     "list": ([DataXY(x=1, y=2)], [DataYX(x=1, y=2)]),
     "nested": (OuterOfXY(DataXY(x=1, y=2)), OuterOfYX(DataYX(x=1, y=2))),
 }
@@ -176,19 +175,17 @@ def test_pods_over_the_two_orders_have_different_pipeline_hashes() -> None:
     )
 
 
-@op.register_type(name="itl881.order.Same")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.order.Same")
 class SameFirst:
-    """First class declared under ``itl881.order.Same``."""
+    """First structural class ``itl972.order.Same``."""
 
     a: int
     b: str
 
 
-@op.register_type(name="itl881.order.Same")
-@dataclasses.dataclass
+@op.dataclass(name="itl972.order.Same")
 class SameSecond:
-    """Second class under ``itl881.order.Same``, same fields in the same order."""
+    """Second structural class ``itl972.order.Same``, same fields in the same order."""
 
     a: int
     b: str
@@ -196,6 +193,5 @@ class SameSecond:
 
 def test_same_fields_in_the_same_order_are_one_type() -> None:
     """Two classes with one name and the same ordered fields are one type."""
-    with pytest.warns(UserWarning, match="same identity"):
-        assert _type_name(SameFirst(1, "x")) == _type_name(SameSecond(1, "x"))
+    assert _type_name(SameFirst(1, "x")) == _type_name(SameSecond(1, "x"))
     assert _row_hash(SameFirst(1, "x")) == _row_hash(SameSecond(1, "x"))

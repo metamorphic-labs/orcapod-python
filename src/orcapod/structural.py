@@ -3,9 +3,14 @@
 An ordinary ``@dataclass`` is identified by its exact class: a pod annotated with it
 accepts that class object and no other. A class made with ``@orcapod.dataclass`` is
 **structural**: Orcapod identifies it by its name and its fields (names, types and
-order), so two such classes with the same name and fields are one type, stored values
-can be read back without the class being defined, and a pod parameter annotated with
-the class always receives an instance of that class.
+order). Two such classes with the same name and fields are one type: a pod annotated
+with one accepts a column of the other, their instances compare equal when their field
+values are equal, and stored values can be read back without the class being defined.
+
+Orcapod never converts a value from one class to another. A function annotated with a
+structural class receives the object that arrives, which may be an instance of another
+class of the same type: a structural class promises its fields, not its methods.
+``from_instance`` is the explicit conversion.
 
 See ``docs/concepts/your-own-data-types.md``.
 """
@@ -13,7 +18,6 @@ See ``docs/concepts/your-own-data-types.md``.
 from __future__ import annotations
 
 import dataclasses
-import functools
 import types
 import typing
 from collections.abc import Callable
@@ -24,10 +28,6 @@ import orcapod.logical_types.user_class_identity as _uci
 T = TypeVar("T")
 
 __all__ = ["dataclass"]
-
-#: Decision point O3 (ITL-972): whether ``P(other)`` converts, beside
-#: ``P.from_instance(other)``.
-CONSTRUCTOR_CONVERTS = True
 
 _UNIONS = (typing.Union, types.UnionType)
 
@@ -49,9 +49,12 @@ def dataclass(
     """Define a dataclass that Orcapod identifies by its name and fields.
 
     Use it in place of ``dataclasses.dataclass``, bare or with keywords. The result is
-    a real dataclass (``dataclasses.fields``, ``asdict`` and ``replace`` work) with one
-    addition: ``from_instance``, which builds an instance from an instance of another
-    dataclass with the same fields.
+    a real dataclass (``dataclasses.fields``, ``asdict`` and ``replace`` work) with two
+    differences. ``==`` compares field values across classes of the same type: an
+    instance equals an instance of another ``orcapod.dataclass`` with the same name
+    and fields when their field values are equal (unless ``eq=False`` is passed or the
+    class defines ``__eq__`` itself). And the class has ``from_instance``, which builds
+    an instance from an instance of another dataclass with the same fields.
 
     Args:
         cls: The class, when used as a bare decorator.
@@ -96,9 +99,11 @@ def dataclass(
                 f"dataclasses only."
             )
         declared = _uci.validate_name(name if name is not None else target.__name__)
+        own_eq = "__eq__" in vars(target)
         made = dataclasses.dataclass(target, **options)
-        _uci.make_structural(made, declared)
-        _add_conversion(made)
+        finish_structural_class(
+            made, declared, structural_equality=options.get("eq", True) and not own_eq
+        )
         return made
 
     if cls is None:
@@ -106,81 +111,89 @@ def dataclass(
     return decorate(cls)
 
 
+def finish_structural_class(
+    cls: type, name: str, *, structural_equality: bool = True
+) -> None:
+    """Turn a dataclass that was created for this purpose into a structural class.
+
+    Marks the class with its name and adds ``from_instance`` and, unless the class
+    opted out of generated equality, the ``__eq__`` that compares across classes of
+    one type. Used by ``orcapod.dataclass`` and for classes built from stored metadata.
+
+    Args:
+        cls: The dataclass just created.
+        name: The validated name of the type.
+        structural_equality: Whether to install ``structural_eq`` as ``__eq__``.
+    """
+    _uci.make_structural(cls, name)
+    if structural_equality:
+        setattr(cls, "__eq__", structural_eq)
+    setattr(cls, "from_instance", classmethod(_from_instance))
+
+
+# ---------------------------------------------------------------------------
+# Equality across classes of one type
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+def structural_eq(self: Any, other: Any) -> Any:
+    """Compare two instances of structural classes of the same type by field values.
+
+    Installed as ``__eq__`` by ``orcapod.dataclass``. Instances of the same class
+    compare as dataclasses do. Instances of two structural classes with the same name
+    and fields (a class defined again, a class built from stored metadata) are equal
+    when their compared fields are equal. Anything else is not comparable.
+
+    Args:
+        self: An instance of a structural class.
+        other: Any object.
+
+    Returns:
+        ``True`` or ``False`` for an instance of a class of the same type, else
+        ``NotImplemented``.
+    """
+    mine, theirs = self.__class__, other.__class__
+    if theirs is not mine and not (
+        _uci.is_structural(theirs) and _uci.same_user_type(mine, theirs)
+    ):
+        return NotImplemented
+    names = [field.name for field in dataclasses.fields(self) if field.compare]
+    return tuple(getattr(self, name) for name in names) == tuple(
+        getattr(other, name, _MISSING) for name in names
+    )
+
+
 # ---------------------------------------------------------------------------
 # Conversion: an instance of the class from an instance of another dataclass
 # ---------------------------------------------------------------------------
 
 
-def _add_conversion(cls: type) -> None:
-    """Add ``from_instance`` and the converting constructor to a structural class.
+def _from_instance(cls: type, other: Any) -> Any:
+    """Build an instance of this class from an instance of another dataclass.
 
-    Called on a class that ``orcapod.dataclass`` has just created.
+    This is the only conversion between classes, and Orcapod never calls it for you.
+
+    Args:
+        other: An instance of an ordinary dataclass or an ``orcapod.dataclass`` with
+            exactly the same field names and the same declared field types.
+
+    Returns:
+        A new instance of this class with ``other``'s field values. Fields typed by
+        an ``orcapod.dataclass`` are converted the same way.
+
+    Raises:
+        TypeError: If ``other`` is not a dataclass instance, or its fields differ
+            from this class's fields.
     """
-
-    def from_instance(klass: type, other: Any) -> Any:
-        """Build an instance of this class from an instance of another dataclass.
-
-        Args:
-            other: An instance of an ordinary dataclass or an ``orcapod.dataclass``
-                with the same fields.
-
-        Returns:
-            A new instance of this class with ``other``'s field values. Fields typed
-            by an ``orcapod.dataclass`` are converted the same way.
-
-        Raises:
-            TypeError: If ``other`` is not a dataclass instance, or its fields differ
-                from this class's fields.
-        """
-        return klass(**converted_fields(klass, other))
-
-    setattr(cls, "from_instance", classmethod(from_instance))
-
-    if not CONSTRUCTOR_CONVERTS:
-        return
-    generated = cls.__init__
-
-    @functools.wraps(generated)
-    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-        if len(args) == 1 and not kwargs and _is_conversion_call(cls, args[0]):
-            generated(self, **converted_fields(cls, args[0]))
-            return
-        generated(self, *args, **kwargs)
-
-    setattr(cls, "__init__", __init__)
-
-
-def _is_conversion_call(cls: type, argument: Any) -> bool:
-    """Return True if ``cls(argument)`` means "convert ``argument``".
-
-    It does when the argument is a dataclass instance and the class's first field
-    could not itself hold a dataclass: the decision depends on the class definition
-    and on the kind of the argument, never on values.
-    """
-    if not dataclasses.is_dataclass(argument) or isinstance(argument, type):
-        return False
-    names = _uci.stored_field_names(cls)
-    if not names:
-        return True
-    return not _may_hold_dataclass(_uci.type_hints(cls).get(names[0], Any))
-
-
-def _may_hold_dataclass(annotation: Any) -> bool:
-    """Return True if a field with this annotation could hold a dataclass instance."""
-    if annotation is Any or annotation is object:
-        return True
-    if isinstance(annotation, typing.TypeVar):
-        return True
-    if typing.get_origin(annotation) in _UNIONS:
-        return any(_may_hold_dataclass(arg) for arg in typing.get_args(annotation))
-    return isinstance(annotation, type) and dataclasses.is_dataclass(annotation)
+    return cls(**converted_fields(cls, other))
 
 
 def converted_fields(cls: type, other: Any) -> dict[str, Any]:
     """Return the keyword arguments that build a ``cls`` from ``other``.
 
-    This is the acceptance rule of the conversion (decision point O4, ITL-972):
-    ``other`` is a dataclass instance whose stored fields have exactly the names of
+    This is the acceptance rule of ``from_instance``: ``other`` is a dataclass instance whose stored fields have exactly the names of
     ``cls``'s fields, and whose declared field types agree with ``cls``'s.
 
     Args:
@@ -221,7 +234,7 @@ def converted_fields(cls: type, other: Any) -> dict[str, Any]:
                 f"{source.__qualname__}: field {field!r} is declared "
                 f"{offered_hints.get(field, Any)!r} there and {target!r} here."
             )
-        values[field] = convert_argument(getattr(other, field), target)
+        values[field] = _converted_value(getattr(other, field), target)
     return values
 
 
@@ -253,39 +266,33 @@ def _convertible(offered: Any, wanted: Any) -> bool:
     return all(_convertible(x, y) for x, y in zip(args_offered, args_wanted))
 
 
-def mentions_structural(annotation: Any) -> bool:
-    """Return True if an annotation names a structural class at any depth.
-
-    Args:
-        annotation: A type annotation.
-
-    Returns:
-        Whether ``convert_argument`` can change a value of this annotation.
-    """
+def _mentions_structural(annotation: Any) -> bool:
+    """Return True if an annotation names a structural class at any depth."""
     if isinstance(annotation, type) and typing.get_origin(annotation) is None:
         return _uci.is_structural(annotation)
-    return any(mentions_structural(arg) for arg in typing.get_args(annotation))
+    return any(_mentions_structural(arg) for arg in typing.get_args(annotation))
 
 
-def convert_argument(value: Any, annotation: Any) -> Any:
-    """Return ``value`` with every structural class in ``annotation`` applied.
+def _converted_value(value: Any, annotation: Any) -> Any:
+    """Return a field value converted to the structural classes its annotation names.
 
-    Where the annotation names a structural class and the value is an instance of
-    another dataclass, the value is replaced by an instance of the annotated class
-    (``from_instance``). Lists, sets, tuples and dict values are rebuilt only when
-    their annotation names a structural class; every other value is returned as it is.
+    Used by ``from_instance`` for the fields of the instance it builds. Where the
+    annotation names a structural class and the value is an instance of another
+    dataclass, the value is replaced by ``from_instance`` of the annotated class.
+    Lists, sets, tuples and dict values are rebuilt only when their annotation names a
+    structural class; every other value is returned as it is.
 
     Args:
-        value: The value to pass.
-        annotation: The annotation of the parameter or field receiving it.
+        value: The field value of the instance being converted.
+        annotation: The annotation of the field receiving it.
 
     Returns:
-        The value to pass in its place.
+        The value to store in the new instance.
 
     Raises:
         TypeError: If a value cannot be converted to the annotated structural class.
     """
-    if value is None or not mentions_structural(annotation):
+    if value is None or not _mentions_structural(annotation):
         return value
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -294,39 +301,21 @@ def convert_argument(value: Any, annotation: Any) -> Any:
             return value
         return annotation.from_instance(value)
     if origin in _UNIONS:
-        return _convert_union_member(value, args)
+        for member in args:
+            if isinstance(member, type) and typing.get_origin(member) is None:
+                if _uci.is_structural(member) and dataclasses.is_dataclass(value):
+                    return _converted_value(value, member)
+            elif typing.get_origin(member) is type(value):
+                return _converted_value(value, member)
+        return value
     if origin in (list, set, frozenset) and len(args) == 1:
-        return origin(convert_argument(item, args[0]) for item in value)
+        return origin(_converted_value(item, args[0]) for item in value)
     if origin is tuple:
         if len(args) == 2 and args[1] is Ellipsis:
-            return tuple(convert_argument(item, args[0]) for item in value)
+            return tuple(_converted_value(item, args[0]) for item in value)
         if len(args) == len(value):
-            return tuple(convert_argument(item, arg) for item, arg in zip(value, args))
+            return tuple(_converted_value(item, arg) for item, arg in zip(value, args))
         return value
     if origin is dict and len(args) == 2:
-        return {key: convert_argument(item, args[1]) for key, item in value.items()}
-    return value
-
-
-def _convert_union_member(value: Any, members: tuple[Any, ...]) -> Any:
-    """Convert a value typed by a union to the member it belongs to.
-
-    A dataclass instance goes to the structural member of the same type
-    (``same_user_type``); a container goes to the first member with the same origin.
-    A value no member claims is returned as it is.
-    """
-    cls = type(value)
-    for member in members:
-        if cls is member:
-            return value
-    for member in members:
-        if isinstance(member, type) and typing.get_origin(member) is None:
-            if (
-                _uci.is_structural(member)
-                and _uci.is_structural(cls)
-                and _uci.same_user_type(cls, member)
-            ):
-                return member.from_instance(value)
-        elif typing.get_origin(member) is cls:
-            return convert_argument(value, member)
+        return {key: _converted_value(item, args[1]) for key, item in value.items()}
     return value

@@ -706,7 +706,9 @@ def synthesize_structural_class(
     cls = dataclasses.make_dataclass(python_name, fields)
     cls.__module__ = SYNTHESIZED_MODULE
     cls.__doc__ = f"Structural class {name!r}, built from stored metadata."
-    make_structural(cls, name)
+    from orcapod.structural import finish_structural_class
+
+    finish_structural_class(cls, name)
     if class_record(cls, converter) != record:
         raise ValueError(
             f"Cannot rebuild the structural class {describe_record(record)} from its "
@@ -719,8 +721,8 @@ def synthesize_structural_class(
 def make_structural(cls: type, name: str) -> None:
     """Mark a dataclass as the structural class ``name``.
 
-    Called by ``orcapod.dataclass`` on the class it has just created, and on classes
-    synthesized from stored metadata.
+    Called through ``orcapod.structural.finish_structural_class`` on a class that
+    ``orcapod.dataclass`` has just created or that was built from stored metadata.
 
     Args:
         cls: A dataclass created for this purpose.

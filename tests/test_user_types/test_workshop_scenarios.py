@@ -29,6 +29,8 @@ CELLS = {
     "define_reordered": "@dataclass\nclass Point:\n    y: int\n    x: int\n",
     "define_added": "@dataclass\nclass Point:\n    x: int\n    y: int\n    z: int = 0\n",
     "define_model_reordered": "import pydantic\nclass Point(pydantic.BaseModel):\n    y: int\n    x: int\n",
+    "define_s": "@op.dataclass\nclass Point:\n    x: int\n    y: int\n",
+    "define_s_float": "@op.dataclass\nclass Point:\n    x: int\n    y: float\n",
     "define_float": "@dataclass\nclass Point:\n    x: int\n    y: float\n",
     "define_model": "import pydantic\nclass Point(pydantic.BaseModel):\n    x: int\n    y: int\n",
     "import_mod": "from wsmodels import Point\n",
@@ -230,11 +232,32 @@ def test_w1_rerun_define_cell_same_fields_rebinds(workdir: Path) -> None:
     assert second["values"] == first["values"]
 
 
-def test_w1_old_pod_cell_with_redefined_class(workdir: Path) -> None:
-    """Re-running only the class cell keeps the earlier pod cell usable."""
+def test_w1_old_pod_cell_refuses_a_redefined_ordinary_class(workdir: Path) -> None:
+    """After re-running only the class cell, the earlier pod refuses the new class."""
     log = _kernel(workdir, ["setup", "define", "pod", "run_pod", "define", "run_pod"])
+    assert [e["cell"] for e in log if "error" in e] == ["run_pod"]
+    assert "error" not in log[3]
+    assert log[-1]["error"].startswith("ValueError")
+    assert "column 'p'" in log[-1]["error"]
+
+
+def test_w1_old_pod_cell_with_redefined_structural_class(workdir: Path) -> None:
+    """Re-running only an ``op.dataclass`` cell keeps the earlier pod cell usable."""
+    log = _kernel(
+        workdir, ["setup", "define_s", "pod", "run_pod", "define_s", "run_pod"]
+    )
     first, second = _runs(log)
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
+    assert first["extension_name"].split("@")[0] == "Point"
+
+
+def test_w2_structural_rerun_with_changed_fields_is_a_new_type(workdir: Path) -> None:
+    """An ``op.dataclass`` re-run with a changed field type is a new type."""
+    log = _kernel(workdir, ["setup", "define_s", "run", "define_s_float", "run"])
+    first, second = _runs(log)
+    assert (second["calls"], second["rows"]) == (2, 2)
+    assert first["extension_name"] != second["extension_name"]
+    assert set(first["table_paths"]) < set(second["table_paths"])
 
 
 def test_w1_run_all_twice(workdir: Path) -> None:
@@ -296,8 +319,8 @@ def test_w2_rerun_with_changed_fields_is_a_new_type(workdir: Path) -> None:
     assert (second["calls"], second["rows"]) == (2, 2)
     assert second["q_class_is_point"]
     assert first["pod_pipeline_hash"] != second["pod_pipeline_hash"]
-    assert first["extension_name"].split("@")[0] == "Point"
-    assert second["extension_name"].split("@")[0] == "Point"
+    assert first["extension_name"].split("@")[0] == "__main__.Point"
+    assert second["extension_name"].split("@")[0] == "__main__.Point"
     assert first["extension_name"] != second["extension_name"]
     assert set(first["table_paths"]) < set(second["table_paths"])
 
@@ -326,14 +349,6 @@ def test_w4_module_reload_rebinds(workdir: Path) -> None:
     first, second = _runs(log)
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
     assert first["extension_name"].startswith("wsmodels.Point@")
-
-
-def test_main_class_notice_once(workdir: Path) -> None:
-    """The notebook-or-script class notice is given once and names the class."""
-    log = _kernel(workdir, ["setup", "define", "run", "define", "run"])
-    notices = [w for e in log for w in e["warnings"] if "notebook or script" in w]
-    assert len(notices) == 1
-    assert "'Point'" in notices[0]
 
 
 # ---------------------------------------------------------------------------
@@ -390,20 +405,18 @@ def test_w7_script_as_main_twice(workdir: Path) -> None:
     assert (first["calls"], second["calls"]) == (2, 0)
 
 
-def test_w8_script_then_import_hits_with_declared_name(workdir: Path) -> None:
-    """A declared name lets a module run as main and then imported share results."""
+def test_w8_script_then_import_hits_with_a_structural_class(workdir: Path) -> None:
+    """An ``op.dataclass`` in a module run as main and then imported shares results."""
     write_files(
         workdir,
         {
             "pkg/__init__.py": "",
             "pkg/pipeline.py": """
-                from dataclasses import dataclass
                 import orcapod as op
                 import wsjob
                 from child_harness import report
 
-                @op.register_type(name="Point")
-                @dataclass
+                @op.dataclass
                 class Point:
                     '''The scenario's ``Point`` class.'''
                     x: int
@@ -427,18 +440,16 @@ def test_w8_script_then_import_hits_with_declared_name(workdir: Path) -> None:
     assert first["node_identity_path"] == second["node_identity_path"]
 
 
-def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
-    """A class moved from a notebook into a module keeps its results under its name."""
+def test_w11_notebook_to_module_with_a_structural_class(workdir: Path) -> None:
+    """An ``op.dataclass`` moved from a notebook into a module keeps its results."""
     write_files(
         workdir,
         {
             "pkg/__init__.py": "",
             "pkg/models.py": """
-                from dataclasses import dataclass
                 import orcapod as op
 
-                @op.register_type(name="Point")
-                @dataclass
+                @op.dataclass
                 class Point:
                     '''The scenario's ``Point`` class.'''
                     x: int
@@ -446,7 +457,7 @@ def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
             """,
         },
     )
-    notebook = _runs(_kernel(workdir, ["setup", "define", "run"]))[0]
+    notebook = _runs(_kernel(workdir, ["setup", "define_s", "run"]))[0]
     module = _script(
         workdir,
         "import wsjob\nfrom child_harness import report\nfrom pkg.models import Point\n"
@@ -461,8 +472,8 @@ def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
     assert module["values"] == notebook["values"]
 
 
-def test_w11_module_without_declared_name_is_a_different_type(workdir: Path) -> None:
-    """A module class without a declared name is another type than the notebook's."""
+def test_w11_ordinary_module_class_is_a_different_type(workdir: Path) -> None:
+    """An ordinary class in a module is another type than the notebook's class."""
     notebook = _runs(_kernel(workdir, ["setup", "define", "run"]))[0]
     module = _runs(_kernel(workdir, ["setup", "import_mod", "run"]))[0]
     assert module["calls"] == 2
@@ -495,9 +506,9 @@ except Exception as exc:
 """
 
 
-def _store_from_notebook(workdir: Path) -> None:
+def _store_from_notebook(workdir: Path, define: str = "define") -> None:
     """Store results for the notebook ``Point`` class in the working store."""
-    _runs(_kernel(workdir, ["setup", "define", "run"]))
+    _runs(_kernel(workdir, ["setup", define, "run"]))
 
 
 def test_w12_read_notebook_results_from_script_with_same_class(workdir: Path) -> None:
@@ -510,18 +521,16 @@ def test_w12_read_notebook_results_from_script_with_same_class(workdir: Path) ->
     assert out["classes"] == ["__main__.Point"]
 
 
-def test_read_with_declared_class_from_a_module(workdir: Path) -> None:
-    """A module class declared under the stored name reads the stored values."""
-    _store_from_notebook(workdir)
+def test_read_with_a_structural_class_from_a_module(workdir: Path) -> None:
+    """A structural class of the stored name and fields in a module reads the values."""
+    _store_from_notebook(workdir, "define_s")
     write_files(
         workdir,
         {
             "geo.py": """
-                from dataclasses import dataclass
                 import orcapod as op
 
-                @op.register_type(name="Point")
-                @dataclass
+                @op.dataclass
                 class Point:
                     '''The scenario's ``Point`` class.'''
                     x: int
@@ -534,14 +543,43 @@ def test_read_with_declared_class_from_a_module(workdir: Path) -> None:
     assert out["classes"] == ["geo.Point"]
 
 
-def test_read_without_the_class_names_it_and_how_to_register(workdir: Path) -> None:
-    """A read without the class raises, naming it, its fields and ``register_type``."""
+def test_read_without_an_ordinary_class_names_it(workdir: Path) -> None:
+    """A read without the ordinary class raises, naming the column, class and fields."""
     _store_from_notebook(workdir)
     out = _script(workdir, READER.format(define=""))
     assert out["error"].startswith("ImportError: Column 'q'")
-    assert "'Point'" in out["message"]
-    assert "register_type" in out["message"]
+    assert "'__main__.Point'" in out["message"]
     assert "{x: int, y: int}" in out["message"]
+
+
+def test_read_without_a_structural_class_builds_it(workdir: Path) -> None:
+    """A read without the ``op.dataclass`` gives values of a class built from metadata."""
+    _store_from_notebook(workdir, "define_s")
+    out = _script(workdir, READER.format(define=""))
+    assert out.get("error") is None, out
+    assert out["values"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
+    assert out["classes"] == ["orcapod.synthesized.Point"]
+
+
+def test_ordinary_module_class_does_not_read_notebook_results(workdir: Path) -> None:
+    """An ordinary class with the same fields at another module path is not the type."""
+    _store_from_notebook(workdir)
+    write_files(
+        workdir,
+        {
+            "geo.py": """
+                from dataclasses import dataclass
+
+                @dataclass
+                class Point:
+                    '''The scenario's ``Point`` class.'''
+                    x: int
+                    y: int
+            """
+        },
+    )
+    out = _script(workdir, READER.format(define="import geo"))
+    assert out["error"].startswith("ImportError: Column 'q'"), out
 
 
 def test_read_with_different_fields_raises_naming_both_shapes(workdir: Path) -> None:
@@ -552,148 +590,3 @@ def test_read_with_different_fields_raises_naming_both_shapes(workdir: Path) -> 
     assert out["error"].startswith("TypeIdentityError: Column 'q'"), out
     assert "{x: int, y: int}" in out["message"]
     assert "{x: int, y: float}" in out["message"]
-
-
-def test_failed_read_leaves_the_class_free_to_be_declared(workdir: Path) -> None:
-    """A read that rejects a candidate class must not fix that class's name."""
-    _store_from_notebook(workdir)
-    write_files(
-        workdir,
-        {
-            "pkg/__init__.py": "",
-            "pkg/models.py": """
-                from dataclasses import dataclass
-
-                @dataclass
-                class Point:
-                    '''The scenario's ``Point`` class.'''
-                    x: int
-                    y: int
-            """,
-        },
-    )
-    code = """
-import os
-from pathlib import Path
-import orcapod as op
-from child_harness import error_text, report
-from orcapod.contexts import get_default_context
-from orcapod.databases import DeltaTableDatabase, ExtensionAwareDatabase
-import wsjob
-from pkg.models import Point
-
-root = Path(os.environ["WS_DB"])
-path = tuple(next(p for p in wsjob.table_paths(root) if "/_result/" in p).split("/"))
-converter = get_default_context().type_converter
-
-def read():
-    '''Read the stored result table and return its values as text.'''
-    db = ExtensionAwareDatabase(DeltaTableDatabase(root), converter=converter)
-    table = db.get_all_records(path)
-    return [repr(r["q"]) for r in converter.arrow_table_to_python_dicts(table.select(["q"]))]
-
-out = {}
-try:
-    read()
-except Exception as exc:
-    out["first"] = error_text(exc)
-    out["message"] = str(exc)
-op.register_type(Point, name="Point")
-out["second"] = sorted(read())
-report(out)
-"""
-    out = _script(workdir, code)
-    assert out["first"].startswith("TypeIdentityError"), out
-    assert "pkg.models.Point" in out["message"]
-    assert "op.register_type(<class>, name='Point')" in out["message"]
-    assert out["second"] == ["Point(x=10, y=11)", "Point(x=20, y=21)"]
-
-
-NESTED_WRITER = """
-from dataclasses import dataclass
-
-import wsjob
-from child_harness import report
-
-
-@dataclass
-class Inner:
-    '''The scenario's ``Inner`` class.'''
-    v: int
-
-
-@dataclass
-class Outer:
-    '''The scenario's ``Outer`` class.'''
-    inner: Inner
-
-
-report(wsjob.run_job(Outer, rows=[{"inner": Inner(1)}, {"inner": Inner(2)}]))
-"""
-
-NESTED_READER = """
-import os
-from pathlib import Path
-import orcapod as op
-from child_harness import error_text, report
-from orcapod.contexts import get_default_context
-from orcapod.databases import DeltaTableDatabase, ExtensionAwareDatabase
-import wsjob
-from pkg.models import Inner, Outer
-
-root = Path(os.environ["WS_DB"])
-path = tuple(next(p for p in wsjob.table_paths(root) if "/_result/" in p).split("/"))
-converter = get_default_context().type_converter
-
-def read():
-    '''Read the stored result table and return its values as text.'''
-    db = ExtensionAwareDatabase(DeltaTableDatabase(root), converter=converter)
-    table = db.get_all_records(path)
-    return [repr(r["q"]) for r in converter.arrow_table_to_python_dicts(table.select(["q"]))]
-
-out = {}
-try:
-    read()
-except Exception as exc:
-    out["first"] = error_text(exc)
-op.register_type(Inner, name="Inner")
-op.register_type(Outer, name="Outer")
-out["second"] = sorted(read())
-report(out)
-"""
-
-
-def test_failed_read_leaves_nested_classes_free_to_be_declared(workdir: Path) -> None:
-    """Testing a read candidate must not fix the names of its nested classes.
-
-    The stored ``Outer`` holds an ``Inner`` named ``Inner``. The reader's module classes
-    are not declared yet, so the first read rejects ``Outer``; declaring both classes
-    under their stored names afterwards must work in the same process.
-    """
-    stored = _script(workdir, NESTED_WRITER)
-    assert (stored["calls"], stored["rows"]) == (2, 2)
-    write_files(
-        workdir,
-        {
-            "pkg/__init__.py": "",
-            "pkg/models.py": """
-                from dataclasses import dataclass
-
-                @dataclass
-                class Inner:
-                    '''The scenario's ``Inner`` class.'''
-                    v: int
-
-                @dataclass
-                class Outer:
-                    '''The scenario's ``Outer`` class.'''
-                    inner: Inner
-            """,
-        },
-    )
-    out = _script(workdir, NESTED_READER)
-    assert out["first"].startswith("TypeIdentityError"), out
-    assert out["second"] == [
-        "Outer(inner=Inner(v=1))",
-        "Outer(inner=Inner(v=2))",
-    ]
