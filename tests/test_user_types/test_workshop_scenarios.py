@@ -68,23 +68,27 @@ class Point:
 
 @pytest.fixture
 def workdir(tmp_path: Path) -> Path:
+    """Return a working directory with the job modules and an empty ``db`` directory."""
     write_files(tmp_path, {"wsjob.py": WSJOB, "wsmodels.py": WSMODELS})
     (tmp_path / "db").mkdir()
     return tmp_path
 
 
 def _kernel(workdir: Path, cells: list[str]) -> list[dict[str, Any]]:
+    """Run ``cells`` in a fresh kernel process and return one log entry per cell."""
     code = f"SCENARIO = {cells!r}\n" + KERNEL
     return run_child(["-c", code], cwd=workdir, env={"WS_DB": str(workdir / "db")})
 
 
 def _runs(log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assert that no cell failed and return the log entries of the run cells."""
     errors = [e for e in log if "error" in e]
     assert not errors, errors
     return [e for e in log if e["cell"].startswith("run")]
 
 
 def _script(workdir: Path, code: str, **env: str) -> Any:
+    """Run ``code`` in a fresh process against the working store; return its report."""
     return run_child(
         ["-c", code], cwd=workdir, env={"WS_DB": str(workdir / "db"), **env}
     )
@@ -208,6 +212,7 @@ def test_subclass_identity_and_fields_do_not_depend_on_registration_order(
 
 
 def test_w1_rerun_define_cell_same_fields_rebinds(workdir: Path) -> None:
+    """Re-running the class cell unchanged reuses the stored results."""
     log = _kernel(workdir, ["setup", "define", "run", "define", "run"])
     first, second = _runs(log)
     assert (first["calls"], first["rows"]) == (2, 2)
@@ -226,6 +231,7 @@ def test_w1_old_pod_cell_with_redefined_class(workdir: Path) -> None:
 
 
 def test_w1_run_all_twice(workdir: Path) -> None:
+    """Running all cells a second time reuses the stored results."""
     log = _kernel(workdir, ["setup", "define", "pod", "run_pod"] * 2)
     first, second = _runs(log)
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
@@ -277,6 +283,7 @@ def test_class_redefined_with_an_added_field_is_a_new_type(workdir: Path) -> Non
 
 
 def test_w2_rerun_with_changed_fields_is_a_new_type(workdir: Path) -> None:
+    """Re-running with a changed field type gives a new type with its own tables."""
     log = _kernel(workdir, ["setup", "define", "run", "define_float", "run"])
     first, second = _runs(log)
     assert (second["calls"], second["rows"]) == (2, 2)
@@ -289,6 +296,7 @@ def test_w2_rerun_with_changed_fields_is_a_new_type(workdir: Path) -> None:
 
 
 def test_w3_pydantic_rerun_rebinds(workdir: Path) -> None:
+    """Re-running a pydantic class cell unchanged reuses the stored results."""
     log = _kernel(workdir, ["setup", "define_model", "run", "define_model", "run"])
     first, second = _runs(log)
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
@@ -297,6 +305,7 @@ def test_w3_pydantic_rerun_rebinds(workdir: Path) -> None:
 def test_dataclass_and_pydantic_with_same_name_and_fields_are_distinct(
     workdir: Path,
 ) -> None:
+    """A dataclass and a pydantic model with one name and fields are distinct types."""
     log = _kernel(workdir, ["setup", "define", "run", "define_model", "run"])
     first, second = _runs(log)
     assert second["calls"] == 2
@@ -305,6 +314,7 @@ def test_dataclass_and_pydantic_with_same_name_and_fields_are_distinct(
 
 
 def test_w4_module_reload_rebinds(workdir: Path) -> None:
+    """Reloading the class's module reuses the stored results."""
     log = _kernel(workdir, ["setup", "import_mod", "run", "reload_mod", "run"])
     first, second = _runs(log)
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
@@ -312,6 +322,7 @@ def test_w4_module_reload_rebinds(workdir: Path) -> None:
 
 
 def test_main_class_notice_once(workdir: Path) -> None:
+    """The notebook-or-script class notice is given once and names the class."""
     log = _kernel(workdir, ["setup", "define", "run", "define", "run"])
     notices = [w for e in log for w in e["warnings"] if "notebook or script" in w]
     assert len(notices) == 1
@@ -324,6 +335,7 @@ def test_main_class_notice_once(workdir: Path) -> None:
 
 
 def test_w5_restart_same_class_hits_cache(workdir: Path) -> None:
+    """The same class in a restarted kernel reuses the stored results."""
     first = _runs(_kernel(workdir, ["setup", "define", "run"]))[0]
     second = _runs(_kernel(workdir, ["setup", "define", "run"]))[0]
     assert (first["calls"], second["calls"], second["rows"]) == (2, 0, 2)
@@ -340,6 +352,7 @@ def test_w6_restart_with_changed_fields_recomputes(workdir: Path) -> None:
 
 
 def test_w7_script_as_main_twice(workdir: Path) -> None:
+    """A script run as a file and then with ``-m`` reuses the stored results."""
     write_files(
         workdir,
         {
@@ -369,6 +382,7 @@ def test_w7_script_as_main_twice(workdir: Path) -> None:
 
 
 def test_w8_script_then_import_hits_with_declared_name(workdir: Path) -> None:
+    """A declared name lets a module run as main and then imported share results."""
     write_files(
         workdir,
         {
@@ -436,6 +450,7 @@ def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
 
 
 def test_w11_module_without_declared_name_is_a_different_type(workdir: Path) -> None:
+    """A module class without a declared name is another type than the notebook's."""
     notebook = _runs(_kernel(workdir, ["setup", "define", "run"]))[0]
     module = _runs(_kernel(workdir, ["setup", "import_mod", "run"]))[0]
     assert module["calls"] == 2
@@ -469,10 +484,12 @@ except Exception as exc:
 
 
 def _store_from_notebook(workdir: Path) -> None:
+    """Store results for the notebook ``Point`` class in the working store."""
     _runs(_kernel(workdir, ["setup", "define", "run"]))
 
 
 def test_w12_read_notebook_results_from_script_with_same_class(workdir: Path) -> None:
+    """A script defining the same class reads the notebook's stored values."""
     _store_from_notebook(workdir)
     define = "from dataclasses import dataclass\n@dataclass\nclass Point:\n    x: int\n    y: int\n"
     out = _script(workdir, READER.format(define=define))
@@ -482,6 +499,7 @@ def test_w12_read_notebook_results_from_script_with_same_class(workdir: Path) ->
 
 
 def test_read_with_declared_class_from_a_module(workdir: Path) -> None:
+    """A module class declared under the stored name reads the stored values."""
     _store_from_notebook(workdir)
     write_files(
         workdir,
@@ -504,6 +522,7 @@ def test_read_with_declared_class_from_a_module(workdir: Path) -> None:
 
 
 def test_read_without_the_class_names_it_and_how_to_register(workdir: Path) -> None:
+    """A read without the class raises, naming it, its fields and ``register_type``."""
     _store_from_notebook(workdir)
     out = _script(workdir, READER.format(define=""))
     assert out["error"].startswith("ImportError: Column 'q'")
@@ -513,6 +532,7 @@ def test_read_without_the_class_names_it_and_how_to_register(workdir: Path) -> N
 
 
 def test_read_with_different_fields_raises_naming_both_shapes(workdir: Path) -> None:
+    """A read with a class of other fields raises, naming both shapes."""
     _store_from_notebook(workdir)
     define = "from dataclasses import dataclass\n@dataclass\nclass Point:\n    x: int\n    y: float\n"
     out = _script(workdir, READER.format(define=define))

@@ -103,6 +103,7 @@ from orcapod.sources import DictSource
 
 
 def table_paths(root):
+    """Return the sorted relative paths of the Delta tables under ``root``."""
     return sorted(
         str(p.parent.relative_to(root)) for p in Path(root).rglob("_delta_log") if p.is_dir()
     )
@@ -128,6 +129,7 @@ def make_pod(point_cls):
     calls = []
 
     def shift(p):
+        """Record the call and return ``p`` unchanged."""
         calls.append(p)
         return p
 

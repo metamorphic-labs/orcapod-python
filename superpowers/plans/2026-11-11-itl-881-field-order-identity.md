@@ -91,3 +91,9 @@ Full suite on 3.11, 3.12, 3.13 one at a time; ruff; basedpyright; push; CI; Code
 - Out of scope, to report: the semantic hasher expands a namedtuple with fields sorted by
   name (`semantic_hasher._expand_namedtuple`), so namedtuple field order does not enter its
   hash, although a namedtuple compares as an ordered tuple.
+- Second CodeRabbit round (plan approved by the coordinator): identity errors fatal under
+  `error_policy="continue"` in both orchestrators (own commit); `None` nested class on read;
+  stored record checked against its extension name; lazy candidate lookup; distinct scenario
+  values; test docstrings; spec example. Declined: stale read converter after rebinding (not
+  reproduced). Deferred: pydantic field alias fails on read (also on `main`).
+- Full suite after these: 7794 passed, 96 skipped, 20 xfailed on 3.11, 3.12 and 3.13.

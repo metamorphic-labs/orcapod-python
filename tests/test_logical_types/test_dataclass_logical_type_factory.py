@@ -727,8 +727,9 @@ def test_reconstruct_rejects_a_record_that_does_not_match_the_extension_name():
     # This test is about the factory's read entry point: an inconsistent stored
     # column cannot be produced through the public interface.
     metadata = _metadata(_Flat)
-    record = dict(metadata["identity"])  # pyright: ignore[reportCallIssue, reportArgumentType]  # the identity is a JSON object
-    record["fields"] = [["name", "str"], ["count", "str"]]
+    stored = metadata["identity"]
+    assert isinstance(stored, dict)
+    record = {**stored, "fields": [["name", "str"], ["count", "str"]]}
     storage = pa.struct(
         [pa.field("name", pa.large_string()), pa.field("count", pa.int64())]
     )

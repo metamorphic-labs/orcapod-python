@@ -94,7 +94,9 @@ class defined in a module, or the name declared with `op.register_type`.
   a run returned 0 rows with only log warnings.
 - **A stored shape that disagrees with the registered class raises.** `DeltaTableDatabase`
   raises the new `orcapod.errors.TypeIdentityError` as is. It is not a `StoreReadError`:
-  the table is intact and the class differs. Reading a column whose class cannot be found raises
+  the table is intact and the class differs. Like a store error, it fails the run under
+  every `error_policy`, with both orchestrators: a stored row that cannot be decoded is
+  never skipped as a failed row. Reading a column whose class cannot be found raises
   `ImportError` naming the column, the type and the `op.register_type` call to declare it.
 - **A subclass is its own type.** A dataclass or pydantic subclass was stored as its
   parent when the parent was registered first: its extra fields were silently dropped from
@@ -198,6 +200,12 @@ that raised. See *When the store cannot be written* in the function-pods guide. 
   against a `0.2.0` store.
 - `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
   have the same hashes (`predicates` is stored as a tuple).
+
+#### A nested class stored as `None` reads back (ITL-881)
+
+A dataclass or pydantic model with an optional nested class (`child: Inner | None`) that
+stored `None` raised `TypeError: 'NoneType' object is not subscriptable` when the value
+was read back. It now reads back as `None`.
 
 #### Stored dataclass and pydantic values stay readable after Delta compaction (ITL-881)
 

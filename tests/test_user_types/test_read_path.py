@@ -25,11 +25,14 @@ from orcapod.sources import DictSource
 @op.register_type(name="itl881.StoredPoint")
 @dataclasses.dataclass
 class StoredPoint:
+    """Declared under ``itl881.StoredPoint``."""
+
     x: int
     y: int
 
 
 def _extension_field_metadata() -> dict[bytes | str, bytes | str]:
+    """Return Arrow field metadata marking a column as a ``StoredPoint`` column."""
     value: Any = StoredPoint(1, 2)
     source = DictSource(data=[{"k": "a", "p": value}], tag_columns=["k"])
     ext = source.as_table().schema.field("p").type
@@ -40,6 +43,7 @@ def _extension_field_metadata() -> dict[bytes | str, bytes | str]:
 
 
 def test_storage_mismatch_raises_instead_of_reading_nothing(tmp_path: Path) -> None:
+    """A stored column whose storage differs from its class raises on read."""
     wrong = pa.struct([pa.field("x", pa.float64()), pa.field("y", pa.int64())])
     field = pa.field("q", wrong).with_metadata(_extension_field_metadata())
     table = pa.table(
@@ -55,17 +59,21 @@ def test_storage_mismatch_raises_instead_of_reading_nothing(tmp_path: Path) -> N
 @op.register_type(name="itl881.Labelled")
 @dataclasses.dataclass
 class Labelled:
+    """Declared under ``itl881.Labelled``; has a string field."""
+
     label: str
     n: int
 
 
 def _run_labelled(db_root: Path) -> tuple[int, list[Labelled]]:
+    """Run an echo pod over two ``Labelled`` rows; return the call count and values."""
     from orcapod import PipelineJob, function_pod
 
     calls: list[Labelled] = []
 
     @function_pod(output_keys="q")
     def echo(p: Labelled) -> Labelled:
+        """Record the call and return ``p`` unchanged."""
         calls.append(p)
         return p
 

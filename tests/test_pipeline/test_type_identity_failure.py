@@ -28,6 +28,8 @@ from orcapod.pipeline import PipelineJob
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
+Orchestrator = SyncPipelineOrchestrator | AsyncPipelineOrchestrator
+
 _CALLS: list[int] = []
 
 
@@ -47,7 +49,7 @@ def pair(x: int) -> Pair:
     return Pair(x, x)
 
 
-ORCHESTRATORS: dict[str, Callable[[], object]] = {
+ORCHESTRATORS: dict[str, Callable[[], Orchestrator]] = {
     "sync": lambda: SyncPipelineOrchestrator(error_policy="continue"),
     "async": lambda: AsyncPipelineOrchestrator(error_policy="continue"),
 }
@@ -62,7 +64,7 @@ def _reset_calls():
 
 
 @pytest.fixture(params=list(ORCHESTRATORS))
-def make_orchestrator(request: pytest.FixtureRequest) -> Callable[[], object]:
+def make_orchestrator(request: pytest.FixtureRequest) -> Callable[[], Orchestrator]:
     """Return a factory for the parametrized orchestrator (``continue`` policy)."""
     return ORCHESTRATORS[request.param]
 
@@ -121,7 +123,7 @@ def store_another_shape(result_table: Path) -> None:
 
 
 @pytest.fixture
-def stored(tmp_path: Path, make_orchestrator: Callable[[], object]) -> Path:
+def stored(tmp_path: Path, make_orchestrator: Callable[[], Orchestrator]) -> Path:
     """A store in which the job has computed and stored all three rows."""
     store_path = tmp_path / "store"
     build_job(store_path).run(orchestrator=make_orchestrator())
@@ -131,7 +133,7 @@ def stored(tmp_path: Path, make_orchestrator: Callable[[], object]) -> Path:
 
 
 def test_other_stored_shape_fails_the_run(
-    stored: Path, make_orchestrator: Callable[[], object]
+    stored: Path, make_orchestrator: Callable[[], Orchestrator]
 ) -> None:
     """A result table holding another shape fails the run before any function call."""
     result_table, _ = table_dirs(stored)
@@ -145,7 +147,7 @@ def test_other_stored_shape_fails_the_run(
 
 
 def test_other_stored_shape_fails_the_run_in_the_per_row_lookup(
-    stored: Path, make_orchestrator: Callable[[], object]
+    stored: Path, make_orchestrator: Callable[[], Orchestrator]
 ) -> None:
     """The per-row lookup's identity error fails the run under ``continue``."""
     # With the pipeline table gone, the first read of the result table is the per-row
