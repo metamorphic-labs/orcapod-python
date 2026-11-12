@@ -33,6 +33,7 @@ from orcapod.databases import DeltaTableDatabase
 from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.hashing.semantic_hashing.builtin_handlers import GenericAliasHandler
+from orcapod.hashing.semantic_hashing.encoded import Encoded
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
@@ -528,17 +529,18 @@ def test_native_container_hashes_like_any_generic_alias_in_the_schema_hash(
 ) -> None:
     """In the type hash a native container is its origin and arguments, like ``list[int]``."""
     context = get_default_context()
-    handled = GenericAliasHandler().handle(annotation, context.semantic_hasher)
-    assert handled == {
-        "__type__": "generic_alias",
-        "origin": context.semantic_hasher.hash_object(
-            typing.get_origin(annotation)
-        ).to_string(),
-        "args": [
-            context.semantic_hasher.hash_object(arg).to_string()
-            for arg in typing.get_args(annotation)
-        ],
-    }
-    assert context.semantic_hasher.hash_object(
-        annotation
-    ) == context.semantic_hasher.hash_object(handled)
+    hasher = context.semantic_hasher
+    handled = GenericAliasHandler().handle(annotation, hasher)
+    # The handler returns the hasher's tagged form (ITL-942) holding the nested
+    # hashes themselves, which enter the parent as digests without a label (ITL-945).
+    assert handled == Encoded(
+        "generic_alias",
+        {
+            "origin": hasher.hash_object(typing.get_origin(annotation)),
+            "args": [hasher.hash_object(arg) for arg in typing.get_args(annotation)],
+        },
+    )
+    # Exactly the form of a container of a plain type: no member for a version.
+    plain = GenericAliasHandler().handle(list[int], hasher)
+    assert isinstance(plain, Encoded)
+    assert (handled.tag, sorted(handled.fields)) == (plain.tag, sorted(plain.fields))
