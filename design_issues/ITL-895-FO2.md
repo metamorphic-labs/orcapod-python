@@ -1,7 +1,7 @@
 ## `src/orcapod/core/data_function.py` — returned values not checked against the declared type
 
 ### FO2 — Inputs built from Python values are not checked against their declared types
-**Status:** open (deferred)
+**Status:** open
 **Severity:** medium
 **Issue:** ITL-895
 

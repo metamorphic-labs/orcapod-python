@@ -188,6 +188,8 @@ The function-output rule is: the returned value must be an instance of the decla
 | `float` | NumPy floating scalar wider than 64 bits | rejected: explicitly return `float(value)` |
 | `list[T]` | tuple, NumPy array, range, deque, dict view, or iterator | rejected: return `list(value)` |
 | `list[T]` | set or frozenset | rejected: return `sorted(value)` for deterministic order |
+| `dict[K, V]` | another mapping, such as `MappingProxyType` or `UserDict` | rejected: return `dict(value)` |
+| `Literal[...]` | a value that is not a member, or equals one with another type (`True`, `1.0` or `numpy.int64(1)` for `Literal[1]`) | rejected: a `Literal` names exact values, so no numeric exception applies |
 | `date` | `datetime` | accepted as a Python subclass; storage keeps the date only |
 | `int` | `bool` | accepted as a Python subclass; stored as an integer |
 | `int` | float, Decimal, Fraction | rejected; choose an explicit conversion |
@@ -213,8 +215,20 @@ existing registry binding. A `Sub` returned for `Base` reaches the next in-memor
 as that same `Sub` object. The stored column is `Base`: subclass-only fields are not
 stored and do not enter the row hash. Two such values differing only in those extra
 fields therefore have the same stored row hash. Likewise, a `datetime` declared as
-`date` is passed on unchanged in memory, but storage contains only its date. No warning-and-convert path remains for
-function outputs. Make container conversions explicit:
+`date` is passed on unchanged in memory, but storage contains only its date.
+
+A consequence to know: the declared type's logical type decides what is stored, so a
+function should read only what its declared parameter type has. A function that reads a
+field its declared parameter type does not have (a subclass-only field, or the time of a
+`datetime` declared as `date`) gets results that depend on the execution path: standalone
+streams and the asynchronous orchestrator pass the in-memory object, while the synchronous
+orchestrator and any later read pass the stored base value. Such results can also be reused
+across values, because two values that differ only in what is not stored have the same row
+hash and the second is served the first one's stored result. This follows from Python
+subclassing and is left as it is (ITL-978).
+
+No warning-and-convert path remains for function outputs. Make container conversions
+explicit:
 
 ```python
 @function_pod(output_keys="weights")

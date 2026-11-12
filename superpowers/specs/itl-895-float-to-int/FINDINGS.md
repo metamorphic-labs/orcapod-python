@@ -224,7 +224,10 @@ inference produces a union. `FunctionNode.as_table` passes the declared schema
   `iter_data()`), and flag rows whose returned value is not exactly the declared type as
   candidates. Some candidates were stored correctly (a same-kind NumPy scalar, for example),
   so review each candidate's stored value and its conversion before deciding whether
-  information was lost. `07` does this and finds exactly the two odd-input rows. For `None` outputs on an in-memory store,
+  information was lost. `07` does this and finds exactly the two odd-input rows. This method
+  needs a function that reproduces its historical outputs: if the function depends on time,
+  randomness or external state it can now return a conforming value for an input whose
+  stored row was truncated, so the check cannot reliably find every affected row. For `None` outputs on an in-memory store,
   the node fails to read at all; Delta never stored them.
 - Downstream rows computed from such a value can also be wrong (z=15 vs z=10 above). They
   need the same check one level down.

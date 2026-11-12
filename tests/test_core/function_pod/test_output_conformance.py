@@ -20,12 +20,13 @@ from __future__ import annotations
 import collections
 import datetime as dt
 import enum
+import types
 import warnings
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import pytest
@@ -875,3 +876,139 @@ def test_inferred_source_uses_value_class() -> None:
     table = source.as_table()
     assert table.schema.field("y").type.storage_type.names == ["count", "extra"]
     assert type(Data(table.select(["y"])).as_dict()["y"]) is ExtendedReading
+
+
+class TestDeclaredDict:
+    """A declared ``dict`` takes a ``dict`` instance; other mappings are unrelated types."""
+
+    @pytest.mark.parametrize(
+        ("returned", "type_name"),
+        [
+            pytest.param(types.MappingProxyType({"a": 1}), "mappingproxy", id="proxy"),
+            pytest.param(collections.UserDict(a=1), "UserDict", id="user-dict"),
+        ],
+    )
+    def test_non_dict_mapping_is_rejected(self, returned: Any, type_name: str) -> None:
+        """A mapping that is not a ``dict`` needs an explicit ``dict(value)``."""
+        pod = make_pod(dict[str, int], returned)
+        with pytest.raises(errors.OutputTypeError) as info:
+            list(pod.pod(make_source()).iter_data())
+        assert type_name in str(info.value)
+
+    def test_dict_subclass_is_accepted(self) -> None:
+        """A ``dict`` subclass stands in for ``dict``."""
+        pod = make_pod(dict[str, int], collections.OrderedDict(a=1))
+        [(_, data)] = list(pod.pod(make_source()).iter_data())
+        assert data.as_dict()["y"] == {"a": 1}
+
+
+class TestDeclaredLiteral:
+    """A declared ``Literal`` takes exactly its members: same type and same value."""
+
+    @pytest.mark.parametrize(
+        ("declared", "returned", "type_name"),
+        [
+            pytest.param(Literal[1], 1.5, "float", id="float-for-int-member"),
+            pytest.param(Literal[1], 2, "int", id="other-int"),
+            pytest.param(Literal["yes"], "no", "str", id="other-str"),
+            pytest.param(Literal[1], True, "bool", id="bool-equal-to-member"),
+            pytest.param(Literal[1], np.int64(1), "int64", id="numpy-equal-to-member"),
+            pytest.param(Literal["yes"], 3, "int", id="other-type"),
+            pytest.param(Literal["yes"], None, "NoneType", id="none-not-a-member"),
+            pytest.param(list[Literal["yes"]], ["yes", "no"], "str", id="nested"),
+        ],
+    )
+    def test_non_member_is_rejected(
+        self, declared: Any, returned: Any, type_name: str
+    ) -> None:
+        """A value outside the members raises, naming the returned type."""
+        pod = make_pod(declared, returned, name="literal_fn")
+        with pytest.raises(errors.OutputTypeError) as info:
+            list(pod.pod(make_source()).iter_data())
+        message = str(info.value)
+        assert "'literal_fn'" in message
+        assert type_name in message
+        assert "ArrowTypeError" not in message
+
+    @pytest.mark.parametrize(
+        ("declared", "returned"),
+        [
+            pytest.param(Literal["yes"], "yes", id="str-member"),
+            pytest.param(Literal[1, 2], 2, id="int-member"),
+            pytest.param(Literal["yes", None], None, id="none-member"),
+            pytest.param(Literal["yes", None], "yes", id="member-beside-none"),
+        ],
+    )
+    def test_member_is_accepted(self, declared: Any, returned: Any) -> None:
+        """A member is passed on unchanged."""
+        pod = make_pod(declared, returned)
+        [(_, data)] = list(pod.pod(make_source()).iter_data())
+        assert data.as_dict()["y"] == returned
+        assert type(data.as_dict()["y"]) is type(returned)
+
+    @pytest.mark.parametrize("orchestrator_cls", ORCHESTRATORS)
+    def test_non_member_is_never_stored(self, orchestrator_cls: Any) -> None:
+        """``1.5`` for ``Literal[1]`` is a row failure, not a stored ``1``."""
+        job = PipelineJob(name="literal", store=InMemoryArrowDatabase())
+        with job:
+            make_pod(Literal[1], 1.5).pod(make_source(), label="node")
+        job.run(orchestrator=orchestrator_cls())
+        table = job.nodes["node"].get_all_records()
+        assert table is None or table.num_rows == 0
+
+
+@function_pod(output_keys="y")
+def make_extended_reading(x: int) -> Reading:
+    """Declared ``Reading``; returns a subclass whose extra field varies with the input."""
+    return ExtendedReading(1, x)
+
+
+@function_pod(output_keys="z")
+def read_extra_field(y: Reading) -> int:
+    """Reads a field its declared parameter type does not have."""
+    return getattr(y, "extra", -1)
+
+
+class TestSubclassOnlyFieldsDownstream:
+    """Baseline for ITL-978 (design issue ITL-895-FO3): today's behaviour when a downstream
+    function reads a subclass-only field. The row hash covers the declared base fields only, so the
+    result depends on the execution path and is reused across values. These tests pin what
+    happens now; they do not state what should happen."""
+
+    @staticmethod
+    def _run(store: Any, xs: tuple[int, ...], orchestrator_cls: Any) -> dict[str, int]:
+        job = PipelineJob(name="extra", store=store)
+        with job:
+            made = make_extended_reading.pod(make_source(xs), label="make")
+            read_extra_field.pod(made, label="down")
+        job.run(orchestrator=orchestrator_cls())
+        table = job.nodes["down"].get_all_records()
+        assert table is not None
+        return {row["k"]: row["z"] for row in table.select(["k", "z"]).to_pylist()}
+
+    def test_standalone_passes_the_subclass_object(self) -> None:
+        """In memory the downstream function receives each subclass object."""
+        stream = read_extra_field.pod(make_extended_reading.pod(make_source((20, 99))))
+        rows = {
+            tag.as_dict()["k"]: data.as_dict()["z"] for tag, data in stream.iter_data()
+        }
+        assert rows == {"r20": 20, "r99": 99}
+
+    def test_sync_orchestrator_passes_the_stored_base(self) -> None:
+        """The sync orchestrator hands on the stored ``Reading``: no extra field."""
+        rows = self._run(InMemoryArrowDatabase(), (20, 99), SyncPipelineOrchestrator)
+        assert rows == {"r20": -1, "r99": -1}
+
+    def test_async_orchestrator_passes_the_subclass_object(self) -> None:
+        """The async orchestrator hands on the in-memory subclass object."""
+        rows = self._run(InMemoryArrowDatabase(), (20, 99), AsyncPipelineOrchestrator)
+        assert rows == {"r20": 20, "r99": 99}
+
+    @pytest.mark.parametrize("second_cls", ORCHESTRATORS)
+    def test_second_run_reuses_the_result_of_another_value(
+        self, second_cls: Any
+    ) -> None:
+        """A later row whose base fields match is served the first row's result."""
+        store = InMemoryArrowDatabase()
+        assert self._run(store, (20,), AsyncPipelineOrchestrator) == {"r20": 20}
+        assert self._run(store, (20, 99), second_cls) == {"r20": 20, "r99": 20}

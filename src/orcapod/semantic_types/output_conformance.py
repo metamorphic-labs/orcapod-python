@@ -157,6 +157,14 @@ class _Checker:
             if len(non_none) == 1:
                 return self.check(value, non_none[0])
             return None  # unsupported complex unions are rejected by the converter
+        if origin is typing.Literal:
+            # A Literal names exact values: a member matches by type and value, so
+            # True is not 1 and no numeric exception applies.
+            if any(type(value) is type(member) and value == member for member in args):
+                return None
+            return Nonconformance(
+                "", declared, value, "Return one of the declared literal values"
+            )
         if value is None:
             return self.near(NearMiss.NONE_FOR_NON_OPTIONAL, value, declared)
         array_type = _declared_ndarray_type(declared)
@@ -200,8 +208,10 @@ class _Checker:
                     return _at(mismatch, f"[{index}]")
             return None
         if origin is dict:
-            if not isinstance(value, Mapping):
-                return Nonconformance("", declared, value)
+            if not isinstance(value, dict):
+                return Nonconformance(
+                    "", declared, value, "Return a dict instead: dict(value)"
+                )
             key_type, value_type = args if len(args) == 2 else (object, object)
             for key, item in value.items():
                 mismatch = _at(self.check(key, key_type), ".keys()") or _at(
@@ -325,7 +335,7 @@ def normalize_output_numbers(value: object, declared: object) -> object:
         return float(typing.cast(typing.SupportsFloat, value))
     if origin is list and isinstance(value, list):
         return [normalize_output_numbers(item, args[0]) for item in value]
-    if origin is dict and isinstance(value, Mapping):
+    if origin is dict and isinstance(value, dict):
         return {
             normalize_output_numbers(key, args[0]): normalize_output_numbers(
                 item, args[1]
