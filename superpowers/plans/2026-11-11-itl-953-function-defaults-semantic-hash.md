@@ -17,15 +17,23 @@ hasher's `TypeError` with the parameter and function names; both hash sites call
 to be created FROM `origin/eywalker/itl-967-v03-hash-step-combine-the-hash-changing` once the
 coordinator says the six merges are in. PR against `main`, "Stacked on the ITL-967 pull request".
 
-**Status (November 12, 2026):** implemented on the issue branch as decided below; docs,
-changelog fragment, design-issue file, golden CASES (code) written. **Left:** (1) ITL-967 has
-not regenerated its golden files yet (711 tests fail on its tip `6ba6cc33` without my change):
-wait for that, merge the ITL-967 branch (no rebase), then regenerate
-`tests/test_hashing/golden/data/*.json` and `tests/test_hashing/golden_values` of
-`generate_type_annotation_golden.py`, update the hand-pinned values in
-`test_canonical_type_names.py`, and list every entry moved or added; (2) D3 answer from the
-developer (kept as "raise"); (3) full checks, PR "Stacked on the ITL-967 pull request",
-CodeRabbit round, `worker_done`.
+**Status (November 12, 2026):** complete, PR opened against `main`, stacked on ITL-967.
+Merged ITL-967 at `c4b1e4a7` (all six hash-step branches, main with #316, its golden
+regeneration). Relative to `c4b1e4a7`:
+
+- golden files `tests/test_hashing/golden/data`: 0 changed, 0 removed, 5 added
+  (`semantic:function.value.{plain,defaults,kinds}`,
+  `semantic:function.stored_signature.{ratio,scaled}`); a regeneration on the merged head
+  gives no diff;
+- re-pinned by hand: `test_canonical_type_names.py`
+  (`test_function_object_hash`, `test_function_signature_hash`) and the two
+  builtin-annotation functions in `hash_samples/type_annotation_golden.json` (a deliberate
+  pre-fix snapshot, so not regenerated wholesale);
+- checks on the merged head: `uv run pytest tests/` 8608 passed, 101 skipped, 18 xfailed,
+  0 failed (3.12; 3.11 and 3.13 were green at the previous merge, 8593 passed each); ruff
+  check and format clean; basedpyright exit 0; changelog fragments OK.
+
+**Left:** CI and the CodeRabbit round on the PR; `worker_done`.
 
 **Decisions that supersede the text further down:**
 
