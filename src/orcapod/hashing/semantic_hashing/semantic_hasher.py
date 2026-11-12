@@ -43,7 +43,8 @@ are wrapped in a ``{"__type__": ..., ...}`` tagged object so that
 structurally similar but type-distinct containers produce different hashes:
 
   list       → [...]                                        # native JSON array
-  dict       → {...}                                        # native JSON object; keys sorted
+  dict       → {...}                                        # str keys: native JSON object, keys sorted
+  dict       → {"__type__": "dict",      "items": [[k, v], ...]}  # any other key; sorted pairs
   tuple      → {"__type__": "tuple",     "items": [...]}
   set        → {"__type__": "set",       "items": [...]}   # items sorted by canonical JSON
   frozenset  → {"__type__": "set",       "items": [...]}   # same tag as set
@@ -322,13 +323,26 @@ class SemanticAwarePythonHasher:
         _visited: frozenset[int],
         resolver: Callable[[Any], ContentHash] | None = None,
     ) -> dict:
-        """Expand a dict/Mapping into a sorted native JSON object."""
-        items: dict[str, Any] = {}
-        for k, v in obj.items():
-            str_key = str(self._expand_element(k, _visited, resolver=resolver))
-            items[str_key] = self._expand_element(v, _visited, resolver=resolver)
-        # Sort for determinism regardless of insertion order.
-        return dict(sorted(items.items()))
+        """Expand a dict/Mapping into a JSON tree that keeps its keys' types.
+
+        A mapping whose keys are all ``str`` becomes a native JSON object (type
+        handlers rely on this for their own ``{"__type__": ...}`` trees). Any other
+        mapping becomes ``{"__type__": "dict", "items": [[key, value], ...]}``, so
+        ``{1: "x"}`` and ``{"1": "x"}`` differ and keys that share a ``str()``
+        never collapse into one (ITL-942). Insertion order never matters: object
+        keys are sorted by the serialiser, pairs by their canonical JSON text.
+        """
+        expanded = [
+            (
+                self._expand_element(k, _visited, resolver=resolver),
+                self._expand_element(v, _visited, resolver=resolver),
+            )
+            for k, v in obj.items()
+        ]
+        if all(isinstance(k, str) for k in obj):
+            return dict(expanded)
+        pairs = sorted(([k, v] for k, v in expanded), key=_canonical_json)
+        return {"__type__": "dict", "items": pairs}
 
     def _expand_namedtuple(
         self,

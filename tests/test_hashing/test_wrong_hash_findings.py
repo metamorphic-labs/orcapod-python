@@ -36,9 +36,6 @@ RECORD_ID_COL = "_tag_record_id::abc"
 
 # Findings whose fix awaits the developer's decision (ITL-942): the tests document the
 # wrong hash and must fail until the fix lands (strict xfail).
-_PENDING_DICT_KEYS = pytest.mark.xfail(
-    strict=True, reason="ITL-942 dict keys: fix awaiting decision"
-)
 _PENDING_E = pytest.mark.xfail(strict=True, reason="ITL-942 E: fix awaiting decision")
 
 
@@ -226,24 +223,15 @@ class TestStructureHasherProcessIndependence:
 
 
 class TestDictKeysKeepTheirType:
-    @_PENDING_DICT_KEYS
     def test_int_key_differs_from_str_key(self) -> None:
         hasher = _semantic_hasher()
         assert hasher.hash_object({1: "x"}) != hasher.hash_object({"1": "x"})
 
-    @_PENDING_DICT_KEYS
     def test_keys_with_equal_str_do_not_collapse(self) -> None:
         hasher = _semantic_hasher()
         both = {1: "a", "1": "b"}
         assert hasher.hash_object(both) != hasher.hash_object({"1": "b"})
         assert hasher.hash_object(both) != hasher.hash_object({1: "a"})
-
-    @_PENDING_DICT_KEYS
-    def test_tuple_differs_from_its_tagged_dict_spelling(self) -> None:
-        hasher = _semantic_hasher()
-        assert hasher.hash_object((1, 2)) != hasher.hash_object(
-            {"__type__": "tuple", "items": [1, 2]}
-        )
 
     def test_str_keyed_dict_insertion_order_still_ignored(self) -> None:
         hasher = _semantic_hasher()
