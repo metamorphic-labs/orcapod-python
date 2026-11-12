@@ -17,7 +17,7 @@ from orcapod.contexts import get_default_context
 from orcapod.core.operators import Join
 
 # Non-public on purpose: the label constant itself is under test.
-from orcapod.hashing.versioned_hashers import _CURRENT_ARROW_HASHER_ID
+from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
 from orcapod.sources import ArrowTableSource
 from orcapod.types import ContentHash
 
@@ -55,7 +55,7 @@ def _non_nullable(name: str, column: pa.Array[Any]) -> pa.Table:
 
 class TestLabel:
     def test_current_arrow_label_is_arrow_v0_2(self):
-        assert _CURRENT_ARROW_HASHER_ID == "arrow_v1"
+        assert ARROW_HASH_LABEL == "arrow_v1"
 
     def test_default_context_uses_arrow_v0_2(self):
         assert get_default_context().arrow_hasher.hasher_id == "arrow_v1"

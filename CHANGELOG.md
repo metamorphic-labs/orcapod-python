@@ -53,7 +53,7 @@ readable with v0.2. A migration is planned after v0.3 (ITL-889).
 #### Arrow hashing moves to starfix hash format 2: every Arrow-derived hash changes (ITL-910)
 
 **Orcapod now requires `starfix>=0.5.0,<0.6`, and the Arrow hash label moves from `arrow_v0.1`
-to `arrow_v0.2`.** starfix 0.4 (hash format 1) lost information for some inputs, so different
+to `arrow_v1`.** starfix 0.4 (hash format 1) lost information for some inputs, so different
 data could hash the same (ITL-848): the lengths of nested lists (`[[[1]], [[2], [3]]]` and
 `[[[1], [2]], [[3]]]`), a null struct and a struct whose fields are all null, and Boolean
 columns, whose hash also depended on how the table was split into chunks. starfix 0.5 (hash
@@ -63,27 +63,28 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   `source_id`s and the `record_id`s and source content hashes built from them, function
   input-data hashes, pipeline base and entry ids, operator and cached-source record hashes,
   invocation hashes, and the hashes of `pa.Table`, pandas `DataFrame` and `Series` values. The
-  hash label in front of each (`arrow_v0.2:000002...`) shows the new format. Pipeline hashes,
+  hash label in front of each (`arrow_v1:000002...`) shows the new format. Pipeline hashes,
   schema hashes, system-tag column names and table paths under the default
-  `table_scope="pipeline_hash"` do not move. Paths that embed a content hash
+  `table_scope="pipeline_hash"` do not move for this reason; they move in v0.3 because of
+  the hash label rule (ITL-945, below). Paths that embed a content hash
   (`table_scope="content_hash"`, `CachedSource` tables) move with it. Where a `GroupBy` or
   `Batch` orders members by `record_id`, the order of members can change too.
 - **Results stored by 0.2.0 are ignored and computed again; they are not reused, changed or
   deleted.** Rows a v0.2 store holds are keyed under `arrow_v0.1` and can never match v0.3
   inputs. v0.3 does not refuse such a store. A value-only change does not move a table, so a
-  v0.3 job writes its `arrow_v0.2` rows into the same tables, next to the `arrow_v0.1` rows,
+  v0.3 job writes its `arrow_v1` rows into the same tables, next to the `arrow_v0.1` rows,
   and uses rows of its own label only:
   - The first v0.3 run on a v0.2 store **computes every input again**. Nothing stored by v0.2
     counts as a cached result, also for functions and data that did not change.
   - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, also on a
     job loaded from a file, including a file saved by v0.2), `get_all_cached_outputs()` of a
     cached function, a stored (`LOG` / `REPLAY`) operator node and a `CachedSource` return
-    rows hashed under `arrow_v0.2` only. Before the first v0.3 run, such a read on a v0.2
+    rows hashed under `arrow_v1` only. Before the first v0.3 run, such a read on a v0.2
     store returns no rows; after it, one row per input, never the v0.2 rows as well.
   - The v0.2 rows stay where they are, byte for byte, and stay readable with v0.2. Each
-    stored key names its label (`arrow_v0.1:000001...` or `arrow_v0.2:000002...`), and
+    stored key names its label (`arrow_v0.1:000001...` or `arrow_v1:000002...`), and
     `orcapod.hashing.stored_hash_labels.stored_hash_labels(store, record_path)` counts the
-    rows of a table by label, for example `{"arrow_v0.1": 3, "arrow_v0.2": 3}`.
+    rows of a table by label, for example `{"arrow_v0.1": 3, "arrow_v1": 3}`.
   - When a read leaves out rows of another label, Orcapod logs one warning per table and
     reader with the total, on the logger `orcapod.hashing.stored_hash_labels`:
     `Skipped 3 rows of stored table 'my_job/.../pdb_v1': written under another hash label
@@ -102,7 +103,7 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   **Migration:** none is needed to run the function, operator and source nodes of a v0.2
   store under v0.3, at the price of computing everything again and of tables that hold both
   generations; side-effect nodes need a fresh store. A tool that converts
-  `arrow_v0.1` rows into `arrow_v0.2` rows is planned (ITL-913, ITL-914); until then the old
+  `arrow_v0.1` rows into `arrow_v1` rows is planned (ITL-913, ITL-914); until then the old
   rows are kept for it. Operator-node and cached-source tables store their record hashes
   without a label; there the rows of v0.2 are told apart by the starfix hash format at the
   start of each record hash (`000001` for v0.2, `000002` for v0.3). That is exact for these
@@ -123,6 +124,54 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   interval, `string_view` and `binary_view` columns, union and run-end-encoded types are
   still refused, now with `ValueError` instead of `NotImplementedError`.
 - Column order and struct field order are still not part of an Arrow hash.
+
+#### Hash label rule: labels renamed, out of hash inputs, bare digests inside names (ITL-945)
+
+**Every structure hash, every table path and every key moves in v0.3.** One rule now holds
+for every hash label (developer, November 11, 2026; `docs/reference/hashing.md`, "The hash
+label rule"):
+
+- **Labels are renamed to `<algorithm>_v1`.** `semantic_v0.1` becomes `semantic_v1`, the Arrow
+  label is `arrow_v1` (it was `arrow_v0.1` in v0.2), `merkle_sha256` becomes `directory_v1`;
+  `ndarray_v1` and `polars_expr_v1` keep their names; the file content hash keeps `sha256`.
+  A label names the algorithm that produced a digest and changes only when that algorithm
+  would give an existing input a different digest.
+- **A label never enters a hash computation.** A nested hash now contributes its digest only:
+  as `{"__type__": "hash", "digest": "<hex>"}` inside a structure hash, as
+  `b"<extension name>::" + digest` for an extension-typed cell inside an Arrow hash, and as the
+  raw digest in the entry-id and operator-node record-hash preimages and in the run snapshot
+  hash. Renaming a label later changes no digest. Until now `"<label>:<hex>"` was hashed, so
+  this moves every `content_hash()` and `pipeline_hash()` whose structure holds a nested hash
+  (types, schemas, pods, streams), every schema hash and so every system-tag column name,
+  every Arrow hash over a logical-type cell, every pipeline base and entry id, and the run URI.
+- **Hashes inside names are bare hex digests.** The function `uri` (its second component), the
+  path components `schema:`, `instance:` and `node:`, the default `source_id` of a
+  `DerivedSource` and the slot name of a `SourceNode` built from a stream no longer hold a
+  label. A v0.3 function table is at
+  `<job>/<function>/<64 hex>/v<major>/python.function.v0/schema:<64 hex>/pdb_v1`.
+  `data_function.uri[1]` and `output_data_schema_hash` return the bare digest.
+- **Hashes stored as values carry their label**, now including the record id (`_record_hash`)
+  of operator-node and cached-source tables: `b"arrow_v1:" + digest` instead of hex text.
+- **A producer-less `ArrowTableStream`** no longer hashes its derived `_content_hash` column
+  into its content hash (the column's values carry the Arrow label).
+- **`BasicDirectoryHasher(algorithm=...)`** raises `ValueError` for any algorithm but
+  `"sha256"`: `directory_v1` names the SHA-256 procedure.
+- **Each label is defined once, in code**: `SEMANTIC_HASH_LABEL`, `ARROW_HASH_LABEL`,
+  `DIRECTORY_HASH_LABEL`, `NumpyArrayHandler.HASH_LABEL`, `POLARS_EXPR_HASH_LABEL`. The data
+  context file no longer carries `hasher_id`; `hasher_id` remains a constructor argument of
+  `SemanticAwarePythonHasher` and `StarfixArrowHasher` and defaults to the label.
+- **Unchanged:** `ContentHash` and all its methods (`to_string`, `to_hex`,
+  `to_prefixed_digest`, `from_string`, `from_prefixed_digest`); the digests of plain Arrow
+  tables and schemas, of flat structures of primitives, and of ndarray, Polars expression,
+  file and directory values (their label text changes, their digest does not);
+  `InvocationContext.invocation_hash`, which keeps its `<label>:<hex>::<label>:<hex>` shape
+  with the new label names; record ids.
+- **Migration.** None is needed beyond the v0.3 step already described: a store written by
+  v0.2 is an older generation whose rows v0.3 does not use. Function, operator and
+  cached-source tables are at new paths, so their v0.2 tables are left untouched. Code that
+  compared `uri[1]` or a path component with `content_hash().to_string()` must compare with
+  `to_hex()`. A job file saved by v0.2 holds the old labels and paths; loaded by
+  v0.3, its nodes point at no v0.3 table and show no rows.
 
 #### A changed column type is refused when appending to a Delta table (ITL-884)
 
@@ -163,7 +212,7 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   `current_label` and `node_label`. (ITL-910)
 - **`orcapod.hashing.stored_hash_labels.stored_hash_labels(database, record_path)`** — counts
   the rows of a stored table by the Arrow hash label they were hashed under, to tell rows
-  written by v0.2 (`arrow_v0.1`) from rows written by v0.3 (`arrow_v0.2`). (ITL-910)
+  written by v0.2 (`arrow_v0.1`) from rows written by v0.3 (`arrow_v1`). (ITL-910)
 
 ### Fixed
 

@@ -310,8 +310,8 @@ later.
 ### A store written by an older version
 
 Stored rows are keyed by hashes of their Arrow data, and each hash carries the label of the
-scheme that produced it: `arrow_v0.1` up to Orcapod v0.2, `arrow_v0.2` since v0.3 (see
-[Arrow Table Hash](../reference/hashing.md#9-arrow-table-hash-arrow_v02)). Rows keyed under
+scheme that produced it: `arrow_v0.1` up to Orcapod v0.2, `arrow_v1` since v0.3 (see
+[Arrow Table Hash](../reference/hashing.md#9-arrow-table-hash-arrow_v1)). Rows keyed under
 another label can never match current inputs, so Orcapod **ignores** them: it does not refuse
 the store, and it does not reuse those rows.
 

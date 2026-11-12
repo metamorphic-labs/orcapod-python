@@ -16,7 +16,7 @@ import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -306,7 +306,7 @@ class TestNamesHoldBareDigests:
     def test_source_info_token_of_a_function_output_holds_no_label(self) -> None:
         stream = label_rule_double.pod(Join()(_source(), _other_source()))
         table = stream.as_table(columns={"source": True})
-        tokens = table.column("_source_doubled").to_pylist()
+        tokens = cast("list[str]", table.column("_source_doubled").to_pylist())
         assert tokens
         for token in tokens:
             assert "semantic_v" not in token, token
@@ -326,7 +326,7 @@ def _stored_row_keys() -> list[bytes]:
     (operator_path,) = store.list_sources()
     records = store.get_all_records(operator_path, record_id_column="__row_key")
     assert records is not None
-    keys = sorted(records.column("__row_key").to_pylist())
+    keys = sorted(cast("list[bytes]", records.column("__row_key").to_pylist()))
 
     cache = InMemoryArrowDatabase()
     cached = CachedSource(_source(), cache_database=cache)
@@ -335,7 +335,9 @@ def _stored_row_keys() -> list[bytes]:
         cached.cache_path, record_id_column="__row_key"
     )
     assert cached_records is not None
-    return keys + sorted(cached_records.column("__row_key").to_pylist())
+    return keys + sorted(
+        cast("list[bytes]", cached_records.column("__row_key").to_pylist())
+    )
 
 
 class TestStoredHashValuesCarryTheirLabel:
@@ -356,10 +358,15 @@ class TestStoredHashValuesCarryTheirLabel:
         )
         records = store.get_all_records(path)
         assert records is not None
-        for value in records.column("__input_data_hash").to_pylist():
-            assert value.startswith(b"arrow_v1:")
-        for value in records.column("__node_content_hash").to_pylist():
-            assert value.startswith(b"semantic_v1:")
+        input_hashes = cast(
+            "list[bytes]", records.column("__input_data_hash").to_pylist()
+        )
+        node_hashes = cast(
+            "list[bytes]", records.column("__node_content_hash").to_pylist()
+        )
+        assert input_hashes and node_hashes
+        assert all(value.startswith(b"arrow_v1:") for value in input_hashes)
+        assert all(value.startswith(b"semantic_v1:") for value in node_hashes)
 
 
 # ---------------------------------------------------------------------------
@@ -377,16 +384,20 @@ def _bare_stream(
     meta: str = "m",
     context_key: str | None = None,
 ) -> ArrowTableStream:
-    columns: dict[str, pa.Array[Any]] = {
-        "id": pa.array([tag], pa.large_string()),
-        "x": pa.array([data], pa.int64()),
-        "__note": pa.array([meta], pa.large_string()),
-        "_tag::origin": pa.array([system_tag], pa.large_string()),
-    }
+    names = ["id", "x", "__note", "_tag::origin"]
+    arrays: list[pa.Array[Any]] = [
+        pa.array([tag], pa.large_string()),
+        pa.array([data], pa.int64()),
+        pa.array([meta], pa.large_string()),
+        pa.array([system_tag], pa.large_string()),
+    ]
     if context_key is not None:
-        columns["_context_key"] = pa.array([context_key], pa.large_string())
+        names.append("_context_key")
+        arrays.append(pa.array([context_key], pa.large_string()))
     return ArrowTableStream(
-        pa.table(columns), tag_columns=["id"], source_info={"x": source_info}
+        pa.Table.from_arrays(arrays, names=names),
+        tag_columns=["id"],
+        source_info={"x": source_info},
     )
 
 
@@ -414,9 +425,8 @@ class TestProducerlessStreamIdentity:
     def test_identity_does_not_cover_the_derived_content_hash_column(self) -> None:
         stream = _bare_stream()
         with_hashes = stream.as_table(all_info=True)
-        assert (
-            with_hashes.column("_content_hash").to_pylist()[0].startswith("arrow_v1:")
-        )
+        row_hashes = cast("list[str]", with_hashes.column("_content_hash").to_pylist())
+        assert row_hashes[0].startswith("arrow_v1:")
         # The public identity_structure() is what content_hash() hashes.
         _, identity_table, _ = stream.identity_structure()
         assert "_content_hash" not in identity_table.column_names
