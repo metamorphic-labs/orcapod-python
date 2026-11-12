@@ -365,7 +365,7 @@ def _converted_union_value(value: Any, members: tuple[Any, ...]) -> Any:
     dataclass instance goes to the first structural member it can be converted to
     (the same field names with the same declared types), and a container to the first
     member with the container's origin whose conversion succeeds. A value no member
-    claims is returned as it is.
+    claims (an ``int`` in ``int | P``) is returned as it is.
 
     Args:
         value: The field value, not ``None``.
@@ -373,6 +373,11 @@ def _converted_union_value(value: Any, members: tuple[Any, ...]) -> Any:
 
     Returns:
         The value to store in the new instance.
+
+    Raises:
+        TypeError: If members claim the value (structural members for a dataclass
+            instance, container members of the value's kind) and it can be converted
+            to none of them.
     """
     cls = type(value)
     classes = [
@@ -381,16 +386,30 @@ def _converted_union_value(value: Any, members: tuple[Any, ...]) -> Any:
     if cls in classes:
         return value
     if dataclasses.is_dataclass(value):
-        for member in classes:
-            if uci.is_structural(member) and _fields_agree(cls, member):
+        structural = [m for m in classes if uci.is_structural(m)]
+        for member in structural:
+            if _fields_agree(cls, member):
                 return _converted_value(value, member)
+        if structural:
+            names = ", ".join(m.__qualname__ for m in structural)
+            raise TypeError(
+                f"An instance of {cls.__qualname__} cannot be converted to any member "
+                f"of the union ({names}): no member has the same fields with the "
+                f"same types."
+            )
         return value
+    failure: TypeError | None = None
     for member in members:
         if typing.get_origin(member) is cls:
             try:
                 return _converted_value(value, member)
-            except TypeError:
-                continue
+            except TypeError as exc:
+                failure = exc
+    if failure is not None:
+        raise TypeError(
+            f"A {cls.__name__} value cannot be converted to any member of the union "
+            f"that is a {cls.__name__}: {failure}"
+        ) from failure
     return value
 
 

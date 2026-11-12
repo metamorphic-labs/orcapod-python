@@ -475,6 +475,41 @@ def test_from_instance_chooses_the_union_member_by_field_types() -> None:
     assert [type(item) for item in built.many] == [TextRecord]
 
 
+@dataclasses.dataclass
+class OrdinaryFlag:
+    """An ordinary dataclass that fits neither record class."""
+
+    flag: bool
+
+
+def test_from_instance_refuses_a_union_value_no_member_can_take() -> None:
+    """A value that fits no member of a union is an error, never left unconverted."""
+    alone: Any = OrdinaryRecords(OrdinaryFlag(True), [])  # pyright: ignore[reportArgumentType]  # dataclasses do not check field types
+    with pytest.raises(TypeError, match="OrdinaryFlag"):
+        _ = _convert(Records, alone)
+    in_list: Any = OrdinaryRecords(TextRecord("a"), [OrdinaryFlag(True)])  # pyright: ignore[reportArgumentType]  # dataclasses do not check field types
+    with pytest.raises(TypeError, match="list"):
+        _ = _convert(Records, in_list)
+
+
+def test_from_instance_leaves_a_union_value_no_member_claims() -> None:
+    """A value of a non-class member of a union is passed as it is."""
+
+    @dataclasses.dataclass
+    class Source:
+        value: int | IntRecord
+
+    converted = _convert(IntOrRecord, Source(3))
+    assert converted.value == 3
+
+
+@op.dataclass(name="itl972.IntOrRecord")
+class IntOrRecord:
+    """A structural class whose field is an ``int`` or a structural class."""
+
+    value: int | IntRecord
+
+
 def test_from_instance_refuses_other_fields() -> None:
     """A missing or an extra field is an error naming the fields."""
 
