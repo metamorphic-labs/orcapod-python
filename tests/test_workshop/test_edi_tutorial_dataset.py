@@ -1363,6 +1363,26 @@ class TestNullabilityRecordChecks:
             tool.conform_batch(batch, pa.schema([field]))
         assert info.value.path == ("l", "[]", "[]")
 
+    def test_a_null_below_a_struct_between_two_lists_is_refused(self):
+        xs_type = pa.list_(pa.field("item", pa.int32(), False))
+        struct_type = pa.struct([pa.field("xs", xs_type, True)])
+        field = pa.field("l", pa.list_(pa.field("item", struct_type, True)), True)
+        xs = pa.ListArray.from_arrays(
+            pa.array([0, 1], pa.int32()),
+            pa.array([None], pa.int32()),
+            type=xs_type,  # pyright: ignore[reportArgumentType]
+        )
+        items = pa.StructArray.from_arrays([xs], fields=list(struct_type))
+        arr = pa.ListArray.from_arrays(
+            pa.array([0, 1], pa.int32()),
+            items,
+            type=field.type,  # pyright: ignore[reportArgumentType]
+        )
+        batch = pa.RecordBatch.from_arrays([arr], names=["l"])
+        with pytest.raises(tool.NullInRequiredColumnError) as info:
+            tool.conform_batch(batch, pa.schema([field]))
+        assert info.value.path == ("l", "[]", "xs", "[]")
+
     def test_a_null_in_a_nullable_nested_item_is_accepted(self):
         inner = pa.list_(pa.field("item", pa.int32(), True))
         field = pa.field("l", pa.list_(pa.field("item", inner, False)), False)

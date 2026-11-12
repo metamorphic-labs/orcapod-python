@@ -525,17 +525,21 @@ def _conform_array(arr: pa.Array[Any], field: pa.Field[Any]) -> pa.Array[Any]:
             raise NullInRequiredColumnError(
                 (field.name, ITEM, *err.path[1:]), err.null_count
             ) from None
-    if not pa.types.is_struct(field.type) or arr.type == field.type:
+    if not pa.types.is_struct(field.type):
         return arr
     struct = arr if isinstance(arr, pa.StructArray) else None
     if struct is None:
         raise SchemaMismatchError(f"column {field.name!r} is not a struct array")
+    # Check every child even when the types already match: Arrow builds arrays
+    # without enforcing child nullability, so equal types prove nothing about values.
     children = []
     for child_field, child in zip(field.type, struct.flatten(), strict=True):
         try:
             children.append(_conform_array(child, child_field))
         except NullInRequiredColumnError as err:
             raise err.within(field.name) from None
+    if arr.type == field.type:
+        return arr
     mask = struct.is_null() if struct.null_count else None
     return pa.StructArray.from_arrays(children, fields=list(field.type), mask=mask)
 
