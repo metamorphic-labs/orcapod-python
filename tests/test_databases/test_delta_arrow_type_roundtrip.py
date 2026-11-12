@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import pathlib
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -32,7 +33,7 @@ _T = [
 ]
 
 # Column name -> three values of that type, chosen within what the type holds.
-COLUMNS: dict[str, pa.Array] = {
+COLUMNS: dict[str, pa.Array[Any]] = {
     "int8": pa.array([-1, 0, 1], pa.int8()),
     "int64": pa.array([-1, 0, 1], pa.int64()),
     "uint8": pa.array([0, 1, 2], pa.uint8()),
@@ -74,7 +75,7 @@ CHANGED = {
 }
 
 
-def _written_and_read(tmp_path: pathlib.Path, column: pa.Array) -> pa.Table:
+def _written_and_read(tmp_path: pathlib.Path, column: pa.Array[Any]) -> pa.Table:
     """Write one three-row column to a Delta store and read it back from a new store object."""
     DeltaTableDatabase(tmp_path).add_records(
         ("t",),
@@ -113,7 +114,7 @@ def test_a_read_returns_the_written_type_and_values(
     ids=["uint32", "uint64"],
 )
 def test_an_unsigned_value_above_the_signed_range_round_trips(
-    column: pa.Array, tmp_path: pathlib.Path
+    column: pa.Array[Any], tmp_path: pathlib.Path
 ) -> None:
     read = _written_and_read(tmp_path, column)
 
@@ -130,7 +131,7 @@ def test_nanosecond_timestamps_keep_their_digits(tmp_path: pathlib.Path) -> None
     read = _written_and_read(tmp_path, column)
 
     assert read.schema.field("c").type == pa.timestamp("ns")
-    assert read.column("c").equals(column)
+    assert read.column("c").to_pylist() == column.to_pylist()
 
 
 @pytest.mark.xfail(reason=PART_B, strict=True)
@@ -145,7 +146,7 @@ def test_nanosecond_timestamps_keep_their_digits(tmp_path: pathlib.Path) -> None
     ids=["date64", "time32[s]", "time64[us]", "duration[us]"],
 )
 def test_types_delta_has_no_equivalent_for_are_stored(
-    column: pa.Array, tmp_path: pathlib.Path
+    column: pa.Array[Any], tmp_path: pathlib.Path
 ) -> None:
     read = _written_and_read(tmp_path, column)
 
@@ -170,7 +171,7 @@ def increment(y: int) -> int:
     return y + 1
 
 
-def _source_table(k: pa.Array) -> pa.Table:
+def _source_table(k: pa.Array[Any]) -> pa.Table:
     schema = pa.schema(
         [
             pa.field("k", k.type, nullable=False),

@@ -31,7 +31,7 @@ _T0 = dt.datetime(2026, 3, 24, 17, 54, 17)
 _DAYS = [_T0 + dt.timedelta(days=i) for i in range(3)]
 
 
-def _logical(py_type: type, values: list[Any]) -> pa.Array:
+def _logical(py_type: type, values: list[Any]) -> pa.Array[Any]:
     """A column of a logical type, built by the type converter."""
     converter = resolve_context(None).type_converter
     table = converter.python_dicts_to_arrow_table(
@@ -41,7 +41,7 @@ def _logical(py_type: type, values: list[Any]) -> pa.Array:
 
 
 # One column of three distinct, non-null values per Arrow type.
-TAG_COLUMNS: dict[str, Callable[[], pa.Array]] = {
+TAG_COLUMNS: dict[str, Callable[[], pa.Array[Any]]] = {
     "int8": lambda: pa.array([1, 2, 3], pa.int8()),
     "int16": lambda: pa.array([1, 2, 3], pa.int16()),
     "int32": lambda: pa.array([1, 2, 3], pa.int32()),
