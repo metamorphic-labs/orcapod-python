@@ -569,15 +569,15 @@ def test_python_type_of_an_unreadable_identifier_is_refused() -> None:
     assert strict.arrow_type_to_python_type(current.get_arrow_extension_type()) is Thing
 
     with pytest.raises(LogicalTypeIdentifierError):
-        strict.arrow_type_to_python_type(column_type)
+        _ = strict.arrow_type_to_python_type(column_type)
     with pytest.raises(LogicalTypeIdentifierError) as excinfo:
-        strict.arrow_schema_to_python_schema(table.schema)
+        _ = strict.arrow_schema_to_python_schema(table.schema)
     assert "'c'" in str(excinfo.value)
     # A member of a struct column is checked like a top-level column.
     with pytest.raises(LogicalTypeIdentifierError):
-        strict.arrow_type_to_python_type(pa.struct([pa.field("t", column_type)]))
+        _ = strict.arrow_type_to_python_type(pa.struct([pa.field("t", column_type)]))
     with pytest.raises(LogicalTypeIdentifierError) as excinfo:
-        strict.arrow_schema_to_python_schema(
+        _ = strict.arrow_schema_to_python_schema(
             pa.schema([pa.field("s", pa.struct([pa.field("t", column_type)]))])
         )
     assert "'s'" in str(excinfo.value)

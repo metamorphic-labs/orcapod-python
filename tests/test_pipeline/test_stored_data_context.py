@@ -1364,19 +1364,16 @@ class TestInputOfAnotherDataContext:
 
     @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
     @pytest.mark.parametrize(
-        "flags",
-        [
-            {},
-            {"skip_cache_lookup": True},
-            {"skip_cache_lookup": True, "skip_cache_insert": True},
-        ],
+        ("skip_lookup", "skip_insert"),
+        [(False, False), (True, False), (True, True)],
         ids=["default", "no_lookup", "no_lookup_no_insert"],
     )
     def test_cached_function_refuses_an_input_of_another_data_context(
         self,
         store: Store,
         other_context: contexts.DataContext,
-        flags: dict[str, bool],
+        skip_lookup: bool,
+        skip_insert: bool,
         asynchronous: bool,
     ):
         """The input's data context is checked before the function is called (ITL-975).
@@ -1390,9 +1387,17 @@ class TestInputOfAnotherDataContext:
 
         with pytest.raises(InputValidationError) as info:
             if asynchronous:
-                _ = asyncio.run(cached.async_call(data, **flags))
+                _ = asyncio.run(
+                    cached.async_call(
+                        data,
+                        skip_cache_lookup=skip_lookup,
+                        skip_cache_insert=skip_insert,
+                    )
+                )
             else:
-                _ = cached.call(data, **flags)
+                _ = cached.call(
+                    data, skip_cache_lookup=skip_lookup, skip_cache_insert=skip_insert
+                )
 
         _assert_names_both_contexts(info.value)
         assert calls == []
