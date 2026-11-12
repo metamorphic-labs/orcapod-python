@@ -104,11 +104,13 @@ def make_arrow_extension_type(
         # vice-versa) are genuine semantic errors and always raise.
         from orcapod.utils.arrow_utils import normalize_to_large_types
 
-        if normalize_to_large_types(_storage) == _storage:
+        if normalize_to_large_types(_storage, keep_null=True) == _storage:
             # _storage is the canonical large form — accept any same-family variant,
             # at any nesting depth (a struct field rewritten from large_string to
             # string by Delta compaction, ITL-881).
-            storage_ok = normalize_to_large_types(storage_type) == _storage
+            storage_ok = (
+                normalize_to_large_types(storage_type, keep_null=True) == _storage
+            )
         else:
             # Non-canonical _storage — require exact match.
             storage_ok = storage_type == _storage
@@ -380,12 +382,38 @@ class LogicalTypeRegistry:
                 UserWarning,
                 stacklevel=4,
             )
+        self._move_bindings(previous, logical_type)
+
+    def _move_bindings(
+        self, previous: LogicalTypeProtocol, logical_type: LogicalTypeProtocol
+    ) -> None:
+        """Bind an identity's names to ``logical_type`` and rebuild its containers.
+
+        The logical-name and Arrow-name bindings move to ``logical_type`` and its
+        Python type is bound to it; the previous Python type keeps its binding. Each
+        registered list or set logical type whose element is ``previous`` is rebuilt
+        over ``logical_type`` and rebound the same way, at any nesting depth, so
+        ``list[Point]`` names the class ``Point`` is now bound to.
+
+        Args:
+            previous: The logical type the names were bound to.
+            logical_type: The logical type to bind them to, with the same names.
+        """
+        containers = [
+            registered
+            for registered in self._by_logical_name.values()
+            if getattr(registered, "element_logical_type", None) is previous
+        ]
         name = logical_type.logical_type_name
         self._by_logical_name[name] = logical_type
         self._by_arrow_name[logical_type.get_arrow_extension_type().extension_name] = (
             logical_type
         )
-        self._by_python_type[new_cls] = logical_type
+        self._by_python_type[logical_type.python_type] = logical_type
+        for container in containers:
+            with_element = getattr(container, "with_element", None)
+            if with_element is not None:
+                self._move_bindings(container, with_element(logical_type))
 
     def get_by_logical_name(self, name: str) -> LogicalTypeProtocol | None:
         """Return the logical type registered under *name*, or ``None``."""

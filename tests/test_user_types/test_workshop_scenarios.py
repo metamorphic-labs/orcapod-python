@@ -61,6 +61,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Point:
+    '''The scenario's ``Point`` class.'''
     x: int
     y: int
 """
@@ -106,19 +107,23 @@ import pydantic
 
 @dataclass
 class Base:
+    '''The scenario's ``Base`` class.'''
     x: int
 
 
 @dataclass
 class Child(Base):
+    '''The scenario's ``Child`` class.'''
     z: int = 0
 
 
 class BaseModel(pydantic.BaseModel):
+    '''The scenario's ``BaseModel`` class.'''
     x: int
 
 
 class ChildModel(BaseModel):
+    '''The scenario's ``ChildModel`` class.'''
     z: int = 0
 """
 
@@ -135,11 +140,13 @@ child = getattr(wsfamily, os.environ["WS_CHILD"])
 
 
 def use_base():
+    '''Return the Arrow extension name the base class is stored under.'''
     source = DictSource(data=[{"k": "a", "p": base(x=1)}], tag_columns=["k"])
     return source.as_table().schema.field("p").type.extension_name
 
 
 def use_child():
+    '''Run the job on the child class and return its result.'''
     return wsjob.run_job(child, rows=[{"x": 1, "z": 10}, {"x": 2, "z": 20}])
 
 
@@ -364,10 +371,12 @@ def test_w7_script_as_main_twice(workdir: Path) -> None:
 
                 @dataclass
                 class Point:
+                    '''The scenario's ``Point`` class.'''
                     x: int
                     y: int
 
                 def main():
+                    '''Run the job on ``Point`` and report its result.'''
                     report(wsjob.run_job(Point))
 
                 if __name__ == "__main__":
@@ -396,10 +405,12 @@ def test_w8_script_then_import_hits_with_declared_name(workdir: Path) -> None:
                 @op.register_type(name="Point")
                 @dataclass
                 class Point:
+                    '''The scenario's ``Point`` class.'''
                     x: int
                     y: int
 
                 def main():
+                    '''Run the job on ``Point`` and report its result.'''
                     report(wsjob.run_job(Point))
 
                 if __name__ == "__main__":
@@ -429,6 +440,7 @@ def test_w11_notebook_to_module_with_declared_name(workdir: Path) -> None:
                 @op.register_type(name="Point")
                 @dataclass
                 class Point:
+                    '''The scenario's ``Point`` class.'''
                     x: int
                     y: int
             """,
@@ -511,6 +523,7 @@ def test_read_with_declared_class_from_a_module(workdir: Path) -> None:
                 @op.register_type(name="Point")
                 @dataclass
                 class Point:
+                    '''The scenario's ``Point`` class.'''
                     x: int
                     y: int
             """
@@ -553,6 +566,7 @@ def test_failed_read_leaves_the_class_free_to_be_declared(workdir: Path) -> None
 
                 @dataclass
                 class Point:
+                    '''The scenario's ``Point`` class.'''
                     x: int
                     y: int
             """,
@@ -573,6 +587,7 @@ path = tuple(next(p for p in wsjob.table_paths(root) if "/_result/" in p).split(
 converter = get_default_context().type_converter
 
 def read():
+    '''Read the stored result table and return its values as text.'''
     db = ExtensionAwareDatabase(DeltaTableDatabase(root), converter=converter)
     table = db.get_all_records(path)
     return [repr(r["q"]) for r in converter.arrow_table_to_python_dicts(table.select(["q"]))]
@@ -603,11 +618,13 @@ from child_harness import report
 
 @dataclass
 class Inner:
+    '''The scenario's ``Inner`` class.'''
     v: int
 
 
 @dataclass
 class Outer:
+    '''The scenario's ``Outer`` class.'''
     inner: Inner
 
 
@@ -629,6 +646,7 @@ path = tuple(next(p for p in wsjob.table_paths(root) if "/_result/" in p).split(
 converter = get_default_context().type_converter
 
 def read():
+    '''Read the stored result table and return its values as text.'''
     db = ExtensionAwareDatabase(DeltaTableDatabase(root), converter=converter)
     table = db.get_all_records(path)
     return [repr(r["q"]) for r in converter.arrow_table_to_python_dicts(table.select(["q"]))]
@@ -663,10 +681,12 @@ def test_failed_read_leaves_nested_classes_free_to_be_declared(workdir: Path) ->
 
                 @dataclass
                 class Inner:
+                    '''The scenario's ``Inner`` class.'''
                     v: int
 
                 @dataclass
                 class Outer:
+                    '''The scenario's ``Outer`` class.'''
                     inner: Inner
             """,
         },

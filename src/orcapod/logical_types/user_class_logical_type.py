@@ -410,9 +410,9 @@ def _check_storage(
     """Raise ``TypeIdentityError`` if stored and registered storage differ beyond layout."""
     from orcapod.utils.arrow_utils import normalize_to_large_types
 
-    if normalize_to_large_types(lt.storage_type) != normalize_to_large_types(
-        storage_type
-    ):
+    if normalize_to_large_types(
+        lt.storage_type, keep_null=True
+    ) != normalize_to_large_types(storage_type, keep_null=True):
         raise TypeIdentityError(
             f"Stored values of {uci.describe_record(record)} have Arrow storage type "
             f"{storage_type}, but the registered class stores {lt.storage_type}."

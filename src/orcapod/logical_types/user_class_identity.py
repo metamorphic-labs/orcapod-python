@@ -385,6 +385,7 @@ def candidate_classes(kind: str, name: str) -> Iterator[type]:
     seen: list[type] = []
 
     def fresh(cls: Any) -> bool:
+        """Record ``cls`` and return True if it is of the stored kind and not seen yet."""
         if class_kind(cls) != kind or cls in seen:
             return False
         seen.append(cls)

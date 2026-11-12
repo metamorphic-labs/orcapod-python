@@ -82,6 +82,7 @@ def register_type(
     """
 
     def decorate(target: T) -> T:
+        """Declare ``target`` under the given name and return it unchanged."""
         _uci.declare(target, name, qualified_name=qualified_name)
         return target
 

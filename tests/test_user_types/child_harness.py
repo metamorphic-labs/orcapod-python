@@ -65,6 +65,10 @@ def run_child(
         check=False,
         timeout=timeout,
     )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"child failed (exit {proc.returncode}):\n{proc.stderr[-4000:]}"
+        )
     for line in proc.stdout.splitlines():
         if line.startswith(JSON_MARKER):
             return json.loads(line[len(JSON_MARKER) :])
