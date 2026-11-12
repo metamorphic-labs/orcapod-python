@@ -243,21 +243,37 @@ class TestArrowTypesPreserved:
 
 
 def _expected_default_source_id(origin, tags_as_data) -> str:
-    """The documented definition: the content hash an operator node would have."""
+    """The documented definition: ``derived:`` plus the labelled derivation hash.
+
+    The derivation hash is the content hash an operator node doing the derivation
+    would have.
+    """
     hasher = origin.data_context.semantic_hasher
-    return hasher.hash_object(
+    derivation_hash = hasher.hash_object(
         (("DerivedSource", tuple(sorted(tags_as_data.items()))), (origin,)),
         resolver=lambda obj: obj.content_hash(hasher),
-    ).to_hex()
+    )
+    return f"derived:{derivation_hash.to_string()}"
 
 
 class TestProvenance:
-    def test_default_source_id_is_the_bare_derivation_hash(self):
+    def test_default_source_id_is_kind_label_and_derivation_hash(self):
         origin = _experiment()
         derived = DerivedSource(origin, tags_as_data=COPY)
         assert derived.source_id == _expected_default_source_id(origin, COPY)
-        assert len(derived.source_id) == 64
-        assert ":" not in derived.source_id
+        kind, label, digest = derived.source_id.split(":")
+        assert kind == DerivedSource.SOURCE_KIND == "derived"
+        assert derived.to_config()["source_type"] == DerivedSource.SOURCE_KIND
+        assert label == origin.data_context.semantic_hasher.hasher_id
+        assert len(digest) == 64
+
+    def test_default_source_id_is_used_as_is_in_values_and_tokens(self):
+        derived = DerivedSource(_experiment(), tags_as_data=COPY)
+        table = derived.as_table(all_info=True)
+        (sid_col,) = _prefixed(table, "_tag_source_id")
+        assert set(table[sid_col].to_pylist()) == {derived.source_id}
+        token = table["_source_session_start"][0].as_py()
+        assert token.split("::") == [derived.source_id, "row_0", "session_start"]
 
     def test_default_source_id_follows_origin_and_mapping_only(self):
         base = DerivedSource(_experiment(), tags_as_data=COPY).source_id

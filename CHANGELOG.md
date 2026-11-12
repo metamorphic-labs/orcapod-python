@@ -85,7 +85,8 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   values as data columns, so a key (for example a session start time) can be an input to a
   function pod. Also available as `node.as_source(tags_as_data=...)`. The copy has the tag's
   exact Arrow type and nullability. The result is a new root source with its own provenance;
-  its default `source_id` is a hash of the origin's identity and the mapping. A saved job
+  its default `source_id` is `derived:<label>:<hex>`, a hash of the origin's identity and the
+  mapping. A saved job
   reloads it whenever its origin can be reloaded. `DerivedSource` without `tags_as_data` is
   unchanged, except that giving it a source (rather than a job node) now raises `TypeError`
   when it is built instead of `AttributeError` when it is first read. (ITL-939)

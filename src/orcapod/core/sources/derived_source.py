@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -39,8 +39,8 @@ def _derivation_hash(
         tags_as_data: Maps a tag column of the origin to the name of its data copy.
 
     Returns:
-        The derivation hash. Its bare hex form is the default ``source_id`` of a
-        ``DerivedSource`` built with ``tags_as_data``.
+        The derivation hash, from which ``_default_source_id`` builds the default
+        ``source_id`` of a ``DerivedSource`` built with ``tags_as_data``.
     """
     hasher = origin.data_context.semantic_hasher
     return hasher.hash_object(
@@ -120,11 +120,12 @@ class DerivedSource(RootSource):
     any source it can be wrapped with ``cached(database)``.
 
     Identity (``tags_as_data`` form):
-        - ``source_id`` defaults to the bare hex of the derivation hash: the
-          content hash an operator node doing this derivation over the origin
-          would have, built from the origin's content hash and the sorted
-          ``tags_as_data`` items. It changes when the origin's identity or the
-          mapping changes. An explicit ``source_id`` replaces it.
+        - ``source_id`` defaults to ``derived:<algorithm label>:<hex digest>``,
+          where label and digest are the derivation hash: the content hash an
+          operator node doing this derivation over the origin would have, built
+          from the origin's content hash and the sorted ``tags_as_data`` items.
+          It changes when the origin's identity or the mapping changes. An
+          explicit ``source_id`` replaces it.
         - ``content_hash`` follows the rule of every root source: class name,
           output schema and ``source_id``.
         - ``pipeline_hash`` is schema-only, as for every root source.
@@ -164,6 +165,35 @@ class DerivedSource(RootSource):
         )
     """
 
+    # The source kind: the config type key, and the prefix of a hash-based default
+    # source id.
+    SOURCE_KIND: ClassVar[str] = "derived"
+
+    @classmethod
+    def _default_source_id(
+        cls,
+        origin: "FunctionJobNode | OperatorJobNode | RootSource",
+        tags_as_data: Mapping[str, str],
+    ) -> str:
+        """Return the default ``source_id`` of a source built with ``tags_as_data``.
+
+        The format is ``<source kind>:<algorithm label>:<hex digest>``, for example
+        ``derived:semantic_v0.1:01bb...``: the kind says what sort of source the id
+        names, and the label and digest are the derivation hash
+        (``_derivation_hash``) in its labelled form. This one string is the
+        source's name everywhere it appears: the system-tag ``source_id`` values,
+        the source-info tokens, and the name of the source in a job.
+
+        Args:
+            origin: The source or job node the derived source reads from.
+            tags_as_data: Maps a tag column of the origin to the name of its copy.
+
+        Returns:
+            The default source id.
+        """
+        derivation_hash = _derivation_hash(origin, tags_as_data)
+        return f"{cls.SOURCE_KIND}:{derivation_hash.to_string()}"
+
     def __init__(
         self,
         origin: "FunctionJobNode | OperatorJobNode | RootSource",
@@ -194,7 +224,7 @@ class DerivedSource(RootSource):
             if self._tags_as_data is None:
                 source_id = f"derived:{origin.content_hash().to_string()}"
             else:
-                source_id = _derivation_hash(origin, self._tags_as_data).to_hex()
+                source_id = self._default_source_id(origin, self._tags_as_data)
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._record_id_column = record_id_column
@@ -229,7 +259,7 @@ class DerivedSource(RootSource):
             The config dict, with ``source_type`` ``"derived"``.
         """
         config: dict[str, Any] = {
-            "source_type": "derived",
+            "source_type": self.SOURCE_KIND,
             "tags_as_data": self._tags_as_data,
             "record_id_column": self._record_id_column,
             "source_id": self._explicit_source_id,

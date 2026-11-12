@@ -123,9 +123,9 @@ before. Things to know:
   (`job.nodes["bmi"].as_source(tags_as_data=...)`).
 - It is a **new source**, not a step in the origin's pipeline: `upstreams` is empty, and it
   has provenance columns of its own, like the result of handing the same rows to
-  `ArrowTableSource`. Use it in place of the origin. Its default `source_id` is a hash built
-  from the origin's identity and the mapping, so it changes when either changes; pass
-  `source_id=` to choose a name.
+  `ArrowTableSource`. Use it in place of the origin. Its default `source_id` is
+  `derived:` followed by a labelled hash built from the origin's identity and the mapping, so
+  it changes when either changes; pass `source_id=` to choose a name.
 - A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
   Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
   the in-memory source itself.
@@ -133,10 +133,8 @@ before. Things to know:
 ```python
 print(with_start.upstreams)
 # ()
-print(len(with_start.source_id), with_start.source_id == DerivedSource(
-    experiments, tags_as_data={"session_start": "session_start_value"}
-).source_id)
-# 64 True
+print(with_start.source_id)
+# derived:...:...
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it
