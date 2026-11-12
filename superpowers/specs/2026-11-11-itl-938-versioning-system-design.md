@@ -1044,6 +1044,33 @@ developer's "additive changes do not change the number" a test, not a judgement.
 
 ---
 
+### 5.6 Hash labels: one rule
+
+Inconsistencies today:
+
+| Aspect | Today |
+|---|---|
+| Naming | `semantic_v0.1`, `arrow_v0.2` (dotted); `ndarray_v1`, `polars_expr_v1` (integer); `sha256`, `merkle_sha256` (no version) |
+| Meaning | the algorithm (`sha256`); a value type (`ndarray_v1`); "any hash may have changed" (the earlier rule for `arrow_v0.x`); a type's only version marker (PR #286) |
+| A hash stored as a value | labelled (`__input_data_hash`, `__node_content_hash`) or bare (the operator cache row key) |
+| A hash inside a name | labelled in path components (`semantic_v0.1:17de3328…`), bare in system-tag column names and the operator identity |
+| A hash inside a hashed input | embedded with its label, so renaming a label changes every hash above it |
+| Definition | each core label is written in three places |
+
+The rule:
+
+| # | Rule | Status |
+|---|---|---|
+| 1 | A label names the algorithm that produced that digest and nothing else. "Algorithm" is everything that amounts to the hashing: the canonical form, any preparation, the encoding and the digest function, not only the final digest function | **decided** |
+| 2 | Format `<algorithm>_v<N>`, integer `N`. **In v0.3 every label is `_v1`**: `semantic_v1`, `arrow_v1`, `ndarray_v1`, `polars_expr_v1`. "Let's let all version be simply v1 for this release since we used to have v0.1, v0.2." The labels of `H0` (`_v0.x`) and of `H1` (`_v1`) are therefore visibly different | **decided** |
+| 3 | A label changes when its algorithm changes so that some existing input would get a different digest; an extension that leaves existing digests alone keeps it | proposed |
+| 4 | A hash stored as a value carries its label: `label:hex` in text, `label:` + raw bytes in a binary column | proposed |
+| 5 | A hash used inside a name (path component, column name, function or operator identity, source-info token) is bare hex | proposed |
+| 6 | A label never enters a hash computation: a nested hash contributes its digest only | proposed |
+| 7 | An identifier built by a recipe (record ids) is not a labelled hash; its recipe is named in the data context file | proposed |
+| 8 | A logical type's value hash follows the same format; its implementer picks the label | proposed |
+| 9 | Each label is defined once, next to its algorithm, and listed in the data context file | proposed |
+
 ## Part 6. Paths before and after v0.3 (decided)
 
 No generation name is added to paths. A path changes when, and only when, the table's schema
