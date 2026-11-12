@@ -11,10 +11,13 @@ import asyncio
 import uuid
 import logging
 from collections import defaultdict
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.channels import BroadcastChannel, Channel
+from orcapod.errors import StoreError, StoreWriteError, TypeIdentityError
 from orcapod.pipeline.result import OrchestratorResult
+from orcapod.utils.store_errors import keep_store_error
 from orcapod.protocols.node_protocols import (
     is_function_node,
     is_operator_node,
@@ -137,6 +140,8 @@ class AsyncPipelineOrchestrator:
         effective_observer = observer if observer is not None else NoOpObserver()
         effective_observer.on_run_start(run_id, pipeline_uri=pipeline_uri)
 
+        topo_order: list[Any] = []
+        store_error: StoreError | TypeIdentityError | None = None
         try:
             topo_order = list(graph.topological_sort())
             buf = self._buffer_size
@@ -187,8 +192,10 @@ class AsyncPipelineOrchestrator:
                         writer = _CollectingWriter(writer, collector)
 
                     if is_source_node(node):
-                        tg.create_task(
-                            node.async_execute(writer, observer=effective_observer)
+                        _start_node(
+                            tg,
+                            node,
+                            node.async_execute(writer, observer=effective_observer),
                         )
                     elif is_function_node(node) or is_side_effect_function_node(node):
                         predecessors = in_edges.get(node, [])
@@ -197,13 +204,15 @@ class AsyncPipelineOrchestrator:
                                 f"FunctionNode expects exactly 1 upstream, got {len(predecessors)}"
                             )
                         input_reader = edge_readers[(predecessors[0], node)]
-                        tg.create_task(
+                        _start_node(
+                            tg,
+                            node,
                             node.async_execute(
                                 input_reader,
                                 writer,
                                 observer=effective_observer,
                                 run_id=run_id,
-                            )
+                            ),
                         )
                     elif is_operator_node(node):
                         predecessors = in_edges.get(node, [])
@@ -218,10 +227,12 @@ class AsyncPipelineOrchestrator:
                         input_readers = [
                             edge_readers[(upstream, node)] for upstream in sorted_preds
                         ]
-                        tg.create_task(
+                        _start_node(
+                            tg,
+                            node,
                             node.async_execute(
                                 input_readers, writer, observer=effective_observer
-                            )
+                            ),
                         )
                     elif is_side_effect_node(node):
                         predecessors = in_edges.get(node, [])
@@ -230,13 +241,15 @@ class AsyncPipelineOrchestrator:
                                 "SideEffectNode expects exactly 1 upstream, got 0"
                             )
                         input_reader = edge_readers[(predecessors[0], node)]
-                        tg.create_task(
+                        _start_node(
+                            tg,
+                            node,
                             node.async_execute(
                                 [input_reader],
                                 writer,
                                 observer=effective_observer,
                                 run_id=run_id,
-                            )
+                            ),
                         )
                     else:
                         raise TypeError(
@@ -250,8 +263,115 @@ class AsyncPipelineOrchestrator:
             return OrchestratorResult(
                 node_outputs=collectors if materialize_results else {}
             )
+        except ExceptionGroup as group:
+            # A failed store read or write stops the run. Raise it on its own, as the
+            # sync orchestrator does, rather than inside the TaskGroup's exception
+            # group.
+            store_error = _single_store_error(group, topo_order)
+            if store_error is not None:
+                raise store_error
+            # A stored row that cannot be decoded as its class stops the run too,
+            # raised on its own as the sync orchestrator raises it (ITL-881).
+            identity_errors = [
+                exc for exc in _leaves(group) if isinstance(exc, TypeIdentityError)
+            ]
+            if identity_errors:
+                store_error = identity_errors[0]
+                raise store_error
+            raise
         finally:
-            effective_observer.on_run_end(run_id)
+            # A failing on_run_end must not replace a failed store read or write.
+            with keep_store_error(store_error, "Observer on_run_end"):
+                effective_observer.on_run_end(run_id)
+
+
+def _start_node(
+    tg: asyncio.TaskGroup, node: Any, work: Coroutine[Any, Any, None]
+) -> None:
+    """Start a node's coroutine in ``tg``, naming the node on the store errors it raises.
+
+    A store error raised on its own or inside an exception group (a node that runs
+    its own task group) gets the node's label when it has none.
+
+    Args:
+        tg: The run's task group.
+        node: The node the coroutine runs.
+        work: The node's ``async_execute`` coroutine.
+    """
+
+    async def run() -> None:
+        try:
+            await work
+        except StoreError as exc:
+            # Name the node the failure belongs to, if the raising site did not,
+            # so _single_store_error can order it like the sync orchestrator.
+            exc.add_context(node_label=node.label)
+            raise
+        except BaseExceptionGroup as group:
+            # A node that runs its own task group raises its store errors inside
+            # a group; name the node on each and re-raise the group unchanged.
+            for store_error in StoreError.in_group(group):
+                store_error.add_context(node_label=node.label)
+            raise
+
+    tg.create_task(run())
+
+
+def _single_store_error(
+    group: ExceptionGroup, topo_order: list[Any]
+) -> StoreError | None:
+    """Pick the one ``StoreError`` an async run raises from its exception group.
+
+    Concurrent node tasks can fail together, so the ``TaskGroup``'s group may hold
+    several store errors, read and write ones alike, and other exceptions. The
+    caller gets a single ``StoreError``, as from the sync orchestrator: the one
+    whose node comes first in topological order (the one the sync orchestrator
+    would meet first, when both failures happen), with ties and node-less errors
+    broken by their order in the group. Every other exception stays attached for
+    diagnosis: each is noted on the chosen error, other store errors are also
+    logged at WARNING, and the whole group is the chosen error's ``__context__``.
+    Its ``__cause__`` stays the backend error.
+
+    Args:
+        group: The exception group the run's ``TaskGroup`` raised.
+        topo_order: The run's nodes in topological order.
+
+    Returns:
+        The store error to raise, or ``None`` when the group holds none.
+    """
+    store_errors = StoreError.in_group(group)
+    if not store_errors:
+        return None
+    rank = {getattr(node, "label", None): i for i, node in enumerate(topo_order)}
+    chosen = min(store_errors, key=lambda err: rank.get(err.node_label, len(rank)))
+    for other in _leaves(group):
+        if other is chosen:
+            continue
+        if isinstance(other, StoreError):
+            kind = "write" if isinstance(other, StoreWriteError) else "read"
+            logger.warning(
+                "Another store %s failed in the same run: %s",
+                kind,
+                other,
+                exc_info=other,
+            )
+            chosen.add_note(f"Another store {kind} failed in the same run: {other}")
+        else:
+            chosen.add_note(
+                f"Another node failed in the same run: {type(other).__name__}: {other}"
+            )
+    return chosen
+
+
+def _leaves(group: BaseExceptionGroup) -> list[BaseException]:
+    """Return every non-group exception in ``group``, nested groups flattened."""
+    found: list[BaseException] = []
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            found.extend(_leaves(exc))
+        else:
+            found.append(exc)
+    return found
 
 
 class _CollectingWriter:

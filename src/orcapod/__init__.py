@@ -15,6 +15,7 @@ from .config import (
     OrcapodConfig,
     load_config,
 )
+from .contexts import enable_file_hash_caching
 from .core.function_pod import (
     FunctionPod,
     function_pod,
@@ -60,6 +61,9 @@ from orcapod.logical_types.directory_type import Directory
 # Extension registration API (ITL-473)
 from .extensions import OrcapodExtension, register_extension
 
+# Your own data types: a dataclass identified by its name and fields (ITL-972)
+from .structural import dataclass
+
 # Post-run hook types (ITL-523)
 from .hooks import (
     HookConfig,
@@ -78,6 +82,7 @@ __all__ = [
     "HashingConfig",
     "OrcapodConfig",
     "load_config",
+    "enable_file_hash_caching",
     "FunctionPod",
     "function_pod",
     "InvocationContext",
@@ -106,6 +111,8 @@ __all__ = [
     # Extension registration API (ITL-473)
     "OrcapodExtension",
     "register_extension",
+    # Your own data types (ITL-972)
+    "dataclass",
     # Post-run hook types (ITL-523)
     "HookConfig",
     "InvocationStatus",
