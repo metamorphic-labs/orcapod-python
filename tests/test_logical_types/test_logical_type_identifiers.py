@@ -522,6 +522,39 @@ def test_extension_typed_column_with_a_readable_older_identifier_is_read() -> No
     assert registered.__arrow_ext_serialize__() == b'{"v":2}'
 
 
+def test_extension_typed_struct_child_with_an_unreadable_identifier_is_refused() -> (
+    None
+):
+    """The identifier check also reaches an extension-typed member of a struct column."""
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+    member_type = _typed_thing_column(b'{"v":1}').schema.field("c").type
+    assert isinstance(member_type, pa.ExtensionType)
+    child = pa.ExtensionArray.from_storage(
+        member_type, pa.array(["a"], pa.large_string())
+    )
+    struct = pa.StructArray.from_arrays([child], fields=[pa.field("t", child.type)])
+
+    with pytest.raises(LogicalTypeIdentifierError):
+        strict.load_logical_types(pa.table({"s": struct}))
+
+    # A readable older identifier on the member comes back as the current type.
+    lenient = _converter(
+        _fresh_context(_thing_logical_type(b'{"v":2}', also_reads=(b'{"v":1}',)))
+    )
+    read = lenient.load_logical_types(pa.table({"s": struct}))
+    member = read.schema.field("s").type.field("t").type
+    assert member.__arrow_ext_serialize__() == b'{"v":2}'
+
+
+def test_values_of_an_unreadable_identifier_are_not_decoded() -> None:
+    """Converting values to Python checks the identifier, like loading the table does."""
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+    table = _typed_thing_column(b'{"v":1}')
+
+    with pytest.raises(LogicalTypeIdentifierError):
+        strict.arrow_table_to_python_dicts(table)
+
+
 def test_list_wrapper_written_before_identifiers_is_read() -> None:
     """A list column whose metadata records no element metadata is read as the current
     list type.

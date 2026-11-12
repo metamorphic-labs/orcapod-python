@@ -281,6 +281,27 @@ class TestDeltaOnCloudStorage:
         )
         assert https.list_table_paths(("absent",)) == []
 
+    def test_an_http_endpoint_from_the_environment_follows_the_same_rule(
+        self, bucket: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ):
+        """An endpoint the file system would take from the environment is checked too."""
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "http://localhost:9000")
+        store = DeltaTableDatabase("s3://bucket/root")
+        with pytest.raises(TableListingNotSupportedError, match="AWS_ALLOW_HTTP"):
+            store.list_table_paths()
+        assert bucket == []
+
+        allowed = DeltaTableDatabase(
+            "s3://bucket/root", storage_options={"AWS_ALLOW_HTTP": "true"}
+        )
+        assert allowed.list_table_paths(("absent",)) == []
+        # An endpoint given in the storage options wins over the environment.
+        https = DeltaTableDatabase(
+            "s3://bucket/root",
+            storage_options={"AWS_ENDPOINT_URL": "https://example.test"},
+        )
+        assert https.list_table_paths(("absent",)) == []
+
     def test_a_listing_that_fails_means_the_store_cannot_list(
         self, monkeypatch: pytest.MonkeyPatch
     ):

@@ -256,6 +256,24 @@ def copy_as_other_context(written: Store, target: Store) -> None:
     target.flush()
 
 
+def copy_with_results_of_other_context(written: Store, target: Store) -> None:
+    """Copy ``written`` to ``target``, relabelling only the result rows as ``OTHER``.
+
+    The pipeline rows stay rows of the current data context and still point, by
+    record id, at result rows that now belong to another data context.
+    """
+    source = reopened(written)
+    for path in sorted(source.list_sources()):
+        rows = source.get_all_records(path, record_id_column=RID)
+        assert rows is not None
+        if path[-1] == "rdb_v2":
+            index = rows.schema.get_field_index(COLUMN)
+            other = pa.array([OTHER] * rows.num_rows, type=pa.large_string())
+            rows = rows.set_column(index, rows.schema.field(index), other)
+        target.add_records(path, rows, record_id_column=RID)
+    target.flush()
+
+
 def run_everything(store: Store) -> None:
     """Write every table kind: function, operator cache, side-effect log, cached source."""
     _ = build_job(store, with_operator=True, with_sink=True).run()
@@ -774,6 +792,22 @@ class TestRowsOfAnotherDataContext:
         assert rows_of(job.nodes["sel"].get_all_records()) == [2, 4]
         _ = job.run(orchestrator=orchestrator)
         assert rows_of(job.nodes["sel"].as_table()) == [2, 4]
+
+    def test_a_result_of_another_data_context_is_not_joined_to_a_current_entry(
+        self, new_store: Callable[[], Store]
+    ):
+        """A current pipeline row whose result row is of another data context has no result."""
+        written = new_store()
+        _ = build_job(written).run()
+        store = new_store()
+        copy_with_results_of_other_context(written, store)
+        calls.clear()
+
+        node = build_job(store).nodes["dbl"]
+        records = node.get_all_records()
+
+        assert records is None or records.num_rows == 0
+        assert calls == []
 
     def test_cached_source_reads_current_rows_only(
         self, new_store: Callable[[], Store]

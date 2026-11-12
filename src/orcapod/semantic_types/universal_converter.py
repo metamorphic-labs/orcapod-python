@@ -1670,6 +1670,11 @@ class UniversalTypeConverter:
                 arrow_type.extension_name
             )
             if lt is not None:
+                # Values are decoded by the registered type: only when it declares
+                # that it reads data stored under this column's metadata.
+                from orcapod.logical_types.identifier import require_readable
+
+                require_readable(lt, arrow_type.__arrow_ext_serialize__())
                 _lt = lt
                 _self = self
                 return lambda storage_value: _lt.storage_to_python(storage_value, _self)
