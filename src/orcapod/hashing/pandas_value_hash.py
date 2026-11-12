@@ -6,11 +6,11 @@ A pandas value hashes as::
 
 under the ``ContentHash`` method label ``"pandas_dataframe_v1"`` (a frame) or
 ``"pandas_series_v1"`` (a Series); see ``orcapod.hashing.labelled_hash``. The label names this
-whole definition, including the Arrow hasher whose digest it embeds (``arrow_v0.1``). A label is
-bumped whenever the hash of any value can change (developer's rule, November 11, 2026): a change
-to the grammar, to the values table, or of the Arrow hasher (a new ``hasher_id``) is a new
-definition under new labels (``pandas_dataframe_v2``, ``pandas_series_v2``). A test pins the
-labels to the Arrow hasher id.
+whole procedure: the grammar, the values table and the ordered Arrow digest it embeds. It
+changes only when the procedure would give an existing value a different digest (then
+``pandas_dataframe_v2`` / ``pandas_series_v2``), and it never enters the computation: only the
+digest bytes of ``hash_table_ordered`` are hashed, not that hash's own label. Such a change
+also changes the identifier of the pandas logical types (``logical_types/pandas_type.py``).
 
 The identity is what pandas' own ``assert_frame_equal`` / ``assert_series_equal`` compare with
 their default arguments (developer's decision, November 11, 2026), with two exceptions:
@@ -74,11 +74,11 @@ if TYPE_CHECKING:
     from orcapod.types import ContentHash
 
 
-PANDAS_DATAFRAME_HASH_METHOD = "pandas_dataframe_v1"
-"""``ContentHash`` method label of a ``pd.DataFrame`` hash; names the whole definition."""
+PANDAS_DATAFRAME_HASH_LABEL = "pandas_dataframe_v1"
+"""``ContentHash.method`` of a ``pd.DataFrame`` value hash: the single definition."""
 
-PANDAS_SERIES_HASH_METHOD = "pandas_series_v1"
-"""``ContentHash`` method label of a ``pd.Series`` hash; names the whole definition."""
+PANDAS_SERIES_HASH_LABEL = "pandas_series_v1"
+"""``ContentHash.method`` of a ``pd.Series`` value hash: the single definition."""
 
 _MASKED_DTYPE_NAMES = frozenset(
     {
@@ -284,7 +284,7 @@ def pandas_frame_content_hash(
     """
     descriptor = pandas_frame_descriptor(df)
     digest = arrow_hasher.hash_table_ordered(_values_table(df)).digest
-    return labelled_content_hash(PANDAS_DATAFRAME_HASH_METHOD, descriptor, digest)
+    return labelled_content_hash(PANDAS_DATAFRAME_HASH_LABEL, descriptor, digest)
 
 
 def pandas_series_content_hash(
@@ -308,4 +308,4 @@ def pandas_series_content_hash(
     digest = arrow_hasher.hash_table_ordered(
         _values_table(series.to_frame(name="c0"))
     ).digest
-    return labelled_content_hash(PANDAS_SERIES_HASH_METHOD, descriptor, digest)
+    return labelled_content_hash(PANDAS_SERIES_HASH_LABEL, descriptor, digest)

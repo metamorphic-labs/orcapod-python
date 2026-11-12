@@ -42,6 +42,17 @@ def leading_names(df: pd.DataFrame) -> str:
     return f"{df.columns[0]}/{df.index.names[0]}"
 
 
+_COUNTED_CALLS: list[str] = []
+
+
+@function_pod(output_keys="leading")
+def counted_leading_names(df: pd.DataFrame) -> str:
+    """As ``leading_names``, recording every call that actually computes."""
+    leading = f"{df.columns[0]}/{df.index.names[0]}"
+    _COUNTED_CALLS.append(leading)
+    return leading
+
+
 _STORES: dict[str, Callable[[Path], ArrowDatabaseProtocol]] = {
     "in_memory": lambda _: InMemoryArrowDatabase(),
     "delta": lambda tmp: DeltaTableDatabase(tmp / "delta"),
@@ -111,3 +122,26 @@ class TestPandasColumnOrder:
                 }
             )
         assert got == _EXPECTED
+
+    def test_equal_frame_is_served_from_the_cache(
+        self, store_name: str, orchestrator_name: str, tmp_path: Path
+    ) -> None:
+        """An equal frame in a later run is a cache hit; a reordered one computes."""
+        store = _STORES[store_name](tmp_path)
+        _COUNTED_CALLS.clear()
+        got: dict[str, str] = {}
+        for key, reverse in (("first", False), ("equal", False), ("reordered", True)):
+            source = DictSource([{"k": key, "reverse": reverse}], tag_columns=["k"])
+            job = PipelineJob(name="pandas_order_counted", store=store)
+            with job:
+                frames = make_frame.pod(source, label="make")
+                counted_leading_names.pod(frames, label="leading")
+            job.run(orchestrator=_ORCHESTRATORS[orchestrator_name]())
+            got.update(
+                {
+                    tag["k"]: data["leading"]
+                    for tag, data in job.nodes["leading"].iter_data()
+                }
+            )
+        assert got == {"first": "a/i", "equal": "a/i", "reordered": "b/j"}
+        assert _COUNTED_CALLS == ["a/i", "b/j"]

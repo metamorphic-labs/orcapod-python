@@ -9,10 +9,9 @@ under a ``ContentHash`` method label ``<type>_v<N>`` (for example ``pandas_dataf
 descriptor carries what the Arrow values cannot express (label types, library dtypes); the
 values digest is the data context's Arrow hasher's ``hash_table_ordered`` of the value's Arrow
 form (order included, the same semantic preprocessing as every Orcapod Arrow hash). The label
-names the whole definition and is its only version marker: the bytes produced under a label
-never change, and a new definition gets a new label. A label is bumped whenever the hash of any
-value can change (developer's rule, November 11, 2026), which includes a change of the Arrow
-hasher whose digest the label embeds.
+names the whole procedure that produced the digest and nothing else (the label rule, ITL-938):
+it changes only when the procedure would give an existing value a different digest, and it
+never enters a hash computation.
 """
 
 from __future__ import annotations

@@ -227,26 +227,6 @@ class TestLabels:
     def test_series_label(self) -> None:
         assert _content_hash(pd.Series([1, 2])).method == "pandas_series_v1"
 
-    def test_labels_are_pinned_to_the_arrow_hasher(self) -> None:
-        """A label is bumped whenever the hash of any value can change (developer, Nov 11, 2026).
-
-        ``pandas_*_v1`` embed the Arrow hasher's digest, so a new Arrow hasher (a new
-        ``hasher_id``) needs new pandas labels. When this fails, bump the labels
-        (``pandas_*_v2``) and then the pin. Update the pin alone only while the labels are
-        still unreleased.
-        """
-        from orcapod.hashing.pandas_value_hash import (
-            PANDAS_DATAFRAME_HASH_METHOD,
-            PANDAS_SERIES_HASH_METHOD,
-        )
-
-        pinned = {"arrow_v0.1": ("pandas_dataframe_v1", "pandas_series_v1")}
-        hasher_id = get_default_context().arrow_hasher.hasher_id
-        assert pinned.get(hasher_id) == (
-            PANDAS_DATAFRAME_HASH_METHOD,
-            PANDAS_SERIES_HASH_METHOD,
-        ), f"Arrow hasher is {hasher_id!r}: bump the pandas labels, then this pin"
-
     def test_frame_and_its_one_column_series_differ(self) -> None:
         assert _hash(pd.DataFrame({"a": [1, 2]})) != _hash(pd.Series([1, 2], name="a"))
 

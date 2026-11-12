@@ -44,9 +44,10 @@ class StarfixArrowHasher:
     2. **Starfix hashing** — ``ArrowDigester.hash_table`` produces a 35-byte
        digest: the starfix hash format number ``00 00 02`` (hash format 2,
        starfix 0.5) followed by a SHA-256 digest, byte-for-byte identical to
-       the Rust ``starfix`` crate output. The order of columns and of struct
-       fields is not part of the hash (starfix's order options stay off); row
-       order and list element order are. Extension identity
+       the Rust ``starfix`` crate output. In ``hash_table`` the order of columns
+       and of struct fields is not part of the hash (starfix's order options stay
+       off); ``hash_table_ordered`` turns both options on. Row order and list
+       element order are always part of it. Extension identity
        (``ARROW:extension:name`` and ``ARROW:extension:metadata``) is hashed
        through starfix's ``include_metadata`` whenever the table has an
        extension column, including pyarrow's built-in canonical extension types
@@ -181,8 +182,12 @@ class StarfixArrowHasher:
 
         The same as ``hash_table`` (the same semantic preprocessing, so a ``File`` column is
         hashed by its content), except that the order of the columns and of the fields of
-        every struct, at every depth, is part of the hash. The two never coincide: starfix
-        records the order options in the digest header.
+        every struct, at every depth, is part of the hash (starfix's ``ordered_columns``
+        and ``ordered_struct_fields`` options). The options are an input of the digest, so
+        the two hashes of one table never coincide, even for a one-column table. Value
+        types whose own equality depends on order build their hash on this digest (pandas
+        ``DataFrame`` and ``Series``); the ``ContentHash`` returned here carries this
+        hasher's label, and such a type uses the digest bytes only, under its own label.
         """
         return ContentHash(
             method=self._hasher_id, digest=self._digest(table, ordered=True)
