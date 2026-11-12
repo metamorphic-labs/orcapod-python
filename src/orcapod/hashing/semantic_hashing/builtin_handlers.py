@@ -448,10 +448,10 @@ class PandasDataFrameHandler:
     """Hasher for ``pd.DataFrame``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
     Delegates to ``pandas_frame_content_hash`` in ``orcapod.hashing.pandas_value_hash``, whose
-    module docstring defines the ``pandas_dataframe_v1`` scheme. The hash distinguishes what
-    ``assert_frame_equal`` distinguishes with its defaults: column order, index levels and their
-    order, label types, ``columns.names``, pandas dtypes and categorical categories, and the
-    values (except ``flags``, and ``-0.0`` vs ``0.0``, which hash apart).
+    module docstring defines the ``pandas_dataframe_v1`` scheme. The hash is strict: column
+    order, index levels and their order, label types, ``columns.names``, pandas dtypes,
+    categorical categories, ``attrs`` and the values are all part of it. Only what storage
+    does not restore (``flags``, for example) is left out.
 
     Args:
         arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
