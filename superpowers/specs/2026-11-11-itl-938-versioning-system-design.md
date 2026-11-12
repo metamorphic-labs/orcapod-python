@@ -806,3 +806,323 @@ Open questions for the developer:
 2. Is the path-or-column test of Part 4 accepted?
 3. Type rules (II1, II2) do not reach the path today. Confirm this is a gap to close.
 4. Next: which axes share one name, which get their own, and the exact path layout per option.
+
+---
+
+## Appendix A. Every hash computation site: what affects the result
+
+For each site: the algorithm, every input that changes the result, inputs one might expect
+to matter that do not, and the label that comes out. Every "affects" and "does not affect"
+below was measured by changing one thing and comparing hashes (Python 3.12.15, numpy 2.2.6,
+pandas 2.2.3, polars 1.41.2, pyarrow 23.0.1, starfix 0.4.0, macOS arm64), unless marked
+"(code only)". The claims flagged in A.9 were re-run a second time independently, on main
+and on the ITL-910 snapshot.
+
+Not verified: other Python versions, big-endian hosts, PostgreSQL and SpiralDB sources,
+`PollingSource`, the async Join path.
+
+Notation: `S:` stands for `semantic_v0.1:`; hashes are shortened to their first 8 hex digits
+(for Arrow hashes, the 8 after the `000001` prefix).
+
+### A.0 Map of sites
+
+```
+ VALUE HASHERS (A.2)                STRUCTURE HASHER (A.1)                 ARROW HASHER (A.3)
+ file, directory, ndarray,   ──►    hash_object(structure)          ◄──   hash_table(table)
+ polars expr, bytes, uuid,          sha256(canonical JSON)                 starfix digest
+ type objects, functions,                    │                                    │
+ schemas                                     ▼                                    ▼
+                         IDENTITY STRUCTURES (A.4 - A.6)             ROW IDENTITIES (A.7 - A.8)
+                         source, stream, operator, function,         row data hash, default source_id,
+                         node  ->  content_hash / pipeline_hash      record id, system tags, entry id,
+                                                                     row keys of every table
+```
+
+### A.1 The structure hasher: `hash_object`
+
+`hashing/semantic_hashing/semantic_hasher.py`. Used for every `content_hash()` and
+`pipeline_hash()`, schema hashes and function identity.
+
+**Algorithm**
+
+1. A value that is already a hash is returned unchanged, with its own label.
+2. `None`, `bool`, `int`, `float`, `str` (and subclasses) go straight to step 6.
+3. Otherwise a handler is looked up by exact type, then along the type's base classes
+   (A.2). Its result is fed back into step 1.
+4. Containers are expanded:
+
+   | Input | Becomes |
+   |---|---|
+   | `list` | JSON array, order kept |
+   | `tuple` | `{"__type__":"tuple","items":[…]}`, order kept |
+   | `set`, `frozenset` | `{"__type__":"set","items":[…]}`, items sorted by their `str()` |
+   | `dict`, any mapping | JSON object with keys turned into `str()`, sorted |
+   | namedtuple | `{"__type__":"namedtuple","name":<class name>,"fields":{…}}` |
+   | anything else nested inside | its own hash as the labelled string `"<label>:<hex>"` |
+
+5. An object with its own identity (a source, stream, pod) is replaced by its `content_hash()`
+   or `pipeline_hash()` string, depending on which chain is being computed.
+6. Digest: `sha256(json.dumps(tree, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))`.
+7. Output label: `semantic_v0.1`.
+
+Example: a source's pipeline identity `(tag_schema, data_schema)` is hashed as exactly
+`{"__type__":"tuple","items":[{"id":"semantic_v0.1:24be397c…"},{"x":"semantic_v0.1:24be397c…"}]}`,
+where `semantic_v0.1:24be397c…` is the hash of the string `"type:builtins.int"`.
+
+| Affects | Example |
+|---|---|
+| The type of a primitive | `[1]` `S:080a9ed4`, `[1.0]` `S:c2272c0a`, `[True]` `S:1c28f2eb` |
+| List order; list versus tuple versus set | `[1,2]` `S:49a64717`, `[2,1]` `S:af1a1fc1`, `(1,2)` `S:ed27331d`, `{1,2}` `S:28654306` |
+| Dict keys and values; a key present with `None` versus absent | `{"a":None}` `S:d091f9c8`, `{}` `S:44136fa3` |
+| The label **and** digest of every nested hash | a nested `foo_v9:…` versus `bar_v9:…` with the same digest differ |
+| The label `semantic_v0.1` itself, whenever the structure holds any non-primitive leaf (a type, schema, function, bytes, another element) | `[b'a']` under another label gives a different digest |
+| `0.0` versus `-0.0`; Unicode normalisation form | hashed as written |
+
+| Does NOT affect | Why |
+|---|---|
+| Dict insertion order | keys are sorted |
+| `set` versus `frozenset`; insertion order of a set | same tag; sorted |
+| The label, for a flat structure of primitives | the label is not in the JSON |
+| Which class a dict, list or `Schema` subclass is | matched through the base class |
+
+Known irregularities (measured):
+
+- A set holding items with the same `str()` (`{1, "1"}`) hashes differently from run to run
+  (`PYTHONHASHSEED`).
+- Dict keys are compared after `str()`: `{1: "x"}` and `{"1": "x"}` are the same hash.
+- A tuple and the dict `{"__type__":"tuple","items":[…]}` are the same hash.
+- At top level, `b'a'` and the string `"61"` are the same hash; a UUID and its 32-hex string
+  are the same hash.
+
+### A.2 Value hashers (handlers)
+
+| Value type | Algorithm | Affects | Does NOT affect | Label |
+|---|---|---|---|---|
+| `bytes`, `bytearray` | lowercase hex string, then A.1 | the bytes | bytes versus bytearray | `semantic_v0.1` |
+| `uuid.UUID` | its 16 bytes, then as bytes | the 128-bit value | — | `semantic_v0.1` |
+| `orcapod.File` | SHA-256 over the file's bytes, read in 64 KiB chunks | file bytes | file name, directory, mtime, permissions, symlink, chunk size | `sha256` |
+| `orcapod.Directory` | Merkle tree: each entry is `sha256("file\0"+name+"\0"+file digest)`, `"dir\0"+name+"\0"+subtree digest` or `"symlink\0"+name+"\0"+link target`; entries sorted by name; node = `sha256("directory\0"+entry digests)` | entry names, contents, tree position, empty subdirectories, hidden files (`.DS_Store`), symlink target text, what the ignore filter removes | root directory name and location, creation order, mtime, permissions | `merkle_sha256` |
+| `numpy.ndarray` | `sha256(len(tag)‖tag‖ndim‖each dim‖nbytes‖data)`, all little-endian 64-bit; `tag` is the dtype (`int32`, `float64`, `datetime64[ns]`, `ucs4[3]`, …); data is C-order little-endian | dtype kind and width, shape, values, exact float bits (`-0.0`, NaN payload), string width, datetime unit | byte order, C or Fortran order, contiguity, subclass, struct padding; the stored layout and `{"version":1}` | `ndarray_v1` |
+| `polars.Expr` | serialise, parse into Orcapod's own tree, `sha256` of its canonical JSON | column names, operators, literal types, operand order, structurally different but equivalent forms | method versus operator spelling (`col.gt(1)` versus `col > 1` versus `1 < col`) | `polars_expr_v1` |
+| `pa.Table`, `pa.RecordBatch` | A.3 | see A.3 | see A.3 | `arrow_v0.1` |
+| `pandas.DataFrame`, `Series` | converted to an Arrow table with the index as a column, then A.3 | values, index values and name, row order, column names, numeric dtype, Series name | column order; `int64` versus `Int64`; object, category and Arrow strings | `arrow_v0.1` |
+| a type (`int`, `Path`, a user class) | the string `"type:<name>"`. For a registered logical type the name is its logical type name (`type:orcapod.path`); otherwise module + qualified name (`type:builtins.int`) | the name | **the Arrow storage type and extension metadata of the logical type** | `semantic_v0.1` |
+| `list[int]`, `dict[str,int]` | `{"__type__":"generic_alias","origin":…,"args":[…]}` of nested type hashes | origin, argument order | `typing.List[int]` versus `list[int]` | `semantic_v0.1` |
+| `int \| None`, `Optional[int]` | `{"__type__":"union","args":[sorted]}` | the member set | spelling and order | `semantic_v0.1` |
+| `Schema` | `{field name: hash of its Python type}`, sorted by name | field names, Python types, `T` versus `T \| None` written in the type | field order; **`optional_fields`**; the Arrow type each field converts to | `semantic_v0.1` |
+| a Python function (as a value) | `{"module", "name", "params", "returns"}`; `params` is text such as `a: int, b: str = 'x'` with defaults as `repr()` | module, name, parameter names, order, annotations, defaults, return annotation | **body**, docstring, closure, qualified name, `async` | `semantic_v0.1` |
+
+Note that a function used as a pod is **not** hashed through the last row; see A.6.
+
+### A.3 The Arrow hasher: `hash_table`
+
+`hashing/arrow_hashers.py`, then starfix. Used for row data hashes, every row key, the
+default `source_id`, and table-like values.
+
+**Algorithm**
+
+1. Columns of plain types are passed to starfix untouched.
+2. Struct, list and extension columns are rebuilt first. A cell of an extension type that has
+   a value hasher becomes the bytes `<extension name>::<label>:<digest>`; for an array that is
+   `orcapod:ndarray::ndarray_v1:` + 32 bytes. Struct and list types are rebuilt from the first
+   non-null row, which **drops nested nullability, nested metadata and list item names**. A
+   column with no non-null row keeps its original type.
+3. Metadata is ignored, except keys starting `ARROW:extension:`.
+4. starfix: a schema digest (SHA-256 of JSON `{column name: {type, nullable}}`, sorted by
+   name; `string` and `large_string`, `list` and `large_list`, dictionary and plain are the
+   same type), then per column a validity bitmap, list lengths and the value bytes.
+5. Output: 3 bytes of format number (`000001`) + SHA-256. Label `arrow_v0.1`.
+
+| Affects | Example |
+|---|---|
+| Row order | `fb52c5ca` -> `51aa84ec` |
+| Column names; struct field names | -> `490fa01f` |
+| Integer and float width (`int64` versus `int32`) | -> `81bfc2bd` |
+| The top-level nullable flag, even with no nulls | -> `10947bfc` |
+| Null values and positions; `""` versus null; `[]` versus null | |
+| Timestamp unit and time zone text (`UTC` versus `+00:00`); decimal precision | |
+| `large_binary` versus `fixed_size_binary` holding the same bytes | `f5bc0613` -> `2e0b4a7a` |
+| For an extension cell: the extension name, the value hasher's label, the value's digest | |
+| On starfix 0.4 only: how a top-level `bool` column is split into chunks | `cacf9103` versus `26795810` for equal tables; fixed in starfix 0.5 (ITL-910: both `95edd95c`) |
+| Nested nullability, when the column has zero rows or is all null | `fb1f61ef` versus `0853207f`; still so on ITL-910 |
+
+| Does NOT affect | Why |
+|---|---|
+| Column order; struct field order | sorted by name |
+| Chunking of non-bool columns; table versus record batch | streamed |
+| `string` versus `large_string`, `binary` versus `large_binary`, `list` versus `large_list`, dictionary encoding | normalised by starfix |
+| Ordinary field and schema metadata | ignored |
+| Nested nullability, when the column has data | dropped in step 2 (`2dd40745` both ways) |
+
+### A.4 Sources
+
+Structure hasher over these structures:
+
+| Source | Content identity | Pipeline identity |
+|---|---|---|
+| `DictSource`, `ArrowTableSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource`, database table sources | `(class name, (tag schema, data schema), source_id)` | `(tag schema, data schema)` |
+| `ListSource` | `(class name, name, elements, tag function's module.qualname)` | same as above |
+| `CachedSource` | the wrapped source's | the wrapped source's |
+| `DerivedSource` | `(origin node's content hash,)` | from the origin's schema |
+| `SourceNode` (unbound) | `("source_node", name, tag schema, data schema)` | `(tag schema, data schema)` |
+
+Where `source_id` comes from when the user gives none:
+
+| Source | Default `source_id` |
+|---|---|
+| `DictSource`, `ListSource`, `DataFrameSource`, `ArrowTableSource` | the Arrow hash of the whole table, 70 bare hex characters |
+| `CSVSource` | the file path as passed |
+| `DeltaTableSource` | the name of the table's directory |
+| SQLite, PostgreSQL, SpiralDB table sources | the table name |
+
+| Affects | Which hash | Example |
+|---|---|---|
+| `source_id` | content | `S:20630802` -> `S:1e0f359d` |
+| The source class name | content | same data and id: `DictSource` `S:20630802`, `ArrowTableSource` `S:a7b3dad3` |
+| Which columns are tags | both | |
+| Column names; Python types | both | |
+| Nullability: one `None` in a column turns `int` into `int \| None` | both | `S:ce67f306` -> `S:fa9b175f` |
+| Data, row order: **only with the default table-hash `source_id`** | content | |
+
+| Does NOT affect | Example |
+|---|---|
+| Data values, row count, row order, when `source_id` is given | all `S:20630802` |
+| Column order | |
+| Arrow width (`int32` versus `int64`) | |
+| `record_id_column`, `label` | |
+| CSV content and mtime | same path, different content: `S:c46011a7` both |
+| Which database file or which parent directory | two SQLite files with a table `t`: same hashes |
+
+### A.5 Operators and streams
+
+A stream produced by an operator: `(operator, inputs)`. The inputs are an unordered set for
+`Join` and `MergeJoin`, an ordered tuple for `SemiJoin` and every single-input operator. The
+same structure is used for both chains; the chains differ only in how the inputs resolve.
+
+| Operator | Its identity |
+|---|---|
+| `Join`, `MergeJoin`, `SemiJoin` | the class name as a string: `"Join"` -> `S:295ca933` |
+| `Batch` | `(class name, batch_size, drop_partial_batch)` |
+| `GroupBy` | `(class name, by)` |
+| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns` | `(class name, columns, strict)` |
+| `MapTags`, `MapData` | `(class name, name map, drop_unmapped)` |
+| `PolarsFilter` | `(class name, predicates, constraints)` |
+| `Index`, `Pick` | `(class name, column, index or key, out)` |
+
+| Affects | Example |
+|---|---|
+| The class name | a subclass named `MyJoin`: `S:2da23cfc` |
+| The constructor arguments listed above, including order of `by`, of selected columns, of predicates | `Batch(2)` `S:6e9c57aa`, `Batch(3)` `S:538df39c` |
+| Input order, for `SemiJoin` | |
+| Nesting of joins | `Join(Join(a,b),c)` differs from `Join(a,b,c)` |
+| The container type of `columns` | `SelectDataColumns(["x"])` `S:c4b23b2f`, `(("x",))` `S:85aeda52`, `({"x"})` `S:b09918bc` |
+
+| Does NOT affect | Example |
+|---|---|
+| The operator's module, implementation or version | a class in another module also named `Join`: `S:295ca933` |
+| Input order, for `Join` and `MergeJoin` | |
+| `label` | |
+| A predicate written another way | `10 < col` equals `col > 10` |
+| Two operators that produce the same output | `DropDataColumns(["y"])` and `SelectDataColumns(["x"])` differ |
+
+A stream with no producer (`ArrowTableStream` built from a table): content identity is
+`(class name, the whole table including system tags and source info, tag columns)`; pipeline
+identity is `(tag schema, data schema)`.
+
+### A.6 Functions and function nodes
+
+A function pod's identity is its `uri`, for both chains:
+
+```
+('double', 'semantic_v0.1:17de3328…', 'v0', 'python.function.v0')
+    │                 │                 │            │
+ function name   hash of the OUTPUT   major      wrapper kind
+ (or the         schema only          version
+ function_name
+ argument)
+```
+
+Major version: the first run of digits followed by a dot (`"v0.7"` -> `v0`, `"2.0"` -> `v2`,
+`"release-10.3rc1"` -> `v10`; `"v1"` is an error). The default is `v0.0` with
+`@function_pod` and `v1.0` with `FunctionPod.from_fn`.
+
+A function node or stream: `(function pod, {input stream})`.
+
+| Affects | Example |
+|---|---|
+| Function name | `S:c1a0b28b` -> `S:63deeae2` |
+| Major version | `v1.0`: `S:9c246eff` |
+| Output annotation; output key names | `-> float`: `S:7d6d0cf0` |
+| The module of a user-defined **output type** | a dataclass `Point` in module A versus B: different |
+| The upstream stream (schema for the pipeline chain; schema and source for the content chain) | |
+
+| Does NOT affect | Example |
+|---|---|
+| The function body, comments, docstring, `async` | all `S:c1a0b28b` |
+| Minor version | `v0.7` equals `v0.0` |
+| The input schema: parameter names, annotations, defaults | the pod hash stays `S:c1a0b28b`; the node hash moves only because the upstream schema moved |
+| The function's module | same source in another module: `S:c1a0b28b` |
+| `label`, `pod_config`, executor, the cache wrappers, the attached database | |
+| `table_scope` | changes the path only |
+
+Stored but used for nothing: `__pf_var_function_signature_hash` (module, name, parameters,
+return annotation) and `__pf_var_function_content_hash` (name, module, **full source text**,
+annotations, a few code-object counts). They do change when the body changes
+(`45763798` -> `3b667e66`), but no lookup reads them.
+
+### A.7 Row-level identities
+
+| Identity | Algorithm | Affects | Does NOT affect |
+|---|---|---|---|
+| **Row data hash** (`__input_data_hash`, `__output_data_hash`, `_content_hash`) | A.3 over the row's data columns only | data values, data column names, Arrow width, the nullable flag of each data column | tags, system tags, source info, `source_id`, row position, the data context key |
+| **Default `source_id`** | A.3 over the whole source table (tag and data columns; columns starting with `_` are dropped), as bare hex | every value, row order, nullable flags | which columns are tags, column order |
+| **Source record id** | `uuid5(namespace, "{source_id}::row_{i}")`, or `"{source_id}::{column}={value}"` with `record_id_column`. The namespace is `uuid5(NAMESPACE_URL, "https://orcapod.org/namespaces/source-record-id")` | `source_id`; row position (or the column's value) | data values, when `source_id` is given |
+| **Source-info token** | `"{source_id}::{row token}::{column}"`; after a function pod `"{uri joined by ':'}::{uuid7 of the output}::{column}"` | — | not a hash |
+| **Schema hash in system-tag names** | A.1 over `(tag schema, data schema)`, bare hex. Equal to the source's pipeline hash | column names, tag or data role, Python types, `T` versus `T \| None` | `source_id`, values, Arrow width, column order |
+| **System-tag name after Join / MergeJoin** | append `::<pipeline hash of that input, bare hex>:<position>`; position is the rank of the input's pipeline hash | the input's pipeline hash | argument order; the join's own hash; any content hash |
+| **System-tag name after Batch / GroupBy** | append `::<pipeline hash of the input stream>` | same | |
+| **Folded record id** (Batch, GroupBy) | `uuid5(namespace2, "::".join(member ids as hex))` | members and their order | |
+| **Folded source id** (Batch, GroupBy) | `sha256` of the members concatenated **with no separator**, bare hex | members and their order | where one member ends and the next begins: `["ab","c"]` equals `["a","bc"]` |
+
+### A.8 Row keys of stored tables
+
+| Key | Algorithm | Affects | Does NOT affect |
+|---|---|---|---|
+| **Pipeline entry id** (`__pipeline_base_entry_id`) | A.3 over a one-row table: the **user tag columns**, the system-tag columns, and `__input_data_hash` | user tag names and values; system-tag names (so the route through the operator chain) and values (so `source_id` and record ids); the row data hash | which function or node computes it; source info |
+| **Pipeline-table row key** (`__record_id`) | the same table plus `__pipeline_recomputation_index` | as above, plus the recomputation count | |
+| **Result-table lookup** | match on `__input_data_hash` only, inside the table at `<job>/_result/<function uri>/rdb_v1`; the newest row wins | the row data hash; function name, output schema, major version; the job name | the function body and its stored hashes; tags; `source_id`; the data context key |
+| **Row filter in a shared pipeline table** | `__node_content_hash` equals the node's content hash | the node's content hash (A.4 to A.6) | data, when `source_id` is given |
+| **Result-table row key** (`__record_id`), `__data_id` | random `uuid7` | nothing | not a hash |
+| **Operator cache row key** (`_record_hash`) | A.3 over the full row: tags, data, source info, system tags and `__node_content_hash`, as bare hex | every column and its Arrow type | row and column order |
+| **Cached-source row key** | A.3 over the source row with source info and system tags, bare hex | same | |
+| **Side-effect log key** | the pipeline entry id with index 0 | as the entry id | |
+
+Measured cache behaviour that follows from this table:
+
+| Scenario | What happens |
+|---|---|
+| Same function and data, source renamed | result table unchanged (2 rows), pipeline table gains 2 rows that point at the existing results, nothing recomputed |
+| Function body changed from `a + b` to `a - b`, version `v0.0` or `v0.9` | the cached `11` is returned |
+| Same, version `v1.0` | recomputed: `9`, in a new table `…/v1/…` |
+
+### A.9 Findings that bear on the design
+
+These came out of the audit. Each was reproduced a second time.
+
+| # | Finding | Why it matters here |
+|---|---|---|
+| A | With a user-given `source_id`, **data is in no content hash anywhere down the chain**: a changed value, an added row and reordered rows leave every stage's content hash unchanged. The row filter `__node_content_hash` therefore does not separate two runs of different data under one `source_id`; their rows are separated only by the entry id | "content hash" does not mean what its name says; the system must name what it actually covers |
+| B | File and database sources default `source_id` to a name, so two SQLite files with a table `t`, or two Delta tables named `tbl` in different directories, have identical hashes | same |
+| C | The stored Arrow type of a column is in no structure hash. Only its Python type name is | type rules (axes II1, II2) cannot reach a path through any existing hash |
+| D | An operator's identity is its class name; nothing about its behaviour or version | axis IV3 has no hook |
+| E | `MergeJoin(m1, m1b)`, same `source_id` and different data, equals `MergeJoin(m1, m1)` on both hashes (`S:57f303d7`, `S:69ff5b2e`), and its **pipeline** hash differs from `MergeJoin(m1, m2)` (`S:a91c53db`) although all three inputs share one schema | the pipeline hash is not purely schema plus topology: unordered inputs are de-duplicated by content |
+| F | `SelectDataColumns(["x"])`, `(("x",))` and `({"x"})` give three different hashes and so three different downstream paths | identity composition (axis I4) is uneven |
+| G | The record-id system tag is `fixed_size_binary[16]` out of a source and `large_binary` after passing through a tag object. Entry ids are unaffected (always built after the conversion); the operator cache key is affected: the same row hashes differently on a direct stream and through the orchestrator | a type drift inside a hashed table |
+| H | The folded source id has no separator between members | a collision by construction |
+| I | Nested nullability is hashed for an empty or all-null column and dropped for a column with data, so the same schema hashes differently depending on whether data is present. `CLAUDE.md` says the nested non-null flag always matters | data-dependent hashing |
+| J | On starfix 0.4 a `bool` column's chunk layout changes the table hash, and so the default `source_id`. Fixed by starfix 0.5 | already addressed by ITL-910 |
+| K | The entry id covers user tag names and values; the code comments say system tags only | documentation |
+| L | Function defaults enter the function-value hash as `repr()`, which is not stable for sets or objects; a set with `str()`-equal items hashes differently per process | process-dependent hashes |
+| M | The structure label is inside the preimage of every nested non-primitive hash, so changing the label alone moves every real identity hash; flat structures are unaffected | a label bump on axis I1 is all-or-nothing |
+| N | The default function version differs by entry point (`v0.0` versus `v1.0`) | the same function gets two identities |
+| O | `ctx_arg_name` changes a pod's content hash, uri and table path but not its pipeline hash | the two chains disagree about the path |
