@@ -794,7 +794,14 @@ def pipeline_pod() -> dict[str, Any]:
 
 @case("pipeline", "pod_default_version")
 def pipeline_pod_default_version() -> dict[str, Any]:
-    # Added by ITL-942 (finding N): every entry point defaults to version v0.0.
+    """Pin one uri for one function whatever the entry point (ITL-942 finding N).
+
+    ``FunctionPod.from_fn`` and ``@function_pod`` both default to version ``v0.0``,
+    so the same function gets the same uri, and therefore the same table paths.
+
+    Returns:
+        The uri of the pod built each way.
+    """
     from orcapod import FunctionPod
 
     built = FunctionPod.from_fn(

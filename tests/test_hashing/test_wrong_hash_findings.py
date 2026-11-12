@@ -36,10 +36,12 @@ RECORD_ID_COL = "_tag_record_id::abc"
 
 
 def _semantic_hasher() -> Any:
+    """Return the default data context's structure hasher."""
     return resolve_context(None).semantic_hasher
 
 
 def _arrow_hasher() -> Any:
+    """Return the default data context's Arrow hasher."""
     return resolve_context(None).arrow_hasher
 
 
@@ -80,6 +82,7 @@ def _stream_with_source_ids(source_ids: list[str | None]) -> ArrowTableStream:
 
 
 def _folded_source_id(stream: Any) -> str:
+    """Return the single folded source-id system-tag value of a one-row stream."""
     table = stream.as_table(columns={"system_tags": True})
     [col] = [c for c in table.column_names if c.startswith("_tag_source_id")]
     [value] = table.column(col).to_pylist()
@@ -87,15 +90,19 @@ def _folded_source_id(stream: Any) -> str:
 
 
 class TestFoldSeparatesMembers:
+    """Finding H: the source-id fold of Batch and GroupBy decodes to its member list."""
+
     @pytest.mark.parametrize(
         "make_op", [lambda: Batch(batch_size=2), lambda: GroupBy(by=["g"])]
     )
     def test_member_boundaries_are_identity(self, make_op: Any) -> None:
+        """Members split differently fold differently."""
         left = _folded_source_id(make_op()(_stream_with_source_ids(["ab", "c"])))
         right = _folded_source_id(make_op()(_stream_with_source_ids(["a", "bc"])))
         assert left != right
 
     def test_null_member_differs_from_empty_member(self) -> None:
+        """A null member folds unlike an empty-string member."""
         left = _folded_source_id(
             Batch(batch_size=2)(_stream_with_source_ids([None, "x"]))
         )
@@ -105,6 +112,7 @@ class TestFoldSeparatesMembers:
         assert left != right
 
     def test_source_info_stays_the_list_of_member_tokens(self) -> None:
+        """Only the scalar system-tag fold changed, not source info."""
         # Only the scalar system-tag fold changed: source-info columns still list
         # each member's own provenance token, in member order.
         source = DictSource(
@@ -121,6 +129,7 @@ class TestFoldSeparatesMembers:
             assert table.column("x").to_pylist() == [[10, 20]]
 
     def test_member_order_is_identity(self) -> None:
+        """Member order is part of the fold."""
         left = _folded_source_id(
             Batch(batch_size=2)(_stream_with_source_ids(["a", "b"]))
         )
@@ -141,6 +150,8 @@ _NULLABLE_LIST = pa.large_list(pa.field("item", pa.int64(), nullable=True))
 
 
 class TestNestedNullabilityIsIdentity:
+    """Finding I: the hashed Arrow type depends on the declared type only."""
+
     @pytest.mark.parametrize(
         ("non_null", "nullable", "value"),
         [
@@ -158,12 +169,14 @@ class TestNestedNullabilityIsIdentity:
     def test_nested_nullability_hashes_with_and_without_data(
         self, non_null: pa.DataType, nullable: pa.DataType, value: Any, rows: int
     ) -> None:
+        """Nested nullability counts with data and with zero rows."""
         hasher = _arrow_hasher()
         a = pa.table({"c": pa.array([value] * rows, type=non_null)})
         b = pa.table({"c": pa.array([value] * rows, type=nullable)})
         assert hasher.hash_table(a) != hasher.hash_table(b)
 
     def test_nested_type_hash_does_not_depend_on_first_row(self) -> None:
+        """Null or present first rows hash under the same type."""
         # The same column type, once with a null first row: the type that is hashed must
         # not change with the data.
         hasher = _arrow_hasher()
@@ -182,6 +195,7 @@ class TestNestedNullabilityIsIdentity:
         assert hasher.hash_table(first) != hasher.hash_table(first_nullable)
 
     def test_list_item_name_is_not_identity(self) -> None:
+        """List item names stay out of the hash, as starfix defines."""
         # starfix ignores list item names (pod code cannot observe them); keep it so.
         hasher = _arrow_hasher()
         item = pa.large_list(pa.field("item", pa.int64()))
@@ -200,7 +214,10 @@ _SEEDS = ("1", "2", "3", "4", "5", "6")
 
 
 class TestStructureHasherProcessIndependence:
+    """Finding L1: set hashes do not depend on the process."""
+
     def test_set_with_str_equal_items(self) -> None:
+        """A set whose items share a str() hashes the same in every process."""
         script = """
             from orcapod.contexts import resolve_context
             print(resolve_context(None).semantic_hasher.hash_object({1, "1", 2, "2"}).to_string())
@@ -208,6 +225,7 @@ class TestStructureHasherProcessIndependence:
         assert len({_run_with_seed(script, seed) for seed in _SEEDS}) == 1
 
     def test_set_with_str_equal_items_differs_from_set_without(self) -> None:
+        """Items that share a str() remain distinct members."""
         hasher = _semantic_hasher()
         assert hasher.hash_object({1, "1"}) != hasher.hash_object({1})
         assert hasher.hash_object({1, "1"}) != hasher.hash_object({"1"})
@@ -219,11 +237,15 @@ class TestStructureHasherProcessIndependence:
 
 
 class TestDictKeysKeepTheirType:
+    """Dict keys keep their type, and no dict spells out another value's encoding."""
+
     def test_int_key_differs_from_str_key(self) -> None:
+        """An int key and its string spelling hash differently."""
         hasher = _semantic_hasher()
         assert hasher.hash_object({1: "x"}) != hasher.hash_object({"1": "x"})
 
     def test_keys_with_equal_str_do_not_collapse(self) -> None:
+        """Two keys with one str() both count."""
         hasher = _semantic_hasher()
         both = {1: "a", "1": "b"}
         assert hasher.hash_object(both) != hasher.hash_object({"1": "b"})
@@ -259,12 +281,14 @@ class TestDictKeysKeepTheirType:
     def test_encoded_values_differ_from_literal_type_dicts(
         self, value: Any, literal: Any
     ) -> None:
+        """A user dict spelling out an encoding never shares its hash."""
         # A user dict spelling out the hasher's own encoding of another value must
         # not share that value's hash.
         hasher = _semantic_hasher()
         assert hasher.hash_object(value) != hasher.hash_object(literal(hasher))
 
     def test_namedtuple_differs_from_literal_type_dict(self) -> None:
+        """A dict spelling out a namedtuple's encoding hashes differently."""
         from collections import namedtuple
 
         hasher = _semantic_hasher()
@@ -277,6 +301,7 @@ class TestDictKeysKeepTheirType:
         assert hasher.hash_object(point(1, 2)) != hasher.hash_object(literal)
 
     def test_nested_hash_differs_from_literal_hash_dict(self) -> None:
+        """A dict spelling out a nested hash's encoding hashes differently."""
         # The nested-hash tag 'hash' is written by ITL-945 (PR #314):
         # {"__type__": "hash", "digest": <hex>}. Before that branch lands a nested
         # hash enters as its string; either way a user dict spelling out the tag
@@ -287,13 +312,35 @@ class TestDictKeysKeepTheirType:
         literal = {"__type__": "hash", "digest": nested.to_hex()}
         assert hasher.hash_object([nested]) != hasher.hash_object([literal])
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Fixed by ITL-945 (PR #314): its _nested_hash() in semantic_hasher.py feeds "
+            "a nested ContentHash into its parent as {'__type__': 'hash', 'digest': "
+            "<hex>} instead of the 'label:hex' string this branch uses, so a hash key "
+            "no longer equals its string spelling. Remove this marker when #314 and "
+            "#315 meet."
+        ),
+    )
+    def test_hash_key_differs_from_its_string_spelling(self) -> None:
+        """A hash key and its string spelling stay two keys (CodeRabbit, PR #315)."""
+        from orcapod.types import ContentHash
+
+        hasher = _semantic_hasher()
+        key = ContentHash("x", b"\x00")
+        swapped_a = {key: 1, key.to_string(): 2}
+        swapped_b = {key: 2, key.to_string(): 1}
+        assert hasher.hash_object(swapped_a) != hasher.hash_object(swapped_b)
+
     def test_dict_with_type_key_differs_from_same_dict_without(self) -> None:
+        """A '__type__' key is part of the dict's identity."""
         hasher = _semantic_hasher()
         assert hasher.hash_object({"__type__": "a", "b": 1}) != hasher.hash_object(
             {"b": 1}
         )
 
     def test_str_keyed_dict_insertion_order_still_ignored(self) -> None:
+        """Insertion order never matters, for any key type."""
         hasher = _semantic_hasher()
         assert hasher.hash_object({"a": 1, "b": 2}) == hasher.hash_object(
             {"b": 2, "a": 1}
@@ -307,6 +354,7 @@ class TestEncodedValues:
     """Only a type handler can produce a tagged value (ITL-942, mechanism M2)."""
 
     def test_user_supplied_encoded_is_refused(self) -> None:
+        """An Encoded found in data is refused, never trusted."""
         from orcapod.hashing.semantic_hashing import Encoded
 
         hasher = _semantic_hasher()
@@ -318,18 +366,21 @@ class TestEncodedValues:
 
     @pytest.mark.parametrize("tag", ["tuple", "set", "dict", "namedtuple", "hash", ""])
     def test_reserved_and_empty_tags_are_rejected(self, tag: str) -> None:
+        """Encoded rejects the hasher's own tags and an empty tag."""
         from orcapod.hashing.semantic_hashing import Encoded
 
         with pytest.raises(ValueError):
             Encoded(tag, {})
 
     def test_type_key_cannot_be_a_field(self) -> None:
+        """Encoded rejects a '__type__' field."""
         from orcapod.hashing.semantic_hashing import Encoded
 
         with pytest.raises(ValueError):
             Encoded("custom", {"__type__": "tuple"})
 
     def test_tags_are_unique_across_hasher_and_builtin_handlers(self) -> None:
+        """Built-in handler tags are Encoded and disjoint from the hasher's tags."""
         from orcapod.hashing.semantic_hashing import Encoded
         from orcapod.hashing.semantic_hashing.builtin_handlers import (
             GenericAliasHandler,
@@ -349,6 +400,7 @@ class TestEncodedValues:
         assert handler_tags.isdisjoint(HASHER_TAGS)
 
     def test_plain_str_keyed_dicts_are_unchanged(self) -> None:
+        """A plain str-keyed dict keeps its pre-ITL-942 hash."""
         # A str-keyed dict without a '__type__' key stays a native JSON object, so
         # its hash equals the sha256 of its canonical JSON (the pre-ITL-942 form).
         import hashlib
@@ -368,7 +420,10 @@ class TestEncodedValues:
 
 
 class TestNamedtupleFieldOrder:
+    """Finding T: a namedtuple's declared field order is part of its hash."""
+
     def test_declared_field_order_is_identity(self) -> None:
+        """Unequal namedtuples with the same name-to-value mapping differ."""
         from collections import namedtuple
 
         hasher = _semantic_hasher()
@@ -379,6 +434,7 @@ class TestNamedtupleFieldOrder:
         assert hasher.hash_object(xy(x=1, y=2)) != hasher.hash_object(yx(y=2, x=1))
 
     def test_equal_namedtuples_share_a_hash(self) -> None:
+        """Equal namedtuples of identically declared classes share a hash."""
         from collections import namedtuple
 
         hasher = _semantic_hasher()
@@ -393,14 +449,18 @@ class TestNamedtupleFieldOrder:
 
 
 def _xy_source() -> DictSource:
+    """Return a source with tag columns k, j and data columns x, y."""
     return DictSource(
         data=[{"k": 1, "j": 2, "x": 1, "y": 2}], tag_columns=["k", "j"], source_id="s"
     )
 
 
 class TestColumnSelectionIdentity:
+    """Finding F: column selection identity is the set of names."""
+
     @pytest.mark.parametrize("op_cls", [SelectDataColumns, DropDataColumns])
     def test_data_column_spellings_share_identity(self, op_cls: Any) -> None:
+        """Every spelling of one set of data columns gives one identity."""
         source = _xy_source()
         spellings = [["x", "y"], ("x", "y"), {"x", "y"}, ["y", "x"], ["x", "y", "x"]]
         streams = [op_cls(columns=c)(source) for c in spellings]
@@ -409,18 +469,21 @@ class TestColumnSelectionIdentity:
 
     @pytest.mark.parametrize("op_cls", [SelectTagColumns, DropTagColumns])
     def test_tag_column_spellings_share_identity(self, op_cls: Any) -> None:
+        """Every spelling of one set of tag columns gives one identity."""
         source = _xy_source()
         spellings = [["k"], ("k",), {"k"}, "k", ["k", "k"]]
         streams = [op_cls(columns=c)(source) for c in spellings]
         assert len({s.pipeline_hash() for s in streams}) == 1
 
     def test_argument_order_is_not_observable(self) -> None:
+        """The output column order is the stream's, not the argument's."""
         source = _xy_source()
         a = SelectDataColumns(columns=["x", "y"])(source).as_table()
         b = SelectDataColumns(columns=["y", "x"])(source).as_table()
         assert a.column_names == b.column_names
 
     def test_caller_list_is_not_aliased(self) -> None:
+        """Mutating the caller's list later does not change the operator."""
         source = _xy_source()
         columns = ["x"]
         stream = SelectDataColumns(columns=columns)(source)
@@ -435,6 +498,7 @@ class TestColumnSelectionIdentity:
 
 
 def _weights(source_id: str, weight: float) -> DictSource:
+    """Return a one-row source with tag k and data w under ``source_id``."""
     return DictSource(
         data=[{"k": 1, "w": weight}], tag_columns=["k"], source_id=source_id
     )
@@ -450,6 +514,7 @@ class TestCommutativeInputIdentity:
     """
 
     def test_self_merge_join_is_a_different_pipeline(self) -> None:
+        """A stream joined with itself is its own pipeline structure."""
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)
         assert (
@@ -457,6 +522,7 @@ class TestCommutativeInputIdentity:
         )
 
     def test_inputs_with_one_source_identity_count_as_one(self) -> None:
+        """Inputs with one source identity count as one input."""
         m1 = _weights("m", 1.0)
         m1b = _weights("m", 2.0)  # same source_id: same source identity
         assert MergeJoin()(m1, m1b).content_hash() == MergeJoin()(m1, m1).content_hash()
@@ -465,6 +531,7 @@ class TestCommutativeInputIdentity:
         )
 
     def test_input_order_is_not_identity(self) -> None:
+        """Argument order of a commutative operator is not identity."""
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)
         assert MergeJoin()(m1, m2).content_hash() == MergeJoin()(m2, m1).content_hash()
@@ -479,11 +546,15 @@ class TestCommutativeInputIdentity:
 
 
 def _record_id_types(table: pa.Table) -> set[pa.DataType]:
+    """Return the Arrow types of a table's record-id system-tag columns."""
     return {f.type for f in table.schema if f.name.startswith("_tag_record_id")}
 
 
 class TestRecordIdType:
+    """Finding G: the record-id system tag is large_binary everywhere."""
+
     def test_source_stream_and_tag_agree(self) -> None:
+        """A source's stream and its Tag objects give record ids one type."""
         source = DictSource(
             data=[{"k": 1, "x": 1}, {"k": 2, "x": 2}], tag_columns=["k"], source_id="s"
         )
@@ -493,6 +564,7 @@ class TestRecordIdType:
         assert stream_types == tag_types == {pa.large_binary()}
 
     def test_batch_keeps_the_type(self) -> None:
+        """Batch keeps the record-id type."""
         source = DictSource(
             data=[{"k": 1, "x": 1}, {"k": 2, "x": 2}], tag_columns=["k"], source_id="s"
         )
@@ -502,6 +574,7 @@ class TestRecordIdType:
         }
 
     def test_operator_cache_keys_match_on_sync_and_async_paths(self) -> None:
+        """One row has one operator-cache key on both execution paths."""
         # OperatorJobNode is driven directly: the test is about its two execution
         # paths (sync run and async_execute), which the cache key must not tell apart.
         import asyncio
@@ -512,6 +585,7 @@ class TestRecordIdType:
         from orcapod.types import CacheMode
 
         def source() -> DictSource:
+            """Return the two-row source fed to both paths."""
             return DictSource(
                 data=[{"k": i, "x": i, "y": i} for i in range(2)],
                 tag_columns=["k"],
@@ -519,6 +593,7 @@ class TestRecordIdType:
             )
 
         def stored_keys(db: Any, node: Any) -> list[bytes]:
+            """Return the sorted stored operator-cache keys of a node."""
             table = db.get_all_records(
                 node.node_identity_path, record_id_column="_record_hash"
             )
@@ -559,17 +634,24 @@ class TestRecordIdType:
 
 
 def _inc(x: int) -> int:
+    """Add one; the function under test for the default version."""
     return x + 1
 
 
 class TestDefaultFunctionVersion:
+    """Finding N: every entry point defaults to version v0.0."""
+
     def test_decorator_and_from_fn_agree(self) -> None:
+        """function_pod and FunctionPod.from_fn give one uri."""
         decorated = function_pod(output_keys="y", function_name="_inc")(_inc)
         built = FunctionPod.from_fn(_inc, output_keys="y", name="_inc")
         assert decorated.pod.uri == built.uri
 
     def test_side_effect_decorator_agrees(self) -> None:
+        """side_effect_function_pod and function_pod(ctx_arg=...) give one uri."""
+
         def _inc_ctx(x: int, ctx: Any) -> int:
+            """Add one; ignores the context."""
             return x + 1
 
         pod = side_effect_function_pod(_inc_ctx, output_keys="y")

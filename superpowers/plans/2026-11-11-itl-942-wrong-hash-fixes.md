@@ -3,9 +3,17 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:executing-plans to implement this plan
 > task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fix the wrong-hash findings H, I, L, F, E, G, N and the dict-key `str()` coercion of the
-ITL-938 hash-site audit (Appendix A.9) before the v0.3 tag, each in its own commit with a failing
-public-interface test first, with one golden regeneration at the end.
+**Goal:** Fix the wrong-hash findings of the ITL-938 hash-site audit (Appendix A.9) before the
+v0.3 tag, each in its own commit with a failing public-interface test first, with one golden
+regeneration at the end.
+
+**Final scope (developer decisions, November 11, 2026; this plan is complete, PR #315):**
+DONE: H (H1), I (I1), L1 (L1a), dict keys (D1 plus the '__type__' mechanism M2, `Encoded`),
+F (F1, and the dead duplicate `SelectDataColumns` in `filters.py` deleted), G (G1), N (N1),
+T (declared field order). NOT DONE BY DECISION: E is kept as intended (pinned by tests and
+documented); L2 (function defaults) moved to ITL-953; R is fixed by #292 (ITL-881); the
+list-of-logical-type fold collision found during I goes to ITL-935. The analysis below is the
+Step 1 record and its "Proposed order" is historical, not an active task list.
 
 **Architecture:** Each fix is local to one hash site (structure hasher, Arrow hasher pre-pass,
 fold helper, operator identity, source record-id type, function-pod default). No new
@@ -17,8 +25,9 @@ listed per finding.
 **Base:** branch `eywalker/itl-942-fix-the-wrong-hash-findings-of-the-hash`, created at the head
 of PR #309 (`5363bfb8`, ITL-910). Stacked on #309.
 
-**Status:** STEP 1 sent to the coordinator (msg_a54556d4b8ab); merged #309 at b88f7eb3 (old-label rows are now ignored on whole-table reads, not refused); G re-checked: Delta stores one binary type, so G1 changes no on-disk schema; implementation waits for the
-developer's choices. Repro scripts: run on `5363bfb8`, Python 3.12, starfix 0.5.0.
+**Status:** complete; PR #315. Merged #309 at b88f7eb3 (old-label rows are ignored on
+whole-table reads, not refused); G re-checked: Delta stores one binary type, so G1 changes no
+on-disk schema. Repro scripts: run on `5363bfb8`, Python 3.12, starfix 0.5.0.
 
 ---
 
@@ -214,8 +223,8 @@ operators, `function_pod`, `FunctionPod.from_fn`, the context's `semantic_hasher
 Then: one golden regeneration, CHANGELOG `[0.3.0] — unreleased` (breaking changes and
 migration), `docs/reference/hashing.md`, DESIGN_ISSUES entry, PR stacked on #309.
 
-## Step 2: implementation tasks
+## Step 2: implementation (done)
 
-Filled in after the developer's choices. Per finding: failing public-interface test →
+Executed after the developer's choices. Per finding: failing public-interface test →
 `uv run pytest <test> -v` shows FAIL → fix → PASS → golden suite run (record moved entries
 without regenerating) → commit `fix(<scope>): … (ITL-942)` listing moved golden entries.
