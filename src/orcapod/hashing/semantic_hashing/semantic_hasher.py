@@ -27,7 +27,7 @@ recursive with ``_expand_structure``:
   - Primitive elements  → passed through as-is (become leaves in the tree)
   - Nested structures   → recurse via ``_expand_structure``
   - Everything else     → call ``hash_object``, embed the resulting
-                          ContentHash.to_string() as a string leaf
+                          the tagged digest of the ContentHash (no label)
 
 The boundary between the two functions encodes a key semantic distinction:
 a ContentIdentifiableProtocol object X whose identity_structure returns [A, B]
@@ -78,6 +78,25 @@ from orcapod.utils.canonical_type_names import canonical_module_name
 logger = logging.getLogger(__name__)
 
 _CIRCULAR_REF_SENTINEL = "CircularRef"
+
+
+def _nested_hash(content_hash: ContentHash) -> dict[str, str]:
+    """Return the form in which a hash enters the structure that contains it.
+
+    Only the digest is fed into the enclosing hash. The label names the algorithm that
+    produced the digest and is never part of a hash input, so renaming a label changes
+    no hash. The tag keeps a nested hash apart from a string that happens to equal its
+    hex digest.
+
+    Args:
+        content_hash: The hash of a nested element.
+
+    Returns:
+        ``{"__type__": "hash", "digest": "<hex digest>"}``.
+    """
+    return {"__type__": "hash", "digest": content_hash.to_hex()}
+
+
 _MEMADDR_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
@@ -228,7 +247,7 @@ class SemanticAwarePythonHasher:
         namedtuple).  Within nested structures this function recurses into
         itself for container elements and calls ``hash_object`` for all
         non-container, non-primitive elements, embedding the resulting
-        ContentHash.to_string() as a string leaf.
+        the tagged digest of the ContentHash (no label).
 
         Primitives are passed through as-is.
 
@@ -245,9 +264,9 @@ class SemanticAwarePythonHasher:
         if isinstance(obj, (type(None), bool, int, float, str)):
             return obj
 
-        # ContentHash is a terminal leaf -- embed as its string form.
+        # ContentHash is a terminal leaf -- embed its digest, never its label.
         if isinstance(obj, ContentHash):
-            return obj.to_string()
+            return _nested_hash(obj)
 
         # Circular-reference guard for containers.
         obj_id = id(obj)
@@ -302,7 +321,7 @@ class SemanticAwarePythonHasher:
 
         - Primitives and ContentHash → handled by _expand_structure (leaf)
         - Nested structures → recurse via _expand_structure
-        - Everything else → call hash_object, embed to_string() as leaf
+        - Everything else → call hash_object, embed its tagged digest as leaf
         """
         if isinstance(obj, (type(None), bool, int, float, str, ContentHash)):
             return self._expand_structure(obj, _visited, resolver=resolver)
@@ -310,8 +329,8 @@ class SemanticAwarePythonHasher:
         if _is_structure(obj):
             return self._expand_structure(obj, _visited, resolver=resolver)
 
-        # Non-structure, non-primitive: hash independently and embed token.
-        return self.hash_object(obj, resolver=resolver).to_string()
+        # Non-structure, non-primitive: hash independently and embed the digest.
+        return _nested_hash(self.hash_object(obj, resolver=resolver))
 
     def _expand_mapping(
         self,

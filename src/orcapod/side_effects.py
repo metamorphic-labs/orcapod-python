@@ -206,7 +206,7 @@ def _execute_side_effect_row(
     of ``0``.  The preimage covers:
 
     * tag system-tag columns,
-    * ``INPUT_DATA_HASH_COL`` (binary ``data.content_hash().to_prefixed_digest()``), and
+    * ``INPUT_DATA_HASH_COL`` (the raw digest of ``data.content_hash()``, no label), and
     * ``_SIDE_EFFECT_RECOMPUTATION_INDEX_COL`` fixed at ``0`` (side effects
       never recompute).
 

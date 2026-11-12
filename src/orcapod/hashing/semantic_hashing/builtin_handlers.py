@@ -124,6 +124,24 @@ class SpecialFormHandler:
         return f"special_form:typing.{name}"
 
 
+def _sorted_hashes(
+    hasher: "SemanticHasherProtocol", args: tuple[Any, ...]
+) -> list[ContentHash]:
+    """Hash each of ``args`` and return the hashes ordered by digest.
+
+    The hashes are returned as ``ContentHash`` objects: the structure hasher feeds only
+    their digests into the enclosing hash, never their labels.
+
+    Args:
+        hasher: The structure hasher in use.
+        args: The members of a union.
+
+    Returns:
+        One hash per member, sorted by hex digest so that member order does not matter.
+    """
+    return sorted((hasher.hash_object(arg) for arg in args), key=ContentHash.to_hex)
+
+
 class GenericAliasHandler:
     """Hasher for generic alias type annotations (``dict[int, str]``, ``Optional[X]``, etc.)."""
 
@@ -135,12 +153,11 @@ class GenericAliasHandler:
         if origin is None:
             return f"generic_alias:{obj!r}"
         if origin is typing.Union:
-            hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-            return {"__type__": "union", "args": hashed_args}
+            return {"__type__": "union", "args": _sorted_hashes(hasher, args)}
         return {
             "__type__": "generic_alias",
-            "origin": hasher.hash_object(origin).to_string(),
-            "args": [hasher.hash_object(arg).to_string() for arg in args],
+            "origin": hasher.hash_object(origin),
+            "args": [hasher.hash_object(arg) for arg in args],
         }
 
 
@@ -149,8 +166,7 @@ class UnionTypeHandler:
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         args = getattr(obj, "__args__", None) or ()
-        hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-        return {"__type__": "union", "args": hashed_args}
+        return {"__type__": "union", "args": _sorted_hashes(hasher, args)}
 
 
 class ArrowTableHandler:
@@ -225,8 +241,9 @@ class SchemaHandler:
                 Python type.
 
         Returns:
-            A ``dict[str, str]`` mapping field name to the ``to_string()`` of each
-            field type's hash, sorted by field name for determinism.
+            A ``dict[str, ContentHash]`` mapping field name to the hash of the field's
+            type, sorted by field name for determinism. The structure hasher feeds
+            only the digests into the schema hash.
 
         Raises:
             TypeError: If ``obj`` is not a ``Schema``, or if ``type_converter`` is
@@ -234,7 +251,7 @@ class SchemaHandler:
         """
         if not isinstance(obj, Schema):
             raise TypeError(f"SchemaHandler: expected a Schema, got {type(obj)!r}")
-        result: dict[str, str] = {}
+        result: dict[str, ContentHash] = {}
         for field_name, python_type in obj.items():
             if self._type_converter is not None:
                 try:
@@ -248,7 +265,7 @@ class SchemaHandler:
                         f"supported native type (int, str, float, bool, bytes, "
                         f"datetime, date)."
                     ) from exc
-            result[field_name] = hasher.hash_object(python_type).to_string()
+            result[field_name] = hasher.hash_object(python_type)
         # Sort by field name for determinism — matches _expand_mapping's sort_keys.
         return dict(sorted(result.items()))
 

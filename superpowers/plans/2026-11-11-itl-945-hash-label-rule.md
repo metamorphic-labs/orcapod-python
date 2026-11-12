@@ -225,7 +225,10 @@ Coordinator, November 11, 2026 (reply to the step 1 question):
    for the `hash` tag as it does for `tuple`. Handlers return `ContentHash` objects inside
    their structures, so the tagged form is produced in one place (`_expand_structure`).
 3. Yes. The line is `src/orcapod/hashing/visitors.py:309-311`.
-4. With the developer. Do not implement.
+4. Developer (via coordinator): leave as is for v0.3. `invocation_hash` keeps
+   `<label>:<hex>::<label>:<hex>` with the new label names; the side-effect topic is deferred
+   to after the tag. Checked: the library feeds `invocation_hash` into no hash computation (it
+   is only handed to the user's function and hooks).
 5. With the developer. Do not implement. Until answered: rename the labels where they are
    written today; add `DIRECTORY_HASH_LABEL`.
 6. Yes: `ValueError` for any algorithm other than `sha256`.

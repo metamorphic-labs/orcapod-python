@@ -298,8 +298,11 @@ def _transform_pdb_batch(
             preimage_arrays: dict[str, pa.Array] = {}
             for col in sys_tag_cols:
                 preimage_arrays[col] = pa.array([row.get(col)], type=pa.large_string())
+            # The entry-id recipe hashes the raw digest of the input data hash; its
+            # label is not part of the hash input.
             preimage_arrays[input_hash_col] = pa.array(
-                [input_hash_bytes], type=pa.large_binary()
+                [ContentHash.from_prefixed_digest(input_hash_bytes).digest],
+                type=pa.large_binary(),
             )
             preimage = pa.table(preimage_arrays)
 
