@@ -229,10 +229,11 @@ def _apply_field(
 
 
 def _has_nested_extension_fields(arrow_type: pa.DataType) -> bool:
-    """Return True if any child field at any nesting depth carries extension metadata.
+    """Return True if any child field at any nesting depth has an extension identity.
 
-    Used to guard struct recursion: structs whose children carry no
-    ``ARROW:extension:name`` metadata are returned as-is without rebuilding.
+    Used to guard struct recursion: structs whose children neither carry
+    ``ARROW:extension:name`` metadata nor are extension-typed are returned as-is
+    without rebuilding.
     """
     import pyarrow as pa
 
@@ -240,6 +241,10 @@ def _has_nested_extension_fields(arrow_type: pa.DataType) -> bool:
         child = arrow_type.field(i)
         meta = child.metadata or {}
         if b"ARROW:extension:name" in meta:
+            return True
+        # A member that is already extension-typed carries its identifier in its
+        # type, not in field metadata; it is checked like a stored one.
+        if isinstance(child.type, pa.ExtensionType):
             return True
         if pa.types.is_struct(child.type) and _has_nested_extension_fields(child.type):
             return True

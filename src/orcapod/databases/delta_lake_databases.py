@@ -699,6 +699,12 @@ class DeltaTableDatabase:
         protocol = "s3" if scheme == "s3a" else scheme
         options = _s3fs_options(self._storage_options) if protocol == "s3" else {}
         endpoint = str(options.get("client_kwargs", {}).get("endpoint_url", ""))
+        if protocol == "s3" and not endpoint:
+            # Without an endpoint in the storage options the file system takes it
+            # from the environment: fsspec's setting first, then the AWS one.
+            endpoint = os.environ.get("FSSPEC_S3_ENDPOINT_URL") or os.environ.get(
+                "AWS_ENDPOINT_URL", ""
+            )
         if endpoint.lower().startswith("http://") and not _allows_http(
             self._storage_options
         ):

@@ -2382,8 +2382,12 @@ class FunctionJobNode(FunctionNodeBase):
                 record_id_column=constants.DATA_RECORD_ID,
             )
             if results is not None:
-                # The data context is taken from the pipeline rows kept above.
-                results = results.drop([constants.DATA_CONTEXT_COL])
+                # A result row of another data context is not this entry's result,
+                # even when a current pipeline row names its record id: it is left
+                # out and the entry counts as having no stored result.
+                results = keep_rows_of_data_context(results, context_key).drop(
+                    [constants.DATA_CONTEXT_COL]
+                )
             if results is None:
                 # Tag table has persistent entries but result DB is empty — data loss
                 logger.warning(
@@ -2427,7 +2431,9 @@ class FunctionJobNode(FunctionNodeBase):
                     )
                 )
             if eph_results is not None:
-                eph_results = eph_results.drop([constants.DATA_CONTEXT_COL])
+                eph_results = keep_rows_of_data_context(eph_results, context_key).drop(
+                    [constants.DATA_CONTEXT_COL]
+                )
                 if results_schema is None:
                     results_schema = eph_results.schema
                 ephemeral_df = ephemeral_taginfo_df.join(
