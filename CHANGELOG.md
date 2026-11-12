@@ -61,36 +61,6 @@ A write that fails because the stored table cannot be read raises `StoreReadErro
 `StoreWriteError`. When read and write failures happen in the same run, both orchestrators
 raise the error of the node that comes first in the pipeline (ITL-884 #290).
 
-#### Delta reads return every row the database's handles wrote (ITL-864)
-
-Right after a first `PipelineJob` run on a `DeltaTableDatabase`, `node.get_all_records()` could
-return only some of the rows (1 of 2 or 3) on both orchestrators. Handles made with `at()` share
-their pending writes, and any handle's flush writes all of them, but each handle kept its own
-loaded copy of the table, so a sibling kept reading the version it had loaded before the flush.
-The loaded tables and the stored-id sets are now shared by every handle of one root. Every read
-method (`get_all_records`, `get_record_by_id`, `get_records_by_ids`,
-`get_records_with_column_value`) returns what a flush would leave: the stored rows plus the
-pending rows whose record id is not stored, or `None` when there are none. Before,
-`get_records_by_ids` ignored pending rows, `get_records_with_column_value` ignored stored rows
-while a pending batch existed, and a pending row whose id was already stored could be returned
-twice or instead of the stored row. Writes made by another process or another root on the same
-path are still seen only after the table is reloaded. (ITL-864 #293)
-
-#### A script that read a local Delta store no longer hangs at exit (ITL-892)
-
-A process that had read a Delta table through `DeltaTableDatabase` or `DeltaTableSource` could
-finish its work and then never exit: it hung in Arrow's thread-pool destructor, or, on Linux with
-Python 3.11 or 3.12, aborted with `terminate called without an active exception`. It happened in
-up to three runs in four on macOS and about one in ten on Linux, on every supported pyarrow and
-deltalake version. The cause is upstream (apache/arrow#50482, apache/arrow#54536). deltalake's
-default reader goes through a filesystem written in Python, and Arrow can release one of its
-buffers on a worker thread while the interpreter is shutting down.
-
-Orcapod now reads local Delta tables through a native pyarrow filesystem, which returns the same
-schema and values. Tables on cloud storage (`s3://`, `gs://`, `az://`) still use deltalake's
-reader and stay exposed until pyarrow ships the fix; see
-[Troubleshooting](docs/troubleshooting.md).
-
 #### A failed store write fails the run (ITL-878)
 
 A failed store write fails the run. `PipelineJob.run()` used to return normally when a node's
