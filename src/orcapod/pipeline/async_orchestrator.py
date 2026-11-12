@@ -15,7 +15,7 @@ from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, Literal
 
 from orcapod.channels import BroadcastChannel, Channel
-from orcapod.errors import StoreError, StoreWriteError
+from orcapod.errors import StoreError, StoreWriteError, TypeIdentityError
 from orcapod.pipeline.result import OrchestratorResult
 from orcapod.utils.store_errors import keep_store_error
 from orcapod.protocols.node_protocols import (
@@ -268,9 +268,16 @@ class AsyncPipelineOrchestrator:
             # sync orchestrator does, rather than inside the TaskGroup's exception
             # group.
             store_error = _single_store_error(group, topo_order)
-            if store_error is None:
-                raise
-            raise store_error
+            if store_error is not None:
+                raise store_error
+            # A stored row that cannot be decoded as its class stops the run too,
+            # raised on its own as the sync orchestrator raises it (ITL-881).
+            identity_errors = [
+                exc for exc in _leaves(group) if isinstance(exc, TypeIdentityError)
+            ]
+            if identity_errors:
+                raise identity_errors[0]
+            raise
         finally:
             # A failing on_run_end must not replace a failed store read or write.
             with keep_store_error(store_error, "Observer on_run_end"):

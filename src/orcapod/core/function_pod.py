@@ -14,7 +14,7 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import StoreError
+from orcapod.errors import StoreError, TypeIdentityError
 from orcapod.utils.store_errors import keep_store_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -605,6 +605,11 @@ class _FunctionPodBase(TraceableBase):
                     exc.add_context(tag=tag.as_dict())
                     with keep_store_error(exc, "Observer on_data_crash"):
                         obs.on_data_crash(pod_label, tag, data, exc)
+                    raise
+                except TypeIdentityError as exc:
+                    # A stored row that cannot be decoded as its class is never
+                    # skipped as a row failure (ITL-881).
+                    obs.on_data_crash(pod_label, tag, data, exc)
                     raise
                 except Exception as exc:
                     logger.debug(
