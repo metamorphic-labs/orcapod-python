@@ -112,6 +112,91 @@ Arrow hash that covers such a cell.
 | Operator cache row key | Arrow hash of the row incl. `__node_content_hash` | arrow | **bare hex** | `_record_hash` (code only) |
 | File-hash cache entry | key `(path, mtime, size)`; value labelled digest | sha256 | the key has no algorithm in it | SQLite / Postgres cache table, outside the store |
 
+### 1.2.1 The two identity chains, source identity and source entry identity
+
+Every node has two hashes, both made by the structure hasher, both chained from its upstreams.
+They differ in one thing: what a **source** contributes at the bottom of the chain.
+
+```
+                          PIPELINE IDENTITY                       CONTENT IDENTITY
+                          (schemas + topology)                    (pipeline identity + which sources)
+
+ source1                  (tag schema, data schema)               (class, tag schema, data schema, source_id)
+   id:int, x:int          semantic_v0.1:52eb0af7…                 semantic_v0.1:d644c803…
+      │                         │                                       │
+      ▼                         ▼                                       ▼
+ double                   (function uri, upstream pipeline hash)  (function uri, upstream content hash)
+                          semantic_v0.1:6fe7280a…                 semantic_v0.1:5da63a88…
+      │                         │                                       │
+      │   source2               │   semantic_v0.1:1560128e…             │   semantic_v0.1:c6411778…
+      ▼      ▼                  ▼      ▼                                ▼      ▼
+ join                     ("Join", {upstream pipeline hashes})    ("Join", {upstream content hashes})
+                          semantic_v0.1:87a24180…                 semantic_v0.1:50c289b4…
+      │                         │                                       │
+      ▼                         ▼                                       ▼
+ take_sum                 semantic_v0.1:1417915f…                 semantic_v0.1:48ddd935…
+
+ USED FOR                 the table path:                         telling rows apart inside a shared table:
+                            …/schema:semantic_v0.1:1417915f…/       column __node_content_hash
+                          system-tag column names (bare):         path component instance:… (table_scope="content_hash")
+                            _tag_source_id::52eb0af7…::6fe7280a…:1 node keys and edges in the saved job file
+```
+
+So two pipelines with the same shape and schemas but different sources write to the **same
+tables**, and their rows are separated by `__node_content_hash`.
+
+**Source identity** has three levels, and each one feeds a different stored thing:
+
+| Level | Computed from | Example value | Feeds |
+|---|---|---|---|
+| Source pipeline identity | `(tag schema, data schema)` only | `semantic_v0.1:52eb0af7…` (the same for `source1` and for any other source with columns `id:int, x:int`) | every downstream pipeline hash, so every table path; the bare hex in system-tag column names |
+| Source content identity | `(class name, schemas, source_id)` | `semantic_v0.1:d644c803…` for `source_id="source1"`; `…9da643df…` for `source_id="other_name"` with the same rows | every downstream content hash; `__node_content_hash`; saved job file |
+| `source_id` | given by the user (`"source1"`), or when absent the bare Arrow hash of the whole table (`000001883080da70…`) | — | source content identity; values of `_tag_source_id::…`; the front of every source-info token and of every record id |
+
+Two measured consequences:
+
+- With a user-given `source_id`, the source's content hash does **not** cover its data:
+  changing one value (`x: 5` to `x: 99`) leaves it at `semantic_v0.1:d644c803…`. The changed
+  row is still distinguished downstream, by its row data hash.
+- With no `source_id`, the source's content hash depends on the **Arrow hasher** through the
+  default id: the same rows give `semantic_v0.1:d8eb49fa…` on main and `…5b6ae6d2…` on
+  ITL-910. This is the one place where an Arrow-hasher change leaks into the structure-hash
+  chain (and into cached-source paths).
+
+**Source entry identity** (the identity of one row of a source) has two parts:
+
+| Part | Computed from | Example | Stored where | Feeds |
+|---|---|---|---|---|
+| Record id | `uuid5(fixed namespace, "{source_id}::{row token}")`; the token is `row_{i}` (position) or `{column}={value}` | row 2 of `source1`: token `source1::row_2`, id `dbbded85-3b31-5aa1-8070-7b5a41d74c5b` | value of `_tag_record_id::52eb0af7…` (16 bytes, bare) | the pipeline entry id of every downstream row |
+| Source-info token | `{source_id}::{row token}::{column}` | `source1::row_2::x` | value of `_source_x` | provenance only; not hashed into keys |
+| Row data hash | the row's data columns | `{"x": 15}` -> `arrow_v0.1:000001d0e4…` | `__input_data_hash` | the result-table lookup key and the pipeline entry id |
+
+How these combine into the key of a stored row:
+
+```
+ record ids of the contributing source rows ──┐   (system-tag columns: uuid5, bare)
+   _tag_record_id::52eb0af7…::6fe7280a…:1     │
+   _tag_record_id::1560128e…::1560128e…:0     ├──► Arrow hash ──► __pipeline_base_entry_id ──┬──► __record_id
+                                              │                   arrow_v0.1:00000103…       │    arrow_v0.1:0000012f…
+ row data hash of the input ──────────────────┘                                              │
+   __input_data_hash  arrow_v0.1:00000196…                __pipeline_recomputation_index ────┘
+```
+
+The record id is positional today: reordering a source's rows changes `row_2` to another
+index and so changes every downstream key. ITL-817 proposes deriving it from content.
+
+Which axis of Part 2 each of these sits on:
+
+| Thing | Axis |
+|---|---|
+| What a source contributes to each chain (schema only; schema + `source_id`) | I4 Identity composition |
+| That the chains are hashed with the structure hasher | I1 Structure hashing |
+| The record-id recipe (namespace, token format, positional or content-derived) | I4 Identity composition |
+| The default `source_id` being an Arrow table hash | I4 (the choice) and I2 (the value) |
+| The entry-id recipe (system tags + input data hash) | I4 Identity composition |
+| That the entry id is hashed with the Arrow hasher | I2 Arrow data hashing |
+| The source-info token format | III3 Column naming |
+
 ### 1.3 The store on disk
 
 **Anatomy of a path** (the pipeline table of node `double`):
