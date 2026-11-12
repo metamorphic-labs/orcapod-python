@@ -146,6 +146,15 @@ because a pipeline job keeps every row it processes in memory, about 5 KB per ro
 node, so 100,000 rows cost about 0.5 GB per node. A table of millions of rows can be iterated
 with `max_rows=None`, but it cannot yet be run through a job on a laptop.
 
+**Looking at a table in a notebook.** A Spiral source shown at the end of a notebook cell
+(or through `view()`) reads only its first 10 rows, in one scan to which the row cap does not
+apply, so a table of any size can be looked at. The header line says what is shown, for
+example `SpiralDBTableSource[spike_event] — first 10 rows of about 63,349` (the table's
+recorded row count, read without scanning), `all 4 rows` when the source reads no more than
+that, or `first 10 matching rows (where unit_id=106); the table has about 63,349 rows` with
+`where=`. Tag columns come first, marked with `*`. To see more rows, use `as_df()` with a
+`limit=` or `where=` source.
+
 **Restrictions are not part of identity.** `where`, `limit` and `asof` choose rows of the
 same table, so two sources on one table have the same `source_id` and `content_hash`
 whatever their restrictions, and a row's result is computed once and shared. One

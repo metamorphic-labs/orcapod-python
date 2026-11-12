@@ -45,6 +45,7 @@ from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
+    import polars as pl
     import pyarrow as pa
 
     from orcapod import contexts
@@ -52,9 +53,12 @@ if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 else:
     pa = LazyModule("pyarrow")
+    pl = LazyModule("polars")
 
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_BATCH_ROWS = 8_192
+# The most rows a notebook display of the source reads.
+PREVIEW_ROWS = 10
 
 # How a datetime or date value of ``where`` is written in a saved config.
 _DATETIME_KEY = "datetime"
@@ -101,6 +105,10 @@ class SpiralDBTableSource(RootSource):
     ``as_table`` and the dataframe methods hold every row they return. Nothing is
     cached: every read scans again.
 
+    Display. Shown in a notebook (``_repr_html_``, ``view``), the source reads only its
+    first ``PREVIEW_ROWS`` rows (10), in one scan to which ``max_rows`` does not apply,
+    and the header says how many rows the table has.
+
     Identity. The source is identified by where the table is, never by its rows. The
     default ``source_id`` is ``<project_id>/<dataset>.<table_name>@<table id>``, where
     the table id is SpiralDB's own: a table dropped and created again under the same
@@ -145,6 +153,11 @@ class SpiralDBTableSource(RootSource):
             ``where`` column is not in the table, or ``limit``, ``max_rows`` or
             ``batch_rows`` is not a positive integer.
     """
+
+    # Whether a notebook display reads the first rows. False shows the schema and the
+    # table's recorded row count only, with no scan (kept for the ITL-991 ruling on what
+    # a preview may read).
+    _preview_reads_rows: bool = True
 
     def __init__(
         self,
@@ -338,21 +351,40 @@ class SpiralDBTableSource(RootSource):
             ValueError: If a batch's columns differ from the source's schema, or a
                 key column holds a null.
         """
+        return self._read_batches(limit=self._limit, max_rows=self._max_rows)
+
+    def _read_batches(
+        self, *, limit: int | None, max_rows: int | None
+    ) -> Generator["ArrowTableStream", None, None]:
+        """Scan the table once, reading at most ``limit`` rows, in streams of ``batch_rows``.
+
+        ``where`` and the pinned version apply as for every read.
+
+        Args:
+            limit: Read at most this many rows, the first in key order.
+            max_rows: Raise when the read would return more rows; ``None`` for no cap.
+
+        Raises:
+            SourceTooLargeError: If the read would return, or returns, more than
+                ``max_rows`` rows.
+            ValueError: If a batch's columns differ from the source's schema, or a
+                key column holds a null.
+        """
         with self._connector() as connector:
-            if self._max_rows is not None and not self._where:
+            if max_rows is not None and not self._where:
                 # Nothing but limit bounds the read, so its size is known up front:
                 # the limit, or the table's recorded row count when that is smaller.
-                expected = self._limit
-                if expected is None or expected > self._max_rows:
+                expected = limit
+                if expected is None or expected > max_rows:
                     recorded = connector.get_row_count_estimate(self._table_name)
                     expected = recorded if expected is None else min(expected, recorded)
-                if expected > self._max_rows:
+                if expected > max_rows:
                     raise self._too_large(f"the read would return {expected:,} rows")
             seen = 0
             for batch in connector.scan_batches(
                 self._table_name,
                 where=self._where or None,
-                limit=self._limit,
+                limit=limit,
                 asof=self._asof,
             ):
                 for start in range(0, batch.num_rows, self._batch_rows):
@@ -366,7 +398,7 @@ class SpiralDBTableSource(RootSource):
                             f"{self._table_schema}."
                         )
                     seen += rows.num_rows
-                    if self._max_rows is not None and seen > self._max_rows:
+                    if max_rows is not None and seen > max_rows:
                         raise self._too_large("the read returned more rows")
                     yield self._builder.attach_provenance(
                         rows,
@@ -409,10 +441,22 @@ class SpiralDBTableSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         """Scan the table and return its rows as one PyArrow table (all held in memory)."""
+        return self._whole_table(
+            self._batch_streams(), columns=columns, all_info=all_info
+        )
+
+    def _whole_table(
+        self,
+        streams: Iterator["ArrowTableStream"],
+        *,
+        columns: ColumnConfig | dict[str, Any] | None,
+        all_info: bool,
+    ) -> "pa.Table":
+        """Return the rows of ``streams`` (batches of one read) as one table."""
         # One stream over all the rows, so that a whole-table option (sorting by
         # tags) applies across batches.
         enriched = {"source": True, "system_tags": True}
-        tables = [stream.as_table(columns=enriched) for stream in self._batch_streams()]
+        tables = [stream.as_table(columns=enriched) for stream in streams]
         if not tables:
             return self._stream.as_table(columns=columns, all_info=all_info)
         whole = ArrowTableStream(
@@ -421,6 +465,45 @@ class SpiralDBTableSource(RootSource):
             system_tag_columns=self._system_tag_columns,
         )
         return whole.as_table(columns=columns, all_info=all_info)
+
+    def _preview(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "tuple[pl.DataFrame, str | None]":
+        """Return the first rows for a notebook display, read in one bounded scan.
+
+        At most ``PREVIEW_ROWS`` rows are read (fewer when the source's ``limit`` is
+        smaller), with ``where`` and the pinned version applied and ``max_rows`` not, so
+        a table of any size displays. The note says whether these are all the rows the
+        source reads and, when not, the table's recorded row count (no scan).
+        """
+        if not self._preview_reads_rows:
+            schema_only = self._stream.as_table(columns=columns, all_info=all_info)
+            return pl.DataFrame(schema_only), (
+                f"rows not read; the table has about {self.row_count_estimate:,} rows"
+            )
+        head_limit = (
+            PREVIEW_ROWS if self._limit is None else min(PREVIEW_ROWS, self._limit)
+        )
+        head = self._whole_table(
+            self._read_batches(limit=head_limit, max_rows=None),
+            columns=columns,
+            all_info=all_info,
+        )
+        shown = head.num_rows
+        if shown < head_limit or head_limit == self._limit:
+            return pl.DataFrame(head), f"all {shown:,} row{'' if shown == 1 else 's'}"
+        recorded = self.row_count_estimate
+        if self._where:
+            condition = ", ".join(f"{c}={v!r}" for c, v in self._where.items())
+            return pl.DataFrame(head), (
+                f"first {shown:,} matching rows (where {condition}); the table has "
+                f"about {recorded:,} rows"
+            )
+        total = recorded if self._limit is None else min(self._limit, recorded)
+        return pl.DataFrame(head), f"first {shown:,} rows of about {total:,}"
 
     # -------------------------------------------------------------------------
     # Serialization

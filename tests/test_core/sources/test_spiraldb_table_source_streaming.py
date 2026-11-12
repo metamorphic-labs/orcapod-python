@@ -465,3 +465,110 @@ class TestInAJob:
             job.run()
 
         assert calls == []
+
+
+class TestNotebookPreview:
+    """A source shown at the end of a notebook cell reads a head of at most 10 rows."""
+
+    @pytest.fixture()
+    def big(self, project):
+        """Add a 25-row ``big`` table and clear the scan log."""
+        project.create_table("default.big", key_schema=_KEYS).write(
+            _rows(list(range(1, 26)))
+        )
+        fake_pyspiral.scan_log.clear()
+        return project
+
+    @staticmethod
+    def _scan_limits() -> list[object]:
+        return [scan.kwargs.get("limit") for scan in fake_pyspiral.scan_log]
+
+    def test_display_reads_one_head_of_ten_rows(self, big):
+        source = SpiralDBTableSource(_PROJECT, "big", label="big")
+
+        html = source._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert html.startswith("SpiralDBTableSource[big] — first 10 rows of about 25\n")
+        assert "shape: (10, 3)" in html
+        assert "*subject_id" in html and "*timestamp" in html
+
+    def test_a_table_above_the_cap_previews_without_raising(self, big):
+        source = SpiralDBTableSource(_PROJECT, "big", max_rows=20)
+        with pytest.raises(SourceTooLargeError):
+            source.as_table()
+        fake_pyspiral.scan_log.clear()
+
+        html = source._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert "first 10 rows of about 25" in html
+
+    def test_a_small_table_shows_all_its_rows(self, project):
+        html = SpiralDBTableSource(_PROJECT, "event")._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert " — all 5 rows\n" in html
+        assert "shape: (5, 3)" in html
+
+    def test_the_sources_own_limit_bounds_the_head(self, big):
+        html = SpiralDBTableSource(_PROJECT, "big", limit=3)._repr_html_()
+
+        assert self._scan_limits() == [3]
+        assert " — all 3 rows\n" in html
+
+    def test_a_limit_above_the_head_is_the_row_count_shown(self, big):
+        html = SpiralDBTableSource(_PROJECT, "big", limit=15)._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert " — first 10 rows of about 15\n" in html
+
+    def test_where_is_applied_and_named(self, big):
+        html = SpiralDBTableSource(
+            _PROJECT, "big", where={"subject_id": "m1"}
+        )._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert (
+            " — first 10 matching rows (where subject_id='m1'); "
+            "the table has about 25 rows\n"
+        ) in html
+
+    def test_view_reads_the_same_head(self, big):
+        source = SpiralDBTableSource(_PROJECT, "big", label="big")
+
+        html = source.view()._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert html.startswith("SpiralDBTableSource[big] — first 10 rows of about 25\n")
+        assert "shape: (10, 3)" in html
+
+    def test_view_with_all_info_shows_system_columns(self, big):
+        html = SpiralDBTableSource(_PROJECT, "big").view(all_info=True)._repr_html_()
+
+        assert self._scan_limits() == [10]
+        assert "_tag_record_id::" in html
+
+    def test_repr_reads_nothing(self, big):
+        source = SpiralDBTableSource(_PROJECT, "big")
+
+        assert repr(source) == "SpiralDBTableSource"
+        assert fake_pyspiral.scan_log == []
+
+    def test_switched_off_preview_shows_the_schema_without_a_scan(
+        self, big, monkeypatch
+    ):
+        # About the non-public switch: the fallback kept for the ITL-991 ruling.
+        monkeypatch.setattr(SpiralDBTableSource, "_preview_reads_rows", False)
+        source = SpiralDBTableSource(_PROJECT, "big", label="big")
+
+        html = source._repr_html_()
+        view = source.view()._repr_html_()
+
+        assert fake_pyspiral.scan_log == []
+        for shown in (html, view):
+            assert shown.startswith(
+                "SpiralDBTableSource[big] — rows not read; the table has about 25 rows\n"
+            )
+            assert "shape: (0, 3)" in shown
+        assert "*subject_id" in html
