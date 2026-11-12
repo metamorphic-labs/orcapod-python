@@ -50,111 +50,6 @@ readable with v0.2. A migration is planned after v0.3 (ITL-889).
   the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
   subclasses, whatever the registration order.
 
-#### Arrow hashing moves to starfix hash format 2: every Arrow-derived hash changes (ITL-910)
-
-**Orcapod now requires `starfix>=0.5.0,<0.6`, and the Arrow hash label moves from `arrow_v0.1`
-to `arrow_v0.2`.** starfix 0.4 (hash format 1) lost information for some inputs, so different
-data could hash the same (ITL-848): the lengths of nested lists (`[[[1]], [[2], [3]]]` and
-`[[[1], [2]], [[3]]]`), a null struct and a struct whose fields are all null, and Boolean
-columns, whose hash also depended on how the table was split into chunks. starfix 0.5 (hash
-format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are not kept.
-
-- **What moves.** Every hash computed from an Arrow table: per-row data hashes, default
-  `source_id`s and the `record_id`s and source content hashes built from them, function
-  input-data hashes, pipeline base and entry ids, operator and cached-source record hashes,
-  invocation hashes, and the hashes of `pa.Table`, pandas `DataFrame` and `Series` values. The
-  hash label in front of each (`arrow_v0.2:000002...`) shows the new format. Pipeline hashes,
-  schema hashes, system-tag column names and table paths under the default
-  `table_scope="pipeline_hash"` do not move. Paths that embed a content hash
-  (`table_scope="content_hash"`, `CachedSource` tables) move with it. Where a `GroupBy` or
-  `Batch` orders members by `record_id`, the order of members can change too.
-- **Results stored by 0.2.0 are ignored and computed again; they are not reused, changed or
-  deleted.** Rows a v0.2 store holds are keyed under `arrow_v0.1` and can never match v0.3
-  inputs. v0.3 does not refuse such a store. A value-only change does not move a table, so a
-  v0.3 job writes its `arrow_v0.2` rows into the same tables, next to the `arrow_v0.1` rows,
-  and uses rows of its own label only:
-  - The first v0.3 run on a v0.2 store **computes every input again**. Nothing stored by v0.2
-    counts as a cached result, also for functions and data that did not change.
-  - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, also on a
-    job loaded from a file, including a file saved by v0.2), `get_all_cached_outputs()` of a
-    cached function, a stored (`LOG` / `REPLAY`) operator node and a `CachedSource` return
-    rows hashed under `arrow_v0.2` only. Before the first v0.3 run, such a read on a v0.2
-    store returns no rows; after it, one row per input, never the v0.2 rows as well.
-  - The v0.2 rows stay where they are, byte for byte, and stay readable with v0.2. Each
-    stored key names its label (`arrow_v0.1:000001...` or `arrow_v0.2:000002...`), and
-    `orcapod.hashing.stored_hash_labels.stored_hash_labels(store, record_path)` counts the
-    rows of a table by label, for example `{"arrow_v0.1": 3, "arrow_v0.2": 3}`.
-  - When a read leaves out rows of another label, Orcapod logs one warning per table and
-    reader with the total, on the logger `orcapod.hashing.stored_hash_labels`:
-    `Skipped 3 rows of stored table 'my_job/.../pdb_v1': written under another hash label
-    than the current one. The rows are left in place unchanged and can be migrated later.`
-  - **Side-effect nodes are the exception: they fail instead of delivering again.** A
-    side-effect pod finds a delivery it already made by an Arrow-derived record id, so
-    deliveries logged by v0.2 cannot be found, and running the node would deliver every side
-    effect a second time. A side effect is an external action, not a value that can be
-    computed again, so a side-effect node whose invocation log holds deliveries logged under
-    another label raises `orcapod.errors.SideEffectLogHashLabelError` (a `StoreError`, so it
-    fails the run whatever the `error_policy`) before it delivers or writes anything. The
-    error names the log, the label found and the current one. Function, operator and source
-    nodes of the same job are not refused. Use a fresh store for the side-effect node, or
-    keep using v0.2 for it, until the log can be migrated.
-
-  **Migration:** none is needed to run the function, operator and source nodes of a v0.2
-  store under v0.3, at the price of computing everything again and of tables that hold both
-  generations; side-effect nodes need a fresh store. A tool that converts
-  `arrow_v0.1` rows into `arrow_v0.2` rows is planned (ITL-913, ITL-914); until then the old
-  rows are kept for it. Operator-node and cached-source tables store their record hashes
-  without a label; there the rows of v0.2 are told apart by the starfix hash format at the
-  start of each record hash (`000001` for v0.2, `000002` for v0.3). That is exact for these
-  two versions, but a later Arrow hash label that keeps starfix hash format 2 could not be
-  told apart in those two kinds of table. A table that `table_scope="content_hash"` or a
-  `CachedSource` places under a content hash moves to a new path instead, so its v0.2 rows
-  are in another table.
-- **Now hashable.** `fixed_size_list` columns, at any depth (ITL-927): a source or operator
-  carrying one works, and its type is kept. A `fixed_size_list<T>[n]` hashes differently from a
-  `large_list<T>` with the same values. pyarrow's canonical extension types (`arrow.uuid`,
-  `arrow.fixed_shape_tensor`) hash with their extension name and metadata, so an `arrow.uuid`
-  column never hashes like the `fixed_size_binary(16)` column holding the same bytes, and
-  `StarfixArrowHasher.hash_schema` keeps the identity of extension columns (ITL-846).
-- **Now refused** with `ValueError` naming the column path and type, where starfix 0.4 hashed
-  silently: a non-nullable field holding a null; a zero-row table with a `map` column; two
-  schema nodes sharing a path (duplicate column names, for example in a `pa.Table` value, or a
-  column `"a/b"` next to a struct column `a` with a child `b`). Data of `null`, `map`,
-  interval, `string_view` and `binary_view` columns, union and run-end-encoded types are
-  still refused, now with `ValueError` instead of `NotImplementedError`.
-- Column order and struct field order are still not part of an Arrow hash.
-
-#### Wrong hashes fixed: values that collided or depended on data, process or spelling (ITL-942)
-
-A hash-site audit (ITL-938) found hashes that were **wrong**: two different things shared a
-hash, or one thing hashed differently depending on its data, the process or how it was
-written. A wrong hash is a bug that overrides hash stability, so these values move. Each fix
-changes only the values that were wrong.
-
-| Fix | Before | Now | What moves |
-|---|---|---|---|
-| Batch / GroupBy source-id fold | members concatenated with no separator: `["ab", "c"]` folded like `["a", "bc"]`, and a `None` member like `""` | SHA-256 of the canonical JSON list of members, in order | the `_tag_source_id` value of every row after a `Batch` or `GroupBy`, and the entry ids downstream of it. Column names and paths do not move. Source-info columns are unchanged |
-| Arrow hashing of nested types | the hashed type was rebuilt from the first non-null value, so nested nullability counted for an empty or all-null column and not for a column with data | the hashed type is the declared type: struct and list fields keep their nullability, at every depth, with or without data | row hashes of struct or list columns with non-nullable nested fields, and of all-null or zero-row `Path`, `File`, `Directory` and `UUID` columns. Key values only |
-| Set order in structure hashes | items sorted by `str()`, so `{1, "1"}` hashed differently per process (`PYTHONHASHSEED`) | items sorted by their canonical JSON text | structure hashes of sets whose `str()` order differs from their JSON order (mixed types, sets of tuples) |
-| Dict keys in structure hashes | keys turned into `str()`: `{1: "x"}` equalled `{"1": "x"}`, and `{1: "a", "1": "b"}` lost a key | a dict with only `str` keys is unchanged; any other dict hashes as a sorted list of `[key, value]` pairs | structure hashes of dicts with non-`str` keys |
-| Dicts that spell out an encoding | `{"__type__": "tuple", "items": [1, 2]}` hashed like `(1, 2)` (also set, namedtuple, generic alias, union) | only the hasher and type handlers write `"__type__"` objects; a dict with a `"__type__"` key hashes as a pair list | structure hashes of dicts with a `"__type__"` key. Handlers that returned a plain `{"__type__": ...}` dict must return `orcapod.hashing.semantic_hashing.Encoded(tag, fields)` |
-| Namedtuple field order | fields sorted by name: `Point(x=1, y=2)` hashed like a `Point` declared `(y, x)` holding `y=2, x=1`, although the tuples differ | fields hashed in declared order | structure hashes of namedtuples |
-| Column selection operators | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns` hashed `["x"]`, `("x",)`, `{"x"}`, `["x", "x"]` differently, and `["y", "x"]` unlike `["x", "y"]`, although the output is the same | identity is the set of names, hashed as a sorted list | pipelines that spelled the columns as a tuple, a set, or an unsorted or repeating list: their hashes **and table paths** move. Sorted lists (the usual spelling) keep their hashes |
-| Record-id system tag type | `fixed_size_binary[16]` out of a source, `large_binary` after a `Tag`, so one row had two operator-cache keys (`cache_mode` LOG/REPLAY, sync run versus async orchestrator) | `large_binary` everywhere | operator-cache and cached-source row keys, and the content hash of a raw stream holding source system tags. On Delta Lake the stored column type does not change: Delta has a single binary type |
-| Default function version | `v0.0` through `@function_pod`, `v1.0` through `FunctionPod.from_fn` and `side_effect_function_pod` | `v0.0` for every entry point | **table paths** of pods built with `FunctionPod.from_fn` or `side_effect_function_pod` without an explicit version: from `.../v1/...` to `.../v0/...` |
-
-**Migration.** A pod built with `FunctionPod.from_fn` or `side_effect_function_pod` that relied
-on the old default keeps its tables by passing `version="v1.0"`. A pipeline that spelled
-selected columns as a tuple or a set gets new tables for that operator and everything
-downstream; no stored row is changed or deleted. Every other fix changes values only, never a
-path or a stored schema.
-
-Reviewed and kept by decision: `MergeJoin(m1, m1)` (a stream joined with itself) has a
-different pipeline hash from `MergeJoin(m1, m2)` with the same schema, because a pipeline hash
-covers the pipeline's structure; two inputs with the same source identity count as one.
-Function default values in the function-value hash are tracked in ITL-953. See
-`docs/reference/hashing.md`.
-
 #### A changed column type is refused when appending to a Delta table (ITL-884)
 
 Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'
@@ -188,13 +83,6 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
-- **`orcapod.errors.SideEffectLogHashLabelError`** — a `StoreError` raised by a side-effect
-  node whose invocation log holds deliveries logged under another Arrow hash label (a log
-  written by v0.2), before anything is delivered. It has `record_path`, `found_label`,
-  `current_label` and `node_label`. (ITL-910)
-- **`orcapod.hashing.stored_hash_labels.stored_hash_labels(database, record_path)`** — counts
-  the rows of a stored table by the Arrow hash label they were hashed under, to tell rows
-  written by v0.2 (`arrow_v0.1`) from rows written by v0.3 (`arrow_v0.2`). (ITL-910)
 
 ### Fixed
 
