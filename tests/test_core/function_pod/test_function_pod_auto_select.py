@@ -708,3 +708,48 @@ def test_sync_and_async_runs_give_the_same_rows() -> None:
     assert tables[0].schema == tables[1].schema
     assert tables[0].to_pylist() == tables[1].to_pylist()
     assert [row["total"] for row in tables[0].to_pylist()] == [5, 9]
+
+
+# ---------------------------------------------------------------------------
+# The stream's convenience methods build the same operators (review of PR #327)
+# ---------------------------------------------------------------------------
+
+
+def test_call_equals_the_stream_convenience_methods() -> None:
+    """``pod(wide)`` is ``pod(wide.select_data_columns([...]))``; ``a.join(b)`` is ``Join()``."""
+    automatic = add.pod(_wide())
+    by_method = add.pod(_wide().select_data_columns(["x", "y"]))
+    _assert_same_stream(automatic, by_method)
+    assert automatic.pipeline_hash() == by_method.pipeline_hash()
+    assert automatic.content_hash() == by_method.content_hash()
+
+    automatic_two = add.pod(_xs(a=1), _ys(b=2))
+    by_method_two = add.pod(_xs(a=1).join(_ys(b=2)).select_data_columns(["x", "y"]))
+    _assert_same_stream(automatic_two, by_method_two)
+    assert automatic_two.pipeline_hash() == by_method_two.pipeline_hash()
+    assert automatic_two.content_hash() == by_method_two.content_hash()
+
+
+def test_job_equals_the_job_built_with_convenience_methods() -> None:
+    """The job nodes and their hashes equal those of the stream-method pipeline."""
+    calls: list[int] = []
+    counted = _counting_pod(calls)
+    db = InMemoryArrowDatabase()
+
+    automatic = PipelineJob(name="job", store=db)
+    with automatic:
+        counted.pod(_xs(a=1), _ys(b=2), label="add")
+    automatic.run()
+
+    by_method = PipelineJob(name="job", store=db)
+    with by_method:
+        joined = _xs(a=1).join(_ys(b=2))
+        counted.pod(joined.select_data_columns(["x", "y"]), label="add")
+    by_method.run()
+
+    assert len(calls) == 2
+    assert sorted(automatic.nodes) == sorted(by_method.nodes)
+    for label, node in by_method.nodes.items():
+        assert type(automatic.nodes[label]) is type(node)
+        assert automatic.nodes[label].pipeline_hash() == node.pipeline_hash()
+        assert automatic.nodes[label].content_hash() == node.content_hash()

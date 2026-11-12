@@ -478,8 +478,9 @@ convenient call and `pod.process(a, b)` the exact primitive:
   columns that are not parameters of the function, places one automatic `SelectDataColumns`
   after the automatic join and before the pod (`_FunctionPodBase.__call__`, the one place
   that decides it). The select is an ordinary operator step: graph, hashes and stored tables
-  must equal those of a pipeline with that select written by hand. Nothing to drop means no
-  step. One info log names the dropped columns; it is not a warning.
+  must equal those of a pipeline with that select written by hand (the stream's
+  `select_data_columns` method builds the same operator, and `a.join(b)` the same `Join`).
+  Nothing to drop means no step. One info log names the dropped columns; it is not a warning.
 - `pod(a, b, strict=True)` and `pod.process(a, b)` reject an extra column. `strict` is part of
   no identity. `process` never takes a `strict` argument and never drops a column.
 - A missing required column is an error in every form. Tags are never dropped. A data column

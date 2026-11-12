@@ -119,13 +119,12 @@ for tag, data in result.iter_data():
 ```
 
 The drop is not hidden. Orcapod places one `SelectDataColumns` [operator](operators.md)
-between the stream and the pod, exactly as if you had written it yourself, so the two
-pipelines below are the same pipeline: same hashes, same graph, same stored tables.
+between the stream and the pod, exactly as if you had written it yourself with the stream's
+`select_data_columns` method, so the two pipelines below are the same pipeline: same hashes,
+same graph, same stored tables. `SelectDataColumns` is the name that appears in the graph.
 
 ```python
-from orcapod.operators import SelectDataColumns
-
-narrow = SelectDataColumns(columns=["weight", "height"])(wide)
+narrow = wide.select_data_columns(["weight", "height"])
 by_hand = compute_bmi.pod(narrow)
 
 print(result.pipeline_hash() == by_hand.pipeline_hash())
@@ -661,6 +660,7 @@ for tag, data in result.iter_data():
 The join happens on shared tag columns, and the merged data columns are fed to the function.
 The [input column rules](#input-columns) apply to the joined stream: the join comes first,
 then one automatic `SelectDataColumns` drops the joined columns the function does not take.
+Written by hand, that is `a.join(b).select_data_columns([...])` passed to the pod.
 Two consequences:
 
 - Two inputs that carry the same data column are rejected by the join, whether or not the
