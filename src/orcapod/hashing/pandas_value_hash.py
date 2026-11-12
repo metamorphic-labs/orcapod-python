@@ -384,7 +384,9 @@ def _attrs_term(attrs: Any) -> Any:
         return {}
 
 
-def _restored_form(dtype: Any, column: pa.ChunkedArray) -> tuple[Any, pa.ChunkedArray]:
+def _restored_form(
+    dtype: Any, column: pa.ChunkedArray[Any]
+) -> tuple[Any, pa.ChunkedArray[Any]]:
     """Return the dtype and Arrow column a field has once read back from storage.
 
     Only an ``object`` field can change: its Arrow column is converted to pandas the way

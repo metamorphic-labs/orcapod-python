@@ -62,9 +62,10 @@ def _with_attrs(value: Any, attrs: dict[Any, Any] | None = None) -> Any:
     return out
 
 
-def _daily(freq: str | None) -> pd.DataFrame:
+def _daily(with_freq: bool) -> pd.DataFrame:
     """Three daily rows; the index carries ``freq`` or not."""
-    index = pd.DatetimeIndex(["2020-01-01", "2020-01-02", "2020-01-03"], freq=freq)
+    days = ["2020-01-01", "2020-01-02", "2020-01-03"]
+    index = pd.DatetimeIndex(days, freq="D") if with_freq else pd.DatetimeIndex(days)
     return pd.DataFrame({"a": [1, 2, 3]}, index=index)
 
 
@@ -217,7 +218,7 @@ EQUAL: dict[str, tuple[Any, Any]] = {
 EXCEPTIONS: dict[str, tuple[tuple[Any, Any], bool]] = {
     # Storage does not restore these, so they never count (pandas tells the pair apart).
     "flags": ((_frame(), _frame().set_flags(allows_duplicate_labels=False)), True),
-    "index freq": ((_daily("D"), _daily(None)), True),
+    "index freq": ((_daily(True), _daily(False)), True),
     "string storage": (
         (
             pd.DataFrame({"a": pd.array(["x", None], dtype="string[python]")}),
@@ -470,7 +471,7 @@ CHANGED_BY_STORAGE: dict[str, Any] = {
         {"a": [1, 2]}, index=pd.Index([5, 6], dtype=object)
     ),
     "RangeIndex with a step": pd.DataFrame({"a": [1, 2]}, index=pd.RangeIndex(5, 9, 2)),
-    "index freq": _daily("D"),
+    "index freq": _daily(True),
     "flags": _frame().set_flags(allows_duplicate_labels=False),
     "unused MultiIndex levels": EQUAL["unused MultiIndex levels"][1],
     "attrs read back as JSON": _with_attrs(_frame(), {1: "x", "t": (1, 2)}),

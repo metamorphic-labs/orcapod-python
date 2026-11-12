@@ -243,10 +243,8 @@ def test_v02_table_with_a_pandas_column_is_reported_not_read_and_left_alone(
             [pa.array([b"not read"], pa.large_binary())], schema=pa.schema([column])
         ),
     )
-    stored = DeltaTable(str(old_dir)).schema().to_arrow()
-    assert pa.schema(stored).field("df").metadata == {
-        b"ARROW:extension:name": b"pandas.dataframe"
-    }
+    stored = DeltaTable(str(old_dir)).to_pyarrow_table().schema.field("df")
+    assert stored.metadata == {b"ARROW:extension:name": b"pandas.dataframe"}
     before = _files(old_dir)
 
     with caplog.at_level(logging.WARNING):
