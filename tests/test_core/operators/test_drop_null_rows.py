@@ -96,8 +96,9 @@ def test_nan_is_not_null() -> None:
         nullable=["v"],
     )
     result = DropNullRows("v")(source)
-    values = result.as_table().column("v").to_pylist()
-    assert values[0] == 1.0 and math.isnan(values[1]) and len(values) == 2
+    first, second = result.as_table().column("v").to_pylist()
+    assert first == 1.0
+    assert isinstance(second, float) and math.isnan(second)
     assert result.as_table().schema.field("v").nullable is False
     assert result.output_schema()[1]["v"] is float
 
@@ -317,7 +318,10 @@ def logical() -> DictSource:
 def test_logical_columns_keep_their_logical_type() -> None:
     source = logical()
     before = source.as_table().schema
-    assert source.output_schema()[1] == {"p": Path | None, "arr": np.ndarray | None}
+    assert source.output_schema()[1] == {
+        "p": Path | None,
+        "arr": np.ndarray | None,  # pyright: ignore[reportMissingTypeArgument]  # the schema holds the bare class
+    }
 
     result = DropNullRows(["p", "arr"])(source)
     assert result.output_schema()[1] == {"p": Path, "arr": np.ndarray}
@@ -329,8 +333,9 @@ def test_logical_columns_keep_their_logical_type() -> None:
     ((tag, data),) = list(result.iter_data())
     assert tag["k"] == "a"
     assert data["p"] == Path("/a")
-    assert isinstance(data["arr"], np.ndarray)
-    assert data["arr"].tolist() == [0, 1, 2]
+    array = data["arr"]
+    assert isinstance(array, np.ndarray)
+    assert array.tolist() == [0, 1, 2]
 
 
 # ── arguments ───────────────────────────────────────────────────────────────
@@ -521,5 +526,5 @@ def test_join_after_the_operator() -> None:
     )
     joined = Join()(DropNullRows("x")(readings()), weights)
     assert joined.output_schema()[1]["x"] is int
-    assert sorted(joined.as_table().column("id").to_pylist()) == [1, 3, 4]
+    assert sorted(_ids(joined)) == [1, 3, 4]
     assert joined.as_table().schema.field("x").nullable is False
