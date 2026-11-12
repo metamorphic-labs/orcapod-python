@@ -66,8 +66,8 @@ Where a hash appears, and in which form:
 |---|---|
 | Labelled value | `__input_data_hash`, `__output_data_hash`, `__node_content_hash`, `__pipeline_base_entry_id`, the pipeline table's record id, the side-effect log's `record_id` and `record_id_hash`, the record id (`_record_hash`) of operator-node and cached-source tables, the `_content_hash` column, the hashes in a saved job file, `InvocationContext.invocation_hash` |
 | Bare digest in a name | the function `uri` (its second component), the path components `schema:<pipeline digest>`, `instance:<content digest>` and `node:<content digest>`, system-tag column names, the operator `uri`, the function `uri` at the start of a function output's source-info token |
-| Labelled hash inside a source id | every default source id built from a hash, `<source kind>:<label>:<hex>`: an in-memory source (`arrow_table:`, `dict:`, `list:`, `data_frame:`, then the labelled table hash), and a `DerivedSource`, which is also what `node.as_source()` returns (`derived:`, then the node's labelled content hash). `hash_source_id` in `core/sources/source_ids.py` is the single definition |
-| Digest only, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "digest": "<hex>"}`; an extension-typed cell in a table: `b"<extension name>::" + digest`; the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the leaf digests of the run snapshot hash (site 13) |
+| Labelled hash inside a source id | every default source id built from a hash, `<source kind>:<label>:<hex>`: an in-memory source (`arrow_table:`, `dict:`, `list:`, `data_frame:`, then the labelled table hash), and a `DerivedSource`, which is also what `node.as_source()` returns (`derived:`, then the node's labelled content hash). `hash_source_id` in `core/sources/source_ids.py` is the single definition of that form. A `DerivedSource` built with `tags_as_data` has its own kind, `tags_as_data:<label>:<hex>` of its derivation hash (`DerivedSource._default_source_id`) |
+| Digest only, inside a hash input | a nested hash in a structure: `{"__type__": "hash", "digest": "<hex>"}`; an extension-typed cell in a table: `b"<extension name>;<hex of the extension metadata>::" + digest` (the logical type's whole identifier, which the hashed field also keeps as its extension name and metadata, so the type is part of the hash of a column with no value too); the input data hash in the entry-id preimage (§3); the node content hash in the operator-node record hash; the leaf digests of the run snapshot hash (site 13) |
 
 A function node's table in v0.3, with the values it stores:
 
@@ -322,6 +322,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `ArrowTableStream` | `(producer, argument_symmetry(upstreams))` | Falls back to `(class_name, as_table(all_info=True), tag_columns)` when no producer or producer is not a `PipelineElementProtocol` |
 | `RootSource` (`ArrowTableSource`) | `(class_name, (tag_schema, data_schema), source_id)` | `source_id` is the explicit user-supplied value; when not provided it defaults to `<source kind>:<algorithm label>:<hex>` of the Arrow hash of the raw table (site 4). Data-inclusive base case of the Merkle chain. |
 | `DerivedSource` | Origin node's `content_hash` | Inherits its generating node's identity |
+| `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id)`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; a `record_id_column`, when set, is appended to the parameters as `("record_id_column", name)` | The rule of every root source; the origin and the mapping enter through the default `source_id`, which is the content hash an operator node doing the derivation would have |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
 | Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
 | `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
@@ -685,7 +686,7 @@ produced it. The label is not part of any hash input (see
 A `numpy.ndarray` value is hashed by value (since v0.3, ITL-888). The semantic hasher's
 `NumpyArrayHandler` returns `ContentHash(method="ndarray_v1", digest=D)`, where `D` is the
 version-1 array digest of the array's stored row. Inside a table hash, an array cell becomes
-the token `b"orcapod:ndarray::" + D`: the extension name, then the digest, without the label. The stored row, the dtype tags and the canonical form are described in
+the token `b"orcapod.ndarray;7b2276657273696f6e223a317d::" + D`: the logical type's identifier (the extension name, `;`, the extension metadata `{"version":1}` in hex), then the digest, without the label. The stored row, the dtype tags and the canonical form are described in
 [NumPy Arrays](../concepts/arrays.md).
 
 For a stored row with dtype tag `T`, shape `(d0, ..., dn-1)` and data bytes `B`:

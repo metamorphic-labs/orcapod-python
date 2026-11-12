@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod import contexts
@@ -840,7 +840,7 @@ class OperatorJobNode(OperatorNodeBase):
                 f"column {col_name!r} has type {col_type!r}, expected large_binary. "
                 "This table was written by an older version of the code that stored "
                 "this column as large_string. Drop and recreate the affected pipeline "
-                "DB tables (see DESIGN_ISSUES.md ON1)."
+                "DB tables (see design_issues/ ON1)."
             )
         own_hash = self.content_hash().to_prefixed_digest()
         mask = pc.equal(table.column(col_name), own_hash)
@@ -1271,24 +1271,36 @@ class OperatorJobNode(OperatorNodeBase):
     # DerivedSource
     # ------------------------------------------------------------------
 
-    def as_source(self):
+    def as_source(self, tags_as_data: "Mapping[str, str] | None" = None):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Its ``source_id`` is the ``DerivedSource`` default,
-        ``derived:<algorithm label>:<hex>`` of this node's content hash.
+        Its ``source_id`` is the ``DerivedSource`` default: without
+        ``tags_as_data``, ``derived:<algorithm label>:<hex>`` of this node's
+        content hash.
+
+        Args:
+            tags_as_data: Maps a tag column of this node to the name of a data
+                column that receives a copy of it. When given, the result is a
+                new root source with its own provenance and a ``source_id``
+                derived from this node's content hash and the mapping; see
+                ``DerivedSource``.
 
         Raises:
             RuntimeError: If no database is attached.
+            InputValidationError: If ``tags_as_data`` is not valid for this
+                node's columns.
         """
         if self._pipeline_database is None:
             raise RuntimeError("Cannot create a DerivedSource without a database")
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # No source_id is given: the source takes the DerivedSource default,
-        # ``derived:<algorithm label>:<hex>`` of this node's content hash.
+        # No source_id is given: the source takes the DerivedSource default
+        # (``derived:<algorithm label>:<hex>`` of this node's content hash, or the
+        # ``tags_as_data`` id when a mapping is given).
         return DerivedSource(
             origin=self,
+            tags_as_data=tags_as_data,
             data_context=self.data_context_key,
             config=self.orcapod_config,
         )
@@ -1350,6 +1362,13 @@ class OperatorJobNode(OperatorNodeBase):
             # OFF or LOG: delegate to operator, forward results downstream
             intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
             should_collect = self._cache_mode == CacheMode.LOG
+            if should_collect:
+                # Rows are forwarded while the operator runs, so an input this node
+                # will refuse to store must be refused before the first row leaves.
+                for input_stream in self._input_streams:
+                    require_same_data_context(
+                        input_stream.data_context_key, self.data_context_key
+                    )
             collected: list[tuple[TagProtocol, DataProtocol]] = []
 
             async def forward() -> None:

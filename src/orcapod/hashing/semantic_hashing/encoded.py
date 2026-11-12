@@ -47,6 +47,15 @@ class Encoded:
     fields: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Validate ``tag`` and the field keys, then freeze ``fields``.
+
+        ``fields`` is copied into a read-only mapping, so later changes to the
+        mapping passed in do not reach this object.
+
+        Raises:
+            ValueError: If ``tag`` is empty or one of ``HASHER_TAGS``, or a field
+                key is not a ``str`` or is ``"__type__"``.
+        """
         if not self.tag:
             raise ValueError("Encoded tag must be a non-empty string.")
         if self.tag in HASHER_TAGS:

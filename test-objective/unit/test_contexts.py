@@ -47,6 +47,7 @@ class TestGetAvailableContexts:
         assert len(contexts) > 0
 
     def test_includes_v1(self):
+        """The available contexts include the version ``v1``."""
         contexts = get_available_contexts()
         assert "v1" in contexts
 

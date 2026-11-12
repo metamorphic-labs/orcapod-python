@@ -71,12 +71,14 @@ def store(tmp_path: Path) -> Path:
 
 @pytest.fixture(params=["sync", "async"])
 def orchestrator(request: pytest.FixtureRequest) -> Any:
+    """A pipeline orchestrator, once synchronous and once asynchronous."""
     return {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}[
         request.param
     ]()
 
 
 def _table_path(table: str) -> tuple[str, ...]:
+    """Split a slash-separated table path into its tuple of components."""
     return tuple(Path(table).parts)
 
 

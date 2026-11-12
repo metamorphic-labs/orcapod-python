@@ -368,7 +368,10 @@ class TestGetFunctionVariationData:
         }
 
     def test_function_version_is_the_full_declared_version(self):
+        """The variation data holds the declared ``v3.7`` whole, typed ``str``."""
+
         def add(x: int, y: int) -> int:
+            """Return ``x + y``."""
             return x + y
 
         pf = PythonDataFunction(add, output_keys="result", version="v3.7")

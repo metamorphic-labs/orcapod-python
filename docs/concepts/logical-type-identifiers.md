@@ -93,7 +93,10 @@ a list; conceptually they are an ordinary list or set of `T`. By design:
 - **A native container has no version of its own.** Its metadata is JSON with `category`
   (`list` or `set`) and the element's extension name and metadata, and nothing else. Its
   identifier is the container kind plus the element's identifier, so it changes exactly when
-  the element's identifier changes.
+  the element's identifier changes. Because the element's metadata is written into that
+  JSON as text, a logical type used inside `list[T]` or `set[T]` must have extension
+  metadata that is valid UTF-8, for its current identifier and for every older one it
+  declares readable.
 - **In the type and schema hash it is hashed like any other generic type**, `list[int]`
   included: as its origin (`list` or `set`) and its argument. The element's identifier enters
   through the argument.

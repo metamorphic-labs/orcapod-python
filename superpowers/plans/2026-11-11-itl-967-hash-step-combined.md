@@ -147,11 +147,21 @@ For each merge:
   `ITL-945.md` and `docs/reference/hashing.md` corrected for the combined result (`pdb_v2`;
   v0.2 tables are found by name). Tests adjusted for the layout component
   (`test_hash_label_rule.py`, `test_cached_source.py`).
-- PINS TO RE-RECORD after all merges (not golden files), with cause:
-  - `tests/test_semantic_types/test_struct_layout_identity.py` (stream/source content and
-    pipeline hashes: ITL-944 x ITL-945)
-  - `tests/test_core/sources/test_spiraldb_table_source_fake.py::TestSourceId` two tests
-    pinned on main with `semantic_v0.1:` / `arrow_v0.1:` values (ITL-910, ITL-945)
-- OPEN: `tests/test_core/sources/test_stream_builder.py::TestUnhashableColumnTypes` (main,
-  ITL-926) expects NotImplementedError naming the columns; starfix 0.5 hashes
-  fixed_size_list and raises ValueError for map. Asked the coordinator.
+- Merge 5 #315 (6fb74c22): GenericAlias/Union handlers return `Encoded` holding
+  `ContentHash` objects; strict xfail removed.
+- Merge 6 #319 (2369d75d): cell token = identifier text + `::` + raw digest.
+- Option A (coordinator): `stream_builder` wrapper catches `ValueError` (starfix 0.5).
+- Review findings (merge point h), plan approved: read-only operator node data context,
+  side-effect check before every run, fresh-store wording, two nitpicks. Declined: event
+  loop. Moot: two findings on removed files.
+- Golden regenerated once (b14a56c7 + 1), attributed by regenerating at each merge commit
+  (scratchpad scripts `attribute.py`, `entries.py`; result in
+  `superpowers/plans/2026-11-12-itl-967-golden-entries.md`). Pins outside golden
+  re-recorded: `hash_samples/schema_hash_golden.json`, `test_canonical_type_names.py`,
+  `test_struct_layout_identity.py`, spiral fake `TestSourceId`.
+- Nov 12: main (#316, ITL-955) merged, golden regenerated once more (6 group_by rows);
+  design-issue entries moved to `design_issues/` (ITL-968).
+- Verified at c4b1e4a7: Python 3.11, 3.12, 3.13 each 8525 passed, 101 skipped, 18 xfailed;
+  ruff clean; basedpyright exit 0.
+- PR #324 open against main. NEXT: CI green, CodeRabbit rounds (one push per round),
+  answer review-body findings too, then `worker_done`.

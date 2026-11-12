@@ -21,7 +21,7 @@ import contextlib
 import logging
 import uuid
 from abc import abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
@@ -41,6 +41,7 @@ from orcapod.errors import (
     StoreWriteError,
 )
 from orcapod.contexts.stored import (
+    StaleTables,
     keep_rows_of_data_context,
     require_same_data_context,
     account_for_stale_tables,
@@ -278,6 +279,13 @@ class FunctionNodeBase(StreamBase):
 
     @property
     def data_context_key(self) -> str:
+        """Key of the node's data context.
+
+        A node loaded from a saved job without its function pod (read-only) has
+        the data context saved in its descriptor.
+        """
+        if self._function_pod is None:
+            return self._data_context.context_key
         return self._function_pod.data_context_key
 
     @property
@@ -819,8 +827,13 @@ class FunctionJobNode(FunctionNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
-    # Set once stored rows of other generations have been accounted for.
+    # Set once stored rows of other generations have been accounted for. A node
+    # that delivers side effects unsets it at the start of every run.
     _stale_tables_checked: bool = False
+    # Set once the rows of the current tables were counted by data context.
+    _current_tables_checked: bool = False
+    # Set once a store that cannot list its tables was reported.
+    _unlisted_store_reported: bool = False
 
     def __init__(
         self,
@@ -920,8 +933,29 @@ class FunctionJobNode(FunctionNodeBase):
             and self._function_pod.ctx_arg_name is not None
         )
 
+    def _begin_run(self) -> None:
+        """Make a node that delivers side effects look for older completions again.
+
+        Tables written before v0.3 can appear in a store between two runs of one
+        node object. Such a node must find them before it delivers anything, so it
+        looks for them at the start of every run, also when every input is already
+        held in memory; other nodes report once, when they first read the store.
+
+        Raises:
+            SideEffectLogDataContextError: If this node delivers side effects and
+                completions it cannot match exist; nothing has been delivered then.
+        """
+        if self._delivers_side_effects:
+            self._stale_tables_checked = False
+            self._account_for_stale_tables()
+
     def _account_for_stale_tables(self) -> None:
-        """Report or refuse, once per node object, stored rows of other generations.
+        """Report or refuse stored rows of other generations.
+
+        Done once per node object; a node that delivers side effects does it at
+        the start of every run (``_begin_run``). Its current tables are read and
+        counted by data context the first time only: the later runs list the store
+        for tables at an older layout, which reads no table.
 
         A pipeline table written by an earlier version of Orcapod (``pdb_v1``) holds
         no ``__data_context`` column: its rows are not read as results and are left
@@ -949,13 +983,25 @@ class FunctionJobNode(FunctionNodeBase):
                 for layout in OLD_PIPELINE_DB_SCHEMA_VERSIONS
             )
             + (self.node_identity_path,),
-            current=(self._versioned_pipeline_path, context_key) if delivers else None,
+            current=(self._versioned_pipeline_path, context_key)
+            if delivers and not self._current_tables_checked
+            else None,
             name_path=self.node_name_path or None,
         )
         if delivers:
             for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
                 if cached_pod is not None:
-                    found.include(cached_pod.stale_result_tables())
+                    found.include(
+                        cached_pod.stale_result_tables(
+                            include_current=not self._current_tables_checked
+                        )
+                    )
+            if found.unlisted:
+                # That the store cannot list its tables is reported once per node
+                # object and attached database, not at every run.
+                if self._unlisted_store_reported:
+                    found = StaleTables(tables=found.tables)
+                self._unlisted_store_reported = True
         try:
             account_for_stale_tables(
                 found, delivers_side_effects=delivers, current_context=context_key
@@ -968,6 +1014,7 @@ class FunctionJobNode(FunctionNodeBase):
                 if cached_pod is not None:
                     cached_pod.stale_result_tables_accounted_for()
         self._stale_tables_checked = True
+        self._current_tables_checked = True
 
     # ------------------------------------------------------------------
     # attach_databases
@@ -1011,6 +1058,8 @@ class FunctionJobNode(FunctionNodeBase):
         """
         # Another store has its own tables of other generations to account for.
         self._stale_tables_checked = False
+        self._current_tables_checked = False
+        self._unlisted_store_reported = False
         self._skipped_rows_reported = False
         if pipeline_database is not None:
             if result_database is None:
@@ -1497,6 +1546,7 @@ class FunctionJobNode(FunctionNodeBase):
         """
         from orcapod.pipeline.observer import NoOpObserver
 
+        self._begin_run()
         # A whole-input condition, not a row failure: the error policy does not apply.
         require_same_data_context(
             input_stream.data_context_key, self._stored_data_context_key
@@ -2022,6 +2072,11 @@ class FunctionJobNode(FunctionNodeBase):
             output_data_hash: Content hash of the output, if any.
         """
         pipeline_database = self._require_pipeline_database()
+        # The row key combines the input's hash with this node's hasher: an input
+        # of another data context would be stored under a mixed key.
+        require_same_data_context(
+            input_data.data_context_key, self._stored_data_context_key
+        )
         self._account_for_stale_tables()
 
         # Determine the next recomputation index by querying all existing rows
@@ -2188,24 +2243,36 @@ class FunctionJobNode(FunctionNodeBase):
 
         return joined if joined.num_rows > 0 else None
 
-    def as_source(self):
+    def as_source(self, tags_as_data: "Mapping[str, str] | None" = None):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Its ``source_id`` is the ``DerivedSource`` default,
-        ``derived:<algorithm label>:<hex>`` of this node's content hash.
+        Its ``source_id`` is the ``DerivedSource`` default: without
+        ``tags_as_data``, ``derived:<algorithm label>:<hex>`` of this node's
+        content hash.
+
+        Args:
+            tags_as_data: Maps a tag column of this node to the name of a data
+                column that receives a copy of it. When given, the result is a
+                new root source with its own provenance and a ``source_id``
+                derived from this node's content hash and the mapping; see
+                ``DerivedSource``.
 
         Raises:
             RuntimeError: If no database is attached.
+            InputValidationError: If ``tags_as_data`` is not valid for this
+                node's columns.
         """
         if self._pipeline_database is None:
             raise RuntimeError("Cannot create a DerivedSource without a database")
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # No source_id is given: the source takes the DerivedSource default,
-        # ``derived:<algorithm label>:<hex>`` of this node's content hash.
+        # No source_id is given: the source takes the DerivedSource default
+        # (``derived:<algorithm label>:<hex>`` of this node's content hash, or the
+        # ``tags_as_data`` id when a mapping is given).
         return DerivedSource(
             origin=self,
+            tags_as_data=tags_as_data,
             data_context=self.data_context_key,
             config=self.orcapod_config,
         )
@@ -2306,8 +2373,12 @@ class FunctionJobNode(FunctionNodeBase):
                 record_id_column=constants.DATA_RECORD_ID,
             )
             if results is not None:
-                # The data context is taken from the pipeline rows kept above.
-                results = results.drop([constants.DATA_CONTEXT_COL])
+                # A result row of another data context is not this entry's result,
+                # even when a current pipeline row names its record id: it is left
+                # out and the entry counts as having no stored result.
+                results = keep_rows_of_data_context(results, context_key).drop(
+                    [constants.DATA_CONTEXT_COL]
+                )
             if results is None:
                 # Tag table has persistent entries but result DB is empty — data loss
                 logger.warning(
@@ -2351,7 +2422,9 @@ class FunctionJobNode(FunctionNodeBase):
                     )
                 )
             if eph_results is not None:
-                eph_results = eph_results.drop([constants.DATA_CONTEXT_COL])
+                eph_results = keep_rows_of_data_context(eph_results, context_key).drop(
+                    [constants.DATA_CONTEXT_COL]
+                )
                 if results_schema is None:
                     results_schema = eph_results.schema
                 ephemeral_df = ephemeral_taginfo_df.join(
@@ -2631,6 +2704,7 @@ class FunctionJobNode(FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        self._begin_run()
         if self._load_status == LoadStatus.UNAVAILABLE:
             raise RuntimeError(
                 f"FunctionJobNode {self.label!r} is unavailable: "
@@ -2678,6 +2752,12 @@ class FunctionJobNode(FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        try:
+            self._begin_run()
+        except StoreError:
+            # Nothing was delivered; downstream must not wait for rows.
+            await output.close()
+            raise
         status = self.load_status
         if status == LoadStatus.CACHE_ONLY:
             await self._async_execute_cache_only(output, observer=observer)

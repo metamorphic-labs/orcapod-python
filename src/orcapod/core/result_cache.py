@@ -51,7 +51,7 @@ class ResultCache:
     The match strategy is extensible: the default lookup matches on
     ``INPUT_DATA_HASH_COL`` only, but callers can supply additional
     constraints (e.g. function variation columns) to narrow the match.
-    This is the hook for future match-tier support (see DESIGN_ISSUES P6).
+    This is the hook for future match-tier support (see design_issues/ P6).
 
     Args:
         result_database: The database to store/retrieve cached results.
@@ -118,7 +118,9 @@ class ResultCache:
         """Set auto-flush behavior."""
         self._auto_flush = on
 
-    def stale_tables(self, data_context_key: str) -> StaleTables:
+    def stale_tables(
+        self, data_context_key: str, include_current: bool = True
+    ) -> StaleTables:
         """Find stored results of other generations: rows this cache will not use.
 
         Result tables at an older layout (``rdb_v1``, or no layout component), at
@@ -128,6 +130,8 @@ class ResultCache:
 
         Args:
             data_context_key: Key of the caller's data context.
+            include_current: Whether to read the current table and count its rows
+                of another data context.
 
         Returns:
             What ``find_stale_tables`` found; empty when there is nothing.
@@ -141,7 +145,7 @@ class ResultCache:
             )
             + (self._record_path,),
             current=(self._versioned_record_path, data_context_key)
-            if self._delivers_side_effects
+            if self._delivers_side_effects and include_current
             else None,
             name_path=self._name_path,
         )

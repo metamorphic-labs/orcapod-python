@@ -137,6 +137,7 @@ def _build_source_registry() -> dict[str, type]:
     from orcapod.core.sources.csv_source import CSVSource
     from orcapod.core.sources.data_frame_source import DataFrameSource
     from orcapod.core.sources.delta_table_source import DeltaTableSource
+    from orcapod.core.sources.derived_source import DerivedSource
     from orcapod.core.sources.dict_source import DictSource
     from orcapod.core.sources.list_source import ListSource
     from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
@@ -151,6 +152,7 @@ def _build_source_registry() -> dict[str, type]:
         DataFrameSource.SOURCE_KIND: DataFrameSource,
         ArrowTableSource.SOURCE_KIND: ArrowTableSource,
         "cached": CachedSource,
+        "derived": DerivedSource,
         "spiraldb_table": SpiralDBTableSource,
         "sqlite_table": SQLiteTableSource,
         "postgresql_table": PostgreSQLTableSource,
@@ -166,6 +168,7 @@ def _build_operator_registry() -> dict[str, type]:
     from orcapod.core.operators import (
         Batch,
         DropDataColumns,
+        DropNulls,
         DropTagColumns,
         GroupBy,
         Join,
@@ -191,6 +194,7 @@ def _build_operator_registry() -> dict[str, type]:
         "MapTags": MapTags,
         "MapData": MapData,
         "PolarsFilter": PolarsFilter,
+        "DropNulls": DropNulls,
     }
 
 

@@ -200,6 +200,9 @@ def renamed_labels(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
 DEFAULT_ID_CASES = (
     "schema:source_stream_builder.default_source_id.",
     "pipeline:default_source_ids.",
+    # A ``tags_as_data`` source with no ``source_id`` (ITL-939).
+    "schema:derived_source_tags_as_data.default_source_id.",
+    "schema:derived_source_tags_as_data.record_id_column.",
 )
 
 
@@ -245,15 +248,26 @@ class TestRenamingALabelChangesNoDigest:
         # name that holds the label (``<source kind>:<algorithm label>:<hex>``), and
         # the name is an input of the source's content hash and of its record ids.
         # So a renamed label moves those for a source with no given ``source_id``
-        # (developer, November 11, 2026; ITL-957), and for nothing else.
-        by_rule_5a = [entry for entry in moved if entry.startswith(DEFAULT_ID_CASES)]
-        others = [entry for entry in moved if not entry.startswith(DEFAULT_ID_CASES)]
-        assert not others, f"{len(others)} values depend on a label: {others[:10]}"
-        assert by_rule_5a
-        assert all(
-            entry.endswith(".content_hash") or "._tag_record_id::" in entry
-            for entry in by_rule_5a
-        ), by_rule_5a
+        # (developer, November 11, 2026; ITL-957), and for nothing else. The golden
+        # cases with such an id are exactly ``DEFAULT_ID_CASES``.
+        unexpected = [
+            entry
+            for entry in moved
+            if not (
+                entry.startswith(DEFAULT_ID_CASES)
+                and (entry.endswith(".content_hash") or "._tag_record_id::" in entry)
+            )
+        ]
+        assert not unexpected, (
+            f"{len(unexpected)} values depend on a label: {unexpected[:10]}"
+        )
+        cases_that_moved = {
+            case
+            for case in DEFAULT_ID_CASES
+            for entry in moved
+            if entry.startswith(case)
+        }
+        assert cases_that_moved == set(DEFAULT_ID_CASES), cases_that_moved
 
     def test_directory_hash_keeps_its_digest(
         self, tmp_path: Path, request: pytest.FixtureRequest

@@ -49,6 +49,7 @@ Orchestrator = SyncPipelineOrchestrator | AsyncPipelineOrchestrator
 
 
 def _local_name(name: str) -> str:
+    """The name a store path component has on disk on this platform."""
     # Windows forbids ':' in file names; DeltaTableDatabase stores it as '!' there.
     return name.replace(":", "!") if sys.platform == "win32" else name
 
@@ -134,7 +135,12 @@ def orchestrator(request: pytest.FixtureRequest) -> Orchestrator:
 
 
 class TestTheFixture:
+    """The archived v0.2.0 store and the hash-moving helper are what the tests assume."""
+
     def test_it_holds_every_kind_of_table_v02_stored(self, tmp_path: Path):
+        """The archive holds nine non-empty tables, none with a ``__data_context``
+        column.
+        """
         _extract(tmp_path)
         tables = _tables(tmp_path)
         assert len(tables) == 9
@@ -159,6 +165,7 @@ class TestTheFixture:
     def test_moving_the_hashes_leaves_no_path_this_version_computes(
         self, tmp_path: Path
     ):
+        """``_move_hashes`` changes every table path and keeps job, names and layouts."""
         _extract(tmp_path / "written")
         _extract(tmp_path / "moved")
         _move_hashes(tmp_path / "moved")
@@ -172,9 +179,12 @@ class TestTheFixture:
 
 
 class TestSideEffectPod:
+    """A sink refuses to run over the delivery log Orcapod v0.2 wrote."""
+
     def test_it_raises_before_delivering_and_names_the_log(
         self, root: Path, orchestrator: Orchestrator
     ):
+        """The run raises naming the ``tdb_v1`` log and the sink, and delivers nothing."""
         job = pods.build_job(DeltaTableDatabase(root), with_notify=False)
         with pytest.raises(SideEffectLogDataContextError) as raised:
             job.run(orchestrator)
@@ -189,6 +199,7 @@ class TestSideEffectPod:
     def test_what_v02_wrote_stays_byte_identical(
         self, root: Path, orchestrator: Orchestrator
     ):
+        """The refused sink run leaves every file of the v0.2 store unchanged."""
         before = _files(root)
         job = pods.build_job(DeltaTableDatabase(root), with_notify=False)
         with pytest.raises(SideEffectLogDataContextError):
@@ -198,9 +209,12 @@ class TestSideEffectPod:
 
 
 class TestFunctionPodThatTakesTheInvocationContext:
+    """A function pod with a context argument refuses to run over its v0.2 tables."""
+
     def test_it_raises_before_running_and_names_its_tables(
         self, root: Path, orchestrator: Orchestrator
     ):
+        """The run raises naming the pipeline and result tables, and calls nothing."""
         job = pods.build_job(DeltaTableDatabase(root), with_sink=False)
         with pytest.raises(SideEffectLogDataContextError) as raised:
             job.run(orchestrator)
@@ -214,6 +228,7 @@ class TestFunctionPodThatTakesTheInvocationContext:
     def test_what_v02_wrote_stays_byte_identical(
         self, root: Path, orchestrator: Orchestrator
     ):
+        """The refused function pod run leaves every file of the v0.2 store unchanged."""
         before = _files(root)
         job = pods.build_job(DeltaTableDatabase(root), with_sink=False)
         with pytest.raises(SideEffectLogDataContextError):
@@ -223,9 +238,12 @@ class TestFunctionPodThatTakesTheInvocationContext:
 
 
 class TestOrdinaryTables:
+    """Tables of nodes without side effects are reported, skipped and left alone."""
+
     def test_function_tables_are_reported_and_inputs_computed_again(
         self, root: Path, orchestrator: Orchestrator, caplog: pytest.LogCaptureFixture
     ):
+        """Old function tables are named in warnings and every input is computed anew."""
         job = pods.build_job(
             DeltaTableDatabase(root), with_notify=False, with_sink=False
         )
@@ -250,6 +268,7 @@ class TestOrdinaryTables:
     def test_the_job_reports_one_total_of_the_tables_no_node_claims(
         self, root: Path, orchestrator: Orchestrator, caplog: pytest.LogCaptureFixture
     ):
+        """The job logs a single total of the five old tables none of its nodes own."""
         # The operator cache, the cached source, and the three tables of the two
         # side-effecting nodes, which this job does not have.
         job = pods.build_job(
@@ -268,6 +287,7 @@ class TestOrdinaryTables:
     def test_the_total_leaves_out_what_the_nodes_of_the_job_claim(
         self, root: Path, caplog: pytest.LogCaptureFixture
     ):
+        """With the side-effecting nodes in the job, the total drops to two tables."""
         job = pods.build_job(DeltaTableDatabase(root))
         with caplog.at_level(logging.WARNING):
             with pytest.raises(SideEffectLogDataContextError):
@@ -278,6 +298,7 @@ class TestOrdinaryTables:
     def test_a_second_run_reuses_what_this_version_stored(
         self, root: Path, orchestrator: Orchestrator
     ):
+        """A second run over the same store computes nothing."""
         pods.build_job(
             DeltaTableDatabase(root), with_notify=False, with_sink=False
         ).run(orchestrator)
@@ -291,6 +312,9 @@ class TestOrdinaryTables:
     def test_cached_source_reports_the_old_cache_and_fills_its_own(
         self, root: Path, caplog: pytest.LogCaptureFixture
     ):
+        """A cached source warns about the old cache, keeps it and writes an ``sdb_v1``
+        one.
+        """
         (old,) = _table_under(root, JOB, "source")
         before = _files(root)
         with caplog.at_level(logging.WARNING):
@@ -305,12 +329,15 @@ class TestOrdinaryTables:
 
 
 class TestStoreOfThisVersion:
+    """A store written by this version is reused silently."""
+
     def test_nothing_is_raised_or_reported(
         self,
         tmp_path: Path,
         orchestrator: Orchestrator,
         caplog: pytest.LogCaptureFixture,
     ):
+        """A second run on a store of this version logs no warning and repeats no work."""
         pods.build_job(DeltaTableDatabase(tmp_path)).run(orchestrator)
         _ = pods.build_cached_source(DeltaTableDatabase(tmp_path)).as_table()
         assert sorted(pods.DELIVERED) == [2, 3, 4]
@@ -326,6 +353,7 @@ class TestTablesCountedByNameAlone:
     """Accepted: every table under the node's name counts, whoever wrote it."""
 
     def test_an_old_table_of_another_pod_with_the_same_name_raises(self):
+        """An old log under the sink's name with another schema hash stops the sink."""
         store = InMemoryArrowDatabase()
         other = (JOB, "side_effects", "deliver", "schema:of-another-pod", "tdb_v1")
         store.add_record(other, b"r", pa.table({"x": [1]}), flush=True)
@@ -336,6 +364,7 @@ class TestTablesCountedByNameAlone:
         assert pods.DELIVERED == []
 
     def test_an_old_table_of_another_node_of_the_same_function_raises(self):
+        """An old pipeline table of another node of ``notify`` stops this node."""
         store = InMemoryArrowDatabase()
         other = (
             JOB,
@@ -355,6 +384,7 @@ class TestTablesCountedByNameAlone:
         assert pods.NOTIFIED == []
 
     def test_a_table_without_a_layout_component_counts(self):
+        """A table under the sink's name with no layout component stops the sink."""
         store = InMemoryArrowDatabase()
         other = (JOB, "side_effects", "deliver", "anything")
         store.add_record(other, b"r", pa.table({"x": [1]}), flush=True)
@@ -363,6 +393,7 @@ class TestTablesCountedByNameAlone:
         assert raised.value.record_paths == (other,)
 
     def test_a_current_table_of_another_node_does_not_raise(self):
+        """A ``tdb_v2`` log of another pod with the same name lets the sink deliver."""
         store = InMemoryArrowDatabase()
         other = (JOB, "side_effects", "deliver", "schema:of-another-pod", "tdb_v2")
         store.add_record(other, b"r", pa.table({"x": [1]}), flush=True)
@@ -370,6 +401,7 @@ class TestTablesCountedByNameAlone:
         assert sorted(pods.DELIVERED) == [2, 3, 4]
 
     def test_a_table_under_a_longer_name_does_not_count(self):
+        """An old log under ``deliver_more`` is not taken for one of ``deliver``."""
         store = InMemoryArrowDatabase()
         other = (JOB, "side_effects", "deliver_more", "schema:x", "tdb_v1")
         store.add_record(other, b"r", pa.table({"x": [1]}), flush=True)
@@ -379,6 +411,7 @@ class TestTablesCountedByNameAlone:
     def test_the_job_total_counts_marked_tables_only(
         self, caplog: pytest.LogCaptureFixture
     ):
+        """The job total counts old tables and skips observer tables and current ones."""
         store = InMemoryArrowDatabase()
         row = pa.table({"x": [1]})
         # Counted: a v0.2 operator cache, a v0.2 cached source, an old function table.
@@ -396,11 +429,14 @@ class TestTablesCountedByNameAlone:
 
 
 class TestStoreThatCannotListItsTables:
+    """Runs against a store that does not support listing its tables."""
+
     @pytest.fixture
     def unlistable(self, monkeypatch: pytest.MonkeyPatch) -> InMemoryArrowDatabase:
         """An in-memory store whose tables cannot be listed."""
 
         def refuse(self: object, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+            """Stand in for ``list_table_paths`` and raise that listing is unsupported."""
             raise TableListingNotSupportedError("this store has no table listing")
 
         monkeypatch.setattr(InMemoryArrowDatabase, "list_table_paths", refuse)
@@ -409,6 +445,7 @@ class TestStoreThatCannotListItsTables:
     def test_side_effecting_nodes_warn_once_and_proceed(
         self, unlistable: InMemoryArrowDatabase, caplog: pytest.LogCaptureFixture
     ):
+        """Each side-effecting node warns once over two runs, and the effects happen."""
         job = pods.build_job(unlistable)
         with caplog.at_level(logging.WARNING):
             job.run()
@@ -433,6 +470,7 @@ class TestStoreThatCannotListItsTables:
     def test_the_sibling_path_check_still_raises(
         self, unlistable: InMemoryArrowDatabase
     ):
+        """A ``tdb_v1`` log beside the sink's own path is refused without a listing."""
         pods.build_job(unlistable, with_notify=False).run()
         pods.reset()
         (log,) = [p for p in unlistable.list_sources() if p[-1] == "tdb_v2"]
@@ -452,6 +490,7 @@ class TestStoreThatCannotListItsTables:
     def test_ordinary_nodes_run_without_a_warning_per_node(
         self, unlistable: InMemoryArrowDatabase, caplog: pytest.LogCaptureFixture
     ):
+        """Nodes without side effects compute and log no side-effect warning."""
         job = pods.build_job(unlistable, with_notify=False, with_sink=False)
         with caplog.at_level(logging.WARNING):
             job.run()
