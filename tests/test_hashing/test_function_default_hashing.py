@@ -79,6 +79,8 @@ class _Unregistered:
 
 @HASH_SITES
 class TestEqualDefaultsHashEqually:
+    """Defaults that are equal as values give one hash, however they were built."""
+
     def test_dict_default_ignores_insertion_order(self, site: Callable[..., Any]):
         """``{"a": 1, "b": 2}`` and ``{"b": 2, "a": 1}`` are one default."""
         assert site(_with_default({"a": 1, "b": 2})) == site(
@@ -125,12 +127,15 @@ def _run_with_seed(script: str, seed: str) -> str:
         capture_output=True,
         text=True,
         env=env,
+        check=False,  # the assertion below reports stderr on failure
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 
 
 class TestAcrossProcessesAndHashSeeds:
+    """Both hashes of a function are the same in every process and hash seed."""
+
     def test_set_and_dict_defaults_hash_equally_under_every_seed(self):
         """Both hashes of one function are the same in every process and hash seed."""
         outputs = {seed: _run_with_seed(_SEED_SCRIPT, seed) for seed in "01234567"}
@@ -144,6 +149,8 @@ class TestAcrossProcessesAndHashSeeds:
 
 @HASH_SITES
 class TestDifferentDefaultsHashDifferently:
+    """Defaults that differ as values never share a hash."""
+
     @pytest.mark.parametrize(
         ("left", "right"),
         [
@@ -161,6 +168,7 @@ class TestDifferentDefaultsHashDifferently:
         ],
     )
     def test_distinct_values(self, site: Callable[..., Any], left: Any, right: Any):
+        """Two functions that differ only in the default's value hash differently."""
         assert site(_with_default(left)) != site(_with_default(right))
 
     def test_default_none_differs_from_no_default(self, site: Callable[..., Any]):
@@ -182,6 +190,8 @@ class TestDifferentDefaultsHashDifferently:
         assert site(_with_default(forged)) != site(_with_default((1, 2)))
 
     def test_the_parameter_a_default_belongs_to_matters(self, site: Callable[..., Any]):
+        """``a=1, b=2`` and ``a=2, b=1`` are different signatures."""
+
         def swapped_ab(x: int, a: int = 1, b: int = 2) -> int:
             return x
 
@@ -196,6 +206,8 @@ class TestDifferentDefaultsHashDifferently:
         """Two defaults that print alike are still told apart by their value."""
 
         class Text(str):
+            """A string whose ``repr()`` is that of the integer 1."""
+
             def __repr__(self) -> str:
                 return "1"
 
@@ -209,7 +221,10 @@ class TestDifferentDefaultsHashDifferently:
 
 
 class TestUnhashableDefaultRaises:
+    """A default the semantic hasher cannot hash is an error, never a fallback."""
+
     def test_function_value_names_parameter_and_function(self):
+        """Hashing the function names the parameter, the function and the type."""
         fn = _with_default(_Unregistered())
         with pytest.raises(TypeError) as excinfo:
             _value_hash(fn)
@@ -219,6 +234,7 @@ class TestUnhashableDefaultRaises:
         assert "_Unregistered" in message
 
     def test_data_function_fails_at_construction(self):
+        """A data function with such a default cannot be built."""
         fn = _with_default(object())
         with pytest.raises(TypeError) as excinfo:
             PythonDataFunction(fn, output_keys="out")
@@ -227,6 +243,7 @@ class TestUnhashableDefaultRaises:
         assert fn.__qualname__ in message
 
     def test_function_pod_decorator_fails_at_decoration(self):
+        """``@function_pod`` raises when it is applied, naming the parameter."""
         with pytest.raises(TypeError, match="'marker'"):
 
             @function_pod(output_keys="out")
@@ -239,11 +256,13 @@ class TestUnhashableDefaultRaises:
             _value_hash(_with_default((1, _Unregistered())))
 
     def test_error_keeps_the_hashers_error_as_its_cause(self):
+        """The hasher's own ``TypeError`` is chained as the cause."""
         with pytest.raises(TypeError) as excinfo:
             _value_hash(_with_default(_Unregistered()))
         assert isinstance(excinfo.value.__cause__, TypeError)
 
     def test_error_states_the_remedy(self):
+        """The message says the default is the problem and how to register a handler."""
         with pytest.raises(TypeError) as excinfo:
             _value_hash(_with_default(_Unregistered()))
         message = str(excinfo.value)
@@ -257,12 +276,16 @@ class TestUnhashableDefaultRaises:
 
 
 class _Colour(enum.Enum):
+    """A plain enum, which the semantic hasher has no handler for."""
+
     RED = 1
     BLUE = 2
 
 
 @dataclasses.dataclass(frozen=True)
 class _Window:
+    """A dataclass whose instances the semantic hasher has no handler for."""
+
     start: int
     stop: int
 
@@ -302,6 +325,7 @@ class TestDefaultsOfCommonTypes:
         make_left: Callable[[], Any],
         make_right: Callable[[], Any],
     ):
+        """Two different values are refused or get different hashes."""
         left, right = (
             _hash_or_error(site, make_left()),
             _hash_or_error(site, make_right()),
@@ -314,6 +338,7 @@ class TestDefaultsOfCommonTypes:
         make_left: Callable[[], Any],
         make_right: Callable[[], Any],
     ):
+        """The same value built twice is refused both times or hashed alike."""
         assert _hash_or_error(site, make_left()) == _hash_or_error(site, make_left())
 
 
@@ -327,6 +352,8 @@ class TestParameterKind:
     """``f(a, *, b)``, ``f(a, /, b)`` and ``f(a, b)`` are three signatures."""
 
     def test_keyword_only_marker(self, site: Callable[..., Any]):
+        """``f(a, *, b)`` differs from ``f(a, b)``."""
+
         def kinds(a: int, b: int) -> int:
             return a
 
@@ -338,6 +365,8 @@ class TestParameterKind:
         assert site(plain) != site(kinds)
 
     def test_positional_only_marker(self, site: Callable[..., Any]):
+        """``f(a, /, b)`` differs from ``f(a, b)``."""
+
         def kinds(a: int, b: int) -> int:
             return a
 
@@ -355,8 +384,11 @@ class TestParameterKind:
 
 
 class TestSignatureTextWithoutDefaults:
+    """``get_function_signature(include_defaults=False)`` keeps the whole annotation."""
+
     def test_annotation_containing_equals_is_kept(self):
         # get_function_signature is the public helper the stored hash is built from.
+        """``Literal["a=b", "c"]`` survives and both defaults are left out."""
         from orcapod.hashing.hash_utils import get_function_signature
 
         def fn(mode: Literal["a=b", "c"] = "c", n: int = 3) -> int:
@@ -390,6 +422,7 @@ class TestPodIdentityIgnoresDefaults:
         return pod, pod(source)
 
     def test_uri_pipeline_hash_and_content_hash_are_unchanged(self):
+        """Two pods that differ only in a default share uri and both hashes."""
         pod_two, out_two = self._pod_output(2.0)
         pod_three, out_three = self._pod_output(3.0)
 
@@ -398,6 +431,7 @@ class TestPodIdentityIgnoresDefaults:
         assert out_two.content_hash() == out_three.content_hash()
 
     def test_stored_signature_hash_differs(self):
+        """The same two pods store different signature hashes."""
         pod_two, _ = self._pod_output(2.0)
         pod_three, _ = self._pod_output(3.0)
 

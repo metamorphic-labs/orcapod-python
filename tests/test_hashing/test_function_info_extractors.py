@@ -70,6 +70,8 @@ class TestFunctionSignatureExtractor:
         return FunctionSignatureExtractor(**kwargs)
 
     def test_basic_extraction_returns_dict_with_name_and_parameters(self):
+        """The description holds the name, the module and one entry per parameter."""
+
         def my_func(x: int, y: str) -> bool:
             return True
 
@@ -101,6 +103,8 @@ class TestFunctionSignatureExtractor:
         assert "module" in result
 
     def test_include_defaults_false_strips_defaults(self):
+        """With ``include_defaults=False`` no entry reports a default."""
+
         def fn(x: int = 42, y: str = "hi") -> None:
             pass
 
@@ -109,6 +113,8 @@ class TestFunctionSignatureExtractor:
         assert all("default" not in entry for entry in result["parameters"])
 
     def test_include_defaults_true_keeps_defaults(self):
+        """A default is reported as a ``ParameterDefault`` holding the value."""
+
         def fn(x: int = 42) -> None:
             pass
 
@@ -133,6 +139,8 @@ class TestFunctionSignatureExtractor:
         assert y["default"] == ParameterDefault(None)
 
     def test_unannotated_parameter_has_no_annotation_entry(self):
+        """A parameter without an annotation has no ``annotation`` member."""
+
         def fn(x, y=1):  # noqa: ANN001, ANN202  (unannotated on purpose)
             pass
 
