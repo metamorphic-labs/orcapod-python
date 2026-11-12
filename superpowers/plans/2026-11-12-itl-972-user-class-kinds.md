@@ -28,6 +28,15 @@ because open points O1–O7 change assertions.
 - Dispatch: task `task_1a2dfeda545d`, dispatch `ctx_604897ad82ad`; questions go through
   `orca orchestration ask`.
 - One pytest process at a time, one Python version at a time.
+- November 12: design sent; O1-O7 are with the developer. Approved meanwhile: the merge
+  (done, 89b4c61b, resolutions as in the design) and failing tests for the parts no
+  decision changes.
+- Baseline after the merge (Python 3.12): 8626 passed, 101 skipped, 19 xfailed, 37 failed.
+  The 37: the 25 golden entries of `GoldenPoint`/`GoldenModel` (the ITL-967 golden files
+  are kept until the one regeneration) plus `test_no_unpinned_entries[semantic|schema|
+  datagram]` and `test_values_independent_of_process_and_hash_seed[0|4242]`; and 7 new
+  tests in `tests/test_user_types/test_exact_classes.py` that fail by design.
+  `tests/test_user_types/test_measured_case.py` does not import yet (`op.dataclass`).
 
 ## Files
 
