@@ -2519,9 +2519,11 @@ a record are unchanged. The pyspiral fake now reports nullability as the server 
 the corruption itself is SpiralDB's (to raise with Spiral).
 
 Live check (coordinator, `superpowers/specs/itl-936-live/live_nullability.py write`): the
-connector's nullability record, refusals, a Join and save/load pass. Also found: SpiralDB
-cannot store a null struct. Written with `push_down_nulls=True`, `g = null` reads back as
-`g = {x: null, y: null}` with the struct valid (value and hash change); null lists, null list
-items and null struct fields survive. The connector now refuses a null struct at any depth
+connector's nullability record, refusals, a Join and save/load pass. Also found, for a
+top-level struct column (nested structs not tested): SpiralDB cannot store a null struct.
+Written without `push_down_nulls`, pyspiral refuses it (`Spiral does not support null column
+groups. Found a null in the column named "g".`); with `push_down_nulls=True`, `g = null` reads
+back as `g = {x: null, y: null}` with the struct valid (value and hash change). Null lists,
+null list items and null struct fields survive. The connector now refuses a null struct at any depth
 with `UnsupportedValueError` before writing, and never passes `push_down_nulls`.
 
