@@ -360,6 +360,58 @@ def _plain_array(value: Any) -> npt.NDArray[Any]:
     return np.ndarray.view(value, np.ndarray)
 
 
+def _require_storable_dtype(dtype: np.dtype[Any]) -> None:
+    """Raise unless arrays of ``dtype`` have a ``.npy`` form Orcapod accepts.
+
+    Raises:
+        UnsupportedValueError: For the dtypes ``dtype_to_tag`` refuses, and for a
+            structured dtype whose fields overlap or are not in offset order.
+    """
+    dtype_to_tag(dtype)
+    try:
+        # NumPy cannot describe such a dtype in a ``.npy`` header.
+        _ = dtype.descr
+    except ValueError as exc:
+        raise _refuse(
+            dtype,
+            "structured fields with overlapping or out-of-order offsets have no "
+            ".npy form (declare the fields in offset order)",
+        ) from exc
+
+
+def _without_metadata(dtype: np.dtype[Any]) -> np.dtype[Any]:
+    """Return ``dtype`` with the same layout and no dtype ``metadata``.
+
+    ``.npy`` does not store dtype metadata, and NumPy warns when asked to write
+    it. Orcapod never counts it, so it is dropped before writing, at every
+    depth. A dtype without metadata is returned unchanged.
+    """
+    if dtype.fields is not None:
+        fields = {str(key): value for key, value in dtype.fields.items()}
+        names = list(dtype.names or ())
+        formats = [_without_metadata(fields[name][0]) for name in names]
+        unchanged = all(
+            new is fields[name][0] for name, new in zip(names, formats, strict=True)
+        )
+        if unchanged and dtype.metadata is None:
+            return dtype
+        return np.dtype(
+            {
+                "names": names,
+                "formats": formats,
+                "offsets": [fields[name][1] for name in names],
+                "itemsize": dtype.itemsize,
+            }
+        )
+    if dtype.subdtype is not None:
+        base, shape = dtype.subdtype
+        stripped = _without_metadata(base)
+        if stripped is base and dtype.metadata is None:
+            return dtype
+        return np.dtype((stripped, shape))
+    return dtype if dtype.metadata is None else np.dtype(dtype.str)
+
+
 def array_to_npy(value: Any) -> bytes:
     """Return the ``.npy`` file an array is stored as.
 
@@ -378,21 +430,14 @@ def array_to_npy(value: Any) -> bytes:
         TypeError: If ``value`` is not a ``numpy.ndarray``.
     """
     plain = _plain_array(value)
-    # The tag is not stored; computing it applies the dtype refusals.
-    dtype_to_tag(plain.dtype)
+    _require_storable_dtype(plain.dtype)
+    stored_dtype = _without_metadata(plain.dtype)
+    if stored_dtype is not plain.dtype:
+        plain = plain.view(stored_dtype)
     buffer = io.BytesIO()
-    try:
-        npy_format.write_array(
-            buffer, plain, version=NPY_FORMAT_VERSION, allow_pickle=False
-        )
-    except ValueError as exc:
-        # NumPy cannot describe a structured dtype whose fields overlap or are
-        # not in offset order (``dtype.descr`` is undefined for it).
-        raise _refuse(
-            plain.dtype,
-            "structured fields with overlapping or out-of-order offsets have no "
-            f".npy form ({exc})",
-        ) from exc
+    npy_format.write_array(
+        buffer, plain, version=NPY_FORMAT_VERSION, allow_pickle=False
+    )
     data = buffer.getvalue()
     (header_bytes,) = struct.unpack_from("<I", data, len(_NPY_MAGIC))
     if header_bytes > _MAX_NPY_HEADER_BYTES:
@@ -468,6 +513,7 @@ def array_value_digest(value: Any, ignore: frozenset[str]) -> bytes:
         TypeError: If ``value`` is not a ``numpy.ndarray``.
     """
     plain = _plain_array(value)
+    _require_storable_dtype(plain.dtype)
     tag, canonical = canonical_array(plain)
     element_digest = array_digest_v1(tag, canonical.shape, array_bytes(canonical))
 
