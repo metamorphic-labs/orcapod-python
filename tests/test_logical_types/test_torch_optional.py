@@ -91,28 +91,21 @@ READ_TENSOR_COLUMN = textwrap.dedent(
     import pyarrow as pa
 
     from orcapod.errors import MissingOptionalDependencyError
-    from orcapod.logical_types.array_format import (
-        ARRAY_FORMAT_METADATA,
-        ARRAY_STORAGE_TYPE,
-    )
     from orcapod.sources import ArrowTableSource
 
     class StoredTensorType(pa.ExtensionType):
         # Stands in for a column written by Orcapod with PyTorch installed.
         def __init__(self):
-            super().__init__(ARRAY_STORAGE_TYPE, "orcapod.torch_tensor")
+            super().__init__(pa.large_binary(), "orcapod.torch.tensor")
 
         def __arrow_ext_serialize__(self):
-            return ARRAY_FORMAT_METADATA
+            return b'{"ignore":[],"version":1}'
 
         @classmethod
         def __arrow_ext_deserialize__(cls, storage_type, serialized):
             return cls()
 
-    storage = pa.array(
-        [{"dtype": "float32", "shape": [1], "data": b"\\x00\\x00\\x80?"}],
-        type=ARRAY_STORAGE_TYPE,
-    )
+    storage = pa.array([b"a torch.save archive"], type=pa.large_binary())
     table = pa.table(
         {
             "k": pa.array(["r"], pa.large_string()),
@@ -137,5 +130,5 @@ def test_reading_a_tensor_column_without_torch_names_the_missing_dependency() ->
     assert proc.returncode == 0, proc.stderr[-3000:]
     last = proc.stdout.strip().splitlines()[-1]
     assert last.startswith("raised:"), proc.stdout
-    assert "'orcapod.torch_tensor'" in last
+    assert "'orcapod.torch.tensor'" in last
     assert "'torch'" in last

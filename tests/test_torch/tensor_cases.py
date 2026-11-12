@@ -80,7 +80,7 @@ NUMERIC = (
 """Keys of tensors that support ``x * 2`` and ``x.sum()``."""
 
 LABEL = "torch_tensor_v1"
-EXTENSION_NAME = "orcapod.torch_tensor"
+EXTENSION_NAME = "orcapod.torch.tensor"
 
 
 def tag_of(t: Any) -> str:

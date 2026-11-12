@@ -637,9 +637,9 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                     key,
                     conversions,
                     f"Function {self._function_name!r} output {key!r} returned a "
-                    f"torch tensor {describe(conversions)}; Orcapod stored a detached "
-                    "CPU copy, and the returned tensor is unchanged. Return "
-                    "value.detach().cpu() to avoid this warning.",
+                    f"torch tensor {describe(conversions)}; Orcapod stored a CPU "
+                    "tensor without autograd history, and the returned tensor is "
+                    "unchanged. Return value.detach().cpu() to avoid this warning.",
                 )
 
         def combine(*components: tuple[str, ...]) -> str:

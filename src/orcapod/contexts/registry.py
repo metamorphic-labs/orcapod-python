@@ -402,7 +402,9 @@ class JSONDataContextRegistry:
                 # library is imported when a value of the type is first hashed.
                 for entry in registration.get("deferred_value_handlers", []):
                     handler_registry.register_deferred(
-                        entry["python_type"], entry["handler"]
+                        entry["python_type"],
+                        entry["handler"],
+                        parse_objectspec(entry.get("_config", {}), ref_lut=ref_lut),
                     )
 
             return DataContext(

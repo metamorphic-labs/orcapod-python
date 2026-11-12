@@ -182,7 +182,7 @@ def _never_in_the_hash() -> list[tuple[str, Any, Any]]:
         ("grad_attribute", with_grad, leaf),
         (
             "storage_offset",
-            torch.arange(30, dtype=torch.float32)[6:].reshape(2, 3, 4),
+            torch.cat([torch.zeros(6), base.flatten()])[6:].reshape(2, 3, 4),
             base,
         ),
         ("step_slice", base[:, ::2], base[:, ::2].contiguous()),

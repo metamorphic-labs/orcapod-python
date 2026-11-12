@@ -1,7 +1,10 @@
 """What storing a torch tensor converts, and the warnings that report it (ITL-871).
 
-A tensor on a GPU (or another non-CPU device), or one that tracks gradients, is
-stored from a detached CPU copy; the caller's tensor is never modified. The code
+Storage does not keep a tensor's device or its autograd history: a tensor on a
+GPU (or another non-CPU device) is stored as a CPU tensor, and one computed from
+tensors that track gradients (it has a ``grad_fn``) is stored as a leaf.
+``requires_grad`` itself is stored, so a leaf tensor that tracks gradients is not
+converted. The caller's tensor is never modified. The code
 that knows where a value came from (a function pod's output, a source's column)
 reports the conversion with ``orcapod.errors.ValueConversionWarning``, once per
 (function or source, output or column, conversion).
@@ -22,7 +25,7 @@ from orcapod.utils.deferred_types import qualified_name
 
 _TENSOR_CLASS = "torch.Tensor"
 
-_TRACKS_GRADIENTS = "that tracks gradients (requires_grad=True)"
+_HAS_HISTORY = "with autograd history (a grad_fn)"
 
 
 def _is_tensor_type(cls: type) -> bool:
@@ -46,8 +49,8 @@ def tensor_conversions(value: Any) -> tuple[str, ...]:
     Returns:
         The conversions, in first-seen order without repeats:
         ``"on device 'cuda:0'"`` for a tensor that is not on the CPU, and
-        ``"that tracks gradients (requires_grad=True)"`` for one that tracks
-        gradients. Empty when storing converts nothing. A ``meta`` tensor is not
+        ``"with autograd history (a grad_fn)"`` for one that is not a leaf.
+        Empty when storing converts nothing. A ``meta`` tensor is not
         listed: it holds no data and storing it is refused.
     """
     found: dict[str, None] = {}
@@ -67,12 +70,12 @@ def _collect(value: Any, found: dict[str, None]) -> None:
         device = value.device
         if device.type not in ("cpu", "meta"):
             found[f"on device '{device}'"] = None
-        if value.requires_grad:
-            found[_TRACKS_GRADIENTS] = None
+        if value.grad_fn is not None:
+            found[_HAS_HISTORY] = None
 
 
 def describe(conversions: Iterable[str]) -> str:
-    """Join conversions into one phrase (``"on device 'cuda:0' that tracks ..."``)."""
+    """Join conversions into one phrase (``"on device 'cuda:0' with autograd ..."``)."""
     return " ".join(conversions)
 
 
@@ -122,9 +125,9 @@ def warn_source_tensor_conversions(
     for column, count in counts.items():
         warnings.warn(
             f"Source {source_id!r} column {column!r}: {count} of {total} values hold "
-            f"a torch tensor {describe(kinds[column])}; Orcapod stored detached CPU "
-            "copies, and the given tensors are unchanged. Pass value.detach().cpu() "
-            "to avoid this warning.",
+            f"a torch tensor {describe(kinds[column])}; Orcapod stored CPU tensors "
+            "without autograd history, and the given tensors are unchanged. Pass "
+            "value.detach().cpu() to avoid this warning.",
             ValueConversionWarning,
             stacklevel=3,
         )

@@ -40,7 +40,6 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Sequence
-from typing import Any
 
 import pyarrow as pa
 
@@ -104,26 +103,3 @@ def array_digest_v1(
     if view.nbytes:
         h.update(view)
     return h.digest()
-
-
-def array_storage_sort_key(storage_value: Any) -> tuple[Any, ...]:
-    """Ordering key for stored array rows, used where operators sort values.
-
-    Orders by the stored ``(dtype tag, shape, data)``; ``None`` sorts first. The
-    order is defined on the stored row alone, so it is the same for every array
-    type that uses this struct.
-
-    Args:
-        storage_value: A stored ``{"dtype", "shape", "data"}`` mapping, or ``None``.
-
-    Returns:
-        A tuple that orders stored rows deterministically.
-    """
-    if storage_value is None:
-        return (0,)
-    return (
-        1,
-        storage_value["dtype"],
-        list(storage_value["shape"]),
-        bytes(storage_value["data"]),
-    )

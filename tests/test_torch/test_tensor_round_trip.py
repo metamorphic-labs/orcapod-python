@@ -12,6 +12,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from orcapod import function_pod  # noqa: E402
+from orcapod.errors import ValueConversionWarning  # noqa: E402
 from orcapod.sources import ArrowTableSource, DictSource  # noqa: E402
 from tests.test_torch.tensor_cases import (  # noqa: E402
     NUMERIC,
@@ -94,16 +95,18 @@ def _stored_outputs(stream: Any, column: str) -> dict[str, Any]:
 
 
 def test_pod_returning_a_grad_tensor_stores_its_value() -> None:
-    """A grad-tracking output is stored as its detached value; the weight is untouched."""
+    """An output with autograd history is stored as a leaf; the weight is untouched."""
     weight = torch.ones(3, requires_grad=True)
 
     @function_pod(output_keys="y")
     def scale(x: torch.Tensor) -> torch.Tensor:
         """Multiply by a weight that requires gradients."""
-        return x * weight  # tracks gradients
+        return x * weight  # has a grad_fn
 
-    got = _stored_outputs(scale.pod(_source({"a": torch.arange(3.0)})), "y")
-    assert_tensors_identical(got["a"], torch.arange(3.0))
+    with pytest.warns(ValueConversionWarning, match="autograd history"):
+        got = _stored_outputs(scale.pod(_source({"a": torch.arange(3.0)})), "y")
+    assert got["a"].requires_grad and got["a"].is_leaf
+    assert torch.equal(got["a"].detach(), torch.arange(3.0))
     assert weight.requires_grad and weight.grad is None
 
 

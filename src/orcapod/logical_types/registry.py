@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from orcapod.errors import MissingOptionalDependencyError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
@@ -263,10 +263,11 @@ class LogicalTypeRegistry:
 
     An optional ``deferred_logical_types`` list names logical types that are
     loaded on first use, so an optional library is never imported up front
-    (ITL-871). Each entry is a dict of strings: ``python_type`` (qualified class
-    name, e.g. ``"torch.Tensor"``), ``extension_name``, ``logical_type`` (dotted
-    path of the logical type class, instantiated without arguments) and
-    ``requires`` (the module that must be importable). See
+    (ITL-871). Each entry is a dict: ``python_type`` (qualified class name, e.g.
+    ``"torch.Tensor"``), ``extension_name``, ``logical_type`` (dotted path of the
+    logical type class), ``requires`` (the module that must be importable) and,
+    optionally, ``_config`` (keyword arguments the class is instantiated with,
+    for example the ignore list of its value hash). See
     ``orcapod.utils.deferred_types``.
 
     An optional ``factories`` list can also be passed to pre-register
@@ -287,12 +288,12 @@ class LogicalTypeRegistry:
         self,
         logical_types: list[LogicalTypeProtocol] | None = None,
         factories: list[dict] | None = None,
-        deferred_logical_types: list[dict[str, str]] | None = None,
+        deferred_logical_types: list[dict[str, Any]] | None = None,
     ) -> None:
         # Serialises loading a deferred type, so concurrent first lookups load it once.
         self._deferred_lock = threading.Lock()
-        self._deferred_by_python_name: dict[str, dict[str, str]] = {}
-        self._deferred_by_arrow_name: dict[str, dict[str, str]] = {}
+        self._deferred_by_python_name: dict[str, dict[str, Any]] = {}
+        self._deferred_by_arrow_name: dict[str, dict[str, Any]] = {}
         for entry in deferred_logical_types or []:
             self._deferred_by_python_name[entry["python_type"]] = entry
             self._deferred_by_arrow_name[entry["extension_name"]] = entry
@@ -516,7 +517,7 @@ class LogicalTypeRegistry:
             )
         return self._load_deferred(entry)
 
-    def _load_deferred(self, entry: dict[str, str]) -> LogicalTypeProtocol:
+    def _load_deferred(self, entry: dict[str, Any]) -> LogicalTypeProtocol:
         """Instantiate and register a deferred logical type.
 
         Holds a lock and checks again whether another thread has already loaded
@@ -532,7 +533,9 @@ class LogicalTypeRegistry:
             existing = self._by_arrow_name.get(entry["extension_name"])
             if existing is not None:
                 return existing
-            logical_type = load_object(entry["logical_type"])()
+            logical_type = load_object(entry["logical_type"])(
+                **entry.get("_config", {})
+            )
             self.register_logical_type(logical_type)
             self._deferred_by_python_name.pop(entry["python_type"], None)
             self._deferred_by_arrow_name.pop(entry["extension_name"], None)

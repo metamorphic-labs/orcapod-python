@@ -34,14 +34,15 @@ def _null_column(python_type: Any, rows: int) -> pa.Table:
     return pa.table({"c": pa.ExtensionArray.from_storage(arrow_type, storage)})
 
 
-def test_identifier_is_the_extension_name_and_version_1() -> None:
-    """The tensor type's identifier is its extension name plus ``{"version":1}``."""
+def test_identifier_is_the_extension_name_and_the_ignore_list() -> None:
+    """The identifier is ``orcapod.torch.tensor`` plus ``{"ignore":[],"version":1}``."""
     logical_type = get_default_context().type_converter.get_logical_type(torch.Tensor)
     assert logical_type is not None
     identifier = logical_type_identifier(logical_type)
-    assert identifier.name == "orcapod.torch_tensor"
-    assert identifier.metadata == b'{"version":1}'
-    assert tuple(logical_type.readable_extension_metadata()) == (b'{"version":1}',)
+    metadata = b'{"ignore":[],"version":1}'
+    assert identifier.name == "orcapod.torch.tensor"
+    assert identifier.metadata == metadata
+    assert tuple(logical_type.readable_extension_metadata()) == (metadata,)
 
 
 @pytest.mark.parametrize("rows", [0, 2], ids=["zero_rows", "all_null"])
@@ -73,12 +74,12 @@ def test_hashed_type_is_the_same_with_and_without_data() -> None:
 
 
 def test_tensor_and_equal_ndarray_are_told_apart_by_type() -> None:
-    """Equal contents give equal digests; the type, schema and table hashes differ."""
+    """With equal elements, the value, type, schema and table hashes all differ."""
     context = get_default_context()
     hasher = context.semantic_hasher
     tensor = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     array = tensor.numpy().copy()
-    assert hasher.hash_object(tensor).digest == hasher.hash_object(array).digest
+    assert hasher.hash_object(tensor).digest != hasher.hash_object(array).digest
     assert hasher.hash_object(tensor) != hasher.hash_object(array)
     assert hasher.hash_object(torch.Tensor) != hasher.hash_object(np.ndarray)
     assert hasher.hash_object(Schema({"c": torch.Tensor})) != hasher.hash_object(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from orcapod.utils.deferred_types import load_object, match_deferred
@@ -44,7 +45,7 @@ class PythonTypeHandlerRegistry:
                 register at construction time.
         """
         # Handlers loaded on first use, by qualified class name (``register_deferred``).
-        self._deferred: dict[str, dict[str, str]] = {}
+        self._deferred: dict[str, dict[str, Any]] = {}
         self._handlers: dict[type, "PythonTypeHandlerProtocol"] = {}
         self._lock = threading.RLock()
         if handlers:
@@ -58,7 +59,9 @@ class PythonTypeHandlerRegistry:
                     target_type, handler = entry
                     self.register(target_type, handler)
 
-    def register_deferred(self, python_type: str, handler: str) -> None:
+    def register_deferred(
+        self, python_type: str, handler: str, config: Mapping[str, Any] | None = None
+    ) -> None:
         """Register a handler that is loaded on first use (ITL-871).
 
         Neither the type nor the handler is imported until a lookup meets a
@@ -67,13 +70,15 @@ class PythonTypeHandlerRegistry:
 
         Args:
             python_type: Qualified class name, for example ``"torch.Tensor"``.
-            handler: Dotted path of the handler class, instantiated without
-                arguments.
+            handler: Dotted path of the handler class.
+            config: Keyword arguments the handler class is instantiated with
+                (for example the ignore list of the value hash); none by default.
         """
         with self._lock:
             self._deferred[python_type] = {
                 "python_type": python_type,
                 "handler": handler,
+                "config": dict(config or {}),
             }
 
     def register(self, target_type: type, handler: "PythonTypeHandlerProtocol") -> None:
@@ -180,7 +185,7 @@ class PythonTypeHandlerRegistry:
         entry = match_deferred(target_type, self._deferred)
         if entry is None:
             return None
-        handler = load_object(entry["handler"])()
+        handler = load_object(entry["handler"])(**entry["config"])
         self.register(load_object(entry["python_type"]), handler)
         del self._deferred[entry["python_type"]]
         return handler

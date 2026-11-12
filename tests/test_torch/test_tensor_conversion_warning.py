@@ -22,7 +22,6 @@ import torch  # noqa: E402
 from orcapod import function_pod  # noqa: E402
 from orcapod.errors import ValueConversionWarning  # noqa: E402
 from orcapod.sources import ArrowTableSource, DictSource, ListSource  # noqa: E402
-from tests.test_torch.tensor_cases import assert_tensors_identical  # noqa: E402
 
 
 def _accelerator() -> str | None:
@@ -60,15 +59,15 @@ def source_of(values: list[Any]) -> DictSource:
 
 
 def make_with_grad() -> Any:
-    """A new pod ``with_grad`` returning a tensor that tracks gradients.
+    """A new pod ``with_grad`` returning a tensor with autograd history.
 
     Each test builds its own: a function reports a conversion once in its lifetime.
     """
 
     @function_pod(output_keys="y")
     def with_grad(x: torch.Tensor) -> torch.Tensor:
-        """Return a tensor that tracks gradients."""
-        return (x * 2).requires_grad_(True)
+        """Return a tensor computed from one that tracks gradients (it has a ``grad_fn``)."""
+        return x.clone().requires_grad_(True) * 2
 
     return with_grad
 
@@ -90,27 +89,29 @@ def test_a_returned_gradient_tensor_warns_naming_function_output_and_fix() -> No
         out = run(make_with_grad(), source_of([torch.ones(2)]))
     (message,) = conversion_warnings(caught.list)
     assert "Function 'with_grad' output 'y'" in message
-    assert "requires_grad=True" in message
-    assert "detached CPU copy" in message
+    assert "autograd history" in message
+    assert "CPU tensor without autograd history" in message
     assert ".detach().cpu()" in message
-    assert_tensors_identical(out[0]["y"], torch.ones(2) * 2)
+    stored = out[0]["y"]
+    assert stored.requires_grad and stored.is_leaf
+    assert torch.equal(stored.detach(), torch.ones(2) * 2)
 
 
 def test_a_returned_tensor_is_not_modified() -> None:
-    """The returned tensor keeps its gradient flag and values."""
+    """The returned tensor keeps its autograd history and values."""
     kept: list[Any] = []
 
     @function_pod(output_keys="y")
     def keep(x: torch.Tensor) -> torch.Tensor:
-        """Return, and remember, a tensor that tracks gradients."""
-        t = (x * 3).requires_grad_(True)
+        """Return, and remember, a tensor with autograd history."""
+        t = x.clone().requires_grad_(True) * 3
         kept.append(t)
         return t
 
     with pytest.warns(ValueConversionWarning):
         run(keep, source_of([torch.ones(2)]))
     assert kept[0].requires_grad
-    assert kept[0].grad_fn is None
+    assert kept[0].grad_fn is not None
     assert torch.equal(kept[0].detach(), torch.full((2,), 3.0))
 
 
@@ -129,8 +130,8 @@ def test_each_output_and_each_function_warns_once() -> None:
 
     @function_pod(output_keys=["a", "b"])
     def two(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return two tensors that track gradients."""
-        return x.clone().requires_grad_(True), x.clone().requires_grad_(True)
+        """Return two tensors with autograd history."""
+        return x.clone().requires_grad_(True) * 1, x.clone().requires_grad_(True) * 1
 
     source = source_of([torch.ones(2), torch.zeros(2), torch.ones(3)])
     with warnings.catch_warnings(record=True) as caught:
@@ -149,20 +150,35 @@ def test_tensors_inside_a_list_output_warn() -> None:
 
     @function_pod(output_keys="ys")
     def several(x: torch.Tensor) -> list[torch.Tensor]:
-        """Return a list of tensors, one of which tracks gradients."""
-        return [x.clone().requires_grad_(True), x.clone()]
+        """Return a list of tensors, one of which has autograd history."""
+        return [x.clone().requires_grad_(True) * 1, x.clone()]
 
     with pytest.warns(ValueConversionWarning, match="'several' output 'ys'"):
         out = run(several, source_of([torch.ones(2)]))
-    assert all(not t.requires_grad for t in out[0]["ys"])
+    first, second = out[0]["ys"]
+    assert first.requires_grad and first.is_leaf
+    assert not second.requires_grad
 
 
 def test_plain_cpu_tensors_never_warn() -> None:
-    """CPU tensors without gradients raise no conversion warning, in a pod or a source."""
+    """CPU tensors without autograd history raise no conversion warning.
+
+    ``requires_grad`` is stored, so a leaf that tracks gradients (and an
+    ``nn.Parameter``) is not converted.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("error", ValueConversionWarning)
         run(plain, source_of([torch.ones(2), torch.zeros(3)]))
         ListSource(name="x", data=[torch.ones(2)]).as_table()
+        stored = [
+            d.as_dict()["x"]
+            for leaf in (
+                torch.ones(2, requires_grad=True),
+                torch.nn.Parameter(torch.ones(2)),
+            )
+            for _, d in source_of([leaf]).iter_data()
+        ]
+    assert all(t.requires_grad for t in stored)
 
 
 def test_escalated_to_an_error_every_conversion_raises() -> None:
@@ -178,9 +194,9 @@ def test_escalated_to_an_error_every_conversion_raises() -> None:
 def test_a_source_column_warns_once_with_the_count() -> None:
     """A source warns once per column, naming the source, the column and how many."""
     values = [
-        torch.ones(2, requires_grad=True),
+        torch.ones(2, requires_grad=True) * 1,
         torch.zeros(2),
-        torch.ones(1, requires_grad=True),
+        torch.ones(1, requires_grad=True) * 1,
     ]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -192,17 +208,17 @@ def test_a_source_column_warns_once_with_the_count() -> None:
     (message,) = conversion_warnings(caught)
     assert "Source 'weights' column 'x'" in message
     assert "2 of 3" in message
-    assert "requires_grad=True" in message
+    assert "autograd history" in message
     assert ".detach().cpu()" in message
-    assert values[0].requires_grad and values[2].requires_grad
+    assert values[0].grad_fn is not None and values[2].grad_fn is not None
     stored = [d.as_dict()["x"] for _, d in source.iter_data()]
-    assert all(not t.requires_grad for t in stored)
+    assert all(t.is_leaf for t in stored)
 
 
 def test_a_list_source_warns() -> None:
     """``ListSource`` warns for its element column."""
     with pytest.warns(ValueConversionWarning, match="column 'w'"):
-        ListSource(name="w", data=[torch.ones(2, requires_grad=True)])
+        ListSource(name="w", data=[torch.ones(2, requires_grad=True) * 1])
 
 
 @pytest.mark.skipif(_accelerator() is None, reason="needs a CUDA or MPS device")
@@ -218,7 +234,7 @@ def test_a_returned_gpu_tensor_warns_naming_the_device() -> None:
     with pytest.warns(ValueConversionWarning, match=f"device '{device}") as caught:
         out = run(on_device, source_of([torch.arange(3.0)]))
     (message,) = conversion_warnings(caught.list)
-    assert "requires_grad" not in message
+    assert "grad_fn" not in message
     got = out[0]["y"]
     assert got.device.type == "cpu"
     assert torch.equal(got, torch.arange(3.0))

@@ -7,7 +7,6 @@ and read with ``torch.load(map_location="cpu", weights_only=True)``.
 from __future__ import annotations
 
 import io
-import os
 from typing import Any
 
 import pytest
@@ -172,7 +171,7 @@ def test_a_slice_stores_only_its_own_elements() -> None:
 @pytest.mark.parametrize(
     ("value", "strides"),
     [
-        (_base()[:, ::2], (6, 2, 1)),
+        (_base()[:, ::2], (8, 4, 1)),
         (torch.ones(1).expand(4), (1,)),
         (torch.arange(30, dtype=torch.float32)[6:].reshape(2, 3, 4), (12, 4, 1)),
         # Dense inside a larger buffer: the clone keeps the transposed strides.
@@ -315,22 +314,26 @@ def _archive(value: Any) -> bytes:
 def test_a_cell_holding_an_arbitrary_pickle_is_refused(
     force_unrestricted: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A forged cell raises naming the column; torch's environment override changes nothing."""
+    """A forged cell raises naming the column; torch's environment override changes nothing.
+
+    The type converter names the column (``RuntimeError``) around the logical
+    type's ``ValueError``.
+    """
     if force_unrestricted:
         monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-    with pytest.raises(ValueError, match="column 'x'"):
+    with pytest.raises(RuntimeError, match="column 'x'.*restricted loader"):
         read_cell(_archive({"x": _Marker()}))
     assert _PICKLE_RAN == []
 
 
 def test_a_cell_holding_something_other_than_a_tensor_is_refused() -> None:
     """An archive the restricted loader accepts but that is not a tensor is refused."""
-    with pytest.raises(ValueError, match="column 'x'.*dict"):
+    with pytest.raises(RuntimeError, match="column 'x'.*dict, not a tensor"):
         read_cell(_archive({"weights": torch.zeros(2)}))
 
 
 @pytest.mark.parametrize("cell", [b"", b"not a torch archive", b"PK\x03\x04truncated"])
 def test_garbage_bytes_are_refused(cell: bytes) -> None:
     """Bytes that are not a ``torch.save`` archive raise naming the column."""
-    with pytest.raises(ValueError, match="column 'x'"):
+    with pytest.raises(RuntimeError, match="column 'x'.*restricted loader"):
         read_cell(cell)
