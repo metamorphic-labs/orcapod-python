@@ -189,3 +189,25 @@ Design (tests first):
 - `PipelineJob.run` pre-flight: every node's stored tables are checked before the orchestrator
   starts, so a run raises before computing or writing anything (array nodes on fresh tables would
   otherwise run first).
+
+## Table path construction sites (sent to coordinator for ITL-938)
+
+Where stored table paths are constructed (main + this branch; all relative to the store root unless noted). Job scoping: PipelineJob._distribute_databases / run (pipeline/job.py:411-412, 881-882): pipeline_db = store.at(*job_name); result_db = pipeline_db.at("_result").
+
+1. Function node pipeline table: FunctionNodeBase.node_identity_path (core/nodes/function_node.py:337-358) = pod.uri + ("schema:{pipeline_hash}",) [+ ("instance:{content_hash}",) when table_scope="content_hash"]; FunctionJobNode._versioned_pipeline_path (:875) appends PIPELINE_DB_SCHEMA_VERSION "pdb_v1" (system_constants.py:23). Loaded jobs rebuild it from the descriptor: from_descriptor (:1152-1172, node_uri + schema: + instance:). pod.uri = data function uri (core/data_function.py:237): (canonical_function_name, output_data_schema_hash, "v{major_version}", data_function_type_id); FunctionPod.uri (core/function_pod.py:212) prefixes "side_effect_function" when a ctx arg is set.
+   Legacy v0 path (unversioned node_identity_path) checked by _ensure_pdb_schema (:~890).
+2. Function result table: CachedFunctionPod (core/cached_function_pod.py:55) -> ResultCache(record_path=pod.uri) under result_db ("<job>/_result/..."); ResultCache._versioned_record_path (core/result_cache.py:101) appends RESULT_DB_SCHEMA_VERSION "rdb_v1". Shared by every job/pipeline using the same function (not pipeline-hash scoped). Loaded stubs: _ResultDatabaseReader(record_path=descriptor node_uri) (function_node.py:644, :1034, :1152). Legacy v0 = unversioned path (_ensure_rdb_schema).
+   CachedDataFunction (core/data_function.py:1010): ResultCache(record_path=record_path_prefix + data_function.uri) for function-level caching outside a node.
+   Ephemeral results: FunctionJobNode._ephemeral_cached_pod (function_node.py:~1197) over ephemeral_database.
+3. Operator node table: OperatorNodeBase.node_identity_path (core/nodes/operator_node.py:240-260) = node_uri + ("schema:{pipeline_hash}",) [+ ("instance:{content_hash}",)]; operator uri (core/operators/static_output_pod.py:54) = (ClassName, operator content_hash hex). No schema-version component. Row filter by __node_content_hash.
+4. Side-effect invocation log: SideEffectJobNode.attach_databases (side_effects.py:~850) = node_uri + ("schema:{pipeline_hash}", TRACKING_DB_SCHEMA_VERSION "tdb_v1"); SideEffectPod.uri (side_effects.py:424) = ("side_effects", canonical_function_name). Rows keyed by record_id = b"<arrow label>:<digest>".
+5. CachedSource cache table: CachedSource.cache_path (core/sources/cached_source.py:188) = explicit cache_path, else cache_path_prefix + ("source", "node:{source.content_hash()}"). Source content hash is Arrow-derived for default source_ids, so this path moves with the hash format.
+6. Observers: LoggingObserver DEFAULT_LOG_PATH ("execution_logs",) (pipeline/logging_observer.py:65) and StatusObserver DEFAULT_STATUS_PATH ("execution_status",) (pipeline/status_observer.py:73), written inside a node-identity-scoped DB view (observer.contextualize(*node_identity_path)).
+7. Backends map a path tuple to storage: DeltaTableDatabase (one directory per path, ':' stored as '!' on Windows), InMemoryArrowDatabase (key '/'.join), ConnectorArrowDatabase / SQLite / Postgres / Spiral (table name from path). DeltaTableDatabase also keeps pending writes per path.
+8. Saved job files (PipelineJob.save/load, pipeline/serialization.py): descriptors carry node_uri, pipeline_hash, content_hash, table_scope, pipeline_path; loading reconstructs paths from these, not from live hashes.
+9. Migrations / CLI: orcapod/migrations/pipeline_db.py, result_db.py (v0 -> v1 schema), cli/migrate.py (strips schema:/instance: components to find v0 paths).
+10. Not in the store: file hash cachers (hashing/hash_cachers.py SQLite ~/.orcapod/file_hash_cache.db, table file_hash_cache, _SQLITE_SCHEMA_VERSION=1; postgres_hash_cacher.py _SCHEMA_VERSION=1).
+
+Labels/versions currently embedded in path components: "semantic_v0.1:" (pipeline/content hashes in schema:/instance: and output_data_schema_hash), "v{major}", "python.function.v0", "pdb_v1"/"rdb_v1"/"tdb_v1". No path component carries the Arrow label; the D1 check (this branch) is isolated in hashing/stored_hash_labels.py plus one check_stored_hash_labels() method per table owner (FunctionJobNode, _ResultDatabaseReader, ResultCache/CachedFunctionPod, OperatorJobNode, SideEffectJobNode, CachedSource) and a pre-flight loop in PipelineJob.run, in its own commits (feat(store) ..., fix(store) ...).
+
+Status 2026-11-11: D implemented and isolated; PR to be opened as DRAFT, v0.2-store handling awaits ITL-938.

@@ -14,7 +14,7 @@ node, raises ``StoreHashLabelError``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from orcapod.utils.lazy_module import LazyModule
 
@@ -38,7 +38,7 @@ _HEX_DIGEST_PATTERN = "^[0-9a-f]{70}$"
 
 
 def foreign_arrow_label(
-    values: "pa.Array | pa.ChunkedArray", current_label: str
+    values: "pa.Array[Any] | pa.ChunkedArray[Any]", current_label: str
 ) -> str | None:
     """Return an Arrow hash label other than ``current_label`` found in ``values``.
 
@@ -55,7 +55,10 @@ def foreign_arrow_label(
     if len(values) == 0:
         return None
     binary = values.cast(pa.large_binary())
-    labels = pc.list_element(pc.split_pattern(binary, pattern=b":", max_splits=1), 0)
+    labels = pc.list_element(
+        pc.split_pattern(binary, pattern=":", max_splits=1),  # pyright: ignore[reportCallIssue, reportArgumentType]  # the stubs type only Expression inputs; arrays are accepted at runtime
+        0,
+    )
     found = sorted(
         label.decode("utf-8", errors="replace")
         for label in pc.unique(labels).to_pylist()
@@ -82,7 +85,7 @@ def current_hash_format(hasher: "ArrowHasherProtocol") -> str:
 
 
 def foreign_hash_format(
-    values: "pa.Array | pa.ChunkedArray", current_format: str
+    values: "pa.Array[Any] | pa.ChunkedArray[Any]", current_format: str
 ) -> str | None:
     """Return a description of a starfix hash format other than ``current_format``.
 
