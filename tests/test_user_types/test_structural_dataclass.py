@@ -102,6 +102,37 @@ def test_init_false_is_refused() -> None:
             x: int
 
 
+def test_field_level_compare_and_hash_choices_are_refused() -> None:
+    """Equality and hashing cover exactly the stored fields, for every class of a type."""
+    with pytest.raises(TypeError, match="'payload'.*compare=False"):
+
+        @op.dataclass
+        class Uncompared:
+            x: int
+            payload: list[int] = dataclasses.field(default_factory=list, compare=False)
+
+    with pytest.raises(TypeError, match="'payload'.*hash=False"):
+
+        @op.dataclass(frozen=True)
+        class Unhashed:
+            x: int
+            payload: tuple[int, ...] = dataclasses.field(default=(), hash=False)
+
+    with pytest.raises(TypeError, match="'cached'.*init=False"):
+
+        @op.dataclass
+        class Derived:
+            x: int
+            cached: int = dataclasses.field(init=False, default=0)
+
+    @op.dataclass(name="itl972.DerivedOk")
+    class DerivedOk:
+        x: int
+        cached: int = dataclasses.field(init=False, default=0, compare=False)
+
+    assert DerivedOk(1) == DerivedOk(1)
+
+
 def test_an_existing_dataclass_is_refused() -> None:
     """The decorator defines the dataclass; it is not applied on top of one."""
     with pytest.raises(TypeError, match="already a dataclass"):
@@ -395,6 +426,53 @@ def test_from_instance_keeps_the_union_member_a_value_already_is() -> None:
     converted = _convert(Either, OtherEither(OrdinaryNamed("n")))  # pyright: ignore[reportArgumentType]  # dataclasses do not check field types
     assert type(converted.value) is Named
     assert converted.value == Named("n")
+
+
+@op.dataclass(name="itl972.IntRecord")
+class IntRecord:
+    """A structural class whose ``x`` is an ``int``."""
+
+    x: int
+
+
+@op.dataclass(name="itl972.TextRecord")
+class TextRecord:
+    """A structural class whose ``x`` is a ``str``: same field name, other type."""
+
+    x: str
+
+
+@op.dataclass(name="itl972.Records")
+class Records:
+    """A structural class with unions of the two record classes."""
+
+    one: IntRecord | TextRecord
+    many: list[IntRecord] | list[TextRecord]
+
+
+@dataclasses.dataclass
+class OrdinaryText:
+    """An ordinary dataclass with the field of ``TextRecord``."""
+
+    x: str
+
+
+@dataclasses.dataclass
+class OrdinaryRecords:
+    """An ordinary dataclass with the field names of ``Records``."""
+
+    one: IntRecord | TextRecord
+    many: list[IntRecord] | list[TextRecord]
+
+
+def test_from_instance_chooses_the_union_member_by_field_types() -> None:
+    """A union member is chosen by declared field types, not by field names alone."""
+    source: Any = OrdinaryRecords(OrdinaryText("a"), [OrdinaryText("b")])  # pyright: ignore[reportArgumentType]  # dataclasses do not check field types
+    built = _convert(Records, source)
+    assert built.one == TextRecord("a")
+    assert type(built.one) is TextRecord
+    assert built.many == [TextRecord("b")]
+    assert [type(item) for item in built.many] == [TextRecord]
 
 
 def test_from_instance_refuses_other_fields() -> None:

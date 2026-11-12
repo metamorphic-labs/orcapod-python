@@ -51,7 +51,8 @@ def dataclass(
     differences. ``==`` compares field values across classes of the same type: an
     instance equals an instance of another ``orcapod.dataclass`` with the same name
     and fields when their field values are equal (unless ``eq=False`` is passed or the
-    class defines ``__eq__`` itself). And the class has ``from_instance``, which builds
+    class defines ``__eq__`` itself). Equality and hashing always cover all stored
+    fields: ``field(compare=False)`` and ``field(hash=...)`` are not accepted. And the class has ``from_instance``, which builds
     an instance from an instance of another dataclass with the same fields.
 
     Args:
@@ -65,8 +66,9 @@ def dataclass(
         The dataclass, or a decorator that returns it.
 
     Raises:
-        TypeError: If the class is already a dataclass or a pydantic model, or
-            ``init=False`` is passed.
+        TypeError: If the class is already a dataclass or a pydantic model,
+            ``init=False`` is passed, or a field sets ``compare=`` or ``hash=`` so
+            that equality or hashing would not cover exactly the stored fields.
         ValueError: If the name is invalid.
 
     Example:
@@ -99,6 +101,7 @@ def dataclass(
         declared = _uci.validate_name(name if name is not None else target.__name__)
         own_eq = "__eq__" in vars(target)
         made = dataclasses.dataclass(target, **options)
+        _require_structural_comparison(made)
         _structural.finish_structural_class(
             made, declared, structural_equality=options.get("eq", True) and not own_eq
         )
@@ -107,3 +110,38 @@ def dataclass(
     if cls is None:
         return decorate
     return decorate(cls)
+
+
+def _require_structural_comparison(cls: type) -> None:
+    """Raise unless equality and hashing of a new dataclass cover its stored fields.
+
+    Two classes of one structural type must compare and hash alike, including a class
+    built from stored metadata, which knows the fields and nothing else. So a stored
+    field (``init=True``) always takes part, a field that is not stored never does, and
+    no field chooses its own ``hash=``.
+
+    Args:
+        cls: The dataclass ``orcapod.dataclass`` has just created.
+
+    Raises:
+        TypeError: Naming the first field that breaks the rule, and why.
+    """
+    for field in dataclasses.fields(cls):
+        if field.hash is not None:
+            problem = f"sets hash={field.hash!r}"
+        elif field.init and not field.compare:
+            problem = "sets compare=False"
+        elif not field.init and field.compare:
+            problem = (
+                "has init=False, so it is not stored, but takes part in comparison"
+            )
+        else:
+            continue
+        raise TypeError(
+            f"Field {field.name!r} of the orcapod.dataclass {cls.__qualname__} "
+            f"{problem}. An orcapod.dataclass is identified by its fields, and two "
+            f"classes with the same name and fields must compare and hash alike, so "
+            f"equality and hashing cover exactly the stored fields. Remove the "
+            f"compare= or hash= argument (declare an init=False field with "
+            f"compare=False), or use an ordinary dataclass."
+        )

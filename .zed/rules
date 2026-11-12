@@ -286,7 +286,9 @@ A class a user defines is one of two kinds (developer, November 12, 2026, ITL-97
 - A class made with `orcapod.dataclass` is **structural**: identified by its name (default
   the class name) and its fields in declared order. Two structural classes with equal
   identity records are compatible in the schema check and their instances compare equal.
-  Pydantic has no structural kind (ITL-973).
+  Equality and hashing of a structural class cover exactly its stored fields; never let a
+  per-field `compare=` or `hash=` choice through, because a class rebuilt from metadata
+  cannot know it. Pydantic has no structural kind (ITL-973).
 - **No automatic conversion.** Orcapod checks compatibility and passes a value as it is. A
   function annotated with a structural class may receive another class of the same
   identity; a structural class promises its fields, not its methods. `from_instance` is the

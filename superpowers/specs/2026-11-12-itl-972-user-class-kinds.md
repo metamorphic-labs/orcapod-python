@@ -299,6 +299,12 @@ instance of a class with another identity, or of any other type, is not equal
 - `__hash__` stays what `dataclasses` generates (`frozen=True` or `unsafe_hash=True`): the
   hash of the field tuple, which does not depend on the class object, so equal instances of
   two classes have equal hashes. A class that is not hashable stays unhashable.
+- One policy for every class of a type (coordinator, November 12, 2026, review round 2):
+  equality and hashing cover exactly the stored fields. `op.dataclass` refuses
+  `field(compare=False)`, `field(hash=...)` and an `init=False` field that takes part in
+  comparison, with a `TypeError` naming the field. A class synthesized from metadata is
+  hashable by its field values (`unsafe_hash=True`), so a defined and a synthesized class
+  agree on `==` and `hash` by construction, and nothing about options enters the record.
 - Ordering (`order=True`) is unchanged: `<` between two classes is not supported.
 - A class synthesized from stored metadata has the same `__eq__` and `from_instance`.
 

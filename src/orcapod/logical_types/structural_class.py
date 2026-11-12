@@ -232,9 +232,9 @@ def structural_eq(self: Any, other: Any) -> Any:
     """Compare two instances of structural classes of the same type by field values.
 
     Installed as ``__eq__`` by ``orcapod.dataclass``. Instances of the same class
-    compare as dataclasses do. Instances of two structural classes with the same name
-    and fields (a class defined again, a class built from stored metadata) are equal
-    when their compared fields are equal. Anything else is not comparable.
+    and instances of two structural classes with the same name and fields (a class
+    defined again, a class built from stored metadata) are equal when all their stored
+    fields are equal. Anything else is not comparable.
 
     Args:
         self: An instance of a structural class.
@@ -249,7 +249,9 @@ def structural_eq(self: Any, other: Any) -> Any:
         uci.is_structural(theirs) and uci.same_user_type(mine, theirs)
     ):
         return NotImplemented
-    names = [field.name for field in dataclasses.fields(self) if field.compare]
+    # Every stored field, and only those: ``orcapod.dataclass`` refuses a per-field
+    # ``compare=`` or ``hash=`` choice, so every class of the type compares alike.
+    names = uci.stored_field_names(mine)
     return tuple(getattr(self, name) for name in names) == tuple(
         getattr(other, name, _MISSING) for name in names
     )
@@ -360,8 +362,9 @@ def _converted_union_value(value: Any, members: tuple[Any, ...]) -> Any:
     """Return a field value converted to the union member it belongs to.
 
     A value that already is an instance of a member class is kept. Otherwise a
-    dataclass instance goes to the first structural member with the same field names,
-    and a container to the first member with the container's origin. A value no member
+    dataclass instance goes to the first structural member it can be converted to
+    (the same field names with the same declared types), and a container to the first
+    member with the container's origin whose conversion succeeds. A value no member
     claims is returned as it is.
 
     Args:
@@ -378,17 +381,34 @@ def _converted_union_value(value: Any, members: tuple[Any, ...]) -> Any:
     if cls in classes:
         return value
     if dataclasses.is_dataclass(value):
-        offered = set(uci.stored_field_names(cls))
         for member in classes:
-            if uci.is_structural(member) and offered == set(
-                uci.stored_field_names(member)
-            ):
+            if uci.is_structural(member) and _fields_agree(cls, member):
                 return _converted_value(value, member)
         return value
     for member in members:
         if typing.get_origin(member) is cls:
-            return _converted_value(value, member)
+            try:
+                return _converted_value(value, member)
+            except TypeError:
+                continue
     return value
+
+
+def _fields_agree(source: type, target: type) -> bool:
+    """Return True if an instance of ``source`` can be converted to ``target``.
+
+    The two dataclasses have the same stored field names, and each field's declared
+    types agree (``_convertible``): the acceptance rule of ``from_instance``.
+    """
+    wanted = uci.stored_field_names(target)
+    if set(wanted) != set(uci.stored_field_names(source)):
+        return False
+    wanted_hints = uci.type_hints(target)
+    offered_hints = uci.type_hints(source)
+    return all(
+        _convertible(offered_hints.get(field, Any), wanted_hints.get(field, Any))
+        for field in wanted
+    )
 
 
 def _mentions_structural(annotation: Any) -> bool:

@@ -151,7 +151,9 @@ A name must not be empty, contain `@`, `;` or spaces, or start with `orcapod.`. 
 classes with the same fields and **different** names are different types.
 
 `op.dataclass` also takes the options of `dataclasses.dataclass` (`frozen=True`,
-`slots=True`, `kw_only=True`, `order=True`, ...), except `init=False`.
+`slots=True`, `kw_only=True`, `order=True`, ...), except `init=False`. Equality and
+hashing always cover all stored fields, so that every class of a type compares alike: a
+field with `field(compare=False)` or `field(hash=...)` is refused with `TypeError`.
 
 You can see a type on any column that holds it. The part before `@` is the name; the
 rest is a hash of the name, the kind and the fields:
