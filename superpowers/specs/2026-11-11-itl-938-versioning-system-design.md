@@ -2,7 +2,9 @@
 
 Status: **design discussion closed on November 11, 2026.** Every decision is the developer's
 and is listed, dated and quoted, in Part 9. Where an earlier part shows an intermediate view,
-the later part governs; **Part 7.1 is the system on one page.**
+the later part governs; **Part 7.1 is the system on one page.** Decisions the developer made
+later the same day, while the implementation issues were in progress, are listed at the end of
+Part 9 and applied throughout.
 
 | Part | Content |
 |---|---|
@@ -12,7 +14,7 @@ the later part governs; **Part 7.1 is the system on one page.**
 | 5 | The system: schema and subject; every change from the old version to v0.3; the data context as the global hash version; logical types; labels |
 | 6 | Paths before and after v0.3; side-effecting nodes |
 | 7 | The system on one page; what lands before the v0.3 tag and what follows; what ITL-910 must change; the data context file |
-| 8 | Follow-up issues to file |
+| 8 | Follow-up issues to file, with issue and pull request numbers where they exist |
 | 9 | Decisions |
 | Appendix A | Every hash computation site and what affects its result |
 
@@ -763,7 +765,8 @@ flowchart TD
 
 This table is the state when the rule was decided. The gaps it lists are closed by the later
 decisions: the data context column (5.4, 5.5), logical type identifiers (5.5), the restored
-function version column (7.2) and the label rule (5.6).
+function version column (7.2) and the label rule (5.6), which also fixes the form of a
+default source id (rule 5a).
 
 "Told apart today?" asks whether a stored row already carries a value that distinguishes the
 two sides of a change on that axis.
@@ -909,8 +912,11 @@ columns of a join and a batch. It was run on `v0.2.0`, on `main`, and on snapsho
 | 5 | Dict and set order (PR #301) | equal dicts and sets hash the same whatever their insertion order | row data hashes of rows holding a dict or set written in a non-sorted order; no label of its own | values only: same path. Told apart only because the Arrow label moves in the same release | **Possible.** Under the old rule equal values could have several keys, never the reverse, so no result is attached to the wrong input. Re-key; where two old rows collapse to one key, keep one |
 | 6 | Spiral nullability (PR #308) | Spiral tables record which columns are non-nullable | table metadata `__orcapod_nullability__`; for a Spiral source, column types `int \| None` become `int`, so schema hashes and paths | schema changes for those tables: new path | A table without the metadata reads as before; one that gains it is a new schema |
 | 7 | New value types (PR #300 torch, PR #286 Polars values) | new logical types | new type names and labels | nothing existing moves | Nothing to migrate |
-| 8 | Wrong-hash fixes (ITL-942, in progress) | fold separator; nested nullability hashed consistently; process-independent set hashing; column-selection arguments normalised; unordered inputs no longer collapsed by `source_id`; record-id type; default version | per fix: folded `_tag_source_id` values after Batch or GroupBy; row hashes of nested columns; pipeline hashes and paths of nodes after a column selection or a merge join | mostly values; a few are a pure rename of the path (same schema, same subject) | Per fix. A rename is migratable by moving the table (the old path is computable). The fold collision and the collapsed inputs could have attached one identity to two different things; affected rows are recomputed |
+| 8 | Wrong-hash fixes (ITL-942, PR #315) | **H** the Batch/GroupBy source-id fold is the SHA-256 of the canonical JSON member list (it was a concatenation with no separator), and the record-id fold encodes `None` as `null`; **I** the Arrow hasher hashes the declared nested type, with or without data; **L1** a set is ordered by canonical JSON text, so its hash no longer depends on the process; dict keys keep their type (`{1: "x"}` no longer equals `{"1": "x"}`); a user mapping with a `"__type__"` key can no longer equal one of the hasher's own encodings (type handlers return `Encoded`); **F** a column selection's identity is the sorted list of unique names; **G** the record-id column is `large_binary` everywhere; **T** namedtuple fields are hashed in declared order; **N** one default function version, `v0.0` | H: folded `_tag_source_id` values after Batch or GroupBy. G: the content hash of a raw source-builder stream. F: pipeline hashes and paths of nodes after a column selection written as a tuple, a set, or an unsorted or repeating list. N: paths of `from_fn` and `side_effect_function_pod` pods with no explicit version (`…/v1/…` becomes `…/v0/…`). The others: only the hashes of the values that were wrong. **Nothing moves for MergeJoin** (finding E is intended behaviour, A.9). Measured on the golden files: 7 entries changed (4 for H, 3 for G), 32 added, none removed | values, except F and N, which move a path with no change of schema; no stored schema changes | Per fix. F is a rename, migratable by moving the table (the old path is computable); for N, passing `version="v1.0"` keeps the old path. The fold collision could have attached one identity to two different member lists; affected rows are recomputed |
 | 9 | Behaviour fixes (merged: ITL-884, ITL-878, ITL-847/829; open: PR #299, PR #293) | Delta refuses a changed column type instead of casting silently; a failed store write fails the run; SemiJoin handles nested columns; outputs must match the declared type; Delta reads return every row | no hash, label, type or path | nothing moves | No migration. Old stores may hold values written under the old behaviour (a silently cast column, an output that did not match its declared type); these cannot be told apart from correct rows by anything stored |
+| 10 | `GroupBy` keeps non-key tags as tags (ITL-955, PR #316) | a tag that is not a grouping key stays a list-valued **tag** column, as with `Batch`. It used to become a list-valued data column, a bug against the rule that no data element may come from a tag value | the tag and data columns of the grouped stream; the data hash of each grouped row; the all-null `_source_<tag>` columns are gone | **no pipeline hash and no table path moves** (neither commits to the operator's output schema); values only | A function that took a moved tag as a parameter must drop it. A stored `source -> GroupBy -> select data columns -> pod` chain reuses its results without recomputation. A tag value needed as data comes from a derived source (row 11) |
+| 11 | Derived source with tags as data (ITL-939, PR #317) | new: `DerivedSource(origin, tags_as_data={tag: data_name})`, also `node.as_source(tags_as_data=…)`, keeps the origin's tags and offers chosen tag values as data columns. It is a source, not an operator, because its data comes from tag values. Its default `source_id` is `derived:<algorithm label>:<hex>` (5.6, rule 5a) | new values only | nothing existing moves | Nothing to migrate |
+| 12 | Default source ids built from a hash (ITL-939, PR #317; ITL-945, PR #314; ITL-957, not started) | a default id built from a hash is `<source kind>:<algorithm label>:<hex>` (5.6, rule 5a). Done for the derived source and for a job node's `as_source()`. Still to do for the in-memory sources, whose default is today the bare Arrow hash of the table | for the in-memory sources, once ITL-957 lands: the default `source_id` and what derives from it (`_tag_source_id` values, record ids, `_source_` tokens, the source's content hash, content-scoped and cached-source paths) | values; a source with a user-given `source_id` is untouched | As row 2: re-derive and re-key, matching by tags |
 
 **Conclusion.** The logic does not give v0.3 a distinct path everywhere. It gives a new path
 exactly to the tables whose schema changed (arrays, user classes, Spiral nullability, and
@@ -926,7 +932,6 @@ differ in the Arrow-hashed key values and are told apart by the label inside tho
 | S changes, path moves only for two table kinds | Orcapod's bookkeeping columns | `pdb_v1`, `rdb_v1` only |
 | Neither S nor M changes, path moves | `SelectDataColumns(["x"])` versus `(("x",))` | A.9 F |
 | Neither S nor M changes, path moves | any change to how a structure hash is computed for an unchanged structure: the table is the same table under a new name | F2 |
-| M changes, path does not | two unordered inputs with the same `source_id` collapse | A.9 E |
 
 ### 5.4 One global hash version: the data context (decided)
 
@@ -988,7 +993,7 @@ and its manifest also names the definitions that live in code today.
 flowchart LR
     subgraph REG["Registry: one frozen manifest per hash version"]
         M1["H0 (= nauticalab 61d0f18)<br/>structure: canonical JSON, rules s1<br/>arrow: starfix format 1<br/>array: sha256 of .npy bytes<br/>record id: positional uuid5<br/>fold: sha256, no separator<br/>…"]
-        M2["H1 (= what v0.3.0 computes)<br/>structure: s1 + fixes<br/>arrow: starfix format 2<br/>array: array_digest_v1<br/>record id: positional uuid5<br/>fold: sha256 with separator<br/>…"]
+        M2["H1 (= what v0.3.0 computes)<br/>structure: s1 + fixes<br/>arrow: starfix format 2<br/>array: array_digest_v1<br/>record id: positional uuid5<br/>fold: sha256 of the JSON member list<br/>…"]
     end
     ROW["a stored row<br/>hash version = H0"] -->|"look up"| M1
     CUR["current Orcapod<br/>hash version = H1"] --> M2
@@ -1040,7 +1045,7 @@ developer's "additive changes do not change the number" a test, not a judgement.
 | Point | Decision or status |
 |---|---|
 | Logical types are not part of `H` | Registering a type cannot change `H`. A change to one type's layout or hashing changes that type's identifier, not `H`. Tables and rows that do not involve the type are untouched |
-| What a hash depends on | `H` plus the logical types that appear in the hashed data, never the whole set registered in the process. Today a dataclass subclass hashes as its base once the base is registered (`logical_types/registry.py`): a leak to close |
+| What a hash depends on | `H` plus the logical types that appear in the hashed data, never the whole set registered in the process. Today a dataclass subclass hashes as its base once the base is registered (`logical_types/registry.py`): a leak, closed by PR #292 |
 | How a logical type is versioned | "Can be entirely left up to the logical type extension implementer -- namely they should have some version/identifier but exactly how that is used/matched is left to them." Orcapod requires only that the identifier changes whenever the type's stored layout or its hashing changes |
 | Where the identifier is recorded | In the column's type metadata (Arrow extension name and extension metadata), which the stores preserve. By the data-type decision this is part of the schema, so a changed identifier gives a new path. Today only arrays write a version (`{"version":1}`); other types write empty metadata (ITL-935) |
 | The identifier in the schema hash | Today the schema hash covers the type's name only. For a changed identifier to move the path, the whole identifier (name and metadata) must be hashed |
@@ -1051,7 +1056,8 @@ developer's "additive changes do not change the number" a test, not a judgement.
 | Built-in logical types | "Built in extension types should be versioned just like plugin/external ones using same rule/mechanism." Array, file, path, directory, UUID, DataFrame and Series follow the same contract as an extension package's types |
 | The logical type contract (confirmed) | The identifier is the pair (Arrow extension name, extension metadata), opaque to Orcapod. "Arrow extension name + extension metadata is what it should be used to identify the relationship of extension type vs its ability to handle / produce specific hash version." Orcapod stores it with the column and includes **all of it** in the schema hash |
 | When the identifier must change | Only when an existing value would be stored or hashed differently. "Logical type may not change their schema/mechanism ID at all even if they e.g. add support to storing values it wasn't able to support (hence extension type version must have gone up, but their metadata/id could stay same). This is ok as long as all old values would have yielded identical hash under the newly updated extension type." The identifier is therefore not the package version of the type's implementation; it follows the same additive rule as `H` |
-| Built-in types | get their identifier before the v0.3 tag (file, path, directory, UUID, DataFrame, Series; the array has one) |
+| Built-in types | get their identifier before the v0.3 tag (file, path, directory, UUID, DataFrame, Series; the array has one). Each keeps `{"version":1}` |
+| Native containers (`list[...]`, `set[...]`) | **Carry no version of their own.** "Simply drop version from what we consider to be truly native logical type container (set, list)." The `list[...]` and `set[...]` wrappers exist only because Arrow cannot hold an extension type inside a list value field. Their identifier is the container kind plus the element's identifier. The Python schema hash keeps treating `list[T]` and `set[T]` as an ordinary generic (`{origin, args}`). A change to how such a container is stored or hashed is a change of the data context (`H`), not of a logical type. A third-party container type is an ordinary logical type with its own identifier |
 | Where `H` is recorded | In the data context key, on every table kind. "We just would use the data context key still but ensure we make it labeled specially and distinctively from existing values. This is how we are going to be able to tell what is from H0 vs H1 (h0 will use the old data context key convention)." `H0` rows carry `std:v0.1:default`. "We should add this on all tables consistently. We will treat any tables lacking the column as coming from H0" |
 | Reading | Rows written under the current data context key are the current entries; reads filter on that key |
 | What requires a new `H` | "ANY existing golden hash value changes OUTSIDE of changes to logical data types." A golden value that moves because a logical type changed belongs to that type's identifier |
@@ -1086,8 +1092,9 @@ The rule:
 | 2b | The directory hash is a procedure of its own ("folder hashing is implementation specific"), so it follows the format: `merkle_sha256` becomes `directory_v1` ("directory_v1 is better than folder_v1"), matching the type name `orcapod.Directory` | **decided** |
 | 3 | A label changes when its algorithm would give an existing input, even if not all inputs, a different digest; an extension that leaves existing digests alone keeps it | **decided** |
 | 4 | A hash stored as a value carries its label: `label:hex` in text, `label:` + raw bytes in a binary column. The operator cache row key and the cached-source row key, bare today, become labelled | **decided** |
-| 5 | A hash used inside a name (path component, column name, function or operator identity, source-info token) is bare hex. Reasons: a path must change only when schema or subject changes, and a label in the name would change it on a label bump even when the digest is unchanged; names are mixed today and bare is the shorter way to make them uniform; `:` in names is rewritten on Windows, constrains table names on SQL backends and makes the source-info token ambiguous | **decided** |
-| 6 | A label never enters a hash computation: a nested hash contributes its digest only. "Agree with rule 6 - it simplifies and also I don't think the extra guarantee was meaningful anyway." The guarantee given up: that two different algorithms can never feed the same text into a parent hash. With SHA-256 that needs two algorithms to hash the very same bytes, and the position and type of the value (the schema, the extension name in an Arrow cell) already tell the two apart | **decided** |
+| 5 | A hash used inside a name (path component, column name, function or operator identity, source-info token) is bare hex. Reasons: a path must change only when schema or subject changes, and a label in the name would change it on a label bump even when the digest is unchanged; names are mixed today and bare is the shorter way to make them uniform; `:` in names is rewritten on Windows, constrains table names on SQL backends and makes the source-info token ambiguous. One stated exception: 5a | **decided** |
+| 5a | **Stated exception to rule 5: a default source id built from a hash keeps a prefix and the label.** A source id is the source's name. "Generally, we want source_id to be useful in identifying the source easily." "If they are going to use some kind of hash value as their source ID, it ought to have label/prefix to help identify what source type/category it's associated with." Such a default has the form `<source kind>:<algorithm label>:<hex>`, for example `derived:semantic_v1:<hex>` for a derived source; a job node's `as_source()` id is `<node path>:semantic_v1:<hex>`. The one string is used unchanged as the `source_id` system-tag value and inside `_source_<col>` values. **Consequence:** the id string enters hash inputs exactly where a user-given source id does (the source's content hash, record ids, and through the system-tag values the record-id preimages of downstream nodes). So a later rename of the label would move default ids, and the record ids and content hashes of pipelines that rely on them, even when the digest is unchanged. To that extent a label, as part of a name, reaches a hash input, which rule 6 otherwise excludes | **decided** |
+| 6 | A label never enters a hash computation: a nested hash contributes its digest only. "Agree with rule 6 - it simplifies and also I don't think the extra guarantee was meaningful anyway." The guarantee given up: that two different algorithms can never feed the same text into a parent hash. With SHA-256 that needs two algorithms to hash the very same bytes, and the position and type of the value (the schema, the extension name in an Arrow cell) already tell the two apart. (A label inside a default source id is part of a name: rule 5a) | **decided** |
 | 7 | An identifier built by a recipe (record ids) is not a labelled hash; its recipe is named in the data context file | **decided** |
 | 8 | A logical type's value hash follows the same format; its implementer picks the label | **decided** |
 | 9 | Each label MUST be defined in a single place: once in code, beside its algorithm. The data context file names the hasher and does not repeat the label | **decided** |
@@ -1130,7 +1137,7 @@ before (H0)   <job>/<function name>/<output-schema hash>/v<major>/<wrapper kind>
 
 after  (H1)   <job>/<function name>/<output-schema digest>/v<major>/<wrapper kind>/schema:<pipeline digest>/pdb_v2
               <job>/_result/<function name>/<output-schema digest>/v<major>/<wrapper kind>/rdb_v2
-              operator cache and cached source gain a layout component;  side-effect log …/tdb_v2
+              operator cache …/odb_v1 and cached source …/sdb_v1 (a layout component, new);  side-effect log …/tdb_v2
 
 example       my_pipeline/double/semantic_v0.1:17de3328…a26939/v0/python.function.v0/schema:semantic_v0.1:6fe7280a…b9ec94/pdb_v1     (H0)
               my_pipeline/double/<64 hex>/v0/python.function.v0/schema:<64 hex>/pdb_v2                                              (H1)
@@ -1140,12 +1147,41 @@ Digests inside a path are bare in `H1` (5.6, rule 5), and their values differ fr
 because labels no longer enter hash computations (rule 6).
 
 The hashes inside a path also move for nodes that involve a logical type, because the whole
-type identifier now enters the schema hash, and for nodes touched by the wrong-hash fixes.
+type identifier now enters the schema hash, and for the two wrong-hash fixes that reach a path
+(5.2, row 8: a column selection written in a non-canonical way, and a pod that relied on the
+`from_fn` default version).
 
-**On finding a table at the old layout** (decided November 11, 2026): "report total count and
-simply move on". No error, except for side-effecting nodes of both kinds (6.2), which fail
+**On finding a table written before v0.3** (decided November 11, 2026): "report total count
+and simply move on". No error, except for side-effecting nodes of both kinds (6.2), which fail
 explicitly so that an external action is not delivered twice. A table that lacks the data
 context column is `H0`.
+
+**How such a table is found** (ITL-954, PR #318). Not at the node's own path with an older
+layout component: because the hashes inside every path move, a v0.2 table is at a path v0.3
+never computes. It is found by name, with a prefix scan.
+
+- The database protocol gains a listing method, `ArrowDatabaseProtocol.list_table_paths(prefix=())`:
+  the sorted paths of the tables under a path prefix, nested tables included, without opening
+  a table. A store that cannot enumerate raises `TableListingNotSupportedError`.
+- The scan runs under the part of a path that does not move: `<function>/`,
+  `side_effect_function/<function>/` or `side_effects/<pod>/`, and the same below `_result/`.
+- Old versus current is decided by the layout component, not by a hash: a table there whose
+  last component is not `pdb_v2`, `rdb_v2`, `tdb_v2`, `odb_v1` or `sdb_v1` was written before
+  v0.3.
+
+| Who finds pre-v0.3 tables | What happens |
+|---|---|
+| An ordinary function node | one warning per node, naming the tables; the node proceeds |
+| `PipelineJob.run()` | one total per run of the old tables under the job that no node claims by name: operator caches, cached sources stored under the job, nodes that left the job |
+| A side-effecting node of either kind (`SideEffectPod`; a function pod with `ctx_arg`) | raises `SideEffectLogDataContextError` naming every table, before anything is delivered |
+| A node on a store that cannot list its tables | logs one warning that it could not check, and proceeds: "when store fails to list, just warn". There is no setting that turns this into a failure |
+
+A table found by listing is not read, so it is reported without a number of rows. Counting by
+name errs towards failing, and the error names the tables so the user can tell: an old table
+of another function or pod with the same name in the same job, or of another node of the same
+function, is counted too. The in-memory database and a local Delta store list exactly; Delta on
+S3 lists through `s3fs`; Delta on other cloud stores lists only when the matching `fsspec`
+package reaches the store; SQLite, PostgreSQL and SpiralDB list by table name.
 
 **Within a layout**, rows written under the current data context are the current entries;
 reads and lookups filter on the data context column. Rows of another data context stay in the
@@ -1153,7 +1189,8 @@ table untouched, to be migrated.
 
 ### 6.1 Consequences found while implementing "do not fail" (ITL-910 worker, November 11, 2026)
 
-Resolutions: (1) side-effecting nodes fail explicitly (decided); (2) every table gets the
+Resolutions: (1) side-effecting nodes fail explicitly (decided), on pre-v0.3 tables found by
+the prefix scan of Part 6; (2) every table gets the
 `__data_context` column and these two row keys become labelled; (3) accepted, with a total
 count reported.
 
@@ -1231,28 +1268,34 @@ side-effect tables is deferred to a dedicated follow-up after the tag (Part 8, i
 | **Data context** | The global hash version. A string key, `std:v<N>:default`. `N` increments when, and only when, an existing golden hash value moves for a reason other than a logical type's own change. `std:v0.1:default` (and any table without the column) is `H0`: what `nauticalab/orcapod-python` at `61d0f18` computes. `std:v1:default` is what v0.3.0 computes |
 | **Manifest** | One file per data context version, frozen at release, naming every definition the version covers. The current one ships in Orcapod; all of them, with the old code, in `orcapod-sanctuary` |
 | **`__data_context` column** | In every Orcapod table. Rows under the current data context are the current entries; reads and lookups filter on it |
-| **Logical type identifier** | Arrow extension name + extension metadata, owned by the type's implementer, built-in types included. Changes only when an existing value would be stored or hashed differently. Stored with the column; all of it enters the schema hash; a change is a schema change and so a new path |
-| **Label on a hash** | `<algorithm>_v<N>`; names the whole hashing procedure that produced that digest; informational. Every label is `_v1` in v0.3 (`semantic_v1`, `arrow_v1`, `directory_v1`, …); the file hash keeps `sha256`. Changes only when an existing input would get a different digest. Stored with a hash kept as a value; absent from hashes inside names; never part of a hashed input; defined in one place |
+| **Logical type identifier** | Arrow extension name + extension metadata, owned by the type's implementer, built-in types included. Changes only when an existing value would be stored or hashed differently. Stored with the column; all of it enters the schema hash; a change is a schema change and so a new path. The native containers `list[...]` and `set[...]` carry no version of their own: container kind plus the element's identifier; a change to them is a data context change |
+| **Label on a hash** | `<algorithm>_v<N>`; names the whole hashing procedure that produced that digest; informational. Every label is `_v1` in v0.3 (`semantic_v1`, `arrow_v1`, `directory_v1`, …); the file hash keeps `sha256`. Changes only when an existing input would get a different digest. Stored with a hash kept as a value; absent from hashes inside names, except a default source id; never part of a hashed input; defined in one place |
 | **Function major version** | Stays in the path: the user's handle for a clean break |
-| **Old layout found** | Count and skip, reporting one total. Side-effecting nodes of both kinds fail explicitly |
+| **Tables written before v0.3** | Found by a prefix scan of the store (`ArrowDatabaseProtocol.list_table_paths`) and told from current ones by their layout component. Reported and skipped: one warning per node, one total per job run. Side-effecting nodes of both kinds fail explicitly. A store that cannot list its tables: one warning per node, then proceed |
 | **Source identity** | Chosen by the source: content or address. Same `source_id` and same record id mean the same entry |
+| **Source id** | The source's name; it should identify the source easily. A default built from a hash is `<source kind>:<algorithm label>:<hex>`, one string used unchanged in the `source_id` system tag and in `_source_<col>` values: the stated exception to bare hashes inside names |
 
 ### 7.2 Must land before the v0.3 tag
 
 | # | Work | State | What moves |
 |---|---|---|---|
-| 1 | starfix 0.5, label `arrow_v1` (ITL-910, PR #309), revised as listed in 7.3a | in progress | every Arrow-derived hash; `arrow.json` and the Arrow-derived entries of the other golden files |
-| 2 | Wrong-hash fixes (ITL-942): fold separator; nested nullability hashed the same with and without data; process-independent set hashing; column-selection arguments normalised; unordered inputs with one `source_id` not collapsed; record-id column type; one default function version; dict-key coercion; subclass type hash independent of registration order | in progress | folded system-tag values; row hashes of nested columns; pipeline hashes and paths after a column selection or merge join |
-| 3 | **Data context `std:v1:default`**: frozen manifest; `__data_context` column in every table; layout versions `pdb_v2`, `rdb_v2`, `tdb_v2` and a layout component for operator-cache and cached-source tables; reads and lookups filter on the column; old layout counted and skipped; side-effecting nodes of both kinds fail | to file | **every table path** (layout component); `job.*` `table_paths` in `pipeline.json` |
-| 4 | **Logical type identifiers** (ITL-935): the contract; every built-in type writes an identifier; the whole identifier enters the schema hash | to dispatch | stored column type, schema hash and paths of every table with a file, path, directory, UUID, DataFrame, Series or array column |
+| 1 | starfix 0.5, label `arrow_v1` (ITL-910, PR #309), revised as listed in 7.3a | ITL-910, PR #309, open | every Arrow-derived hash; `arrow.json` and the Arrow-derived entries of the other golden files |
+| 2 | Wrong-hash fixes (ITL-942): the Batch/GroupBy source-id fold (H); the declared nested type hashed the same with and without data (I); process-independent set ordering (L1); dict keys keep their type; `"__type__"` encodings reserved to the hasher (`Encoded`); column-selection arguments normalised (F); record-id column type (G); namedtuple fields in declared order (T); one default function version (N). Not part of it: MergeJoin (E, intended behaviour, nothing moves); the subclass type hash (fixed by PR #292, row 5); function defaults (L2, row 2a) | ITL-942, PR #315, open | 7 golden entries changed (4 folded `_tag_source_id` values of `batch` and `group_by`, 3 content hashes of a raw source-builder stream), 32 added, none removed. Paths only for F (a selection written as a tuple, set, or unsorted or repeating list) and N (`from_fn` and `side_effect_function_pod` pods with no explicit version) |
+| 2a | Function defaults through the semantic hasher (finding L2): a default value enters the function-value hash as `repr()` today | ITL-953, not started | function-value hashes of functions with default values |
+| 3 | **Data context `std:v1:default`**: frozen manifest; `__data_context` column in every table; layout versions `pdb_v2`, `rdb_v2`, `tdb_v2` and new layout components `odb_v1` (operator cache) and `sdb_v1` (cached source); reads and lookups filter on the column; old-layout tables reported and skipped; side-effecting nodes of both kinds fail | ITL-944, PR #313, open | **every table path** (layout component); `job.*` `table_paths` in `pipeline.json` |
+| 3a | **Find tables written before v0.3 by a prefix scan**: `ArrowDatabaseProtocol.list_table_paths`; old versus current by layout component; one warning per function node and one total per job run; side-effecting nodes of both kinds raise; a store that cannot list its tables gives one warning per node and the run proceeds (Part 6) | ITL-954, PR #318, open | nothing: no hash, path or stored schema. A public protocol addition |
+| 4 | **Logical type identifiers** (ITL-935): the contract; every built-in type writes an identifier (`{"version":1}`); the native containers `list[...]` and `set[...]` carry none of their own (5.5); the whole identifier enters the schema hash. Also fixed there: a list or set of a value-hashed logical type holding `[]` hashed equal to one holding `[None]`; the element list is now encoded unambiguously | ITL-935, PR not open yet | stored column type, schema hash and paths of every table with a file, path, directory, UUID, DataFrame, Series or array column; the hash of a list or set of a value-hashed logical type |
 | 5 | User class identity (PR #292); dict and set order (PR #301) | open PRs | as in 5.2 |
 | 6 | New types follow the contract: torch (PR #300), Polars values (PR #286), pandas changes (ITL-897). No label used as a version marker | held | new entries only |
-| 6a | **Hash label rule** (5.6): labels renamed to `_v1`; labels removed from every hashed input; bare digests in path components and source-info tokens; labelled row keys for the operator cache and cached source; each label defined once | to file | every structure hash that contains a nested hash; every Arrow hash over a logical-type cell; every path component |
+| 6a | **Hash label rule** (5.6): labels renamed to `_v1`; labels removed from every hashed input; bare digests in path components and in the function uri of source-info tokens; labelled row keys for the operator cache and cached source; each label defined once. A default source id keeps its label (rule 5a): the `DerivedSource` default and a job node's `as_source()` id stay labelled (commit `40a71022`) | ITL-945, PR #314, open | every structure hash that contains a nested hash; every Arrow hash over a logical-type cell; every path component |
+| 6b | **Default source ids of the in-memory sources** (rule 5a): the `SourceStreamBuilder` default, today the bare Arrow hash of the table, takes the form `<source kind>:<algorithm label>:<hex>` | ITL-957, not started | the default `source_id` of `DictSource`, `ListSource`, `DataFrameSource` and `ArrowTableSource`, and what derives from it: `_tag_source_id` values, record ids, `_source_` tokens, the source's content hash |
+| 6c | **`GroupBy` keeps non-key tags as list-valued tag columns**, as `Batch` does. No data element may come from a tag value; turning non-key tags into data columns was a bug | ITL-955, PR #316, open | the data hash of each grouped row (six `group_by.row[…]` golden entries replaced). No pipeline hash and no path |
+| 6d | **Tag values as data go through a derived source**: `DerivedSource(origin, tags_as_data={tag: name})`, with the default id `derived:<algorithm label>:<hex>` | ITL-939, PR #317, open | new entries only |
 | 7 | Golden rule in CI: an existing golden value may change only together with a data context version increment, or with the identifier of the logical type it belongs to | to file | — |
-| 8 | Function version stored as a column of the result table. Checked by reading the code and by running a function declared `version="v3.7"` on main and on `61d0f18`: no column of either table holds the version or its minor part. The major part is in the path (`…/v3/…`); the full string is only in a saved job file (`"version": "v3.7"`). The body is tracked (`__pf_var_function_content_hash`), the version is not. **History:** until November 10, 2025 the cached pod wrote a tiered pod id as columns `__pod_id_version` (the full version string), `__pod_id_signature`, `__pod_id_content`, `__pod_id_git_hash`, and a lookup could be restricted to one tier (`match_tier`). The refactor `8f5e2fa69` ("major cleanup and simplification of protocols", November 10, 2025) replaced that with `get_function_variation_data()` = name, signature hash, content hash, git hash: `version` was dropped from the stored columns, `minor_version_string` was added as a property that nothing reads, and the tier-restricted lookup was left as commented-out code. Decided: restore it, as `__pf_var_function_version` holding the full version string | to file | result-table layout |
+| 8 | Function version stored as a column of the result table. Checked by reading the code and by running a function declared `version="v3.7"` on main and on `61d0f18`: no column of either table holds the version or its minor part. The major part is in the path (`…/v3/…`); the full string is only in a saved job file (`"version": "v3.7"`). The body is tracked (`__pf_var_function_content_hash`), the version is not. **History:** until November 10, 2025 the cached pod wrote a tiered pod id as columns `__pod_id_version` (the full version string), `__pod_id_signature`, `__pod_id_content`, `__pod_id_git_hash`, and a lookup could be restricted to one tier (`match_tier`). The refactor `8f5e2fa69` ("major cleanup and simplification of protocols", November 10, 2025) replaced that with `get_function_variation_data()` = name, signature hash, content hash, git hash: `version` was dropped from the stored columns, `minor_version_string` was added as a property that nothing reads, and the tier-restricted lookup was left as commented-out code. Decided: restore it, as `__pf_var_function_version` holding the full version string | ITL-944, PR #313, open | result-table layout |
 | 9 | Documentation: `CLAUDE.md` and `docs/reference/hashing.md` (what the content hash covers, the system-tag prefix, the label rule, the path rule, the data context rule) | to file | — |
 
-All of 1 to 6 land inside the single step `H0` to `H1`. After the tag, `std:v1:default` and
+All of 1 to 6d land inside the single step `H0` to `H1`. After the tag, `std:v1:default` and
 every logical type identifier written by v0.3 are commitments.
 
 ### 7.3 Can follow the tag
@@ -1261,7 +1304,7 @@ every logical type identifier written by v0.3 are commitments.
 |---|---|
 | Migration `H0` to `H1` (ITL-913, ITL-914): match by tags, re-derive inputs, re-key; relabel where nothing changed | Old tables stay untouched and readable by the old version; nothing is lost |
 | `orcapod-sanctuary` with the `H0` manifest and code (starfix 0.4, the old array format, the old folds) | Needed only by migration and verification |
-| Detect old-layout tables and suggest migration | The count is reported from v0.3 |
+| Suggest migration for the tables written before v0.3 | They are found and reported from v0.3 (ITL-954) |
 | Tier-restricted cache lookup (`match_tier`): let a user require that a cached result also match the version, signature or body | The developer wants it back; not urgent |
 | Side-effect tables: a dedicated design (6.2, issue 9) | Deferred by the developer until after the tag |
 | The stored Arrow type of a plain column is not in the path (`int32` and `int64` sources share a path; the second write fails) | Fails loudly today, not silently |
@@ -1280,6 +1323,10 @@ every logical type identifier written by v0.3 are commitments.
 | 6 | The extension-cell token and every other hash input carry the digest only, no label (5.6); the entry-id table's `__input_data_hash`, the operator-cache row's `__node_content_hash` and the run snapshot hash are three such inputs |
 | 7 | The changelog and documentation no longer say that v0.3 refuses stores written by v0.2 |
 | 8 | Golden regeneration happens once, after the label rule, the wrong-hash fixes (ITL-942), the data context column and the logical type identifiers are in |
+
+Items 2 to 5 are carried out on top of PR #309 by ITL-944 (PR #313: the data context column,
+the new layouts, the side-effect failure) and ITL-954 (PR #318: finding the tables written
+before v0.3 by a prefix scan, Part 6).
 
 ### 7.4 The data context file (additions agreed November 11, 2026)
 
@@ -1308,21 +1355,29 @@ registration, and the versioned file keeps only the core.
 
 ## Part 8. Follow-up issues to file (titles and one paragraph each)
 
-1. **Data context v1: `__data_context` on every table and a frozen manifest.** Introduce
+Issue and pull request numbers are given where they exist (November 11, 2026). No pull request
+is merged yet.
+
+1. **Data context v1: `__data_context` on every table and a frozen manifest (ITL-944, PR #313;
+   the store scan is ITL-954, PR #318).** Introduce
    `std:v1:default` as the data context of v0.3. Add a `__data_context` column to the function
    pipeline, function result, operator-cache, cached-source and side-effect tables, replacing
    `__input_data_context_key` and the result table's `_context_key`. Move the layout versions
    (`pdb_v2`, `rdb_v2`, `tdb_v2`) and give operator-cache and cached-source tables a layout
-   component. Reads and lookups use rows of the current data context only. A table at an old
-   layout is counted and skipped, with one total reported; side-effecting nodes of both kinds
-   (a `SideEffectPod`, and a function pod that takes the invocation context) raise instead.
-   Freeze `v1.json` at the tag.
-1a. **Hash label rule.** Apply 5.6: rename the labels (`semantic_v1`, `arrow_v1`,
-   `directory_v1`; the file hash keeps `sha256`); feed only digests into hash computations
-   (structure hasher expansion, the generic, union and schema handlers, the Arrow cell token);
-   store bare digests in path components and source-info tokens; label the operator-cache and
-   cached-source row keys; define each label once in code, with the data context file naming
-   the hasher and not repeating the label. Sequence it before the final
+   component (`odb_v1`, `sdb_v1`). Reads and lookups use rows of the current data context
+   only. A table written before v0.3 is found by a prefix scan through
+   `ArrowDatabaseProtocol.list_table_paths` and told from a current one by its layout
+   component (Part 6); it is reported and skipped, with one warning per node and one total per
+   job run; side-effecting nodes of both kinds (a `SideEffectPod`, and a function pod that
+   takes the invocation context) raise instead. A store that cannot list its tables gives one
+   warning per node, and the run proceeds. Freeze `v1.json` at the tag.
+1a. **Hash label rule (ITL-945, PR #314).** Apply 5.6: rename the labels (`semantic_v1`,
+   `arrow_v1`, `directory_v1`; the file hash keeps `sha256`); feed only digests into hash
+   computations (structure hasher expansion, the generic, union and schema handlers, the Arrow
+   cell token); store bare digests in path components and in the function uri of source-info
+   tokens; keep the label in a default source id built from a hash (rule 5a); label the
+   operator-cache and cached-source row keys; define each label once in code, with the data
+   context file naming the hasher and not repeating the label. Sequence it before the final
    golden regeneration of v0.3.
 2. **Manifest format for a data context version.** Define the manifest: one entry per
    definition the version covers (structure hashing, Arrow hashing and its preparation step,
@@ -1336,12 +1391,17 @@ registration, and the versioned file keeps only the core.
 4. **Logical type identifiers for built-in types (ITL-935).** Every built-in logical type
    writes an identifier in its extension metadata; the schema hash covers extension name and
    metadata; document the contract for extension authors (the identifier changes only when an
-   existing value would be stored or hashed differently).
-5. **A hash must not depend on the set of registered logical types.** A dataclass subclass
-   hashes as its base class once the base is registered. Resolve a type the same way whatever
-   else is registered and in whatever order.
-6. **Store the function's minor version.** Add it to the result table so that rows computed
-   under different minor versions can be told apart, as the body hash already allows.
+   existing value would be stored or hashed differently). The native containers `list[...]`
+   and `set[...]` write no version of their own: container kind plus the element's identifier
+   (5.5). The same issue makes the element list of a list or set of a value-hashed logical
+   type unambiguous, so that `[]` and `[None]` no longer hash the same. Pull request not open
+   yet.
+5. **A hash must not depend on the set of registered logical types (fixed by PR #292).** A
+   dataclass subclass hashes as its base class once the base is registered. Resolve a type the
+   same way whatever else is registered and in whatever order.
+6. **Store the function's minor version (ITL-944, PR #313).** Add it to the result table so
+   that rows computed under different minor versions can be told apart, as the body hash
+   already allows. Stored as `__pf_var_function_version`, the full version string.
 7. **`orcapod-sanctuary`: the `H0` data context.** Package the `H0` manifest with the code it
    names (starfix 0.4.0, the `.npy` array format and hash, the fold without separator, the
    v0.2 identity definitions) so that an `H0` row can be re-hashed under its own rules.
@@ -1375,6 +1435,18 @@ registration, and the versioned file keeps only the core.
     commit. The result cache already accepts extra constraints; no caller passes them.
 13. **Documentation of the versioning system.** One reference page: the path rule, the data
     context, logical type identifiers, labels, and what a user sees after an upgrade.
+14. **Function defaults through the semantic hasher (ITL-953, not started).** Finding L2 of
+    A.9: a function's default values enter the function-value hash as `repr()`, which is not
+    stable for sets or objects. Hash them as values. Split from ITL-942 as its own issue.
+15. **Default source ids of the in-memory sources (ITL-957, not started).** The
+    `SourceStreamBuilder` default, the bare Arrow hash of the table, takes the form of rule 5a:
+    `<source kind>:<algorithm label>:<hex>`. The derived source has it from ITL-939 (PR #317);
+    a job node's `as_source()` id and the plain `DerivedSource` default keep it in ITL-945
+    (PR #314).
+16. **`GroupBy` keeps non-key tags as tags (ITL-955, PR #316)** and **tag values as data
+    through a derived source (ITL-939, PR #317).** No data element may come from a tag value.
+    `GroupBy` leaves non-key tags as list-valued tag columns; a tag value needed as data is
+    offered by `DerivedSource(origin, tags_as_data={tag: name})`.
 
 ## Part 9. Decisions
 
@@ -1441,6 +1513,19 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **Close of the discussion.** "Otherwise you are good to proceed." |
 | Nov 11, 2026 | Operator behaviour needs no marker of its own: it is covered by the global hash version through the golden files (5.5). |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
+
+Decisions made after the design session, while the implementation issues were in progress
+(developer, through the coordinator). Each is applied in the parts named:
+
+| Date | Decision (developer's words where quoted) | Applied in |
+|---|---|---|
+| Nov 11, 2026 | **Finding E (MergeJoin) is withdrawn: it is intended behaviour.** `MergeJoin(M1, M1)` and `MergeJoin(M1, M2)` differing in pipeline hash is by design: two unordered inputs with the same source identity count as one. Pinned by a test in PR #315. Nothing moves for MergeJoin under ITL-942. | 5.2 row 8, 5.3, 7.2 row 2, A.9 E |
+| Nov 11, 2026 | **Function defaults through the semantic hasher (finding L2) are their own issue**, ITL-953, not part of ITL-942. | 7.2 row 2a, Part 8 issue 14, A.9 L |
+| Nov 11, 2026 | **A source id is the source's name; a default built from a hash carries a prefix and the label.** "Generally, we want source_id to be useful in identifying the source easily." "If they are going to use some kind of hash value as their source ID, it ought to have label/prefix to help identify what source type/category it's associated with." Form: `<source kind>:<algorithm label>:<hex>`, one string used unchanged in the `source_id` system tag and inside `_source_<col>` values. A stated exception to "bare hashes inside names". Consequence accepted: the id string enters hash inputs where a user-given source id does, so a later label rename would move default ids. | 5.6 rules 5 and 5a, 7.1, 7.2 rows 6a, 6b and 6d, Part 8 issues 1a and 15 |
+| Nov 11, 2026 | **Native container logical types carry no version.** "Simply drop version from what we consider to be truly native logical type container (set, list)." Their identifier is the container kind plus the element's identifier; a change to how they are stored or hashed is a data context change. Other built-in logical types keep `{"version":1}`; a third-party container type is an ordinary logical type. | 5.5, 7.1, 7.2 row 4, Part 8 issue 4 |
+| Nov 11, 2026 | **A store that cannot list its tables: warn and proceed.** "When store fails to list, just warn." One warning per node; no setting that fails instead. | Part 6, 7.1, 7.2 row 3a, Part 8 issue 1 |
+| Nov 11, 2026 | **Tables written before v0.3 are found by a prefix scan**, through a new listing method on the database protocol, `ArrowDatabaseProtocol.list_table_paths` (a public protocol addition, confirmed by the developer; ITL-954). Side-effecting nodes of both kinds raise on pre-v0.3 tables under their prefix. | Part 6, 6.1, 7.1, 7.2 row 3a, 7.3a |
+| Nov 11, 2026 | **No data element may come from a tag value.** An operator may use tags, but tag content never becomes data. `GroupBy` turning non-key tags into data columns was a bug (ITL-955): they stay list-valued tag columns, as with `Batch`. Offering a tag value as data is a derived source, `DerivedSource(tags_as_data={tag: name})` (ITL-939). | 5.2 rows 10 and 11, 7.2 rows 6c and 6d, Part 8 issue 16 |
 
 Deferred by the developer:
 
@@ -1760,14 +1845,14 @@ These came out of the audit. Each was reproduced a second time.
 | B | File and database sources default `source_id` to a name: the CSV path, the table name, the Delta directory name. Two SQLite files with a table `t`, or two Delta tables named `tbl` in different directories, have identical hashes. Under the contract this is the source's choice, but here the user stated nothing and the default address is not unique | candidate follow-up: is a bare table or directory name a good enough default address |
 | C | The stored Arrow type of a column is in no structure hash. Only its Python type name is | type rules (axes II1, II2) cannot reach a path through any existing hash |
 | D | An operator's identity is its class name; nothing about its behaviour or version | axis IV3 has no hook |
-| E | `MergeJoin(m1, m1b)`, same `source_id` and different data, equals `MergeJoin(m1, m1)` on both hashes (`S:57f303d7`, `S:69ff5b2e`), and its **pipeline** hash differs from `MergeJoin(m1, m2)` (`S:a91c53db`) although all three inputs share one schema | the pipeline hash is not purely schema plus topology: unordered inputs are de-duplicated by content |
+| E | **Intended (developer, November 11, 2026); withdrawn as a finding.** `MergeJoin(m1, m1b)`, same `source_id` and different data, equals `MergeJoin(m1, m1)` on both hashes (`S:57f303d7`, `S:69ff5b2e`), and its **pipeline** hash differs from `MergeJoin(m1, m2)` (`S:a91c53db`) although all three inputs share one schema. Two unordered inputs with the same source identity count as one; a test in PR #315 pins it | nothing to fix and nothing moves; the documentation of the pipeline hash says that unordered inputs with one source identity count as one |
 | F | `SelectDataColumns(["x"])`, `(("x",))` and `({"x"})` give three different hashes and so three different downstream paths | identity composition (axis I4) is uneven |
 | G | The record-id system tag is `fixed_size_binary[16]` out of a source and `large_binary` after passing through a tag object. Entry ids are unaffected (always built after the conversion); the operator cache key is affected: the same row hashes differently on a direct stream and through the orchestrator | a type drift inside a hashed table |
 | H | The folded source id has no separator between members | a collision by construction |
 | I | Nested nullability is hashed for an empty or all-null column and dropped for a column with data, so the same schema hashes differently depending on whether data is present. `CLAUDE.md` says the nested non-null flag always matters | data-dependent hashing |
 | J | On starfix 0.4 a `bool` column's chunk layout changes the table hash, and so the default `source_id`. Fixed by starfix 0.5 | already addressed by ITL-910 |
 | K | The entry id covers user tag names and values; the code comments say system tags only | documentation |
-| L | Function defaults enter the function-value hash as `repr()`, which is not stable for sets or objects; a set with `str()`-equal items hashes differently per process | process-dependent hashes |
+| L | Function defaults enter the function-value hash as `repr()`, which is not stable for sets or objects; a set with `str()`-equal items hashes differently per process | process-dependent hashes. Two issues: the set ordering (L1) is fixed in ITL-942; the function defaults (L2) are ITL-953 |
 | M | The structure label is inside the preimage of every nested non-primitive hash, so changing the label alone moves every real identity hash; flat structures are unaffected | a label bump on axis I1 is all-or-nothing |
 | N | The default function version differs by entry point (`v0.0` versus `v1.0`) | the same function gets two identities |
 | O | `ctx_arg_name` changes a pod's content hash, uri and table path but not its pipeline hash | the two chains disagree about the path |
