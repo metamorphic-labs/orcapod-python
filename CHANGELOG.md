@@ -9,10 +9,9 @@
 **The array format and every array hash changed in v0.3.** A store written by v0.2 that holds
 `numpy.ndarray` columns is **not migrated**. Every node that handles arrays gets new tables,
 so its v0.2 results are no longer found; and since every Arrow-derived hash changed too
-(ITL-910, below), v0.3 refuses a v0.2 store with `StoreHashLabelError` rather than computing
-next to its rows. Nothing written by v0.2 is changed or deleted, and those tables stay readable
-with v0.2. Use a fresh store for v0.3, or keep using v0.2 for an existing store. A migration is
-planned after v0.3 (ITL-889).
+(ITL-910, below), no v0.2 result is reused at all: v0.3 ignores the rows a v0.2 store holds and
+computes every input again. Nothing written by v0.2 is changed or deleted, and those tables stay
+readable with v0.2. A migration is planned after v0.3 (ITL-889).
 
 - **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
   `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
@@ -32,9 +31,9 @@ planned after v0.3 (ITL-889).
   pipeline and operator tables of every node downstream of an array column move as well,
   even when it has no array column itself. A pod whose inputs and outputs hold no array
   keeps its function result table, and nodes with no array column upstream keep their tables;
-  because every Arrow-derived hash changed as well (ITL-910, below), such tables still hold
-  v0.2 rows, so a v0.3 job on a v0.2 store is refused with `StoreHashLabelError` instead of
-  reusing them.
+  but an array-free pod does **not** reuse its v0.2 results: every Arrow-derived hash changed
+  as well (ITL-910, below), so the v0.2 rows in such tables are ignored, the inputs are computed
+  again, and the new rows are stored next to the old ones.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
@@ -69,33 +68,48 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   `table_scope="pipeline_hash"` do not move. Paths that embed a content hash
   (`table_scope="content_hash"`, `CachedSource` tables) move with it. Where a `GroupBy` or
   `Batch` orders members by `record_id`, the order of members can change too.
-- **Results stored by 0.2.0 are refused, never mixed or silently dropped.** Rows a v0.2 store
-  holds are keyed under `arrow_v0.1` and can never match v0.3 inputs. A v0.3 job pointed at
-  such a store raises `orcapod.errors.StoreHashLabelError` (a `StoreError`, so it fails the run
-  whatever the orchestrator's `error_policy`) before any node computes or writes anything:
-  `PipelineJob.run()` checks the stored tables of every function node (pipeline and result
-  tables), every operator node and every side-effect node first. Reading such a node
-  (`as_table()`, `iter_data()`, `get_all_records()`, also on a loaded job) raises the same
-  error, and so does a `CachedSource` whose cache table holds v0.2 rows. The store is left
-  exactly as it was, and there is no option to skip the check (`NodeConfig.ignore_schema`
-  does not apply). The error names the table, the label found and the current one:
+- **Results stored by 0.2.0 are ignored and computed again; they are not reused, changed or
+  deleted.** Rows a v0.2 store holds are keyed under `arrow_v0.1` and can never match v0.3
+  inputs. v0.3 does not refuse such a store. A value-only change does not move a table, so a
+  v0.3 job writes its `arrow_v0.2` rows into the same tables, next to the `arrow_v0.1` rows,
+  and uses rows of its own label only:
+  - The first v0.3 run on a v0.2 store **computes every input again**. Nothing stored by v0.2
+    counts as a cached result, also for functions and data that did not change.
+  - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, also on a
+    job loaded from a file, including a file saved by v0.2), `get_all_cached_outputs()` of a
+    cached function, a stored (`LOG` / `REPLAY`) operator node and a `CachedSource` return
+    rows hashed under `arrow_v0.2` only. Before the first v0.3 run, such a read on a v0.2
+    store returns no rows; after it, one row per input, never the v0.2 rows as well.
+  - The v0.2 rows stay where they are, byte for byte, and stay readable with v0.2. Each
+    stored key names its label (`arrow_v0.1:000001...` or `arrow_v0.2:000002...`), and
+    `orcapod.hashing.stored_hash_labels.stored_hash_labels(store, record_path)` counts the
+    rows of a table by label, for example `{"arrow_v0.1": 3, "arrow_v0.2": 3}`.
+  - When a read leaves out rows of another label, Orcapod logs one warning per table and
+    reader with the total, on the logger `orcapod.hashing.stored_hash_labels`:
+    `Skipped 3 rows of stored table 'my_job/.../pdb_v1': written under another hash label
+    than the current one. The rows are left in place unchanged and can be migrated later.`
+  - **Side-effect nodes are the exception: they fail instead of delivering again.** A
+    side-effect pod finds a delivery it already made by an Arrow-derived record id, so
+    deliveries logged by v0.2 cannot be found, and running the node would deliver every side
+    effect a second time. A side effect is an external action, not a value that can be
+    computed again, so a side-effect node whose invocation log holds deliveries logged under
+    another label raises `orcapod.errors.SideEffectLogHashLabelError` (a `StoreError`, so it
+    fails the run whatever the `error_policy`) before it delivers or writes anything. The
+    error names the log, the label found and the current one. Function, operator and source
+    nodes of the same job are not refused. Use a fresh store for the side-effect node, or
+    keep using v0.2 for it, until the log can be migrated.
 
-  ```
-  The stored table 'my_job/double/semantic_v0.1:.../pdb_v1' of node 'dbl' holds rows hashed
-  under 'arrow_v0.1', but this version of Orcapod hashes with 'arrow_v0.2'. Rows hashed under
-  another label can never match current inputs, so nothing was read, computed or written. Use a
-  fresh store for this pipeline, or keep using the Orcapod version that wrote this store; a
-  migration tool for stores written by Orcapod v0.2 is planned.
-  ```
-
-  **Migration:** run v0.3 pipelines on a fresh store, or keep using v0.2 for an existing store.
-  A migration tool is planned (ITL-913, ITL-914). The check reads each stored table once per
-  node per run (one full read per table; a cheaper projected read is a follow-up).
-  Operator-node and cached-source tables store their record hashes without a label; for them
-  the check compares the starfix hash format at the start of each record hash (`000001` for
-  v0.2), which detects every v0.2 row. A table that `table_scope="content_hash"` or a
-  `CachedSource` places under a content hash moves to a new path instead, so its v0.2 rows are
-  not found there and not refused.
+  **Migration:** none is needed to run the function, operator and source nodes of a v0.2
+  store under v0.3, at the price of computing everything again and of tables that hold both
+  generations; side-effect nodes need a fresh store. A tool that converts
+  `arrow_v0.1` rows into `arrow_v0.2` rows is planned (ITL-913, ITL-914); until then the old
+  rows are kept for it. Operator-node and cached-source tables store their record hashes
+  without a label; there the rows of v0.2 are told apart by the starfix hash format at the
+  start of each record hash (`000001` for v0.2, `000002` for v0.3). That is exact for these
+  two versions, but a later Arrow hash label that keeps starfix hash format 2 could not be
+  told apart in those two kinds of table. A table that `table_scope="content_hash"` or a
+  `CachedSource` places under a content hash moves to a new path instead, so its v0.2 rows
+  are in another table.
 - **Now hashable.** `fixed_size_list` columns, at any depth (ITL-927): a source or operator
   carrying one works, and its type is kept. A `fixed_size_list<T>[n]` hashes differently from a
   `large_list<T>` with the same values. pyarrow's canonical extension types (`arrow.uuid`,
@@ -143,9 +157,13 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
-- **`orcapod.errors.StoreHashLabelError`** — a `StoreError` raised when a stored table holds
-  rows hashed under another Arrow hash label (a store written by v0.2). It has `record_path`,
-  `found_label`, `current_label` and `node_label`. (ITL-910)
+- **`orcapod.errors.SideEffectLogHashLabelError`** — a `StoreError` raised by a side-effect
+  node whose invocation log holds deliveries logged under another Arrow hash label (a log
+  written by v0.2), before anything is delivered. It has `record_path`, `found_label`,
+  `current_label` and `node_label`. (ITL-910)
+- **`orcapod.hashing.stored_hash_labels.stored_hash_labels(database, record_path)`** — counts
+  the rows of a stored table by the Arrow hash label they were hashed under, to tell rows
+  written by v0.2 (`arrow_v0.1`) from rows written by v0.3 (`arrow_v0.2`). (ITL-910)
 
 ### Fixed
 

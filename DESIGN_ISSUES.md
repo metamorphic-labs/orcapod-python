@@ -2465,22 +2465,47 @@ Arrow-derived hash moves; the golden files were regenerated once, explicitly. Or
 stay off. pyarrow's canonical extension types and `hash_schema` on extension columns hash with
 their extension identity instead of as their storage type.
 
-Stored rows: under the default `table_scope`, table paths did not move, so a v0.3 node would
-have recomputed into the same tables as a v0.2 store and later read both generations (observed:
-4 rows for 2 inputs). Developer decision (November 11, 2026): fail explicitly. A table holding
-rows under another Arrow label raises `StoreHashLabelError` on every read and before the first
-write, and `PipelineJob.run()` checks every node's tables before any node runs; there is no
-opt-out. Function-node pipeline and result tables and side-effect logs are checked by the label
-in their stored keys; operator-node and cached-source tables, whose record hashes carry no
-label, by the starfix format at the start of each hex digest.
+Stored rows: under the default `table_scope`, table paths do not move (developer, November
+11, 2026: only a change of a table's schema goes into its path; a value-only change stays in
+the same table), so a v0.3 node writes into the same tables as a v0.2 store. The first decision
+that day was to refuse such a store (`StoreHashLabelError`); the developer reversed it in the
+ITL-938 design session: v0.3 does not refuse a v0.2 store. It ignores rows hashed under
+`arrow_v0.1`, computes every input again under `arrow_v0.2`, and leaves the old rows in place,
+unchanged and distinguishable, for a later migration (ITL-913, ITL-914).
+
+Key lookups cannot match a row of another label. Every read of a whole table drops the rows
+of another label through one function, `hashing/stored_hash_labels.keep_rows_hashed_under`
+(without it: 4 rows for 2 inputs): `FunctionJobNode._fetch_joined_records` (phase 1,
+`get_all_records`, `as_table`, `iter_data`, `as_source`, loaded jobs) on
+`__pipeline_base_entry_id`; `ResultCache.get_all_records` on `__input_data_hash`;
+`OperatorJobNode._read_stored_records` and `CachedSource._read_cached_records` on the starfix
+format at the start of the `_record_hash` record id. Each reader logs one warning with the
+total number of rows it left out (`report_skipped_rows`; developer: total counts are enough,
+eventually old entries should be detected and a migration suggested).
+`stored_hash_labels(database, record_path)` counts a table's rows by label.
+
+Side-effect invocation logs are the one exception (developer, same day): they are read by key
+only, so deliveries logged under `arrow_v0.1` would not be found and every side effect would
+be delivered again. A side-effect node whose log holds such rows raises
+`SideEffectLogHashLabelError` before delivering anything. The developer wants a separate,
+later discussion of what side-effect logs hold.
 
 Known limits, follow-ups:
-- The check reads each table in full once per node per run, through `get_all_records`. A
-  projected, limited read on `ArrowDatabaseProtocol` (one column, one row) would make it cheap
-  on large stores.
-- The format-prefix check on operator and cached-source tables detects a change of starfix
-  format, not of Orcapod's label: a future label bump that keeps the starfix format would not be
-  detected there. Storing the label with those record hashes would close that gap.
+- The warning is logged once per reader object (node, result cache, cached source) and
+  table, not once per process: stored paths are relative to the store, so a process-wide
+  record of reported tables would silence a second store with the same layout.
+- A global hash-version identifier stored with every row is being designed (not decided); it
+  would also give operator-node and cached-source rows a label.
+- Operator-node and cached-source record hashes carry no label, only the starfix format at
+  the start of the hex digest. That separates `arrow_v0.1` (format 1) from `arrow_v0.2`
+  (format 2) exactly, but a future label that keeps the starfix format could not be told apart
+  there. Storing the label with those rows (a schema change) would close that gap.
+- The node content hash does not separate the generations: a source with an explicit
+  `source_id` gives the same node content hash under both labels.
+- A `DeltaTableDatabase` object keeps the table version it read first, so a job object that
+  read a table before a run does not see the rows the run added until the store is reopened
+  (not specific to hash labels; seen when re-reading a node of the same job after an
+  incremental run).
 - Tables placed under a content hash (`table_scope="content_hash"`, `CachedSource` without an
   explicit `source_id`) move to new paths when the content hash moves, so their v0.2 rows are
-  not found and not refused.
+  in another table.

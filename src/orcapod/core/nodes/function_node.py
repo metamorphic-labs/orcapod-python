@@ -36,11 +36,13 @@ from orcapod.errors import (
     PipelineJobRequiredError,
     SchemaVersionError,
     StoreError,
-    StoreHashLabelError,
     StoreReadError,
     StoreWriteError,
 )
-from orcapod.hashing.stored_hash_labels import foreign_arrow_label
+from orcapod.hashing.stored_hash_labels import (
+    keep_rows_hashed_under,
+    report_skipped_rows,
+)
 from orcapod.utils.store_errors import keep_store_error
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
@@ -744,26 +746,6 @@ class _ResultDatabaseReader:
         """
         return self._record_path + (RESULT_DB_SCHEMA_VERSION,)
 
-    def check_stored_hash_labels(self, current_label: str) -> None:
-        """Refuse a result table holding rows hashed under another Arrow hash label.
-
-        Args:
-            current_label: The Arrow hash label of the current input data hashes.
-
-        Raises:
-            StoreHashLabelError: If a stored result row carries another Arrow hash label.
-        """
-        path = self.record_path
-        stored = self.result_database.get_all_records(path)
-        if stored is not None and constants.INPUT_DATA_HASH_COL in stored.column_names:
-            found = foreign_arrow_label(
-                stored.column(constants.INPUT_DATA_HASH_COL), current_label
-            )
-            if found is not None:
-                raise StoreHashLabelError(
-                    self.result_database.base_path + path, found, current_label
-                )
-
 
 # ---------------------------------------------------------------------------
 # FunctionJobNode — DB-backed execution node
@@ -803,9 +785,9 @@ class FunctionJobNode(FunctionNodeBase):
     execution.
     """
 
-    # Set by ``check_stored_hash_labels`` once this node's stored tables passed; a
-    # class default so nodes rebuilt from a saved descriptor start unchecked.
-    _stored_hash_labels_checked: bool = False
+    # Set once a read has reported the stored rows it skipped (rows of another Arrow
+    # hash label); a class default so nodes rebuilt from a saved descriptor start unset.
+    _skipped_rows_reported: bool = False
 
     def __init__(
         self,
@@ -927,52 +909,6 @@ class FunctionJobNode(FunctionNodeBase):
             )
         _checked_pdb_paths.add(versioned_path)
 
-    def check_stored_hash_labels(self) -> None:
-        """Refuse stored tables holding rows hashed under another Arrow hash label.
-
-        Reads this node's pipeline table and its function's result table once per
-        node instance (again after ``attach_databases``). Rows keyed under another
-        Arrow hash label (``arrow_v0.1``, written by Orcapod v0.2) can never match
-        current inputs, so reading them as results or computing next to them would
-        mix old and new rows (ITL-910). ``NodeConfig.ignore_schema`` does not
-        disable this check.
-
-        Raises:
-            StoreHashLabelError: If a stored row carries another Arrow hash label.
-        """
-        if self._stored_hash_labels_checked:
-            return
-        # A node loaded from a saved job has no function pod; its context comes from
-        # the descriptor.
-        context = (
-            self._data_context if self._function_pod is None else self.data_context
-        )
-        current_label = context.arrow_hasher.hasher_id
-        if self._pipeline_database is not None:
-            path = self._versioned_pipeline_path
-            stored = self._pipeline_database.get_all_records(path)
-            if (
-                stored is not None
-                and _PIPELINE_BASE_ENTRY_ID_COL in stored.column_names
-            ):
-                found = foreign_arrow_label(
-                    stored.column(_PIPELINE_BASE_ENTRY_ID_COL), current_label
-                )
-                if found is not None:
-                    raise StoreHashLabelError(
-                        self._pipeline_database.base_path + path,
-                        found,
-                        current_label,
-                        node_label=self.label,
-                    )
-        if self._cached_function_pod is not None:
-            try:
-                self._cached_function_pod.check_stored_hash_labels(current_label)
-            except StoreHashLabelError as exc:
-                exc.add_context(node_label=self.label)
-                raise
-        self._stored_hash_labels_checked = True
-
     # ------------------------------------------------------------------
     # attach_databases
     # ------------------------------------------------------------------
@@ -1035,7 +971,6 @@ class FunctionJobNode(FunctionNodeBase):
                 )
 
             self._pipeline_database = pipeline_database
-            self._stored_hash_labels_checked = False
 
             # Clear all caches
             self._node_identity_path_cache = None
@@ -1308,7 +1243,6 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             A ``(tag, output_data)`` tuple.
         """
-        self.check_stored_hash_labels()
         tag_out, result = self._process_data_internal(tag, data)
         return tag_out, result
 
@@ -1347,7 +1281,6 @@ class FunctionJobNode(FunctionNodeBase):
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
         tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
-        self.check_stored_hash_labels()
         ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
 
         # Collect upstream entries and resolve base_entry_ids (stable across recomputation)
@@ -2022,7 +1955,6 @@ class FunctionJobNode(FunctionNodeBase):
             return None
 
         self._ensure_pdb_schema()
-        self.check_stored_hash_labels()
         taginfo = self._pipeline_database.get_all_records(
             self._versioned_pipeline_path,
             record_id_column=_PIPELINE_ENTRY_ID_COL,
@@ -2030,6 +1962,26 @@ class FunctionJobNode(FunctionNodeBase):
 
         if taginfo is None:
             return None
+
+        # Rows keyed under another Arrow hash label (written by another version of
+        # Orcapod) are not this node's results: they can never match current inputs
+        # and stay in the table untouched (ITL-910). Result rows are reached only
+        # through the pipeline rows kept here.
+        # A node loaded from a saved job has no function pod; its context comes from
+        # the descriptor.
+        context = (
+            self._data_context if self._function_pod is None else self.data_context
+        )
+        stored_rows = taginfo.num_rows
+        taginfo = keep_rows_hashed_under(
+            taginfo, _PIPELINE_BASE_ENTRY_ID_COL, context.arrow_hasher.hasher_id
+        )
+        if taginfo.num_rows < stored_rows and not self._skipped_rows_reported:
+            self._skipped_rows_reported = True
+            report_skipped_rows(
+                self._pipeline_database.base_path + self._versioned_pipeline_path,
+                stored_rows - taginfo.num_rows,
+            )
 
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema
@@ -2452,7 +2404,6 @@ class FunctionJobNode(FunctionNodeBase):
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
         try:
-            self.check_stored_hash_labels()
             tag_schema = self._input_stream.output_schema(
                 columns={"system_tags": True}
             )[0]

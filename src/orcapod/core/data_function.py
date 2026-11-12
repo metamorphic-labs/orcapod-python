@@ -1139,5 +1139,6 @@ class CachedDataFunction(DataFunctionWrapper):
             A PyArrow table of cached results, or ``None`` if empty.
         """
         return self._cache.get_all_records(
-            include_system_columns=include_system_columns
+            self.data_context.arrow_hasher.hasher_id,
+            include_system_columns=include_system_columns,
         )
