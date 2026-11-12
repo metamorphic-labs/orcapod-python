@@ -239,7 +239,12 @@ class TestOrdinaryTables:
             ):
                 if table[-1] not in CURRENT_LAYOUTS:
                     assert "/".join(table) in reported, table
-        records = job.nodes["plus_two"].get_all_records()
+        # A new database object: one that read a table before the run does not see
+        # the rows the run added.
+        reread = pods.build_job(
+            DeltaTableDatabase(root), with_notify=False, with_sink=False
+        )
+        records = reread.nodes["plus_two"].get_all_records()
         assert sorted(records["p"].to_pylist()) == [4, 5, 6]
 
     def test_the_job_reports_one_total_of_the_tables_no_node_claims(
@@ -417,9 +422,11 @@ class TestStoreThatCannotListItsTables:
             and "side effect" in record.getMessage()
         ]
         assert len(warned) == 2  # one per side-effecting node, not one per run
-        assert any(f"{JOB}/side_effects/deliver" in message for message in warned)
+        assert any(f"'{JOB}/side_effects/deliver'" in message for message in warned)
         assert any(
-            f"{JOB}/side_effect_function/notify" in message for message in warned
+            f"'{JOB}/side_effect_function/notify' and "
+            f"'{JOB}/_result/side_effect_function/notify'" in message
+            for message in warned
         )
         assert all("this store has no table listing" in m for m in warned)
 

@@ -1015,6 +1015,8 @@ class CachedDataFunction(DataFunctionWrapper):
             result_database=result_database,
             record_path=record_path_prefix + self.uri,
             auto_flush=True,
+            # The first uri component is the function's name; no hash before it.
+            name_path=record_path_prefix + self.uri[:1],
         )
 
     def _build_metadata_datagrams(self) -> tuple[Datagram, Datagram]:

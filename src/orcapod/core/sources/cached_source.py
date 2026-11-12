@@ -221,13 +221,22 @@ class CachedSource(RootSource):
 
         A cache written by an earlier version of Orcapod holds no ``__data_context``
         column. Its rows are not read and are left unchanged; their number is
-        reported (ITL-944).
+        reported (ITL-944). Without an explicit ``cache_path`` the path holds a hash
+        that can differ between versions, so older caches are also looked for
+        anywhere under ``<cache_path_prefix>/source`` (ITL-954): those are caches of
+        any source stored there, and they are reported without a number of rows.
         """
         if self._stale_tables_checked:
             return
         self._stale_tables_checked = True
         account_for_stale_tables(
-            find_stale_tables(self._cache_database, (self._unversioned_cache_path,)),
+            find_stale_tables(
+                self._cache_database,
+                (self._unversioned_cache_path,),
+                name_path=None
+                if self._explicit_cache_path is not None
+                else self._cache_path_prefix + ("source",),
+            ),
             delivers_side_effects=False,
             current_context=self.data_context_key,
         )

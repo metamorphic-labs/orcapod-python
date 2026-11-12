@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import StoreReadError, StoreWriteError
 from orcapod.contexts.stored import (
-    StaleTable,
+    StaleTables,
     keep_rows_of_data_context,
     require_same_data_context,
     account_for_stale_tables,
@@ -68,6 +68,7 @@ class ResultCache:
         record_path: tuple[str, ...],
         auto_flush: bool = True,
         delivers_side_effects: bool = False,
+        name_path: tuple[str, ...] | None = None,
     ) -> None:
         """Create a result cache over one result table.
 
@@ -79,11 +80,16 @@ class ResultCache:
                 (a function pod that takes the invocation context). Such a cache
                 fails, instead of computing again, when it finds results stored
                 under another data context or at an older table layout.
+            name_path: The beginning of ``record_path`` up to the function's name,
+                the part that holds no hash. Result tables written before v0.3 are
+                looked for under it, whatever hashes their paths hold (ITL-954).
+                ``None`` looks at the paths computed from ``record_path`` only.
         """
         self._result_database = result_database
         self._record_path = record_path
         self._auto_flush = auto_flush
         self._delivers_side_effects = delivers_side_effects
+        self._name_path = name_path
         # Set once a read has reported the stored rows it skipped.
         self._skipped_rows_reported = False
         # Set once stored results of other generations have been accounted for.
@@ -112,12 +118,13 @@ class ResultCache:
         """Set auto-flush behavior."""
         self._auto_flush = on
 
-    def stale_tables(self, data_context_key: str) -> list[StaleTable]:
+    def stale_tables(self, data_context_key: str) -> StaleTables:
         """Find stored results of other generations: rows this cache will not use.
 
-        Result tables at an older layout (``rdb_v1``, or no layout component), and, for a cache whose
-        function delivers side effects, rows of another data context in the current
-        table (ITL-944). The tables are only read.
+        Result tables at an older layout (``rdb_v1``, or no layout component), at
+        this cache's own path and anywhere under its function's name (ITL-954),
+        and, for a cache whose function delivers side effects, rows of another data
+        context in the current table (ITL-944). The tables are only read.
 
         Args:
             data_context_key: Key of the caller's data context.
@@ -136,7 +143,17 @@ class ResultCache:
             current=(self._versioned_record_path, data_context_key)
             if self._delivers_side_effects
             else None,
+            name_path=self._name_path,
         )
+
+    def stale_tables_accounted_for(self) -> None:
+        """Record that the owner of this cache accounted for what ``stale_tables`` found.
+
+        A node that delivers side effects accounts for its result tables together
+        with its pipeline table, in one error or one warning; this cache then does
+        not report or refuse them a second time.
+        """
+        self._stale_tables_checked = True
 
     def _account_for_stale_tables(self, data_context_key: str) -> None:
         """Report or refuse, once per cache object, stored results of other generations.

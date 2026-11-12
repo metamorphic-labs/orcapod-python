@@ -420,6 +420,12 @@ class SideEffectLogDataContextError(StoreError):
     operator and source tables do not fail this way: there, such rows are reported,
     skipped and computed again.
 
+    Tables written by Orcapod up to v0.2 are found by name: every table at an older
+    layout stored under the node's function or pod name in the job counts,
+    whatever hashes its path holds (ITL-954). A table of another function or pod
+    with the same name in the same job, or of another node of the same function,
+    therefore raises this error too; ``record_paths`` names every table found.
+
     Use a fresh store for the node, or keep using the Orcapod version that wrote the
     tables; migrating stored rows to the current data context is planned.
 
