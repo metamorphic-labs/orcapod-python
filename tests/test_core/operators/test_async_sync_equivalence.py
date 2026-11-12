@@ -490,7 +490,7 @@ def test_async_execute_requires_input_pipeline_hashes(case: Case) -> None:
     channels: list[Channel[Row]] = [Channel() for _ in case.make_sources()]
     output: Channel[Row] = Channel()
     with pytest.raises(TypeError, match="input_pipeline_hashes"):
-        case.make_op().async_execute(  # pyright: ignore[reportCallIssue, reportUnusedCoroutine]  # the missing keyword is the point
+        case.make_op().async_execute(  # pyright: ignore[reportCallIssue]  # the missing keyword is the point
             [channel.reader for channel in channels], output.writer
         )
 
