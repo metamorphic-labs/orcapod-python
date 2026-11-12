@@ -1175,6 +1175,28 @@ Consequences for the design:
 | 3 | The user's function receives `ctx.invocation_hash` (`semantic_v0.1:26aa830d…` + the key) to use as an idempotency key with the external system. It is built from hashes, so it changes with the data context too |
 | 4 | Positional record ids make a reordered or prepended source deliver everything again, today, within one version |
 
+**Correction (developer, November 11, 2026): there is a second kind of side-effecting node,
+and it does store tags.** A function pod that takes the invocation context,
+`@function_pod(output_keys=…, ctx_arg="ctx")`, is documented as the preferred way to write a
+side-effect pod. It runs as an ordinary function node (node type `side_effect_function`) and
+uses the normal function tables. Measured on main:
+
+| | `SideEffectPod` (`@side_effect_pod`, `@sink_pod`, `@tap_pod`) | function pod with `ctx_arg` |
+|---|---|---|
+| Tables | its own log `j/side_effects/notify/schema:…/tdb_v1` | `j/side_effect_function/notify/…/schema:…/pdb_v1` and `j/_result/side_effect_function/notify/…/rdb_v1` |
+| Tags stored | no | **yes**, in the pipeline table (`id`, system tags) |
+| A repeat is suppressed by | the entry key: user tags, system tags, input data hash | the result cache: the input data hash only |
+| Rows reordered | delivered again, all | not delivered again |
+| Source renamed | delivered again, all | not delivered again |
+| A new tag with the same data as an earlier row | (key includes tags) | **not delivered**: the cached result is reused |
+| Function body changed | not delivered again | not delivered again |
+| Function renamed | delivered again, all | delivered again, all |
+
+Consequence for v0.3: the explicit failure decided for side-effect logs must also cover a
+function node whose pod takes the context. Otherwise, with old-layout tables counted and
+skipped, such a node would find no cached result and deliver every effect again without an
+error.
+
 ## Part 7. Before the v0.3 tag, and after (draft for the developer's review)
 
 ### 7.1 The system in one page
