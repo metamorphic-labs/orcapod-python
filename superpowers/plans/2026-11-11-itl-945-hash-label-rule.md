@@ -213,7 +213,23 @@ Each with my recommendation; answers are recorded under "Decisions".
 
 ## Decisions
 
-(pending)
+Coordinator, November 11, 2026 (reply to the step 1 question):
+
+1. Yes: digest only at the three extra hash inputs; stored columns stay labelled. List them in
+   the PR notes for the design table.
+2. **Not** the bare hex string. A nested hash enters as a tagged value with the digest and no
+   label: `{"__type__": "hash", "digest": "<hex>"}`. The structure hasher has no escaping for a
+   user dict with a `"__type__"` key today (a tuple and the dict
+   `{"__type__":"tuple","items":[…]}` already hash alike); ITL-942 option D1 wraps any dict
+   that has a `"__type__"` key as `{"__type__":"dict","items":[…]}`, which closes the collision
+   for the `hash` tag as it does for `tuple`. Handlers return `ContentHash` objects inside
+   their structures, so the tagged form is produced in one place (`_expand_structure`).
+3. Yes. The line is `src/orcapod/hashing/visitors.py:309-311`.
+4. With the developer. Do not implement.
+5. With the developer. Do not implement. Until answered: rename the labels where they are
+   written today; add `DIRECTORY_HASH_LABEL`.
+6. Yes: `ValueError` for any algorithm other than `sha256`.
+7, 8, 9. Agreed as stated.
 
 ## Notes
 
