@@ -422,7 +422,8 @@ class TestCachedSourceWithSourceProxy:
         loaded = CachedSource(
             source=proxy,
             cache_database=db,
-            cache_path=cached.cache_path,
+            # An explicit cache_path excludes the layout component (sdb_v1).
+            cache_path=cached.cache_path[:-1],
             source_id=source.source_id,
         )
 
@@ -471,7 +472,8 @@ class TestCachedSourceWithSourceProxy:
         loaded = CachedSource(
             source=proxy,
             cache_database=db,
-            cache_path=cached.cache_path,
+            # An explicit cache_path excludes the layout component (sdb_v1).
+            cache_path=cached.cache_path[:-1],
             source_id=source.source_id,
         )
         assert loaded.content_hash() == original_content

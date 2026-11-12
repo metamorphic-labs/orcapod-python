@@ -529,9 +529,14 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return self._function_name
 
     def get_function_variation_data(self) -> dict[str, Any]:
-        """Raw data defining function variation - system computes hash"""
+        """Raw data defining function variation, stored with every result row.
+
+        ``function_version`` is the full version string the function was declared
+        with (``"v3.7"``); only its major part is in the table path.
+        """
         return {
             "function_name": self._function_name,
+            "function_version": self._version,
             "function_signature_hash": self._function_signature_hash,
             "function_content_hash": self._function_content_hash,
             "git_hash": self._git_hash,
@@ -542,6 +547,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return Schema(
             {
                 "function_name": str,
+                "function_version": str,
                 "function_signature_hash": bytes,
                 "function_content_hash": bytes,
                 "git_hash": str,

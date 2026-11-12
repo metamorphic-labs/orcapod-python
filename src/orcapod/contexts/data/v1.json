@@ -149,14 +149,6 @@
         "changelog": [
             "First frozen manifest. std:v1:default is what Orcapod v0.3.0 computes (H1). Everything written before v0.3 carries std:v0.1:default or no data context column and is the earlier generation H0 (ITL-938, ITL-944)"
         ],
-        "hash_labels": {
-            "structure": "semantic_v0.1",
-            "arrow": "arrow_v0.2",
-            "file": "sha256",
-            "directory": "merkle_sha256",
-            "array": "ndarray_v1",
-            "polars_expression": "polars_expr_v1"
-        },
         "libraries": {
             "starfix": ">=0.5.0,<0.6 (hash format 2, digest prefix 000002)"
         },

@@ -27,7 +27,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
-from orcapod import PipelineJob, function_pod
+from orcapod import FunctionPod, PipelineJob, function_pod
 from orcapod.contexts import stored_data_contexts
 from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Data
@@ -183,13 +183,13 @@ def old_layout_path(path: tuple[str, ...]) -> tuple[str, ...]:
     return path[:-1]
 
 
+# Columns holding a hash-derived key of a stored row.
+KEY_COLUMNS = (RID, "__pipeline_base_entry_id", "__input_data_hash", "record_id_hash")
+
+
 def _other_key(value: Any) -> Any:
-    """A stored key as another generation of hashing would have written it."""
-    if isinstance(value, bytes) and value.startswith(b"arrow_v0.2:"):
-        return b"arrow_v9.9:" + value[len(b"arrow_v0.2:") :]
-    if isinstance(value, bytes) and value.startswith(b"000002"):
-        return b"ffffff" + value[6:]
-    return value
+    """A stored key as another generation of hashing would have written it: not this one."""
+    return b"other:" + value if isinstance(value, bytes) else value
 
 
 def copy_as_v02(written: Store, target: Store) -> None:
@@ -216,7 +216,10 @@ def copy_as_other_context(written: Store, target: Store) -> None:
         assert rows is not None
         columns = {
             name: pa.array(
-                [_other_key(value) for value in rows.column(name).to_pylist()],
+                [
+                    _other_key(value) if name in KEY_COLUMNS else value
+                    for value in rows.column(name).to_pylist()
+                ],
                 type=rows.schema.field(name).type,
             )
             for name in rows.column_names
@@ -354,6 +357,67 @@ class TestColumnAndLayout:
         assert rows_of(job.nodes["dbl"].as_table()) == [2, 4]
         for _, data in job.nodes["dbl"].iter_data():
             assert data.data_context_key == CURRENT
+
+
+# ---------------------------------------------------------------------------
+# The function version in the result table
+# ---------------------------------------------------------------------------
+
+
+def _triple(x: int) -> int:
+    return 3 * x
+
+
+@function_pod(output_keys="tripled", version="v3.7")
+def triple_v3_7(x: int) -> int:
+    return 3 * x
+
+
+def _stored_function_versions(store: Store, pod: Any) -> list[str]:
+    """Run ``pod`` over ``ROWS`` in a job and return the versions its result rows hold."""
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        pod(DictSource(data=ROWS, tag_columns=["k"], source_id="src"), label="fn")
+    _ = job.run()
+    records = reopened(store).get_all_records(table_path(store, "rdb_v2"))
+    assert records is not None
+    return records.column("__pf_var_function_version").to_pylist()
+
+
+class TestFunctionVersionColumn:
+    """Every result row holds the full version string of the function that produced it."""
+
+    def test_declared_version_is_stored_in_full(self, store: Store):
+        versions = _stored_function_versions(store, triple_v3_7.pod)
+        assert versions == ["v3.7", "v3.7"]
+
+    def test_function_pod_decorator_default_version(self, store: Store):
+        expected = double.pod.data_function.to_config()["config"]["version"]
+        assert _stored_function_versions(store, double.pod) == [expected, expected]
+
+    def test_from_fn_default_version(self, store: Store):
+        pod = FunctionPod.from_fn(_triple, output_keys="tripled")
+        expected = pod.data_function.to_config()["config"]["version"]
+        assert _stored_function_versions(store, pod) == [expected, expected]
+
+    def test_version_is_read_back_with_the_meta_columns(self, store: Store):
+        def build(database: Store) -> PipelineJob:
+            job = PipelineJob(name=JOB_NAME, store=database)
+            with job:
+                triple_v3_7.pod(
+                    DictSource(data=ROWS, tag_columns=["k"], source_id="src"),
+                    label="fn",
+                )
+            return job
+
+        _ = build(store).run()
+        # Read through a newly built job: a Delta database object that read a table
+        # before the run does not see the rows the run added to it.
+        node = build(reopened(store)).nodes["fn"]
+        records = node.get_all_records(all_info=True)
+        assert records is not None
+        assert records.column("__pf_var_function_version").to_pylist() == ["v3.7"] * 2
+        assert "__pf_var_function_version" not in node.as_table().column_names
 
 
 # ---------------------------------------------------------------------------
