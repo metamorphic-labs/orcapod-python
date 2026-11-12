@@ -36,16 +36,25 @@ def deliver(m: int, ctx: Any) -> None:
     DELIVERED.append(m)
 
 
-def build_job(store: Any, *, cache_mode: Any = None) -> Any:
+def build_job(
+    store: Any,
+    *,
+    cache_mode: Any = None,
+    with_notify: bool = True,
+    with_sink: bool = True,
+) -> Any:
     """Build the fixture's job on ``store``.
 
     Nodes: ``plus_one`` and ``plus_two`` (function pods), ``notify`` (a function pod
     that takes the invocation context), ``select`` (an operator whose output is
-    stored) and ``sink`` (a side-effect pod).
+    stored) and ``sink`` (a side-effect pod). The fixture was written with all of
+    them.
 
     Args:
         store: The database the job stores its tables in.
         cache_mode: Cache mode of the ``select`` operator; ``LOG`` when ``None``.
+        with_notify: Whether the job has the ``notify`` node.
+        with_sink: Whether the job has the ``sink`` node.
     """
     from orcapod import PipelineJob, function_pod
     from orcapod.core.operators import SelectDataColumns
@@ -72,9 +81,11 @@ def build_job(store: Any, *, cache_mode: Any = None) -> Any:
         ints = DictSource(data=ROWS, tag_columns=["k"], source_id="ints")
         ones = plus_one.pod(ints, label="plus_one")
         plus_two.pod(ones, label="plus_two")
-        notify.pod(ones, label="notify")
+        if with_notify:
+            notify.pod(ones, label="notify")
         SelectDataColumns(["m"])(ones, label="select")
-        sink_pod(deliver).process(ones, label="sink")
+        if with_sink:
+            sink_pod(deliver).process(ones, label="sink")
     job.nodes["select"].attach_databases(
         pipeline_database=store.at(JOB_NAME),
         cache_mode=CacheMode.LOG if cache_mode is None else cache_mode,
