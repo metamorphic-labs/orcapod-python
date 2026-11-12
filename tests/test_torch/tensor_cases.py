@@ -121,6 +121,52 @@ def expected_digest(t: Any) -> bytes:
     return reference_digest(tag_of(t), list(t.shape), value_bytes(t))
 
 
+TENSOR_CLASS = "torch.Tensor"
+PARAMETER_CLASS = "torch.nn.parameter.Parameter"
+"""The class names written in the value hash."""
+
+
+def c_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    """The strides, in elements, of a C-contiguous tensor of ``shape`` (as torch gives them)."""
+    strides: list[int] = []
+    step = 1
+    for dim in reversed(list(shape)):
+        strides.append(step)
+        step *= max(int(dim), 1)
+    return tuple(reversed(strides))
+
+
+def reference_value_digest(
+    element_digest: bytes,
+    *,
+    requires_grad: bool,
+    conj_bit: bool,
+    neg_bit: bool,
+    strides: Sequence[int],
+    class_name: str,
+) -> bytes:
+    """The value hash ``D`` of a tensor, written from the spec with ``hashlib`` and ``struct``.
+
+    ``D = SHA-256(lp(extension name) || E || u8(requires_grad) || u8(conj_bit) ||
+    u8(neg_bit) || u64le(ndim) || i64le(each stride) || lp(class name))``, where
+    ``lp(x) = u64le(len(utf8(x))) || utf8(x)``.
+    """
+
+    def lp(text: str) -> bytes:
+        raw = text.encode("utf-8")
+        return struct.pack("<Q", len(raw)) + raw
+
+    preimage = (
+        lp(EXTENSION_NAME)
+        + element_digest
+        + bytes([int(requires_grad), int(conj_bit), int(neg_bit)])
+        + struct.pack("<Q", len(strides))
+        + b"".join(struct.pack("<q", int(s)) for s in strides)
+        + lp(class_name)
+    )
+    return hashlib.sha256(preimage).digest()
+
+
 def assert_tensors_identical(got: Any, expected: Any) -> None:
     """Assert ``got`` is a plain CPU tensor equal to ``expected`` bit for bit.
 
