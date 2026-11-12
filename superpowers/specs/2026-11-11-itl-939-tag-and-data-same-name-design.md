@@ -401,6 +401,8 @@ session = SpiralDBTableSource(PROJECT, "session", dataset=DATASET)
 
 # EDI keys and columns are nullable in the DB schema, so the parameters are Optional.
 @function_pod(output_keys="onset_s")
+# Illustrative only: in the EDI tutorial data experiment_start_timestamp is a relative clock,
+# not microseconds since the epoch, so this formula does not compute an onset on that table.
 def onset_s(session_start: datetime | None, experiment_start_timestamp: int | None) -> float | None:
     if session_start is None or experiment_start_timestamp is None:
         return None
@@ -609,6 +611,8 @@ Otherwise `InputValidationError` naming the column.
 session = SpiralDBTableSource(PROJECT, "session", dataset=DATASET)
 
 @function_pod(output_keys="onset_s")
+# Illustrative only: in the EDI tutorial data experiment_start_timestamp is a relative clock,
+# not microseconds since the epoch, so this formula does not compute an onset on that table.
 def onset_s(session_start: datetime | None, experiment_start_timestamp: int | None) -> float | None:
     if session_start is None or experiment_start_timestamp is None:
         return None
@@ -653,13 +657,14 @@ origin. exp07 #4 runs it: 5 rows, the correct answer.
 | Data columns | the origin's, then the copies in map order |
 | Copy's Arrow type | the tag's field exactly: same type, same nullability, logical types kept. Not null stays not null (`timestamp[us, tz=UTC] not null`); a nullable tag gives `datetime \| None`. The column is the tag's Arrow column, never rebuilt from Python values. |
 | System tags | its own pair, named with its own schema hash (`_tag_source_id::8b20…`, where the origin has `::2f50…`). It starts provenance afresh, as every source does. |
-| Record ids | from its `source_id` and a per-row token, by the standard source rule: `record_id_column` if given, otherwise the row position. |
+| Record ids | from its `source_id` and a per-row token, by the standard source rule: `record_id_column` if given, otherwise the row position. A positional token names a position, not a row: if the origin returns the same rows in another order, a moved row gets another record id and is recorded again downstream. This is the limitation every source has (see `stream_builder._make_provenance_token`; ITL-929 addresses it). It cannot pair a result with the wrong row, because every downstream identity includes the row's data hash and a pod's result depends only on its input data; with `tags_as_data` the copied key is part of that data. Pass `record_id_column` when the origin's row order is not stable. |
 | Source-info | one token per data column, pointing at the derived source: `derived:experiment::row_0::session_start` for the copy, `derived:experiment::row_0::task_id` for an original column. The origin's own tokens are not carried. |
-| Default `source_id` | `derived:<origin source_id>` (decision 5) |
+| Default `source_id` | as first proposed: `derived:<origin source_id>` (decision 5). **Superseded by 8.10:** `tags_as_data:<algorithm label>:<hex>`, built from the origin's content hash, so it is defined for job-node origins too, which have no `source_id` of their own. |
 | `upstreams`, `producer` | `()` and `None`: it is a root |
 | Data context | the origin's |
 
-**Identity.**
+**Identity** (as first proposed; the developer's answers in 8.10 replace the `content_hash` and
+default `source_id` rules given here).
 
 * `content_hash`: the origin's content hash, the sorted copies and the `source_id`. A
   `DerivedSource` made without the new argument keeps today's identity, `(origin content
@@ -687,7 +692,7 @@ origin and the derived source can both be used in one job (exp07 #7b), because t
 `source_id`s differ.
 
 **Save and load.** `to_config()` holds `source_type: "derived"`, the origin's own config, the
-map and the `source_id`. `from_config()` rebuilds the origin first. exp07 #7: the saved job
+map, the `record_id_column` and the `source_id` (so a reload keeps the same record ids). `from_config()` rebuilds the origin first. exp07 #7: the saved job
 loads with no unbound source, the reloaded source has the same `content_hash`, and the
 downstream node has the same `pipeline_hash`. The recipe, saved the same way, loads with its
 source unbound (exp07 #8). A derived source over a job node stays not reloadable, as today
@@ -880,6 +885,14 @@ What answers 5 to 7 change in 8.3:
   part of it, because a derived source may later combine several sources.
 * **`content_hash`** follows the rule of every root source: class name, output schema and
   `source_id`. The origin and the mapping enter through the default `source_id`.
+  **With an explicit `source_id`** the origin, the mapping and the `record_id_column` do not
+  enter the `content_hash`: a source's content hash is an address, not a digest of its rows,
+  and an explicit `source_id` is a name the user vouches for. This is the rule of every
+  source (two `ArrowTableSource`s given the same `source_id` and schema have the same content
+  hash). It matters for `derived.cached(database)`, whose table is keyed by the content hash:
+  changing the origin, the mapping or the `record_id_column` under the same explicit
+  `source_id` would reuse the rows cached before, so such a change needs a new `source_id`.
+  The default `source_id` does this by itself, since it is built from all three.
 * **`pipeline_hash`** stays schema only.
 * The plain form, `node.as_source()` without `tags_as_data`, keeps today's identity and
   `source_id` (ITL-956).

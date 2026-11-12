@@ -6,6 +6,12 @@ given names. It reads the origin's rows, appends the copies, and runs the standa
 enrichment (``SourceStreamBuilder``), so it is a new root with its own provenance. It is
 defined here, not in ``src/``; the real class would build its rows lazily.
 
+This prototype records the proposal as it was first sent. Its identity (the origin's content
+hash plus the copies) and its default ``source_id`` (``derived:<origin source_id>``) are not
+the final rules: the implemented ``DerivedSource`` uses the root-source identity (class name,
+output schema, ``source_id``) and a default ``source_id`` of ``tags_as_data:<label>:<hex>``
+(design document section 8.10). The captured output is kept as it was.
+
 Shows: keys and schema, types and nullability of the copy, provenance columns, the
 elapsed-time pod and the ``Join`` with ``session``, ``Join`` with the original, hashes
 compared with the origin and with the hand-written recipe (W2), a ``PipelineJob`` run with

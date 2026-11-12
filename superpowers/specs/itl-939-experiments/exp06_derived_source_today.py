@@ -128,8 +128,8 @@ for name, orch in (("sync", None), ("async", AsyncPipelineOrchestrator())):
     job2 = PipelineJob(name=f"stage2_{name}", store=InMemoryArrowDatabase())
     with job2:
         length.pod(node.as_source(), label="len")
-    attempt(f"{name} run", lambda: job2.run(orchestrator=orch) and None)
-    attempt(f"{name} rows", lambda: job2.nodes["len"].as_table().num_rows)
+    attempt(f"{name} run", lambda job=job2, o=orch: job.run(orchestrator=o) and None)
+    attempt(f"{name} rows", lambda job=job2: job.nodes["len"].as_table().num_rows)
 
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "stage2.json"
