@@ -197,6 +197,87 @@ Which axis of Part 2 each of these sits on:
 | That the entry id is hashed with the Arrow hasher | I2 Arrow data hashing |
 | The source-info token format | III3 Column naming |
 
+### 1.2.2 System tags and source-info columns through an operator chain
+
+Two families of hidden columns travel with every row. They are where source identity
+(1.2.1) and the operator chain meet, and both hold hashes.
+
+| Family | Columns | What it records | Is it hashed into row keys? |
+|---|---|---|---|
+| **System tags** | a pair per contributing source: `_tag_source_id::<suffix>` and `_tag_record_id::<suffix>` | which source, and which row of it, this row descends from. The column **name** records the route the row took through multi-input operators | **yes**: the entry id is the Arrow hash of all system-tag columns (names, types and values) plus the input data hash |
+| **Source info** | one per data column: `_source_<column>` | where each data value came from: a source row, or a function invocation | no: provenance only |
+
+Measured at each stage (the row for `id=2`; hashes shortened, all bare `semantic_v0.1` hex):
+
+```
+source1                                              pipeline hash 52eb0af7…
+   _tag_source_id::52eb0af7…                         "source1"
+   _tag_record_id::52eb0af7…                         dbbded85…   fixed_size_binary[16]   = uuid5("source1::row_2")
+   _source_x                                         "source1::row_2::x"
+        │
+        ▼  double  (function pod)                    NAME-PRESERVING
+   _tag_source_id::52eb0af7…                         "source1"
+   _tag_record_id::52eb0af7…                         dbbded85…   large_binary            <- type changed
+   _source_doubled                                   "double:semantic_v0.1:17de3328…:v0:python.function.v0::<uuid7>::doubled"
+        │                                            (the source-info token is REPLACED by the function's)
+        ▼  join with source2                         NAME-EXTENDING: append ::<input pipeline hash>:<position>
+   _tag_source_id::1560128e…::1560128e…:0            "source2"
+   _tag_record_id::1560128e…::1560128e…:0            01e2b591…
+   _tag_source_id::52eb0af7…::6fe7280a…:1            "source1"         52eb0af7 = source1's schema hash
+   _tag_record_id::52eb0af7…::6fe7280a…:1            dbbded85…         6fe7280a = pipeline hash of `double`, the join input
+   _source_y                                         "source2::row_1::y"
+   _source_doubled                                   unchanged
+        │
+        ▼  batch                                     REDUCING: values fold to one digest; append ::<input pipeline hash>
+   _tag_source_id::1560128e…::1560128e…:0::87a24180… "36f89629…"  (bare SHA-256 of the members' source ids)
+   _tag_record_id::1560128e…::1560128e…:0::87a24180… 1ddcf99a…    (uuid5 over the members' record ids)
+   _tag_source_id::52eb0af7…::6fe7280a…:1::87a24180… "6baf7889…"
+   _tag_record_id::52eb0af7…::6fe7280a…:1::87a24180… 7f463412…
+   _source_y                                         ["source2::row_0::y", "source2::row_1::y"]      large_list<large_string>
+   _source_doubled                                   ["double:…::doubled", "double:…::doubled"]
+```
+
+What the name of a system-tag column encodes, piece by piece:
+
+```
+_tag_record_id :: 52eb0af7… :: 6fe7280a… : 1 :: 87a24180…
+└──────┬──────┘   └───┬───┘    └───┬───┘  └┬┘   └───┬───┘
+  which field    schema hash   pipeline   its     pipeline hash of the
+  (source id or  of the        hash of    canonical  stream that Batch /
+   record id)    source        the join   position   GroupBy reduced
+                               input      in the join
+```
+
+Facts measured on this chain:
+
+| Fact | Evidence |
+|---|---|
+| A join is commutative: `join(double, source2)` and `join(source2, double)` give the same pipeline hash `87a24180…` and identical column names | both orders run |
+| Two sources with the same schema are told apart in the name only by position: `merge_join(source1, source3)` gives `…::52eb0af7…::52eb0af7…:0` and `…:1` | run |
+| Every hash inside a column name is a bare structure hash. A structure-hasher change renames every system-tag column in every stored table | names above |
+| The values are bare too: a record id is 16 raw bytes; a folded source id is 64 hex characters with no label | values above |
+| The record-id column is `fixed_size_binary[16]` out of a source and `large_binary` after a function pod. The entry id is an Arrow hash over these columns, so the Arrow type of a system-tag column is part of every downstream row key | types above |
+| A function pod replaces the source-info token of its outputs with its own: uri, the output's `uuid7`, the column. The uri inside carries a labelled structure hash, separated by the same `:` the label uses | `_source_doubled` |
+| Reducing operators turn source info into lists and keep system tags scalar (a digest) | `batch` |
+
+Which axis of Part 2 each piece sits on:
+
+| Piece | Axis |
+|---|---|
+| The column-name grammar (`_tag_…::hash::hash:pos::hash`, separators, which hashes are appended and when) | III3 Column naming |
+| That the hashes in the names are structure hashes | I1 Structure hashing |
+| Which hash is appended (the input's pipeline hash, not its content hash) and the canonical ordering of join inputs | I4 Identity composition |
+| The fold recipe for reducing operators (`uuid5` over record ids, SHA-256 over source ids) | I4 Identity composition |
+| The Arrow type of system-tag and source-info columns | II1 Conversion rules |
+| The source-info token grammar (`{source_id}::{row token}::{column}`; `{uri}::{uuid7}::{column}`) | III3 Column naming |
+| That system tags are hashed into the entry id, and source info is not | I4 Identity composition |
+| How each operator evolves the two families (preserve, extend, reduce) | IV3 Operator behaviour |
+
+So system tags are the point where four axes meet: a change to structure hashing (I1), to
+column naming (III3), to identity composition (I4) or to an operator's behaviour (IV3) each
+changes the **names** of stored columns, which by the developer's rule must show in the path,
+and each changes the entry id, so old rows cannot be found.
+
 ### 1.3 The store on disk
 
 **Anatomy of a path** (the pipeline table of node `double`):
