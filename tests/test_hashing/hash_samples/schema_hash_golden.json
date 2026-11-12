@@ -1,10 +1,10 @@
 {
-  "Schema({x: int})": "semantic_v0.1:158169963faab1bebfc2362a12c0bcd08a151025297bb82bac32f76fd3919892",
-  "Schema({x: int, y: str})": "semantic_v0.1:aea243d4bb7e401c0c64522207f569e3cd4e3bbacbd825ee59858a875b20af3a",
-  "Schema({f: op.File})": "semantic_v0.1:0b6ba627f6df1cc38924fa523ac58eed8794504a3c433ee9996526a6e4d92e99",
-  "Schema({d: op.Directory})": "semantic_v0.1:4771cda927b245f75922f4adbae627f8b326d37562871d00f56bd8f49cf0913a",
-  "Schema({p: op.Path})": "semantic_v0.1:339f1894b80c5992fba7f0a9065aaa8192fb9fa858b631a837df0cc3260781b0",
-  "Schema({x: int, f: op.File})": "semantic_v0.1:5736104378d995bbc5a3b4fb3bbf1d15054a648d1ac357004cbc2a6997265472",
-  "Schema({f: op.File, d: op.Directory})": "semantic_v0.1:eb2bbcffef31c18e291616e46d1d135363a5ccdd5df4ef1ce3bda123e5f3ad27",
-  "Schema({f: op.File | None})": "semantic_v0.1:d03ce7c8cce4c8f4b96932cb4d1198d4b29b30e38180f98c93d0dba7fe53aea3"
+  "Schema({x: int})": "semantic_v1:e2eed73f4a554064d6c3acd3d3b39b81d2ea6164e9326c1412ed820cde586f2c",
+  "Schema({x: int, y: str})": "semantic_v1:1bb91fe0f62d9a633d9602fdc8d1893e60d5819f6693175f4fc5661f90bf8d09",
+  "Schema({f: op.File})": "semantic_v1:422b5d5f9fa8c4b0b2e560d60bedaf3543937aeddba795e4efa4fb75f66f3208",
+  "Schema({d: op.Directory})": "semantic_v1:70ff1e0fc5fe237cef075db91f83a1dcdedfc15bf7e6cc7d7cba0cdb6c4965ac",
+  "Schema({p: op.Path})": "semantic_v1:637fefabd7a76ca3ef2a122e88abcf4cd539244263a198c6a9dca40e02012061",
+  "Schema({x: int, f: op.File})": "semantic_v1:aeb94f7552f1063070e9023ad40b109b1c7053d58a2132038b0ac594a6f1b008",
+  "Schema({f: op.File, d: op.Directory})": "semantic_v1:99970841e88e2fd7564c4c777b75fdcdd54575f704b0a86c4bb5789e1376aa34",
+  "Schema({f: op.File | None})": "semantic_v1:3a6439f73b082ea1e8afbb71602d3ff9b280fae4f237f3f8d87e59a0b4c697b3"
 }

@@ -295,7 +295,7 @@ class TestFunctionSignatureGolden:
     def test_function_object_hash(self):
         hasher = get_default_context().semantic_hasher
         assert hasher.hash_object(golden_fn).to_string() == (
-            "semantic_v1:632a091ad0a15f1d152e5a9fa262be60bf3204d135ddfcdb355f7aee79198951"
+            "semantic_v1:d42b58c4bbd2396e5464de32a2b3d4c3966ec91ed950157cb019969657f0ede0"
         )
 
 
@@ -324,7 +324,7 @@ class TestFunctionPodGolden:
     def test_uri(self, data_function: PythonDataFunction):
         assert data_function.uri == (
             "golden_pod_fn",
-            "semantic_v1:31aba778a6c9ac8dbb60b16fef30be2cae1dff221f29f44ac2cf83950893f9d0",
+            "e25ab1ffe8b41c7e6a226983a213cc0d47a0da78459fb5e20b288ed4482c7ad8",
             "v0",
             "python.function.v0",
         )

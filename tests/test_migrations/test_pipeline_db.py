@@ -327,8 +327,9 @@ class TestMigratePipelineV0ToV1Extended:
         preimage = pa.table(
             {
                 _SYS_TAG_COL: pa.array([_SYS_TAG_VAL], type=pa.large_string()),
+                # The entry-id recipe hashes the raw digest, without its label.
                 constants.INPUT_DATA_HASH_COL: pa.array(
-                    [_INPUT_HASH.to_prefixed_digest()], type=pa.large_binary()
+                    [_INPUT_HASH.digest], type=pa.large_binary()
                 ),
             }
         )
@@ -363,8 +364,9 @@ class TestMigratePipelineV0ToV1Extended:
         preimage = pa.table(
             {
                 _SYS_TAG_COL: pa.array([_SYS_TAG_VAL], type=pa.large_string()),
+                # The entry-id recipe hashes the raw digest, without its label.
                 constants.INPUT_DATA_HASH_COL: pa.array(
-                    [_INPUT_HASH.to_prefixed_digest()], type=pa.large_binary()
+                    [_INPUT_HASH.digest], type=pa.large_binary()
                 ),
             }
         )

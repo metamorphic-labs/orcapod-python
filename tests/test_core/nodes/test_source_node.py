@@ -27,8 +27,8 @@ class TestSourceNodeHashStability:
 
     For tag_schema=Schema({"id": int}), data_schema=Schema({"value": float}),
     name="slot_a":
-      content_hash  = semantic_v1:df0cba56fd880f86584ef89b35ef850bd813c95c114ac3bc84818e195b2175cb
-      pipeline_hash = semantic_v1:3e32b07447e313318744ce498086c21ad136a40596f833c05162088e840ad16e
+      content_hash  = semantic_v1:0d746e4cf3c0e7bf150b64b02a7e7c05603a8285165411a415b2b6f2d57cc822
+      pipeline_hash = semantic_v1:63230a5b2478c091f8fbb68df445144964ca0de0105079a6a738c1e04dbcd510
     """
 
     def test_content_hash_is_deterministic(self, tag_schema, data_schema):
@@ -45,7 +45,7 @@ class TestSourceNodeHashStability:
     def test_content_hash_stable_value(self, tag_schema, data_schema):
         """content_hash must match the value anchored at migration time.
 
-        Digest (hex): b2779d890c22b601f0ed71eb2817138205cc509581b9d7e23186c2f0ec815695
+        Digest (hex): 0d746e4cf3c0e7bf150b64b02a7e7c05603a8285165411a415b2b6f2d57cc822
 
         Note: hash changed in ENG-493 when identity_structure() prefix was updated
         from ``"SourceSpec"`` to ``"source_node"`` to better reflect the node type.
@@ -57,7 +57,7 @@ class TestSourceNodeHashStability:
         expected = ContentHash(
             method="semantic_v1",
             digest=bytes.fromhex(
-                "b2779d890c22b601f0ed71eb2817138205cc509581b9d7e23186c2f0ec815695"
+                "0d746e4cf3c0e7bf150b64b02a7e7c05603a8285165411a415b2b6f2d57cc822"
             ),
         )
         assert node.content_hash() == expected
@@ -76,7 +76,7 @@ class TestSourceNodeHashStability:
     def test_pipeline_hash_stable_value(self, tag_schema, data_schema):
         """pipeline_hash must match the value anchored at migration time.
 
-        Digest (hex): 3e32b07447e313318744ce498086c21ad136a40596f833c05162088e840ad16e
+        Digest (hex): 63230a5b2478c091f8fbb68df445144964ca0de0105079a6a738c1e04dbcd510
         """
         from orcapod.core.nodes.source_node import SourceNode
         from orcapod.types import ContentHash
@@ -85,7 +85,7 @@ class TestSourceNodeHashStability:
         expected = ContentHash(
             method="semantic_v1",
             digest=bytes.fromhex(
-                "3e32b07447e313318744ce498086c21ad136a40596f833c05162088e840ad16e"
+                "63230a5b2478c091f8fbb68df445144964ca0de0105079a6a738c1e04dbcd510"
             ),
         )
         assert node.pipeline_hash() == expected
