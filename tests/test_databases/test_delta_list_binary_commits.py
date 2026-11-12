@@ -117,7 +117,7 @@ def test_read_back_has_the_logical_type(tmp_path: Path) -> None:
     assert all(isinstance(u, uuid.UUID) for ids in rows for u in ids)
 
 
-def _bytes_rows(ids: list[bytes], values: list[list[bytes]]) -> pa.Table:
+def _bytes_rows(ids: list[bytes], values: list[list[bytes | None] | None]) -> pa.Table:
     return pa.table(
         {
             "__record_id": pa.array(ids, pa.large_binary()),
