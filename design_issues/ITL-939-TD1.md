@@ -23,4 +23,4 @@ Left open, tracked elsewhere: the same-name collisions that fail late in `Join`/
 and for a pod output key equal to a tag name (ITL-940); the gaps of the plain
 `node.as_source()` form, which has no system tags and cannot be saved, and whose zero-row
 table before the node has run takes its Arrow types from the Python schema (ITL-956);
-`GroupBy` promoting non-key tags into data (ITL-955).
+`GroupBy` promoting non-key tags into data (ITL-955, fixed separately).
