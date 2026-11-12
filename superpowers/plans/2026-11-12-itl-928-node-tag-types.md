@@ -25,6 +25,10 @@ casts back on every read.
   tags (ecc879b7, approved by the coordinator as its own commit). Part B tests committed as
   strict xfails (`tests/test_databases/test_delta_arrow_type_roundtrip.py`,
   `test_store_read_back_keeps_tag_type`). Nothing pushed yet (coordinator: do not push).
+- 2026-11-12: Part A PR opened: https://github.com/metamorphic-labs/orcapod-python/pull/335
+  (body: ITL-928 part A, no magic word). Rows disagreeing on a column type raise
+  InputValidationError (coordinator option 1). Part B will be a SECOND PR on top, after the
+  developer's decision; still no Delta code. Next: CodeRabbit rounds + CI on #335.
 - Audit scripts: `.untracked/measure.py` (tags, all read points, `[sync|async] [memory|delta|sqlite]`),
   `.untracked/measure2.py` (data columns, all-info columns, operator node, CachedSource),
   `.untracked/rerun_ids.py` (consequence 2), `.untracked/repro_flush_poison.py`.
