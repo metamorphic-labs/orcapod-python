@@ -16,7 +16,6 @@ import pyarrow as pa
 import pytest
 
 from orcapod.config import HashingConfig, OrcapodConfig
-from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
@@ -70,8 +69,11 @@ def _data_frame_source(**kwargs) -> RootSource:
 
 
 # (source class, expected kind, factory, name of a data column)
+InMemorySourceClass = (
+    type[ArrowTableSource] | type[DictSource] | type[ListSource] | type[DataFrameSource]
+)
 IN_MEMORY_SOURCES: list[
-    tuple[type[RootSource], str, Callable[..., RootSource], str]
+    tuple[InMemorySourceClass, str, Callable[..., RootSource], str]
 ] = [
     (ArrowTableSource, "arrow_table", _arrow_table_source, "x"),
     (DictSource, "dict", _dict_source, "x"),
@@ -94,7 +96,12 @@ def _source_id_values(source: RootSource) -> set[str]:
         if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
     ]
     assert columns, "the source has no source_id system tag column"
-    return {v for c in columns for v in table.column(c).to_pylist()}
+    values: set[str] = set()
+    for column in columns:
+        for value in table.column(column).to_pylist():
+            assert isinstance(value, str)
+            values.add(value)
+    return values
 
 
 @pytest.mark.parametrize(
@@ -188,9 +195,7 @@ class TestKindsTellSourcesApart:
 
 def _function_node() -> FunctionJobNode:
     return FunctionJobNode(
-        function_pod=FunctionPod(
-            data_function=PythonDataFunction(double, output_keys="result")
-        ),
+        function_pod=FunctionPod.from_fn(double, output_keys="result"),
         input_stream=make_int_stream(n=3),
         pipeline_database=InMemoryArrowDatabase(),
     )

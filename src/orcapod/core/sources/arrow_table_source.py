@@ -63,7 +63,8 @@ class ArrowTableSource(RootSource):
     tag values but distinct record IDs) and delivered again by a
     ``SideEffectPod``.  No result is paired with the wrong row, because every
     key includes the row's own data hash.  ``source_id`` must be stable too:
-    when omitted it defaults to the table hash, which changes with row order.
+    when omitted it defaults to ``arrow_table:<algorithm label>:<hex>`` of the
+    table hash, which changes with row order.
     Whenever row order can vary between runs, pass an explicit ``source_id``
     and set ``record_id_column`` to a column that is unique per row.
     """
