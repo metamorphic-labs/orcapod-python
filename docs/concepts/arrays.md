@@ -124,6 +124,14 @@ list. The list is configured in the `hash_ignore` object of Orcapod's logical ty
 registration file (`contexts/logical_types.json`); v0.3 has no other way to change it. A
 name that is not one of the three above is an error when the data context is built.
 
+!!! note "Known limitation in v0.3"
+    A list other than the default cannot be used end to end in a pipeline yet. A data
+    context built from your own registration file hashes bare values and Arrow tables with
+    its list, but streams and datagrams find their data context by its key, which is the
+    key of the default context, so their rows are read by the default context, and it
+    refuses a column of another list (ITL-965). In v0.3 the default list, empty, is the
+    one that works everywhere.
+
 The same mechanism serves the other library value types, each with its own names.
 
 ## What cannot be stored
