@@ -171,6 +171,9 @@ def test_two_lists_are_two_types(tmp_path: Path) -> None:
             [_table(strict, Labelled(1, "a")), _table(lenient, Labelled(1, "a"))]
         )
     # The type hash and the schema hash take the identifier, which holds the list.
+    assert strict.arrow_hasher.hash_schema(
+        pa.schema([("x", strict_type)])
+    ) != lenient.arrow_hasher.hash_schema(pa.schema([("x", lenient_type)]))
     assert strict.semantic_hasher.hash_object(
         Labelled
     ) != lenient.semantic_hasher.hash_object(Labelled)
