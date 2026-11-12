@@ -52,8 +52,12 @@ SCRIPT = textwrap.dedent(
 
     import orcapod
     from orcapod import function_pod
-    from orcapod.contexts import get_default_context
+    from orcapod.contexts import get_default_context, resolve_context
     from orcapod.sources import DictSource
+
+    # Building the v0.3 data context names the tensor type without importing torch.
+    assert resolve_context("std:v1:default").context_key == "std:v1:default"
+    assert "torch" not in sys.modules
 
     @function_pod(output_keys="y")
     def double(x: np.ndarray) -> np.ndarray:

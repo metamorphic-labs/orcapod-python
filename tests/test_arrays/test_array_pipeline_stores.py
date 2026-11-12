@@ -79,6 +79,7 @@ def _node(job: PipelineJob, label: str, column: str) -> dict[str, Any]:
 @pytest.mark.parametrize("runner", sorted(RUNNERS))
 @pytest.mark.parametrize("store", sorted(STORES))
 def test_pipeline_keeps_arrays_exact(tmp_path: Path, store: str, runner: str) -> None:
+    """Arrays come back exact through every orchestrator and every store."""
     job = _build(STORES[store](tmp_path))
     RUNNERS[runner](job)
 

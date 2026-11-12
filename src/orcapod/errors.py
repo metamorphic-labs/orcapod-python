@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Self
 
 
 class InputValidationError(Exception):
@@ -21,6 +21,26 @@ class SchemaInconsistencyError(InputValidationError):
 
     ``SchemaInconsistencyError`` is a subclass of ``InputValidationError`` so existing
     ``except InputValidationError`` handlers continue to work.
+    """
+
+
+class TypeIdentityError(ValueError):
+    """Raised when stored values and a registered user class disagree on identity.
+
+    A stored dataclass or pydantic column records its class's identity (name, kind and
+    field types). This error is raised when the class found for that name has a
+    different identity or a different Arrow storage type, or when the column was
+    written by an Orcapod version that did not record the identity. The message names
+    the column where it is known, the class, and both shapes.
+    """
+
+
+class RecursiveTypeError(TypeError):
+    """Raised when a class refers back to itself through its fields.
+
+    Arrow cannot store a recursive struct, so a dataclass or pydantic model whose
+    fields reach the class again (``next: Node | None``) cannot be stored. The message
+    names the field path, e.g. ``Node.next -> Node``.
     """
 
 
@@ -122,6 +142,83 @@ class InconsistentSourceError(ValueError):
     """
 
 
+def _in_table(message: str, table: str | None) -> str:
+    """Prefix ``message`` with the table it concerns, when known."""
+    return message if table is None else f"table {table}: {message}"
+
+
+class NullabilityRecordError(ValueError):
+    """A table's nullability record cannot be read, or a schema cannot be recorded.
+
+    The record is the list of non-nullable column paths Orcapod keeps in a SpiralDB
+    table's key-value metadata (ITL-936). An unknown format or version, a missing chunk, a
+    digest mismatch or a path the table does not have is an error, never ignored.
+
+    Attributes:
+        reason: What is wrong with the record.
+        table: The table, as ``"<project>/<dataset>/<table>"``, added by the caller that
+            knows it; ``None`` otherwise.
+    """
+
+    def __init__(self, reason: str, *, table: str | None = None) -> None:
+        self.reason = reason
+        self.table = table
+        super().__init__(_in_table(f"nullability record: {reason}", table))
+
+
+class NullabilityRecordMismatchError(ValueError):
+    """A write declares different non-nullable columns than the table's record.
+
+    The record is never widened, narrowed or rewritten by a write.
+
+    Attributes:
+        only_in_record: Paths the record lists that the write declares nullable.
+        only_in_write: Paths the write declares non-nullable that the record does not list.
+        table: The table, added by the caller; ``None`` otherwise.
+    """
+
+    def __init__(
+        self,
+        only_in_record: list[str],
+        only_in_write: list[str],
+        *,
+        table: str | None = None,
+    ) -> None:
+        self.only_in_record = list(only_in_record)
+        self.only_in_write = list(only_in_write)
+        self.table = table
+        parts = []
+        if only_in_record:
+            parts.append(
+                f"recorded non-nullable but nullable in the write: {only_in_record}"
+            )
+        if only_in_write:
+            parts.append(f"non-nullable in the write but not recorded: {only_in_write}")
+        super().__init__(
+            _in_table(
+                "the write's nullability differs from the table's nullability "
+                "record (" + "; ".join(parts) + ")",
+                table,
+            )
+        )
+
+
+class NullInNonNullableColumnError(ValueError):
+    """A column declared or recorded non-nullable holds a null.
+
+    Attributes:
+        column: The column path, e.g. ``"quality.snr"`` or ``"spikes[]"``.
+        table: The table, added by the caller; ``None`` otherwise.
+    """
+
+    def __init__(self, column: str, *, table: str | None = None) -> None:
+        self.column = column
+        self.table = table
+        super().__init__(
+            _in_table(f"column {column!r} is non-nullable but holds nulls", table)
+        )
+
+
 class CursorInvalidatedError(Exception):
     """Raised by a ``DynamicSourceProtocol`` implementation when the previous
     cursor is no longer valid and the source state must be rebuilt from scratch.
@@ -190,19 +287,6 @@ class EmptyDataHashMissingError(Exception):
         )
 
 
-class SchemaVersionError(Exception):
-    """Raised when an old schema version is detected at a database path.
-
-    Occurs when a table exists at the unversioned (v0) path but not at the
-    expected versioned path, and the node has not opted in to tolerating
-    the old schema via ``NodeConfig.ignore_schema``.
-
-    To suppress this error, set ``node.node_config = NodeConfig(ignore_schema=("v0",))``
-    and re-run. The node will recompute all results from scratch rather than
-    reading from the v0 cache.
-    """
-
-
 class EphemeralResultMissingError(Exception):
     """Raised when a downstream pod has a cache miss for an ``EmptyData`` input.
 
@@ -234,16 +318,94 @@ class EphemeralResultMissingError(Exception):
         )
 
 
-class StoreWriteError(RuntimeError):
-    """Raised when a node's results or records could not be written to the store.
+class TableListingNotSupportedError(NotImplementedError):
+    """Raised by ``list_table_paths`` when a store cannot enumerate its tables.
 
-    A failed store write always fails the run, whatever the orchestrator's
+    Some stores can read and write a table at a known path but have no way to list
+    the tables they hold (for example a Delta store on cloud storage for which no
+    file system package is installed). Orcapod then cannot look for tables written
+    by an earlier version; it says so in a warning and carries on.
+    """
+
+
+class StoreError(RuntimeError):
+    """Base of the errors raised when the store could not be read or written.
+
+    A store error always fails the run, whatever the orchestrator's
     ``error_policy``: ``error_policy="continue"`` skips rows whose *function*
-    raised, never rows that could not be stored. The run stops at the first
-    failed write. Rows stored before the failure are kept, and re-running the
-    job does not recompute stored function results.
+    raised, never rows whose stored data could not be read or written. Catch
+    ``StoreError`` to handle both ``StoreReadError`` and ``StoreWriteError``.
 
     The backend's own exception is chained as ``__cause__``.
+
+    Attributes:
+        node_label: Label of the node the failure belongs to, or ``None`` when it
+            is not known or not tied to one node.
+        tag: Tag values of the row being processed, or ``None`` when the failure
+            is not tied to one row.
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        node_label: str | None = None,
+        tag: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Create the error.
+
+        Args:
+            *args: The exception arguments, as for any exception.
+            node_label: Label of the node the failure belongs to, if known.
+            tag: Tag values of the row being processed, if known.
+        """
+        self.node_label: str | None = node_label
+        self.tag: dict[str, Any] | None = dict(tag) if tag is not None else None
+        super().__init__(*args)
+
+    @classmethod
+    def in_group(cls, group: BaseExceptionGroup) -> list[Self]:
+        """Return every error of this class in an exception group, nested ones included.
+
+        Args:
+            group: An exception group, such as the one an ``asyncio.TaskGroup``
+                raises.
+
+        Returns:
+            The matching leaves in the order the group holds them.
+        """
+        found: list[Self] = []
+        for exc in group.exceptions:
+            if isinstance(exc, BaseExceptionGroup):
+                found.extend(cls.in_group(exc))
+            elif isinstance(exc, cls):
+                found.append(exc)
+        return found
+
+    def add_context(
+        self, node_label: str | None = None, tag: Mapping[str, Any] | None = None
+    ) -> None:
+        """Fill in the node label and row tag where the raising site did not know them.
+
+        Called by the code that runs the node or the row as the error passes
+        through it. Values that are already set are kept.
+
+        Args:
+            node_label: Label of the node the failure belongs to.
+            tag: Tag values of the row being processed.
+        """
+        if self.node_label is None:
+            self.node_label = node_label
+        if self.tag is None and tag is not None:
+            self.tag = dict(tag)
+
+
+class StoreWriteError(StoreError):
+    """Raised when a node's results or records could not be written to the store.
+
+    The run stops at the first failed write. Rows stored before the failure are
+    kept, and re-running the job does not recompute stored function results.
+    A write that fails because the stored table cannot be read raises
+    ``StoreReadError`` instead.
 
     Attributes:
         record_path: Path of the table the write was for, relative to the
@@ -276,29 +438,10 @@ class StoreWriteError(RuntimeError):
             flush: Whether committing pending writes failed.
         """
         self.record_path: tuple[str, ...] = tuple(record_path)
-        self.node_label: str | None = node_label
-        self.tag: dict[str, Any] | None = dict(tag) if tag is not None else None
         self.flush: bool = flush
-        super().__init__(self.record_path, node_label, tag)
-
-    @classmethod
-    def in_group(cls, group: BaseExceptionGroup) -> "list[StoreWriteError]":
-        """Return every ``StoreWriteError`` in an exception group, nested ones included.
-
-        Args:
-            group: An exception group, such as the one an ``asyncio.TaskGroup``
-                raises.
-
-        Returns:
-            The ``StoreWriteError`` leaves in the order the group holds them.
-        """
-        found: list[StoreWriteError] = []
-        for exc in group.exceptions:
-            if isinstance(exc, BaseExceptionGroup):
-                found.extend(cls.in_group(exc))
-            elif isinstance(exc, cls):
-                found.append(exc)
-        return found
+        super().__init__(
+            self.record_path, node_label, tag, node_label=node_label, tag=tag
+        )
 
     def add_context(
         self, node_label: str | None = None, tag: Mapping[str, Any] | None = None
@@ -312,10 +455,7 @@ class StoreWriteError(RuntimeError):
             node_label: Label of the node that owns the write.
             tag: Tag values of the row being stored.
         """
-        if self.node_label is None:
-            self.node_label = node_label
-        if self.tag is None and tag is not None and not self.flush:
-            self.tag = dict(tag)
+        super().add_context(node_label, None if self.flush else tag)
 
     def __str__(self) -> str:
         """Describe the failed write: node, row, table and the backend's reason."""
@@ -341,4 +481,125 @@ class StoreWriteError(RuntimeError):
         return (
             f"Could not write to the store for {where}{row} "
             f"(table {'/'.join(self.record_path)!r}){reason}. " + retry
+        )
+
+
+class StoreReadError(StoreError):
+    """Raised when a stored table exists but could not be read.
+
+    A table that does not exist reads as empty. A table that exists but cannot be
+    read (a missing or damaged data file, a log the backend cannot load, columns
+    whose stored data no longer matches the table schema) raises this error
+    instead, so stored results never look dropped. Its rows are not recomputed
+    and the table is not overwritten.
+
+    Attributes:
+        table: Location of the table that could not be read (a directory or a
+            cloud URI).
+        record_path: Path of the table, including the database view's prefix.
+        node_label: Label of the node whose read failed, or ``None`` when the
+            read did not happen while a node ran.
+        tag: Tag values of the row being processed when the read failed, or
+            ``None`` when the read was not for one row.
+    """
+
+    def __init__(self, table: str, record_path: tuple[str, ...]) -> None:
+        """Create the error for one table that could not be read.
+
+        Args:
+            table: Location of the table (a directory or a cloud URI).
+            record_path: Path of the table, including the database view's prefix.
+        """
+        self.table: str = table
+        self.record_path: tuple[str, ...] = tuple(record_path)
+        super().__init__(table, self.record_path)
+
+    def __str__(self) -> str:
+        """Describe the failed read: table, node, row and the backend's reason."""
+        node = f" for node {self.node_label!r}" if self.node_label else ""
+        row = f" for row {self.tag!r}" if self.tag else ""
+        cause = self.__cause__
+        reason = f": {type(cause).__name__}: {cause}" if cause is not None else ""
+        return (
+            f"Could not read the stored table at {self.table!r}{node}{row}{reason}. "
+            "The table exists, so its rows are not treated as missing and the table "
+            "was not overwritten."
+        )
+
+
+class SideEffectLogDataContextError(StoreError):
+    """Raised when a side-effecting node finds completions logged under another data context.
+
+    A node whose run is an external action finds what it already did by keys hashed
+    under its data context: a side-effect pod in its invocation log, a function pod
+    that takes the invocation context (``ctx_arg``) in its function tables.
+    Completions stored under another data context cannot be matched with current
+    inputs: tables written by Orcapod up to v0.2 (an older table layout, data context
+    ``std:v0.1:default``), or rows of another data context in the current tables
+    (ITL-944). Running the node would perform every side effect again. Unlike a
+    computed result, a side effect cannot be taken back, so the node raises this
+    error before it does anything and leaves the tables as they are. Other function,
+    operator and source tables do not fail this way: there, such rows are reported,
+    skipped and computed again.
+
+    Tables written by Orcapod up to v0.2 are found by name: every table at an older
+    layout stored under the node's function or pod name in the job counts,
+    whatever hashes its path holds (ITL-954). A table of another function or pod
+    with the same name in the same job, or of another node of the same function,
+    therefore raises this error too; ``record_paths`` names every table found.
+
+    A fresh store is not a safe way around this error: it holds no completions, so on
+    it the node performs every side effect again. Run the node on a fresh store only
+    when a repeated delivery is acceptable; otherwise keep using the Orcapod version
+    that wrote the tables. Migrating stored rows to the current data context is
+    planned.
+
+    Attributes:
+        record_paths: Paths, from the root of the store, of the tables holding such
+            completions.
+        record_path: The first of ``record_paths``.
+        found_context: Data context key of the completions that do not match.
+        current_context: Data context key of the node.
+        node_label: Label of the node.
+    """
+
+    def __init__(
+        self,
+        record_paths: tuple[tuple[str, ...], ...],
+        found_context: str,
+        current_context: str,
+        node_label: str | None = None,
+    ) -> None:
+        """Create the error for the tables of one node.
+
+        Args:
+            record_paths: Paths of the tables holding completions that do not match.
+            found_context: Data context key of those completions.
+            current_context: Data context key of the node.
+            node_label: Label of the node, if known.
+        """
+        self.record_paths: tuple[tuple[str, ...], ...] = tuple(
+            tuple(path) for path in record_paths
+        )
+        self.record_path: tuple[str, ...] = self.record_paths[0]
+        self.found_context: str = found_context
+        self.current_context: str = current_context
+        super().__init__(
+            self.record_paths, found_context, current_context, node_label=node_label
+        )
+
+    def __str__(self) -> str:
+        """Describe the tables, both data contexts and the remedy."""
+        node = f"Node {self.node_label!r}" if self.node_label else "This node"
+        tables = ", ".join(repr("/".join(path)) for path in self.record_paths)
+        return (
+            f"{node} performs side effects, and its stored completions were logged "
+            f"under the data context {self.found_context!r} (in {tables}), but the "
+            f"node runs under {self.current_context!r}. They cannot be matched with "
+            "current inputs, so running the node would perform every side effect "
+            "again; nothing was delivered or written. Keep using the Orcapod "
+            "version that wrote these tables; they are left in place and can be "
+            "migrated to the current data context later. A fresh store holds no "
+            "completions, so on it the node performs every side effect again: use "
+            "one only when a repeated delivery is acceptable."
         )

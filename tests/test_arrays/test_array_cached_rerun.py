@@ -96,6 +96,7 @@ def _run(store: Path, counter: Path, mode: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_cached_rerun_in_fresh_process(tmp_path: Path, mode: str) -> None:
+    """A cached re-run in a fresh process calls no pod and reads every array back exactly."""
     from tests.test_arrays.array_cases import ARRAYS, NUMERIC
 
     store, counter = tmp_path / "store", tmp_path / "calls.txt"

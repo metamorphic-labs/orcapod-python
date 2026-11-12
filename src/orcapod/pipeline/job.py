@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -12,11 +13,22 @@ from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.side_effects import SideEffectJobNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
-from orcapod.errors import StoreWriteError
+from orcapod.contexts.stored import (
+    report_unclaimed_tables,
+    unclaimed_tables_written_before_v03,
+)
+from orcapod.errors import (
+    StoreError,
+    StoreReadError,
+    StoreWriteError,
+    TableListingNotSupportedError,
+)
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
+from orcapod.databases.utils import as_table_committing
 from orcapod.types import CacheMode, NodeConfig
+from orcapod.utils.store_errors import flush_best_effort
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,34 +42,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-def _flush_best_effort(
-    run_error: BaseException, *databases: ArrowDatabaseProtocol
-) -> None:
-    """Flush each database, noting instead of raising if a flush fails.
-
-    Used when a run has already failed: the run's own error is the one to report,
-    and a second failure while committing the writes that did succeed must not
-    replace it. A flush failure is logged and added as a note to ``run_error``,
-    so the caller learns that pending results may not have been stored.
-
-    Args:
-        run_error: The error the run failed with, which the caller re-raises.
-        *databases: The databases to flush.
-    """
-    for database in databases:
-        try:
-            database.flush()
-        except Exception as flush_error:
-            logger.exception(
-                "Could not flush pending writes after the run failed; "
-                "the rows they hold were not stored"
-            )
-            run_error.add_note(
-                "Flushing pending writes after this failure also failed "
-                + f"({type(flush_error).__name__}: {flush_error}); results that were "
-                + "still pending may not have been stored."
-            )
+_PENDING_BEFORE_RUN_NOTE = (
+    "These writes were left pending in the store before this run started (written "
+    "without a flush, or by a run that failed). The run stopped before computing "
+    "anything."
+)
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -426,6 +415,52 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)
 
+    def _report_unclaimed_tables_written_before_v03(
+        self, excluded_hashes: set[str]
+    ) -> None:
+        """Report, once per run, the pre-v0.3 tables no node of this job reports itself.
+
+        A function or side-effect node looks under its own name in the store and
+        reports, or refuses, the tables an earlier version of Orcapod wrote there.
+        Operator caches and cached sources have no name in their path that survives
+        a change of hashes, and a node that left the job has no node to report it.
+        This lists the tables stored under the job's name once and reports one
+        total of what is left (ITL-954). The tables are not read.
+
+        Args:
+            excluded_hashes: Keys of the nodes this run leaves out (an unbound
+                source and everything downstream of it). Such a node does not
+                run, so it reports nothing itself and claims no table.
+        """
+        if self._store is None:
+            return
+        pipeline_db = self._store.at(*self._name)
+        claimed: set[tuple[str, ...]] = set()
+        for node_hash, node in (self._persistent_node_map or {}).items():
+            if node_hash in excluded_hashes:
+                continue
+            if isinstance(node, FunctionJobNode):
+                name_path = node.node_name_path
+                if name_path:
+                    claimed.update({name_path, ("_result",) + name_path})
+            elif isinstance(node, SideEffectJobNode):
+                claimed.add(node.node_uri)
+        try:
+            unclaimed = unclaimed_tables_written_before_v03(pipeline_db, claimed)
+        except TableListingNotSupportedError as exc:
+            logger.info(
+                "The store cannot list its tables (%s), so tables written by an "
+                "earlier version of Orcapod are reported only where a node finds "
+                "them at its own path.",
+                exc,
+            )
+            return
+        if unclaimed:
+            report_unclaimed_tables(
+                pipeline_db.base_path,
+                [pipeline_db.base_path + path for path in unclaimed],
+            )
+
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()
     # ------------------------------------------------------------------
@@ -734,6 +769,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         orchestrator: "SyncPipelineOrchestrator | AsyncPipelineOrchestrator | None" = None,
         observer: "ExecutionObserverProtocol | None" = None,
         materialize_results: bool = True,
+        commit_every_rows: int = 100,
     ) -> "PipelineJob":
         """Execute the resolvable subgraph of this job in place.
 
@@ -755,22 +791,49 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 the duration of the run. When ``False`` each node's buffer is
                 released as soon as the node completes, reducing peak memory.
                 This setting does not affect database persistence or post-run
-                result access — DB records are written regardless, and
-                ``job.nodes["label"].get_all_records()`` works the same in
-                either case.
+                result access: DB records are written regardless, and
+                ``job.nodes["label"]`` returns the same rows from
+                ``as_table()`` and ``iter_data()`` in either case, on either
+                orchestrator. An operator node with the default
+                ``cache_mode=OFF`` (the only mode a job sets) keeps its output
+                in memory and stores nothing. Its ``get_all_records()`` returns
+                ``None`` when no matching records exist; records from an earlier
+                LOG run remain readable after switching to OFF.
+            commit_every_rows: How many rows a function node processes between
+                commits of its results and pipeline records to the store
+                (default 100). Each node also commits when it finishes, before a
+                failed run raises, and the job commits at its end. On a durable
+                store (``DeltaTableDatabase``) a hard crash (power loss, killed
+                process) loses at most the rows of the running node since its
+                last commit; re-running the job recomputes only those. A larger
+                value commits less often (faster, fewer files); ``1`` commits
+                after every row. A node run on its own, outside ``run()``,
+                commits after every row. It must be smaller than the store's
+                ``batch_size`` when the store has one (``DeltaTableDatabase``,
+                default 1000): the store commits every pending table by itself
+                once one table's pending rows reach that size, which would
+                break the node's results-before-records commit order.
 
         Returns:
             ``self`` — the same ``PipelineJob`` instance, with
             ``_has_run`` and ``_run_id`` set.
 
         Raises:
-            ValueError: If no store is set.
+            ValueError: If no store is set, or ``commit_every_rows`` is not a
+                positive integer smaller than the store's ``batch_size``.
             RuntimeError: If no pipeline has been compiled.
             StoreWriteError: If a node's results or records could not be written
                 to the store, whatever the orchestrator's ``error_policy``. The run
                 stops at the first failed write. Writes that succeeded before it
                 are flushed first, so rows stored before the failure are kept, and
                 re-running the job does not recompute stored function results.
+                A failed commit of a node's batch names the node but no row
+                (``flush=True``): the batch's writes stay pending and are retried
+                once by the flush that follows the failure.
+            StoreReadError: If a stored table exists but could not be read,
+                whatever the orchestrator's ``error_policy``, also when the read
+                was needed to write a node's results. Its rows are not recomputed
+                and the table is not overwritten.
         """
         import hashlib
         import uuid
@@ -778,10 +841,31 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.observer import NoOpObserver
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
+        if (
+            isinstance(commit_every_rows, bool)
+            or not isinstance(commit_every_rows, int)
+            or commit_every_rows < 1
+        ):
+            raise ValueError(
+                "commit_every_rows must be a positive integer (rows per commit), "
+                f"got {commit_every_rows!r}"
+            )
         if not self._compiled:
             raise RuntimeError(
                 "PipelineJob has no compiled pipeline. "
                 "Record invocations inside a 'with job:' block first."
+            )
+        table_committing = as_table_committing(self._store)
+        if (
+            table_committing is not None
+            and commit_every_rows >= table_committing.batch_size
+        ):
+            raise ValueError(
+                f"commit_every_rows={commit_every_rows} must be smaller than the "
+                f"store's batch_size={table_committing.batch_size}: the store commits a "
+                "table by itself once it holds batch_size pending rows, which could "
+                "commit pipeline records before their results. Use a smaller "
+                "commit_every_rows, or create the store with a larger batch_size."
             )
         if self._store is None:
             raise ValueError(
@@ -832,6 +916,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             elif any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
                 excluded_hashes.add(node_hash)
 
+        self._report_unclaimed_tables_written_before_v03(excluded_hashes)
+
         # --- Build execution OrcaDAG from existing node objects (no cloning) ---
         exec_dag: OrcaDAG = OrcaDAG()
         for node_hash, node in self._persistent_node_map.items():
@@ -853,9 +939,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         effective_observer = observer or NoOpObserver()
         run_id = uuid.uuid4().hex[:16]
 
-        # Snapshot hash: SHA-256 of sink-node content hashes for the run URI.
+        # Snapshot hash: SHA-256 of sink-node content digests for the run URI.
+        # Digests only: a hash label is never part of a hash input.
         leaf_hashes = sorted(
-            node.content_hash().to_string()
+            node.content_hash().to_hex()
             for node in exec_dag.nodes()
             if not exec_dag.successors(node) and hasattr(node, "content_hash")
         )
@@ -865,34 +952,61 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db = self._store.at(*self._name)
         result_db = pipeline_db.at("_result")
 
+        # A store that commits a table by itself at batch_size: commit what it already
+        # holds pending (writes made without a flush, or a failed run's batches) before
+        # this run writes. Those rows would otherwise count towards a table's
+        # batch_size, which could then be reached mid-run and commit this run's pipeline
+        # records ahead of their results (ITL-919).
+        if table_committing is not None:
+            try:
+                pipeline_db.flush()
+            except StoreError as exc:
+                exc.add_note(_PENDING_BEFORE_RUN_NOTE)
+                raise
+            except Exception as exc:
+                flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
+                flush_error.add_note(_PENDING_BEFORE_RUN_NOTE)
+                raise flush_error from exc
+
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         try:
-            effective_orchestrator.run(
-                exec_dag,
-                observer=effective_observer,
-                run_id=run_id,
-                pipeline_uri=pipeline_uri,
-                materialize_results=materialize_results,
-            )
+            with contextlib.ExitStack() as batched:
+                # Function nodes commit every commit_every_rows rows (ITL-919).
+                for node in exec_dag.nodes():
+                    if isinstance(node, FunctionJobNode):
+                        batched.enter_context(
+                            node._batched_commits(commit_every_rows)  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' commit cadence
+                        )
+                effective_orchestrator.run(
+                    exec_dag,
+                    observer=effective_observer,
+                    run_id=run_id,
+                    pipeline_uri=pipeline_uri,
+                    materialize_results=materialize_results,
+                )
         except Exception as run_error:
             # Commit the writes that did succeed before the failure, so their rows
             # do not look dropped, then report the failure itself.
-            _flush_best_effort(run_error, pipeline_db, result_db)
+            flush_best_effort(run_error, pipeline_db, result_db)
             raise
 
-        # Flush databases.
+        # Flush databases. Every view of the store shares one set of pending
+        # batches, so a failed batch can leave the ones after it unwritten.
+        pending_note = (
+            "Writes that were still pending when the flush failed, such as a "
+            + "cache_mode=LOG operator's output or a node's last records, may not "
+            + "have been stored."
+        )
         try:
             pipeline_db.flush()
             result_db.flush()
+        except StoreReadError as exc:
+            # A stored table could not be read: report the read failure itself.
+            exc.add_note(pending_note)
+            raise
         except Exception as exc:
             flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
-            # Every view of the store shares one set of pending batches, so a failed
-            # batch can leave the ones after it unwritten.
-            flush_error.add_note(
-                "Writes that were still pending when the flush failed, such as a "
-                + "cache_mode=LOG operator's output or a node's last records, may not "
-                + "have been stored."
-            )
+            flush_error.add_note(pending_note)
             raise flush_error from exc
 
         # Mutate self in place.

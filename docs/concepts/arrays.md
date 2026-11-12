@@ -28,9 +28,14 @@ for tag, data in scale.pod(source).iter_data():
 !!! warning "v0.3 changed the array format"
     Orcapod v0.2 stored arrays as `.npy` files under the extension name `numpy.ndarray` and
     hashed the file. v0.3 replaces both, as described below, and does not migrate older
-    stores. Under v0.3, every node that handles arrays computes again into new tables, and its
-    v0.2 results are no longer returned. They stay on disk, readable with v0.2. Start v0.3
-    pipelines with a fresh store, or keep using v0.2 for an existing one. A migration is
+    stores. Every node that handles arrays, and every node downstream of an array column, gets
+    new tables in v0.3. Because v0.3 also changed every hash of Arrow data, v0.3 reuses no
+    result of a store written by v0.2: it ignores the v0.2 rows and computes every input
+    again (see [A store written by an older version](function-pods.md#a-store-written-by-an-older-version)).
+    Nodes that perform side effects are the exception: a side-effect pod, or a function pod
+    that takes the invocation context, does not run again on such a store but raises
+    `SideEffectLogDataContextError` before it delivers anything.
+    The v0.2 tables and rows stay on disk unchanged, readable with v0.2. A migration is
     planned after v0.3 (ITL-889).
 
 ## What counts as the same array
@@ -198,8 +203,12 @@ for tag, data in scale_tensor.pod(tensors).iter_data():
 
 **A tensor is a different type from an array.** A tensor and an ndarray with equal dtype,
 shape and values are stored in the same struct, with the same bytes, but under the extension
-name `orcapod.torch_tensor` and the hash label `torch_tensor_v1`. So their hashes differ, and
-a pod that declares `x: torch.Tensor` cannot take an `np.ndarray` column (or the reverse).
+name `orcapod.torch_tensor` and the hash label `torch_tensor_v1`. The extension name is part
+of the type's [identifier](logical-type-identifiers.md), which is hashed with every column,
+schema and type: a tensor column and an array column never hash the same, with or without
+rows. The value digest itself is shared, so inside an untyped Python structure (a `dict` or
+`list` hashed directly) a tensor and an equal array hash the same. A pod that declares
+`x: torch.Tensor` cannot take an `np.ndarray` column (or the reverse).
 Convert at the pod boundary when you need to: `torch.from_numpy(a)` or `t.numpy()`.
 
 **What counts as the same tensor.** Dtype, shape and element bits, exactly as for arrays. These

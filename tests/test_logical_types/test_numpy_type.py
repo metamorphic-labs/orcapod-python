@@ -15,6 +15,7 @@ class TestLogicalNumpyArrayProtocol:
         assert isinstance(LogicalNumpyArray(), LogicalTypeProtocol)
 
     def test_logical_type_name(self):
+        """The logical type name is ``orcapod.ndarray``."""
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         assert LogicalNumpyArray().logical_type_name == "orcapod.ndarray"
@@ -25,6 +26,7 @@ class TestLogicalNumpyArrayProtocol:
         assert LogicalNumpyArray().python_type is np.ndarray
 
     def test_arrow_ext_name(self):
+        """The Arrow extension name is ``orcapod.ndarray``."""
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         assert (
@@ -33,6 +35,7 @@ class TestLogicalNumpyArrayProtocol:
         )
 
     def test_arrow_ext_storage_type(self):
+        """The Arrow storage type is the shared array struct."""
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         from orcapod.logical_types.array_format import ARRAY_STORAGE_TYPE
@@ -57,6 +60,7 @@ class TestLogicalNumpyArrayProtocol:
 
 class TestLogicalNumpyArrayStorage:
     def test_python_to_storage_returns_the_array_struct_row(self):
+        """``python_to_storage`` returns the array struct row: dtype tag, shape and data."""
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         arr = np.array([1.0, 2.0, 3.0])
@@ -64,6 +68,7 @@ class TestLogicalNumpyArrayStorage:
         assert result == {"dtype": "float64", "shape": [3], "data": arr.tobytes()}
 
     def test_object_dtype_raises(self):
+        """``python_to_storage`` refuses object arrays."""
         from orcapod.logical_types.numpy_type import LogicalNumpyArray
 
         arr = np.array([1, "hello", None], dtype=object)
@@ -123,6 +128,7 @@ class TestLogicalNumpyArrayRoundTrip:
         assert np.array_equal(result["y"], arr["y"])
 
     def test_fortran_order_reads_back_c_order(self):
+        """A Fortran-ordered array reads back C-contiguous with the same values."""
         # Memory order is not part of an array's identity: storage is C order.
         arr = np.asfortranarray(np.array([[1, 2], [3, 4]], dtype=np.float64))
         result = self._rt(arr)

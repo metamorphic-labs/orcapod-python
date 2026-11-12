@@ -21,8 +21,9 @@ decided:
 - A NumPy array and a PyTorch tensor are distinct types (November 10).
 - The extension and logical type name `orcapod.ndarray` and the hash label `ndarray_v1`
   (name confirmed November 11).
-- D-PATH: the new logical type name moves the table paths of nodes with array columns, and of
-  nothing else (agreed November 11).
+- D-PATH: the new logical type name moves the table paths of nodes with array columns and the
+  pipeline and operator tables of every node downstream of one (agreed November 11; scope
+  stated precisely in E).
 - `longdouble`/`clongdouble`, unit-less datetimes and timedeltas, and titled structured dtypes
   are refused in v0.3 (November 11).
 
@@ -52,11 +53,15 @@ definition and the hash label below are public commitments once v0.3 is tagged.
 - Masked arrays, object dtype, `StringDType`, `longdouble` and unit-less datetimes are refused at
   write time with a `ValueError` naming the column and the dtype. A NumPy scalar returned where
   `np.ndarray` is declared is refused at the pod (ITL-883).
-- The new logical type name moves the **pipeline hash of every node that has an array column, and
-  only those**. v0.3 therefore builds new tables for the array nodes and leaves every v0.2
-  table that holds array values untouched (verified, see E). It may append rows to an existing
-  result table of a pod that takes arrays but outputs none; that table holds no array column. This is a deliberate table
-  path change for array nodes (D-PATH, agreed by the developer, November 11).
+- The new logical type name moves the **pipeline hash of every node that has an array column,
+  and, because pipeline hashes are Merkle-chained, of every node downstream of one**, even
+  when that node has no array column. Nodes with no array column upstream keep their hash.
+  v0.3 therefore builds new tables for the array nodes and new pipeline and operator tables
+  for their descendants, and leaves every v0.2 table untouched (verified, see E). It may
+  append rows to an existing result table of a pod that takes arrays but outputs none; that
+  table holds no array column. An array-free pod downstream keeps its result table and reuses
+  its results. This is a deliberate table path change (D-PATH, agreed by the developer,
+  November 11).
 - Old-data detection and migration are deferred to ITL-889 (developer, November 10). Section E
   states the known consequence for the CHANGELOG.
 - The NumPy-neutral pieces (storage struct, digest) live in one module that `torch.Tensor`
@@ -250,7 +255,7 @@ structured field names, structured field order (at every nesting depth).
 | D6 | object dtype, `StringDType` | Refused, naming column and dtype. | ITL-883 defect 3 becomes a clear error. |
 | D7 | Subclasses (`np.matrix`, `np.recarray`, `np.memmap`, user subclasses) | **Accepted and read back as plain `np.ndarray`**; documented. Hash equals the base-class value's. Rejecting them would break `recarray`/`memmap` users for no gain; the value is fully preserved. | `np.matrix` reads back as a 2-D ndarray. |
 | D8 | NumPy scalar returned where `np.ndarray` is declared | Refused at the pod with a `TypeError` naming the output key, the declared type and the returned type (ITL-883 defect 2). Arrays are never wrapped implicitly (type strictness). | `x * 2` on a 0-d array returns a scalar; users write `np.asarray(...)`. |
-| D-PATH | Logical type name | `orcapod.ndarray` (see B), which moves the pipeline hash, and so the table path, of every node with an array column, and of nothing else. Agreed November 11. | v0.2 tables are never mixed with v0.3 rows (E). Old tables stay as they are. |
+| D-PATH | Logical type name | `orcapod.ndarray` (see B), which moves the pipeline hash, and so the table path, of every node with an array column and of every node downstream of one (Merkle chain); nodes with no array column upstream do not move. Agreed November 11. | v0.2 tables are never mixed with v0.3 rows (E). Old tables stay as they are. |
 
 ---
 
@@ -274,6 +279,17 @@ process):
   input hashes. Those tables hold no array column, so the append cannot make them unreadable.
 - So under v0.3 the array nodes **recompute every row once**, and their v0.2 results are no longer
   returned. Nothing is damaged and no table becomes unreadable.
+- **Descendants without an array column move too** (CodeRabbit round on 1cf5eed4, November 11).
+  A node's pipeline hash includes its upstream's, so every node downstream of an array column
+  gets a new pipeline hash, and a new pipeline or operator table, even with no array column
+  of its own. Its function result table keeps its path when its function identity has no
+  array, so its results are reused, not recomputed. Verified on v0.2.0 against this
+  branch: for `source(x: ndarray, n: int) -> DropDataColumns(["x"]) -> plus_one(n)`, the
+  `plus_one` pipeline hash moves from `7c13dce1…` to `9f5326e3…`, while `plus_one` over an
+  array-free source keeps `b2d5c5d7…`. `tests/test_arrays/test_array_v02_store.py` pins this
+  on the v0.2 store fixture (`after_drop`: no function call, v0.2 result table reused, new
+  pipeline table), and pins that `total`'s shared result table keeps its v0.2 rows next to
+  the new rows under distinct record ids.
 
 **The rejected alternative** (keeping the name `numpy.ndarray` for the type hash, so paths
 stay): new-format rows are appended into the v0.2 tables. Delta accepts the append, the next
@@ -352,7 +368,8 @@ Risks:
    re-run in a fresh process is verified with the real type
    (`tests/test_arrays/test_array_cached_rerun.py`).
 4. **Golden churn from #284.** #284 merged first; the moved entries are listed in G and in the PR.
-5. **D-PATH is a table path change for array nodes.** Agreed by the developer, November 11.
+5. **D-PATH is a table path change for array nodes and their descendants.** Agreed by the
+   developer, November 11.
 
 Nothing was cut: the extra golden pins, the docs worked example and the `longdouble` refusal
 are all in the PR.

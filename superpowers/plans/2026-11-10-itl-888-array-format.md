@@ -95,15 +95,13 @@ def test_digest_separates_fields():
 
 
 def test_storage_type():
+    # Children are nullable at the Arrow level (spec A1, finding F1): Polars drops
+    # nested non-null flags, so the logical type enforces non-null instead.
     assert ARRAY_STORAGE_TYPE == pa.struct(
         [
-            pa.field("dtype", pa.large_string(), nullable=False),
-            pa.field(
-                "shape",
-                pa.large_list(pa.field("item", pa.int64(), nullable=False)),
-                nullable=False,
-            ),
-            pa.field("data", pa.large_binary(), nullable=False),
+            pa.field("dtype", pa.large_string()),
+            pa.field("shape", pa.large_list(pa.int64())),
+            pa.field("data", pa.large_binary()),
         ]
     )
 ```
@@ -243,3 +241,35 @@ Plan (mechanical, coordinator-scoped; no behaviour change beyond keeping both si
 3. Golden: `git diff origin/main -- tests/test_hashing/golden/` must equal this PR's approved diff.
 4. Verify: pytest on 3.11/3.12/3.13, ruff check, ruff format --check, basedpyright exit code.
 5. Push; wait for CI + CodeRabbit on new head; read review bodies + inline threads.
+
+Done (2026-11-11): merged cf4f67c7 (CHANGELOG conflict) and a4e4a3e5 (DESIGN_ISSUES conflict),
+both additive; golden diff vs main unchanged. Decisions restated as decided (coordinator,
+developer confirmation November 11; ITL-889, ITL-911 deferred).
+
+### CodeRabbit round on 75f8959d (contained bug fixes, TDD)
+
+1. `_dtype_from_value`: a structured entry whose name is not a string or whose shape is not
+   a list of non-negative ints raised `TypeError` (or NumPy's own `ValueError`); raise the
+   documented "malformed array dtype tag entry" `ValueError`. Test: extend the parametrized
+   read-path test in `tests/test_arrays/test_array_value_format.py`.
+2. `canonical_array`: use `np.ndarray.view(value, np.ndarray)` so a subclass overriding
+   `view` cannot change the stored or hashed values (D7: subclasses are plain arrays). Test:
+   a subclass whose `view` returns other values stores and hashes like its base array.
+3. Body pre-merge checks: ITL-889 is deferred (referenced, not targeted); changelog entries
+   from #287/#296 come from merging main; docstring coverage declined as in earlier rounds.
+
+### CodeRabbit round on 1cf5eed4 (coordinator decisions, 2026-11-11)
+
+- Plan's storage-type test: nullable children (done, 6ce706cf).
+- (A) Path-move scope: pipeline hashes are Merkle-chained, so the pipeline/operator tables of
+  every node downstream of an array column move too; result tables of array-free pods keep
+  their path (no recompute). Verified v0.2.0 vs branch: source(x, n) -> DropDataColumns(['x'])
+  -> plus_one(n) pipeline hash 7c13dce1 -> 9f5326e3; array-free lineage b2d5c5d7 unchanged.
+  Fix wording in spec, CHANGELOG, docs/concepts/arrays.md, DESIGN_ISSUES, PR description.
+  New fixture test: add `mixed` source -> DropDataColumns(['x']) -> `plus_two(n)` (label
+  `after_drop`) to `v02_store_pods.build_job`, regenerate the archive with v0.2.0
+  (`git archive v0.2.0`), then assert under v0.3: after_drop calls its function 0 times, its
+  pipeline table is new, its result table is the v0.2 one; `total`'s shared result table holds
+  the v0.2 rows unchanged plus new rows under new record ids, and reads back correctly.
+- (B) Polars ext metadata: declined, follow-up ITL-917.
+- (C) Windows: map ':' to '!' in archive member names on win32 (unverified on Windows).

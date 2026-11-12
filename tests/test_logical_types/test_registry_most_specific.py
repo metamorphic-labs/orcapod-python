@@ -56,6 +56,7 @@ class LogicalLabeled(BaseLogicalType):
 
 
 def test_ndarray_subclasses_resolve_to_the_array_type() -> None:
+    """NumPy's own ndarray subclasses resolve to the array logical type."""
     registry = LogicalTypeRegistry(logical_types=[LogicalNumpyArray()])
     for sub in (np.matrix, np.recarray, np.memmap):
         lt = registry.get_by_python_type(sub)
@@ -63,6 +64,7 @@ def test_ndarray_subclasses_resolve_to_the_array_type() -> None:
 
 
 def test_registered_subclass_wins_for_itself_and_its_subclasses() -> None:
+    """A registered subclass wins for itself and its subclasses, in any registration order."""
     for order in ("array_first", "subclass_first"):
         array_lt, labeled_lt = LogicalNumpyArray(), LogicalLabeled()
         types = (

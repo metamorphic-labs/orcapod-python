@@ -36,24 +36,15 @@ class PythonTypeHandlerRegistry:
     """
 
     def __init__(
-        self,
-        handlers: list[tuple[type, "PythonTypeHandlerProtocol"]] | None = None,
-        deferred_handlers: list[dict[str, str]] | None = None,
+        self, handlers: list[tuple[type, "PythonTypeHandlerProtocol"]] | None = None
     ) -> None:
         """
         Args:
             handlers: Optional list of ``(target_type, hasher)`` pairs to
                 register at construction time.
-            deferred_handlers: Optional handlers loaded on first use, so an
-                optional library is never imported up front (ITL-871). Each
-                entry is a dict of strings: ``python_type`` (qualified class
-                name, e.g. ``"torch.Tensor"``) and ``handler`` (dotted path of
-                the handler class, instantiated without arguments). See
-                ``orcapod.utils.deferred_types``.
         """
-        self._deferred: dict[str, dict[str, str]] = {
-            entry["python_type"]: entry for entry in deferred_handlers or []
-        }
+        # Handlers loaded on first use, by qualified class name (``register_deferred``).
+        self._deferred: dict[str, dict[str, str]] = {}
         self._handlers: dict[type, "PythonTypeHandlerProtocol"] = {}
         self._lock = threading.RLock()
         if handlers:
@@ -66,6 +57,24 @@ class PythonTypeHandlerRegistry:
                 if entry and len(entry) == 2 and all(x is not None for x in entry):
                     target_type, handler = entry
                     self.register(target_type, handler)
+
+    def register_deferred(self, python_type: str, handler: str) -> None:
+        """Register a handler that is loaded on first use (ITL-871).
+
+        Neither the type nor the handler is imported until a lookup meets a
+        class whose MRO contains *python_type*. A deferred handler already
+        named for *python_type* is replaced. See ``orcapod.utils.deferred_types``.
+
+        Args:
+            python_type: Qualified class name, for example ``"torch.Tensor"``.
+            handler: Dotted path of the handler class, instantiated without
+                arguments.
+        """
+        with self._lock:
+            self._deferred[python_type] = {
+                "python_type": python_type,
+                "handler": handler,
+            }
 
     def register(self, target_type: type, handler: "PythonTypeHandlerProtocol") -> None:
         """Register a hasher for a specific Python type.

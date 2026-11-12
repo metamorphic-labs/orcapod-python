@@ -144,16 +144,22 @@ def test_tensor_and_equal_ndarray_differ_in_hash_but_share_the_digest_body() -> 
         assert data_hash(t) != data_hash(t.numpy()), name
 
 
-def test_table_token_carries_extension_name_and_label() -> None:
-    # The Arrow hasher folds the extension name in front of the handler's label.
-    """A stored cell hashes as the extension name, the label and the digest."""
+def test_table_token_carries_identifier_and_digest() -> None:
+    """A stored cell hashes as the logical type identifier and the digest, no label."""
+    from orcapod.hashing.arrow_hashers import StarfixArrowHasher
+
     hasher = get_default_context().arrow_hasher
+    assert isinstance(hasher, StarfixArrowHasher)
     t = torch.arange(3.0)
     table = DictSource(data=[{"k": "r", "x": t}], tag_columns=["k"]).as_table()
     # Non-public helper: this test is about the token the hasher builds for a cell.
-    processed = hasher._process_table_columns(table.select(["x"]))  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+    processed = hasher._process_table_columns(table.select(["x"]))  # pyright: ignore[reportPrivateUsage]
     token = processed.column("x")[0].as_py()
-    assert token == b"orcapod:torch_tensor::torch_tensor_v1:" + semantic_hash(t).digest
+    assert (
+        token
+        == b"orcapod.torch_tensor;7b2276657273696f6e223a317d::"
+        + semantic_hash(t).digest
+    )
 
 
 def _base() -> Any:
@@ -371,17 +377,34 @@ def test_none_returned_for_optional_tensor_is_accepted() -> None:
     assert_tensors_identical(got["b"], torch.ones(2))
 
 
-def test_declared_tensor_subclass_accepts_a_plain_tensor() -> None:
-    """A pod declared ``-> nn.Parameter`` stores through the tensor type, so a plain tensor is accepted."""
+def test_declared_tensor_subclass_refuses_a_plain_tensor() -> None:
+    """A pod declared ``-> nn.Parameter`` must return an ``nn.Parameter``."""
 
     @function_pod(output_keys="y")
     def as_parameter(x: torch.Tensor) -> torch.nn.Parameter:
         """Return a plain tensor where ``nn.Parameter`` is declared."""
-        return x * 2  # pyright: ignore[reportReturnType]  # deliberately a plain tensor; the column type is orcapod.torch_tensor
+        return x * 2  # pyright: ignore[reportReturnType]  # deliberately the base class
 
     source = DictSource(data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"])
-    got = [d.as_dict()["y"] for _, d in as_parameter.pod(source).iter_data()]
-    assert_tensors_identical(got[0], torch.ones(2) * 2)
+    with pytest.raises(TypeError, match="'y'.*Parameter.*Tensor"):
+        list(as_parameter.pod(source).iter_data())
+
+
+def test_subclass_instance_is_accepted_for_declared_tensor() -> None:
+    """A pod declared ``-> torch.Tensor`` may return a subclass instance."""
+
+    @function_pod(output_keys="y")
+    def as_parameter(x: torch.Tensor) -> torch.Tensor:
+        """Return an ``nn.Parameter`` where ``torch.Tensor`` is declared."""
+        return torch.nn.Parameter(x * 2, requires_grad=False)
+
+    source = DictSource(data=[{"k": "a", "x": torch.ones(2)}], tag_columns=["k"])
+    stream = as_parameter.pod(source)
+    y_type = stream.as_table().schema.field("y").type
+    assert isinstance(y_type, pa.ExtensionType)
+    assert y_type.extension_name == "orcapod.torch_tensor"
+    got = [d.as_dict()["y"] for _, d in stream.iter_data()]
+    assert torch.equal(got[0], torch.ones(2) * 2)
 
 
 # ---------------------------------------------------------------------------

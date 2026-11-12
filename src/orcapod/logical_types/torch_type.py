@@ -31,7 +31,7 @@ meta tensors, named tensors, and other dtypes (sub-byte and packed types,
 ``bcomplex32``).
 
 This module imports torch; it is loaded on first use through the deferred
-registration in the data context (``orcapod.utils.deferred_types``), so
+registration in ``contexts/logical_types.json`` (``orcapod.utils.deferred_types``), so
 ``import orcapod`` never imports torch.
 """
 

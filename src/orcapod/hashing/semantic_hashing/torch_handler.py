@@ -1,6 +1,7 @@
 """Semantic hash handler for ``torch.Tensor`` (ITL-871).
 
-Loaded on first use through the deferred handler entry in the data context, so
+Loaded on first use through the ``deferred_value_handlers`` entry of
+``contexts/logical_types.json``, so
 importing Orcapod never imports torch.
 """
 
@@ -23,8 +24,11 @@ class TorchTensorHandler:
     row ``LogicalTorchTensor`` stores, so device, gradient state, memory layout,
     lazy conjugate/negative bits and subclass do not change the hash, while
     dtype, shape and every element bit do. The digest body equals the one of an
-    ``np.ndarray`` with the same dtype, shape and values; the label (and, in a
-    table, the extension name) keeps the two types apart.
+    ``np.ndarray`` with the same dtype, shape and values. The two types are
+    told apart by their logical type identifiers, which enter every type,
+    schema and table hash; the label is informational and enters no hash, so
+    inside an untyped Python structure a tensor and an equal ndarray hash the
+    same.
     """
 
     HASH_LABEL = TORCH_TENSOR_HASH_LABEL

@@ -15,6 +15,7 @@ Built-in PythonTypeHandlerProtocol implementations.
   NumpyArrayHandler     -- numpy.ndarray: ndarray_v1 value digest (array_digest_v1)
   PandasDataFrameHandler -- pd.DataFrame: Arrow Table via Arrow hasher (lazy default-context fallback)
   PandasSeriesHandler   -- pd.Series: Arrow Table via Arrow hasher (lazy default-context fallback)
+  PolarsExprHandler     -- pl.Expr: polars_expr_v1 canonical expression tree (ITL-828)
 
 ``register_builtin_python_type_handlers(registry)`` populates a registry
 with all of the above handlers.
@@ -26,6 +27,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from orcapod.hashing.semantic_hashing.encoded import Encoded
+from orcapod.hashing.semantic_hashing.function_info_extractors import ParameterDefault
+from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
 
@@ -58,6 +62,25 @@ class BytesHandler:
         raise TypeError(f"BytesHandler: expected bytes or bytearray, got {type(obj)!r}")
 
 
+def hash_default_value(value: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+    """Hash one parameter default.
+
+    The single place that decides how a default value is hashed: like every other
+    hashed value, by the semantic hasher, never by its ``repr()``.
+
+    Args:
+        value: The default value.
+        hasher: The semantic hasher hashing the function.
+
+    Returns:
+        The hash of the value.
+
+    Raises:
+        TypeError: If the hasher has no way to hash the value.
+    """
+    return hasher.hash_object(value)
+
+
 class FunctionHandler:
     """Hasher for Python functions/callables with a ``__code__`` attribute.
 
@@ -77,15 +100,63 @@ class FunctionHandler:
         func_name = getattr(obj, "__name__", repr(obj))
         logger.debug("FunctionHandler: extracting info for function %r", func_name)
         info: dict[str, Any] = self.function_info_extractor.extract_function_info(obj)
-        return info
+        parameters = info.get("parameters")
+        if not parameters:
+            return info
+        return {
+            **info,
+            "parameters": [
+                self._with_hashed_default(entry, obj, hasher) for entry in parameters
+            ],
+        }
+
+    @staticmethod
+    def _with_hashed_default(
+        entry: dict[str, Any], func: Any, hasher: "SemanticHasherProtocol"
+    ) -> dict[str, Any]:
+        """Return a parameter entry with its default replaced by the default's hash.
+
+        Args:
+            entry: One parameter entry of the extracted function description.
+            func: The function the parameter belongs to.
+            hasher: The semantic hasher hashing the function.
+
+        Returns:
+            ``entry`` unchanged when it has no ``ParameterDefault``; otherwise a
+            copy whose ``"default"`` is the hash of the default value.
+
+        Raises:
+            TypeError: If the default value cannot be hashed. The message names the
+                parameter and the function; the hasher's error is its cause.
+        """
+        default = entry.get("default")
+        if not isinstance(default, ParameterDefault):
+            return entry
+        try:
+            default_hash = hash_default_value(default.value, hasher)
+        except TypeError as exc:
+            module = getattr(func, "__module__", None)
+            qualname = getattr(func, "__qualname__", None) or repr(func)
+            function_name = f"{module}.{qualname}" if module else qualname
+            raise TypeError(
+                f"Cannot hash the default value of parameter {entry['name']!r} of "
+                f"function {function_name}: {exc} A default value is part of the "
+                "function's hash: use a default the hasher can hash, or remove the "
+                "default and supply the value as an input."
+            ) from exc
+        return {**entry, "default": default_hash}
 
 
 class TypeObjectHandler:
     """Hasher for type objects (classes passed as values).
 
     Resolves types registered in the ``LogicalTypeRegistry`` exposed by
-    *type_converter* to their stable ``logical_type_name``
-    (e.g. ``"type:orcapod.file"`` for ``op.File``).
+    *type_converter* to their logical type identifier, the Arrow extension name
+    and extension metadata, written as ``LogicalTypeIdentifier.text``
+    (``"type:orcapod.file;7b2276657273696f6e223a317d"`` for ``op.File``:
+    the name, ``;``, then the metadata ``{"version":1}`` in hex). A change of
+    either part of the identifier therefore changes every type, schema,
+    function and pipeline hash the type takes part in.
     Falls back to ``"type:<module>.<qualname>"`` for unregistered types or
     when no ``type_converter`` is provided. The module is the canonical one
     from ``canonical_type_name``, so standard-library types that moved into a
@@ -95,7 +166,7 @@ class TypeObjectHandler:
     Args:
         type_converter: Optional ``TypeConverterProtocol``.  When provided,
             ``type_converter.get_logical_type(obj)`` is called to resolve
-            registered logical types to their stable canonical name.  When
+            registered logical types to their identifier.  When
             ``None`` (the default), the fallback ``"type:<module>.<qualname>"``
             serialisation is always used.
     """
@@ -111,7 +182,7 @@ class TypeObjectHandler:
         if self._type_converter is not None:
             lt = self._type_converter.get_logical_type(obj)
             if lt is not None:
-                return f"type:{lt.logical_type_name}"
+                return f"type:{logical_type_identifier(lt).text}"
         return f"type:{canonical_type_name(obj)}"
 
 
@@ -121,6 +192,24 @@ class SpecialFormHandler:
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         name = getattr(obj, "_name", None) or repr(obj)
         return f"special_form:typing.{name}"
+
+
+def _sorted_hashes(
+    hasher: "SemanticHasherProtocol", args: tuple[Any, ...]
+) -> list[ContentHash]:
+    """Hash each of ``args`` and return the hashes ordered by digest.
+
+    The hashes are returned as ``ContentHash`` objects: the structure hasher feeds only
+    their digests into the enclosing hash, never their labels.
+
+    Args:
+        hasher: The structure hasher in use.
+        args: The members of a union.
+
+    Returns:
+        One hash per member, sorted by hex digest so that member order does not matter.
+    """
+    return sorted((hasher.hash_object(arg) for arg in args), key=ContentHash.to_hex)
 
 
 class GenericAliasHandler:
@@ -134,13 +223,14 @@ class GenericAliasHandler:
         if origin is None:
             return f"generic_alias:{obj!r}"
         if origin is typing.Union:
-            hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-            return {"__type__": "union", "args": hashed_args}
-        return {
-            "__type__": "generic_alias",
-            "origin": hasher.hash_object(origin).to_string(),
-            "args": [hasher.hash_object(arg).to_string() for arg in args],
-        }
+            return Encoded("union", {"args": _sorted_hashes(hasher, args)})
+        return Encoded(
+            "generic_alias",
+            {
+                "origin": hasher.hash_object(origin),
+                "args": [hasher.hash_object(arg) for arg in args],
+            },
+        )
 
 
 class UnionTypeHandler:
@@ -148,8 +238,7 @@ class UnionTypeHandler:
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         args = getattr(obj, "__args__", None) or ()
-        hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
-        return {"__type__": "union", "args": hashed_args}
+        return Encoded("union", {"args": _sorted_hashes(hasher, args)})
 
 
 class ArrowTableHandler:
@@ -189,8 +278,8 @@ class SchemaHandler:
 
     Canonical, explicit path for schema hashing. For each field, hashes the Python
     type via ``hasher.hash_object`` (which dispatches to ``TypeObjectHandler``, using
-    the stable ``logical_type_name`` / Arrow extension name for registered types and the
-    stable ``builtins.*`` / stdlib path for native types). Field names are sorted so the
+    the logical type identifier, Arrow extension name and metadata, for registered types
+    and the stable ``builtins.*`` / stdlib path for native types). Field names are sorted so the
     hash is deterministic regardless of insertion order.
 
     This produces the same hash as the previous accidental path through ``_expand_mapping``
@@ -224,8 +313,9 @@ class SchemaHandler:
                 Python type.
 
         Returns:
-            A ``dict[str, str]`` mapping field name to the ``to_string()`` of each
-            field type's hash, sorted by field name for determinism.
+            A ``dict[str, ContentHash]`` mapping field name to the hash of the field's
+            type, sorted by field name for determinism. The structure hasher feeds
+            only the digests into the schema hash.
 
         Raises:
             TypeError: If ``obj`` is not a ``Schema``, or if ``type_converter`` is
@@ -233,7 +323,7 @@ class SchemaHandler:
         """
         if not isinstance(obj, Schema):
             raise TypeError(f"SchemaHandler: expected a Schema, got {type(obj)!r}")
-        result: dict[str, str] = {}
+        result: dict[str, ContentHash] = {}
         for field_name, python_type in obj.items():
             if self._type_converter is not None:
                 try:
@@ -247,7 +337,7 @@ class SchemaHandler:
                         f"supported native type (int, str, float, bool, bytes, "
                         f"datetime, date)."
                     ) from exc
-            result[field_name] = hasher.hash_object(python_type).to_string()
+            result[field_name] = hasher.hash_object(python_type)
         # Sort by field name for determinism — matches _expand_mapping's sort_keys.
         return dict(sorted(result.items()))
 
@@ -483,6 +573,39 @@ class PandasSeriesHandler:
         return self._get_arrow_hasher().hash_table(table)
 
 
+class PolarsExprHandler:
+    """Hasher for ``pl.Expr``: the ``polars_expr_v1`` canonical expression tree.
+
+    Delegates to ``polars_expr_content_hash`` in
+    ``orcapod.hashing.semantic_hashing.polars_expr``, whose module docstring defines the
+    grammar. Expressions outside the grammar raise ``ValueError`` naming the expression.
+    """
+
+    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
+        """Return the content hash of ``obj``.
+
+        Args:
+            obj: A ``pl.Expr`` instance.
+            hasher: Ignored. Present for protocol conformance.
+
+        Returns:
+            A ``ContentHash`` with method ``"polars_expr_v1"``.
+
+        Raises:
+            TypeError: If ``obj`` is not a ``pl.Expr``.
+            ValueError: If the expression is outside the ``polars_expr_v1`` grammar.
+        """
+        import polars as _pl
+
+        from orcapod.hashing.semantic_hashing.polars_expr import (
+            polars_expr_content_hash,
+        )
+
+        if not isinstance(obj, _pl.Expr):
+            raise TypeError(f"PolarsExprHandler: expected pl.Expr, got {type(obj)!r}")
+        return polars_expr_content_hash(obj)
+
+
 def register_builtin_python_type_handlers(
     registry: "HandlerRegistryProtocol",
     file_hasher: Any = None,
@@ -601,6 +724,10 @@ def register_builtin_python_type_handlers(
 
     registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher))
     registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher))
+
+    import polars as _pl
+
+    registry.register(_pl.Expr, PolarsExprHandler())
 
     logger.debug(
         "register_builtin_python_type_handlers: registered %d hashers",

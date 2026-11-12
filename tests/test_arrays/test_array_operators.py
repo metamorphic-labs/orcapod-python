@@ -80,6 +80,7 @@ def other_source() -> DictSource:
 
 
 def test_join() -> None:
+    """``Join`` passes array columns through unchanged."""
     got = rows(Join()(arrays_source(), other_source()))
     assert sorted(got) == NAMES
     for name in NAMES:
@@ -87,6 +88,7 @@ def test_join() -> None:
 
 
 def test_semijoin() -> None:
+    """``SemiJoin`` keeps the matching rows with their arrays unchanged."""
     keep = NAMES[::2]
     right = DictSource(
         data=[{"k": name, "y": 0} for name in keep], tag_columns=["k"], source_id="r"
@@ -98,6 +100,7 @@ def test_semijoin() -> None:
 
 
 def test_map_data() -> None:
+    """``MapData`` renames an array column and keeps its values."""
     got = rows(MapData({"x": "z"})(arrays_source()))
     for name in NAMES:
         assert "x" not in got[name]
@@ -105,6 +108,7 @@ def test_map_data() -> None:
 
 
 def test_select_and_drop_data_columns() -> None:
+    """Selecting or dropping data columns keeps the array column unchanged."""
     selected = rows(SelectDataColumns(["x"])(arrays_source()))
     dropped = rows(DropDataColumns(["n"])(arrays_source()))
     for got in (selected, dropped):
@@ -114,6 +118,7 @@ def test_select_and_drop_data_columns() -> None:
 
 
 def test_polars_filter_on_tag() -> None:
+    """``PolarsFilter`` on a tag keeps the matching rows with their arrays unchanged."""
     got = rows(PolarsFilter(constraints={"g": "g1"})(arrays_source()))
     expected = [n for n in NAMES if GROUP[n] == "g1"]
     assert sorted(got) == expected
@@ -122,6 +127,7 @@ def test_polars_filter_on_tag() -> None:
 
 
 def test_batch() -> None:
+    """``Batch`` collects array values into lists, in row order, with none lost."""
     out = list(Batch(batch_size=4)(arrays_source()).iter_data())
     seen: list[str] = []
     for tag, data in out:
@@ -135,11 +141,12 @@ def test_batch() -> None:
 
 
 def test_group_by() -> None:
+    """``GroupBy`` collects each group's arrays into a list."""
     out = list(GroupBy(by=["g"])(arrays_source()).iter_data())
     assert sorted(fields(t)["g"] for t, _ in out) == ["g0", "g1", "g2"]
     for tag, data in out:
-        # GroupBy moves the non-key tag ``k`` into the data as a list.
-        names = list(fields(data)["k"])
+        # GroupBy keeps the non-key tag ``k`` as a list-valued tag.
+        names = list(fields(tag)["k"])
         assert sorted(names) == sorted(n for n in NAMES if GROUP[n] == fields(tag)["g"])
         for name, x in zip(names, fields(data)["x"], strict=True):
             assert_arrays_identical(x, expected_x(name))
@@ -147,6 +154,7 @@ def test_group_by() -> None:
 
 @pytest.mark.parametrize("shift", [0, 1])
 def test_merge_join_colliding_array_column(shift: int) -> None:
+    """``MergeJoin`` merges a colliding array column into a list holding both sides' arrays."""
     left = arrays_source("left")
     right = arrays_source("right", shift=shift)
     got = rows(MergeJoin()(left, right))
@@ -168,20 +176,24 @@ def assert_merged_groups(got: dict[str, Any], shift: int) -> None:
     for group, merged in got.items():
         names = [n for n in NAMES if GROUP[n] == group]
         assert len(merged) == 2
-        expected = [
+        remaining = [
             [expected_x(n) for n in names],
             [expected_x(n, shift) for n in names],
         ]
+        # Each merged list matches a distinct expected list, so a lost input fails.
         for members in merged:
-            assert any(
-                len(members) == len(e)
-                and all(_same_array(g, x) for g, x in zip(members, e, strict=True))
-                for e in expected
+            match = next(
+                (
+                    i
+                    for i, e in enumerate(remaining)
+                    if len(members) == len(e)
+                    and all(_same_array(g, x) for g, x in zip(members, e, strict=True))
+                ),
+                None,
             )
-        if shift:
-            assert not all(
-                _same_array(a, b) for a, b in zip(merged[0], merged[1], strict=True)
-            )
+            assert match is not None, f"unexpected member list in {group}"
+            del remaining[match]
+        assert not remaining
 
 
 def _same_array(got: Any, expected: Any) -> bool:
@@ -194,6 +206,7 @@ def _same_array(got: Any, expected: Any) -> bool:
 
 @pytest.mark.parametrize("shift", [0, 1])
 def test_merge_join_colliding_grouped_array_column(shift: int) -> None:
+    """``MergeJoin`` merges colliding lists of arrays (after ``GroupBy``) in a deterministic order."""
     left = grouped_arrays_source("left")
     right = grouped_arrays_source("right", shift)
     out = MergeJoin()(left, right)
@@ -206,6 +219,7 @@ def test_merge_join_colliding_grouped_array_column(shift: int) -> None:
 
 
 def test_merge_join_colliding_grouped_array_column_async_equals_sync() -> None:
+    """The async ``MergeJoin`` merges lists of arrays into the same data as the sync path."""
     left = grouped_arrays_source("left")
     right = grouped_arrays_source("right", 1)
     expected = {fields(t)["g"]: d for t, d in sync_rows(MergeJoin(), left, right)}

@@ -347,7 +347,7 @@ class UniversalTypeConverter:
 
         # list[T] → large_list(T storage) when T is a plain type, or a top-level
         # ListLogicalType extension when T has a registered LogicalType.
-        # Arrow forbids extension types inside list value fields (ET1 in DESIGN_ISSUES.md).
+        # Arrow forbids extension types inside list value fields (ET1 in design_issues/).
         # Wrapping the whole list as an extension type (ET2 fix, ITL-173) preserves
         # element type information at the field-metadata level.
         if origin is list:
@@ -387,7 +387,7 @@ class UniversalTypeConverter:
 
         # dict[K, V] → pa.large_list(struct{key: K, value: V}).
         # Raise if K or V resolves to an extension type: the key/value land inside struct
-        # fields, which also forbids extension types (ET1 in DESIGN_ISSUES.md).
+        # fields, which also forbids extension types (ET1 in design_issues/).
         if origin is dict:
             if len(args) < 2:
                 raise ValueError(
@@ -400,14 +400,14 @@ class UniversalTypeConverter:
                 raise ValueError(
                     f"'dict[{args[0]}, ...]' is not yet supported: the key type maps to Arrow "
                     f"extension type {key_arrow.extension_name!r}, which cannot be preserved "
-                    f"inside a struct field due to an Arrow limitation (ET1 in DESIGN_ISSUES.md). "
+                    f"inside a struct field due to an Arrow limitation (ET1 in design_issues/). "
                     f"Native dict-of-logical-type support is tracked in PLT-1732."
                 )
             if isinstance(val_arrow, pa.ExtensionType):
                 raise ValueError(
                     f"'dict[..., {args[1]}]' is not yet supported: the value type maps to Arrow "
                     f"extension type {val_arrow.extension_name!r}, which cannot be preserved "
-                    f"inside a struct field due to an Arrow limitation (ET1 in DESIGN_ISSUES.md). "
+                    f"inside a struct field due to an Arrow limitation (ET1 in design_issues/). "
                     f"Native dict-of-logical-type support is tracked in PLT-1732."
                 )
             return pa.large_list(
@@ -430,9 +430,11 @@ class UniversalTypeConverter:
 
             # Cycle detection (via the shared ContextVar-backed in_progress set)
             if annotation in in_progress:
-                raise TypeError(
-                    f"Circular type dependency detected while synthesising "
-                    f"LogicalType for {annotation!r}."
+                from orcapod.errors import RecursiveTypeError
+
+                raise RecursiveTypeError(
+                    f"{annotation.__qualname__} (a class that refers back to itself "
+                    f"cannot be stored: Arrow has no recursive struct type)"
                 )
 
             # Factory dispatch via MRO walk
@@ -553,6 +555,11 @@ class UniversalTypeConverter:
             if self._logical_type_registry is not None:
                 lt = self._logical_type_registry.get_by_arrow_extension_name(ext_name)
                 if lt is not None:
+                    # The name is known: the incoming metadata must be one the
+                    # registered type reads, as on the registry-miss path.
+                    from orcapod.logical_types.identifier import require_readable
+
+                    require_readable(lt, arrow_type.__arrow_ext_serialize__())
                     return lt.get_arrow_extension_type()
             # Registry miss — extract info and register
             raw_meta = arrow_type.__arrow_ext_serialize__()
@@ -705,10 +712,15 @@ class UniversalTypeConverter:
             The Arrow extension type after registration.
 
         Raises:
+            LogicalTypeIdentifierError: If the extension name is known (or was
+                reconstructed by a factory) and ``extension_metadata`` is not one
+                of the values the logical type declares readable.
             ValueError: If metadata is missing, malformed, lacks ``"category"``, or
                 no factory is registered for the category.
         """
         import json as _json
+
+        from orcapod.logical_types.identifier import require_readable
 
         if self._logical_type_registry is None:
             raise ValueError(
@@ -721,6 +733,8 @@ class UniversalTypeConverter:
             arrow_extension_name
         )
         if lt is not None:
+            # The name is known: the stored metadata must be one the type reads.
+            require_readable(lt, extension_metadata or b"")
             return lt.get_arrow_extension_type()
 
         # Missing metadata — cannot auto-register
@@ -771,6 +785,7 @@ class UniversalTypeConverter:
         logical_type = factory.reconstruct_from_arrow(
             arrow_extension_name, storage_type, metadata_dict, converter=self
         )
+        require_readable(logical_type, extension_metadata)
         self._logical_type_registry.register_logical_type(logical_type)
         return logical_type.get_arrow_extension_type()
 
@@ -895,7 +910,16 @@ class UniversalTypeConverter:
 
         This is the main entry point for Arrow → Python type conversion.
         Results are cached for performance.
+
+        Raises:
+            LogicalTypeIdentifierError: If the type, or a member nested in it, has
+                the extension name of a registered logical type with metadata that
+                type does not read.
         """
+        # Before the cache: Arrow compares two instances of one extension class
+        # without their metadata, so a container remembered for a readable
+        # identifier is equal to one whose member carries an unreadable identifier.
+        self._require_readable_members(arrow_type)
         try:
             if arrow_type in self._arrow_to_python_types:
                 return self._arrow_to_python_types[arrow_type]
@@ -909,6 +933,43 @@ class UniversalTypeConverter:
         except TypeError:
             pass  # Unhashable type — skip caching.
         return python_type
+
+    def _require_readable_members(self, arrow_type: pa.DataType) -> None:
+        """Raise unless every registered extension type in ``arrow_type`` is readable.
+
+        Walks the type itself and every type nested in it: the storage of an
+        extension type, the fields of a struct or a union, the values of a list, the
+        keys and items of a map, and the values of a dictionary type.
+
+        This runs before every lookup in a cache keyed by an Arrow type
+        (``_arrow_to_python_types``, ``_arrow_to_python_converters`` and, behind the
+        first, ``_struct_signature_to_typeddict``): Arrow compares two instances of
+        one extension class without their metadata, so such a key does not tell a
+        readable identifier from an unreadable one.
+
+        Args:
+            arrow_type: The Arrow type to check.
+
+        Raises:
+            LogicalTypeIdentifierError: If an extension type whose name is registered
+                carries metadata the registered logical type does not read.
+        """
+        if isinstance(arrow_type, pa.ExtensionType):
+            if self._logical_type_registry is not None:
+                lt = self._logical_type_registry.get_by_arrow_extension_name(
+                    arrow_type.extension_name
+                )
+                if lt is not None:
+                    from orcapod.logical_types.identifier import require_readable
+
+                    require_readable(lt, arrow_type.__arrow_ext_serialize__())
+            self._require_readable_members(arrow_type.storage_type)
+        elif pa.types.is_dictionary(arrow_type):
+            self._require_readable_members(arrow_type.value_type)
+        else:
+            # Struct and union fields, a list's value field, a map's entries field.
+            for index in range(arrow_type.num_fields):
+                self._require_readable_members(arrow_type.field(index).type)
 
     def get_logical_type_by_arrow_extension_name(
         self, arrow_extension_name: str
@@ -974,10 +1035,20 @@ class UniversalTypeConverter:
         Round-trip guarantee:
             - ``int``       → ``nullable=False`` → ``int``
             - ``int | None`` → ``nullable=True``  → ``int | None``
+
+        Raises:
+            LogicalTypeIdentifierError: If a column (or a member of one) has the
+                extension name of a registered logical type with metadata that type
+                does not read; the error names the column.
         """
+        from orcapod.logical_types.identifier import LogicalTypeIdentifierError
+
         fields = {}
         for field in arrow_schema:
-            python_type = self.arrow_type_to_python_type(field.type)
+            try:
+                python_type = self.arrow_type_to_python_type(field.type)
+            except LogicalTypeIdentifierError as exc:
+                raise exc.for_column(field.name) from exc
             if field.nullable and python_type is not Any:
                 python_type = python_type | None
             fields[field.name] = python_type
@@ -1164,7 +1235,16 @@ class UniversalTypeConverter:
 
         This creates and caches conversion functions for optimal performance
         during data conversion operations.
+
+        Raises:
+            LogicalTypeIdentifierError: If the type, or a member nested in it, has
+                the extension name of a registered logical type with metadata that
+                type does not read.
         """
+        # Before the cache, as in ``arrow_type_to_python_type``: a converter
+        # remembered for a readable identifier must not decode values stored under
+        # an unreadable one.
+        self._require_readable_members(arrow_type)
         try:
             if arrow_type in self._arrow_to_python_converters:
                 return self._arrow_to_python_converters[arrow_type]
@@ -1241,7 +1321,7 @@ class UniversalTypeConverter:
                         f"'tuple[{args[0]}, ...]' is not supported: the element type maps to "
                         f"Arrow extension type {element_type.extension_name!r}, which cannot be "
                         f"preserved inside a list or struct field due to an Arrow limitation "
-                        f"(ET1 in DESIGN_ISSUES.md)."
+                        f"(ET1 in design_issues/)."
                     )
                 return pa.list_(element_type, len(args))
             else:
@@ -1254,7 +1334,7 @@ class UniversalTypeConverter:
                             f"'tuple[..., {arg_type}, ...]' is not supported: element type "
                             f"maps to Arrow extension type {field_type.extension_name!r}, which "
                             f"cannot be preserved inside a struct field due to an Arrow limitation "
-                            f"(ET1 in DESIGN_ISSUES.md)."
+                            f"(ET1 in design_issues/)."
                         )
                     fields.append((f"f{i}", field_type))
                 return pa.struct(fields)
@@ -1338,6 +1418,11 @@ class UniversalTypeConverter:
                 arrow_type.extension_name
             )
             if lt is not None:
+                # The registered class is named only for a column whose values that
+                # class reads: never by extension name alone.
+                from orcapod.logical_types.identifier import require_readable
+
+                require_readable(lt, arrow_type.__arrow_ext_serialize__())
                 return lt.python_type
 
         # Handle basic types
@@ -1657,6 +1742,11 @@ class UniversalTypeConverter:
                 arrow_type.extension_name
             )
             if lt is not None:
+                # Values are decoded by the registered type: only when it declares
+                # that it reads data stored under this column's metadata.
+                from orcapod.logical_types.identifier import require_readable
+
+                require_readable(lt, arrow_type.__arrow_ext_serialize__())
                 _lt = lt
                 _self = self
                 return lambda storage_value: _lt.storage_to_python(storage_value, _self)

@@ -168,6 +168,18 @@ def dtype_to_tag(dtype: np.dtype[Any]) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
 
 
+def _is_subarray_shape(shape: Any) -> bool:
+    """Return whether a parsed tag value is a valid subarray shape.
+
+    Args:
+        shape: The third part of a structured tag entry.
+
+    Returns:
+        ``True`` for a list of non-negative ``int`` values (``bool`` excluded).
+    """
+    return isinstance(shape, list) and all(type(d) is int and d >= 0 for d in shape)
+
+
 def _dtype_from_value(value: Any) -> np.dtype[Any]:
     """Return the canonical NumPy dtype of a parsed tag value.
 
@@ -183,8 +195,16 @@ def _dtype_from_value(value: Any) -> np.dtype[Any]:
     if isinstance(value, list):
         fields: list[Any] = []
         for entry in value:
-            if not isinstance(entry, list) or len(entry) not in (2, 3):
-                expected = "[name, tag] or [name, tag, shape]"
+            if (
+                not isinstance(entry, list)
+                or len(entry) not in (2, 3)
+                or not isinstance(entry[0], str)
+                or (len(entry) == 3 and not _is_subarray_shape(entry[2]))
+            ):
+                expected = (
+                    "[name, tag] or [name, tag, shape], with a string name and a "
+                    "shape that is a list of non-negative integers"
+                )
                 raise ValueError(
                     f"malformed array dtype tag entry {entry!r}: expected {expected}"
                 )
@@ -262,7 +282,8 @@ def canonical_array(value: npt.NDArray[Any]) -> tuple[str, npt.NDArray[Any]]:
         )
     if not isinstance(value, np.ndarray):
         raise TypeError(f"expected a numpy.ndarray, got {type(value).__name__}")
-    plain = value.view(np.ndarray)
+    # The base implementation, so a subclass's own ``view`` cannot change the values.
+    plain = np.ndarray.view(value, np.ndarray)
     tag = dtype_to_tag(plain.dtype)
     dtype = tag_to_dtype(tag)
     if dtype.names is None:

@@ -44,10 +44,8 @@ def total(d: torch.Tensor) -> float:
 
 
 @function_pod(output_keys="count")
-def count(k: list[str], x: list[torch.Tensor]) -> int:
-    # GroupBy moves the non-key tag ``k`` into the data as a list.
+def count(x: list[torch.Tensor]) -> int:
     """Return the number of tensors in the group."""
-    assert len(k) == len(x)
     return len(x)
 
 
@@ -87,8 +85,6 @@ def _build(store: Any) -> PipelineJob:
         d = double.pod(y, label="double")
         total.pod(d, label="total")
         count.pod(GroupBy(by=["g"])(every, label="grouped"), label="count")
-        # Operator results are read through a function pod: a terminal operator
-        # node yields no rows after an async run (pre-existing, not tensor-specific).
         pair.pod(MergeJoin()(numeric, shifted, label="merge_join"), label="merged")
     return job
 
@@ -121,27 +117,9 @@ def _node(job: PipelineJob, label: str, column: str, key: str = "k") -> dict[str
     }
 
 
-_STALE_DELTA_VIEW = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "ITL-864 / PR #293: a DeltaTableDatabase at() view keeps a stale table "
-        "snapshot after another view flushes, so a node reloading after an async "
-        "run can miss rows. Remove once #293 is on main."
-    ),
-)
-
-
 @pytest.mark.parametrize(
     ("store", "runner"),
-    [
-        pytest.param(
-            store,
-            runner,
-            marks=_STALE_DELTA_VIEW if (store, runner) == ("delta", "async") else (),
-        )
-        for store in sorted(STORES)
-        for runner in sorted(RUNNERS)
-    ],
+    [(store, runner) for store in sorted(STORES) for runner in sorted(RUNNERS)],
 )
 def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -> None:
     """Every node of the job keeps tensors exact on each store and runner."""
@@ -165,9 +143,12 @@ def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -
     counts = _node(job, "count", "count", key="g")
     assert sum(counts.values()) == len(TENSORS)
 
-    merged = _node(job, "merged", "pair")
-    for i, name in enumerate(NUMERIC):
-        assert_same_tensors_any_order(
-            list(merged[name]),
-            [TENSORS[name], TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]],
-        )
+    # The operator node itself and the pod downstream of it hold the same lists.
+    for label, column in (("merge_join", "x"), ("merged", "pair")):
+        merged = _node(job, label, column)
+        assert sorted(merged) == sorted(NUMERIC)
+        for i, name in enumerate(NUMERIC):
+            assert_same_tensors_any_order(
+                list(merged[name]),
+                [TENSORS[name], TENSORS[NUMERIC[(i + 1) % len(NUMERIC)]]],
+            )

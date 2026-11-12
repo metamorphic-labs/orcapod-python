@@ -35,11 +35,9 @@ def _registry(requires: str = "polars") -> LogicalTypeRegistry:
 
 def _handlers() -> PythonTypeHandlerRegistry:
     """A handler registry with ``ThingHandler`` deferred."""
-    return PythonTypeHandlerRegistry(
-        deferred_handlers=[
-            {"python_type": f"{_MOD}.Thing", "handler": f"{_MOD}.ThingHandler"}
-        ]
-    )
+    registry = PythonTypeHandlerRegistry()
+    registry.register_deferred(f"{_MOD}.Thing", f"{_MOD}.ThingHandler")
+    return registry
 
 
 def test_python_type_lookup_loads_the_deferred_type_once() -> None:

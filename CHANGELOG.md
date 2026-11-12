@@ -2,15 +2,16 @@
 
 ## [0.3.0] — unreleased
 
-### Breaking Changes
+### Breaking changes and migration
 
 #### NumPy arrays: new storage format and new hashes, no automatic migration (ITL-888, ITL-883)
 
 **The array format and every array hash changed in v0.3.** A store written by v0.2 that holds
-`numpy.ndarray` columns is **not migrated**. Under v0.3, every node that handles arrays
-computes again into new tables, and its v0.2 results are no longer returned. Nothing written by
-v0.2 is changed or deleted, and those tables stay readable with v0.2. Use a fresh store for
-v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.3 (ITL-889).
+`numpy.ndarray` columns is **not migrated**. Every node that handles arrays gets new tables,
+so its v0.2 results are no longer found; and since every Arrow-derived hash changed too
+(ITL-910, below), no v0.2 result is reused at all: v0.3 ignores the rows a v0.2 store holds and
+computes every input again. Nothing written by v0.2 is changed or deleted, and those tables stay
+readable with v0.2. A migration is planned after v0.3 (ITL-889).
 
 - **Storage.** An array column is now the Arrow extension type `orcapod.ndarray` (metadata
   `{"version":1}`) over `struct<dtype: large_string, shape: large_list<int64>,
@@ -26,7 +27,13 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   SHA-256 over a length-prefixed encoding of the stored row (`docs/reference/hashing.md`,
   section 8), and the label replaces the bare `sha256`. Because the logical type name is now
   `orcapod.ndarray`, the type, schema and pipeline hashes of anything with an array column
-  change too, and so do the table paths of those nodes, and of nothing else.
+  change too, and so do the table paths of those nodes. Pipeline hashes are chained, so the
+  pipeline and operator tables of every node downstream of an array column move as well,
+  even when it has no array column itself. A pod whose inputs and outputs hold no array
+  keeps its function result table, and nodes with no array column upstream keep their tables;
+  but an array-free pod does **not** reuse its v0.2 results: every Arrow-derived hash changed
+  as well (ITL-910, below) and every table moved to a new layout (ITL-944, below), so the
+  v0.2 tables are not read and the inputs are computed again.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
@@ -43,61 +50,78 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
   subclasses, whatever the registration order.
 
+#### A changed column type is refused when appending to a Delta table (ITL-884)
+
+Before writing to an existing `DeltaTableDatabase` table, the flush now compares the new rows'
+column types with the stored ones. If a column's type differs, the flush raises
+`InputValidationError` naming the table, the column and both types, and writes nothing to that
+table (other tables' pending rows in the same flush may still be committed). Before,
+Delta's merge silently cast the new rows to the stored type (`int32` or `float64` rows written
+into an `int64` column, `large_binary` into `large_string`), or, when an extension (logical) type
+was involved, accepted rows the table could then no longer read. The comparison treats types the
+way Delta stores them: `string` and `large_string` (and the other large and non-large layouts)
+are the same type, types the Delta writer converts on the way in are compared as converted
+(unsigned integers as signed, every timestamp in microseconds), an extension type is compared by
+its storage type, and nullability is not compared. Struct fields are compared by name at any depth, including inside lists and maps.
+New and missing columns, and new and missing struct fields, pass the check; whether Delta's
+merge adds a new one follows the database's `allow_schema_evolution` setting, as before.
+
+`DeltaTableDatabase.flush()` (and `add_records(..., flush=True)`) now raises a
+`StoreReadError` or this `InputValidationError` as itself. Before, it wrapped every failure in a
+`RuntimeError`. When several tables fail in one flush, the `StoreReadError` is raised, or else the
+first `InputValidationError`, with each other failure attached as a note and logged. Failed rows
+stay queued for the next flush. A flush that fails only for other reasons still raises
+`RuntimeError`, with the first failure as its cause.
+
 ### Added
 
 - **`orcapod.errors.StoreWriteError`** — raised when a node's results or records cannot be
   written to the store. It names the node, the row's tag and the table, and chains the
   database's own exception as its cause. (ITL-878 #287)
-
-
-#### PyTorch tensors as data values (ITL-871)
-
-- **`torch.Tensor` is a value type**: a source column, a function pod parameter or return value,
-  stored, cached and re-run like an ndarray, sync and async, in memory and in Delta stores.
-  PyTorch is optional: support works whenever `torch` can be imported, however it was
-  installed; the new extra `orcapod[torch]` (`torch>=2.3`) installs it from PyPI. Tested with
-  PyTorch 2.15. The PyTorch build must support the installed NumPy, because tensors convert
-  through NumPy.
-  `import orcapod` never imports PyTorch: the type is set up on first use, and reading a
-  stored tensor column without PyTorch raises `orcapod.errors.MissingOptionalDependencyError`.
-- **Storage.** Extension type `orcapod.torch_tensor` (metadata `{"version":1}`) over the same
-  struct as `orcapod.ndarray`, with the same dtype tags and bytes for shared dtypes. The
-  dtypes NumPy lacks are stored as raw bits under the PyTorch dtype name: `bfloat16`,
-  `complex32` (real then imaginary `float16`) and `float8_e4m3fn`, `float8_e5m2`,
-  `float8_e4m3fnuz`, `float8_e5m2fnuz`, `float8_e8m0fnu`. Reading a stored dtype that the
-  installed PyTorch lacks raises `ValueError` naming the dtype and the PyTorch version.
-- **Identity and hash.** A tensor is its dtype, shape and element bits; device, gradient state,
-  memory layout, lazy conjugate/negative views and subclass are not stored. `TorchTensorHandler`
-  returns `ContentHash("torch_tensor_v1", digest)` with the array digest of the stored row, so
-  a tensor and an equal ndarray share the digest but not the hash. GPU tensors and tensors that
-  require gradients are accepted and stored from a detached CPU copy; the caller's tensor is
-  never modified. Tensors read back on the CPU, contiguous, without gradients, with the exact
-  stored dtype and shape.
-- **`orcapod.errors.ValueConversionWarning`** (a `UserWarning`) reports such a conversion,
-  naming the function and output (or the source and column), what was converted and how to
-  avoid it (`value.detach().cpu()`). A function warns once per output and conversion, however
-  many rows it processes; `DictSource` and `ListSource` warn once per column with the count.
-  Under `-W error::orcapod.errors.ValueConversionWarning` every conversion raises.
-- **Refused at write time**, naming the column and reason: sparse, mkldnn, quantized, nested
-  and meta tensors, named tensors, and other dtypes (sub-byte and packed types, `bcomplex32`). A pod declared `-> torch.Tensor` that returns an ndarray or a number raises
-  `TypeError` naming the output.
-- **Registries** accept `deferred_logical_types` (`LogicalTypeRegistry`) and `deferred_handlers`
-  (`PythonTypeHandlerRegistry`): a value type named by its qualified class name and extension
-  name, loaded on first use. No existing hash, schema or table path changes.
+- **`orcapod.errors.StoreReadError`** — raised when a stored table exists but cannot be read.
+  It names the table, and the node and row being processed when they are known, and chains
+  the backend's exception as its cause. (ITL-884 #290)
+- **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
+  `except StoreError` handles both. (ITL-884 #290)
 
 ### Fixed
 
-- A failed store write fails the run. `PipelineJob.run()` used to return normally when a
-  node's result or record could not be written (the row was skipped like a crashed function
-  under the default `error_policy="continue"`), so the node read back fewer rows than it
-  computed. It now raises `StoreWriteError` at the first failed write, whatever
-  `error_policy` is, on both orchestrators (the async one no longer raises an exception
-  group). Rows stored before the failure are committed and kept; re-running does not
-  recompute stored function results. A failed flush of pending writes raises
-  `StoreWriteError` with `flush=True` and names the store, not a row. A function output that
-  cannot be turned into a record (a naive `datetime`, a value not matching the declared
-  type) is still a row failure governed by `error_policy`, like a function that raised. See
-  *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
+#### A Delta table that cannot be read is no longer reported as having no rows (ITL-884)
+
+When a `DeltaTableDatabase` table existed but could not be read (a missing or damaged data
+file, a log the backend cannot load, data files whose column type no longer matches the
+table), `get_all_records` and `get_records_by_ids` returned `None`, the same answer as for a
+table that does not exist. A `PipelineJob` then warned that the stored results "may have been
+deleted externally", swallowed the per-row read errors under `error_policy="continue"`, finished
+without raising, and its nodes showed no records. Every read now raises
+`orcapod.errors.StoreReadError`, which names the table and chains the backend's error, and a
+store read failure fails the run under both orchestrators whatever the `error_policy`, also
+when it happens while a row's result is being stored. A table that does not exist still reads as
+empty.
+
+A flush that could not load an existing table no longer treats it as absent. Before this fix a
+`DeltaProtocolError` while loading the table made the flush write the batch with
+`mode="overwrite"`, replacing the stored rows. The flush now raises and writes nothing.
+
+A write that fails because the stored table cannot be read raises `StoreReadError`, not
+`StoreWriteError`. When read and write failures happen in the same run, both orchestrators
+raise the error of the node that comes first in the pipeline (ITL-884 #290).
+
+#### A failed store write fails the run (ITL-878)
+
+A failed store write fails the run. `PipelineJob.run()` used to return normally when a node's
+result or record could not be written (the row was skipped like a crashed function under the
+default `error_policy="continue"`), so the node read back fewer rows than it computed. It now
+raises `StoreWriteError` at the first failed write, whatever `error_policy` is, on both
+orchestrators (the async one no longer raises an exception group). Rows stored before the
+failure are committed and kept; re-running does not recompute stored function results. A failed
+flush of pending writes raises `StoreWriteError` with `flush=True` and names the store, not a
+row. A function output that cannot be turned into a record (a naive `datetime`, a value not
+matching the declared type) is still a row failure governed by `error_policy`, like a function
+that raised. See *When the store cannot be written* in the function-pods guide. (ITL-878 #287)
+
+#### Newcomer papercuts (ITL-821)
+
 - `orcapod.enable_file_hash_caching` is exported at the top level (ITL-821).
 - A source built from data with no rows and no schema (e.g. `DictSource(data=[])`) raises
   `ValueError: Table is empty` instead of `tag_columns not found in table` (ITL-821).
@@ -108,6 +132,24 @@ v0.3, or keep using v0.2 for an existing store. A migration is planned after v0.
   (ITL-821).
 - `examples/save_and_load_pipelines.py` runs again, rewritten around `PipelineJob`; the test
   suite now runs every example (ITL-821).
+- `polars_filter` with a Polars expression predicate (`stream.polars_filter(pl.col("x") > 0)`)
+  can be hashed, so it works upstream of a join and inside a `PipelineJob` (ITL-828). An
+  expression hashes under the new label `polars_expr_v1`, through Orcapod's own canonical
+  encoding of the expression tree rather than Polars' serialization, which is not stable
+  across Polars versions. Column references, literals, comparisons, arithmetic, boolean
+  operators, `is_null`/`is_not_null`/`is_nan`/`is_not_nan`, `is_in` (a Python list),
+  `is_between`, `all_horizontal`/`any_horizontal`, `str.contains`/`starts_with`/`ends_with`
+  and `cast` are supported. Anything else, notably Python functions (`map_elements`,
+  `map_batches`) and selectors over several columns, raises `ValueError` naming the
+  expression when the filter's identity is needed. Keyword-constraint filters hash as before.
+- Inside a `PipelineJob`, a `PolarsFilter` (keyword constraints too) upstream of a `Join` no
+  longer raises `InputValidationError` (`str` vs `str | None`): the filter now keeps every
+  column's input nullability, instead of returning every column nullable (ITL-828). A filtered
+  row's data hash now equals its source row's, so the data hashes of filtered rows change from
+  `0.2.0`, and a function pod downstream of a `polars_filter` recomputes its results once
+  against a `0.2.0` store.
+- `PolarsFilter(predicates=[...])` and `stream.polars_filter(...)` with the same predicates now
+  have the same hashes (`predicates` is stored as a tuple).
 
 ## [0.2.0] — 2026-11-10
 
