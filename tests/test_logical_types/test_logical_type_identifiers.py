@@ -160,16 +160,6 @@ def test_builtin_identifier_is_declared_by_the_extension_type(
     )
 
 
-@pytest.mark.parametrize("annotation", [list[pathlib.Path], set[uuid.UUID]])
-def test_list_and_set_wrappers_write_a_version_and_the_element_identifier(
-    annotation: Any,
-) -> None:
-    arrow_type = _extension_type(annotation)
-    metadata = json.loads(arrow_type.__arrow_ext_serialize__())
-    assert metadata["version"] == 1
-    assert metadata["element_ext_metadata"] == VERSION_1.decode()
-
-
 def test_identifier_text_is_name_and_hex_of_metadata() -> None:
     assert LogicalTypeIdentifier("orcapod.path", VERSION_1).text == (
         "orcapod.path;" + VERSION_1.hex()
@@ -278,105 +268,6 @@ def test_hashes_without_logical_types_do_not_depend_on_registered_types() -> Non
     assert plain.semantic_hasher.hash_object(
         plain_function
     ) == extended.semantic_hasher.hash_object(plain_function)
-
-
-def _thing_list_logical_type(metadata: bytes) -> LogicalTypeProtocol:
-    """A third-party wrapper logical type for ``list[Thing]`` with the given metadata."""
-    storage = pa.large_list(pa.large_string())
-    arrow_cls: Any = make_arrow_extension_type(
-        "thirdparty.thinglist", storage, metadata
-    )
-    polars_cls: Any = make_polars_extension_type(
-        "thirdparty.thinglist", storage, metadata.decode()
-    )
-
-    class LogicalThingList(BaseLogicalType):
-        logical_type_name = "thirdparty.thinglist"
-        python_type = list[Thing]  # type: ignore[assignment]
-        _arrow: pa.ExtensionType = arrow_cls()
-        _polars: pl.BaseExtension = polars_cls()
-
-        def get_arrow_extension_type(self) -> pa.ExtensionType:
-            return self._arrow
-
-        def get_polars_extension_type(self) -> pl.BaseExtension:
-            return self._polars
-
-        def python_to_storage(self, value: Any, converter: Any = None) -> list[str]:
-            return [thing.text for thing in value]
-
-        def storage_to_python(
-            self, storage_value: Any, converter: Any = None
-        ) -> list[Thing]:
-            return [Thing(text) for text in storage_value]
-
-    return LogicalThingList()
-
-
-def _wrapper_contexts() -> tuple[DataContext, DataContext]:
-    """Two contexts whose ``list[Thing]`` wrapper differs only in its metadata."""
-    element = b'{"version":1}'
-    return (
-        _fresh_context(
-            _thing_logical_type(element), _thing_list_logical_type(b'{"version":1}')
-        ),
-        _fresh_context(
-            _thing_logical_type(element), _thing_list_logical_type(b'{"version":2}')
-        ),
-    )
-
-
-def test_wrapper_metadata_alone_changes_the_schema_hash() -> None:
-    v1, v2 = _wrapper_contexts()
-    schema = Schema({"c": list[Thing]})
-    assert v1.semantic_hasher.hash_object(schema) != v2.semantic_hasher.hash_object(
-        schema
-    )
-    # The element type alone is unaffected by the wrapper's identifier.
-    assert v1.semantic_hasher.hash_object(Thing) == v2.semantic_hasher.hash_object(
-        Thing
-    )
-
-
-def test_wrapper_metadata_alone_changes_a_function_signature_hash() -> None:
-    v1, v2 = _wrapper_contexts()
-
-    def takes_things(things: list[Thing]) -> int:
-        return len(things)
-
-    assert v1.semantic_hasher.hash_object(
-        takes_things
-    ) != v2.semantic_hasher.hash_object(takes_things)
-
-
-def test_typing_list_and_builtin_list_of_a_logical_type_hash_the_same() -> None:
-    hasher = get_default_context().semantic_hasher
-    assert hasher.hash_object(typing.List[pathlib.Path]) == hasher.hash_object(
-        list[pathlib.Path]
-    )
-
-
-@pytest.mark.parametrize(
-    "annotation",
-    [
-        list[int],
-        list[list[float]],
-        dict[str, int],
-        dict[str, op.File],
-        tuple[int, str],
-        typing.List[int],
-    ],
-)
-def test_generic_alias_without_a_wrapper_logical_type_hashes_as_before(
-    annotation: Any,
-) -> None:
-    """Only ``list[T]``/``set[T]`` of a logical ``T`` hash as a wrapper identifier."""
-    context = get_default_context()
-    # ``GenericAliasHandler()`` without a converter is the origin-and-arguments
-    # structure every alias had before wrapper identifiers were hashed.
-    assert GenericAliasHandler(type_converter=context.type_converter).handle(
-        annotation, context.semantic_hasher
-    ) == GenericAliasHandler().handle(annotation, context.semantic_hasher)
 
 
 class _ThingHandler:
@@ -565,7 +456,6 @@ def test_list_wrapper_of_an_unreadable_element_is_refused() -> None:
             "category": "list",
             "element_ext_name": "orcapod.path",
             "element_ext_metadata": '{"version":9}',
-            "version": 1,
         }
     ).encode()
     stored = _stored_column(
@@ -575,3 +465,80 @@ def test_list_wrapper_of_an_unreadable_element_is_refused() -> None:
     )
     with pytest.raises(LogicalTypeIdentifierError):
         converter.load_logical_types(stored)
+
+
+# --- native containers: list[T] / set[T] of a logical type -------------------
+
+
+def _file_value(tmp_path: pathlib.Path) -> Any:
+    target = tmp_path / "f.txt"
+    target.write_text("content")
+    return op.File(target)
+
+
+def _directory_value(tmp_path: pathlib.Path) -> Any:
+    target = tmp_path / "d"
+    target.mkdir(exist_ok=True)
+    (target / "f.txt").write_text("content")
+    return op.Directory(target)
+
+
+_ELEMENT_VALUE: dict[Any, Any] = {
+    pathlib.Path: lambda tmp_path: pathlib.Path("/a/b"),
+    uuid.UUID: lambda tmp_path: uuid.UUID(int=7),
+    op.File: _file_value,
+    op.Directory: _directory_value,
+}
+
+
+@pytest.mark.parametrize("container", [list, set])
+@pytest.mark.parametrize("element", [pathlib.Path, uuid.UUID, op.File, op.Directory])
+def test_container_cells_with_different_null_elements_hash_differently(
+    container: Any, element: Any, tmp_path: pathlib.Path
+) -> None:
+    """``[]``, ``[None]``, ``[None, None]`` and ``[x]`` are four different values."""
+    context = get_default_context()
+    container_type = _extension_type(container[element])
+    element_type = _converter().get_logical_type(element)
+    assert element_type is not None
+    value = element_type.python_to_storage(
+        _ELEMENT_VALUE[element](tmp_path), _converter()
+    )
+    cells: list[list[Any]] = [[], [None], [None, None], [value], [value, None]]
+
+    hashes = []
+    for cell in cells:
+        storage = pa.array([cell], container_type.storage_type)
+        table = pa.table({"c": pa.ExtensionArray.from_storage(container_type, storage)})
+        hashes.append(context.arrow_hasher.hash_table(table))
+    assert len(set(hashes)) == len(cells)
+
+
+@pytest.mark.parametrize("annotation", [list[pathlib.Path], set[uuid.UUID]])
+def test_native_container_identifier_has_no_version_of_its_own(annotation: Any) -> None:
+    """A list/set wrapper is identified by its kind and its element's identifier only."""
+    metadata = json.loads(_extension_type(annotation).__arrow_ext_serialize__())
+    assert sorted(metadata) == ["category", "element_ext_metadata", "element_ext_name"]
+    assert metadata["element_ext_metadata"] == VERSION_1.decode()
+
+
+@pytest.mark.parametrize("annotation", [list[pathlib.Path], set[op.File]])
+def test_native_container_hashes_like_any_generic_alias_in_the_schema_hash(
+    annotation: Any,
+) -> None:
+    """In the type hash a native container is its origin and arguments, like ``list[int]``."""
+    context = get_default_context()
+    handled = GenericAliasHandler().handle(annotation, context.semantic_hasher)
+    assert handled == {
+        "__type__": "generic_alias",
+        "origin": context.semantic_hasher.hash_object(
+            typing.get_origin(annotation)
+        ).to_string(),
+        "args": [
+            context.semantic_hasher.hash_object(arg).to_string()
+            for arg in typing.get_args(annotation)
+        ],
+    }
+    assert context.semantic_hasher.hash_object(
+        annotation
+    ) == context.semantic_hasher.hash_object(handled)

@@ -27,7 +27,6 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from orcapod.hashing.hash_utils import generic_alias_logical_type
 from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
@@ -131,23 +130,7 @@ class SpecialFormHandler:
 
 
 class GenericAliasHandler:
-    """Hasher for generic alias type annotations (``dict[int, str]``, ``Optional[X]``, etc.).
-
-    A generic alias that is itself stored as a logical type (``list[T]`` or
-    ``set[T]`` of a logical type ``T``) hashes as that wrapper type's identifier,
-    ``"type:<extension name>;<hex metadata>"``, exactly as ``TypeObjectHandler``
-    does for a class. The wrapper's identifier contains the element's, so the
-    whole identifier of every logical type involved is hashed. Any other alias
-    hashes as its origin and arguments.
-
-    Args:
-        type_converter: Optional ``TypeConverterProtocol`` used to find wrapper
-            logical types. When ``None``, every alias hashes as origin and
-            arguments.
-    """
-
-    def __init__(self, type_converter: "TypeConverterProtocol | None" = None) -> None:
-        self._type_converter = type_converter
+    """Hasher for generic alias type annotations (``dict[int, str]``, ``Optional[X]``, etc.)."""
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> Any:
         import typing
@@ -159,9 +142,6 @@ class GenericAliasHandler:
         if origin is typing.Union:
             hashed_args = sorted(hasher.hash_object(arg).to_string() for arg in args)
             return {"__type__": "union", "args": hashed_args}
-        wrapper = generic_alias_logical_type(obj, self._type_converter)
-        if wrapper is not None:
-            return f"type:{logical_type_identifier(wrapper).text}"
         return {
             "__type__": "generic_alias",
             "origin": hasher.hash_object(origin).to_string(),
@@ -634,7 +614,7 @@ def register_builtin_python_type_handlers(
     registry.register(type, TypeObjectHandler(type_converter=type_converter))
     registry.register(_types.UnionType, UnionTypeHandler())
 
-    generic_alias_hasher = GenericAliasHandler(type_converter=type_converter)
+    generic_alias_hasher = GenericAliasHandler()
     registry.register(_types.GenericAlias, generic_alias_hasher)
     try:
         import typing as _typing

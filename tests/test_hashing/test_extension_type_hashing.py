@@ -313,9 +313,11 @@ class TestListExtensionHashing:
     def test_list_file_extension_embeds_per_element_scalar_hashes(self, ctx, tmp_path):
         """The combined list hash embeds each element's scalar hash.
 
-        Combined format: b"<outer_type_name>::<h0>\\x00<h1>"
-        where h0 and h1 are the scalar visit results for the same files.
-        Splitting the suffix by \\x00 recovers individual element hashes.
+        Combined format: the outer type's identifier text, ``::``, the element
+        count as an 8-byte little-endian integer, then per element the byte
+        ``01``, the token length (8 bytes, little-endian) and the token, where
+        the tokens are the scalar visit results for the same files (a null
+        element is the single byte ``00``).
         """
         f0 = tmp_path / "contract0.txt"
         f0.write_text("content zero")
@@ -329,16 +331,24 @@ class TestListExtensionHashing:
 
         visitor = SemanticHashingVisitor(ctx.type_converter, ctx.semantic_hasher)
 
-        # Scalar hashes — b"orcapod:file::<method>:<digest>" each
+        # Scalar hashes — b"<identifier text of orcapod.file>::<method>:<digest>" each
         _, h0_bytes = visitor.visit(scalar_ext_type, s0)
         _, h1_bytes = visitor.visit(scalar_ext_type, s1)
 
-        # List hash — b"list[orcapod:file]::<h0>\x00<h1>"
         _, combined = visitor.visit(list_ext_type, [s0, s1])
 
-        # Strip outer type prefix and split to recover per-element hashes
-        suffix = combined.split(b"::", 1)[1]  # b"<h0>\x00<h1>"
-        elem_hashes = suffix.split(b"\x00")
+        # Strip the outer type prefix and decode the counted, length-prefixed elements.
+        suffix = combined.split(b"::", 1)[1]
+        count = int.from_bytes(suffix[:8], "little")
+        assert count == 2
+        elem_hashes = []
+        offset = 8
+        for _ in range(count):
+            assert suffix[offset : offset + 1] == b"\x01"
+            length = int.from_bytes(suffix[offset + 1 : offset + 9], "little")
+            elem_hashes.append(suffix[offset + 9 : offset + 9 + length])
+            offset += 9 + length
+        assert offset == len(suffix)
         assert elem_hashes[0] == h0_bytes, (
             "Embedded element 0 must equal the scalar hash of file 0"
         )

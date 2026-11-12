@@ -8,7 +8,6 @@ from uuid import UUID
 import orcapod as op
 import pytest
 
-from orcapod.logical_types.identifier import logical_type_identifier
 
 from orcapod.hashing.hash_utils import (
     canonical_annotation_str,
@@ -458,10 +457,7 @@ class TestCanonicalAnnotationStrWithRegistry:
 
     def test_generic_list_of_registered_type(self, type_converter):
         result = canonical_annotation_str(list[op.File], type_converter)
-        # list[File] is stored as a wrapper logical type: its own identifier is used.
-        wrapper = type_converter.get_logical_type_for_python_type(list[op.File])
-        assert result == logical_type_identifier(wrapper).text
-        assert result.startswith("list[orcapod.file];")
+        assert result == "list[orcapod.file;7b2276657273696f6e223a317d]"
 
     def test_generic_dict_with_registered_value(self, type_converter):
         result = canonical_annotation_str(dict[str, op.File], type_converter)

@@ -298,7 +298,7 @@ class TestFunctionSignatureGolden:
     def test_function_object_hash(self):
         hasher = get_default_context().semantic_hasher
         assert hasher.hash_object(golden_fn).to_string() == (
-            "semantic_v0.1:e82e5b01ef04e93b033bbd27c2fb50c4f83cbcc13acb9f69f51c92a75d12a2ad"
+            "semantic_v0.1:313d3edd8a063dbd1b9263647dcb0c78597d6a8806bc37d88bda4e194cafdb22"
         )
 
 

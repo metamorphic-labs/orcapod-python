@@ -11,6 +11,25 @@ Design decisions:
 - Storage type: ``pa.large_list(element_storage)`` — NO extension type inside list value
 - Metadata JSON: ``{"category": "list"|"set", "element_ext_name": "...", "element_ext_metadata": null_or_string}``
 - ``python_type`` returns the full generic alias ``list[uuid.UUID]`` (not bare ``list``)
+
+Native containers (developer, November 11, 2026, ITL-935). ``list[T]`` and ``set[T]``
+of a logical type ``T`` are the *native containers*, and the only ones. They are
+logical types only because Arrow cannot hold an extension type inside a list value
+field; conceptually they are an ordinary list or set of ``T``. Therefore:
+
+- A native container has **no version of its own**: its extension metadata carries no
+  ``"version"`` key. Its identifier is the container kind (``list`` / ``set``) plus the
+  element's identifier (extension name and metadata), so it changes exactly when the
+  element's identifier does.
+- In the type and schema hash a native container is hashed like any generic alias, as
+  its origin and arguments (``GenericAliasHandler``); the element's identifier enters
+  through the argument.
+- A change to how native containers are stored or hashed is a change of the core
+  hashing, that is of the data context (the global hash version), never a logical
+  type change.
+
+A container type supplied by a third party is not a native container: it is an
+ordinary logical type with its own identifier.
 """
 
 from __future__ import annotations
@@ -41,9 +60,6 @@ logger = logging.getLogger(__name__)
 
 LIST_CATEGORY = "list"
 SET_CATEGORY = "set"
-
-LIST_WRAPPER_VERSION = 1
-"""Version of the list/set wrapper's own stored layout, written as ``"version"``."""
 
 
 class ListLogicalType(BaseLogicalType):
@@ -93,7 +109,10 @@ class ListLogicalType(BaseLogicalType):
 
         category = SET_CATEGORY if is_set else LIST_CATEGORY
 
-        def _wrapper_metadata(element_metadata: bytes, versioned: bool) -> bytes:
+        def _container_metadata(element_metadata: bytes) -> bytes:
+            # No "version" key, by design: see "Native containers" in the module
+            # docstring. The identifier is the container kind plus the element's
+            # identifier, so it changes exactly when the element's does.
             meta_dict: dict[str, Any] = {
                 "category": category,
                 "element_ext_name": element_ext_name,
@@ -101,19 +120,14 @@ class ListLogicalType(BaseLogicalType):
                     element_metadata.decode("utf-8") if element_metadata else None
                 ),
             }
-            if versioned:
-                meta_dict["version"] = LIST_WRAPPER_VERSION
             return json.dumps(meta_dict).encode("utf-8")
 
-        self._metadata_bytes: bytes = _wrapper_metadata(raw_meta_bytes, True)
-        # A stored wrapper is readable when its element is: under the current
-        # wrapper metadata, or under the form written before identifiers
-        # existed (ITL-935), which had no "version" key and the same layout.
-        element_readable = tuple(element_logical_type.readable_extension_metadata())
+        self._metadata_bytes: bytes = _container_metadata(raw_meta_bytes)
+        # A stored container is readable exactly when its element is: one
+        # readable container metadata value per readable element metadata value.
         self._also_reads: tuple[bytes, ...] = tuple(
-            _wrapper_metadata(element_metadata, versioned)
-            for versioned in (True, False)
-            for element_metadata in element_readable
+            _container_metadata(element_metadata)
+            for element_metadata in element_logical_type.readable_extension_metadata()
         )
 
         # Derive storage type: large_list of the element's storage type (not extension type).
@@ -159,7 +173,7 @@ class ListLogicalType(BaseLogicalType):
         - ``extension_name``: ``"list[<element_ext_name>]"`` or ``"set[...]"``
         - ``storage_type``: ``pa.large_list(<element_storage_type>)``
         - Serialized metadata: JSON with ``category``, ``element_ext_name``,
-          ``element_ext_metadata`` and ``version``
+          and ``element_ext_metadata``
 
         Returns:
             A cached ``pa.ExtensionType`` instance.

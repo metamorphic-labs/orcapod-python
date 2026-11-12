@@ -80,9 +80,29 @@ Orcapod's own types follow the same contract as yours. Their metadata is the JSO
 | `numpy.ndarray` | `orcapod.ndarray` | `{"version":1}` |
 | `pandas.DataFrame` | `pandas.dataframe` | `{"version":1}` |
 | `pandas.Series` | `pandas.series` | `{"version":1}` |
-| `list[T]`, `set[T]` of a logical type `T` | `list[<name of T>]`, `set[<name of T>]` | JSON with `category`, the element's name and metadata, and `"version": 1` |
 
 `{"version":N}` is the convention of the built-in types only. Your types may use any bytes.
+
+### Native containers: `list[T]` and `set[T]`
+
+A column typed `list[T]` or `set[T]`, where `T` is a logical type, is stored under a wrapper
+extension type named `list[<name of T>]` or `set[<name of T>]`. These two are the *native
+containers*. They are logical types only because Arrow cannot hold an extension type inside
+a list; conceptually they are an ordinary list or set of `T`. By design:
+
+- **A native container has no version of its own.** Its metadata is JSON with `category`
+  (`list` or `set`) and the element's extension name and metadata, and nothing else. Its
+  identifier is the container kind plus the element's identifier, so it changes exactly when
+  the element's identifier changes.
+- **In the type and schema hash it is hashed like any other generic type**, `list[int]`
+  included: as its origin (`list` or `set`) and its argument. The element's identifier enters
+  through the argument.
+- **A change to how native containers are stored or hashed is a change of Orcapod's core
+  hashing**, recorded by the data context (the global hash version), never a change of a
+  logical type.
+
+A container type you implement yourself is not a native container. It is an ordinary logical
+type with its own identifier, which you declare and change like that of any other type.
 
 ## Declaring the identifier of your own type
 

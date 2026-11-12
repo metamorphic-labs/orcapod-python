@@ -56,13 +56,3 @@ class TypeConverterProtocol(Protocol):
     def ensure_types_registered_for_schemas(self, *schemas: Schema) -> None: ...
 
     def get_logical_type(self, python_type: type) -> "LogicalTypeProtocol | None": ...
-
-    def get_logical_type_for_python_type(
-        self, annotation: Any
-    ) -> "LogicalTypeProtocol | None":
-        """Return the logical type ``annotation`` is stored as, registering it if needed.
-
-        Unlike ``get_logical_type`` this also resolves generic aliases such as
-        ``list[T]`` of a logical type ``T`` to their wrapper logical type.
-        """
-        ...

@@ -134,13 +134,19 @@ the type and changes only when an existing value would be stored or hashed diffe
 - **Built-in types write an identifier.** `orcapod.path`, `orcapod.upath`, `orcapod.uuid`,
   `orcapod.file`, `orcapod.directory`, `pandas.dataframe` and `pandas.series` now write the
   extension metadata `{"version":1}` (they wrote none); `orcapod.ndarray` already did.
-  `list[T]` and `set[T]` of a logical type add `"version": 1` to their metadata and carry
-  the element's new metadata.
+  `list[T]` and `set[T]` of a logical type (the native containers) have no version of their
+  own, by design: their metadata carries the element's name and new metadata, so their
+  identifier changes exactly when the element's does.
 - **The whole identifier is hashed.** A type hash, a schema hash and a function signature
   used to contain the logical type's name only. They now contain
   `<extension name>;<hex of the metadata>` (`LogicalTypeIdentifier.text`). The hashed cell
   of a value-hashed type (UUID, file, directory, array, pandas) starts with the same text,
   where it used to start with the name alone, written with `:` for `.`.
+- **Fixed: `[]` and `[None]` hashed the same in a list or set of a value-hashed type.** The
+  hashed cell of a `list[T]` / `set[T]` column (T a UUID, file, directory, array or pandas
+  type) joined its element hashes with a separator and wrote nothing for a null element, so
+  an empty list, `[None]` and `[None, None]` shared one hash. The cell now holds the element
+  count and, per element, a null marker or a length-prefixed element hash.
 - **What moves, once, in v0.3.** For every node whose schema or function signature has a
   column of a logical type (including dataclass and pydantic columns): its schema, function
   and pipeline hashes, hence the paths of its stored tables, and the hashes of the rows that

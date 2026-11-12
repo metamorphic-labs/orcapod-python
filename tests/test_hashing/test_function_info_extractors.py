@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 import orcapod as op
 from orcapod.contexts import get_default_context
-from orcapod.logical_types.identifier import logical_type_identifier
 
 
 class TestFunctionNameExtractor:
@@ -255,7 +254,6 @@ class TestFunctionSignatureExtractorWithRegistry:
 
     @pytest.fixture
     def extractor(self):
-        from orcapod.contexts import get_default_context
         from orcapod.hashing.semantic_hashing.function_info_extractors import (
             FunctionSignatureExtractor,
         )
@@ -310,13 +308,7 @@ class TestFunctionSignatureExtractorWithRegistry:
         def fn(files: list[op.File]) -> str: ...
 
         info = extractor.extract_function_info(fn)
-        # list[File] is stored as a wrapper logical type: its own identifier is used.
-        wrapper = get_default_context().type_converter.get_logical_type_for_python_type(
-            list[op.File]
-        )
-        assert wrapper is not None
-        assert info["params"] == f"files: {logical_type_identifier(wrapper).text}"
-        assert info["params"].startswith("files: list[orcapod.file];")
+        assert info["params"] == "files: list[orcapod.file;7b2276657273696f6e223a317d]"
 
     def test_union_return_annotation_is_raw_union(self, extractor):
         """op.File | None return annotation is stored as a raw union type object.
@@ -472,7 +464,6 @@ class TestFunctionSignatureExtractorWithRegistry:
            same ``type_converter``), it produces ``"type:orcapod.path"`` — the stable canonical
            form — not ``"type:pathlib.Path"`` (the old module-path form).
         """
-        from orcapod.contexts import get_default_context
         from orcapod.hashing.semantic_hashing.builtin_handlers import TypeObjectHandler
 
         def fn(s: str) -> Path: ...

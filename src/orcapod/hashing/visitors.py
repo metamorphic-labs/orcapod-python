@@ -5,6 +5,7 @@ Generic visitor pattern for traversing Arrow types and data simultaneously.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import struct
 import typing
 from typing import TYPE_CHECKING, Any
 
@@ -161,6 +162,36 @@ class SemanticHashingError(Exception):
     pass
 
 
+_U64 = struct.Struct("<Q")
+_NULL_ELEMENT = b"\x00"
+_PRESENT_ELEMENT = b"\x01"
+
+
+def _encode_container_elements(elements: "list[Any]") -> bytes:
+    """Encode the hashed elements of a list/set cell without ambiguity.
+
+    Layout: ``u64le(element count)``, then for each element either the byte
+    ``00`` (a null element) or the byte ``01``, ``u64le(token length)`` and
+    the token. Every field is counted or length-prefixed, so two different
+    element lists never encode to the same bytes; in particular an empty
+    list, ``[None]`` and ``[None, None]`` differ.
+
+    Args:
+        elements: The per-element hash tokens (``bytes``), with ``None`` for a
+            null element.
+
+    Returns:
+        The encoded bytes.
+    """
+    parts = [_U64.pack(len(elements))]
+    for element in elements:
+        if element is None:
+            parts.append(_NULL_ELEMENT)
+        else:
+            parts.append(_PRESENT_ELEMENT + _U64.pack(len(element)) + element)
+    return b"".join(parts)
+
+
 class SemanticHashingVisitor(ArrowTypeDataVisitor):
     """Visitor that replaces extension-typed columns with their content hashes.
 
@@ -278,16 +309,16 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
                 )
 
                 # Fold the outer type's identifier (extension name and metadata)
-                # into the result, the same way the scalar path does.  This ensures list[T] and set[T] with identical
-                # contents produce distinct hashes.
+                # into the result, the same way the scalar path does, so list[T]
+                # and set[T] with identical contents produce distinct hashes.
+                # The elements follow as a count and, per element, a null marker
+                # or a length-prefixed token, so [] and [None] and [None, None]
+                # (and any two different element lists) never share an encoding.
                 type_name = arrow_type_identifier(extension_type).text
                 combined = (
                     type_name.encode("utf-8")
                     + b"::"
-                    + b"\x00".join(
-                        elem if isinstance(elem, bytes) else b""
-                        for elem in (list_data or [])
-                    )
+                    + _encode_container_elements(list_data or [])
                 )
                 return pa.large_binary(), combined
 

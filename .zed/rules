@@ -228,6 +228,11 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
   (`{"version":N}`); a new built-in type must write one, never empty metadata.
 - A changed identifier is a schema change: it moves stored paths and golden values of that
   type. Treat it like any other hash change (developer approval, migration assessment).
+- The native containers `list[T]` / `set[T]` of a logical type (`ListLogicalType`) have no
+  version of their own, by design: never add a `"version"` key to their metadata. Their
+  identifier is the container kind plus the element's identifier; the type hash treats them
+  like any generic alias (origin and arguments). A change to how they are stored or hashed is
+  a data context (global hash version) change, not a logical type change.
 - On read, stored metadata must be one of the type's `readable_extension_metadata()`;
   otherwise raise `LogicalTypeIdentifierError`. Never wrap a stored column by name alone and
   never fall back to the storage type. List an older value in `also_reads` only when the
