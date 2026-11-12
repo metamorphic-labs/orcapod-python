@@ -18,13 +18,11 @@ from orcapod.contexts.core import (
     ContextValidationError,
     DataContext,
 )
+from orcapod.system_constants import (
+    PRE_V1_DATA_CONTEXT_KEY,
+    PRE_V1_DATA_CONTEXT_VERSION,
+)
 from orcapod.utils.object_spec import parse_objectspec
-
-# The data context of everything Orcapod wrote before v0.3. Its manifest is not
-# shipped: stored rows that carry this key, and tables without a data context column,
-# belong to it.
-PRE_V1_DATA_CONTEXT_VERSION = "v0.1"
-PRE_V1_DATA_CONTEXT_KEY = "std:v0.1:default"
 
 logger = logging.getLogger(__name__)
 

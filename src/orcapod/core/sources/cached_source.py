@@ -10,6 +10,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
+    require_same_data_context,
     account_for_stale_tables,
     find_stale_tables,
     report_rows_of_other_data_contexts,
@@ -257,6 +258,7 @@ class CachedSource(RootSource):
         Raises if the source cannot provide data (e.g. an unbound
         ``SourceProxy``).
         """
+        require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
             columns={"source": True, "system_tags": True}
         )

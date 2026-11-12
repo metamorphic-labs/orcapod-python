@@ -689,8 +689,8 @@ data context out. Those rows are never changed or deleted, and a read that leave
 logs one warning per table with their number (logger `orcapod.contexts.stored`).
 
 **Tables written before v0.3** have no `__data_context` column and sit at an older layout
-(`pdb_v1`, `rdb_v1`, `tdb_v1`; operator-node and cached-source tables had no layout
-component). Orcapod does not read them as results and never modifies them. When it finds
+(`pdb_v1`, `rdb_v1`, `tdb_v1`; operator-node and cached-source tables, and the function
+tables of Orcapod v0.1, had no layout component). Orcapod does not read them as results and never modifies them. When it finds
 one it logs one warning with the number of rows:
 
 ```text
@@ -707,6 +707,12 @@ invocation context (`@function_pod(ctx_arg=...)`), whose completions are in its 
 result tables. Either raises `SideEffectLogDataContextError`, naming the tables, before
 doing anything when it finds its tables at an older layout or completions of another data
 context in its current tables.
+
+A node stores rows for inputs of its own data context only: an input of another data context
+raises `InputValidationError` naming both keys before anything is written. (What should
+eventually happen instead is tracked in ITL-951.) `std:v0.1:default` itself is not shipped
+with v0.3 and does not resolve; a pipeline or job file saved by v0.2 loads under the current
+data context with a warning.
 
 `stored_data_contexts(database, record_path)` reads a stored table and counts its rows by
 data context. A table without the column reports all its rows under `std:v0.1:default`.

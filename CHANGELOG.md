@@ -130,6 +130,27 @@ read its tables as results, and computes every input again into its own tables.
   - `orcapod.contexts.stored_data_contexts(store, record_path)` counts the rows of a table
     by data context, for example `{"std:v1:default": 3}`; a table without the column reports
     its rows under `std:v0.1:default`.
+- **`std:v0.1:default` is no longer shipped.** `orcapod/contexts/data/v0.1.json` is removed
+  (it will be kept in `orcapod-sanctuary`), so `resolve_context("std:v0.1:default")` and
+  `resolve_context("v0.1")` raise `ContextResolutionError` naming it as the data context of
+  Orcapod before v0.3. A pipeline or job file saved by v0.2 still loads: each node that
+  names `std:v0.1:default` is loaded under the current data context with a warning, and
+  shows no rows until v0.3 has run (its v0.2 tables are at the old layout).
+- **Removed: the v0 to v1 migration machinery.** `orcapod.errors.SchemaVersionError`,
+  `NodeConfig(ignore_schema=...)` (and `NodeConfig.ignore_schema`), the package
+  `orcapod.migrations` (`migrate_pipeline_db`, `migrate_result_db`, `MigrationResult`), the
+  command `orcapod migrate` (`pipeline-db`, `result-db`), `ResultCache.base_record_path`,
+  `ResultCache.set_ignore_schema` and `CachedFunctionPod.set_ignore_schema`. They converted
+  tables without a layout component to `pdb_v1` / `rdb_v1`, which v0.3 does not read. A
+  table without a layout component is now counted and reported like any other old layout,
+  where it used to raise `SchemaVersionError`. Remove `ignore_schema` from your code; the
+  migration to the v0.3 layouts is a later tool (ITL-913, ITL-914).
+- **An input of another data context is refused.** A node, cache or cached source that
+  would store a row for an input whose data context differs from its own raises
+  `InputValidationError` naming both keys, before anything is computed, delivered or
+  written. For a function node this is checked for the whole input, so it fails the run
+  whatever the `error_policy`. Only one data context is shipped, so this needs a custom
+  context registry to happen.
 - **Hash values.** The content hash of a stream that has no producer (a bare
   `ArrowTableStream`) covers its `_context_key` column, so it changes with the key. No other
   hash value changes because of this entry.

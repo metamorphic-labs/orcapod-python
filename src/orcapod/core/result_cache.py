@@ -16,6 +16,7 @@ from orcapod.errors import StoreReadError, StoreWriteError
 from orcapod.contexts.stored import (
     StaleTable,
     keep_rows_of_data_context,
+    require_same_data_context,
     account_for_stale_tables,
     find_stale_tables,
     report_rows_of_other_data_contexts,
@@ -186,6 +187,7 @@ class ResultCache:
         """
         from orcapod.core.datagrams import Data
 
+        require_same_data_context(input_data.data_context_key, data_context_key)
         self._account_for_stale_tables(data_context_key)
 
         RECORD_ID_COL = "_record_id"
@@ -262,6 +264,7 @@ class ResultCache:
                 same ID already exists.
             data_context_key: Key of the caller's data context, stored on the row.
         """
+        require_same_data_context(input_data.data_context_key, data_context_key)
         self._account_for_stale_tables(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})

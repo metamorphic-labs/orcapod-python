@@ -32,7 +32,9 @@ from orcapod.protocols import hashing_protocols as hp
 from orcapod.protocols import semantic_types_protocols as sp
 
 from .core import ContextResolutionError, ContextValidationError, DataContext
-from .registry import PRE_V1_DATA_CONTEXT_KEY, JSONDataContextRegistry
+from orcapod.system_constants import PRE_V1_DATA_CONTEXT_KEY
+
+from .registry import JSONDataContextRegistry
 from .stored import stored_data_contexts
 
 if TYPE_CHECKING:

@@ -27,6 +27,7 @@ from orcapod.errors import (
 from orcapod.contexts.stored import (
     account_for_stale_tables,
     find_stale_tables,
+    require_same_data_context,
     with_data_context,
 )
 from orcapod.invocation import (
@@ -238,6 +239,8 @@ def _execute_side_effect_row(
     Returns:
         ``(tag, data)`` to emit downstream, or ``None`` to drop the row.
     """
+    require_same_data_context(data.data_context_key, data_context_key)
+
     # 1. Build the preimage — delegates to the shared helper used by FunctionJobNode.
     #    Appends the recomputation index (fixed at 0; side effects never recompute).
     preimage = _build_record_id_preimage(tag, data).append_column(

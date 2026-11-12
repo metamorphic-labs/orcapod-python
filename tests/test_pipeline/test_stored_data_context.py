@@ -19,22 +19,32 @@ old-layout paths without the column, or under another data context key with othe
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
+import shutil
 from collections.abc import Callable
+from importlib import resources
 from typing import Any, cast
 
 import pyarrow as pa
 import pytest
 
-from orcapod import FunctionPod, PipelineJob, function_pod
+from orcapod import FunctionPod, PipelineJob, contexts, function_pod
 from orcapod.contexts import stored_data_contexts
 from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Data
+from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.sources.cached_source import CachedSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import SideEffectLogDataContextError, StoreError
+from orcapod.errors import (
+    InputValidationError,
+    SideEffectLogDataContextError,
+    StoreError,
+)
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.side_effects import SideEffectPod, sink_pod
 from orcapod.sources import ArrowTableSource, DictSource
@@ -986,6 +996,130 @@ class TestSideEffectFunctionNodes:
         store = v02_store(new_store)
         _ = build_job(store).run()
         assert sorted(calls) == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# An input of another data context
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def other_context(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> contexts.DataContext:
+    """Register a second data context, ``OTHER``, with the hashers of the default one.
+
+    A row can only name a data context the registry knows, so the registry is replaced
+    for the test by one that holds the shipped manifest and a copy of it under ``OTHER``.
+    """
+    shipped = pathlib.Path(str(resources.files("orcapod.contexts"))) / "data"
+    manifests = tmp_path / "contexts"
+    shutil.copytree(shipped, manifests)
+    manifest = json.loads((manifests / "v1.json").read_text())
+    manifest["context_key"] = OTHER
+    manifest["version"] = "v0.9"
+    (manifests / "v0.9.json").write_text(json.dumps(manifest))
+    registry = contexts.create_registry(str(manifests))
+    # Replacing the module's registry is the only way to register a second context.
+    monkeypatch.setattr(contexts, "_registry", registry)
+    return registry.get_context(OTHER)
+
+
+def _other_context_stream(column: str = "x") -> ArrowTableStream:
+    """A stream of the data context ``OTHER``: its rows name it, and so does its table."""
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field(column, pa.int64(), nullable=False),
+            pa.field("_context_key", pa.large_string(), nullable=False),
+        ]
+    )
+    table = pa.table(
+        {"k": ["a", "b"], column: [1, 2], "_context_key": [OTHER, OTHER]},
+        schema=schema,
+    )
+    return ArrowTableStream(table, tag_columns=["k"], data_context=OTHER)
+
+
+def _assert_names_both_contexts(error: InputValidationError) -> None:
+    assert repr(OTHER) in str(error)
+    assert repr(CURRENT) in str(error)
+
+
+@pytest.mark.usefixtures("other_context")
+class TestInputOfAnotherDataContext:
+    """A node does not write rows for an input hashed under another data context.
+
+    A ``PipelineJob`` wraps every input stream in a source node of the default data
+    context, so these tests drive the nodes directly, the way a job drives them.
+    """
+
+    def test_function_node_raises_and_writes_nothing(self, store: Store):
+        node = FunctionJobNode(
+            function_pod=double.pod,  # pyright: ignore[reportArgumentType]  # the decorator types .pod as the pod base class
+            input_stream=_other_context_stream(),
+            pipeline_database=store,
+            result_database=store,
+        )
+
+        with pytest.raises(InputValidationError) as info:
+            node.run()
+
+        _assert_names_both_contexts(info.value)
+        assert calls == []
+        assert reopened(store).list_sources() == []
+
+    def test_cached_function_raises_before_calling_it(
+        self, store: Store, other_context: contexts.DataContext
+    ):
+        cached = CachedDataFunction(double.pod.data_function, result_database=store)
+
+        with pytest.raises(InputValidationError) as info:
+            _ = cached.call(Data({"x": 1}, data_context=other_context))
+
+        _assert_names_both_contexts(info.value)
+        assert calls == []
+        assert reopened(store).list_sources() == []
+
+    def test_stored_operator_node_raises_and_writes_nothing(self, store: Store):
+        node = OperatorJobNode(
+            operator=SelectDataColumns(["x"]),
+            input_streams=[_other_context_stream()],
+            pipeline_database=store,
+            cache_mode=CacheMode.LOG,
+        )
+
+        with pytest.raises(InputValidationError) as info:
+            node.run()
+
+        _assert_names_both_contexts(info.value)
+        assert reopened(store).list_sources() == []
+
+    def test_side_effect_pod_raises_before_delivering(self):
+        sink = sink_pod(_deliver)
+        assert isinstance(sink, SideEffectPod)
+
+        with pytest.raises(InputValidationError) as info:
+            _ = list(sink.process(_other_context_stream("double")).iter_data())
+
+        _assert_names_both_contexts(info.value)
+        assert delivered == []
+
+    def test_cached_source_raises_and_writes_nothing(self, store: Store):
+        table = pa.table({"k": ["a", "b"], "x": [1, 2]})
+        source = CachedSource(
+            ArrowTableSource(
+                table, tag_columns=["k"], source_id="fixed", data_context=OTHER
+            ),
+            cache_database=store,
+            data_context=CURRENT,
+        )
+
+        with pytest.raises(InputValidationError) as info:
+            _ = source.as_table()
+
+        _assert_names_both_contexts(info.value)
+        assert reopened(store).list_sources() == []
 
 
 # ---------------------------------------------------------------------------

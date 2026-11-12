@@ -434,6 +434,13 @@ current data context are the current entries.
   value for a reason other than a logical type's own change needs a new data context version
   with its own manifest file, never an edit of a released one.
 - In memory the data context column is still `_context_key` (`ColumnConfig(context=True)`).
+- A writer refuses an input of another data context than its own
+  (`contexts/stored.require_same_data_context`, `InputValidationError` naming both keys)
+  before anything is written; a whole-input condition is checked outside the row error
+  policy. The eventual behaviour is ITL-951.
+- `std:v0.1:default` is not shipped; saved files that name it load through
+  `contexts.resolve_saved_context`. There is no `SchemaVersionError`, `ignore_schema` or
+  `orcapod.migrations`: do not reintroduce a per-layout migration path without a decision.
 - Logical types and the value handlers that hash their Python values are registered in
   `contexts/logical_types.json`, never in a data context manifest: a logical type is
   versioned by its own identifier, and that file is not frozen.

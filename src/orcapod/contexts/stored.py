@@ -27,9 +27,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, NamedTuple, Protocol, cast
 
-from orcapod.contexts.registry import PRE_V1_DATA_CONTEXT_KEY
-from orcapod.errors import SideEffectLogDataContextError
-from orcapod.system_constants import constants
+from orcapod.errors import InputValidationError, SideEffectLogDataContextError
+from orcapod.system_constants import PRE_V1_DATA_CONTEXT_KEY, constants
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -57,6 +56,31 @@ def with_data_context(table: "pa.Table", context_key: str) -> "pa.Table":
         pa.field(constants.DATA_CONTEXT_COL, pa.large_string(), nullable=False),
         pa.array([context_key] * table.num_rows, type=pa.large_string()),
     )
+
+
+def require_same_data_context(input_context_key: str, own_context_key: str) -> None:
+    """Refuse an input that was hashed under another data context than the writer's.
+
+    A stored row names one data context, the one whose hashers produced its keys. An
+    input of another data context would give a row whose keys mix two generations of
+    hashing, so the writer refuses it before anything is written. What should
+    eventually happen instead (the node's data context is meant to win) is tracked
+    in ITL-951.
+
+    Args:
+        input_context_key: Data context key of the input (a row or a stream).
+        own_context_key: Data context key of the node, cache or source that writes.
+
+    Raises:
+        InputValidationError: If the two keys differ.
+    """
+    if input_context_key != own_context_key:
+        raise InputValidationError(
+            f"The input was produced under the data context {input_context_key!r}, "
+            f"but this node stores its rows under {own_context_key!r}. A stored row "
+            "carries one data context; convert the input to the node's data context "
+            "first, or run the node under the input's data context."
+        )
 
 
 def keep_rows_of_data_context(table: "pa.Table", context_key: str) -> "pa.Table":

@@ -2568,7 +2568,20 @@ Known limits, follow-ups:
   changed, and `changes` lists what is true on this branch (starfix format 2); the entries
   for ITL-935 and ITL-942 are added when those land. `golden.digest` stays `null` until the
   manifest is frozen, because the golden files still move.
-- Pending the developer's answer when this entry was written: whether `v0.1.json` stays
-  loadable; whether the v0 to v1 machinery (`SchemaVersionError`, `NodeConfig(ignore_schema=)`,
-  `orcapod.migrations`, `orcapod migrate`) is removed; what a node does with an input whose
-  data context differs from its own; whether the in-memory `_context_key` column is renamed.
+- `v0.1.json` is removed (to live in `orcapod-sanctuary`); `std:v0.1:default` raises
+  `ContextResolutionError`, and a node saved under it loads under the current data context
+  with a warning (`contexts.resolve_saved_context`).
+- The v0 to v1 machinery is removed: `SchemaVersionError`, `NodeConfig(ignore_schema=)`,
+  `orcapod.migrations`, `orcapod migrate`. A table without a layout component is an old
+  layout like `pdb_v1`.
+- An input of another data context raises `InputValidationError`
+  (`contexts/stored.require_same_data_context`) before anything is written. The developer
+  wants the node's data context to win eventually: ITL-951.
+- Found while testing that rule, not fixed here: a data context is not carried reliably in
+  memory. `ArrowTableStream` gives every row the stream object's data context and ignores
+  the `_context_key` column of its table (the two can disagree); a source's `data_context`
+  is not given to the rows of its stream; and `PipelineJob` wraps each input in a source
+  node of the default data context. So inside a job an input of another data context is
+  not seen as such, and the check only fires for nodes and caches driven directly.
+- Open: whether the in-memory column `_context_key` (`ColumnConfig(context=True)`) is
+  renamed to `__data_context` as well. It is unchanged here.

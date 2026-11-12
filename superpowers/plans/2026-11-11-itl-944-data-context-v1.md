@@ -1,6 +1,6 @@
 # ITL-944: data context v1 (frozen manifest, `__data_context` column, new layouts)
 
-Status: **STEP 1 plan, awaiting the developer's answers. No library code changed yet.**
+Status: **implemented** (see "Outcome" at the end). Sections (a) to (h) below are the STEP 1 plan as sent; where the outcome differs, the outcome section wins.
 
 - Linear: ITL-944. Design: ITL-938 design document, Parts 5.5, 6, 7, 8 (read at `bd7a4a6b`,
   re-checked unchanged before sending this plan).
@@ -149,6 +149,58 @@ renames the file, so whichever lands second re-applies its edit to `v1.json`. IT
 `function_node.py` and `arrow_utils.py` near the write path. Golden files: this branch
 changes 5 entries; they should go into the shared regeneration.
 
-## Open questions sent to the coordinator
+## Answers (coordinator and developer, November 11, 2026)
 
-See the `ask` of November 11, 2026 (Q1 to Q8); answers to be recorded here.
+| Q | Answer |
+|---|---|
+| Q1 `v0.1.json` | removed; `std:v0.1:default` raises, naming it as the pre-v0.3 data context (to live in `orcapod-sanctuary`) |
+| Q2 moved content hashes | accepted as part of H0 to H1 |
+| Q3 golden files | regenerated on this branch, diff limited to the listed entries |
+| Q4 layout names | `odb_v1`, `sdb_v1`; also appended to an explicit `cache_path` |
+| Q5 v0 to v1 machinery | removed (`SchemaVersionError`, `ignore_schema`, `orcapod.migrations`, `orcapod migrate`); a bare-path table is an old layout |
+| Q6 mixed contexts | raise `InputValidationError` naming both keys before anything is written; eventual behaviour is ITL-951. The in-memory column name was not answered: unchanged, open |
+| Q7 wording, error name | approved; `SideEffectLogDataContextError` |
+| Q8 label filter, v0.2 job files | label filtering removed, `stored_data_contexts` added; a v0.2 job file loads under the current context with a warning |
+
+Later instructions from the same session:
+
+- Result table gains `__pf_var_function_version` (full version string).
+- No hash label text hard-coded in new tests or docs; labels are renamed in PR #309's branch.
+- Manifest fields `released_in`, `previous`, `definitions`, `libraries`, `golden`, `changes`
+  (design document 7.4); logical types and their value handlers move to the unfrozen
+  `contexts/logical_types.json`.
+- The explicit failure covers both kinds of side-effecting node: `SideEffectPod` nodes and
+  function nodes whose pod takes the invocation context (`ctx_arg`). Decided in one place:
+  `contexts/stored.account_for_stale_tables`.
+
+## Outcome
+
+Commits on the branch, in order: plan; manifest `v1.json` and frozen check; two WIP
+checkpoints and the feature commit for the column, layouts, read filter and old-layout
+handling; manifest fields and the logical-type registration file; side-effecting function
+nodes; removal of `v0.1.json` and the v0 to v1 machinery; refusal of inputs of another data
+context.
+
+Golden entries changed (`uv run python tests/test_hashing/golden/generate_golden_hashes.py`,
+diff checked):
+
+- values: `schema:source_stream_builder.{default_source_id,named_source_id,record_id_column}.content_hash`
+  (the context key is hashed into the content hash of a stream without a producer);
+  `pipeline:job.table_paths`, `pipeline:polars_filter_expr_job.table_paths` (layout
+  component only).
+- entry names only, values identical: the `table[<path>].record_ids` and
+  `table[<path>].input_data_hashes` entries of those two jobs (4 names), because the name
+  embeds the table path.
+- also pinned outside the golden suite and updated: the three bare-stream content hashes in
+  `tests/test_semantic_types/test_struct_layout_identity.py`.
+
+Differences from the STEP 1 plan:
+
+- `released_manifests.json` is in `contexts/`, not `contexts/data/` (every `*.json` in
+  `data/` is loaded as a manifest).
+- Old-layout tables are reported once per reader object, not once per process, and there is
+  no job-level summary line (cut).
+- Operator-cache and cached-source record hashes are unchanged; the column is appended
+  after hashing.
+
+Open points and findings are listed in the PR body and in `DESIGN_ISSUES.md` (DC1).

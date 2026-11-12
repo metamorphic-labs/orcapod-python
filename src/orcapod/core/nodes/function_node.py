@@ -33,6 +33,7 @@ from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.datagrams.tag_data import EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
+    InputValidationError,
     PipelineJobRequiredError,
     StoreError,
     StoreReadError,
@@ -40,6 +41,7 @@ from orcapod.errors import (
 )
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
+    require_same_data_context,
     account_for_stale_tables,
     find_stale_tables,
     report_rows_of_other_data_contexts,
@@ -1284,9 +1286,18 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             Materialized list of (tag, output_data) pairs, excluding
             ``None`` outputs and failed data.
+
+        Raises:
+            InputValidationError: If the input stream is of another data context
+                than this node; raised before any row is processed, whatever the
+                error policy.
         """
         from orcapod.pipeline.observer import NoOpObserver
 
+        # A whole-input condition, not a row failure: the error policy does not apply.
+        require_same_data_context(
+            input_stream.data_context_key, self._stored_data_context_key
+        )
         node_label = self.label
         node_hash = self.content_hash().to_string()
 
@@ -1399,6 +1410,7 @@ class FunctionJobNode(FunctionNodeBase):
         """
         # A node that delivers side effects must not run on completions it cannot match.
         self._account_for_stale_tables()
+        require_same_data_context(data.data_context_key, self._stored_data_context_key)
         # Guard: EmptyData inputs skip all computation and go straight to cache lookup.
         # EmptyData.content_hash() returns the cached_content_hash, so
         # result_cache.lookup(data) works transparently — it finds the downstream
@@ -1544,6 +1556,7 @@ class FunctionJobNode(FunctionNodeBase):
         """
         # A node that delivers side effects must not run on completions it cannot match.
         self._account_for_stale_tables()
+        require_same_data_context(data.data_context_key, self._stored_data_context_key)
         # Guard: same logic as sync _process_data_internal — see inline comment there.
         if isinstance(data, EmptyData):
             if self._cached_function_pod is not None:
@@ -2419,6 +2432,15 @@ class FunctionJobNode(FunctionNodeBase):
 
         from orcapod.pipeline.observer import NoOpObserver
 
+        # A whole-input condition, not a row failure: the error policy does not apply.
+        if self._input_stream is not None:
+            try:
+                require_same_data_context(
+                    self._input_stream.data_context_key, self._stored_data_context_key
+                )
+            except InputValidationError:
+                await output.close()
+                raise
         node_label = self.label
         node_hash = self.content_hash().to_string()
 

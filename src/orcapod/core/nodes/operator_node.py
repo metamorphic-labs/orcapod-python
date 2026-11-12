@@ -20,7 +20,7 @@ import asyncio
 import logging
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod import contexts
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
@@ -36,6 +36,7 @@ from orcapod.errors import (
 )
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
+    require_same_data_context,
     account_for_stale_tables,
     find_stale_tables,
     report_rows_of_other_data_contexts,
@@ -846,8 +847,20 @@ class OperatorJobNode(OperatorNodeBase):
                 f"OperatorJobNode {self.label!r} has no pipeline database attached."
             )
         output_table = stream.as_table(
-            columns={"source": True, "system_tags": True},
+            columns={"source": True, "system_tags": True, "context": True},
         )
+        # The inputs and the rows name their data context; all must be this node's.
+        for input_stream in self._input_streams:
+            require_same_data_context(
+                input_stream.data_context_key, self.data_context_key
+            )
+        row_context_keys = cast(
+            "list[str]",
+            pc.unique(output_table.column(constants.CONTEXT_KEY)).to_pylist(),
+        )
+        for row_context_key in row_context_keys:
+            require_same_data_context(row_context_key, self.data_context_key)
+        output_table = output_table.drop([constants.CONTEXT_KEY])
 
         # Always append the node content hash column first so that it is included
         # in the per-row HASH_COLUMN_NAME computation below.  This makes record IDs
