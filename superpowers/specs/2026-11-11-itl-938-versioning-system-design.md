@@ -1107,7 +1107,7 @@ table untouched, to be migrated.
 | 5 | User class identity (PR #292); dict and set order (PR #301) | open PRs | as in 5.2 |
 | 6 | New types follow the contract: torch (PR #300), Polars values (PR #286), pandas changes (ITL-897). No label used as a version marker | held | new entries only |
 | 7 | Golden rule in CI: an existing golden value may change only together with a data context version increment, or with the identifier of the logical type it belongs to | to file | — |
-| 8 | Function minor version stored as a column of the result table (the developer's example of a tracked value; it is not stored today). The layout is changing anyway | to confirm | result-table layout |
+| 8 | Function version stored as a column of the result table. Checked by reading the code and by running a function declared `version="v3.7"` on main and on `61d0f18`: no column of either table holds the version or its minor part. The major part is in the path (`…/v3/…`); the full string is only in a saved job file (`"version": "v3.7"`). The body is tracked (`__pf_var_function_content_hash`), the version is not | to confirm | result-table layout |
 | 9 | Documentation: `CLAUDE.md` and `docs/reference/hashing.md` (what the content hash covers, the system-tag prefix, the label rule, the path rule, the data context rule) | to file | — |
 
 All of 1 to 6 land inside the single step `H0` to `H1`. After the tag, `std:v1:default` and
@@ -1124,6 +1124,31 @@ every logical type identifier written by v0.3 are commitments.
 | The stored Arrow type of a plain column is not in the path (`int32` and `int64` sources share a path; the second write fails) | Fails loudly today, not silently |
 | Default `source_id` of database and Delta sources is a bare name | The source contract allows it; a better default is a separate choice |
 | Content-derived record ids (ITL-817) | Changes row keys: a data context increment of its own |
+
+### 7.4 The data context file (proposed additions)
+
+Today `contexts/data/v0.1.json` holds: `context_key`, `version`, `description`, the wiring of
+the hashers, the type converter with its list of logical types, the handler registry, and a
+free-text `metadata.changelog`. Its schema allows no other field.
+
+**Freeze rule (decided November 11, 2026).** "We need to make sure we release a new version
+and fix it at the time of versioned release of the library. While still preparing the
+versioned release that contains a data context definition, we are safe to change the file in
+place."
+
+| Proposed field | Purpose |
+|---|---|
+| `released_in` | the library version whose release froze this file; empty while the release is being prepared. A check can then refuse any edit to a file whose `released_in` is set |
+| `previous` | the data context this one follows (`std:v0.1:default` for `std:v1:default`) |
+| `definitions` | a name for each definition that lives in code and not in a swappable component: what each identity is composed of, the record-id, entry-id and fold recipes, the system-tag and source-info naming grammar, the type conversion rules |
+| `libraries` | third-party libraries whose behaviour enters a core hash, with the verified range (starfix `>=0.5,<0.6`, hash format 2) |
+| `golden` | a digest of the core golden files, tying the manifest to the values it stands for |
+| `changes` | which definitions differ from `previous`, in place of the free-text changelog |
+
+**One split.** The file also lists the registered logical types and their value handlers.
+Logical types are outside the data context version, and adding one must not edit a frozen
+file. Proposed: the list of logical types moves to a separate, unfrozen registration (its own
+file or section), and the versioned file keeps only the core.
 
 ## Part 8. Follow-up issues to file (titles and one paragraph each)
 
