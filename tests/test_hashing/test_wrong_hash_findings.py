@@ -349,6 +349,57 @@ class TestRecordIdType:
             pa.large_binary()
         }
 
+    def test_operator_cache_keys_match_on_sync_and_async_paths(self) -> None:
+        # OperatorJobNode is driven directly: the test is about its two execution
+        # paths (sync run and async_execute), which the cache key must not tell apart.
+        import asyncio
+
+        from orcapod.channels import Channel
+        from orcapod.core.nodes.operator_node import OperatorJobNode
+        from orcapod.databases import InMemoryArrowDatabase
+        from orcapod.types import CacheMode
+
+        def source() -> DictSource:
+            return DictSource(
+                data=[{"k": i, "x": i, "y": i} for i in range(2)],
+                tag_columns=["k"],
+                source_id="s",
+            )
+
+        def stored_keys(db: Any, node: Any) -> list[bytes]:
+            table = db.get_all_records(
+                node.node_identity_path, record_id_column="_record_hash"
+            )
+            return sorted(table.column("_record_hash").to_pylist())
+
+        sync_db = InMemoryArrowDatabase()
+        sync_node = OperatorJobNode(
+            SelectDataColumns(["x"]),
+            [source()],
+            pipeline_database=sync_db,
+            cache_mode=CacheMode.LOG,
+        )
+        sync_node.run()
+
+        async def run_async() -> tuple[Any, Any]:
+            db = InMemoryArrowDatabase()
+            node = OperatorJobNode(
+                SelectDataColumns(["x"]),
+                [source()],
+                pipeline_database=db,
+                cache_mode=CacheMode.LOG,
+            )
+            inputs, outputs = Channel(buffer_size=16), Channel(buffer_size=16)
+            for item in source().iter_data():
+                await inputs.writer.send(item)
+            await inputs.writer.close()
+            await node.async_execute([inputs.reader], outputs.writer)
+            await outputs.reader.collect()
+            return db, node
+
+        async_db, async_node = asyncio.run(run_async())
+        assert stored_keys(sync_db, sync_node) == stored_keys(async_db, async_node)
+
 
 # ---------------------------------------------------------------------------
 # N. One default function version, whatever the entry point
