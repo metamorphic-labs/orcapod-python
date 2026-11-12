@@ -16,6 +16,7 @@ from orcapod.types import ContentHash, PathLike
 from orcapod.utils.canonical_type_names import stabilize_type_names
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,61 @@ def _is_in_string(line: str, pos: int) -> bool:
     return in_single or in_double
 
 
+def parameter_defaults(func: Callable[..., object]) -> list[tuple[str, object]]:
+    """Return the default values of a function's parameters.
+
+    Args:
+        func: The function to inspect.
+
+    Returns:
+        One ``(parameter name, default value)`` pair for each parameter that has a
+        default, in declared order.
+    """
+    return [
+        (name, typing.cast(object, param.default))
+        for name, param in inspect.signature(func).parameters.items()
+        if param.default is not inspect.Parameter.empty
+    ]
+
+
+def hash_parameter_defaults(
+    func: Callable[..., object], hasher: "SemanticHasherProtocol"
+) -> list[list[object]]:
+    """Hash each default value of a function with the semantic hasher.
+
+    A default value is part of a function's signature, so it is hashed like every
+    other hashed value: by ``hasher``, never by its ``repr()``.
+
+    Args:
+        func: The function whose defaults are hashed.
+        hasher: The semantic hasher that hashes each default value.
+
+    Returns:
+        One ``[parameter name, hash of the default]`` pair for each parameter that
+        has a default, in declared order. Empty when the function has no defaults.
+
+    Raises:
+        TypeError: If ``hasher`` cannot hash a default value. The message names the
+            parameter and the function and keeps the hasher's error as its cause.
+    """
+    hashed: list[list[object]] = []
+    for name, default in parameter_defaults(func):
+        try:
+            hashed.append([name, hasher.hash_object(default)])
+        except TypeError as exc:
+            module = getattr(func, "__module__", None)
+            qualname = getattr(func, "__qualname__", None) or repr(func)
+            function_name = f"{module}.{qualname}" if module else qualname
+            raise TypeError(
+                f"Cannot hash the default value of parameter {name!r} of function "
+                f"{function_name}: {exc} A default value is part of the function's "
+                "hash, so it must be a value the semantic hasher can hash. Register a "
+                "handler for its type, or remove the default and supply the value as "
+                "an input."
+            ) from exc
+    return hashed
+
+
 def get_function_signature(
     func: Callable[..., object],
     name_override: str | None = None,
@@ -236,6 +292,10 @@ def get_function_signature(
 
     param_strs = []
     for name, param in sig.parameters.items():
+        if not include_defaults:
+            # Drop the default from the parameter itself; cutting the formatted text
+            # at "=" would truncate an annotation such as Literal["a=b"].
+            param = param.replace(default=inspect.Parameter.empty)
         annotation = typing.cast(object, param.annotation)
         param_str = stabilize_type_names(str(param), annotation)
         if annotation is not inspect.Parameter.empty and is_union_annotation(
@@ -248,8 +308,6 @@ def get_function_signature(
             # Replace ": <old_ann>" with ": <new_ann>" (first occurrence only).
             # The ": " prefix distinguishes the annotation from the default value.
             param_str = param_str.replace(f": {old_ann}", f": {new_ann}", 1)
-        if not include_defaults and "=" in param_str:
-            param_str = param_str.split("=")[0].strip()
         param_strs.append(param_str)
 
     parts["params"] = f"({', '.join(param_strs)})"

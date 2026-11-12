@@ -20,6 +20,7 @@ from orcapod.core.datagrams import Datagram, Data
 from orcapod.hashing.hash_utils import (
     get_function_components,
     get_function_signature,
+    hash_parameter_defaults,
 )
 from orcapod.core.result_cache import ResultCache
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
@@ -518,8 +519,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         self._git_hash = git_hash
 
         semantic_hasher = self.data_context.semantic_hasher
+        # A default value enters the signature hash as the semantic hasher's hash of
+        # the value, never as its repr() (ITL-953). A function with no defaults keeps
+        # the hash of its signature text alone.
+        signature: Any = get_function_signature(function, include_defaults=False)
+        default_hashes = hash_parameter_defaults(function, semantic_hasher)
+        if default_hashes:
+            signature = {"signature": signature, "defaults": default_hashes}
         self._function_signature_hash = semantic_hasher.hash_object(
-            get_function_signature(function)
+            signature
         ).to_prefixed_digest()
         self._function_content_hash = semantic_hasher.hash_object(
             get_function_components(self._function)
