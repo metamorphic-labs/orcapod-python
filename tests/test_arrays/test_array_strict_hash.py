@@ -116,8 +116,8 @@ def _layout(dtype: np.dtype[Any]) -> Any:
         dtype = dtype.subdtype[0]
     if dtype.names is None:
         return None
-    fields = dtype.fields
-    assert fields is not None
+    assert dtype.fields is not None
+    fields: dict[str, Any] = {str(key): value for key, value in dtype.fields.items()}
     return [dtype.itemsize] + [
         [fields[name][1], _layout(fields[name][0])] for name in dtype.names
     ]
@@ -240,7 +240,9 @@ def test_column_is_npy_bytes_under_the_default_identifier() -> None:
     assert field.type.extension_name == EXTENSION_NAME
     assert field.type.storage_type == pa.large_binary()
     assert field.type.__arrow_ext_serialize__() == ignore_metadata([])
-    cell = _source({"a": BASE}).as_table().column("x").chunk(0).storage[0].as_py()
+    chunk = _source({"a": BASE}).as_table().column("x").chunk(0)
+    assert isinstance(chunk, pa.ExtensionArray)
+    cell = chunk.storage[0].as_py()
     assert cell[:8] == b"\x93NUMPY\x03\x00"
 
 
