@@ -90,7 +90,9 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
     reader with the total, on the logger `orcapod.hashing.stored_hash_labels`:
     `Skipped 3 rows of stored table 'my_job/.../pdb_v1': written under another hash label
     than the current one. The rows are left in place unchanged and can be migrated later.`
-  - **Side-effect nodes are the exception: they fail instead of delivering again.** A
+  - **Side-effect nodes are the exception: they fail instead of delivering again, for a log
+    at their v0.3 path.** A log written by v0.2 is at another path (ITL-945, below), is not
+    detected, and its side effects are delivered again on the first v0.3 run. A
     side-effect pod finds a delivery it already made by an Arrow-derived record id, so
     deliveries logged by v0.2 cannot be found, and running the node would deliver every side
     effect a second time. A side effect is an external action, not a value that can be

@@ -253,6 +253,11 @@ Implemented and pushed; PR #314 against `main`, stacked on #309.
 - CodeRabbit round 1: tag sorting restored in the producer-less stream identity (a regression
   of this branch, no golden value affected); test and doc wording fixes; declined findings
   answered on the PR.
+- Correction to decision 2: the `"__type__"` collision is not closed by ITL-942 option D1
+  (non-str keys only) but by its mechanism M2 (in progress): only the hasher's own encodings
+  may produce an object with a `"__type__"` key; plain mappings with that key take a pair-list
+  form. `_nested_hash` is unchanged; `GenericAliasHandler` and `UnionTypeHandler` must return
+  ITL-942's `Encoded` marker when the branches meet.
 - Consequence raised with the coordinator: every v0.3 table path differs from v0.2's, so a
   v0.2 side-effect log is not found at the v0.3 path and the explicit failure of ITL-910 does
   not trigger for a v0.2 store. Documented; detection belongs to ITL-944.

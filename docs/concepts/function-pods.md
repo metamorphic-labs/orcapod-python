@@ -328,11 +328,15 @@ the store, and it does not reuse those rows.
 - When a read leaves such rows out, Orcapod logs one warning with their number:
   `Skipped 3 rows of stored table '...': written under another hash label than the current
   one. The rows are left in place unchanged and can be migrated later.`
-- Side-effect pods are the exception. A side effect is an external action, and deliveries
-  logged by v0.2 cannot be matched with current inputs, so running the node would deliver
-  everything a second time. Instead the node raises `SideEffectLogHashLabelError` (from
-  `orcapod.errors`, a `StoreError`) before it delivers anything. Use a fresh store for that
-  node, or keep using the version that wrote the log.
+- Side-effect pods: a side effect is an external action, and a delivery logged under another
+  label cannot be matched with current inputs. A node whose invocation log, **at its v0.3
+  path**, holds such deliveries raises `SideEffectLogHashLabelError` (from `orcapod.errors`,
+  a `StoreError`) before it delivers anything.
+- **A side-effect log written by v0.2 is not detected.** It is at a path v0.3 does not read
+  (every v0.3 table path differs from v0.2's), so the node raises no error and running it
+  on a v0.2 store **delivers every side effect again**. Before the first v0.3 run of a
+  pipeline with side effects, make sure a repeated delivery is acceptable, or keep using the
+  version that wrote the log.
 
 ## Multiple input streams
 
