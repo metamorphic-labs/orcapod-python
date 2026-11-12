@@ -10,7 +10,9 @@ never on the stored bytes.
 What ``.npy`` does not keep is never part of the hash: strides other than C or
 Fortran contiguity (a strided view is stored C-contiguous), the subclass, the
 ``writeable`` flag, dtype metadata, the ``align`` flag of a structured dtype (its
-offsets are kept) and padding bytes between structured fields.
+offsets are kept) and padding bytes between structured fields (NumPy does not
+define their content; they are written as zero, so memory the array happened
+to sit on never reaches a store).
 
 Value hash ``D`` (label ``ndarray_v1``), in two steps. With
 ``lp(x) = u64le(len(utf8(x))) || utf8(x)``:
@@ -49,9 +51,11 @@ without pickle support.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
+import math
 import re
 import struct
 import sys
@@ -412,12 +416,34 @@ def _without_metadata(dtype: np.dtype[Any]) -> np.dtype[Any]:
     return dtype if dtype.metadata is None else np.dtype(dtype.str)
 
 
+def _has_padding(dtype: np.dtype[Any]) -> bool:
+    """Return whether a structured dtype has bytes that belong to no field."""
+    if dtype.fields is None and dtype.subdtype is None:
+        return False
+    return tag_to_dtype(dtype_to_tag(dtype)).itemsize != dtype.itemsize
+
+
+def _with_zeroed_padding(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
+    """Return a copy of a structured array whose padding bytes are zero.
+
+    Padding between structured fields is not part of the value and NumPy does
+    not define its content (``np.empty`` leaves whatever the memory held), so it
+    is never written to a store. The copy has the same dtype, field values and
+    C or Fortran order; ``array`` is not modified.
+    """
+    fortran = array.flags.f_contiguous and not array.flags.c_contiguous
+    out = np.zeros(array.shape, dtype=array.dtype, order="F" if fortran else "C")
+    _copy_by_field_name(out, array)
+    return out
+
+
 def array_to_npy(value: Any) -> bytes:
     """Return the ``.npy`` file an array is stored as.
 
     The array is written as it is: byte order, C or Fortran contiguity and
     structured offsets are kept. A view that is neither C- nor Fortran-contiguous
-    is written C-contiguous. ``value`` is not modified.
+    is written C-contiguous, and padding bytes between structured fields are
+    written as zero. ``value`` is not modified.
 
     Args:
         value: A ``numpy.ndarray`` (a subclass is stored as a plain array).
@@ -434,6 +460,8 @@ def array_to_npy(value: Any) -> bytes:
     stored_dtype = _without_metadata(plain.dtype)
     if stored_dtype is not plain.dtype:
         plain = plain.view(stored_dtype)
+    if _has_padding(stored_dtype):
+        plain = _with_zeroed_padding(plain)
     buffer = io.BytesIO()
     npy_format.write_array(
         buffer, plain, version=NPY_FORMAT_VERSION, allow_pickle=False
@@ -449,6 +477,63 @@ def array_to_npy(value: Any) -> bytes:
     return data
 
 
+def _require_declared_payload(data: bytes) -> None:
+    """Raise unless the bytes after the header are exactly the declared array.
+
+    ``read_array`` allocates the array its header declares before it reads the
+    elements, so a small cell that declares a huge shape would ask for that much
+    memory. The header is checked first: its length, and that dtype item size
+    times the element count equals the number of bytes that follow it. A header
+    that declares an object array is left for ``read_array`` to refuse.
+
+    Raises:
+        ValueError: If the header is too long, incomplete or malformed, or the
+            payload length differs from what the header declares.
+    """
+    prefix = len(_NPY_MAGIC) + 4
+    if len(data) < prefix:
+        raise ValueError("stored numpy array value is truncated: no .npy header")
+    (header_bytes,) = struct.unpack_from("<I", data, len(_NPY_MAGIC))
+    if header_bytes > _MAX_NPY_HEADER_BYTES:
+        raise ValueError(
+            f"stored numpy array value has a .npy header of {header_bytes} bytes; "
+            f"at most {_MAX_NPY_HEADER_BYTES} are read"
+        )
+    payload_start = prefix + header_bytes
+    if len(data) < payload_start:
+        raise ValueError(
+            "stored numpy array value is truncated: incomplete .npy header"
+        )
+    try:
+        header = ast.literal_eval(bytes(data[prefix:payload_start]).decode("utf-8"))
+        shape = header["shape"]
+        dtype = npy_format.descr_to_dtype(header["descr"])
+        if not isinstance(shape, tuple) or not all(
+            type(dim) is int and dim >= 0 for dim in shape
+        ):
+            raise ValueError(f"shape {shape!r} is not a tuple of non-negative integers")
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        SyntaxError,
+        MemoryError,
+        RecursionError,
+    ) as exc:
+        raise ValueError(
+            f"stored numpy array value has a malformed .npy header: {exc}"
+        ) from exc
+    if dtype.hasobject:
+        return
+    declared = dtype.itemsize * math.prod(shape)
+    stored = len(data) - payload_start
+    if declared != stored:
+        raise ValueError(
+            f"stored numpy array value declares {declared} element bytes (shape "
+            f"{shape}, dtype {dtype}) but holds {stored}"
+        )
+
+
 def npy_to_array(data: bytes) -> npt.NDArray[Any]:
     """Return the array stored in a ``.npy`` file written by ``array_to_npy``.
 
@@ -461,13 +546,15 @@ def npy_to_array(data: bytes) -> npt.NDArray[Any]:
 
     Raises:
         ValueError: If ``data`` is not a ``.npy`` file of format
-            ``NPY_FORMAT_VERSION``, is truncated, or holds an object array.
+            ``NPY_FORMAT_VERSION``, is truncated, holds more or fewer element
+            bytes than its header declares, or holds an object array.
     """
     if bytes(data[: len(_NPY_MAGIC)]) != _NPY_MAGIC:
         raise ValueError(
             "stored numpy array value is not a .npy file of format "
             f"{NPY_FORMAT_VERSION[0]}.{NPY_FORMAT_VERSION[1]}"
         )
+    _require_declared_payload(data)
     return npy_format.read_array(io.BytesIO(data), allow_pickle=False)
 
 

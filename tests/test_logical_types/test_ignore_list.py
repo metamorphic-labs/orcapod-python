@@ -36,7 +36,7 @@ STRICT = b'{"ignore":[],"version":1}'
 LENIENT = b'{"ignore":["label"],"version":1}'
 
 
-def _context(tmp_path: Path, ignore: list[str]) -> DataContext:
+def _context(tmp_path: Path, ignore: Any) -> DataContext:
     """Build a data context that registers the toy type with ``ignore``."""
     shipped = Path(contexts_package.__file__).parent / "logical_types.json"
     registration = json.loads(shipped.read_text())
@@ -54,7 +54,8 @@ def _context(tmp_path: Path, ignore: list[str]) -> DataContext:
             },
         ]
     )
-    custom = tmp_path / f"logical_types_{'_'.join(ignore) or 'strict'}.json"
+    name = "_".join(str(item) for item in ignore) if isinstance(ignore, list) else ""
+    custom = tmp_path / f"logical_types_{name or 'other'}.json"
     custom.write_text(json.dumps(registration))
     return JSONDataContextRegistry(logical_types_file=custom).get_context()
 
@@ -222,6 +223,13 @@ def test_an_unknown_option_name_fails_the_context_build(tmp_path: Path) -> None:
     """A context that lists a name the type does not have cannot be built."""
     with pytest.raises(ContextValidationError, match="'colour'.*allowed names: label"):
         _context(tmp_path, ["colour"])
+
+
+@pytest.mark.parametrize("value", [{"label": False}, "label", [1], None])
+def test_hash_ignore_must_be_a_list_of_names(tmp_path: Path, value: Any) -> None:
+    """Only a JSON list of names is an ignore list; an object or a string is refused."""
+    with pytest.raises(ContextValidationError, match="list of property names"):
+        _context(tmp_path, value)
 
 
 # --- Arrow and stored columns ----------------------------------------------------------

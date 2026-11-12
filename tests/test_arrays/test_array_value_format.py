@@ -530,6 +530,73 @@ def test_a_cell_that_is_not_a_stored_array_raises_naming_the_column(
             data.as_dict()
 
 
+def _source_of_cell(cell: bytes) -> ArrowTableSource:
+    converter = get_default_context().type_converter
+    ext = converter.python_type_to_arrow_type(np.ndarray)
+    assert isinstance(ext, pa.ExtensionType)
+    storage = pa.array([cell], type=ext.storage_type)
+    table = pa.table(
+        {
+            "k": pa.array(["r"], pa.large_string()),
+            "x": pa.ExtensionArray.from_storage(ext, storage),
+        }
+    )
+    return ArrowTableSource(table, tag_columns=["k"])
+
+
+def test_a_cell_that_declares_more_than_it_holds_is_refused_before_allocation() -> None:
+    """A small cell whose header declares a huge array is refused without allocating it."""
+    buffer = io.BytesIO()
+    np.lib.format.write_array_header_2_0(
+        buffer, {"descr": "<f8", "fortran_order": False, "shape": (2**40,)}
+    )
+    lying = b"\x93NUMPY\x03\x00" + buffer.getvalue()[8:] + b"\x00" * 8
+    with pytest.raises((ValueError, RuntimeError), match="'x'.*declares"):
+        for _, data in _source_of_cell(lying).iter_data():
+            data.as_dict()
+
+
+def test_a_cell_with_trailing_bytes_is_refused() -> None:
+    """A cell that holds more than the array its header declares is refused."""
+    with pytest.raises((ValueError, RuntimeError), match="'x'.*declares"):
+        for _, data in _source_of_cell(stored(np.arange(4.0)) + b"extra").iter_data():
+            data.as_dict()
+
+
+def test_padding_bytes_are_stored_as_zero_and_do_not_change_the_hash() -> None:
+    """Garbage in structured padding never reaches the store, and is not part of the hash."""
+    aligned = np.dtype([("a", "i1"), ("b", "<f8")], align=True)
+    marker = b"\xa5" * 7
+    dirty = np.frombuffer(
+        b"\x01"
+        + marker
+        + struct.pack("<d", 0.5)
+        + b"\x02"
+        + marker
+        + struct.pack("<d", 1.5),
+        dtype=aligned,
+    ).copy()
+    clean = np.zeros(2, dtype=aligned)
+    clean["a"], clean["b"] = dirty["a"], dirty["b"]
+    before = dirty.tobytes()
+
+    cell = stored(dirty)
+    assert marker not in cell
+    assert cell == stored(clean)
+    assert dirty.tobytes() == before  # the given array is not modified
+    got = read_back(dirty)
+    assert got.dtype == aligned
+    assert got["a"].tolist() == [1, 2] and got["b"].tolist() == [0.5, 1.5]
+    assert got.tobytes() == clean.tobytes()
+    assert semantic_hash(dirty) == semantic_hash(clean) == semantic_hash(got)
+    # Fortran order and nesting are kept when padding is cleared.
+    outer = np.dtype([("p", aligned), ("s", aligned, (2,))], align=True)
+    nested = np.asfortranarray(np.ones((2, 3), dtype=outer))
+    back = read_back(nested)
+    assert back.dtype == outer and back.flags.f_contiguous
+    assert semantic_hash(back) == semantic_hash(nested)
+
+
 def test_a_stored_object_array_is_never_unpickled() -> None:
     """A ``.npy`` file holding a pickled object array is refused on read."""
     converter = get_default_context().type_converter

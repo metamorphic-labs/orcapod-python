@@ -1,6 +1,12 @@
-# ITL-981: library value types (design note, awaiting developer sign-off)
+# ITL-981: library value types (design note)
 
-Status: PROPOSAL, November 12, 2026. No library code is changed yet.
+Status: SIGNED OFF by the developer on November 12, 2026 and implemented in PR #328. The
+text below is the proposal as it was approved; the four "open decisions" at the end were
+decided as proposed (refuse a column of another list; label `ndarray_v1`; keep refusing
+unit-less datetimes and field titles; sorted metadata keys), and section (vii) records the
+final extension names. Added in review of PR #328: padding bytes between structured fields
+are written as zero, and a stored cell must hold exactly the element bytes its header
+declares.
 Measured with NumPy 2.2.6 and pyarrow 23.0.1 on a little-endian machine, writing with
 `numpy.lib.format.write_array(version=(3, 0), allow_pickle=False)` and reading with
 `numpy.lib.format.read_array(allow_pickle=False)`. "Measured" below means exactly that.

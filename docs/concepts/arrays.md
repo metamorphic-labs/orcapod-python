@@ -63,7 +63,7 @@ Part of the hash by default; each has a name and can be put on the type's
 | Name | What it is |
 |---|---|
 | `memory_order` | C or Fortran. An array counts as Fortran when it is Fortran-contiguous and not C-contiguous; every other array counts as C. |
-| `byte_order` | Little- or big-endian, for each scalar field. A native array hashes as its actual byte order, so the hash is the same on every machine. |
+| `byte_order` | Little- or big-endian, for each scalar field. A native array hashes as the byte order it actually has, never as "native": the same array bytes hash the same on every machine, and an array created natively on a big-endian machine is a big-endian array. |
 | `struct_layout` | The field offsets and the item size of a structured dtype, at every nesting depth. An aligned (padded) dtype and the packed dtype with the same fields differ. |
 
 Never part of the hash, because `.npy` does not keep it. A value read back from a store must
@@ -77,7 +77,10 @@ hash like the value that was written, or every cached run would compute again:
 - **The `writeable` flag.** An array always reads back writeable.
 - **Dtype `metadata`**, and the `align=True` flag of a structured dtype (the offsets that
   flag produced are kept and count, as `struct_layout`).
-- **Padding bytes between structured fields.** NumPy does not define their content.
+- **Padding bytes between structured fields.** NumPy does not define their content (an
+  `np.empty` array holds whatever the memory held). They are not part of the value: they are
+  written to the store as zero, so residual memory never reaches a store that may be shared,
+  and they read back as zero. Every field reads back as written.
 
 ```python
 from orcapod.contexts import get_default_context
@@ -177,8 +180,8 @@ Each cell is one `.npy` file, written by NumPy itself
 (`numpy.lib.format.write_array`, format version 3.0, `allow_pickle=False`) and read with
 `numpy.lib.format.read_array(..., allow_pickle=False)`. Format 3.0 is the one that stores
 field names outside Latin-1. Pickle is never written and never read: a cell that holds an
-object array, or is not a complete `.npy` file of format 3.0, raises a `ValueError` that
-names the column.
+object array, is not a complete `.npy` file of format 3.0, or does not hold exactly the
+element bytes its header declares, raises a `ValueError` that names the column.
 
 The extension metadata is `{"ignore":[],"version":1}`: the ignore list and the version of
 the type. A null array is a null cell, allowed when the column is annotated
@@ -206,6 +209,7 @@ What reads back:
 | subclass | plain `np.ndarray` |
 | `writeable` flag | writeable |
 | dtype `metadata`, the `align` flag | not kept |
+| padding bytes between structured fields | zero |
 
 ```python
 big = np.asfortranarray(np.arange(6, dtype=">f4").reshape(2, 3))
