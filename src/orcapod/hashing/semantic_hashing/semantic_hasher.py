@@ -356,7 +356,7 @@ class SemanticAwarePythonHasher:
         self,
         encoded: Encoded,
         resolver: Callable[[Any], ContentHash] | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Expand a handler's ``Encoded`` result into ``{"__type__": tag, **fields}``."""
         tree: dict[str, Any] = {TYPE_KEY: encoded.tag}
         for key, value in encoded.fields.items():

@@ -551,4 +551,5 @@ class TestDefaultFunctionVersion:
         decorated = function_pod(
             output_keys="y", function_name="_inc_ctx", ctx_arg="ctx"
         )(_inc_ctx)
+        assert isinstance(pod, FunctionPod)
         assert pod.uri == decorated.pod.uri
