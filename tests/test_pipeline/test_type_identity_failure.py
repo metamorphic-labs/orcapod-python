@@ -26,6 +26,7 @@ from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import StoreError, TypeIdentityError
 from orcapod.pipeline import PipelineJob
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
 Orchestrator = SyncPipelineOrchestrator | AsyncPipelineOrchestrator
@@ -160,4 +161,42 @@ def test_other_stored_shape_fails_the_run_in_the_per_row_lookup(
         build_job(stored).run(orchestrator=make_orchestrator())
 
     assert not isinstance(info.value, StoreError)
+    assert _CALLS == []
+
+
+class _CrashingObserver(NoOpObserver):
+    """An observer whose callbacks raise while the pod's failure propagates."""
+
+    def on_data_crash(
+        self, node_label: str, tag: Any, data: Any, error: Exception
+    ) -> None:
+        """Raise from the row-crash callback."""
+        raise RuntimeError("observer failed in on_data_crash")
+
+    def on_node_end(self, node_label: str, node_hash: str) -> None:
+        """Raise from the node-end callback of the pod's node."""
+        if node_label == "pair":
+            raise RuntimeError("observer failed in on_node_end")
+
+    def on_run_end(self, run_id: str) -> None:
+        """Raise from the run-end callback."""
+        raise RuntimeError("observer failed in on_run_end")
+
+
+def test_failing_observer_does_not_replace_the_identity_error(
+    stored: Path, make_orchestrator: Callable[[], Orchestrator]
+) -> None:
+    """Callbacks that raise while the identity error propagates are noted, not raised."""
+    result_table, pipeline_table = table_dirs(stored)
+    store_another_shape(result_table)
+    shutil.rmtree(pipeline_table)
+
+    with pytest.raises(TypeIdentityError) as info:
+        build_job(stored).run(
+            orchestrator=make_orchestrator(), observer=_CrashingObserver()
+        )
+
+    notes = getattr(info.value, "__notes__", [])
+    assert any("observer failed in on_data_crash" in note for note in notes), notes
+    assert any("observer failed in on_run_end" in note for note in notes), notes
     assert _CALLS == []

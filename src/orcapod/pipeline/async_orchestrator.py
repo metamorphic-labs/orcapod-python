@@ -141,7 +141,7 @@ class AsyncPipelineOrchestrator:
         effective_observer.on_run_start(run_id, pipeline_uri=pipeline_uri)
 
         topo_order: list[Any] = []
-        store_error: StoreError | None = None
+        store_error: StoreError | TypeIdentityError | None = None
         try:
             topo_order = list(graph.topological_sort())
             buf = self._buffer_size
@@ -276,7 +276,8 @@ class AsyncPipelineOrchestrator:
                 exc for exc in _leaves(group) if isinstance(exc, TypeIdentityError)
             ]
             if identity_errors:
-                raise identity_errors[0]
+                store_error = identity_errors[0]
+                raise store_error
             raise
         finally:
             # A failing on_run_end must not replace a failed store read or write.

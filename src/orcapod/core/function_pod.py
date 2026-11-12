@@ -329,7 +329,8 @@ class _FunctionPodBase(TraceableBase):
     def _fire_post_run_hooks(self, payload: PostRunPayload) -> None:
         """Fire all registered hooks with payload in registration order.
 
-        When the invocation failed with a ``StoreError``, a fail-loud hook that
+        When the invocation failed with a ``StoreError`` or a ``TypeIdentityError``
+        (both fail the run under every error policy), a fail-loud hook that
         raises does not replace it: its failure is logged and noted on the store
         error, the remaining hooks are skipped as for any fail-loud failure, and the
         caller re-raises the store error.
@@ -338,7 +339,9 @@ class _FunctionPodBase(TraceableBase):
             payload: The post-run payload to pass to each hook.
         """
         error = payload.stats.error
-        store_error = error if isinstance(error, StoreError) else None
+        store_error = (
+            error if isinstance(error, (StoreError, TypeIdentityError)) else None
+        )
         for hook in self._post_run_hooks:
             fn = hook.fn if isinstance(hook, HookConfig) else hook
             on_error = hook.on_error if isinstance(hook, HookConfig) else "raise"
@@ -609,7 +612,8 @@ class _FunctionPodBase(TraceableBase):
                 except TypeIdentityError as exc:
                     # A stored row that cannot be decoded as its class is never
                     # skipped as a row failure (ITL-881).
-                    obs.on_data_crash(pod_label, tag, data, exc)
+                    with keep_store_error(exc, "Observer on_data_crash"):
+                        obs.on_data_crash(pod_label, tag, data, exc)
                     raise
                 except Exception as exc:
                     logger.debug(

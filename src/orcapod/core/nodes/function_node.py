@@ -1321,8 +1321,10 @@ class FunctionJobNode(FunctionNodeBase):
                 except TypeIdentityError as exc:
                     # A stored row that cannot be decoded as its class is never
                     # skipped as a row failure, whatever the error policy (ITL-881).
-                    ctx_obs.on_data_crash(node_label, tag, data, exc)
-                    ctx_obs.on_node_end(node_label, node_hash)
+                    with keep_store_error(exc, "Observer on_data_crash"):
+                        ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    with keep_store_error(exc, "Observer on_node_end"):
+                        ctx_obs.on_node_end(node_label, node_hash)
                     raise
                 except Exception as exc:
                     logger.warning(

@@ -1,8 +1,9 @@
 """Helpers that keep a ``StoreError`` intact on its way out of a run.
 
-A failed store read or write always fails the run (ITL-878, ITL-884). User callbacks that run while
-the error propagates (a post-run hook, an observer callback) may fail too; their
-failure is logged and noted on the store error, never raised in its place.
+A failed store read or write always fails the run (ITL-878, ITL-884), and so does a
+stored row that cannot be decoded as its class (``TypeIdentityError``, ITL-881). User
+callbacks that run while the error propagates (a post-run hook, an observer callback)
+may fail too; their failure is logged and noted on the error, never raised in its place.
 """
 
 from __future__ import annotations
@@ -11,18 +12,18 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from orcapod.errors import StoreError
+from orcapod.errors import StoreError, TypeIdentityError
 
 logger = logging.getLogger(__name__)
 
 
 def note_callback_failure(
-    store_error: StoreError, during: str, failure: Exception
+    store_error: StoreError | TypeIdentityError, during: str, failure: Exception
 ) -> None:
     """Log a callback failure and record it on the propagating store error.
 
     Args:
-        store_error: The store error on its way out of the run.
+        store_error: The store error (or identity error) on its way out of the run.
         during: What was running, for the log and the note, such as
             ``"Observer on_data_crash"``.
         failure: The exception the callback raised.
@@ -41,7 +42,9 @@ def note_callback_failure(
 
 
 @contextmanager
-def keep_store_error(store_error: StoreError | None, during: str) -> Iterator[None]:
+def keep_store_error(
+    store_error: StoreError | TypeIdentityError | None, during: str
+) -> Iterator[None]:
     """Run a callback so that it cannot replace a propagating store error.
 
     With ``store_error`` set, an ``Exception`` the block raises is logged and noted on
@@ -50,7 +53,8 @@ def keep_store_error(store_error: StoreError | None, during: str) -> Iterator[No
     unchanged and its exceptions propagate.
 
     Args:
-        store_error: The store error on its way out, or ``None`` when none is.
+        store_error: The store error (or identity error) on its way out, or ``None``
+            when none is.
         during: What the block runs, for the log and the note.
 
     Yields:
