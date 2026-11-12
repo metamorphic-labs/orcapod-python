@@ -17,11 +17,30 @@ hasher's `TypeError` with the parameter and function names; both hash sites call
 to be created FROM `origin/eywalker/itl-967-v03-hash-step-combine-the-hash-changing` once the
 coordinator says the six merges are in. PR against `main`, "Stacked on the ITL-967 pull request".
 
-**Status:** STEP 1 done. Branch created from the ITL-967 tip `6ba6cc33` (all six merges in);
-this plan and the failing tests are committed and pushed. D2 (S2) and D4 approved; **D1 and D3
-are with the developer: do not implement them until the coordinator relays the answers.** On
-`6ba6cc33` the new test file gives 16 failed, 58 passed (the set-order test fails or passes
-with the process's hash seed before the fix).
+**Status (November 12, 2026):** implemented on the issue branch as decided below; docs,
+changelog fragment, design-issue file, golden CASES (code) written. **Left:** (1) ITL-967 has
+not regenerated its golden files yet (711 tests fail on its tip `6ba6cc33` without my change):
+wait for that, merge the ITL-967 branch (no rebase), then regenerate
+`tests/test_hashing/golden/data/*.json` and `tests/test_hashing/golden_values` of
+`generate_type_annotation_golden.py`, update the hand-pinned values in
+`test_canonical_type_names.py`, and list every entry moved or added; (2) D3 answer from the
+developer (kept as "raise"); (3) full checks, PR "Stacked on the ITL-967 pull request",
+CodeRabbit round, `worker_done`.
+
+**Decisions that supersede the text further down:**
+
+- **D1 = (b)** (developer): one structured description. `parameters` is a list of
+  `{name, kind, annotation, default}` entries in declared order; `annotation` / `default`
+  absent when there is none. Fixes finding X (parameter kind). Every function-value hash moves.
+- **Stored column = `hash_object(function)`** (coordinator, supersedes D2/S2): one description
+  of a signature. Every newly written `__pf_var_function_signature_hash` value moves.
+  `get_function_signature` is no longer used by `src` (kept public, with the Y fix).
+- **D3 = raise** until the developer decides. `hash_default_value` (in
+  `builtin_handlers.py`) is the one function that decides how a default is hashed, so "hash a
+  pod parameter's default as the data value it would be in a column" can be added there later.
+  Not built.
+- **D4** as proposed. With one site left there is no shared helper: `FunctionHandler` hashes
+  each `ParameterDefault` the extractor reports and wraps the hasher's `TypeError`.
 
 ---
 
@@ -156,7 +175,7 @@ message: parameter name, function `module.qualname`, the hasher's text, and the 
 | `docs/reference/hashing.md`, `docs/concepts/function-pods.md` | the rule, the consequence, the remedy |
 | `changelog.d/ITL-953.md`, `design_issues/ITL-953-FD1.md` | fragment and entry |
 
-## Tasks (executed after the go-ahead)
+## Tasks (ORIGINAL draft for D1 (a) / S2; kept as the Step 1 record, superseded by the decisions at the top)
 
 ### Task 1: branch and commit the failing tests
 
