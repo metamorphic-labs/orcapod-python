@@ -35,11 +35,11 @@ Descriptor grammar
 Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone, or pyarrow's
 ``pandas`` schema metadata)::
 
-    frame:  {"kind": "pandas.dataframe", "height": <rows>,
+    frame:  {"kind": "orcapod.pandas.dataframe", "height": <rows>,
              "columns": [[<label>, <dtype>], ...],      in column order
              "columns_names": [<label>, ...],           columns.names, one per column level
              "index": [[<label>, <dtype>], ...]}        index levels in order: name, dtype
-    series: {"kind": "pandas.series", "height": <rows>, "name": <label>, "dtype": <dtype>,
+    series: {"kind": "orcapod.pandas.series", "height": <rows>, "name": <label>, "dtype": <dtype>,
              "index": [[<label>, <dtype>], ...]}
 
     <label> := <str> | null | {"bool": b} | {"int": n} | {"float": <float.hex()>}
@@ -323,7 +323,7 @@ def pandas_frame_descriptor(df: pd.DataFrame) -> dict[str, Any]:
         ValueError: If a label or dtype is outside the grammar; a dtype error names its column.
     """
     return {
-        "kind": "pandas.dataframe",
+        "kind": "orcapod.pandas.dataframe",
         "height": len(df),
         "columns": [
             _column_descriptor(label, dtype)
@@ -347,7 +347,7 @@ def pandas_series_descriptor(series: pd.Series) -> dict[str, Any]:
         ValueError: If a label or the dtype is outside the grammar.
     """
     return {
-        "kind": "pandas.series",
+        "kind": "orcapod.pandas.series",
         "height": len(series),
         "name": pandas_label_descriptor(series.name),
         "dtype": pandas_dtype_descriptor(series.dtype),

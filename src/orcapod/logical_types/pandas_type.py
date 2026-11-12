@@ -36,11 +36,12 @@ _SERIES_UNNAMED_SENTINEL = "__pandas_series_unnamed__"
 
 
 _IDENTIFIER_METADATA = version_metadata(1)
-"""Extension metadata of the types in this module: version 1 of their stored layout."""
+"""Extension metadata of the types in this module: version 1 of their stored layout.
 
-_LEGACY_METADATA = (b"",)
-"""Metadata written before identifiers existed (ITL-935). The layout was already
-version 1, so data stored with empty metadata is read as version 1."""
+Before v0.3 these types were stored under the names ``pandas.dataframe`` and
+``pandas.series`` (with empty metadata). Those names are not registered any more, so a
+column stored under them is refused on read, never read as the current types.
+"""
 
 
 def _table_to_ipc_bytes(table: pa.Table) -> bytes:
@@ -82,7 +83,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
     nullable integer, boolean, datetime, categorical) is supported. Columns with
     truly mixed Python types that Arrow cannot infer raise ``ValueError``.
 
-    The extension name ``"pandas.dataframe"`` is library-qualified.
+    The extension name ``"orcapod.pandas.dataframe"`` names the library, under Orcapod's own prefix.
 
     Example:
         >>> lt = LogicalPandasDataFrame()
@@ -93,18 +94,17 @@ class LogicalPandasDataFrame(BaseLogicalType):
     """
 
     _arrow_ext_class = make_arrow_extension_type(
-        "pandas.dataframe",
+        "orcapod.pandas.dataframe",
         pa.large_binary(),
         _IDENTIFIER_METADATA,
-        also_reads=_LEGACY_METADATA,
     )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "pandas.dataframe", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+        "orcapod.pandas.dataframe", pa.large_binary(), _IDENTIFIER_METADATA.decode()
     )
     _polars_ext: pl.BaseExtension | None = None
 
-    logical_type_name: str = "pandas.dataframe"
+    logical_type_name: str = "orcapod.pandas.dataframe"
     python_type: type = pd.DataFrame
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
@@ -112,7 +112,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
 
         Returns:
             A ``pa.ExtensionType`` instance with extension name
-            ``"pandas.dataframe"`` and storage type ``pa.large_binary()``.
+            ``"orcapod.pandas.dataframe"`` and storage type ``pa.large_binary()``.
         """
         if LogicalPandasDataFrame._arrow_ext is None:
             LogicalPandasDataFrame._arrow_ext = (
@@ -124,7 +124,7 @@ class LogicalPandasDataFrame(BaseLogicalType):
         """Return the cached Polars extension type for ``pd.DataFrame``.
 
         Returns:
-            A ``pl.BaseExtension`` instance registered under ``"pandas.dataframe"``.
+            A ``pl.BaseExtension`` instance registered under ``"orcapod.pandas.dataframe"``.
         """
         if LogicalPandasDataFrame._polars_ext is None:
             LogicalPandasDataFrame._polars_ext = (
@@ -187,7 +187,7 @@ class LogicalPandasSeries(BaseLogicalType):
     ``"__pandas_series_unnamed__"`` to distinguish it from a Series named with
     an empty string.
 
-    The extension name ``"pandas.series"`` is library-qualified.
+    The extension name ``"orcapod.pandas.series"`` names the library, under Orcapod's own prefix.
 
     Example:
         >>> lt = LogicalPandasSeries()
@@ -198,18 +198,17 @@ class LogicalPandasSeries(BaseLogicalType):
     """
 
     _arrow_ext_class = make_arrow_extension_type(
-        "pandas.series",
+        "orcapod.pandas.series",
         pa.large_binary(),
         _IDENTIFIER_METADATA,
-        also_reads=_LEGACY_METADATA,
     )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "pandas.series", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+        "orcapod.pandas.series", pa.large_binary(), _IDENTIFIER_METADATA.decode()
     )
     _polars_ext: pl.BaseExtension | None = None
 
-    logical_type_name: str = "pandas.series"
+    logical_type_name: str = "orcapod.pandas.series"
     python_type: type = pd.Series
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
@@ -217,7 +216,7 @@ class LogicalPandasSeries(BaseLogicalType):
 
         Returns:
             A ``pa.ExtensionType`` instance with extension name
-            ``"pandas.series"`` and storage type ``pa.large_binary()``.
+            ``"orcapod.pandas.series"`` and storage type ``pa.large_binary()``.
         """
         if LogicalPandasSeries._arrow_ext is None:
             LogicalPandasSeries._arrow_ext = LogicalPandasSeries._arrow_ext_class()
@@ -227,7 +226,7 @@ class LogicalPandasSeries(BaseLogicalType):
         """Return the cached Polars extension type for ``pd.Series``.
 
         Returns:
-            A ``pl.BaseExtension`` instance registered under ``"pandas.series"``.
+            A ``pl.BaseExtension`` instance registered under ``"orcapod.pandas.series"``.
         """
         if LogicalPandasSeries._polars_ext is None:
             LogicalPandasSeries._polars_ext = LogicalPandasSeries._polars_ext_class()

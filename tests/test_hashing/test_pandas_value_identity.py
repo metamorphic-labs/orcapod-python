@@ -396,7 +396,7 @@ class TestDescriptorGrammar:
         )
         frame.columns = frame.columns.rename("features")
         assert pandas_frame_descriptor(frame) == {
-            "kind": "pandas.dataframe",
+            "kind": "orcapod.pandas.dataframe",
             "height": 2,
             "columns": [
                 [{"int": 0}, {"masked": "Int64"}],
@@ -423,7 +423,7 @@ class TestDescriptorGrammar:
             name=("a", 1),
         )
         assert pandas_series_descriptor(series) == {
-            "kind": "pandas.series",
+            "kind": "orcapod.pandas.series",
             "height": 2,
             "name": {"tuple": ["a", {"int": 1}]},
             "dtype": {"string": "python"},

@@ -59,10 +59,15 @@ BUILTINS_WITH_EMPTY_LEGACY: list[tuple[Any, str]] = [
     (uuid.UUID, "orcapod.uuid"),
     (op.File, "orcapod.file"),
     (op.Directory, "orcapod.directory"),
-    (pd.DataFrame, "pandas.dataframe"),
-    (pd.Series, "pandas.series"),
 ]
-ALL_BUILTINS = [*BUILTINS_WITH_EMPTY_LEGACY, (np.ndarray, "orcapod.ndarray")]
+# pandas values were stored under ``pandas.dataframe`` / ``pandas.series`` before v0.3;
+# the current names never carried empty metadata (ITL-897).
+ALL_BUILTINS = [
+    *BUILTINS_WITH_EMPTY_LEGACY,
+    (pd.DataFrame, "orcapod.pandas.dataframe"),
+    (pd.Series, "orcapod.pandas.series"),
+    (np.ndarray, "orcapod.ndarray"),
+]
 
 
 def _converter(context: DataContext | None = None) -> UniversalTypeConverter:
@@ -427,8 +432,6 @@ _LEGACY_STORAGE = {
     "orcapod.uuid": pa.array([uuid.UUID(int=7).bytes], pa.large_binary()),
     "orcapod.file": pa.array(["/a/f.txt"], pa.large_string()),
     "orcapod.directory": pa.array(["/a/d"], pa.large_string()),
-    "pandas.dataframe": pa.array([b"x"], pa.large_binary()),
-    "pandas.series": pa.array([b"x"], pa.large_binary()),
 }
 
 
@@ -466,6 +469,38 @@ def test_array_without_metadata_is_refused() -> None:
     )
     with pytest.raises(LogicalTypeIdentifierError):
         converter.load_logical_types(table)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pandas.dataframe",
+        "pandas.series",
+        "orcapod.pandas.dataframe",
+        "orcapod.pandas.series",
+    ],
+)
+@pytest.mark.parametrize("metadata", [b"", None])
+def test_pandas_without_metadata_is_refused(name: str, metadata: bytes | None) -> None:
+    """A pandas column without metadata is refused under the old and the current names.
+
+    Before v0.3 pandas values were stored as ``pandas.dataframe`` / ``pandas.series`` with
+    empty metadata. Those names are no longer registered, and the current names never
+    wrote empty metadata, so neither is read as the current type or as raw bytes.
+    """
+    table = _stored_column(name.encode(), metadata, pa.array([b"x"], pa.large_binary()))
+    with pytest.raises(ValueError):
+        _converter().load_logical_types(table)
+
+
+@pytest.mark.parametrize("name", ["pandas.dataframe", "pandas.series"])
+def test_pandas_stored_under_the_old_name_with_version_1_is_refused(name: str) -> None:
+    """What an unreleased v0.3 build wrote (old name, ``{"version":1}``) is refused."""
+    table = _stored_column(
+        name.encode(), b'{"version":1}', pa.array([b"x"], pa.large_binary())
+    )
+    with pytest.raises(ValueError):
+        _converter().load_logical_types(table)
 
 
 def test_third_party_type_reads_only_what_it_declares() -> None:

@@ -19,7 +19,7 @@ class TestLogicalPandasDataFrameProtocol:
     def test_logical_type_name(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
 
-        assert LogicalPandasDataFrame().logical_type_name == "pandas.dataframe"
+        assert LogicalPandasDataFrame().logical_type_name == "orcapod.pandas.dataframe"
 
     def test_python_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
@@ -31,7 +31,7 @@ class TestLogicalPandasDataFrameProtocol:
 
         assert (
             LogicalPandasDataFrame().get_arrow_extension_type().extension_name
-            == "pandas.dataframe"
+            == "orcapod.pandas.dataframe"
         )
 
     def test_arrow_ext_storage_type(self):
@@ -140,7 +140,7 @@ class TestLogicalPandasSeriesProtocol:
     def test_logical_type_name(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
 
-        assert LogicalPandasSeries().logical_type_name == "pandas.series"
+        assert LogicalPandasSeries().logical_type_name == "orcapod.pandas.series"
 
     def test_python_type(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
@@ -152,7 +152,7 @@ class TestLogicalPandasSeriesProtocol:
 
         assert (
             LogicalPandasSeries().get_arrow_extension_type().extension_name
-            == "pandas.series"
+            == "orcapod.pandas.series"
         )
 
     def test_arrow_ext_storage_type(self):

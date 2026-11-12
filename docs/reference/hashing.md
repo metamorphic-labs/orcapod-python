@@ -1105,11 +1105,11 @@ ContentHash("pandas_dataframe_v1" | "pandas_series_v1",
 - The label never enters the computation; only the bytes of `D` do.
 
 ```text
-frame:  {"kind": "pandas.dataframe", "height": <rows>,
+frame:  {"kind": "orcapod.pandas.dataframe", "height": <rows>,
          "columns": [[<label>, <dtype>], ...],      in column order
          "columns_names": [<label>, ...],           columns.names, one per column level
          "index": [[<label>, <dtype>], ...]}        index levels in order: name, dtype
-series: {"kind": "pandas.series", "height": <rows>, "name": <label>, "dtype": <dtype>,
+series: {"kind": "orcapod.pandas.series", "height": <rows>, "name": <label>, "dtype": <dtype>,
          "index": [[<label>, <dtype>], ...]}
 
 <label> := <str> | null | {"bool": b} | {"int": n} | {"float": <float.hex()>}
@@ -1154,7 +1154,7 @@ column). A value that cannot be converted to Arrow raises `ValueError`.
 
 Storage is not affected: a pandas value is stored as the Arrow IPC stream of
 `pa.Table.from_pandas(value, preserve_index=True)`, which keeps column order, and the
-logical type identifiers stay `pandas.dataframe` / `pandas.series` with `{"version":1}`.
+logical type identifiers stay `orcapod.pandas.dataframe` / `orcapod.pandas.series` with `{"version":1}`.
 Before v0.3 a pandas value was hashed as an Arrow table (§9, order ignored), so a frame and
 the same frame with its columns reordered shared a hash, and a cached pod could be served
 the result computed for the other one (ITL-897, ITL-887).

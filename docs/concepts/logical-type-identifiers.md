@@ -78,8 +78,8 @@ Orcapod's own types follow the same contract as yours. Their metadata is the JSO
 | `orcapod.File` | `orcapod.file` | `{"version":1}` |
 | `orcapod.Directory` | `orcapod.directory` | `{"version":1}` |
 | `numpy.ndarray` | `orcapod.ndarray` | `{"version":1}` |
-| `pandas.DataFrame` | `pandas.dataframe` | `{"version":1}` |
-| `pandas.Series` | `pandas.series` | `{"version":1}` |
+| `pandas.DataFrame` | `orcapod.pandas.dataframe` | `{"version":1}` |
+| `pandas.Series` | `orcapod.pandas.series` | `{"version":1}` |
 
 `{"version":N}` is the convention of the built-in types only. Your types may use any bytes.
 
