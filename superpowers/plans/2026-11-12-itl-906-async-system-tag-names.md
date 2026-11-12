@@ -123,3 +123,27 @@ the operator object was never validated (`_validated_common_keys` is set by
 Job level: a sync job whose upstream operator node produced zero rows feeds a binary operator
 (Join/MergeJoin/SemiJoin) a widened table (ITL-912: int8 -> int64) and raises a type
 disagreement; out of scope (ITL-912).
+
+## Review round: developer comment 4557365620 ("what's the point of this helper function??")
+
+Decision (developer "Go with A", coordinator approval 2026-11-12): REQUIRE the hashes and remove
+`_pair_input_pipeline_hashes`. One rule for every operator:
+
+- Every operator's `async_execute` declares `*, input_pipeline_hashes: Sequence[ContentHash]`,
+  required, no default (replaces `| None = None` and `**kwargs`). Missing -> `TypeError`.
+- The five that use it (UnaryOperator, BinaryOperator, StaticOutputOperatorPod default, Batch,
+  Join) check `len(input_pipeline_hashes) != len(inputs)` inline and raise `ValueError` naming
+  both numbers. Join's no-hash fallback (positional suffixes "0", "1") goes too.
+- Per-row operators (MapTags, MapData, Select/Drop Tag/Data, DropNulls, Index, Pick) and SemiJoin
+  take it and say it is not used (they preserve names).
+- `_materialize_to_stream(rows)` loses its hash parameter (output holders: operator_node ~1150,
+  ~1488, Index, Pick); barrier paths call a new `_materialize_input_stream(rows, pipeline_hash)`
+  (required hash) returning `_RowsOfStream`.
+- Protocols unchanged (no protocol declares an operator's `async_execute`).
+- Changelog ITL-906: add Join's old fallback. PR body: signature uniform and why.
+
+### Steps
+- [ ] Failing tests (`tests/test_core/operators/test_async_sync_equivalence.py`): each barrier
+  operator + Join without hashes raises `TypeError`; wrong length raises `ValueError` naming both.
+- [ ] Implement; update direct test callers; design issue Fix note; changelog.
+- [ ] Full suite 3.12, 3.11, 3.13; ruff; basedpyright; merge origin/main; one push; reply.
