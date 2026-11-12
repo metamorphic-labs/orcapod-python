@@ -346,7 +346,7 @@ is for:
    __record_id                  arrow_v0.1:0000012f…        row key = entry id + recomputation index
    __pipeline_base_entry_id     arrow_v0.1:00000103…        hash of (system tags + input data hash)
    __input_data_hash            arrow_v0.1:00000196…        hash of the input row's data; lookup key into the result table
-   __node_content_hash          semantic_v0.1:48ddd935…     which node (and so which input data) wrote the row
+   __node_content_hash          semantic_v0.1:48ddd935…     which node (and so which sources) wrote the row
    __data_id                    16 bytes (uuid7)            pointer to the output row in the result table
 
  USER-VISIBLE CONTENT (tags; the data columns live in the result table)
@@ -1528,6 +1528,7 @@ Decisions made after the design session, while the implementation issues were in
 | Nov 11, 2026 | **Native container logical types carry no version.** "Simply drop version from what we consider to be truly native logical type container (set, list)." Their identifier is the container kind plus the element's identifier; a change to how they are stored or hashed is a data context change. Other built-in logical types keep `{"version":1}`; a third-party container type is an ordinary logical type. | 5.5, 7.1, 7.2 row 4, Part 8 issue 4 |
 | Nov 11, 2026 | **A store that cannot list its tables: warn and proceed.** "When store fails to list, just warn." One warning per node; no setting that fails instead. | Part 6, 7.1, 7.2 row 3a, Part 8 issue 1 |
 | Nov 11, 2026 | **Tables written before v0.3 are found by a prefix scan**, through a new listing method on the database protocol, `ArrowDatabaseProtocol.list_table_paths` (a public protocol addition, confirmed by the developer; ITL-954). Side-effecting nodes of both kinds raise on pre-v0.3 tables under their prefix. | Part 6, 6.1, 7.1, 7.2 row 3a, 7.3a |
+| Nov 11, 2026 | **A source's content hash is an address.** "Sources content hash is meant to be a stable address and is not necessarily going to reflect the very data content." The wording "data-inclusive, changes when data changes" in `CLAUDE.md` and `.zed/rules` is replaced. | 1.3, A.9 A, `CLAUDE.md`, `.zed/rules` |
 | Nov 11, 2026 | **No data element may come from a tag value.** An operator may use tags, but tag content never becomes data. `GroupBy` turning non-key tags into data columns was a bug (ITL-955): they stay list-valued tag columns, as with `Batch`. Offering a tag value as data is a derived source, `DerivedSource(tags_as_data={tag: name})` (ITL-939). | 5.2 rows 10 and 11, 7.2 rows 6c and 6d, Part 8 issue 16 |
 
 Deferred by the developer:
@@ -1844,7 +1845,7 @@ These came out of the audit. Each was reproduced a second time.
 
 | # | Finding | Why it matters here |
 |---|---|---|
-| A | **Intended (developer, November 11, 2026).** Content identity is *source identity*, not data content: with a user-given `source_id`, a changed value, an added row and reordered rows leave every stage's content hash unchanged. A source decides whether its identity reflects its exact content or is an address for it; see the source identity contract in Part 9. Rows are still told apart by the entry id (record id + row data hash). `CLAUDE.md` describes `content_hash()` as "data-inclusive, changes when data changes", which should be reworded | the system must name what the content hash covers: the pipeline bound to named sources |
+| A | **Intended (developer, November 11, 2026).** Content identity is *source identity*, not data content: with a user-given `source_id`, a changed value, an added row and reordered rows leave every stage's content hash unchanged. A source decides whether its identity reflects its exact content or is an address for it; see the source identity contract in Part 9. Rows are still told apart by the entry id (record id + row data hash). "Sources content hash is meant to be a stable address and is not necessarily going to reflect the very data content." `CLAUDE.md` described `content_hash()` as "data-inclusive, changes when data changes"; it is reworded in this pull request | the system must name what the content hash covers: the pipeline bound to named sources |
 | B | File and database sources default `source_id` to a name: the CSV path, the table name, the Delta directory name. Two SQLite files with a table `t`, or two Delta tables named `tbl` in different directories, have identical hashes. Under the contract this is the source's choice, but here the user stated nothing and the default address is not unique | candidate follow-up: is a bare table or directory name a good enough default address |
 | C | The stored Arrow type of a column is in no structure hash. Only its Python type name is | type rules (axes II1, II2) cannot reach a path through any existing hash |
 | D | An operator's identity is its class name; nothing about its behaviour or version | axis IV3 has no hook |
