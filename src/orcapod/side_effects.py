@@ -13,7 +13,7 @@ import dataclasses
 import datetime
 import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.function_node import _build_record_id_preimage
@@ -840,11 +840,10 @@ class SideEffectJobNode(SideEffectNode):
                 )
         stored = self._pipeline_database.get_all_records(self._table_path)
         if stored is not None:
-            found = sorted(
-                key
-                for key in set(stored.column(constants.DATA_CONTEXT_COL).to_pylist())
-                if key != current
+            logged = cast(
+                "list[str]", stored.column(constants.DATA_CONTEXT_COL).to_pylist()
             )
+            found = sorted(key for key in set(logged) if key != current)
             if found:
                 raise SideEffectLogDataContextError(
                     self._pipeline_database.base_path + self._table_path,

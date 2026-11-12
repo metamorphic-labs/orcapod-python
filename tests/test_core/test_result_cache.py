@@ -119,6 +119,7 @@ class TestLookupHit:
         input_pkt = Data({"x": 10})
 
         output = pf.direct_call(input_pkt)
+        assert output is not None
         variation_datagram = Datagram(
             pf.get_function_variation_data(),
             python_schema=pf.get_function_variation_data_schema(),

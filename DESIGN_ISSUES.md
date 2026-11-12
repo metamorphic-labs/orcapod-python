@@ -2509,3 +2509,56 @@ Known limits, follow-ups:
 - Tables placed under a content hash (`table_scope="content_hash"`, `CachedSource` without an
   explicit `source_id`) move to new paths when the content hash moves, so their v0.2 rows are
   in another table.
+
+---
+
+## `src/orcapod/contexts/` — data context of stored rows
+
+### DC1 — a stored row did not say which generation of hashing wrote it
+**Status:** resolved, with open follow-ups listed below
+**Severity:** high
+**Issue:** ITL-944
+
+The data context key (`std:v0.1:default`) never changed although its manifest
+`contexts/data/v0.1.json` was edited in place 44 times, so the key stored in result rows
+(`_context_key`) and pipeline rows (`__input_data_context_key`) told a reader nothing.
+Operator-cache, cached-source and side-effect tables stored no key at all. PR #309 told the
+rows of v0.2 from the rows of v0.3 by the label inside each hash, which names an algorithm,
+not a generation, and is missing from operator-cache and cached-source record ids.
+
+**Fix:** (developer's decisions of November 11, 2026, ITL-938 design document Parts 5.5 to 8)
+- The default data context is `std:v1:default`, manifest `contexts/data/v1.json`.
+  `contexts/released_manifests.json` pins the sha256 of every released manifest (`null` while
+  a manifest is open); `tests/test_contexts/test_data_context_v1.py` fails when a pinned file
+  changes, when more than the default manifest is open, or when a final release ships an open
+  manifest. `v1.json` is pinned once, in the v0.3.0 release-preparation commit.
+- Every stored row carries `__data_context` (`large_string`): function pipeline and result
+  tables, operator-cache tables, cached-source tables, side-effect invocation logs. It
+  replaces `__input_data_context_key` and the result table's `_context_key`. The value is the
+  key of the node, cache or source that writes the row.
+- Layouts moved: `pdb_v2`, `rdb_v2`, `tdb_v2`, and new components `odb_v1` (operator cache)
+  and `sdb_v1` (cached source, also after an explicit `cache_path`).
+- Reads and lookups keep rows of the current data context only, through
+  `contexts/stored.keep_rows_of_data_context` or a lookup constraint on the column. A table
+  at an old layout is counted and reported once per reader object, never read as current,
+  never written. Side-effect nodes raise `SideEffectLogDataContextError` before delivering.
+- `orcapod.contexts.stored_data_contexts(database, record_path)` lists the data contexts a
+  table holds. The label filtering of PR #309 (`hashing/stored_hash_labels.py`) is removed.
+- The result table also stores `__pf_var_function_version`, the full function version.
+
+Known limits, follow-ups:
+- Row keys do not include the data context. A later data context under which a row's key is
+  unchanged collides with the old row on write (`skip_duplicates`), and the new row is not
+  stored. The design's answer is that migration relabels unaffected rows; until a migration
+  exists this must be revisited before `std:v2:default` is introduced.
+- The content hash of a stream without a producer covers its `_context_key` column, so it
+  moves with the data context key.
+- Old-layout tables are reported once per reader object, not once per process or job, and
+  counting their rows reads the whole table (the store protocol has no row count).
+- The manifest still lists object specs only. Naming the definitions that live in code
+  (identity compositions, record-id and fold recipes, the system-tag naming grammar) is the
+  manifest-format follow-up of the ITL-938 design document, Part 8 item 2.
+- Pending the developer's answer when this entry was written: whether `v0.1.json` stays
+  loadable; whether the v0 to v1 machinery (`SchemaVersionError`, `NodeConfig(ignore_schema=)`,
+  `orcapod.migrations`, `orcapod migrate`) is removed; what a node does with an input whose
+  data context differs from its own; whether the in-memory `_context_key` column is renamed.

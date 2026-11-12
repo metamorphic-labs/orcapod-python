@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -381,7 +381,7 @@ def _stored_function_versions(store: Store, pod: Any) -> list[str]:
     _ = job.run()
     records = reopened(store).get_all_records(table_path(store, "rdb_v2"))
     assert records is not None
-    return records.column("__pf_var_function_version").to_pylist()
+    return cast("list[str]", records.column("__pf_var_function_version").to_pylist())
 
 
 class TestFunctionVersionColumn:

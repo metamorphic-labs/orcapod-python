@@ -32,8 +32,8 @@ readable with v0.2. A migration is planned after v0.3 (ITL-889).
   even when it has no array column itself. A pod whose inputs and outputs hold no array
   keeps its function result table, and nodes with no array column upstream keep their tables;
   but an array-free pod does **not** reuse its v0.2 results: every Arrow-derived hash changed
-  as well (ITL-910, below), so the v0.2 rows in such tables are ignored, the inputs are computed
-  again, and the new rows are stored next to the old ones.
+  as well (ITL-910, below) and every table moved to a new layout (ITL-944, below), so the
+  v0.2 tables are not read and the inputs are computed again.
 - **Refused at write time** with `orcapod.errors.UnsupportedValueError` (a `ValueError`), naming
   the column and dtype: masked arrays (the mask used to be dropped silently), object dtypes,
   NumPy 2 `StringDType` (used to fail with a misleading pickle error), `longdouble` and
@@ -49,6 +49,80 @@ readable with v0.2. A migration is planned after v0.3 (ITL-889).
 - `LogicalTypeRegistry.get_by_python_type` now picks the most specific registered class along
   the MRO, so a registered `np.ndarray` subclass wins over `np.ndarray` for itself and its
   subclasses, whatever the registration order.
+
+#### Data context `std:v1:default`: a `__data_context` column on every table, and every table at a new path (ITL-944)
+
+**v0.3 writes every stored table at a new path, and records on every row which generation of
+hashing wrote it.** A store written by v0.2 is not migrated and not modified: v0.3 does not
+read its tables as results, and computes every input again into its own tables.
+
+- **One data context key for the whole of Orcapod's hashing.** The default data context is
+  now `std:v1:default` (manifest `orcapod/contexts/data/v1.json`). The version increments
+  when, and only when, an existing hash value changes for a reason other than a logical
+  type's own change. Everything stored before v0.3 (rows that carry `std:v0.1:default`, and
+  tables without the new column) is the earlier generation. A released manifest file is
+  frozen: `orcapod/contexts/released_manifests.json` pins the sha256 of each one, and a test
+  fails when a pinned file is edited. `v1.json` is pinned when v0.3.0 is tagged.
+- **New column `__data_context`** (`large_string`) on every row of the function pipeline
+  table, the function result table, the operator-cache table, the cached-source table and
+  the side-effect invocation log. It **replaces** `__input_data_context_key` in the pipeline
+  table and `_context_key` in the result table. In memory nothing is renamed:
+  `ColumnConfig(context=True)` still shows `_context_key`.
+- **New column `__pf_var_function_version`** in the function result table: the full version
+  string the function was declared with (`"v3.7"`). Only the major part is in the table
+  path, and until now no stored column held the version.
+- **New table layouts, so new paths.** The last component of every table path moved:
+
+  | Table | v0.2 | v0.3 |
+  |---|---|---|
+  | Function pipeline table | `…/schema:<pipeline hash>/pdb_v1` | `…/schema:<pipeline hash>/pdb_v2` |
+  | Function result table | `…/_result/<function uri>/rdb_v1` | `…/_result/<function uri>/rdb_v2` |
+  | Side-effect invocation log | `…/schema:<pipeline hash>/tdb_v1` | `…/schema:<pipeline hash>/tdb_v2` |
+  | Operator-cache table | `<operator uri>/schema:<pipeline hash>` | `<operator uri>/schema:<pipeline hash>/odb_v1` |
+  | Cached-source table | `source/node:<content hash>` | `source/node:<content hash>/sdb_v1` |
+
+  The layout component is always the last one: `CachedSource(..., cache_path=("my", "cache"))`
+  now stores at `("my", "cache", "sdb_v1")`, and `CachedSource.cache_path` returns that full
+  path. Pass the path without the layout component as `cache_path`.
+- **Reads and lookups use rows of the current data context only.** A result lookup matches
+  on the input hash and the data context; every read of a whole table (a node's `as_table()`,
+  `iter_data()`, `get_all_records()`, `as_source()`, `get_all_cached_outputs()` of a cached
+  function, a stored operator node, a `CachedSource`) leaves rows of another data context
+  out, leaves them unchanged, and logs one warning per table with their number (logger
+  `orcapod.contexts.stored`).
+- **What a v0.2 store looks like to v0.3.**
+  - Its tables are at the old layout. v0.3 never reads them as results and never writes to
+    them; they stay byte for byte as v0.2 left them and stay readable with v0.2.
+  - The first v0.3 run **computes every input again**, also for functions and data that did
+    not change, and stores the rows in the new tables. Before that run, reading a node
+    returns no rows.
+  - When v0.3 finds a table at an old layout, it logs one warning with the number of rows:
+    `Found 3 rows in stored table 'my_job/.../pdb_v1' written by an earlier version of
+    Orcapod (older table layout, data context std:v0.1:default). They are not used and are
+    left unchanged; they can be migrated later.`
+  - **Side-effect nodes fail instead of delivering again.** A side effect is an external
+    action, and a delivery logged by v0.2 cannot be matched with current inputs. A
+    side-effect node that finds an invocation log at an old layout (or logged deliveries of
+    another data context) raises `orcapod.errors.SideEffectLogDataContextError` (a
+    `StoreError`, so it fails the run whatever the `error_policy`) before it delivers or
+    writes anything. Function, operator and source nodes of the same job are not refused.
+    Use a fresh store for the side-effect node, or keep using v0.2 for it.
+  - `orcapod.contexts.stored_data_contexts(store, record_path)` counts the rows of a table
+    by data context, for example `{"std:v1:default": 3}`; a table without the column reports
+    its rows under `std:v0.1:default`.
+- **Hash values.** The content hash of a stream that has no producer (a bare
+  `ArrowTableStream`) covers its `_context_key` column, so it changes with the key. No other
+  hash value changes because of this entry.
+- **Removed (introduced earlier in this unreleased cycle, never released):**
+  `orcapod.hashing.stored_hash_labels` and `orcapod.errors.SideEffectLogHashLabelError`.
+  Rows are told apart by `__data_context`, not by the label inside a hash.
+- **Internal API.** `ResultCache.lookup`, `ResultCache.store` and
+  `ResultCache.get_all_records` take the caller's `data_context_key`.
+
+  **Migration:** none is needed to run the function, operator and source nodes of a v0.2
+  store under v0.3, at the price of computing everything again; side-effect nodes need a
+  fresh store. A tool that converts old-layout tables is planned (ITL-913, ITL-914); until
+  then they are kept, untouched, for it.
 
 #### Arrow hashing moves to starfix hash format 2: every Arrow-derived hash changes (ITL-910)
 
@@ -68,48 +142,9 @@ format 2, prefix `00 00 02`) is lossless; this is a fix, so the old values are n
   `table_scope="pipeline_hash"` do not move. Paths that embed a content hash
   (`table_scope="content_hash"`, `CachedSource` tables) move with it. Where a `GroupBy` or
   `Batch` orders members by `record_id`, the order of members can change too.
-- **Results stored by 0.2.0 are ignored and computed again; they are not reused, changed or
-  deleted.** Rows a v0.2 store holds are keyed under `arrow_v0.1` and can never match v0.3
-  inputs. v0.3 does not refuse such a store. A value-only change does not move a table, so a
-  v0.3 job writes its `arrow_v0.2` rows into the same tables, next to the `arrow_v0.1` rows,
-  and uses rows of its own label only:
-  - The first v0.3 run on a v0.2 store **computes every input again**. Nothing stored by v0.2
-    counts as a cached result, also for functions and data that did not change.
-  - Reading a node (`as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, also on a
-    job loaded from a file, including a file saved by v0.2), `get_all_cached_outputs()` of a
-    cached function, a stored (`LOG` / `REPLAY`) operator node and a `CachedSource` return
-    rows hashed under `arrow_v0.2` only. Before the first v0.3 run, such a read on a v0.2
-    store returns no rows; after it, one row per input, never the v0.2 rows as well.
-  - The v0.2 rows stay where they are, byte for byte, and stay readable with v0.2. Each
-    stored key names its label (`arrow_v0.1:000001...` or `arrow_v0.2:000002...`), and
-    `orcapod.hashing.stored_hash_labels.stored_hash_labels(store, record_path)` counts the
-    rows of a table by label, for example `{"arrow_v0.1": 3, "arrow_v0.2": 3}`.
-  - When a read leaves out rows of another label, Orcapod logs one warning per table and
-    reader with the total, on the logger `orcapod.hashing.stored_hash_labels`:
-    `Skipped 3 rows of stored table 'my_job/.../pdb_v1': written under another hash label
-    than the current one. The rows are left in place unchanged and can be migrated later.`
-  - **Side-effect nodes are the exception: they fail instead of delivering again.** A
-    side-effect pod finds a delivery it already made by an Arrow-derived record id, so
-    deliveries logged by v0.2 cannot be found, and running the node would deliver every side
-    effect a second time. A side effect is an external action, not a value that can be
-    computed again, so a side-effect node whose invocation log holds deliveries logged under
-    another label raises `orcapod.errors.SideEffectLogHashLabelError` (a `StoreError`, so it
-    fails the run whatever the `error_policy`) before it delivers or writes anything. The
-    error names the log, the label found and the current one. Function, operator and source
-    nodes of the same job are not refused. Use a fresh store for the side-effect node, or
-    keep using v0.2 for it, until the log can be migrated.
-
-  **Migration:** none is needed to run the function, operator and source nodes of a v0.2
-  store under v0.3, at the price of computing everything again and of tables that hold both
-  generations; side-effect nodes need a fresh store. A tool that converts
-  `arrow_v0.1` rows into `arrow_v0.2` rows is planned (ITL-913, ITL-914); until then the old
-  rows are kept for it. Operator-node and cached-source tables store their record hashes
-  without a label; there the rows of v0.2 are told apart by the starfix hash format at the
-  start of each record hash (`000001` for v0.2, `000002` for v0.3). That is exact for these
-  two versions, but a later Arrow hash label that keeps starfix hash format 2 could not be
-  told apart in those two kinds of table. A table that `table_scope="content_hash"` or a
-  `CachedSource` places under a content hash moves to a new path instead, so its v0.2 rows
-  are in another table.
+- **Results stored by 0.2.0 are not reused.** Every table v0.3 writes is at a new path and
+  every row names its data context; see "Data context `std:v1:default`" below (ITL-944) for
+  what a v0.2 store looks like to v0.3.
 - **Now hashable.** `fixed_size_list` columns, at any depth (ITL-927): a source or operator
   carrying one works, and its type is kept. A `fixed_size_list<T>[n]` hashes differently from a
   `large_list<T>` with the same values. pyarrow's canonical extension types (`arrow.uuid`,
@@ -157,13 +192,12 @@ stay queued for the next flush. A flush that fails only for other reasons still 
   the backend's exception as its cause. (ITL-884 #290)
 - **`orcapod.errors.StoreError`** — the base of `StoreReadError` and `StoreWriteError`;
   `except StoreError` handles both. (ITL-884 #290)
-- **`orcapod.errors.SideEffectLogHashLabelError`** — a `StoreError` raised by a side-effect
-  node whose invocation log holds deliveries logged under another Arrow hash label (a log
-  written by v0.2), before anything is delivered. It has `record_path`, `found_label`,
-  `current_label` and `node_label`. (ITL-910)
-- **`orcapod.hashing.stored_hash_labels.stored_hash_labels(database, record_path)`** — counts
-  the rows of a stored table by the Arrow hash label they were hashed under, to tell rows
-  written by v0.2 (`arrow_v0.1`) from rows written by v0.3 (`arrow_v0.2`). (ITL-910)
+- **`orcapod.errors.SideEffectLogDataContextError`** — a `StoreError` raised by a
+  side-effect node whose invocation log is at an older table layout or holds deliveries of
+  another data context, before anything is delivered. It has `record_path`,
+  `found_context`, `current_context` and `node_label`. (ITL-944)
+- **`orcapod.contexts.stored_data_contexts(database, record_path)`** — counts the rows of a
+  stored table by the data context that wrote them. (ITL-944)
 
 ### Fixed
 
