@@ -7,11 +7,14 @@ computed for the same frame with its columns in another order.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
+from deltalake import DeltaTable, write_deltalake
 from pandas.testing import assert_frame_equal
 
 from orcapod import PipelineJob, function_pod
@@ -175,9 +178,11 @@ class TestPandasColumnOrder:
     ) -> None:
         """A frame that storage reads back in another form is still a cache hit.
 
-        Run 1 hashes the frame the pod returned; run 2 hashes the frame read back from
-        the store (``object`` ints as ``int64``, ``string[pyarrow]`` as ``string[python]``,
-        ``attrs`` as JSON). The consumer must not compute again.
+        The store holds the frame in the form storage restores (``object`` ints as
+        ``int64``, ``string[pyarrow]`` as ``string[python]``, ``attrs`` as JSON). A second
+        run on the same store must not compute the consumer again. The hash-level
+        guarantee, ``hash(read(write(v))) == hash(v)``, is tested in
+        ``tests/test_hashing/test_pandas_value_identity.py``.
         """
         store = _STORES[store_name](tmp_path)
         _CONSUMER_CALLS.clear()
@@ -192,3 +197,64 @@ class TestPandasColumnOrder:
             totals += [data["total"] for _, data in job.nodes["total"].iter_data()]
         assert totals == [3, 3]
         assert _CONSUMER_CALLS == [3]
+
+
+def _files(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` with its bytes."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_v02_table_with_a_pandas_column_is_reported_not_read_and_left_alone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A table v0.2 wrote with a ``pandas.dataframe`` column is counted and untouched.
+
+    Before v0.3 a frame column was stored under the extension name ``pandas.dataframe``
+    with no metadata, in a table at an older layout (``rdb_v1``). That name is no longer
+    registered. The table is found by the function's name and reported; it is never
+    read (reading the column would be refused), and its files stay byte-identical.
+    """
+    root = tmp_path / "delta"
+    old = (
+        "pandas_order",
+        "_result",
+        "make_frame",
+        "0" * 64,
+        "v0",
+        "python.function.v0",
+        "rdb_v1",
+    )
+    old_dir = root.joinpath(*old)
+    old_dir.mkdir(parents=True)
+    # Written with deltalake directly: the table must look like what v0.2 stored, which
+    # this version's database would not write.
+    column = pa.field(
+        "df",
+        pa.large_binary(),
+        metadata={b"ARROW:extension:name": b"pandas.dataframe"},
+    )
+    write_deltalake(
+        str(old_dir),
+        pa.table(
+            [pa.array([b"not read"], pa.large_binary())], schema=pa.schema([column])
+        ),
+    )
+    stored = DeltaTable(str(old_dir)).schema().to_arrow()
+    assert pa.schema(stored).field("df").metadata == {
+        b"ARROW:extension:name": b"pandas.dataframe"
+    }
+    before = _files(old_dir)
+
+    with caplog.at_level(logging.WARNING):
+        job = _run(DeltaTableDatabase(root), "sync", [("fwd", False)])
+
+    reported = " ".join(record.getMessage() for record in caplog.records)
+    assert "written by an earlier version of Orcapod" in reported
+    assert "/".join(old) in reported
+    got = {tag["k"]: data["leading"] for tag, data in job.nodes["leading"].iter_data()}
+    assert got == {"fwd": "a/i"}
+    assert _files(old_dir) == before
