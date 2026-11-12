@@ -49,9 +49,9 @@ its values and tells a null struct from a struct whose fields are all null.
 carries what starfix does not see, in a grammar Orcapod owns (never Polars' ``repr`` or its
 ``_PL_*`` metadata)::
 
-    frame:  {"kind": "polars.dataframe", "height": <rows>,
+    frame:  {"kind": "orcapod.polars.dataframe", "height": <rows>,
              "columns": [[<name>, <dtype>], ...]}   in column order
-    series: {"kind": "polars.series", "name": <name>, "height": <rows>,
+    series: {"kind": "orcapod.polars.series", "name": <name>, "height": <rows>,
              "dtype": <dtype>}
 
     <dtype> := "int8" | "int16" | "int32" | "int64"
@@ -103,6 +103,14 @@ if TYPE_CHECKING:
 
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
+
+POLARS_DATAFRAME_EXTENSION_NAME = "orcapod.polars.dataframe"
+"""Arrow extension name (and logical type name) of a stored ``pl.DataFrame``; also the
+``"kind"`` of its hash descriptor, so the type has one name everywhere."""
+
+POLARS_SERIES_EXTENSION_NAME = "orcapod.polars.series"
+"""Arrow extension name (and logical type name) of a stored ``pl.Series``; also the
+``"kind"`` of its hash descriptor."""
 
 POLARS_DATAFRAME_HASH_LABEL = "polars_dataframe_v1"
 """``ContentHash`` method label of a ``pl.DataFrame`` hash; names the whole definition."""
@@ -451,7 +459,7 @@ def polars_frame_content_hash(
             ) from error
         columns.append((name, dtype_descriptor))
     descriptor = {
-        "kind": "polars.dataframe",
+        "kind": POLARS_DATAFRAME_EXTENSION_NAME,
         "height": df.height,
         "columns": _ordered_pairs(columns, ignore_order=ignore_column_order),
     }
@@ -496,7 +504,7 @@ def polars_series_content_hash(
             f"Polars value: Series {series.name!r} cannot be hashed: {error}"
         ) from error
     descriptor: dict[str, Any] = {
-        "kind": "polars.series",
+        "kind": POLARS_SERIES_EXTENSION_NAME,
         "height": series.len(),
         "dtype": dtype_descriptor,
     }
@@ -579,15 +587,17 @@ class LogicalPolarsDataFrame(BaseLogicalType):
     """
 
     _arrow_ext_class = make_arrow_extension_type(
-        "orcapod.polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA
+        POLARS_DATAFRAME_EXTENSION_NAME, pa.large_binary(), _IDENTIFIER_METADATA
     )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "orcapod.polars.dataframe", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+        POLARS_DATAFRAME_EXTENSION_NAME,
+        pa.large_binary(),
+        _IDENTIFIER_METADATA.decode(),
     )
     _polars_ext: pl.BaseExtension | None = None
 
-    logical_type_name: str = "orcapod.polars.dataframe"
+    logical_type_name: str = POLARS_DATAFRAME_EXTENSION_NAME
     python_type: type = pl.DataFrame
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:
@@ -670,15 +680,15 @@ class LogicalPolarsSeries(BaseLogicalType):
     """
 
     _arrow_ext_class = make_arrow_extension_type(
-        "orcapod.polars.series", pa.large_binary(), _IDENTIFIER_METADATA
+        POLARS_SERIES_EXTENSION_NAME, pa.large_binary(), _IDENTIFIER_METADATA
     )
     _arrow_ext: pa.ExtensionType | None = None
     _polars_ext_class = make_polars_extension_type(
-        "orcapod.polars.series", pa.large_binary(), _IDENTIFIER_METADATA.decode()
+        POLARS_SERIES_EXTENSION_NAME, pa.large_binary(), _IDENTIFIER_METADATA.decode()
     )
     _polars_ext: pl.BaseExtension | None = None
 
-    logical_type_name: str = "orcapod.polars.series"
+    logical_type_name: str = POLARS_SERIES_EXTENSION_NAME
     python_type: type = pl.Series
 
     def get_arrow_extension_type(self) -> pa.ExtensionType:

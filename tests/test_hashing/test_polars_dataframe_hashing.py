@@ -434,7 +434,7 @@ class TestHashDefinition:
         frame = self._frame()
         descriptor = _canonical_json(
             {
-                "kind": "polars.dataframe",
+                "kind": "orcapod.polars.dataframe",
                 "height": 3,
                 "columns": [
                     ["x", "int64"],
@@ -452,7 +452,7 @@ class TestHashDefinition:
         series = self._frame()["s"]
         descriptor = _canonical_json(
             {
-                "kind": "polars.series",
+                "kind": "orcapod.polars.series",
                 "name": "s",
                 "height": 3,
                 "dtype": {"struct": [["u", "int8"], ["v", "string"]]},

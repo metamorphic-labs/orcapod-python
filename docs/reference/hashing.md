@@ -511,9 +511,9 @@ and states names, order and dtypes again in Orcapod's own terms. `descriptor` is
 sorted, compact separators, UTF-8) in a grammar Orcapod owns, never Polars' `repr`:
 
 ```text
-frame:  {"kind": "polars.dataframe", "height": <rows>,
+frame:  {"kind": "orcapod.polars.dataframe", "height": <rows>,
          "columns": [[<name>, <dtype>], ...]}        in column order
-series: {"kind": "polars.series", "name": <name>, "height": <rows>,
+series: {"kind": "orcapod.polars.series", "name": <name>, "height": <rows>,
          "dtype": <dtype>}
 
 <dtype> := "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
