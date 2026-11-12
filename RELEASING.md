@@ -51,12 +51,21 @@ Do these on `main` before triggering the workflow:
 2. **Check that `main` is green** — the `Run Tests` workflow on the commit you are
    releasing. The Release workflow re-runs the unit tests on Python 3.11, 3.12 and 3.13
    and the license check, but not the PostgreSQL or SpiralDB integration jobs.
-3. **Check the version is free** — the tag must not exist on origin, and the version must
+3. **Freeze the data context manifest** in the release pull request, as its last commit,
+   after every pull request that changes a hash has landed: set `released_in` and
+   `golden.digest` in `src/orcapod/contexts/data/<version>.json` and the file's sha256 in
+   `src/orcapod/contexts/released_manifests.json`. The tagged build fails
+   `tests/test_contexts/test_data_context_v1.py::test_a_final_release_ships_no_open_manifest`
+   otherwise. After this commit a hash change needs a new data context version.
+4. **Check the version is free** — the tag must not exist on origin, and the version must
    not exist on PyPI or TestPyPI; neither index allows a version to be uploaded twice, even
    after it is deleted.
 
+While the repository is `internal`, the PyPI page's links into the repository do not open
+for a logged-out reader; they work once it is public.
+
 Per-release checklists live in `superpowers/plans/` (for example
-`2026-11-09-v0.2-release-checklist.md`).
+`2026-11-09-v0.2-release-checklist.md`, `2026-11-12-v0.3-release-checklist.md`).
 
 ## Cutting a Release
 

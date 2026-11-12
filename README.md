@@ -18,8 +18,9 @@ pip install orcapod
 uv add orcapod
 ```
 
-`0.2.0` is not on PyPI, where the latest release is `0.1.4`; `0.2.0` is the tag `v0.2.0` of
-the repository.
+`0.3.0` is the first release since `0.1.4` on PyPI; `0.2.0` exists only as the tag `v0.2.0` of
+the repository. A store written by `0.2.0` or earlier is not read by `0.3.0`: see
+[`CHANGELOG.md`](CHANGELOG.md), *Upgrading from 0.2.0*.
 
 Optional features are installed as extras:
 
