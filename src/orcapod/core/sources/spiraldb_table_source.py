@@ -61,7 +61,7 @@ _DATETIME_KEY = "datetime"
 _DATE_KEY = "date"
 
 
-def _where_to_config(where: Mapping[str, object]) -> dict[str, Any]:
+def _locationto_config(where: Mapping[str, object]) -> dict[str, Any]:
     """Return ``where`` with its date and datetime values in a JSON form."""
     out: dict[str, Any] = {}
     for column, value in where.items():
@@ -74,8 +74,8 @@ def _where_to_config(where: Mapping[str, object]) -> dict[str, Any]:
     return out
 
 
-def _where_from_config(saved: Mapping[str, Any]) -> dict[str, object]:
-    """Return the ``where`` mapping that ``_where_to_config`` wrote."""
+def _locationfrom_config(saved: Mapping[str, Any]) -> dict[str, object]:
+    """Return the ``where`` mapping that ``_locationto_config`` wrote."""
     out: dict[str, object] = {}
     for column, value in saved.items():
         if isinstance(value, dict) and set(value) == {_DATETIME_KEY}:
@@ -186,19 +186,19 @@ class SpiralDBTableSource(RootSource):
         self._max_rows = max_rows
         self._batch_rows = batch_rows
         self._given_asof = asof
-        where_ = f"SpiralDB project {project_id!r}, dataset {dataset!r}"
+        location = f"SpiralDB project {project_id!r}, dataset {dataset!r}"
 
         with self._connector() as connector:
             if table_name not in connector.get_table_names():
                 raise ValueError(
-                    f"{where_}: Table {table_name!r} not found in database."
+                    f"{location}: Table {table_name!r} not found in database."
                 )
             self._key_columns: tuple[str, ...] = tuple(
                 connector.get_pk_columns(table_name)
             )
             if not self._key_columns:
                 raise ValueError(
-                    f"{where_}: Table {table_name!r} has no primary key columns, so "
+                    f"{location}: Table {table_name!r} has no primary key columns, so "
                     "its rows cannot be identified."
                 )
             self._table_id = connector.get_spiral_table_id(table_name)
@@ -217,7 +217,7 @@ class SpiralDBTableSource(RootSource):
         unknown = [c for c in self._where if c not in schema.names]
         if unknown:
             raise ValueError(
-                f"{where_}: where names columns that table {table_name!r} does not "
+                f"{location}: where names columns that table {table_name!r} does not "
                 f"have: {unknown}. Columns: {schema.names}"
             )
         if self._source_id is None:
@@ -233,7 +233,7 @@ class SpiralDBTableSource(RootSource):
                 system_tag_columns=system_tag_columns,
             )
         except ValueError as exc:
-            raise ValueError(f"{where_}, table {table_name!r}: {exc}") from exc
+            raise ValueError(f"{location}, table {table_name!r}: {exc}") from exc
         self._stream = template.stream
         self._schema_hash = template.schema_hash
         self._tag_columns = template.tag_columns
@@ -340,15 +340,12 @@ class SpiralDBTableSource(RootSource):
         """
         with self._connector() as connector:
             if self._max_rows is not None and not self._where:
-                # Nothing but limit bounds the read, so its size is known up front.
-                expected = (
-                    self._limit
-                    if self._limit is not None and self._limit <= self._max_rows
-                    else min(
-                        connector.get_row_count_estimate(self._table_name),
-                        self._limit if self._limit is not None else 2**63,
-                    )
-                )
+                # Nothing but limit bounds the read, so its size is known up front:
+                # the limit, or the table's recorded row count when that is smaller.
+                expected = self._limit
+                if expected is None or expected > self._max_rows:
+                    recorded = connector.get_row_count_estimate(self._table_name)
+                    expected = recorded if expected is None else min(expected, recorded)
                 if expected > self._max_rows:
                     raise self._too_large(f"the read would return {expected:,} rows")
             seen = 0
@@ -436,7 +433,7 @@ class SpiralDBTableSource(RootSource):
             "table_id": self._table_id,
             "tag_columns": list(self._tag_columns),
             "system_tag_columns": list(self._system_tag_columns),
-            "where": _where_to_config(self._where),
+            "where": _locationto_config(self._where),
             "limit": self._limit,
             "asof": self._given_asof,
             "max_rows": self._max_rows,
@@ -468,7 +465,7 @@ class SpiralDBTableSource(RootSource):
             dataset=config.get("dataset", "default"),
             tag_columns=config.get("tag_columns"),
             system_tag_columns=config.get("system_tag_columns", ()),
-            where=_where_from_config(config.get("where") or {}),
+            where=_locationfrom_config(config.get("where") or {}),
             limit=config.get("limit"),
             asof=config.get("asof"),
             max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),

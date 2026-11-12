@@ -1,0 +1,143 @@
+"""SpiralDBTableSource against a live SpiralDB project (ITL-186). Opt-in.
+
+Skipped unless ``ORCAPOD_SPIRAL_LIVE_PROJECT`` names a project the saved ``spiral login``
+can read, with a ``default.spike_event`` table (the workshop project is
+``edi-tutorial-v1-841226``). Every test is read-only except
+``test_rows_appended_between_runs_are_the_only_ones_computed``, which also needs
+``ORCAPOD_SPIRAL_LIVE_WRITE=1`` and writes only to a table it creates and drops in the
+project's ``scratch`` dataset.
+
+    ORCAPOD_SPIRAL_LIVE_PROJECT=edi-tutorial-v1-841226 \\
+        uv run --extra spiraldb pytest tests/test_core/sources/test_spiraldb_table_source_live.py
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from pathlib import Path
+
+import pyarrow as pa
+import pytest
+
+from orcapod import PipelineJob, function_pod
+from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import SourceTooLargeError
+from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.sources import SpiralDBTableSource
+
+PROJECT = os.environ.get("ORCAPOD_SPIRAL_LIVE_PROJECT", "")
+WRITE = os.environ.get("ORCAPOD_SPIRAL_LIVE_WRITE") == "1"
+
+pytestmark = pytest.mark.skipif(
+    not PROJECT, reason="Set ORCAPOD_SPIRAL_LIVE_PROJECT to run the live Spiral tests"
+)
+
+
+def test_building_a_source_is_quick_and_names_the_table():
+    start = time.monotonic()
+    source = SpiralDBTableSource(PROJECT, "spike_event")
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 10
+    assert source.source_id == f"{PROJECT}/default.spike_event@{source.table_id}"
+    assert source.table_id.startswith("table_")
+    assert "unit_id" in source.keys()[0]
+    assert source.row_count_estimate > 0
+
+
+def test_limit_reads_the_first_rows():
+    source = SpiralDBTableSource(PROJECT, "spike_event", limit=1000)
+
+    table = source.as_table(all_info=True)
+
+    assert table.num_rows == 1000
+    (record_ids,) = [
+        table.column(name)
+        for name in table.column_names
+        if name.startswith("_tag_record_id::")
+    ]
+    assert len(set(record_ids.to_pylist())) == 1000
+
+
+def test_where_reads_only_matching_rows_with_the_same_record_ids():
+    first = SpiralDBTableSource(PROJECT, "spike_event", limit=1).as_table(all_info=True)
+    unit_id = first.column("unit_id")[0].as_py()
+    source = SpiralDBTableSource(
+        PROJECT, "spike_event", where={"unit_id": unit_id}, max_rows=None
+    )
+
+    table = source.as_table(all_info=True)
+
+    assert table.num_rows > 0
+    assert set(table.column("unit_id").to_pylist()) == {unit_id}
+    record_id = next(n for n in table.column_names if n.startswith("_tag_record_id::"))
+    assert first.column(record_id)[0].as_py() in table.column(record_id).to_pylist()
+
+
+def test_a_whole_table_over_the_cap_is_refused_without_reading():
+    source = SpiralDBTableSource(PROJECT, "spike_event", max_rows=10)
+
+    start = time.monotonic()
+    with pytest.raises(SourceTooLargeError, match="limit="):
+        source.as_table()
+    assert time.monotonic() - start < 10
+
+
+def test_an_async_job_over_a_limited_read(tmp_path: Path):
+    calls: list[float | None] = []
+
+    @function_pod(output_keys="doubled")
+    def double(spike_amplitude_uv: float | None) -> float | None:
+        calls.append(spike_amplitude_uv)
+        return None if spike_amplitude_uv is None else 2 * spike_amplitude_uv
+
+    def run() -> PipelineJob:
+        job = PipelineJob(name="live", store=DeltaTableDatabase(tmp_path / "store"))
+        with job:
+            double.pod(
+                SpiralDBTableSource(PROJECT, "spike_event", limit=500), label="double"
+            )
+        job.run(orchestrator=AsyncPipelineOrchestrator())
+        return job
+
+    assert run().nodes["double"].as_table().num_rows == 500
+    assert 0 < len(calls) <= 500
+    calls.clear()
+    run()
+    assert calls == []
+
+
+@pytest.mark.skipif(not WRITE, reason="Set ORCAPOD_SPIRAL_LIVE_WRITE=1 to write a scratch table")
+def test_rows_appended_between_runs_are_the_only_ones_computed(tmp_path: Path):
+    import spiral  # pyright: ignore[reportMissingImports]  # spiraldb extra, absent in the type-check job
+
+    name = f"itl186_live_{uuid.uuid4().hex[:8]}"
+    project = spiral.Spiral().project(PROJECT)
+    table = project.create_table(f"scratch.{name}", key_schema=[("k", pa.int64())])
+    calls: list[int | None] = []
+
+    @function_pod(output_keys="w")
+    def double(v: int | None) -> int | None:
+        calls.append(v)
+        return None if v is None else 2 * v
+
+    def run() -> None:
+        job = PipelineJob(name="append", store=DeltaTableDatabase(tmp_path / "store"))
+        with job:
+            double.pod(
+                SpiralDBTableSource(PROJECT, name, dataset="scratch"), label="double"
+            )
+        job.run()
+
+    try:
+        table.write(pa.table({"k": [2, 3], "v": [20, 30]}))
+        run()
+        assert sorted(calls) == [20, 30]
+        calls.clear()
+        table.write(pa.table({"k": [1], "v": [10]}))
+        run()
+        assert calls == [10]
+    finally:
+        project.drop_table(f"scratch.{name}")
