@@ -12,13 +12,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from orcapod.errors import (
-    SchemaVersionError,
-    StoreHashLabelError,
-    StoreReadError,
-    StoreWriteError,
-)
-from orcapod.hashing.stored_hash_labels import foreign_arrow_label
+from orcapod.errors import SchemaVersionError, StoreReadError, StoreWriteError
+from orcapod.hashing.stored_hash_labels import keep_rows_hashed_under
 from orcapod.protocols.core_protocols import DataProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import constants, RESULT_DB_SCHEMA_VERSION
@@ -71,7 +66,6 @@ class ResultCache:
         self._record_path = record_path
         self._auto_flush = auto_flush
         self._ignore_schema: tuple[str, ...] | None = None
-        self._hash_labels_checked = False
 
     @property
     def result_database(self) -> ArrowDatabaseProtocol:
@@ -158,34 +152,6 @@ class ResultCache:
         # Only cache as checked after the raise-or-ignore decision passes.
         _checked_rdb_paths.add(v1_path)
 
-    def check_stored_hash_labels(self, current_label: str) -> None:
-        """Refuse a result table holding rows hashed under another Arrow hash label.
-
-        Reads the stored ``INPUT_DATA_HASH_COL`` values once per instance. Rows
-        keyed under another label can never match current inputs, so computing
-        next to them would mix old and new rows (ITL-910). ``ignore_schema``
-        does not disable this check.
-
-        Args:
-            current_label: The Arrow hash label of the current input data hashes.
-
-        Raises:
-            StoreHashLabelError: If a stored row carries another Arrow hash label.
-        """
-        if self._hash_labels_checked:
-            return
-        path = self._versioned_record_path
-        stored = self._result_database.get_all_records(path)
-        if stored is not None and constants.INPUT_DATA_HASH_COL in stored.column_names:
-            found = foreign_arrow_label(
-                stored.column(constants.INPUT_DATA_HASH_COL), current_label
-            )
-            if found is not None:
-                raise StoreHashLabelError(
-                    self._result_database.base_path + path, found, current_label
-                )
-        self._hash_labels_checked = True
-
     def lookup(
         self,
         input_data: DataProtocol,
@@ -214,7 +180,6 @@ class ResultCache:
         from orcapod.core.datagrams import Data
 
         self._ensure_rdb_schema()
-        self.check_stored_hash_labels(input_data.content_hash().method)
 
         RECORD_ID_COL = "_record_id"
 
@@ -285,7 +250,6 @@ class ResultCache:
                 same ID already exists.
         """
         self._ensure_rdb_schema()
-        self.check_stored_hash_labels(input_data.content_hash().method)
 
         data_table = output_data.as_table(columns={"source": True, "context": True})
 
@@ -350,11 +314,17 @@ class ResultCache:
                 ) from exc
 
     def get_all_records(
-        self, include_system_columns: bool = False
+        self, current_label: str, include_system_columns: bool = False
     ) -> "pa.Table | None":
-        """Return all cached records from the result store.
+        """Return the cached records hashed under the current Arrow hash label.
+
+        Rows whose input data hash carries another Arrow hash label (written by
+        another version of Orcapod) can never match current inputs; they stay in the
+        table and are not returned (ITL-910).
 
         Args:
+            current_label: The Arrow hash label of current input data hashes
+                (``arrow_hasher.hasher_id`` of the caller's data context).
             include_system_columns: If True, include system columns
                 (e.g. record_id) in the result.
 
@@ -367,6 +337,12 @@ class ResultCache:
         result_table = self._result_database.get_all_records(
             self._versioned_record_path, record_id_column=record_id_column
         )
-        if result_table is None or result_table.num_rows == 0:
+        if result_table is None:
+            return None
+        if constants.INPUT_DATA_HASH_COL in result_table.column_names:
+            result_table = keep_rows_hashed_under(
+                result_table, constants.INPUT_DATA_HASH_COL, current_label
+            )
+        if result_table.num_rows == 0:
             return None
         return result_table

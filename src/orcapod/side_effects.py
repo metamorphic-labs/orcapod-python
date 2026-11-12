@@ -19,13 +19,7 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.function_node import _build_record_id_preimage
 from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import (
-    StoreError,
-    StoreHashLabelError,
-    StoreReadError,
-    StoreWriteError,
-)
-from orcapod.hashing.stored_hash_labels import foreign_arrow_label
+from orcapod.errors import StoreError, StoreReadError, StoreWriteError
 from orcapod.invocation import (
     InvocationContext,
     InvocationHashConfig,
@@ -794,37 +788,6 @@ class SideEffectJobNode(SideEffectNode):
         )
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
-        self._stored_hash_labels_checked = False
-
-    def check_stored_hash_labels(self) -> None:
-        """Refuse an invocation log holding completions hashed under another Arrow label.
-
-        Completions are looked up by an Arrow-derived record id, so completions
-        logged under another label (``arrow_v0.1``, Orcapod v0.2) would never be
-        found and every side effect would be delivered again (ITL-910). Reads the
-        log's ``record_id_hash`` values once per node instance.
-
-        Raises:
-            StoreHashLabelError: If a logged completion carries another Arrow hash label.
-        """
-        if (
-            self._stored_hash_labels_checked
-            or self._pipeline_database is None
-            or self._table_path is None
-        ):
-            return
-        current_label = self._pod.data_context.arrow_hasher.hasher_id
-        stored = self._pipeline_database.get_all_records(self._table_path)
-        if stored is not None and "record_id_hash" in stored.column_names:
-            found = foreign_arrow_label(stored.column("record_id_hash"), current_label)
-            if found is not None:
-                raise StoreHashLabelError(
-                    self._pipeline_database.base_path + self._table_path,
-                    found,
-                    current_label,
-                    node_label=self.label,
-                )
-        self._stored_hash_labels_checked = True
 
     # ------------------------------------------------------------------
     # DB attachment
@@ -845,7 +808,6 @@ class SideEffectJobNode(SideEffectNode):
                 or ``None`` to detach.
         """
         self._pipeline_database = pipeline_database
-        self._stored_hash_labels_checked = False
         if pipeline_database is not None:
             self._table_path = self.node_uri + (
                 f"schema:{self.pipeline_hash().to_string()}",
@@ -874,12 +836,7 @@ class SideEffectJobNode(SideEffectNode):
 
         Returns:
             List of ``(tag, data)`` tuples — the pass-through rows.
-
-        Raises:
-            StoreHashLabelError: If the invocation log holds completions hashed
-                under another Arrow hash label; nothing is delivered then.
         """
-        self.check_stored_hash_labels()
         results = []
         for tag, data in input_stream.iter_data():
             result = _execute_side_effect_row(
@@ -941,7 +898,6 @@ class SideEffectJobNode(SideEffectNode):
         )
 
         try:
-            self.check_stored_hash_labels()
 
             async def process_one(tag: TagProtocol, data: DataProtocol) -> None:
                 try:

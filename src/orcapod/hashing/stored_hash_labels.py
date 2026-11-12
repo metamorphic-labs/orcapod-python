@@ -1,15 +1,25 @@
-"""Find stored rows that were hashed under another Arrow hash label (ITL-910).
+"""Tell stored rows hashed under one Arrow hash label from another (ITL-910).
 
-Orcapod keys stored rows by Arrow-derived hashes. Two stored forms exist:
+Orcapod keys stored rows by Arrow-derived hashes, and a change of the Arrow hash label
+(``arrow_v0.1`` up to Orcapod v0.2, ``arrow_v0.2`` since v0.3) changes those values but not
+the table they are stored in. A table can therefore hold rows of several labels side by
+side. Orcapod writes and uses rows of its current label only; rows of another label stay
+where they are, unchanged, until they are migrated.
+
+Two stored forms carry the label:
 
 - prefixed digests, ``b"<label>:<digest>"`` (for example ``b"arrow_v0.2:\\x00\\x00\\x02..."``),
   in function-node pipeline and result tables and side-effect invocation logs;
-- hex digests without a label (``b"000002..."``), in operator-node and cached-source
-  tables. Every starfix digest starts with its 3-byte hash format number, so the first six
-  hex characters name the starfix hash format of the row.
+- hex digests without a label (``b"000002..."``), the record ids of operator-node and
+  cached-source tables. Every starfix digest starts with its 3-byte hash format number, so
+  the first six hex characters name the starfix hash format of the row. A later Arrow
+  label that keeps the starfix format could not be told apart in these tables.
 
-The functions here only report what they find; the caller, which knows the table and the
-node, raises ``StoreHashLabelError``.
+To list the labels a stored table holds::
+
+    from orcapod.hashing.stored_hash_labels import stored_hash_labels
+
+    stored_hash_labels(store, record_path)  # {"arrow_v0.1": 3, "arrow_v0.2": 3}
 """
 
 from __future__ import annotations
@@ -25,47 +35,88 @@ else:
     pa = LazyModule("pyarrow")
     pc = LazyModule("pyarrow.compute")
 
-_ARROW_LABEL_PREFIX = "arrow_v"
+# ``arrow_v<version>:`` at the start of a prefixed digest.
+_ARROW_LABEL_PATTERN = r"^arrow_v[0-9A-Za-z._-]*:"
+
+# A full starfix digest in hex: 35 bytes, 70 lowercase hex characters.
+_HEX_DIGEST_PATTERN = "^[0-9a-f]{70}$"
 
 # The Arrow hash label that used each starfix hash format. Labels move more often than
 # formats (any change to a table hash moves the label), so this maps only the formats
 # whose label is known.
 _LABEL_OF_FORMAT = {"000001": "arrow_v0.1", "000002": "arrow_v0.2"}
 
-_HEX_DIGEST_PATTERN = "^[0-9a-f]{70}$"
+# Columns holding an Arrow-derived key, in the order they are looked for: the base entry
+# id of function-node pipeline tables, the input data hash of function result tables and
+# the record id hash of side-effect invocation logs. A table with none of them
+# (operator-node and cached-source tables) keeps its hash as the record id.
+_KEY_COLUMNS = ("__pipeline_base_entry_id", "__input_data_hash", "record_id_hash")
+
+_RECORD_ID_COLUMN = "__stored_hash_labels_record_id"
 
 
-def foreign_arrow_label(
-    values: "pa.Array[Any] | pa.ChunkedArray[Any]", current_label: str
-) -> str | None:
-    """Return an Arrow hash label other than ``current_label`` found in ``values``.
+def hash_labels_of(
+    values: "pa.Array[Any] | pa.ChunkedArray[Any]",
+) -> "pa.Array[Any]":
+    """Return what each stored key says about the Arrow hasher that produced it.
 
     Args:
-        values: A binary or string column of prefixed digests ``b"<label>:<digest>"``.
-            Nulls and values whose label is not an Arrow hash label (``arrow_v...``) are
-            not considered.
-        current_label: The Arrow hash label the current hasher writes.
+        values: A binary or string column of stored keys.
 
     Returns:
-        The smallest such label, or ``None`` when every Arrow-labelled value carries
-        ``current_label``.
+        A ``large_string`` array as long as ``values``: the Arrow hash label of a
+        prefixed digest (``b"arrow_v0.2:..."`` gives ``"arrow_v0.2"``), the starfix hash
+        format of a full hex digest (``b"000002..."``, 70 lowercase hex characters,
+        gives ``"000002"``), and null for every other value (nulls, labels of other
+        hashers, hand-made ids).
     """
-    if len(values) == 0:
-        return None
     binary = values.cast(pa.large_binary())
-    labels = pc.list_element(
-        pc.split_pattern(binary, pattern=":", max_splits=1),  # pyright: ignore[reportCallIssue, reportArgumentType]  # the stubs type only Expression inputs; arrays are accepted at runtime
+    if isinstance(binary, pa.ChunkedArray):
+        binary = binary.combine_chunks()
+    if len(binary) == 0:
+        return pa.array([], pa.large_string())
+    # The pyarrow stubs type these kernels for Expression inputs only; arrays are
+    # accepted at runtime.
+    is_prefixed = pc.match_substring_regex(binary, _ARROW_LABEL_PATTERN)
+    is_hex_digest = pc.match_substring_regex(binary, _HEX_DIGEST_PATTERN)
+    label = pc.list_element(
+        pc.split_pattern(binary, pattern=":", max_splits=1),  # pyright: ignore[reportCallIssue, reportArgumentType]
         0,
     )
-    found = sorted(
-        label.decode("utf-8", errors="replace")
-        for label in pc.unique(labels).to_pylist()
-        if label is not None
+    hash_format = pc.binary_slice(binary, 0, 6)
+    picked = pc.if_else(
+        is_prefixed,
+        label,
+        pc.if_else(is_hex_digest, hash_format, pa.scalar(None, pa.large_binary())),
     )
-    for label in found:
-        if label.startswith(_ARROW_LABEL_PREFIX) and label != current_label:
-            return label
-    return None
+    return picked.cast(pa.large_string())
+
+
+def keep_rows_hashed_under(table: "pa.Table", column: str, current: str) -> "pa.Table":
+    """Drop the rows of ``table`` whose key was hashed under another Arrow hasher.
+
+    Every read of a whole stored table goes through this function, so rows of another
+    Arrow hash label are never returned as results.
+
+    Args:
+        table: Rows read from a stored table.
+        column: The column of ``table`` holding the Arrow-derived key.
+        current: What ``hash_labels_of`` gives for a key written by the current Arrow
+            hasher: its label (``"arrow_v0.2"``) for prefixed digests, its starfix hash
+            format (``current_hash_format``) for hex digests.
+
+    Returns:
+        ``table`` itself when no row is dropped, otherwise ``table`` without the rows
+        whose key names another label or format. Rows whose key names none are kept.
+    """
+    labels = hash_labels_of(table.column(column))
+    other = pc.fill_null(pc.not_equal(labels, current), False)
+    if not pc.any(other).as_py():
+        return table
+    # The single place where stored rows of another label are left out of a read. A
+    # report of the skipped rows (ITL-938, not decided) belongs here: ``other`` marks
+    # them and ``labels`` names their label.
+    return table.filter(pc.invert(other))
 
 
 class _Digest(Protocol):
@@ -93,34 +144,46 @@ def current_hash_format(hasher: _TableHasher) -> str:
     return hasher.hash_table(probe).digest[:3].hex()
 
 
-def foreign_hash_format(
-    values: "pa.Array[Any] | pa.ChunkedArray[Any]", current_format: str
-) -> str | None:
-    """Return a description of a starfix hash format other than ``current_format``.
+class _RecordReader(Protocol):
+    """The part of ``ArrowDatabaseProtocol`` this module needs (no import cycle)."""
+
+    def get_all_records(
+        self, record_path: tuple[str, ...], record_id_column: str | None = None
+    ) -> "pa.Table | None": ...
+
+
+def stored_hash_labels(
+    database: _RecordReader, record_path: tuple[str, ...]
+) -> dict[str | None, int]:
+    """Count the rows of a stored table by the Arrow hash label they were hashed under.
+
+    Reads the whole table. The label is taken from the table's Arrow-derived key: the
+    base entry id of a function-node pipeline table, the input data hash of a function
+    result table, the record id hash of a side-effect invocation log, and otherwise the
+    record id (operator-node and cached-source tables, whose hex digests name only a
+    starfix hash format).
 
     Args:
-        values: A binary or string column of hex digests without a label. Values
-            that are not a full starfix digest in hex (70 lowercase hex characters)
-            are not considered.
-        current_format: The format the current hasher writes, as returned by
-            ``current_hash_format``.
+        database: The store, positioned so that ``record_path`` names the table.
+        record_path: Path of the stored table.
 
     Returns:
-        The Arrow hash label that used the first other format found (for example
-        ``"arrow_v0.1"``), or ``"starfix hash format <hex>"`` when that format's label is
-        not known; ``None`` when every non-null value has ``current_format``.
+        A mapping from label to number of rows, for example
+        ``{"arrow_v0.1": 3, "arrow_v0.2": 3}``. A starfix hash format whose label is
+        not known appears as ``"starfix hash format <hex>"``, rows whose key names no
+        label appear under ``None``, and a missing or empty table gives ``{}``.
     """
-    if len(values) == 0:
-        return None
-    binary = values.cast(pa.large_binary())
-    # Only full starfix digests count: 35 bytes, 70 lowercase hex characters.
-    binary = pc.filter(binary, pc.match_substring_regex(binary, _HEX_DIGEST_PATTERN))
-    formats = sorted(
-        prefix.decode("ascii", errors="replace")
-        for prefix in pc.unique(pc.binary_slice(binary, 0, 6)).to_pylist()
-        if prefix is not None
+    table = database.get_all_records(record_path, record_id_column=_RECORD_ID_COLUMN)
+    if table is None or table.num_rows == 0:
+        return {}
+    column = next(
+        (name for name in _KEY_COLUMNS if name in table.column_names),
+        _RECORD_ID_COLUMN,
     )
-    for fmt in formats:
-        if fmt != current_format:
-            return _LABEL_OF_FORMAT.get(fmt, f"starfix hash format {fmt}")
-    return None
+    counts: dict[str | None, int] = {}
+    for entry in pc.value_counts(hash_labels_of(table.column(column))).to_pylist():
+        found: str | None = entry["values"]
+        if found is not None and not found.startswith("arrow_v"):
+            found = _LABEL_OF_FORMAT.get(found, f"starfix hash format {found}")
+        counts[found] = counts.get(found, 0) + entry["counts"]
+    return counts

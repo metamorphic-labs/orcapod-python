@@ -66,17 +66,6 @@ class CachedFunctionPod(WrappedFunctionPod):
         """Return the path to the cached records in the result store (versioned)."""
         return self._cache.record_path
 
-    def check_stored_hash_labels(self, current_label: str) -> None:
-        """Refuse a result table holding rows hashed under another Arrow hash label.
-
-        Args:
-            current_label: The Arrow hash label of the current input data hashes.
-
-        Raises:
-            StoreHashLabelError: If a stored result row carries another Arrow hash label.
-        """
-        self._cache.check_stored_hash_labels(current_label)
-
     def set_ignore_schema(self, ignore_schema: tuple[str, ...] | None) -> None:
         """Propagate ``ignore_schema`` setting to the underlying ``ResultCache``.
 
@@ -372,7 +361,8 @@ class CachedFunctionPod(WrappedFunctionPod):
     ) -> "pa.Table | None":
         """Return all cached records from the result store for this pod."""
         return self._cache.get_all_records(
-            include_system_columns=include_system_columns
+            self.data_context.arrow_hasher.hasher_id,
+            include_system_columns=include_system_columns,
         )
 
     def process(
