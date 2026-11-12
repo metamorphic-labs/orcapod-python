@@ -36,6 +36,7 @@ from orcapod.core.streams.head import (
     BLUEPRINT_NOTE,
     HeadStatus,
     StreamHead,
+    head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
@@ -1332,7 +1333,7 @@ class OperatorJobNode(OperatorNodeBase):
         check_head_size(n)
         config = head_column_config(columns, all_info)
         if self._cached_output_stream is not None:
-            return self._cached_output_stream.head(n, columns=config).for_stream(self)
+            return head_of(self._cached_output_stream.head(n, columns=config), self)
         if self._cache_mode == CacheMode.REPLAY and self._pipeline_database is not None:
             return self._head_from_store(n, config)
         if self._loaded:

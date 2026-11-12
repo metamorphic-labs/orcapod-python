@@ -20,6 +20,7 @@ from orcapod.core.streams.base import schema_requires_io
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
+    head_of,
     render_error_html,
 )
 from orcapod.core.streams.base import (
@@ -638,9 +639,9 @@ class SourceJobNode(SourceNodeBase):
                 HeadStatus.UNAVAILABLE,
                 note="no source bound",
             )
-        return self._bound_source.head(
-            n, columns=columns, all_info=all_info
-        ).for_stream(self)
+        return head_of(
+            self._bound_source.head(n, columns=columns, all_info=all_info), self
+        )
 
     async def async_iter_data(
         self,

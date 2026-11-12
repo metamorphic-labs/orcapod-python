@@ -562,6 +562,10 @@ class StreamBase(TraceableBase):
             self, status, table, tag_columns=tuple(tag_schema.keys()), note=note
         )
 
+    def _display_name(self) -> str:
+        """The name a preview header shows: the label. Never used as an identity."""
+        return self.label
+
     def _schema_requires_io(self) -> bool:
         """Whether reading this stream's schema would read or poll a source.
 

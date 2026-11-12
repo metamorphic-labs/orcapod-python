@@ -8,10 +8,12 @@ writes a cache.
 
 from __future__ import annotations
 
+import io
 from typing import Any
 from unittest import mock
 
 import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import pytest
 
@@ -479,3 +481,75 @@ def test_cached_function_pod_stream_does_not_read_its_result_store() -> None:
     assert after.status is HeadStatus.ROWS
     assert after.table.equals(table.slice(0, 5))
     assert len(calls) == 25
+
+
+class _NpyArrayType(pa.ExtensionType):
+    """The array logical type stored as one ``.npy`` file per cell (the ITL-981 form)."""
+
+    def __init__(self) -> None:
+        from orcapod.logical_types.numpy_type import NDARRAY_EXTENSION_NAME
+
+        super().__init__(pa.large_binary(), NDARRAY_EXTENSION_NAME)
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return b""
+
+    @classmethod
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> _NpyArrayType:
+        return cls()
+
+
+def _npy(array: npt.NDArray[Any]) -> bytes:
+    buffer = io.BytesIO()
+    np.lib.format.write_array(buffer, array, version=(3, 0))
+    return buffer.getvalue()
+
+
+def test_preview_reads_an_npy_cell_header_only() -> None:
+    """An array cell stored as ``.npy`` shows its dtype and shape from the header."""
+    storage = pa.array(
+        [_npy(np.zeros(40, dtype=np.float32)), _npy(np.ones((2, 3))), None],
+        type=pa.large_binary(),
+    )
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "frame": pa.ExtensionArray.from_storage(_NpyArrayType(), storage),
+            "jpeg": pa.array([b"\xff\xd8\xff\xe0" * 10, b"", None], pa.large_binary()),
+        }
+    )
+    head = StreamHead(
+        table=table,
+        status=HeadStatus.ROWS,
+        kind="ArrowTableStream",
+        label="frames",
+        tag_columns=("id",),
+        total_rows=3,
+    )
+    html = head._repr_html_()
+    assert "ndarray float32 (40,)" in html
+    assert "ndarray float64 (2, 3)" in html
+    assert "bytes (40 B)" in html
+    assert "NUMPY" not in html
+
+
+def test_preview_keeps_both_ends_of_a_long_key() -> None:
+    """A long hash key keeps its start and its distinguishing end in the preview."""
+    key = "derived:arrow_v1:" + "ab" * 61 + "XYZ"
+    source = DictSource([{"key": key, "x": 1}], tag_columns=["key"], label="keys")
+    html = source._repr_html_()
+    assert "derived:arrow_v1:abab" in html
+    assert "XYZ" in html
+    assert key not in html
+    assert source.head().table.column("key").to_pylist() == [key]
+
+
+def test_an_unlabelled_source_is_shown_by_its_source_id() -> None:
+    """A source given no label is named by its source id in the header; its label is kept."""
+    source = DictSource(
+        [{"id": 1, "x": 2}], tag_columns=["id"], source_id="spike_event"
+    )
+    assert source.head().header() == "DictSource[spike_event] — all 1 row"
+    assert source.label == "DictSource"

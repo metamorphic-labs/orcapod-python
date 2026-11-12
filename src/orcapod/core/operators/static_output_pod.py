@@ -17,9 +17,10 @@ from orcapod.core.streams.base import (
     head_column_config,
 )
 from orcapod.core.streams.head import (
-    STALE_NOTE,
     HeadStatus,
+    STALE_NOTE,
     StreamHead,
+    head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.protocols.core_protocols import (
@@ -450,8 +451,8 @@ class DynamicPodStream(StreamBase):
         had_result = self._cached_stream is not None
         self._update_cache_status()
         if self._cached_stream is not None and self._cached_time is not None:
-            return self._cached_stream.head(n, columns=config).for_stream(
-                self, origin="computed"
+            return head_of(
+                self._cached_stream.head(n, columns=config), self, origin="computed"
             )
         return self._head_without_rows(
             config,

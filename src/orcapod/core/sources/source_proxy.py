@@ -16,6 +16,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
+    head_of,
 )
 from orcapod.core.streams.base import (
     check_head_size,
@@ -219,9 +220,9 @@ class SourceProxy(RootSource):
     ) -> StreamHead:
         """Return the bound source's head, or no rows when no live source is bound."""
         if self._delegate is not None:
-            return self._delegate.head(
-                n, columns=columns, all_info=all_info
-            ).for_stream(self)
+            return head_of(
+                self._delegate.head(n, columns=columns, all_info=all_info), self
+            )
         check_head_size(n)
         config = head_column_config(columns, all_info)
         return self._head_without_rows(

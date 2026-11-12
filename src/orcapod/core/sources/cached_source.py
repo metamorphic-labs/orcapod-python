@@ -9,7 +9,10 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import schema_requires_io
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.head import (
+    StreamHead,
+    head_of,
+)
 from orcapod.contexts.stored import (
     keep_rows_of_data_context,
     require_same_data_context,
@@ -425,10 +428,11 @@ class CachedSource(RootSource):
         read and written only on first use (``iter_data``, ``as_table``).
         """
         if self._cached_stream is not None and not self.is_stale:
-            return self._cached_stream.head(
-                n, columns=columns, all_info=all_info
-            ).for_stream(self)
-        return self._source.head(n, columns=columns, all_info=all_info).for_stream(
+            return head_of(
+                self._cached_stream.head(n, columns=columns, all_info=all_info), self
+            )
+        return head_of(
+            self._source.head(n, columns=columns, all_info=all_info),
             self,
             note="rows of the wrapped source; the cache is read and written on first use",
         )

@@ -383,3 +383,17 @@ renders `SpiralDBTableSource[spike_event] — first 10 rows of about 63,349`.
 - `head()` is part of `StreamProtocol`.
 - `_CachedFunctionPodStream` (added on main by ITL-988) drops stored meta columns in head as
   in `as_table`.
+- `StreamProtocol.head` returns `StreamHeadProtocol` (in `protocols/core_protocols/streams.py`),
+  which `StreamHead` implements; that keeps `head.py` out of the protocol import chain.
+  Delegating heads go through `head_of(head, stream)`.
+- An array column is recognised by the array logical type's extension name
+  (`numpy_type.NDARRAY_EXTENSION_NAME`, read at call time through `importlib` because that
+  module sits above `head.py` in the import graph), never by sniffing bytes. Both stored
+  forms are shown as `ndarray <dtype> <shape>`: the `{dtype, shape, data}` struct on main
+  today, and one `.npy` file per cell after PR #328 (ITL-981), whose header alone is read
+  (zero-copy buffer slice). Other binary cells show `bytes (N B)`.
+- Long strings keep their first 56 and last 20 characters around an ellipsis, so ~140
+  character hash keys stay distinguishable; Polars' own string shortening is raised to 80
+  characters while rendering (coordinator input from the ITL-990 workshop rundown).
+- A rowless head does not read its schema when that would poll a source upstream
+  (`schema_requires_io`); it then has no columns and says so (CodeRabbit round 1).

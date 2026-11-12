@@ -187,6 +187,14 @@ class RootSource(StreamBase):
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
 
+    def _display_name(self) -> str:
+        """The name a preview header shows: the label when one was given, else the
+        source id (a source id is the source's name), e.g. a table's name. The label
+        itself is not changed."""
+        if self.has_assigned_label or self._source_id is None:
+            return self.label
+        return self._source_id
+
     def head(
         self,
         n: int = 10,

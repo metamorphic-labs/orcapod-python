@@ -9,8 +9,11 @@ notebook preview of a stream is its ``head()`` rendered by ``StreamHead._repr_ht
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import html
+import importlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
@@ -80,6 +83,8 @@ _ORIGIN_NOUNS = {
 
 # Display limits of the preview.
 _MAX_TEXT = 80
+_TEXT_START = 56
+_TEXT_END = 20
 _MAX_LIST_ITEMS = 5
 
 
@@ -92,7 +97,8 @@ class StreamHead:
             stream has no rows to show, a zero-row table with its columns.
         status: Where the rows came from, or why there are none.
         kind: Class name of the stream, source or node shown.
-        label: Its label.
+        label: The name shown for it: its label, or for a source given no label its
+            source id (``display_name``). Never used as an identity.
         tag_columns: The columns of ``table`` that are tags.
         total_rows: The stream's row count when it is known without computing, else
             ``None``. For ``PARTIAL``, the number of rows computed so far.
@@ -132,7 +138,7 @@ class StreamHead:
             table=table,
             status=status,
             kind=type(stream).__name__,
-            label=str(stream.label),
+            label=display_name(stream),
             tag_columns=tuple(c for c in tag_columns if c in table.column_names),
             total_rows=total_rows,
             total_is_estimate=total_is_estimate,
@@ -155,7 +161,7 @@ class StreamHead:
             table=table.slice(0, 0),
             status=status,
             kind=type(stream).__name__,
-            label=str(stream.label),
+            label=display_name(stream),
             tag_columns=tuple(c for c in tag_columns if c in table.column_names),
             note=note,
         )
@@ -168,7 +174,7 @@ class StreamHead:
         return dataclasses.replace(
             self,
             kind=type(stream).__name__,
-            label=str(stream.label),
+            label=display_name(stream),
             origin=self.origin if origin is None else origin,
             note=self.note if note is None else note,
         )
@@ -254,7 +260,9 @@ class StreamHead:
         if tags:
             parts.append(f"<div><small>{html.escape(tags)}</small></div>")
         if self.table.num_columns:
-            parts.append(self._display_frame()._repr_html_())
+            # Polars shortens strings to its own default length; show up to _MAX_TEXT.
+            with pl.Config(fmt_str_lengths=_MAX_TEXT):
+                parts.append(self._display_frame()._repr_html_())
         return "\n".join(parts)
 
     def __str__(self) -> str:
@@ -263,7 +271,8 @@ class StreamHead:
         if tags:
             lines.append(tags)
         if self.table.num_columns:
-            lines.append(str(self._display_frame()))
+            with pl.Config(fmt_str_lengths=_MAX_TEXT):
+                lines.append(str(self._display_frame()))
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -273,9 +282,45 @@ class StreamHead:
         )
 
 
+_MAX_NAME = 48
+
+
+def display_name(stream: Any) -> str:
+    """Return the name the header shows for ``stream``: never its label changed.
+
+    A stream that says (``_display_name``) gives its own, e.g. a source with no label
+    of its own is shown by its source id; otherwise its label. A long name keeps its
+    start and end around an ellipsis.
+    """
+    name_of = getattr(stream, "_display_name", None)
+    name = str(name_of() if callable(name_of) else stream.label)
+    if len(name) > _MAX_NAME:
+        name = f"{name[:30]}…{name[-12:]}"
+    return name
+
+
+def head_of(
+    head: Any, stream: Any, *, origin: str | None = None, note: str | None = None
+) -> StreamHead:
+    """Return ``head`` (another stream's) shown as ``stream``.
+
+    Args:
+        head: What another stream's ``head`` returned: a ``StreamHead``.
+        stream: The stream, source or node that shows those rows as its own.
+        origin: Another origin for the rows, if given.
+        note: Another note, if given.
+
+    Raises:
+        TypeError: If ``head`` is not a ``StreamHead``.
+    """
+    if not isinstance(head, StreamHead):
+        raise TypeError(f"head() returned {type(head).__name__}, not a StreamHead")
+    return head.for_stream(stream, origin=origin, note=note)
+
+
 def render_error_html(stream: Any, error: BaseException) -> str:
     """Return the preview of a stream whose ``head`` raised: its name and the error."""
-    title = f"{type(stream).__name__}[{stream.label}] — could not read: {error}"
+    title = f"{type(stream).__name__}[{display_name(stream)}] — could not read: {error}"
     return f"<div><strong>{html.escape(title)}</strong></div>"
 
 
@@ -300,18 +345,24 @@ def _summarise(column: pa.ChunkedArray[Any]) -> list[str | None] | None:
     if isinstance(arrow_type, pa.ExtensionType):
         return _summarise_extension(column, arrow_type)
     if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
-        return _byte_summaries(column, "bytes")
+        return _byte_summaries([column], "bytes")
     if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
-        # Lengths come from Arrow; only the shortened text becomes Python strings.
+        # Lengths come from Arrow; only the kept parts become Python strings. A long
+        # value keeps its start and its end (hash keys differ at the end), with an
+        # ellipsis between.
         lengths: list[int | None] = pc.utf8_length(column).to_pylist()
         if all(n is None or n <= _MAX_TEXT for n in lengths):
             return None
-        heads: list[str | None] = pc.utf8_slice_codeunits(
-            column, 0, _MAX_TEXT - 3
+        shorts: list[str | None] = pc.utf8_slice_codeunits(
+            column, 0, _MAX_TEXT
         ).to_pylist()
+        starts: list[str | None] = pc.utf8_slice_codeunits(
+            column, 0, _TEXT_START
+        ).to_pylist()
+        ends: list[str | None] = pc.utf8_slice_codeunits(column, -_TEXT_END).to_pylist()
         return [
-            None if n is None or head is None else head + "…" if n > _MAX_TEXT else head
-            for head, n in zip(heads, lengths)
+            None if n is None else f"{a}…{b}" if n > _MAX_TEXT else short
+            for n, short, a, b in zip(lengths, shorts, starts, ends)
         ]
     if (
         pa.types.is_list(arrow_type)
@@ -325,41 +376,92 @@ def _summarise(column: pa.ChunkedArray[Any]) -> list[str | None] | None:
 def _summarise_extension(
     column: pa.ChunkedArray[Any], arrow_type: pa.ExtensionType
 ) -> list[str | None] | None:
+    """Return display strings for a logical-type column, or ``None`` to let Polars show it.
+
+    An array column is recognised by its logical type's extension name, never by the
+    bytes of a cell: it shows as ``ndarray float64 (2, 3)``, read from its stored form
+    without decoding the data. Another logical type over binary storage shows its size,
+    over a struct its name; any other storage is shown by Polars.
+    """
+    # The array logical type's module is read when a column is shown, not imported:
+    # it sits above this module in the import graph (types, protocols, side effects),
+    # and it loads numpy, which only an array column needs.
+    numpy_type = importlib.import_module("orcapod.logical_types.numpy_type")
+    array_extension_name: str = numpy_type.NDARRAY_EXTENSION_NAME
+
     storage_type = arrow_type.storage_type
     short_name = arrow_type.extension_name.rsplit(".", 1)[-1]
-    if pa.types.is_struct(storage_type):
-        names = {storage_type.field(i).name for i in range(storage_type.num_fields)}
-        # Only the small fields are read; an ndarray's ``data`` is never decoded.
-        wanted = [n for n in ("dtype", "shape") if n in names]
-        values = [
-            v
-            for array in column.chunks
-            for v in _struct_fields(
-                cast(pa.StructArray, cast("pa.ExtensionArray[Any]", array).storage),
-                wanted,
-            )
-        ]
-        if {"dtype", "shape"} <= names:
+    storages = [
+        cast("pa.ExtensionArray[Any]", array).storage for array in column.chunks
+    ]
+    is_binary = pa.types.is_binary(storage_type) or pa.types.is_large_binary(
+        storage_type
+    )
+    if arrow_type.extension_name == array_extension_name:
+        if pa.types.is_struct(storage_type):
             return [
-                None
-                if v is None
-                else f"{short_name} {v['dtype']} {_shape_text(v['shape'])}"
-                for v in values
+                None if v is None else f"ndarray {v['dtype']} {_shape_text(v['shape'])}"
+                for storage in storages
+                for v in _struct_fields(
+                    cast(pa.StructArray, storage), ["dtype", "shape"]
+                )
             ]
-        return [None if v is None else f"<{short_name}>" for v in values]
-    if pa.types.is_binary(storage_type) or pa.types.is_large_binary(storage_type):
-        storage = pa.chunked_array(
-            [cast("pa.ExtensionArray[Any]", array).storage for array in column.chunks],
-            type=storage_type,
-        )
-        return _byte_summaries(storage, short_name)
+        if is_binary:
+            return [
+                _npy_summary(storage[i])
+                for storage in storages
+                for i in range(len(storage))
+            ]
+    if is_binary:
+        return _byte_summaries(storages, short_name)
+    if pa.types.is_struct(storage_type):
+        return [
+            f"<{short_name}>" if valid else None
+            for storage in storages
+            for valid in storage.is_valid().to_pylist()
+        ]
     return None
 
 
-def _byte_summaries(column: pa.ChunkedArray[Any], name: str) -> list[str | None]:
-    """Return ``name (size)`` for each binary cell; sizes come from Arrow, not the bytes."""
-    lengths: list[int | None] = pc.binary_length(column).to_pylist()
-    return [None if n is None else f"{name} ({_size(n)})" for n in lengths]
+def _npy_summary(cell: Any) -> str | None:
+    """Return ``ndarray <dtype> <shape>`` for one ``.npy`` cell, reading its header only.
+
+    The ``.npy`` header is a magic string, a version, the header length and a Python
+    dict literal with ``descr``, ``fortran_order`` and ``shape``. The buffer is sliced
+    without copying, and the array data is never read.
+    """
+    if not cell.is_valid:
+        return None
+    buffer = cell.as_buffer()
+    size = f"ndarray ({_size(buffer.size)})"
+    try:
+        prefix = buffer[:12].to_pybytes()
+        if not prefix.startswith(b"\x93NUMPY"):
+            return size
+        if prefix[6] == 1:
+            start, length = 10, int.from_bytes(prefix[8:10], "little")
+        else:
+            start, length = 12, int.from_bytes(prefix[8:12], "little")
+        text = buffer[start : start + length].to_pybytes().decode("utf-8")
+        header = ast.literal_eval(text)
+        import numpy as np
+
+        dtype = np.dtype(header["descr"])
+        return f"ndarray {dtype.name} {_shape_text(header['shape'])}"
+    except (ValueError, SyntaxError, KeyError, TypeError, IndexError):
+        return size
+
+
+def _byte_summaries(arrays: Sequence[Any], name: str) -> list[str | None]:
+    """Return ``name (size)`` for each binary cell of ``arrays``, in order.
+
+    Sizes come from Arrow (``binary_length``); the bytes are never read.
+    """
+    return [
+        None if n is None else f"{name} ({_size(n)})"
+        for array in arrays
+        for n in pc.binary_length(array).to_pylist()
+    ]
 
 
 def _struct_fields(
