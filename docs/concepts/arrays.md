@@ -29,11 +29,11 @@ for tag, data in scale.pod(source).iter_data():
     Orcapod v0.2 stored arrays as `.npy` files under the extension name `numpy.ndarray` and
     hashed the file. v0.3 replaces both, as described below, and does not migrate older
     stores. Every node that handles arrays, and every node downstream of an array column, gets
-    new tables in v0.3. Because v0.3 also changed every hash of Arrow data, a v0.3 job refuses
-    a store written by v0.2 with `StoreHashLabelError` instead of computing next to its rows
-    (see [A store written by an older version](function-pods.md#a-store-written-by-an-older-version)).
-    The v0.2 tables stay on disk, readable with v0.2. Start v0.3 pipelines with a fresh store,
-    or keep using v0.2 for an existing one. A migration is planned after v0.3 (ITL-889).
+    new tables in v0.3. Because v0.3 also changed every hash of Arrow data, v0.3 reuses no
+    result of a store written by v0.2: it ignores the v0.2 rows and computes every input
+    again (see [A store written by an older version](function-pods.md#a-store-written-by-an-older-version)).
+    The v0.2 tables and rows stay on disk unchanged, readable with v0.2. A migration is
+    planned after v0.3 (ITL-889).
 
 ## What counts as the same array
 

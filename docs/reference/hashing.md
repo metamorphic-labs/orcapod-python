@@ -655,13 +655,59 @@ count; their schemas hash); union and run-end-encoded types; two schema nodes sh
 column `"a/b"` next to a struct column `a` with a child `b`); and a non-nullable field holding
 a null. A source whose table has such a column fails when it is constructed.
 
-**Stores written under another label.** Function-node pipeline and result tables and
-side-effect invocation logs store their keys as `b"<label>:<digest>"`; operator-node and
-cached-source tables store record hashes as hex digests, which start with the starfix format
-number. A table holding rows under another Arrow label (`arrow_v0.1`, format `000001`, written
-by Orcapod v0.2) is refused with `StoreHashLabelError` on every read and before the first
-write; `PipelineJob.run()` checks every node's tables before any node runs. See
-[A store written by an older version](../concepts/function-pods.md#a-store-written-by-an-older-version).
+#### Stores written under another label
+
+A change of the Arrow hash label changes the stored keys but not the tables they are stored
+in, so one table can hold rows of several labels. Orcapod writes and uses rows of its
+current label only. Key lookups cannot match a row of another label, and every read of a
+whole table (a node's `as_table()`, `iter_data()`, `get_all_records()`, `as_source()`, a
+cached function's `get_all_cached_outputs()`, a stored operator node, a `CachedSource`) leaves
+the rows of another label out. Those rows are never changed or deleted: a store written by
+Orcapod v0.2 keeps its `arrow_v0.1` rows, v0.3 computes every input again and adds
+`arrow_v0.2` rows next to them, and a later migration can convert the old ones.
+
+How a stored row names its label:
+
+| Table | Key | Stored form |
+|---|---|---|
+| Function-node pipeline table | `__pipeline_base_entry_id` | `b"<label>:<digest>"` |
+| Function result table | `__input_data_hash` | `b"<label>:<digest>"` |
+| Side-effect invocation log | `record_id_hash` | `b"<label>:<digest>"` |
+| Operator-node table, cached-source table | the record id (`_record_hash`) | hex digest, no label |
+
+A hex digest starts with the starfix format number (`000001` for `arrow_v0.1`, `000002` for
+`arrow_v0.2`), which tells these two labels apart. A later label that keeps starfix hash
+format 2 could not be told apart in operator-node and cached-source tables.
+
+`stored_hash_labels(database, record_path)` reads a stored table and counts its rows by
+label. A table written by v0.2 and then run under v0.3 gives
+`{"arrow_v0.1": n, "arrow_v0.2": n}`; a starfix format whose label is not known is listed as
+`"starfix hash format <hex>"`, and rows whose key names no label are counted under `None`.
+
+```python
+from orcapod import PipelineJob, function_pod
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.hashing.stored_hash_labels import stored_hash_labels
+from orcapod.sources import DictSource
+
+
+@function_pod(output_keys="doubled")
+def double_for_labels(x: int) -> int:
+    return 2 * x
+
+
+label_store = InMemoryArrowDatabase()
+label_job = PipelineJob(name="labels_demo", store=label_store)
+with label_job:
+    rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"])
+    _ = double_for_labels.pod(rows, label="dbl")
+label_job.run()
+
+for path in sorted(label_store.list_sources()):
+    print(path[-1], stored_hash_labels(label_store, path))
+# rdb_v1 {'arrow_v0.2': 2}
+# pdb_v1 {'arrow_v0.2': 2}
+```
 
 ```python
 import pyarrow as pa
