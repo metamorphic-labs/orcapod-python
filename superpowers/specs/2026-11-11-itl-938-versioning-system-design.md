@@ -1,8 +1,20 @@
 # ITL-938: one coherent versioning system for hashes, hash labels and stored paths
 
-Status: **draft, discussion in progress.** Parts 1 to 4 (what exists, the axes of change,
-their impact, the path-or-column test) are complete. Parts 5 to 8 (the system, the path
-layout, the v0.3 cut list, follow-up issues) are filled in as the developer decides them.
+Status: **design discussion closed on November 11, 2026.** Every decision is the developer's
+and is listed, dated and quoted, in Part 9. Where an earlier part shows an intermediate view,
+the later part governs; **Part 7.1 is the system on one page.**
+
+| Part | Content |
+|---|---|
+| 1 | What exists today: hashers, where each hash is stored, the store on disk, every version marker, measured failure modes |
+| 2, 3 | The axes along which Orcapod's behaviour can change, and what each one affects |
+| 4 | The path-or-column rule |
+| 5 | The system: schema and subject; every change from the old version to v0.3; the data context as the global hash version; logical types; labels |
+| 6 | Paths before and after v0.3; side-effecting nodes |
+| 7 | The system on one page; what lands before the v0.3 tag and what follows; what ITL-910 must change; the data context file |
+| 8 | Follow-up issues to file |
+| 9 | Decisions |
+| Appendix A | Every hash computation site and what affects its result |
 
 Linear: [ITL-938](https://linear.app/metamorphic/issue/ITL-938). Design only; no library code.
 
@@ -749,6 +761,10 @@ flowchart TD
 
 ### 4.1 The rule applied to each axis
 
+This table is the state when the rule was decided. The gaps it lists are closed by the later
+decisions: the data context column (5.4, 5.5), logical type identifiers (5.5), the restored
+function version column (7.2) and the label rule (5.6).
+
 "Told apart today?" asks whether a stored row already carries a value that distinguishes the
 two sides of a change on that axis.
 
@@ -912,7 +928,7 @@ differ in the Arrow-hashed key values and are told apart by the label inside tho
 | Neither S nor M changes, path moves | any change to how a structure hash is computed for an unchanged structure: the table is the same table under a new name | F2 |
 | M changes, path does not | two unordered inputs with the same `source_id` collapse | A.9 E |
 
-### 5.4 One global hash version (direction set by the developer; details proposed)
+### 5.4 One global hash version: the data context (decided)
 
 **Requirement (developer, November 11, 2026).** Every row must carry enough to tell exactly
 which version of the computation of hashes produced it. Summarising everything that changed is
@@ -925,7 +941,8 @@ migration can be planned: cheap where nothing relevant to an entry changed, or a
 under both; if the old entry exists, create the new entry from it". A purely additive change,
 under which no previously computed hash changes, does not change the number.
 
-Working name here: **hash version** (the name is open).
+The concept keeps the name **data context**; its version is the global hash version. `H0` and
+`H1` below are shorthand for `std:v0.1:default` and `std:v1:default`.
 
 **Numbering (decided November 11, 2026).** `H0` is exactly what the deployed
 `nauticalab/orcapod-python` at `61d0f18` (starfix 0.4.0) computes. `H1` is what v0.3.0 computes
@@ -961,7 +978,7 @@ it. It is broader than what the data context holds today:
 And the data context holds one thing that is not a hash-version matter: the set of registered
 logical types can grow (a new type is added) without any existing hash changing.
 
-Proposal: make the data context version **be** the hash version. The context key is already
+Decided: the data context version **is** the hash version. The context key is already
 stored per row and per node, and it is already what a reader uses to pick the hashers for a
 stored row, which is exactly what reading an old row under its own rules needs. Two changes
 make it true: the version changes whenever an existing golden value changes (and only then),
@@ -1040,7 +1057,9 @@ developer's "additive changes do not change the number" a test, not a judgement.
 | What requires a new `H` | "ANY existing golden hash value changes OUTSIDE of changes to logical data types." A golden value that moves because a logical type changed belongs to that type's identifier |
 | Operator behaviour | Needs no marker of its own: operators are part of the core, their outputs are pinned in the golden files (`pipeline.json` covers join, merge join, semi join, batch, group by, selection, mapping, filter), so a change to what an operator emits moves a golden value and requires a new `H` |
 | Registry | The current manifest in Orcapod; all historical ones, with the old code, in `orcapod-sanctuary` |
-| Open | the exact `H1` key string and the name of the concept; whether function tables reuse their existing context-key columns or every table gets one uniform column (a layout change, hence new paths); side-effect logs |
+| The key and the column | The data context stays a string: `std:v1:default` for v0.3, then `v2`, `v3`. It is stored in one column named `__data_context` in every table (option B), replacing `__input_data_context_key` and `_context_key`. Adding the column changes every table's layout, so every v0.3 table is at a new path |
+| Freeze | A data context file is fixed at the versioned release of the library; it may be edited while that release is being prepared |
+| Deferred | side-effect tables (6.2); the stored Arrow type of a plain column |
 
 ---
 
@@ -1071,7 +1090,7 @@ The rule:
 | 6 | A label never enters a hash computation: a nested hash contributes its digest only. "Agree with rule 6 - it simplifies and also I don't think the extra guarantee was meaningful anyway." The guarantee given up: that two different algorithms can never feed the same text into a parent hash. With SHA-256 that needs two algorithms to hash the very same bytes, and the position and type of the value (the schema, the extension name in an Arrow cell) already tell the two apart | **decided** |
 | 7 | An identifier built by a recipe (record ids) is not a labelled hash; its recipe is named in the data context file | **decided** |
 | 8 | A logical type's value hash follows the same format; its implementer picks the label | **decided** |
-| 9 | Each label MUST be defined in a single place, and is listed in the data context file | **decided** |
+| 9 | Each label MUST be defined in a single place: once in code, beside its algorithm. The data context file names the hasher and does not repeat the label | **decided** |
 
 **Hash inputs that contain a label today** (rule 6 removes the label from each; the stored
 columns stay labelled). The first three were in the inventory; the last three were found by
@@ -1086,14 +1105,14 @@ the ITL-945 worker, who traced every hash conversion while running the test suit
 | the `__node_content_hash` column inside the row hashed for the operator-cache row key | operator node |
 | the run snapshot hash in the run URI, a SHA-256 over labelled strings | `job.py:862` |
 
-Implementation detail decided by the coordinator, to be confirmed by the developer: a nested
-hash enters its parent as a structurally tagged value carrying the digest and no label, not
-as a bare hex string, so that a hash and a string equal to its hex cannot be confused.
+Implementation detail decided by the coordinator; the developer was told on November 11,
+2026 and raised no objection: a nested hash enters its parent as a structurally tagged value
+carrying the digest and no label, not as a bare hex string, so that a hash and a string equal
+to its hex cannot be confused.
 
-Open on the label rule: (a) `ctx.invocation_hash`, a documented idempotency key of the form
-`<label>:<hex>::<label>:<hex>`: bare `<hex>::<hex>` as an identifier built from hashes, or
-unchanged; (b) rule 9: define each label once in code beside its algorithm, with the data
-context file naming the hasher and not repeating the label.
+Left as is for v0.3: `ctx.invocation_hash`, a documented idempotency key of the form
+`<label>:<hex>::<label>:<hex>`. Whether it becomes a bare identifier, and what it is built
+from, belongs to the side-effect follow-up (6.2).
 
 ## Part 6. Paths before and after v0.3 (decided)
 
@@ -1124,14 +1143,19 @@ The hashes inside a path also move for nodes that involve a logical type, becaus
 type identifier now enters the schema hash, and for nodes touched by the wrong-hash fixes.
 
 **On finding a table at the old layout** (decided November 11, 2026): "report total count and
-simply move on". No error, except for side-effect logs, which fail explicitly so that an
-external action is not delivered twice. A table that lacks the data context column is `H0`.
+simply move on". No error, except for side-effecting nodes of both kinds (6.2), which fail
+explicitly so that an external action is not delivered twice. A table that lacks the data
+context column is `H0`.
 
 **Within a layout**, rows written under the current data context are the current entries;
 reads and lookups filter on the data context column. Rows of another data context stay in the
 table untouched, to be migrated.
 
 ### 6.1 Consequences found while implementing "do not fail" (ITL-910 worker, November 11, 2026)
+
+Resolutions: (1) side-effecting nodes fail explicitly (decided); (2) every table gets the
+`__data_context` column and these two row keys become labelled; (3) accepted, with a total
+count reported.
 
 | # | Consequence | Why | Options |
 |---|---|---|---|
@@ -1192,10 +1216,10 @@ uses the normal function tables. Measured on main:
 | Function body changed | not delivered again | not delivered again |
 | Function renamed | delivered again, all | delivered again, all |
 
-Consequence for v0.3: the explicit failure decided for side-effect logs must also cover a
-function node whose pod takes the context. Otherwise, with old-layout tables counted and
-skipped, such a node would find no cached result and deliver every effect again without an
-error.
+Decided for v0.3 (November 11, 2026, "let's keep the failure as in (a)"): the explicit
+failure covers both kinds. A `SideEffectPod` node and a function node whose pod takes the
+context both raise on an older store instead of delivering again. Everything else about
+side-effect tables is deferred to a dedicated follow-up after the tag (Part 8, issue 9).
 
 ## Part 7. Before the v0.3 tag, and after (draft for the developer's review)
 
@@ -1204,13 +1228,13 @@ error.
 | Element | Rule |
 |---|---|
 | **Path** | Names the table's schema and subject. Changes when, and only when, one of them changes |
-| **Data context** | A string key, `std:v<N>:default`. `N` increments when, and only when, an existing golden hash value moves for a reason other than a logical type's own change. `std:v0.1:default` (and any table without the column) is `H0`: what `nauticalab/orcapod-python` at `61d0f18` computes. `std:v1:default` is what v0.3.0 computes |
+| **Data context** | The global hash version. A string key, `std:v<N>:default`. `N` increments when, and only when, an existing golden hash value moves for a reason other than a logical type's own change. `std:v0.1:default` (and any table without the column) is `H0`: what `nauticalab/orcapod-python` at `61d0f18` computes. `std:v1:default` is what v0.3.0 computes |
 | **Manifest** | One file per data context version, frozen at release, naming every definition the version covers. The current one ships in Orcapod; all of them, with the old code, in `orcapod-sanctuary` |
 | **`__data_context` column** | In every Orcapod table. Rows under the current data context are the current entries; reads and lookups filter on it |
 | **Logical type identifier** | Arrow extension name + extension metadata, owned by the type's implementer, built-in types included. Changes only when an existing value would be stored or hashed differently. Stored with the column; all of it enters the schema hash; a change is a schema change and so a new path |
 | **Label on a hash** | `<algorithm>_v<N>`; names the whole hashing procedure that produced that digest; informational. Every label is `_v1` in v0.3 (`semantic_v1`, `arrow_v1`, `directory_v1`, …); the file hash keeps `sha256`. Changes only when an existing input would get a different digest. Stored with a hash kept as a value; absent from hashes inside names; never part of a hashed input; defined in one place |
 | **Function major version** | Stays in the path: the user's handle for a clean break |
-| **Old layout found** | Count and skip. Side-effect logs fail explicitly |
+| **Old layout found** | Count and skip, reporting one total. Side-effecting nodes of both kinds fail explicitly |
 | **Source identity** | Chosen by the source: content or address. Same `source_id` and same record id mean the same entry |
 
 ### 7.2 Must land before the v0.3 tag
@@ -1219,7 +1243,7 @@ error.
 |---|---|---|---|
 | 1 | starfix 0.5, label `arrow_v0.2` (ITL-910, PR #309). Revised: no error on rows under another label; with item 3 the label filter is not needed for this release | in progress | every Arrow-derived hash; `arrow.json` and the Arrow-derived entries of the other golden files |
 | 2 | Wrong-hash fixes (ITL-942): fold separator; nested nullability hashed the same with and without data; process-independent set hashing; column-selection arguments normalised; unordered inputs with one `source_id` not collapsed; record-id column type; one default function version; dict-key coercion; subclass type hash independent of registration order | in progress | folded system-tag values; row hashes of nested columns; pipeline hashes and paths after a column selection or merge join |
-| 3 | **Data context `std:v1:default`**: frozen manifest; `__data_context` column in every table; layout versions `pdb_v2`, `rdb_v2`, `tdb_v2` and a layout component for operator-cache and cached-source tables; reads and lookups filter on the column; old layout counted and skipped; side-effect logs fail | to file | **every table path** (layout component); `job.*` `table_paths` in `pipeline.json` |
+| 3 | **Data context `std:v1:default`**: frozen manifest; `__data_context` column in every table; layout versions `pdb_v2`, `rdb_v2`, `tdb_v2` and a layout component for operator-cache and cached-source tables; reads and lookups filter on the column; old layout counted and skipped; side-effecting nodes of both kinds fail | to file | **every table path** (layout component); `job.*` `table_paths` in `pipeline.json` |
 | 4 | **Logical type identifiers** (ITL-935): the contract; every built-in type writes an identifier; the whole identifier enters the schema hash | to dispatch | stored column type, schema hash and paths of every table with a file, path, directory, UUID, DataFrame, Series or array column |
 | 5 | User class identity (PR #292); dict and set order (PR #301) | open PRs | as in 5.2 |
 | 6 | New types follow the contract: torch (PR #300), Polars values (PR #286), pandas changes (ITL-897). No label used as a version marker | held | new entries only |
@@ -1243,6 +1267,19 @@ every logical type identifier written by v0.3 are commitments.
 | The stored Arrow type of a plain column is not in the path (`int32` and `int64` sources share a path; the second write fails) | Fails loudly today, not silently |
 | Default `source_id` of database and Delta sources is a bare name | The source contract allows it; a better default is a separate choice |
 | Content-derived record ids (ITL-817) | Changes row keys: a data context increment of its own |
+
+### 7.3a What ITL-910 (PR #309) must change
+
+| # | Change |
+|---|---|
+| 1 | The Arrow label is `arrow_v1`, not `arrow_v0.2` (code, data context file, `docs/reference/hashing.md`, changelog, golden files) |
+| 2 | Remove `StoreHashLabelError` and its pre-flight for function, operator and source tables. v0.3 does not fail on rows or tables written before it |
+| 3 | The filter on the Arrow label or on starfix's prefix is not the mechanism: v0.3 tables are at new layout paths, and within a layout reads and lookups filter on `__data_context` |
+| 4 | On finding an old-layout table: report a total count and proceed |
+| 5 | Keep an explicit failure for side-effecting nodes of both kinds: `SideEffectPod`, and a function node whose pod takes the invocation context |
+| 6 | The extension-cell token and every other hash input carry the digest only, no label (5.6); the entry-id table's `__input_data_hash`, the operator-cache row's `__node_content_hash` and the run snapshot hash are three such inputs |
+| 7 | The changelog and documentation no longer say that v0.3 refuses stores written by v0.2 |
+| 8 | Golden regeneration happens once, after the label rule, the wrong-hash fixes (ITL-942), the data context column and the logical type identifiers are in |
 
 ### 7.4 The data context file (additions agreed November 11, 2026)
 
@@ -1277,13 +1314,15 @@ registration, and the versioned file keeps only the core.
    `__input_data_context_key` and the result table's `_context_key`. Move the layout versions
    (`pdb_v2`, `rdb_v2`, `tdb_v2`) and give operator-cache and cached-source tables a layout
    component. Reads and lookups use rows of the current data context only. A table at an old
-   layout is counted and skipped, with one total reported; side-effect logs raise instead.
+   layout is counted and skipped, with one total reported; side-effecting nodes of both kinds
+   (a `SideEffectPod`, and a function pod that takes the invocation context) raise instead.
    Freeze `v1.json` at the tag.
 1a. **Hash label rule.** Apply 5.6: rename the labels (`semantic_v1`, `arrow_v1`,
    `directory_v1`; the file hash keeps `sha256`); feed only digests into hash computations
    (structure hasher expansion, the generic, union and schema handlers, the Arrow cell token);
    store bare digests in path components and source-info tokens; label the operator-cache and
-   cached-source row keys; define each label in one place. Sequence it before the final
+   cached-source row keys; define each label once in code, with the data context file naming
+   the hasher and not repeating the label. Sequence it before the final
    golden regeneration of v0.3.
 2. **Manifest format for a data context version.** Define the manifest: one entry per
    definition the version covers (structure hashing, Arrow hashing and its preparation step,
@@ -1383,21 +1422,32 @@ Decisions made in this discussion:
 | Nov 11, 2026 | **One uniform data context column on every table (option B); name stays "data context".** "I agree option B sounds right." "I agree about keeping the name data context as I see no strong need to rename." Consequence: every table's layout version moves, so every v0.3 table is at a new path. |
 | Nov 11, 2026 | **Old-layout tables are counted and skipped.** "If old layout is found, report total count and simply move on." |
 | Nov 11, 2026 | Form of the data context value: "does it even make sense to keep the naming as std:H1:default -- we could instead just turn it into much simpler and smaller u64 column with an ID ... Whatever that'd make the readout quicker would be preferable." (Integer ID proposed; exact type under discussion.) |
+| Nov 11, 2026 | **The data context stays a string; v0.3 is `std:v1:default`.** "Let's just keep string data context and even same format is fine: std:v1:default as the new version and we'll simply increment v2, v3 and so on. ... String does allow for the simplicity of making it easier for users to have their own data context although this is not currently in use." |
+| Nov 11, 2026 | **Column name `__data_context`, uniformly**, replacing `__input_data_context_key` and `_context_key`. "I agree naming it __data_context everywhere makes sense." "Yes, let's go ahead and name it __data_context uniformly." |
+| Nov 11, 2026 | **Freeze rule for a data context file.** "We should stop editing in place -- more concretely we need to make sure we release a new version and fix it at the time of versioned release of the library. While still preparing the versioned release that contains a data context definition, we are safe to change the file in place per se." |
+| Nov 11, 2026 | **Data context file additions agreed; logical types leave the frozen file.** "I agreed with the proposed data context file field additions. I'm imagining libraries would be the list of depended critical libraries like starfix:v0.5.0." "And yes agreed with removing logical types out of frozen file." |
+| Nov 11, 2026 | **Restore the stored function version before the tag.** "Yes please put back." It "certainly had [been] planned to have the version split into major vs the rest and the rest of the thing (or just full version info) was to be stored as a column." |
+| Nov 11, 2026 | **Tier-restricted cache lookup**: "Yes would like that feature in but agree that this is not at all urgent." |
+| Nov 11, 2026 | **Before-tag list**: "I generally agree with the list before v0.3 tag." |
+| Nov 11, 2026 | **Labels need one consistent rule.** "One thing we still have to settle is the use of hash label -- right now it is not really entirely consistent and I'd like to have a consistent rule/approach." |
+| Nov 11, 2026 | **Every label is `_v1` in v0.3; a label names the whole hashing procedure.** "Let's let all version be simply v1 for this release since we used to have v0.1, v0.2..." "By algorithm you do mean anything that amounts to hashing, not just the final digest algorithm like sha256." Core labels: "semantic_v1 and arrow_v1 as I had mentioned." |
+| Nov 11, 2026 | **One label format; the file hash is the only exception; the directory hash is `directory_v1`.** "As for file, I think I'd like to keep it as one stated exception with sha256 as that's literally what we do to get hash of a file." "One format in general -- I think file is the only exception where I do want to use bare sha256. Folder hashing is implementation specific so it should be given folder_v1." "Actually directory_v1 is better than folder_v1." |
+| Nov 11, 2026 | **Labels never enter a hash computation.** "Agree with rule 6 - it simplifies and also I don't think the extra guarantee was meaningful anyway." |
+| Nov 11, 2026 | **Bare hashes inside names.** "Yes bare hashes inside names." |
+| Nov 11, 2026 | **Remaining label rules confirmed.** "Indeed label only changes when its algorithm would give an existing input (even if not all) a different digest." "Yes it should become labeled for the operator cache row key." "Record id is indeed ID built by a recipe and thus should not be labeled hashes." "Yes logical type's implementer gets to pick its label." "Yes each label MUST be defined in a single place." "As for label, yes it should only be defined once in code." |
+| Nov 11, 2026 | **Plain-column Arrow type: an error for v0.3, revisit after the tag.** "Let's defer till after the tagged release of v0.3 but also let's factor in the consideration whereby we would want to hash over arrow type of schema instead of going with Python type. ... let's leave it as error (A) and in general it shouldn't get hit." |
+| Nov 11, 2026 | **Side-effect tables: dedicated follow-up after the v0.3 tag.** "Let's make sure to have a dedicated follow up work on side effect table but this is to be tackled after the v0.3 tagging. I think for v0.3, I would want to defer." The developer recalled correctly that one kind stores tag information: the function pod that takes the invocation context. |
+| Nov 11, 2026 | **The side-effect failure covers both kinds for v0.3.** "Let's keep the failure as in (a)." |
+| Nov 11, 2026 | **Close of the discussion.** "Otherwise you are good to proceed." |
 | Nov 11, 2026 | Operator behaviour needs no marker of its own: it is covered by the global hash version through the golden files (5.5). |
 | Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
-Open questions for the developer:
+Deferred by the developer:
 
-1. Does "data type" include a logical type's extension name and metadata (its stored
-   representation version), or only the physical Arrow type?
-2. What does a reader do on meeting rows of another value-level generation in the same table:
-   skip them, fail, or reuse them? Does the November 11 decision "v0.3 fails explicitly when it
-   meets v0.2 rows" stand?
-3. Function major version: keep it in the path, or make it a column the lookup must match?
-4. Which column tells value-level generations apart: the labels already inside the values,
-   a per-row rules name (the data context key, made meaningful), or both?
-5. Operator behaviour (IV3): should a change be recorded, and where?
-6. Which of the wrong-hash findings in A.9 are fixed before the v0.3 tag?
+1. Side-effect tables: a dedicated design after the v0.3 tag (Part 8, issue 9).
+2. The stored Arrow type of a plain column: an error for v0.3; after the tag, consider hashing
+   the schema over Arrow types (Part 8, issue 10).
+3. Tier-restricted cache lookup: wanted, not urgent (Part 8, issue 12).
 
 ---
 
