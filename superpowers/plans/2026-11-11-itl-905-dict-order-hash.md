@@ -139,7 +139,7 @@ Golden suite (`tests/test_hashing/golden`):
   * `DictSource` with `data_schema={"m": dict[str, int]}` → equal.
   * function pod `-> dict[str, int]` returning the two orders → equal output hashes; sync and async.
   * nested `dict[str, dict[str, int]]`, `list[dict[str, int]]`, `dict[str, list[dict[str,int]]]` reordered at inner and outer level → equal.
-  * `ArrowTableSource` with `large_list<struct<key,value>>` in both orders → equal; and equal to the `DictSource` hash.
+  * `ArrowTableSource` with `large_list<struct<key,value>>` in both orders → different, because Arrow lists hash as stored. Only the key-ordered list matches the `DictSource` hash.
   * key types: int (`{10:..., 9:...}`), bool, bytes, float incl. `-0.0`, date, aware datetime, tuple keys, Optional key with `None` → reorder gives equal hash.
   * NaN key → `ValueError` naming the column; Arrow-native duplicate key → `ValueError` naming the column.
   * `list[tuple[str,int]]` (ordered pairs) in two orders → hashes **differ** (non-dict lists are never sorted).
@@ -220,7 +220,7 @@ Commits on `eywalker/itl-905-a-dict-values-insertion-order-changes-its`:
    (`arrow:dict_order`, `datagram:dict_order`).
 6. plain `set[T]` sorted at conversion (+ module/error rename).
 7. revert hash-time sort; Arrow-native unsorted vs sorted pinned as DIFFERENT.
-8. v0.2.0 fixture extended with a dict-returning pod: cache hit serves the stored order/hash.
+8. v0.2.0 fixture extended with a dict-returning pod: v0.3 does not serve v0.2.0 rows. Every input is recomputed, and the v0.2.0 tables remain unchanged.
 9. docs (hashing reference 1c), CHANGELOG `[0.3.0]`, DESIGN_ISSUES DO1.
 
 Correction to section 5: the golden suite DID hold one out-of-order dict
