@@ -242,6 +242,66 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 ---
 
+### 1c. Polars expression predicates
+
+`PolarsFilter.identity_structure()` is `("PolarsFilter", predicates, constraints)`, with
+`predicates` always a tuple. Keyword constraints hash as plain values. A `pl.Expr` predicate
+hashes through `PolarsExprHandler` to the leaf `polars_expr_v1:<hex>`.
+
+Polars' own serialization of an expression (`Expr.meta.serialize`) changed layout between
+1.20, 1.30 and 1.36 and is documented as unstable across versions, and `str(expr)` is lossy
+(`pl.lit(0.1, dtype=pl.Float32)` and `pl.lit(0.1, dtype=pl.Float64)` print alike), so neither
+is hashed. Orcapod parses the JSON serialization with a strict parser into a tree in its own
+grammar and hashes that:
+
+```text
+ContentHash("polars_expr_v1", sha256(canonical JSON of the tree))
+canonical JSON = keys sorted, separators (",", ":"), UTF-8
+
+node    := {"col": <name>} | {"lit": <literal>}
+         | {"binary": [<op>, <node>, <node>]}
+         | {"fn": [<fname>, <options>, [<node>, ...]]}
+         | {"cast": [<dtype>, "strict" | "non_strict", <node>]}
+op      := eq ne eq_missing ne_missing lt le gt ge and or xor add sub mul truediv
+           floordiv mod
+fname   := not is_null is_not_null is_nan is_not_nan negate all_horizontal
+           any_horizontal str.starts_with str.ends_with     (options {})
+         | is_in {"nulls_equal": bool} | is_between {"closed": both|left|right|none}
+         | str.contains {"literal": bool, "strict": bool}
+literal := {"dyn_int": "<decimal>"} | {"dyn_float": "<float.hex()>"}
+         | {"null": null} | {"boolean": bool} | {"string": str}
+         | {"int8" ... "uint64": "<decimal>"} | {"float32" | "float64": "<float.hex()>"}
+         | {"decimal": ["<unscaled>", precision, scale]} | {"binary": "<hex>"}
+         | {"date": days} | {"time": ns}
+         | {"datetime": [value, unit, time zone or null]} | {"duration": [value, unit]}
+         | {"list": [<dtype>, [<value or null>, ...]]}   (no lists of decimals or bytes)
+dtype   := the dtype names of the Polars value descriptor ("int64", "string",
+           {"datetime": [unit, tz]}, {"list": <dtype>}, ...)
+```
+
+The module docstring of `orcapod.hashing.semantic_hashing.polars_expr` is the full
+definition. Consequences:
+
+* `pl.col("x") > 0`, `pl.col("x").gt(0)`, `pl.col("x") > pl.lit(0)` and `0 < pl.col("x")`
+  hash equal. `> 0` (a Python int, typed by Polars against the column), `> 0.0` and
+  `> pl.lit(0, dtype=pl.Int8)` hash differently. The expression is hashed as written:
+  `a & b` and `b & a` differ, and so does the order of the predicates of one filter.
+* Unsupported expressions raise `ValueError` naming the expression: Python functions
+  (`map_elements`, `map_batches`, whose serialized form differs between processes),
+  selectors over several columns (`pl.col("x", "y")`, `pl.all()`, regex columns,
+  `pl.exclude`, `cs.*`, dtype columns), aggregations and windows, `alias`,
+  `when/then/otherwise`, NaN and infinite literals (the JSON form cannot tell them apart),
+  `pl.Series` literals, and any node or layout the parser does not know. A Polars release
+  that changes its serialization therefore fails loudly rather than moving a hash; the parser
+  is then taught the new layout and maps it onto the same tree.
+* Supporting a new construct adds to the grammar without changing any existing hash. Only a
+  change to the encoding of a supported construct needs a new label (`polars_expr_v2`).
+
+The canonical trees of a corpus of expressions are pinned in
+`tests/test_hashing/test_polars_expr_hashing.py`, and their hashes in the golden suite.
+
+---
+
 ## 2. Source Provenance & System Tags
 
 When a source is built by `SourceStreamBuilder`, four hash-related operations happen in
@@ -485,3 +545,76 @@ in any data-level preimage; they serve logging, observability, and result inspec
 | **Known exclusions** | **Not a content hash.** Two datagrams with identical content have different UUIDs. Not used in any hash preimage. Serves as an object identity token, not a content fingerprint. |
 
 ---
+
+## 8. Array Value Digest
+
+**Value hash labels.** A type whose values are hashed by a dedicated handler labels its hash
+`<type>_v<N>`, for example `ndarray_v1` (and later `tensor_v1`). The label is the
+`ContentHash.method` and appears in every token built from the hash. The bytes produced under
+an existing label never change. A new definition gets a new label, so a hash always says
+which definition produced it.
+
+A `numpy.ndarray` value is hashed by value (since v0.3, ITL-888). The semantic hasher's
+`NumpyArrayHandler` returns `ContentHash(method="ndarray_v1", digest=D)`, where `D` is the
+version-1 array digest of the array's stored row. Inside a table hash, an array cell becomes
+the token `b"orcapod:ndarray::ndarray_v1:" + D`: the extension name, then the label and the
+digest. The stored row, the dtype tags and the canonical form are described in
+[NumPy Arrays](../concepts/arrays.md).
+
+For a stored row with dtype tag `T`, shape `(d0, ..., dn-1)` and data bytes `B`:
+
+```
+P = u64le(len(utf8(T))) || utf8(T)
+ || u64le(n) || i64le(d0) || ... || i64le(dn-1)
+ || u64le(len(B)) || B
+D = SHA-256(P)
+```
+
+`u64le` and `i64le` are 8-byte little-endian unsigned and signed integers. Every field is
+length-prefixed, so two different rows never share a preimage. `D` depends only on the stored
+row, so it can be recomputed from a stored table by any SHA-256 implementation. The label
+`ndarray_v1` names this definition; a different definition gets a different label. A
+`torch.Tensor` type is to share the digest under its own label.
+
+| Variation | Same `D`? |
+|---|---|
+| C or Fortran order, strides, views | yes |
+| Little- or big-endian byte order | yes |
+| Structured offsets, alignment padding | yes |
+| `np.matrix`, `np.recarray`, `np.memmap` against the plain array | yes |
+| Dtype (including width), shape, any element bit, structured field names or field order | no |
+
+The reference implementation below uses only the standard library, and the vectors are pinned:
+
+```python
+import hashlib
+import struct
+
+def array_digest_v1(tag: str, shape: tuple[int, ...], data: bytes) -> str:
+    t = tag.encode("utf-8")
+    p = struct.pack("<Q", len(t)) + t + struct.pack("<Q", len(shape))
+    p += b"".join(struct.pack("<q", d) for d in shape)
+    p += struct.pack("<Q", len(data)) + data
+    return hashlib.sha256(p).hexdigest()
+
+print(array_digest_v1("float32", (2, 3), struct.pack("<6f", 0, 1, 2, 3, 4, 5)))
+# 318f6e503e8064e89ce6039453fce709f8e01f60c501af2b63bbbe9cf8fbf90e
+print(array_digest_v1("float64", (), struct.pack("<d", 2.5)))
+# 47f182d862f5dd597d88836deddaed609ed94490827302e75e8364e877633cae
+print(array_digest_v1("int8", (0, 3), b""))
+# 54165f92526b48bf9bae265168aa7020b135a9973d372d9ceaa9ae92f611068a
+```
+
+The same values through Orcapod:
+
+```python
+import numpy as np
+
+from orcapod.contexts import get_default_context
+
+hasher = get_default_context().semantic_hasher
+print(hasher.hash_object(np.arange(6, dtype=np.float32).reshape(2, 3)).to_string())
+# ndarray_v1:318f6e503e8064e89ce6039453fce709f8e01f60c501af2b63bbbe9cf8fbf90e
+print(hasher.hash_object(np.array(2.5)).to_string())
+# ndarray_v1:47f182d862f5dd597d88836deddaed609ed94490827302e75e8364e877633cae
+```

@@ -2211,6 +2211,238 @@ value needs a migration assessment and the developer's approval. Not pinned yet:
 
 ---
 
+## `src/orcapod/pipeline/job.py`, orchestrators, node write paths — store write failures
+
+### SW1 — A failed store write did not fail `PipelineJob.run()`
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-878
+
+A node's write to the store ran inside the per-row handler meant for function failures:
+`FunctionNode.execute` (sync) and `_FunctionPodBase.async_execute.process_one` (async) wrap
+compute *and* the result-table and pipeline-table writes in one `except Exception`. With the
+default `error_policy="continue"` a failed write was skipped like a crashed function: the sync
+path logged a WARNING, the async path logged only at DEBUG, `job.run()` returned normally and
+the node read back fewer rows (none when every write failed, e.g. a logical-type output on
+`SQLiteConnector`, ITL-877). An operator LOG write failure did raise, but before `job.run()`'s
+final flush, so the upstream function node's pending pipeline rows were never committed while
+its result rows were; async callers got an `ExceptionGroup`.
+
+**Fix:** Contract, for now (developer, November 10, 2026): a failed store write always fails
+the run, whatever `error_policy` is. Every node write site (`ResultCache.store`,
+`FunctionNode.add_pipeline_record`, `OperatorNode._store_output_stream`, the side-effect
+invocation log) raises `orcapod.errors.StoreWriteError`, chained from the backend error and
+naming the node, the row's tag and the table. The per-row handlers re-raise it, so the run
+stops at the first failed write; `error_policy` still decides only about rows whose function
+raised. `AsyncPipelineOrchestrator` unwraps it from the `TaskGroup` exception group, so both
+orchestrators raise the same error. `PipelineJob.run()` flushes the writes that succeeded
+before re-raising (a flush failure there is logged, not raised over the original), and wraps a
+failure of its final flush. Nothing stored is rewritten; no hash, path or schema change. An
+opt-in mode that tolerates store failures is a possible later option. A fail-loud post-run
+hook or an observer callback that raises while the store error propagates is logged and noted
+on it (`orcapod.utils.store_errors`), not raised in its place, so a node function that runs
+another cached pod cannot turn that pod's store failure into a skipped row. When concurrent
+node tasks fail together, the async orchestrator raises the store error of the node first in
+topological order, notes the other failures on it and logs other store errors at WARNING.
+A failed flush (the result cache's per-row auto-flush or the job's final flush) raises
+`StoreWriteError(flush=True)` naming the store and no row: views of one store share their
+pending writes, so the failing batch may be an earlier row's or another table's.
+The rule (developer, November 11, 2026): store failures fail the run; a function output that
+cannot be stored (a naive `datetime`, a value not matching the declared type, rejected while
+`ResultCache.store` prepares the record, before any write) is a row failure governed by
+`error_policy` exactly like a function that raised, not a `StoreWriteError`: the value is
+specific to that row, the store is healthy, and every re-run would fail at the same row. The
+async orchestrator logs row failures at DEBUG and ignores `fail_fast` (ITL-879), unchanged here.
+Regressions: `tests/test_pipeline/test_store_write_failure.py`. Related, not fixed here: the async
+orchestrator ignores `error_policy` (ITL-879); connector and Delta `flush` drop a batch whose
+write fails (ITL-880).
+
+---
+
+## `src/orcapod/core/operators/semijoin.py` — nested columns and string/large_string keys
+
+### SJ1 — `SemiJoin` failed on nested columns and on `string` vs `large_string` keys
+**Status:** resolved
+**Severity:** high
+**Issue:** ITL-847, ITL-829 (first case only)
+
+The sync path used pyarrow's Acero hash join (`join_type="left semi"`), which rejects any nested
+column: `ArrowInvalid: Data type list<item: int8> is not supported in join non-key field`. A list,
+large_list, struct or struct-backed logical column (a dataclass) on either input failed, as did a
+struct or list key. Acero also rejected a key that is `string` on one side and `large_string` on
+the other (a `CSVSource` against a `DictSource`, ITL-829). The async path built its lookup from
+`as_dict()` values, so struct and list keys were unhashable, and a null key matched a null.
+
+**Fix:** the sync path joins in Polars (`how="semi"`, `maintain_order="left"`) against the right
+input's key columns only, then casts the result to the left table's schema, so every column keeps
+the left input's exact Arrow type, top-level and nested nullability, and logical type. Before the
+join each key goes through `require_shared_arrow_type` (Polars would silently unify `int8` with
+`int16`); sync and async raise `InputValidationError` naming the column and both types. A null key
+never matches: Polars already does that for scalar keys but treats a null struct or list as equal
+to another, so right rows with a null key are dropped first. The async path checks key types on
+the first row of each side and builds its lookup from each key's Arrow storage value, frozen into
+a hashable form (nulls inside a struct or list compare equal, NaN equals NaN, as in Polars).
+Results of inputs that already worked are unchanged (content and pipeline hashes, per-row hashes,
+schemas, tables and row order, sync and async). Regressions:
+`tests/test_core/operators/test_semijoin_nested.py`; the ITL-846 strict xfail in
+`test_async_sync_equivalence.py` is removed, and the SemiJoin meta case now uses nested meta
+columns. Open: ITL-829's second case (a non-nullable key against a nullable one, raised by
+`schema_utils.intersection_schemas` during input validation) is unchanged and keeps its strict
+xfail. The async path checks key types on the first row of each input, because
+`async_execute` receives only channels and no stream exposes its Arrow schema without rows.
+So when either input is empty (left or right), a key type mismatch that the sync path reports
+yields an empty result on the async path instead of an error. `Join`'s async key check
+(`_check_shared_key_types`) has the same limit.
+
+---
+
+## `src/orcapod/databases/delta_lake_databases.py` — read failures
+
+### DR1 — A Delta table that could not be read was reported as having no rows
+**Status:** resolved
+**Severity:** critical
+**Issue:** ITL-884
+
+`DeltaTableDatabase.get_all_records` logged a read error at WARNING and returned `None`, and
+`get_records_by_ids` returned `None` on any error. Both conflated "the table does not exist"
+with "the table exists but cannot be read". Callers treat `None` as no rows. A function node
+recomputed with a "deleted externally" warning, its per-row lookups failed inside the
+`error_policy="continue"` handler, and the run finished without raising, so stored results
+looked dropped. `_flush_by_key` also treated a `DeltaProtocolError` on load as "no table" and
+wrote the batch with `mode="overwrite"`. The case that exposed it: an append whose column type
+differs from the stored table, which Delta's merge either casts silently to the stored type or,
+with an extension type involved, accepts and then cannot read. Other backends were not
+affected: the in-memory and connector databases (SQLite, PostgreSQL, SpiralDB) return `None`
+only for a table that does not exist and let read errors propagate.
+
+**Fix:** only `TableNotFoundError` means absent. Every other load or read error raises
+`orcapod.errors.StoreReadError`, which names the table and chains the cause. `FunctionNode.execute`, the
+async `FunctionPod` row handler and the async orchestrator let it fail the run whatever the
+`error_policy`. Before merging into an existing table, `_flush_by_key` compares the batch with
+the stored Delta schema through Delta's own type mapping (extension types by storage,
+large-normalized, nullability ignored). On a difference it raises `InputValidationError` naming the
+table, column and both types, and nothing is written; struct fields are compared by name at
+every depth, so a new nested field is schema evolution, not a difference. The batch's types
+are converted with the Delta writer's own conversion (`deltalake.writer._conversion`, the one
+`write_deltalake` and `merge` use) before the comparison, and the stored schema is read without
+field metadata, so a type the writer stores differently (timestamps in microseconds, unsigned as
+signed) or a logical type whose Delta storage differs is never refused; the differential guard
+`tests/test_databases/test_delta_append_types.py` appends an identical schema for every Arrow and
+logical type Delta can store. `flush()` raises a `StoreReadError` or
+that `InputValidationError` as itself, not wrapped in `RuntimeError`, with every other failed
+batch noted on it, so a read failure in a per-row result-cache flush still fails the run. The
+async orchestrator selects the `StoreReadError` from the `TaskGroup`'s exception group with a
+plain `except`, noting the other failures, so a concurrent unrelated failure cannot turn it into
+an `ExceptionGroup`. With ITL-878 (SW1) both errors derive from `orcapod.errors.StoreError`
+and share one path: the per-row handlers, `orcapod.utils.store_errors` and both orchestrators
+handle `StoreError`. A write that fails because the stored table cannot be read raises
+`StoreReadError`, not `StoreWriteError`; a refused append is a `StoreWriteError` caused by the
+`InputValidationError`. The orchestrators label a store error with the node it escaped from,
+and the async orchestrator ranks read and write errors alike by node order. Regressions:
+`tests/test_databases/test_delta_read_failures.py`,
+`tests/test_pipeline/test_store_read_failure.py` and
+`tests/test_pipeline/test_store_errors_together.py`. Open: whether a nullability-only change
+should be refused (Delta's merge relaxes a non-null nested field to nullable) belongs to the
+nullability audit, ITL-842.
+
+---
+
+## Newcomer papercuts found by the docs audit
+
+### NP1 — Missing export, misleading errors, inconsistent defaults, broken example, write noise
+**Status:** in progress
+**Severity:** medium
+**Issue:** ITL-821
+
+The docs audit (PR #271) ran every sample against `main` and found behavior that trips a
+newcomer. Re-checked on `b197544e` (v0.2.0 + #291):
+
+1. `orcapod.enable_file_hash_caching` was not exported. **Fix:** re-exported from `orcapod`.
+2. `DictSource(data=[], tag_columns=[...])` raised `tag_columns not found in table: {...}.
+   Available columns: []`. **Fix:** `SourceStreamBuilder.build` raises `Table is empty` for
+   a table with no columns; a zero-row source with `data_schema=` still builds.
+3. A pod applied to a stream with an extra column printed `Key 'age' not found in parameter
+   types.` (a `logger.warning` reaching logging's last-resort stderr handler) before raising
+   `Incoming data data type ...`. **Fix:** `schema_utils.schema_incompatibility` returns the
+   reason instead of logging; `FunctionPod` and `FunctionNode` raise `Incoming data schema
+   ... : column 'age' is not a parameter of the function`.
+4. Defaults that disagree: `@function_pod` `version="v0.0"` vs `FunctionPod.from_fn` /
+   `side_effect_function_pod` `"v1.0"` (the major version is in the data function's `uri`, so
+   it moves identity hashes and the result-store path); `MapData`/`MapTags`
+   `drop_unmapped=False` vs `stream.map_data`/`map_tags` `True` (in the operator identity).
+   **Open:** awaiting the developer's choice of default.
+5. `examples/save_and_load_pipelines.py` passed a database to `Pipeline()` and failed.
+   **Fix:** rewritten around `PipelineJob`; `tests/test_examples/test_examples.py` runs every
+   example in a subprocess so an example cannot break silently again.
+6. Noise: the protobuf gencode `UserWarning`s on import no longer reproduce (every
+   `orcapod` module imported with and without all extras, `-W always`; protobuf is never
+   loaded), so that half is closed. deltalake's `WARN deltalake_core::writer::stats Skipping
+   column ... because it's a binary field` lines on every Delta write still appear.
+   **Open:** awaiting the developer's choice of how to silence them.
+
+---
+
+## `src/orcapod/core/operators/filters.py` — `PolarsFilter` identity and nullability (ITL-828)
+
+### PF1 — An expression predicate could not be hashed, and a filter broke a join inside a job
+**Status:** resolved
+
+**PF1a.** `stream.polars_filter(pl.col("x") > 0).pipeline_hash()` raised `TypeError` (no
+semantic handler for `pl.Expr`), so an expression filter failed upstream of a join and anywhere
+inside a `PipelineJob`.
+
+**Fix (PF1a):** `PolarsExprHandler` hashes a `pl.Expr` as `polars_expr_v1`: a strict parser
+turns `Expr.meta.serialize(format="json")` into a tree in an Orcapod-owned grammar
+(`hashing/semantic_hashing/polars_expr.py`), hashed as sha256 of its canonical JSON. Polars'
+serialization is not hashed directly: it changed layout between 1.20, 1.30 and 1.36. Unknown
+nodes and unsupported expressions (Python functions, multi-column selectors, aggregations,
+`alias`, `when/then`, non-finite literals, `pl.Series` literals) raise `ValueError` naming the
+expression, so a Polars layout change fails loudly instead of moving a hash. `predicates` is
+normalized to a tuple. The developer confirmed the identity design (November 11, 2026).
+
+Also fixed: inside a `PipelineJob` any `PolarsFilter` (keyword constraints too) upstream of a
+`Join` raised `InputValidationError` (`str` vs `str | None`), because Polars returns every field
+nullable and the filter restored types but not nullability.
+
+**PF1b.** Data columns of a filtered stream also came back nullable, which broke the rule that
+operators never change nullability, and gave a filtered row a different data hash from its
+source row.
+
+**Fix (PF1b):** the filter restores every column's input nullability (developer, November 11,
+2026). A filtered row's data hash now equals its source row's. The pinned
+`pipeline:polars_filter` row data hashes moved (approved); they are the cache keys of any
+function pod downstream of a filter, so a 0.2 store recomputes those results once.
+
+---
+
+## `src/orcapod/logical_types/numpy_type.py`, `src/orcapod/logical_types/array_format.py` — array format
+
+### AR1 — `numpy.ndarray` stored as a `.npy` file and hashed by file bytes
+**Status:** in progress
+**Severity:** high
+**Issue:** ITL-888 (absorbs ITL-883; design ITL-874)
+
+Arrays were stored as the exact `np.save` file in a `large_binary` column under extension name
+`numpy.ndarray`, and hashed as SHA-256 of that file under the bare label `sha256`. The hash
+followed the file, not the value: equal arrays in C and Fortran order, in little- and big-endian
+byte order, or with structured fields at other offsets hashed differently. Masked arrays lost
+their mask silently. `StringDType` failed with a misleading pickle error. A pod declared
+`-> np.ndarray` could return a NumPy scalar unchecked.
+
+v0.3 moves to the value-based format of `superpowers/specs/2026-11-10-array-format-v0.3.md`:
+extension `orcapod.ndarray` over `struct<dtype, shape, data>` (little-endian, C order), hashed
+by value under the label `ndarray_v1` (developer's decisions, November 10 and 11, 2026). Old
+data is neither detected nor migrated in v0.3; migration is deferred to ITL-889. Accepting
+`longdouble`/`clongdouble`, unit-less datetimes and titled structured dtypes, refused in v0.3,
+is reconsidered in ITL-911. The new logical type name moves the table paths of nodes with an
+array column and the pipeline and operator tables of every node downstream of one (pipeline
+hashes are Merkle-chained); an array-free pod downstream keeps its result table and reuses its
+results.
+
+Known compromise: the struct's children are nullable at the Arrow level, because Polars drops
+nested non-null flags on its way back to Arrow (ITL-842). The logical type enforces non-null
+instead. Tighten under a new storage version once nested nullability survives Polars.
+
 ## `src/orcapod/logical_types/` — identity of user classes (dataclasses, pydantic models)
 
 ### UCI1 — A user class was identified by `module.qualname` only, without its fields

@@ -35,7 +35,11 @@ from orcapod.errors import (
     EphemeralResultMissingError,
     PipelineJobRequiredError,
     SchemaVersionError,
+    StoreError,
+    StoreReadError,
+    StoreWriteError,
 )
+from orcapod.utils.store_errors import keep_store_error
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
     DataFunctionExecutorProtocol,
@@ -184,12 +188,14 @@ class FunctionNodeBase(StreamBase):
             # Use the pod's exposed input schema (ctx excluded) rather than the
             # data function's full schema, because ctx is auto-injected per row.
             expected_data_schema = function_pod.input_data_schema
-            if not schema_utils.check_schema_compatibility(
+            reason = schema_utils.schema_incompatibility(
                 incoming_data_types, expected_data_schema
-            ):
+            )
+            if reason is not None:
                 raise ValueError(
-                    f"Incoming data data type {incoming_data_types} from {input_stream} "
-                    f"is not compatible with expected input schema {expected_data_schema}"
+                    f"Incoming data schema {incoming_data_types} from {input_stream} "
+                    f"is not compatible with expected input schema "
+                    f"{expected_data_schema}: {reason}"
                 )
 
         self._input_stream = input_stream
@@ -1164,14 +1170,20 @@ class FunctionJobNode(FunctionNodeBase):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _require_pipeline_database(self) -> None:
-        """Raise a clear RuntimeError if no pipeline database is attached.
+    def _require_pipeline_database(self) -> ArrowDatabaseProtocol:
+        """Return the attached pipeline database, raising if there is none.
 
         Called at the top of methods that unconditionally access
         ``self._pipeline_database``.  Provides an actionable error message
         instead of an opaque ``AttributeError: 'NoneType' object has no
         attribute ...`` when a definition-level pipeline is executed without
         supplying a database.
+
+        Returns:
+            The attached pipeline database.
+
+        Raises:
+            RuntimeError: If no pipeline database is attached.
         """
         if self._pipeline_database is None:
             raise RuntimeError(
@@ -1179,6 +1191,7 @@ class FunctionJobNode(FunctionNodeBase):
                 "Either construct the pipeline with a pipeline_database argument, "
                 "or supply one via Pipeline.load(..., pipeline_database=<db>)."
             )
+        return self._pipeline_database
 
     # ------------------------------------------------------------------
     # as_node — return the lightweight FunctionNode equivalent
@@ -1294,6 +1307,16 @@ class FunctionJobNode(FunctionNodeBase):
                     tag_out, result = self._process_data_internal(
                         tag, data, logger=pkt_logger, run_id=run_id
                     )
+                except StoreError as exc:
+                    # A failed store read or write fails the run whatever the error
+                    # policy: error_policy only decides about rows whose function
+                    # raised.
+                    exc.add_context(node_label=node_label, tag=tag.as_dict())
+                    with keep_store_error(exc, "Observer on_data_crash"):
+                        ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    with keep_store_error(exc, "Observer on_node_end"):
+                        ctx_obs.on_node_end(node_label, node_hash)
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Data execution failed in %s: %s",
@@ -1701,14 +1724,14 @@ class FunctionJobNode(FunctionNodeBase):
                 so that downstream ``EmptyData`` flow-through can locate its cached
                 result keyed by the same hash (= the downstream's ``INPUT_DATA_HASH_COL``).
         """
-        self._require_pipeline_database()
+        pipeline_database = self._require_pipeline_database()
         self._ensure_pdb_schema()
         base_entry_id = self.compute_base_entry_id(tag, input_data)
 
         # Determine the next recomputation index by querying all existing rows
         # for this base_entry_id. No await is used here, so within a single-threaded
         # asyncio event loop this read-then-write sequence is uninterrupted.
-        existing = self._pipeline_database.get_records_with_column_value(
+        existing = pipeline_database.get_records_with_column_value(
             self._versioned_pipeline_path,
             {_PIPELINE_BASE_ENTRY_ID_COL: base_entry_id},
         )
@@ -1773,12 +1796,22 @@ class FunctionJobNode(FunctionNodeBase):
             meta_table,
         )
 
-        self._pipeline_database.add_record(
-            self._versioned_pipeline_path,
-            versioned_entry_id,
-            combined_record,
-            skip_duplicates=True,
-        )
+        try:
+            pipeline_database.add_record(
+                self._versioned_pipeline_path,
+                versioned_entry_id,
+                combined_record,
+                skip_duplicates=True,
+            )
+        except StoreReadError:
+            # The stored table could not be read: report the read failure itself.
+            raise
+        except Exception as exc:
+            raise StoreWriteError(
+                self._versioned_pipeline_path,
+                node_label=self.label,
+                tag=tag.as_dict(),
+            ) from exc
 
     # ------------------------------------------------------------------
     # Records and sources
@@ -2420,14 +2453,22 @@ class FunctionJobNode(FunctionNodeBase):
                                 execution_pod.RESULT_COMPUTED_FLAG, False
                             )
                         )
-                        self.add_pipeline_record(
-                            original_tag,
-                            input_data,
-                            data_record_id=output_data.datagram_uuid,
-                            computed=result_computed,
-                            is_ephemeral=is_ephemeral,
-                            output_data_hash=output_data.content_hash(),
-                        )
+                        try:
+                            self.add_pipeline_record(
+                                original_tag,
+                                input_data,
+                                data_record_id=output_data.datagram_uuid,
+                                computed=result_computed,
+                                is_ephemeral=is_ephemeral,
+                                output_data_hash=output_data.content_hash(),
+                            )
+                        except StoreError as exc:
+                            # This runs outside the pod's per-row handler: name the
+                            # node and row here.
+                            exc.add_context(
+                                node_label=node_label, tag=original_tag.as_dict()
+                            )
+                            raise
                         # Update in-memory cache so iter_data() sees the result.
                         base_entry_id = self.compute_base_entry_id(
                             original_tag, input_data
@@ -2517,6 +2558,10 @@ class FunctionJobNode(FunctionNodeBase):
                         clean = tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
                         )
+                        if isinstance(error, StoreError):
+                            # The pod re-raises a failed store read or write after
+                            # this call; name the node it belongs to.
+                            error.add_context(node_label=node_label)
                         ctx_obs.on_data_crash(node_label, clean, data, error)
                         # Clean up the dangling input_store entry so it doesn't
                         # accumulate memory during long-running calls with errors.

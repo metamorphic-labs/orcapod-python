@@ -14,6 +14,8 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.streams.base import StreamBase
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
+from orcapod.errors import StoreError
+from orcapod.utils.store_errors import keep_store_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
     FunctionPodProtocol,
@@ -238,12 +240,12 @@ class _FunctionPodBase(TraceableBase):
         # check_schema_compatibility uses beartype.door.is_subhint which accepts
         # any concrete branch: is_subhint(str, str | Path) → True,
         # is_subhint(int, str | Path) → False.
-        if not schema_utils.check_schema_compatibility(
-            input_schema, expected_data_schema
-        ):
+        reason = schema_utils.schema_incompatibility(input_schema, expected_data_schema)
+        if reason is not None:
             # TODO: use custom exception type for better error handling
             raise ValueError(
-                f"Incoming data data type {input_schema} is not compatible with expected input schema {expected_data_schema}"
+                f"Incoming data schema {input_schema} is not compatible with "
+                f"expected input schema {expected_data_schema}: {reason}"
             )
 
     def process_data(
@@ -327,9 +329,16 @@ class _FunctionPodBase(TraceableBase):
     def _fire_post_run_hooks(self, payload: PostRunPayload) -> None:
         """Fire all registered hooks with payload in registration order.
 
+        When the invocation failed with a ``StoreError``, a fail-loud hook that
+        raises does not replace it: its failure is logged and noted on the store
+        error, the remaining hooks are skipped as for any fail-loud failure, and the
+        caller re-raises the store error.
+
         Args:
             payload: The post-run payload to pass to each hook.
         """
+        error = payload.stats.error
+        store_error = error if isinstance(error, StoreError) else None
         for hook in self._post_run_hooks:
             fn = hook.fn if isinstance(hook, HookConfig) else hook
             on_error = hook.on_error if isinstance(hook, HookConfig) else "raise"
@@ -337,6 +346,9 @@ class _FunctionPodBase(TraceableBase):
                 fn(payload)
             except Exception as exc:
                 if on_error == "raise":
+                    if store_error is not None:
+                        note_callback_failure(store_error, f"Post-run hook {fn!r}", exc)
+                        return
                     raise
                 logger.warning(
                     "Post-run hook %r raised and was suppressed: %s",
@@ -587,6 +599,13 @@ class _FunctionPodBase(TraceableBase):
                     out_tag, result_data = await self._async_invoke_with_hooks(
                         tag, data, logger=pkt_logger, run_id=run_id
                     )
+                except StoreError as exc:
+                    # A failed store read or write fails the run; only rows whose
+                    # function raised are skipped.
+                    exc.add_context(tag=tag.as_dict())
+                    with keep_store_error(exc, "Observer on_data_crash"):
+                        obs.on_data_crash(pod_label, tag, data, exc)
+                    raise
                 except Exception as exc:
                     logger.debug(
                         "Data processing failed, skipping: %s", exc, exc_info=True

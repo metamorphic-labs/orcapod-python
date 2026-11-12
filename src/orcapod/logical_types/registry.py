@@ -394,13 +394,26 @@ class LogicalTypeRegistry:
     def get_by_python_type(self, python_type: type) -> LogicalTypeProtocol | None:
         """Return the logical type for *python_type*, or ``None``.
 
-        Checks exact match first, then falls back to an ``issubclass`` scan.
-        When multiple registered types are superclasses of *python_type*, the
-        one registered first wins (insertion-order dict, Python 3.7+).
+        The most specific registered type wins: *python_type* itself, then each
+        class of its MRO in order, so a subclass registered with its own logical
+        type is used for itself and its subclasses whatever the registration
+        order (an ``np.ndarray`` subclass without one is an array). A logical type
+        with ``exact_python_type_only`` (a dataclass or pydantic model) is never
+        returned for a subclass. Types that are
+        subclasses only through ``__subclasshook__``/ABC registration fall back
+        to an ``issubclass`` scan, where the first registered match wins.
         """
         result = self._by_python_type.get(python_type)
         if result is not None:
             return result
+        for base in getattr(python_type, "__mro__", ())[1:]:
+            result = self._by_python_type.get(base)
+            # A user class matches exactly: its subclass is a different class with
+            # its own fields and identity, never stored as the base (ITL-881).
+            if result is not None and not getattr(
+                result, "exact_python_type_only", False
+            ):
+                return result
         for registered_type, registered_lt in self._by_python_type.items():
             if getattr(registered_lt, "exact_python_type_only", False):
                 continue
