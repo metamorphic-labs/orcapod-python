@@ -293,7 +293,8 @@ src/orcapod/
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
 │       ├── column_selection.py # Select/Drop Tag/Data columns
 │       ├── mappers.py          # MapTags, MapData (rename columns)
-│       └── filters.py          # PolarsFilter
+│       ├── filters.py          # PolarsFilter
+│       └── drop_null_rows.py   # DropNullRows (drop rows with a null in named columns, T | None → T)
 ├── hashing/
 │   └── semantic_hashing/       # BaseSemanticHasher, type handlers
 ├── semantic_types/             # Type conversion (Python ↔ Arrow)
@@ -374,6 +375,11 @@ FunctionNode.
 `GroupBy` is the only operator that reduces row count many→one: it collapses N rows sharing a
 tag tuple into one row with list-valued members. It still synthesizes no new data values —
 every emitted element came from an input row — and it keys only on tags, never on data.
+
+Filters are the operators that read data columns (ITL-943): `PolarsFilter` evaluates its
+predicate on values, and `DropNullRows` reads only whether a value is present (its validity),
+never the value. A filter decides which rows exist and never synthesizes a value; no other
+operator reads data content.
 
 ### Two identity chains
 
@@ -524,6 +530,12 @@ data. The rules:
   `as_table()` (which legitimately differs: `ArrowTableStream.output_schema` ignores
   `columns.source`, so `_source_*`, `_content_hash`, and `_context_key` appear in the table
   but never in the schema).
+- `DropNullRows` keeps the rows where every named column (tag or data) is non-null and clears
+  the nullable flag of each named field, so `T | None` becomes `T`. Only top-level validity is
+  read (not list items, struct children or NaN). Its identity is the sorted tuple of unique
+  names. Both paths apply one rule, `DropNullRows._narrow_table`: an Arrow validity mask and
+  the same arrays re-wrapped under the new field flags, with no Polars round-trip and no cast
+  other than large normalization. A named column that is already non-nullable is a no-op.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
   stream came from `Batch` — group before batching, not after). Members are sorted by non-key

@@ -28,6 +28,10 @@ a tag tuple into a single row with list-valued members. It stays on the operator
 boundary because it synthesizes no new data values -- every element of every emitted list came
 from an input row -- and it keys only on tags, never on data content.
 
+The filters are the operators that read data columns: `PolarsFilter` evaluates its predicate
+on values, and `DropNullRows` reads only whether a value is present (its validity), never the
+value. Both decide which rows exist; neither synthesizes a value.
+
 ## Operator categories
 
 ### `UnaryOperator` -- single input
@@ -350,6 +354,88 @@ except ValueError as exc:
 # Cannot hash the Polars expression 'col("age").python_udf()' for an Orcapod identity
 ```
 
+### DropNullRows
+
+`DropNullRows(columns)` keeps the rows where every named column is non-null, and narrows
+each named column from `T | None` to `T`. Use it when a column is nullable by specification
+but a function needs a value: a pod whose parameter is a plain `int` refuses an `int | None`
+column, and `PolarsFilter` can drop the null rows but leaves the type as it was.
+
+```python
+import pyarrow as pa
+from orcapod import function_pod
+from orcapod.operators import DropNullRows
+from orcapod.sources import ArrowTableSource
+
+recordings = ArrowTableSource(
+    pa.table(
+        {
+            "session": pa.array(["s1", "s2", "s3"], pa.large_string()),
+            "start_ms": pa.array([1000, None, 3000], pa.int64()),
+        },
+        schema=pa.schema(
+            [
+                pa.field("session", pa.large_string(), nullable=False),
+                pa.field("start_ms", pa.int64(), nullable=True),
+            ]
+        ),
+    ),
+    tag_columns=["session"],
+)
+print(recordings.output_schema()[1])
+# Schema({'start_ms': int | None})
+
+
+@function_pod(output_keys="start_s")
+def to_seconds(start_ms: int) -> float:
+    return start_ms / 1000
+
+
+try:
+    to_seconds.pod(recordings)
+except ValueError as exc:
+    print(str(exc).rsplit(": ", 1)[1])
+# column 'start_ms' has type int | None, the function expects int
+
+present = DropNullRows("start_ms")(recordings)
+print(present.output_schema()[1])
+# Schema({'start_ms': int})
+print(to_seconds.pod(present).as_table().to_pylist())
+# [{'session': 's1', 'start_s': 1.0}, {'session': 's3', 'start_s': 3.0}]
+```
+
+The rules:
+
+- **Columns.** Pass one name or a collection of names; a row survives only if every named
+  column is non-null. The names may be tag columns, data columns, or both. A name that is
+  not a tag or data column of the stream raises `InputValidationError`, and an empty
+  collection raises `ValueError`.
+- **What counts as null.** Only the top-level value: a null list or a null struct is null. An
+  empty list, a list that holds nulls, a struct whose fields are null and a floating-point
+  NaN are not. Nested fields keep their nullability.
+- **Already non-nullable columns** are accepted and left as they are, so applying the
+  operator twice is the same as applying it once.
+- **Everything else is unchanged**: other columns' types and nullability, logical types
+  (a `Path | None` column becomes `Path`), system tags, source info and row order. A result
+  with no rows has the same narrowed schema.
+- **Identity** is the set of names: `DropNullRows("a")`, `DropNullRows(["a"])` and
+  `DropNullRows({"a"})` are one operator, and the order of names does not matter.
+- **Row hashes.** Nullability is part of a row's Arrow schema, so a surviving row's data
+  hash changes when a named data column was nullable (its tag hash, when a named tag column
+  was). The new hash is the one the row has in a stream that declared the column
+  non-nullable from the start.
+
+Tag columns work the same way. A stream whose key column is `str | None` cannot be joined
+with one whose key is `str` (`Join` never reconciles types), so narrow the key first. The
+stream method is `drop_null_rows`:
+
+```python
+by_method = recordings.drop_null_rows(["session", "start_ms"])
+by_operator = DropNullRows(["start_ms", "session"])(recordings)
+print(by_method.pipeline_hash() == by_operator.pipeline_hash())
+# True
+```
+
 ### Pick and Index
 
 `Pick(column, key)` extracts one entry from a struct- or dict-typed data column, and
@@ -444,8 +530,8 @@ operators or function pods.
 
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
-`drop_tag_columns`, `drop_data_columns`, `map_tags`, `map_data`, `polars_filter`, `pick` and
-`index`.
+`drop_tag_columns`, `drop_data_columns`, `map_tags`, `map_data`, `polars_filter`,
+`drop_null_rows`, `pick` and `index`.
 
 ```python
 import polars as pl
