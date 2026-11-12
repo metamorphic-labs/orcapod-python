@@ -65,6 +65,38 @@ def _operator_job(store: InMemoryArrowDatabase) -> PipelineJob:
     return job
 
 
+@function_pod(output_keys="sent", ctx_arg="ctx")
+def notify(x: int, ctx: Any) -> int:
+    """Record a delivery; a function pod that takes the invocation context."""
+    delivered.append(x)
+    return x
+
+
+def _notify_job(store: InMemoryArrowDatabase) -> PipelineJob:
+    """A job whose only stored node is a function pod that takes the invocation context."""
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
+        notify.pod(source, label="notify")
+    return job
+
+
+def _add_table_written_before_v03(
+    store: InMemoryArrowDatabase, current_layout: str, old_layout: str
+) -> tuple[str, ...]:
+    """Store a table of the same pod at an older layout, under another hash."""
+    (current_path,) = [p for p in store.list_sources() if p[-1] == current_layout]
+    old_path = current_path[:-2] + ("schema:" + "0" * 64, old_layout)
+    key = pa.array([b"arrow_v0.1:00"], pa.large_binary())
+    store.add_records(
+        old_path,
+        pa.table({"__record_id": key, "record_id_hash": key}),
+        record_id_column="__record_id",
+    )
+    store.flush()
+    return old_path
+
+
 def _sink_job(store: InMemoryArrowDatabase) -> PipelineJob:
     """A job whose only stored node is a sink reading the source directly."""
     job = PipelineJob(name=JOB_NAME, store=store)
@@ -159,21 +191,26 @@ class TestSideEffectNodeChecksEveryRun:
         delivered.clear()
 
         # A log of the same pod at the layout Orcapod v0.2 wrote, under another hash.
-        (log_path,) = [p for p in store.list_sources() if p[-1] == "tdb_v2"]
-        old_path = log_path[:-2] + ("schema:" + "0" * 64, "tdb_v1")
-        store.add_records(
-            old_path,
-            pa.table(
-                {
-                    "__record_id": pa.array([b"arrow_v0.1:00"], pa.large_binary()),
-                    "record_id_hash": pa.array([b"arrow_v0.1:00"], pa.large_binary()),
-                }
-            ),
-            record_id_column="__record_id",
-        )
-        store.flush()
+        old_path = _add_table_written_before_v03(store, "tdb_v2", "tdb_v1")
 
         # The same job object runs again: the check is not remembered from the first run.
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            _ = job.run()
+        assert old_path in info.value.record_paths
+        assert delivered == []
+
+    def test_a_function_pod_with_ctx_arg_checks_before_every_run_too(self):
+        """The other kind of side-effecting node refuses on its second run as well."""
+        store = InMemoryArrowDatabase()
+        job = _notify_job(store)
+        _ = job.run()
+        assert sorted(delivered) == [1, 2]
+        delivered.clear()
+        _ = job.run()  # nothing new in the store: runs, and delivers nothing again
+        assert delivered == []
+
+        old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
+
         with pytest.raises(SideEffectLogDataContextError) as info:
             _ = job.run()
         assert old_path in info.value.record_paths
