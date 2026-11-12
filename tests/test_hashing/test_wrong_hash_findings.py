@@ -34,10 +34,6 @@ from orcapod.streams import ArrowTableStream
 SOURCE_ID_COL = "_tag_source_id::abc"
 RECORD_ID_COL = "_tag_record_id::abc"
 
-# Findings whose fix awaits the developer's decision (ITL-942): the tests document the
-# wrong hash and must fail until the fix lands (strict xfail).
-_PENDING_E = pytest.mark.xfail(strict=True, reason="ITL-942 E: fix awaiting decision")
-
 
 def _semantic_hasher() -> Any:
     return resolve_context(None).semantic_hasher
@@ -286,7 +282,7 @@ class TestColumnSelectionIdentity:
 
 
 # ---------------------------------------------------------------------------
-# E. Commutative operators keep input multiplicity
+# E. Commutative operators: input identity (behaviour kept by decision)
 # ---------------------------------------------------------------------------
 
 
@@ -296,27 +292,37 @@ def _weights(source_id: str, weight: float) -> DictSource:
     )
 
 
-class TestCommutativeInputsAreAMultiset:
-    @_PENDING_E
-    def test_self_merge_join_pipeline_hash_is_schema_and_topology(self) -> None:
+class TestCommutativeInputIdentity:
+    """Finding E, reviewed and KEPT by decision (developer, November 11, 2026).
+
+    A pipeline hash covers the structure of the pipeline, not only schemas:
+    ``MergeJoin(m1, m1)`` (a stream joined with itself) is a different pipeline
+    from ``MergeJoin(m1, m2)`` even when both inputs share one schema. Inputs are
+    an unordered set, so two inputs with the same source identity count as one.
+    """
+
+    def test_self_merge_join_is_a_different_pipeline(self) -> None:
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)
         assert (
-            MergeJoin()(m1, m1).pipeline_hash() == MergeJoin()(m1, m2).pipeline_hash()
+            MergeJoin()(m1, m1).pipeline_hash() != MergeJoin()(m1, m2).pipeline_hash()
         )
 
-    def test_input_order_is_still_not_identity(self) -> None:
+    def test_inputs_with_one_source_identity_count_as_one(self) -> None:
+        m1 = _weights("m", 1.0)
+        m1b = _weights("m", 2.0)  # same source_id: same source identity
+        assert MergeJoin()(m1, m1b).content_hash() == MergeJoin()(m1, m1).content_hash()
+        assert (
+            MergeJoin()(m1, m1b).pipeline_hash() == MergeJoin()(m1, m1).pipeline_hash()
+        )
+
+    def test_input_order_is_not_identity(self) -> None:
         m1 = _weights("m", 1.0)
         m2 = _weights("m2", 3.0)
         assert MergeJoin()(m1, m2).content_hash() == MergeJoin()(m2, m1).content_hash()
         assert (
             MergeJoin()(m1, m2).pipeline_hash() == MergeJoin()(m2, m1).pipeline_hash()
         )
-
-    def test_multiplicity_is_identity(self) -> None:
-        m1 = _weights("m", 1.0)
-        m2 = _weights("m2", 3.0)
-        assert MergeJoin()(m1, m1).content_hash() != MergeJoin()(m1, m2).content_hash()
 
 
 # ---------------------------------------------------------------------------
