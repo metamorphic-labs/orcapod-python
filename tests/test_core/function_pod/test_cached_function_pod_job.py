@@ -25,6 +25,7 @@ from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.sources import DictSource
+from orcapod.types import ColumnConfig
 
 ORCHESTRATORS: dict[str, Callable[[], Any]] = {
     "sync": SyncPipelineOrchestrator,
@@ -101,6 +102,15 @@ def test_meta_columns_only_when_asked_for_and_the_same_in_both_states() -> None:
     assert [n for n, _ in columns(computed) if n.startswith("__")] == ["__computed"]
     assert computed.column("__computed").to_pylist() == [True, True]
     assert served.column("__computed").to_pylist() == [False, False]
+
+
+@pytest.mark.parametrize("columns", [ColumnConfig(all_info=True), {"all_info": True}])
+def test_all_info_in_the_column_config_keeps_the_meta_columns(columns: Any) -> None:
+    cached = CachedFunctionPod(
+        function_pod=Counter().pod(), result_database=InMemoryArrowDatabase()
+    )
+    table = cached.process(make_source()).as_table(columns=columns)
+    assert "__computed" in table.column_names
 
 
 # -- the job -----------------------------------------------------------------------

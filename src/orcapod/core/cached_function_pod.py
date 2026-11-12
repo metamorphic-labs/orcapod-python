@@ -465,7 +465,8 @@ class _CachedFunctionPodStream(FunctionPodStream):
         all_info: bool = False,
     ) -> "pa.Table":
         table = super().as_table(columns=columns, all_info=all_info)
-        if ColumnConfig.handle_config(columns, all_info=all_info).meta:
+        column_config = ColumnConfig.handle_config(columns, all_info=all_info)
+        if column_config.meta or column_config.all_info:
             return table
         return table.drop_columns(
             [n for n in table.column_names if n.startswith(constants.META_PREFIX)]
