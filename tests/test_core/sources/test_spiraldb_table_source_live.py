@@ -18,6 +18,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -157,7 +158,7 @@ def test_a_source_reads_the_version_it_was_built_at():
     table = project.create_table(f"scratch.{name}", key_schema=[("k", pa.int64())])
 
     def keys(source: SpiralDBTableSource) -> list[int]:
-        return source.as_table().column("k").to_pylist()
+        return cast("list[int]", source.as_table().column("k").to_pylist())
 
     try:
         table.write(pa.table({"k": [1, 2], "v": [10, 20]}))

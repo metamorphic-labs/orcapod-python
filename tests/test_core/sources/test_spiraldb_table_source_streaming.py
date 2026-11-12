@@ -10,7 +10,7 @@ import asyncio
 import datetime as dt
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -244,7 +244,9 @@ class TestRestrictions:
     @pytest.mark.parametrize("name", ["limit", "max_rows", "batch_rows"])
     def test_a_bool_is_not_a_size(self, project, name):
         with pytest.raises(ValueError, match=name):
-            SpiralDBTableSource(_PROJECT, "event", **{name: True})
+            # A bool where an int is declared: the call a type checker would refuse.
+            sizes: dict[str, Any] = {name: True}
+            SpiralDBTableSource(_PROJECT, "event", **sizes)
 
     def test_every_read_of_one_source_uses_the_version_it_was_built_at(self, project):
         table = project.table("default.event")
