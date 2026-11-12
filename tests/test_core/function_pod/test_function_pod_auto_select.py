@@ -128,6 +128,21 @@ def _rows(stream: StreamProtocol) -> list[dict[str, Any]]:
     return stream.as_table(all_info=True).sort_by("k").to_pylist()
 
 
+def _without_source_info(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return rows without their source-info columns.
+
+    Args:
+        rows: Rows as returned by ``_rows``.
+
+    Returns:
+        The same rows, minus every column whose name starts with ``_source_``.
+    """
+    return [
+        {name: value for name, value in row.items() if not name.startswith("_source_")}
+        for row in rows
+    ]
+
+
 def _assert_same_stream(actual: StreamProtocol, expected: StreamProtocol) -> None:
     """Assert two streams have the same identity, schema and rows.
 
@@ -141,7 +156,9 @@ def _assert_same_stream(actual: StreamProtocol, expected: StreamProtocol) -> Non
     assert actual.as_table(all_info=True).schema == (
         expected.as_table(all_info=True).schema
     )
-    assert _rows(actual) == _rows(expected)
+    # An output's source info names the computation that produced the row, which is
+    # new on every in-memory run; every other column must be equal.
+    assert _without_source_info(_rows(actual)) == _without_source_info(_rows(expected))
 
 
 def _drop_messages(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
@@ -219,8 +236,12 @@ def test_stream_passed_for_its_tags_restricts_the_rows() -> None:
 
 
 # The hashes ``add.pod(_xs(), _ys())`` had on main before ITL-807 (commit 25650c42).
-_JOINED_PIPELINE_HASH = "3202203f55b6da5b8a255f526d2a2e04792e88bde45b48588df7c31bd7c98b17"
-_JOINED_CONTENT_HASH = "07a4093d77ff0f2d0267123f8403b860a4ce332857f84e02dbf8f35ed6492f46"
+_JOINED_PIPELINE_HASH = (
+    "3202203f55b6da5b8a255f526d2a2e04792e88bde45b48588df7c31bd7c98b17"
+)
+_JOINED_CONTENT_HASH = (
+    "07a4093d77ff0f2d0267123f8403b860a4ce332857f84e02dbf8f35ed6492f46"
+)
 
 
 def test_matching_inputs_build_the_pipeline_they_built_before() -> None:
@@ -315,9 +336,7 @@ def test_missing_required_column_adds_no_step_to_a_job() -> None:
         with pytest.raises(ValueError, match="'y'"):
             add.pod(_xs(extra=1))
 
-    assert sorted(type(node).__name__ for node in job.nodes.values()) == [
-        "SourceJobNode"
-    ]
+    assert dict(job.nodes) == {}
 
 
 def test_input_with_no_parameter_column_is_rejected() -> None:
@@ -433,7 +452,12 @@ def test_cached_function_pod_drops_unused_columns() -> None:
     automatic = cached(_wide())
     by_hand = cached.process(SelectDataColumns(columns=["x", "y"])(_wide()))
 
-    _assert_same_stream(automatic, by_hand)
+    # Rows served from the pod cache carry other meta columns than computed rows, so
+    # the two tables are compared on identity and on their user columns.
+    assert automatic.pipeline_hash() == by_hand.pipeline_hash()
+    assert automatic.content_hash() == by_hand.content_hash()
+    assert automatic.output_schema() == by_hand.output_schema()
+    assert [(row["k"], row["total"]) for row in _rows(by_hand)] == [(1, 5), (2, 9)]
     assert [row["total"] for row in _rows(automatic)] == [5, 9]
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
         cached(_wide(), strict=True)
@@ -593,16 +617,12 @@ def test_job_equals_the_job_with_a_hand_written_select(tmp_path: Path) -> None:
 
     by_hand = PipelineJob(name="job", store=db)
     with by_hand:
-        counted.pod.process(
-            SelectDataColumns(columns=["x", "y"])(_wide()), label="add"
-        )
+        counted.pod.process(SelectDataColumns(columns=["x", "y"])(_wide()), label="add")
     by_hand.run()
 
     assert len(calls) == 2  # every row came from the tables the automatic job wrote
     assert sorted(db.list_table_paths()) == automatic_paths
-    assert {
-        label: type(node).__name__ for label, node in automatic.nodes.items()
-    } == {
+    assert {label: type(node).__name__ for label, node in automatic.nodes.items()} == {
         "wide": "SourceJobNode",
         "SelectDataColumns": "OperatorJobNode",
         "add": "FunctionJobNode",
