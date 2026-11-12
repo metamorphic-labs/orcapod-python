@@ -3,6 +3,7 @@
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
+    DropNullRows,
     DropTagColumns,
     Join,
     MapData,
@@ -161,3 +162,26 @@ class TestPolarsFilterConfig:
         config = op.to_config()
         # Should either serialize the expression or mark as non-reconstructable
         assert "config" in config
+
+
+class TestDropNullRowsConfig:
+    def test_to_config(self):
+        config = DropNullRows(["y", "x", "y"]).to_config()
+        assert config["class_name"] == "DropNullRows"
+        assert config["config"] == {"columns": ["x", "y"]}
+
+    def test_round_trip(self):
+        op = DropNullRows(["y", "x"])
+        restored = DropNullRows.from_config(op.to_config())
+        assert isinstance(restored, DropNullRows)
+        assert restored.columns == ("x", "y")
+        assert restored.content_hash() == op.content_hash()
+        assert restored.pipeline_hash() == op.pipeline_hash()
+
+    def test_registered_for_pipeline_loading(self):
+        from orcapod.pipeline.serialization import resolve_operator_from_config
+
+        op = DropNullRows(["y", "x"])
+        restored = resolve_operator_from_config(op.to_config())
+        assert isinstance(restored, DropNullRows)
+        assert restored.content_hash() == op.content_hash()

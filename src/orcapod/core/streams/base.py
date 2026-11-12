@@ -186,6 +186,28 @@ class StreamBase(TraceableBase):
             self, label=label
         )
 
+    def drop_null_rows(
+        self,
+        columns: str | Collection[str],
+        label: str | None = None,
+    ) -> StreamBase:
+        """Keep the rows where every named column is non-null; narrow those columns to ``T``.
+
+        Each named column, tag or data, is non-nullable afterwards (``T``
+        instead of ``T | None``), so a pod whose parameter is a plain ``T``
+        can consume it. See ``orcapod.core.operators.DropNullRows``.
+
+        Args:
+            columns: One column name, or a collection of names.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            A stream over the surviving rows, in input order.
+        """
+        from orcapod.core.operators import DropNullRows
+
+        return DropNullRows(columns)(self, label=label)
+
     def select_tag_columns(
         self,
         tag_columns: str | Collection[str],

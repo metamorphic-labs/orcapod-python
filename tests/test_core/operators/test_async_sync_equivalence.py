@@ -31,6 +31,7 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
+    DropNullRows,
     DropTagColumns,
     GroupBy,
     Index,
@@ -312,6 +313,13 @@ CASES = [
     ),
     Case("index", lambda: Index("l8", 0), lambda: (source_a(),)),
     Case("pick", lambda: Pick("d", "q"), lambda: (source_a(),)),
+    Case("drop_null_rows", lambda: DropNullRows("nul"), lambda: (source_a(),)),
+    Case(
+        "drop_null_rows_many",
+        # A nullable column with a null, one without, a tag, a non-nullable list.
+        lambda: DropNullRows(["nul", "s", "ta", "l8"]),
+        lambda: (source_a(),),
+    ),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 
