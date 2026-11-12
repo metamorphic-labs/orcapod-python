@@ -1148,6 +1148,39 @@ class TestInputOfAnotherDataContext:
         _assert_names_both_contexts(info.value)
         assert reopened(store).list_sources() == []
 
+    def test_stored_operator_node_raises_before_forwarding_rows_async(self):
+        """On the async path the refusal comes before any row goes downstream."""
+        import asyncio
+
+        from orcapod.channels import Channel
+
+        async def run() -> tuple[InputValidationError | None, list[Any], list[Any]]:
+            """Run the node asynchronously; return the error, the rows sent on, the tables."""
+            store = InMemoryArrowDatabase()
+            stream = _other_context_stream()
+            node = OperatorJobNode(
+                operator=SelectDataColumns(["x"]),
+                input_streams=[stream],
+                pipeline_database=store,
+                cache_mode=CacheMode.LOG,
+            )
+            inputs, outputs = Channel(buffer_size=16), Channel(buffer_size=16)
+            for item in stream.iter_data():
+                await inputs.writer.send(item)
+            await inputs.writer.close()
+            error: InputValidationError | None = None
+            try:
+                await node.async_execute([inputs.reader], outputs.writer)
+            except InputValidationError as exc:
+                error = exc
+            return error, await outputs.reader.collect(), store.list_sources()
+
+        error, forwarded, tables = asyncio.run(run())
+        assert error is not None
+        _assert_names_both_contexts(error)
+        assert forwarded == []
+        assert tables == []
+
     def test_side_effect_pod_raises_before_delivering(self):
         sink = sink_pod(_deliver)
         assert isinstance(sink, SideEffectPod)
