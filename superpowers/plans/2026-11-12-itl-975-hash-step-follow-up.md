@@ -5,7 +5,7 @@
 **Goal:** Fix the seven small findings left after PR #324's review (ITL-975), each with a
 regression test that fails first, without moving any golden value, stored path or stored schema.
 
-**Architecture:** Three two-to-five line source fixes (a readable-metadata check in the
+**Architecture:** Three two-to-five-line source fixes (a readable-metadata check in the
 Arrow-to-Python type mapping, a flag reset in `FunctionJobNode.set_ephemeral_store`, a data
 context check at the top of `CachedDataFunction.call` / `async_call`), three test-only
 hardenings, and one sentence in an existing changelog fragment.
@@ -157,3 +157,10 @@ def test_python_type_of_a_readable_older_identifier_is_the_current_class() -> No
   Item 1 also names the column in `arrow_schema_to_python_schema` (caller wraps with
   `for_column`). Item 4 clears both endpoint variables in the `bucket` fixture.
   Remaining: CI green, CodeRabbit round(s), `worker_done` with the reviewed sha.
+- 2026-11-12, CodeRabbit round 1 (head c982e96b): one finding, reproduced. The cache in
+  `arrow_type_to_python_type` is keyed by the Arrow type, and Arrow compares two instances
+  of one extension class without their metadata, so a struct remembered for a readable
+  identifier answered for an unreadable one. Coordinator approved option A: walk the type
+  before the cache lookup (`_require_readable_members`), keep the check in
+  `_convert_arrow_to_python`. Stop rule after this push: repeats, base findings and style
+  notes are answered without a further push.

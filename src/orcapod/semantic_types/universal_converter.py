@@ -908,7 +908,16 @@ class UniversalTypeConverter:
 
         This is the main entry point for Arrow → Python type conversion.
         Results are cached for performance.
+
+        Raises:
+            LogicalTypeIdentifierError: If the type, or a member nested in it, has
+                the extension name of a registered logical type with metadata that
+                type does not read.
         """
+        # Before the cache: Arrow compares two instances of one extension class
+        # without their metadata, so a container remembered for a readable
+        # identifier is equal to one whose member carries an unreadable identifier.
+        self._require_readable_members(arrow_type)
         try:
             if arrow_type in self._arrow_to_python_types:
                 return self._arrow_to_python_types[arrow_type]
@@ -922,6 +931,41 @@ class UniversalTypeConverter:
         except TypeError:
             pass  # Unhashable type — skip caching.
         return python_type
+
+    def _require_readable_members(self, arrow_type: pa.DataType) -> None:
+        """Raise unless every registered extension type in ``arrow_type`` is readable.
+
+        Walks the type itself, struct fields, list values and map keys and items.
+
+        Args:
+            arrow_type: The Arrow type to check.
+
+        Raises:
+            LogicalTypeIdentifierError: If an extension type whose name is registered
+                carries metadata the registered logical type does not read.
+        """
+        if isinstance(arrow_type, pa.ExtensionType):
+            if self._logical_type_registry is not None:
+                lt = self._logical_type_registry.get_by_arrow_extension_name(
+                    arrow_type.extension_name
+                )
+                if lt is not None:
+                    from orcapod.logical_types.identifier import require_readable
+
+                    require_readable(lt, arrow_type.__arrow_ext_serialize__())
+            self._require_readable_members(arrow_type.storage_type)
+        elif pa.types.is_struct(arrow_type):
+            for field in arrow_type:
+                self._require_readable_members(field.type)
+        elif (
+            pa.types.is_list(arrow_type)
+            or pa.types.is_large_list(arrow_type)
+            or pa.types.is_fixed_size_list(arrow_type)
+        ):
+            self._require_readable_members(arrow_type.value_type)
+        elif pa.types.is_map(arrow_type):
+            self._require_readable_members(arrow_type.key_type)
+            self._require_readable_members(arrow_type.item_type)
 
     def get_logical_type_by_arrow_extension_name(
         self, arrow_extension_name: str

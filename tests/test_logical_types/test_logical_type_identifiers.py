@@ -14,6 +14,7 @@ import json
 import pathlib
 import typing
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -581,6 +582,62 @@ def test_python_type_of_an_unreadable_identifier_is_refused() -> None:
             pa.schema([pa.field("s", pa.struct([pa.field("t", column_type)]))])
         )
     assert "'s'" in str(excinfo.value)
+
+
+class _ParameterizedThingType(pa.ExtensionType):
+    """One extension class for ``thirdparty.thing`` whose metadata is a parameter.
+
+    Arrow compares two instances of one extension class without their metadata, so
+    they are equal whatever identifiers they carry.
+    """
+
+    def __init__(self, metadata: bytes) -> None:
+        """Store ``metadata`` as the serialized extension metadata."""
+        self._metadata = metadata
+        super().__init__(pa.large_string(), "thirdparty.thing")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        """Return the metadata given at construction."""
+        return self._metadata
+
+    @classmethod
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> "_ParameterizedThingType":
+        """Rebuild the type from its serialized metadata."""
+        return cls(serialized)
+
+
+@pytest.mark.parametrize(
+    "container",
+    [
+        lambda member: pa.struct([pa.field("t", member)]),
+        lambda member: pa.large_list(pa.struct([pa.field("t", member)])),
+        lambda member: pa.map_(pa.large_string(), pa.struct([pa.field("t", member)])),
+    ],
+    ids=["struct", "list_of_struct", "map_of_struct"],
+)
+def test_python_type_of_an_unreadable_member_is_refused_after_a_readable_one(
+    container: Callable[[pa.DataType], pa.DataType],
+) -> None:
+    """A mapping remembered for a readable identifier never answers for an unreadable
+    one (ITL-975): two containers that differ only in a member's metadata are equal
+    to Arrow, and the identifier is still checked for each.
+    """
+    strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
+    readable = container(_ParameterizedThingType(b'{"v":2}'))
+    unreadable = container(_ParameterizedThingType(b'{"v":1}'))
+    assert readable == unreadable  # what makes a lookup by Arrow type alone unsafe
+
+    # The readable container is mapped first, through both entry points.
+    _ = strict.arrow_type_to_python_type(readable)
+    _ = strict.arrow_schema_to_python_schema(pa.schema([pa.field("c", readable)]))
+
+    with pytest.raises(LogicalTypeIdentifierError):
+        _ = strict.arrow_type_to_python_type(unreadable)
+    with pytest.raises(LogicalTypeIdentifierError) as excinfo:
+        _ = strict.arrow_schema_to_python_schema(pa.schema([pa.field("c", unreadable)]))
+    assert "'c'" in str(excinfo.value)
 
 
 def test_python_type_of_a_readable_older_identifier_is_the_current_class() -> None:
