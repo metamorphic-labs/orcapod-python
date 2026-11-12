@@ -1080,13 +1080,97 @@ table untouched, to be migrated.
 | 2 | **Two table kinds carry no Orcapod label in their rows**: the operator cache and the cached-source table. Their row key `_record_hash` is bare hex; `__node_content_hash` is the same under both labels when `source_id` is given | 1.2: hashes stored bare | the branch filters by starfix's own prefix (`000001` / `000002`). A future Arrow label that keeps starfix format 2 would be indistinguishable there unless a label is stored, which changes those tables' layout |
 | 3 | **Old results look absent until v0.3 writes.** Reading a node on a v0.2 store before any v0.3 run returns no rows; a job saved by v0.2 and loaded by v0.3 shows no rows | reads use current-label rows only | report, once per table, how many rows of another label were skipped |
 
-## Part 7. Before the v0.3 tag, and after (to be decided)
+## Part 7. Before the v0.3 tag, and after (draft for the developer's review)
 
-_Filled in during the discussion._
+### 7.1 The system in one page
 
-## Part 8. Follow-up issues to file
+| Element | Rule |
+|---|---|
+| **Path** | Names the table's schema and subject. Changes when, and only when, one of them changes |
+| **Data context** | A string key, `std:v<N>:default`. `N` increments when, and only when, an existing golden hash value moves for a reason other than a logical type's own change. `std:v0.1:default` (and any table without the column) is `H0`: what `nauticalab/orcapod-python` at `61d0f18` computes. `std:v1:default` is what v0.3.0 computes |
+| **Manifest** | One file per data context version, frozen at release, naming every definition the version covers. The current one ships in Orcapod; all of them, with the old code, in `orcapod-sanctuary` |
+| **`__data_context` column** | In every Orcapod table. Rows under the current data context are the current entries; reads and lookups filter on it |
+| **Logical type identifier** | Arrow extension name + extension metadata, owned by the type's implementer, built-in types included. Changes only when an existing value would be stored or hashed differently. Stored with the column; all of it enters the schema hash; a change is a schema change and so a new path |
+| **Label on a hash** | Names the algorithm that produced that value. Informational. Changes when that algorithm changes |
+| **Function major version** | Stays in the path: the user's handle for a clean break |
+| **Old layout found** | Count and skip. Side-effect logs fail explicitly |
+| **Source identity** | Chosen by the source: content or address. Same `source_id` and same record id mean the same entry |
 
-_Filled in during the discussion._
+### 7.2 Must land before the v0.3 tag
+
+| # | Work | State | What moves |
+|---|---|---|---|
+| 1 | starfix 0.5, label `arrow_v0.2` (ITL-910, PR #309). Revised: no error on rows under another label; with item 3 the label filter is not needed for this release | in progress | every Arrow-derived hash; `arrow.json` and the Arrow-derived entries of the other golden files |
+| 2 | Wrong-hash fixes (ITL-942): fold separator; nested nullability hashed the same with and without data; process-independent set hashing; column-selection arguments normalised; unordered inputs with one `source_id` not collapsed; record-id column type; one default function version; dict-key coercion; subclass type hash independent of registration order | in progress | folded system-tag values; row hashes of nested columns; pipeline hashes and paths after a column selection or merge join |
+| 3 | **Data context `std:v1:default`**: frozen manifest; `__data_context` column in every table; layout versions `pdb_v2`, `rdb_v2`, `tdb_v2` and a layout component for operator-cache and cached-source tables; reads and lookups filter on the column; old layout counted and skipped; side-effect logs fail | to file | **every table path** (layout component); `job.*` `table_paths` in `pipeline.json` |
+| 4 | **Logical type identifiers** (ITL-935): the contract; every built-in type writes an identifier; the whole identifier enters the schema hash | to dispatch | stored column type, schema hash and paths of every table with a file, path, directory, UUID, DataFrame, Series or array column |
+| 5 | User class identity (PR #292); dict and set order (PR #301) | open PRs | as in 5.2 |
+| 6 | New types follow the contract: torch (PR #300), Polars values (PR #286), pandas changes (ITL-897). No label used as a version marker | held | new entries only |
+| 7 | Golden rule in CI: an existing golden value may change only together with a data context version increment, or with the identifier of the logical type it belongs to | to file | — |
+| 8 | Function minor version stored as a column of the result table (the developer's example of a tracked value; it is not stored today). The layout is changing anyway | to confirm | result-table layout |
+| 9 | Documentation: `CLAUDE.md` and `docs/reference/hashing.md` (what the content hash covers, the system-tag prefix, the label rule, the path rule, the data context rule) | to file | — |
+
+All of 1 to 6 land inside the single step `H0` to `H1`. After the tag, `std:v1:default` and
+every logical type identifier written by v0.3 are commitments.
+
+### 7.3 Can follow the tag
+
+| Work | Why it can wait |
+|---|---|
+| Migration `H0` to `H1` (ITL-913, ITL-914): match by tags, re-derive inputs, re-key; relabel where nothing changed | Old tables stay untouched and readable by the old version; nothing is lost |
+| `orcapod-sanctuary` with the `H0` manifest and code (starfix 0.4, the old array format, the old folds) | Needed only by migration and verification |
+| Detect old-layout tables and suggest migration | The count is reported from v0.3 |
+| Side-effect logs: what is recorded and how a repeat is prevented | The developer wants a separate discussion; v0.3 fails explicitly |
+| The stored Arrow type of a plain column is not in the path (`int32` and `int64` sources share a path; the second write fails) | Fails loudly today, not silently |
+| Default `source_id` of database and Delta sources is a bare name | The source contract allows it; a better default is a separate choice |
+| Content-derived record ids (ITL-817) | Changes row keys: a data context increment of its own |
+
+## Part 8. Follow-up issues to file (titles and one paragraph each)
+
+1. **Data context v1: `__data_context` on every table and a frozen manifest.** Introduce
+   `std:v1:default` as the data context of v0.3. Add a `__data_context` column to the function
+   pipeline, function result, operator-cache, cached-source and side-effect tables, replacing
+   `__input_data_context_key` and the result table's `_context_key`. Move the layout versions
+   (`pdb_v2`, `rdb_v2`, `tdb_v2`) and give operator-cache and cached-source tables a layout
+   component. Reads and lookups use rows of the current data context only. A table at an old
+   layout is counted and skipped, with one total reported; side-effect logs raise instead.
+   Freeze `v1.json` at the tag.
+2. **Manifest format for a data context version.** Define the manifest: one entry per
+   definition the version covers (structure hashing, Arrow hashing and its preparation step,
+   identity compositions, record-id, entry-id and fold recipes, conversion rules, the
+   system-tag naming grammar, third-party libraries whose behaviour enters a hash). Write the
+   `H0` manifest for `61d0f18` after the fact, using the `v0.2.0` golden files as its
+   reference values (all 608 are identical on `61d0f18`).
+3. **Golden rule in CI.** A change to an existing golden value fails unless the data context
+   version increments in the same change, or the value belongs to a logical type whose
+   identifier changes. Attribute each golden entry to the core or to one logical type.
+4. **Logical type identifiers for built-in types (ITL-935).** Every built-in logical type
+   writes an identifier in its extension metadata; the schema hash covers extension name and
+   metadata; document the contract for extension authors (the identifier changes only when an
+   existing value would be stored or hashed differently).
+5. **A hash must not depend on the set of registered logical types.** A dataclass subclass
+   hashes as its base class once the base is registered. Resolve a type the same way whatever
+   else is registered and in whatever order.
+6. **Store the function's minor version.** Add it to the result table so that rows computed
+   under different minor versions can be told apart, as the body hash already allows.
+7. **`orcapod-sanctuary`: the `H0` data context.** Package the `H0` manifest with the code it
+   names (starfix 0.4.0, the `.npy` array format and hash, the fold without separator, the
+   v0.2 identity definitions) so that an `H0` row can be re-hashed under its own rules.
+8. **Migration from `H0` to `H1`.** For each old-layout table: re-derive inputs, match old
+   rows by tags, write rows under `std:v1:default`. Recompute where the old hash could not
+   distinguish inputs (nested lists, nullable structs, booleans) and two old rows shared a
+   key. Report what could not be migrated (masked arrays, classes that changed, unavailable
+   sources).
+9. **Side-effect logs across data context versions.** Decide what a side-effect log records
+   and how a delivered effect is recognised after a data context change, so that v0.3's
+   explicit failure can be replaced by recognising the old completion.
+10. **The stored Arrow type of a plain column and the path.** Two sources with the same Python
+    type and different Arrow widths share a path and the second write fails. Decide whether
+    the schema hash should cover the Arrow type.
+11. **Default `source_id` for database and Delta sources.** A bare table or directory name is
+    not unique; decide a default address that is.
+12. **Documentation of the versioning system.** One reference page: the path rule, the data
+    context, logical type identifiers, labels, and what a user sees after an upgrade.
 
 ## Part 9. Decisions
 
