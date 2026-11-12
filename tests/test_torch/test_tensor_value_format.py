@@ -404,6 +404,7 @@ def test_subclass_instance_is_accepted_for_declared_tensor() -> None:
     assert isinstance(y_type, pa.ExtensionType)
     assert y_type.extension_name == "orcapod.torch_tensor"
     got = [d.as_dict()["y"] for _, d in stream.iter_data()]
+    assert isinstance(got[0], torch.Tensor)
     assert torch.equal(got[0], torch.ones(2) * 2)
 
 
