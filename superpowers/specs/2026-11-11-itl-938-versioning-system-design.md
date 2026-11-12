@@ -713,52 +713,92 @@ How a change reaches a path today, when it does:
 
 ---
 
-## Part 4. Path or column? A proposed test
+## Part 4. Path or column: the rule (decided)
 
-For a change that leaves column names and dtypes alone but changes what a column's values
-mean, the question is whether it belongs in the path or in a column. Proposed test: ask what
-the column is used for.
+**Decision (developer, November 11, 2026):** "Only things that would certainly change the
+schema of the table needs to be part of the path. Something that changes the value of a
+column while still preserving the schema (same column names, same data types), can happily
+reside within the same table (and thus share the path) as long as distinct entries within the
+table can be told apart to reflect the difference in how the entry has come out to be (e.g.
+minor version or hash of function content exactly makes it in as column values because we
+want to keep track of these differences but nothing about schema would change as long as all
+tracked components in the path such as output value schema changes)."
+
+This replaces the test first proposed here (which also sent key-value changes to the path).
 
 ```mermaid
 flowchart TD
-    Q0{"Does the change alter a column name,<br/>a dtype, or the set of columns?"}
-    Q1{"Does it change the values of a column<br/>used to FIND a row (a key)?"}
-    Q2{"Does it change how stored bytes<br/>must be DECODED?"}
-    Q3{"Does it change WHICH rows<br/>the same inputs produce?"}
-    P["PATH"]
-    C["COLUMN"]
+    Q0{"Does the change certainly alter the table's schema?<br/>(a column name, a data type, the set of columns)"}
+    P["PATH<br/>a new table"]
+    C["COLUMN<br/>same table, same path"]
+    R["Requirement: entries written before and after<br/>the change can be told apart by a column value"]
     Q0 -- yes --> P
-    Q0 -- no --> Q1
-    Q1 -- yes --> P
-    Q1 -- no --> Q2
-    Q2 -- yes --> P
-    Q2 -- no --> Q3
-    Q3 -- yes --> P
-    Q3 -- "no: it only describes how the row came to be" --> C
+    Q0 -- no --> C --> R
 ```
 
-| Kind of column | Examples | Verdict | Reason |
-|---|---|---|---|
-| Used to find a row | `__input_data_hash`, `__pipeline_base_entry_id`, `__record_id`, `__node_content_hash` | path | Old and new rows can never match each other. Sharing a table gains nothing and makes every full read return duplicates (F1: 6 rows for 3 inputs) |
-| Bytes that need a rule to decode | a stored array, a file reference | path | A table has one schema. Two representations cannot share a column without one of them being misread |
-| The rows themselves | output of `Join`, `Batch`, `GroupBy` | path | Rows produced under the old behaviour would be served as if current |
-| Describes how a row came to be | `__pf_exec_python_version`, `__pf_exec_executor_type`, `__pf_var_git_hash`, `__pod_ts` | column | It affects neither finding nor reading the row |
+### 4.1 The rule applied to each axis
 
-By this test almost every axis belongs in the path and only IV4 stays a column. That argues
-for a small number of names in the path, each covering a family of axes, instead of one
-marker per axis.
+"Told apart today?" asks whether a stored row already carries a value that distinguishes the
+two sides of a change on that axis.
 
-Applied to concrete cases:
-
-| Case | Schema changes? | Key values change? | Bytes meaning changes? | Verdict |
+| Axis | Changes the schema? | Verdict | Told apart today? | Gap |
 |---|---|---|---|---|
-| starfix 0.4 -> 0.5 (`arrow_v0.1` -> `arrow_v0.2`) | no | yes | no | path |
-| Arrays move from `.npy` bytes to `struct<dtype, shape, data>` | yes | yes (hash by value replaced hash of bytes) | yes | path |
-| Dict insertion order stops affecting hashes (PR #301) | system-tag names for affected nodes | yes | no | path |
-| SpiralDB table gains the nullability metadata (PR #308) | yes (nullability is part of the schema) | yes (Arrow hash covers nullability) | no | path |
-| `GroupBy` changes its member tiebreaker | no | no | rows differ | path |
-| User upgrades Python 3.12 -> 3.13 | no | no | no | column |
-| User edits a function body | no | no | no (by the developer's decision) | neither |
+| I1 Structure hashing | **yes**: system-tag column names embed structure hashes | path | the path already moves, because the hashes in it change | the old path cannot be derived from the new one; no way to find the old table |
+| I2 Arrow hashing | no: values of key columns only | column | **yes**: every Arrow-hashed value carries its label (`arrow_v0.1:` / `arrow_v0.2:`) | bare Arrow hashes (default `source_id`, operator cache key) carry only starfix's prefix |
+| I3 Per-type value hashing | no | column | **no**: the row hash `arrow_v0.1:…` does not say which array or file hash definition was used inside it | needs a marker, or the rule "bump the Arrow label whenever any hash can change" must cover per-type changes |
+| I4 Identity composition (record-id recipe, entry-id recipe, folds) | no, except where it changes column names | column | **no**: record ids and folded ids are bare bytes | needs a marker |
+| I4 Identity composition (function identity, operator identity) | no | column | partly: the function uri is in the path and in `_source_` tokens | — |
+| II1 Conversion rules | **yes**: data types | path | — | **the path does not move today** (F8) |
+| II2 Per-type representation | **yes** when the stored type changes | path | — | the path moves only if the type is renamed |
+| III2 Table layout | **yes** | path | — | `pdb_v1` / `rdb_v1` exist; other table kinds have none |
+| III3 Column naming | **yes** | path | — | the path does not move today |
+| III4 Backend encoding | as physically stored | per backend | — | — |
+| IV1 User function: output schema | **yes** | path | already in the path | — |
+| IV1 User function: name | no | path today | identifies which function the table belongs to | — |
+| IV1 User function: major version | no | **path today**; a column by the rule | in the path | to decide: keep as a deliberate partition, or make it a column that the lookup must match |
+| IV1 User function: minor version | no | column | **no: not stored anywhere** | add a column |
+| IV1 User function: body | no | column | **yes**: `__pf_var_function_content_hash` (hash of the source text) | — |
+| IV2 Wrapper kind | possibly | path today | in the path | — |
+| IV3 Operator behaviour | no (usually) | column | **no** | nothing marks it; and putting it in the operator's identity would change pipeline hashes and so system-tag column names, which makes it a path change |
+| IV4 Execution environment | no | column | **yes**: `__pf_exec_python_version`, `__pf_exec_executor_type`, `__pf_var_git_hash` | — |
+
+### 4.2 What "told apart" has to cover
+
+A value-level change that affects **key columns** has two consequences inside a shared table:
+
+```
+ one table:  …/schema:semantic_v0.1:6fe7280a…/pdb_v1
+
+   __input_data_hash          __pipeline_base_entry_id      id
+   arrow_v0.1:000001d3da…     arrow_v0.1:00000189…           0     ┐ written before the change
+   arrow_v0.1:000001b277…     arrow_v0.1:000001a4…           1     ┘
+   arrow_v0.2:000002136f…     arrow_v0.2:0000027c…           0     ┐ written after the change
+   arrow_v0.2:00000275c5…     arrow_v0.2:000002e1…           1     ┘
+
+ (1) A lookup by key cannot match across the two groups: the key values differ.
+     Nothing wrong is ever returned, but nothing old is ever found either.
+ (2) A read of the whole table returns both groups: 4 rows for 2 inputs,
+     unless the reader selects one group by the distinguishing value.
+```
+
+So for each value-level axis the system needs to say (a) which column value distinguishes the
+groups, and (b) what a reader does with rows from another group: skip them, fail, or reuse
+them. Point (b) is open.
+
+### 4.3 Concrete cases under the rule
+
+| Case | Schema changes? | Verdict | Distinguishing value |
+|---|---|---|---|
+| starfix 0.4 -> 0.5 (`arrow_v0.1` -> `arrow_v0.2`) | no | same table | the label inside `__input_data_hash`, `__pipeline_base_entry_id`, `__record_id` |
+| Arrays move from `.npy` bytes in `large_binary` to `struct<dtype, shape, data>` | yes | new path | — |
+| A future array layout `{"version":2}` with the same struct | to decide: is the extension metadata part of the "data type"? | — | — |
+| Dict insertion order stops affecting structure hashes (PR #301) | yes for nodes whose hashes move: paths and system-tag column names change | new path | — |
+| A SpiralDB table gains the nullability metadata (PR #308) | yes (nullability is part of the type) | new path | — |
+| `GroupBy` changes its member tiebreaker | no | same table | none today |
+| Record ids become content-derived (ITL-817) | no | same table | none today |
+| User edits a function body | no | same table | `__pf_var_function_content_hash` |
+| User bumps the minor version | no | same table | none today |
+| User upgrades Python 3.12 -> 3.13 | no | same table | `__pf_exec_python_version` |
 
 ---
 
@@ -797,15 +837,23 @@ Decisions made in this discussion:
 |---|---|
 | Nov 11, 2026 | Organise by axes of change, not by today's markers: "what we really need is to organize hierarchically all the different elements / ways by which something about the behavior of the Orcapod system can change." |
 | Nov 11, 2026 | "Anything that ends up changing the schema of the results (changes the column name/dtype or adds more columns to results / tags table) should have itself reflected in the path of the table." |
-| Nov 11, 2026 | "Even if the schema/column doesn't change but the meaning of the columns change, we should critically evaluate whether that should be present as entirely different path or if it should just be reflected in a column that keeps that info." (To be evaluated; Part 4 is the proposal.) |
+| Nov 11, 2026 | "Even if the schema/column doesn't change but the meaning of the columns change, we should critically evaluate whether that should be present as entirely different path or if it should just be reflected in a column that keeps that info." |
+| Nov 11, 2026 | Asked for the identity chains (pipeline versus content identity, source identity, source entry identity), system tags and source columns to be laid out explicitly, and for every hash computation site to state precisely what affects its result (sections 1.2.1, 1.2.2, Appendix A). |
+| Nov 11, 2026 | **Path or column rule.** "Only things that would certainly change the schema of the table needs to be part of the path. Something that changes the value of a column while still preserving the schema (same column names, same data types), can happily reside within the same table (and thus share the path) as long as distinct entries within the table can be told apart to reflect the difference in how the entry has come out to be." Consequence: a pure hash change such as `arrow_v0.1` -> `arrow_v0.2` does not get a new path. |
 
 Open questions for the developer:
 
-1. Is the axis list complete and at the right grain? I4 (identity composition) and IV3
-   (operator behaviour) have no marker today: should both be in the system?
-2. Is the path-or-column test of Part 4 accepted?
-3. Type rules (II1, II2) do not reach the path today. Confirm this is a gap to close.
-4. Next: which axes share one name, which get their own, and the exact path layout per option.
+1. Does "data type" include a logical type's extension name and metadata (its stored
+   representation version), or only the physical Arrow type?
+2. What does a reader do on meeting rows of another value-level generation in the same table:
+   skip them, fail, or reuse them? Does the November 11 decision "v0.3 fails explicitly when it
+   meets v0.2 rows" stand?
+3. Function major version: keep it in the path, or make it a column the lookup must match?
+4. Which column tells value-level generations apart: the labels already inside the values,
+   a per-row rules name (the data context key, made meaningful), or both?
+5. Operator behaviour (IV3): should a change be recorded, and where?
+6. Which of the wrong-hash findings in A.9 are fixed before the v0.3 tag?
+7. Is finding A (content hash does not cover data under a given `source_id`) intended?
 
 ---
 
