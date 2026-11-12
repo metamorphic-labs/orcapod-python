@@ -1,7 +1,7 @@
 # ITL-957 Default Source Ids Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:executing-plans to implement this
-> plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. A successor worker
+> plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. A successor worker
 > continues from the first unchecked step; "Progress notes" at the end is kept current.
 
 **Goal:** Every default source id built from a hash has the form
@@ -152,22 +152,22 @@ A source with a given `source_id`: nothing moves.
 - [x] Write `tests/test_core/sources/test_default_source_ids.py`; on the unmodified combine
       branch 23 of its tests fail (no `SOURCE_KIND`, bare hex default, node path in the
       `as_source()` id) and the given-id, determinism, separator and system-tag tests pass.
-- [ ] Send the plan through `ask`; wait. Do not create the issue branch before the
+- [x] Send the plan through `ask`; wait. Do not create the issue branch before the
       coordinator says the six merges are in.
 
 ### Task 1: Branch
 
-- [ ] `git fetch origin && git checkout -b eywalker/itl-957-default-source-ids-built-from-a-hash-carry origin/eywalker/itl-967-v03-hash-step-combine-the-hash-changing`
-- [ ] `git cherry-pick itl-957-step1-wip` (plan + failing tests); push.
-- [ ] `uv run pytest tests/ -q` on the base; record pre-existing failures by name.
-- [ ] `uv run python tests/test_hashing/golden/generate_golden_hashes.py` must leave
+- [x] `git fetch origin && git checkout -b eywalker/itl-957-default-source-ids-built-from-a-hash-carry origin/eywalker/itl-967-v03-hash-step-combine-the-hash-changing`
+- [x] `git cherry-pick itl-957-step1-wip` (plan + failing tests); push.
+- [x] `uv run pytest tests/ -q` on the base; record pre-existing failures by name.
+- [x] `uv run python tests/test_hashing/golden/generate_golden_hashes.py` must leave
       `git status` clean on the base. If not, stop and `ask`.
 
 ### Task 2: `hash_source_id`
 
 **Files:** create `src/orcapod/core/sources/source_ids.py`, `tests/test_core/sources/test_source_ids.py`.
 
-- [ ] Failing test:
+- [x] Failing test:
 
 ```python
 """``hash_source_id``: the one definition of a hash-based default source id (ITL-957)."""
@@ -201,8 +201,8 @@ def test_label_must_be_non_empty_without_a_colon(label):
         hash_source_id("dict", ContentHash(label, b"\x00" * 32))
 ```
 
-- [ ] Run `uv run pytest tests/test_core/sources/test_source_ids.py -q`: fails, module missing.
-- [ ] Implement:
+- [x] Run `uv run pytest tests/test_core/sources/test_source_ids.py -q`: fails, module missing.
+- [x] Implement:
 
 ```python
 """The form of a default source id that is built from a hash."""
@@ -242,13 +242,13 @@ def hash_source_id(
     return f"{kind}:{content_hash.to_string(hexdigits=hexdigits)}"
 ```
 
-- [ ] Tests pass; `git commit -m "feat(sources): hash_source_id, the form of a hash-based default source id (ITL-957)"`.
+- [x] Tests pass; `git commit -m "feat(sources): hash_source_id, the form of a hash-based default source id (ITL-957)"`.
 
 ### Task 3: In-memory sources and the builder
 
 **Files:** `stream_builder.py`, the four source modules, `serialization.py`, `tests/test_core/sources/test_stream_builder.py`.
 
-- [ ] Add to `test_stream_builder.py` (the builder is the unit under test there):
+- [x] Add to `test_stream_builder.py` (the builder is the unit under test there):
 
 ```python
 def test_build_without_source_id_or_kind_raises(builder, simple_table):
@@ -257,7 +257,7 @@ def test_build_without_source_id_or_kind_raises(builder, simple_table):
 ```
 
       (use that file's existing builder and table fixtures; rename to match them.)
-- [ ] `stream_builder.py`: add the keyword `source_kind: str | None = None` after
+- [x] `stream_builder.py`: add the keyword `source_kind: str | None = None` after
       `source_id`; replace step 6 with
 
 ```python
@@ -277,17 +277,17 @@ def test_build_without_source_id_or_kind_raises(builder, simple_table):
       ``<source_kind>:<algorithm label>:<hex>`` of the table hash, which changes when rows
       are reordered; …` / `source_kind: Kind prefix of the default source id. Required
       when ``source_id`` is not given.`
-- [ ] Each of the four classes: `SOURCE_KIND: ClassVar[str] = "arrow_table"` (`"dict"`,
+- [x] Each of the four classes: `SOURCE_KIND: ClassVar[str] = "arrow_table"` (`"dict"`,
       `"list"`, `"data_frame"`) with the comment `# The config type key; also the kind
       prefix of the default source id.`; `to_config` returns `"source_type": self.SOURCE_KIND`;
       the `builder.build(...)` call gains `source_kind=self.SOURCE_KIND`.
-- [ ] `serialization._build_source_registry`: the four entries become
+- [x] `serialization._build_source_registry`: the four entries become
       `DictSource.SOURCE_KIND: DictSource`, and so on.
-- [ ] Give `source_kind="arrow_table"` to the other direct `builder.build` calls that pass
+- [x] Give `source_kind="arrow_table"` to the other direct `builder.build` calls that pass
       no `source_id` (`tests/test_core/conftest.py`, `test_streams.py`,
       `test_lazy_conversion.py`, `test_source_builder_integration.py`, `test_stream_builder.py`,
       `test_polling_source.py`: check each with `grep -n "\.build(" `).
-- [ ] `uv run pytest tests/test_core/sources -q`: the in-memory classes of
+- [x] `uv run pytest tests/test_core/sources -q`: the in-memory classes of
       `test_default_source_ids.py` pass. Commit
       `feat(sources)!: in-memory default source ids are <kind>:<label>:<hex> (ITL-957)`.
 
@@ -295,58 +295,58 @@ def test_build_without_source_id_or_kind_raises(builder, simple_table):
 
 **Files:** `derived_source.py`, `function_node.py`, `operator_node.py`.
 
-- [ ] `DerivedSource`: add `SOURCE_KIND: ClassVar[str] = "derived"`; default becomes
+- [x] `DerivedSource`: add `SOURCE_KIND: ClassVar[str] = "derived"`; default becomes
       `source_id = hash_source_id(self.SOURCE_KIND, origin.content_hash())`.
-- [ ] Both `as_source()` methods: delete the `path_str` / `source_id` lines and the
+- [x] Both `as_source()` methods: delete the `path_str` / `source_id` lines and the
       `source_id=source_id` argument.
-- [ ] `test_derived_source.py`: replace `test_source_id_contains_pipeline_path` with
+- [x] `test_derived_source.py`: replace `test_source_id_contains_pipeline_path` with
       `test_source_id_has_no_pipeline_path` (`assert "/" not in src.source_id`).
       After #314: update `test_default_derived_source_ids_keep_the_hash_label` so
       `from_node.source_id == f"derived:{labelled}"`.
-- [ ] `uv run pytest tests/test_core/sources tests/test_core/operators tests/test_hashing/test_hash_label_rule.py -q`.
+- [x] `uv run pytest tests/test_core/sources tests/test_core/operators tests/test_hashing/test_hash_label_rule.py -q`.
       Commit `feat(nodes)!: as_source() uses the derived:<label>:<hex> default id (ITL-957)`.
 
 ### Task 5: Pinned tests and golden files
 
-- [ ] `test_materialize_source_info.py::TestIdentityPinned` and
+- [x] `test_materialize_source_info.py::TestIdentityPinned` and
       `test_group_by.py::test_record_id_breaks_ties_between_duplicate_tags`: re-record the
       values that move, with a line in each docstring naming ITL-957 as the cause.
-- [ ] `tests/test_hashing/golden/cases.py`: `"default_source_id": {"source_kind": "arrow_table"}`.
+- [x] `tests/test_hashing/golden/cases.py`: `"default_source_id": {"source_kind": "arrow_table"}`.
       Add a case `schema` / `default_source_ids` that records `source_id` and
       `content_hash().to_string()` of an `ArrowTableSource`, `DictSource`, `ListSource` and
       `DataFrameSource` built with no `source_id`, and the `source_id` of
       `FunctionJobNode.as_source()` and `OperatorJobNode.as_source()` (new entries).
-- [ ] Regenerate: `uv run python tests/test_hashing/golden/generate_golden_hashes.py`.
+- [x] Regenerate: `uv run python tests/test_hashing/golden/generate_golden_hashes.py`.
       `git diff --stat tests/test_hashing/golden/data` must show only: the 8 changed
       entries of `source_stream_builder.default_source_id`, plus added lines of the new
       case. Anything else: stop and `ask`. Write the list into "Progress notes".
-- [ ] Commit `test(golden): default source ids (ITL-957)`.
+- [x] Commit `test(golden): default source ids (ITL-957)`.
 
 ### Task 6: Docs, changelog, design issue
 
-- [ ] `docs/reference/hashing.md`: site 4 (summary row and section) gives the format, the
+- [x] `docs/reference/hashing.md`: site 4 (summary row and section) gives the format, the
       label and the truncation rule; the `RootSource` row; on #314's rows, move "the default
       source id built from a table hash" from "bare digest in a name" to "labelled hash
       inside a source id" and change `<node path>:<label>:<hex>` to `derived:<label>:<hex>`.
-- [ ] `docs/concepts/sources.md` near line 246: one paragraph on the default id with an
+- [x] `docs/concepts/sources.md` near line 246: one paragraph on the default id with an
       example (`dict:arrow_…:…`), no executed sample printing a hash.
-- [ ] `CLAUDE.md` and `.zed/rules`, "Two identity chains": "the default `source_id` of the
+- [x] `CLAUDE.md` and `.zed/rules`, "Two identity chains": "the default `source_id` of the
       in-memory sources (`<source kind>:<algorithm label>:<hex>` of the table hash, …)", and a
       bullet under "Important implementation details": a hash-based default id is built only
       by `hash_source_id`; a new source class declares `SOURCE_KIND`.
-- [ ] Docstrings: `ArrowTableSource`, `DerivedSource`, `as_source()`.
-- [ ] `changelog.d/ITL-957.md`: `### Breaking changes and migration` (default ids of the four
+- [x] Docstrings: `ArrowTableSource`, `DerivedSource`, `as_source()`.
+- [x] `changelog.d/ITL-957.md`: `### Breaking changes and migration` (default ids of the four
       in-memory sources and of `as_source()`; what moves; pass an explicit `source_id` to keep
       a name) and `### Changed` (`SOURCE_KIND`).
-- [ ] `design_issues/ITL-957-SRC1.md`: `## Sources`, `### SRC1 — Default source ids built
+- [x] `design_issues/ITL-957-SRC1.md`: `## Sources`, `### SRC1 — Default source ids built
       from a hash had no kind or label`, **Status:** resolved, **Fix:** note.
-- [ ] `uv run pytest tests/test_docs tests/test_changelog_fragments.py -q`; commit `docs: …`.
+- [x] `uv run pytest tests/test_docs tests/test_changelog_fragments.py -q`; commit `docs: …`.
 
 ### Task 7: Verify and deliver
 
-- [ ] `uv run ruff format . && uv run --with ruff ruff check . && uv run --with basedpyright basedpyright` (exit code 0) `&& uv run pytest tests/`.
-- [ ] sensei:mid-development retrospective; sensei:verification-before-completion.
-- [ ] Merge current `origin/…itl-967…` (and `origin/main` if it moved), rerun the suite.
+- [x] `uv run ruff format . && uv run --with ruff ruff check . && uv run --with basedpyright basedpyright` (exit code 0) `&& uv run pytest tests/`. (basedpyright: 2 errors, both in the combine branch's `tests/test_pipeline/test_hash_step_combined.py`, none from this change.)
+- [x] sensei:mid-development retrospective; sensei:verification-before-completion.
+- [x] Merge current `origin/…itl-967…` (and `origin/main` if it moved), rerun the suite.
 - [ ] Push; open the PR against `main` with sensei:create-pr: "Stacked on the ITL-967 pull
       request"; `Fixes ITL-957`; the list of golden entries moved and added.
       `orca linear attach`, `orca worktree set --worktree current --pr <n>`.
@@ -359,3 +359,22 @@ def test_build_without_source_id_or_kind_raises(builder, simple_table):
 ## Progress notes
 
 - 2026-11-11: Step 1 done up to the `ask`. Heartbeat loop runs in the background.
+- 2026-11-12: Coordinator approved A1 (keep `path_n_char`, hex only), B1 (PollingSource
+  unchanged), C (new golden case), and the design. Issue branch created from the combine
+  branch at `6ba6cc33`; combine branch merged again at `b30b6fa3` and at `8c2066ac` (its
+  golden regeneration).
+- Deviations from the tasks above: the new golden case is `pipeline` / `default_source_ids`
+  (not `schema`); the design-issue file is `design_issues/ITL-957-S2.md`; `test_group_by`'s
+  moved test is `test_falls_back_to_record_id_when_key_covers_all_tags` (under the `_v1`
+  labels the other one keeps its order).
+- Found while implementing: #314's
+  `TestRenamingALabelChangesNoDigest::test_every_pinned_value_keeps_its_digest` flagged the
+  default-id golden entries (content hash and record ids of a source with no given id
+  depend on the label, through the name). That is rule 5a's accepted consequence; the test
+  now allows exactly those entries (`DEFAULT_ID_CASES`) and nothing else.
+- Golden regeneration on top of `8c2066ac`: 8 entries changed (schema
+  `source_stream_builder.default_source_id`: `.source_id`, `.content_hash`, three
+  `_tag_source_id` values, three `_tag_record_id` values), 10 added (pipeline
+  `default_source_ids.*`). Nothing else.
+- Full suite at that point: 8583 passed, 101 skipped, 18 xfailed, 0 failed.
+- Remaining: PR, CI, CodeRabbit rounds, `worker_done`.
