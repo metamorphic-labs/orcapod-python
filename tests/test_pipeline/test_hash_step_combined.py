@@ -112,6 +112,7 @@ class TestStoredPathsAndKeys:
     """Layouts (ITL-944), bare digests in paths and labelled row keys (ITL-945) together."""
 
     def test_every_table_path_holds_bare_digests_and_ends_with_a_current_layout(self):
+        """Table paths end in a current layout and hold digests without a hasher label."""
         store = InMemoryArrowDatabase()
         _ = _operator_job(store).run()
 
@@ -126,6 +127,9 @@ class TestStoredPathsAndKeys:
                     assert BARE_SHA256.fullmatch(digest), path
 
     def test_operator_cache_rows_carry_a_labelled_key_and_the_data_context(self):
+        """Operator cache rows have an ``arrow_v1:`` key and name the current data
+        context.
+        """
         store = InMemoryArrowDatabase()
         _ = _operator_job(store).run()
 
@@ -145,6 +149,9 @@ class TestReadOnlyOperatorNode:
     def _read_only_node(
         self, store: InMemoryArrowDatabase, tmp_path: pathlib.Path
     ) -> OperatorJobNode:
+        """Run and save the operator job, then rebuild its ``sel`` node without an
+        operator.
+        """
         job = _operator_job(store)
         _ = job.run()
         saved = tmp_path / "job.json"
@@ -168,22 +175,48 @@ class TestReadOnlyOperatorNode:
         )
 
     def test_it_names_the_data_context_saved_with_it(self, tmp_path: pathlib.Path):
+        """The read-only node reports the current data context key."""
         node = self._read_only_node(InMemoryArrowDatabase(), tmp_path)
         assert node.data_context_key == CURRENT
 
     def test_it_reads_the_rows_stored_under_its_data_context(
         self, tmp_path: pathlib.Path
     ):
+        """The read-only node returns the rows the run stored."""
         node = self._read_only_node(InMemoryArrowDatabase(), tmp_path)
         records = node.get_all_records()
         assert records is not None
         assert sorted(cast(list[int], records["double"].to_pylist())) == [2, 4]
 
 
+class TestReadOnlyFunctionNode:
+    """A function node loaded without its pod names its data context (CodeRabbit, PR #323)."""
+
+    def test_it_names_the_data_context_saved_with_it(self, tmp_path: pathlib.Path):
+        """The key comes from the descriptor when there is no function pod to ask."""
+        from orcapod.core.nodes.function_node import FunctionJobNode
+
+        store = InMemoryArrowDatabase()
+        job = _operator_job(store)
+        _ = job.run()
+        saved = tmp_path / "job.json"
+        job.save(str(saved))
+        nodes = json.loads(saved.read_text())["pipeline"]["nodes"]
+        (descriptor,) = [d for d in nodes.values() if d.get("label") == "dbl"]
+        database = store.at(JOB_NAME)
+        node = FunctionJobNode.from_descriptor(
+            descriptor,
+            input_stream=None,
+            databases={"pipeline": database, "result": database.at("_result")},
+        )
+        assert node.data_context_key == CURRENT
+
+
 class TestSideEffectNodeChecksEveryRun:
     """A sink looks for completions it cannot match before every run (CodeRabbit, PR #315)."""
 
     def test_a_table_written_before_v03_that_appears_between_runs_is_refused(self):
+        """A sink's second run raises on an old log added after its first run."""
         store = InMemoryArrowDatabase()
         job = _sink_job(store)
         _ = job.run()
@@ -217,6 +250,7 @@ class TestSideEffectNodeChecksEveryRun:
         assert delivered == []
 
     def test_the_error_does_not_offer_a_fresh_store_as_a_safe_retry(self):
+        """The error message warns that a fresh store repeats every side effect."""
         error = SideEffectLogDataContextError(
             (("j", "side_effects", "notify", "schema:abc", "tdb_v1"),),
             "std:v0.1:default",

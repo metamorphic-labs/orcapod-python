@@ -560,9 +560,13 @@ class TestColumnSelectionIdentity:
         """Mutating the caller's list later does not change the operator."""
         source = _xy_source()
         columns = ["x"]
-        stream = SelectDataColumns(columns=columns)(source)
-        before = stream.pipeline_hash()
+        operator = SelectDataColumns(columns=columns)
+        before = operator(source).pipeline_hash()
         columns.append("y")
+        # The operator built before the mutation still selects "x" only.
+        after = operator(source)
+        assert after.keys()[1] == ("x",)
+        assert after.pipeline_hash() == before
         assert SelectDataColumns(columns=["x"])(source).pipeline_hash() == before
 
 
@@ -684,6 +688,7 @@ class TestRecordIdType:
         sync_node.run()
 
         async def run_async() -> tuple[Any, Any]:
+            """Run an equal node with ``async_execute``; return its database and it."""
             db = InMemoryArrowDatabase()
             node = OperatorJobNode(
                 SelectDataColumns(["x"]),

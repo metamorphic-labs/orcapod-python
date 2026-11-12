@@ -50,6 +50,7 @@ def _make_registry_with_type(
             return str
 
         def readable_extension_metadata(self):
+            """Return the metadata this type writes as the only metadata it can read."""
             return (self.get_arrow_extension_type().__arrow_ext_serialize__(),)
 
         def get_arrow_extension_type(self):

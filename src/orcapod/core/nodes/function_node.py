@@ -279,6 +279,13 @@ class FunctionNodeBase(StreamBase):
 
     @property
     def data_context_key(self) -> str:
+        """Key of the node's data context.
+
+        A node loaded from a saved job without its function pod (read-only) has
+        the data context saved in its descriptor.
+        """
+        if self._function_pod is None:
+            return self._data_context.context_key
         return self._function_pod.data_context_key
 
     @property

@@ -276,13 +276,35 @@ class _RecordStore(Protocol):
     """The part of ``ArrowDatabaseProtocol`` this module needs (no import cycle)."""
 
     @property
-    def base_path(self) -> tuple[str, ...]: ...
+    def base_path(self) -> tuple[str, ...]:
+        """Path of this store's view from the root of the underlying store."""
+        ...
 
-    def table_exists(self, record_path: tuple[str, ...]) -> bool: ...
+    def table_exists(self, record_path: tuple[str, ...]) -> bool:
+        """Return whether a table is stored at ``record_path``.
+
+        Args:
+            record_path: Path of the table, relative to ``base_path``.
+
+        Returns:
+            True if the store holds a table at that path.
+        """
+        ...
 
     def get_all_records(
         self, record_path: tuple[str, ...], record_id_column: str | None = None
-    ) -> "pa.Table | None": ...
+    ) -> "pa.Table | None":
+        """Return every row of the table at ``record_path``.
+
+        Args:
+            record_path: Path of the table, relative to ``base_path``.
+            record_id_column: Name of a column to add holding each row's record
+                id; no such column when ``None``.
+
+        Returns:
+            The rows as an Arrow table, or ``None`` if there are none.
+        """
+        ...
 
 
 class StaleTable(NamedTuple):

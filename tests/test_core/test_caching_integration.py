@@ -445,6 +445,9 @@ class TestOperatorPodCaching:
             )
             is None
         )
+        # Nothing was written anywhere else either (for example at the path
+        # without the layout component).
+        assert operator_db.list_table_paths() == []
 
     def test_log_computes_and_writes(self, clinic_a, source_db, operator_db):
         patients, labs = self._make_joined_streams(clinic_a, source_db)

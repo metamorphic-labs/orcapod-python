@@ -58,6 +58,8 @@ ROWS = [{"k": "a", "x": 1}, {"k": "b", "x": 2}]
 CURRENT = "std:v1:default"
 PRE_V1 = "std:v0.1:default"
 OTHER = "std:v0.9:other"
+# Added to the data values of rows stored under ``OTHER``.
+OTHER_OFFSET = 100
 COLUMN = "__data_context"
 RID = "__rid"
 
@@ -166,6 +168,7 @@ def new_store(
     made: list[Store] = []
 
     def make() -> Store:
+        """Create an empty store of the parametrized backend and remember it."""
         if request.param == "in_memory":
             store: Store = InMemoryArrowDatabase()
         else:
@@ -234,7 +237,12 @@ def copy_as_other_context(written: Store, target: Store) -> None:
         columns = {
             name: pa.array(
                 [
-                    _other_key(value) if name in KEY_COLUMNS else value
+                    _other_key(value)
+                    if name in KEY_COLUMNS
+                    # Other data values too, so a read that picks these rows shows.
+                    else value + OTHER_OFFSET
+                    if name in ("double", "x")
+                    else value
                     for value in rows.column(name).to_pylist()
                 ],
                 type=rows.schema.field(name).type,
@@ -311,12 +319,18 @@ LAYOUTS = ("pdb_v2", "rdb_v2", "odb_v1", "sdb_v1", "tdb_v2")
 
 
 class TestColumnAndLayout:
+    """What this version writes: the layout components and the ``__data_context``
+    column.
+    """
+
     def test_every_table_is_at_the_new_layout(self, store: Store):
+        """The last path component of each written table is one of ``LAYOUTS``."""
         run_everything(store)
         layouts = sorted(path[-1] for path in reopened(store).list_sources())
         assert layouts == sorted(LAYOUTS)
 
     def test_explicit_cache_path_ends_with_the_layout_component(self, store: Store):
+        """A ``cache_path`` given to ``CachedSource`` gets ``sdb_v1`` appended."""
         table = pa.table({"k": ["a"], "x": [1]})
         source = CachedSource(
             ArrowTableSource(table, tag_columns=["k"], source_id="fixed"),
@@ -329,6 +343,9 @@ class TestColumnAndLayout:
 
     @pytest.mark.parametrize("layout", LAYOUTS)
     def test_every_row_names_the_current_data_context(self, store: Store, layout: str):
+        """Each table kind has a ``large_string`` ``__data_context`` column of
+        ``CURRENT``.
+        """
         run_everything(store)
         records = reopened(store).get_all_records(table_path(store, layout))
         assert records is not None
@@ -336,6 +353,7 @@ class TestColumnAndLayout:
         assert records.column(COLUMN).to_pylist() == [CURRENT, CURRENT]
 
     def test_the_old_context_columns_are_gone(self, store: Store):
+        """No table has a ``_context_key`` or ``__input_data_context_key`` column."""
         run_everything(store)
         for path in reopened(store).list_sources():
             records = reopened(store).get_all_records(path)
@@ -361,6 +379,7 @@ class TestColumnAndLayout:
     def test_store_written_by_this_version_is_reused(
         self, store: Store, orchestrator: Orchestrator
     ):
+        """A second run calls and delivers nothing and yields rows of ``CURRENT``."""
         _ = build_job(store, with_operator=True, with_sink=True).run(
             orchestrator=orchestrator
         )
@@ -408,20 +427,24 @@ class TestFunctionVersionColumn:
     """Every result row holds the full version string of the function that produced it."""
 
     def test_declared_version_is_stored_in_full(self, store: Store):
+        """A function declared with ``version="v3.7"`` stores ``v3.7`` on its rows."""
         versions = _stored_function_versions(store, triple_v3_7.pod)
         assert versions == ["v3.7", "v3.7"]
 
     def test_function_pod_decorator_default_version(self, store: Store):
-        expected = double.pod.data_function.to_config()["config"]["version"]
-        assert _stored_function_versions(store, double.pod) == [expected, expected]
+        """A decorated function without a version stores the default version, ``v0.0``."""
+        assert _stored_function_versions(store, double.pod) == ["v0.0", "v0.0"]
 
     def test_from_fn_default_version(self, store: Store):
+        """A pod from ``FunctionPod.from_fn`` stores the same default version, ``v0.0``."""
         pod = FunctionPod.from_fn(_triple, output_keys="tripled")
-        expected = pod.data_function.to_config()["config"]["version"]
-        assert _stored_function_versions(store, pod) == [expected, expected]
+        assert _stored_function_versions(store, pod) == ["v0.0", "v0.0"]
 
     def test_version_is_read_back_with_the_meta_columns(self, store: Store):
+        """The version column shows with ``all_info=True`` and not in ``as_table()``."""
+
         def build(database: Store) -> PipelineJob:
+            """A job running ``triple_v3_7`` over ``ROWS`` on ``database``."""
             job = PipelineJob(name=JOB_NAME, store=database)
             with job:
                 triple_v3_7.pod(
@@ -458,12 +481,15 @@ def _saved_by_v02(job: PipelineJob, path: pathlib.Path) -> None:
 
 
 class TestJobSavedByV02:
+    """Loading a job file that names the pre-v1 data context on every node."""
+
     def test_it_loads_under_the_current_data_context_and_shows_no_rows(
         self,
         new_store: Callable[[], Store],
         tmp_path: pathlib.Path,
         caplog: pytest.LogCaptureFixture,
     ):
+        """Loading over a v0.2 store warns about both contexts and reads no rows."""
         written = new_store()
         completed = build_job(written, with_operator=True)
         _ = completed.run()
@@ -487,6 +513,7 @@ class TestJobSavedByV02:
     def test_after_a_run_of_this_version_it_shows_the_new_rows(
         self, new_store: Callable[[], Store], tmp_path: pathlib.Path
     ):
+        """Once this version has run on the store, the loaded job reads its rows."""
         written = new_store()
         completed = build_job(written, with_operator=True)
         _ = completed.run()
@@ -508,9 +535,12 @@ class TestJobSavedByV02:
 
 
 class TestOldLayout:
+    """Tables at a v0.2 layout are skipped, reported and left unchanged."""
+
     def test_old_tables_are_not_read_and_inputs_are_recomputed(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """A run over a v0.2 store calls the function for every input."""
         store = v02_store(new_store)
 
         job = build_job(store, with_operator=True)
@@ -521,6 +551,7 @@ class TestOldLayout:
         assert rows_of(job.nodes["sel"].as_table()) == [2, 4]
 
     def test_old_tables_alone_give_no_rows(self, new_store: Callable[[], Store]):
+        """In ``REPLAY`` mode a v0.2 store yields no rows and no function call."""
         store = v02_store(new_store)
         job = build_job(store, with_operator=True, cache_mode=CacheMode.REPLAY)
         node = job.nodes["dbl"]
@@ -532,6 +563,7 @@ class TestOldLayout:
     def test_old_tables_stay_unchanged(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """A run adds new tables and leaves the rows of the old ones as they were."""
         store = v02_store(new_store)
         before = snapshot(store)
 
@@ -546,6 +578,7 @@ class TestOldLayout:
     def test_delta_files_written_by_v02_are_byte_identical(
         self, tmp_path: pathlib.Path
     ):
+        """A run on a Delta store adds files and changes none of the old ones."""
         written = DeltaTableDatabase(tmp_path / "written")
         _ = build_job(written, with_operator=True).run()
         root = tmp_path / "store"
@@ -562,12 +595,17 @@ class TestOldLayout:
     def test_cached_source_ignores_and_keeps_an_old_cache(
         self, new_store: Callable[[], Store]
     ):
+        """A cached source reads from its source and leaves the old cache table alone."""
         store = v02_store(new_store)
         before = snapshot(store)
 
         source = _cached_source(store)
         assert rows_of(source.as_table(), "x") == [1, 2]
         assert rows_of(source.get_all_records(), "x") == [1, 2]
+        # The rows came from the source, not from the old cache (which holds the
+        # same values): they were written to a cache of this version's layout.
+        assert source.cache_path[-1] == "sdb_v1"
+        assert stored_data_contexts(reopened(store), source.cache_path) == {CURRENT: 2}
 
         after = snapshot(store)
         for path, old_rows in before.items():
@@ -579,6 +617,7 @@ class TestOldLayout:
         orchestrator: Orchestrator,
         caplog: pytest.LogCaptureFixture,
     ):
+        """Each of the four old tables gets one warning with its row count and context."""
         store = v02_store(new_store)
         old_paths = ["/".join(path) for path in sorted(reopened(store).list_sources())]
 
@@ -641,6 +680,9 @@ class TestOldLayout:
             assert report.startswith("Found 2 rows in stored table")
 
     def test_the_v0_migration_machinery_is_gone(self):
+        """``SchemaVersionError``, ``ignore_schema`` and ``orcapod.migrations`` no
+        longer exist.
+        """
         import orcapod.errors
         from orcapod.types import NodeConfig
 
@@ -652,6 +694,7 @@ class TestOldLayout:
     def test_nothing_is_reported_for_a_store_of_this_version(
         self, store: Store, caplog: pytest.LogCaptureFixture
     ):
+        """A rerun on a store of this version logs no data context warning."""
         run_everything(store)
         with caplog.at_level(logging.WARNING, logger="orcapod"):
             run_everything(store)
@@ -664,9 +707,12 @@ class TestOldLayout:
 
 
 class TestRowsOfAnotherDataContext:
+    """Rows of another data context in a current-layout table are skipped."""
+
     def test_they_are_ignored_and_inputs_are_recomputed(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """A run recomputes every input and adds its rows beside the foreign ones."""
         store = other_context_store(new_store)
         before = snapshot(store)
 
@@ -684,6 +730,7 @@ class TestRowsOfAnotherDataContext:
                 assert row in after[path], path
 
     def test_alone_they_give_no_rows(self, new_store: Callable[[], Store]):
+        """In ``REPLAY`` mode a store of only foreign rows yields no rows and no call."""
         store = other_context_store(new_store)
         job = build_job(store, with_operator=True, cache_mode=CacheMode.REPLAY)
         node = job.nodes["dbl"]
@@ -696,6 +743,7 @@ class TestRowsOfAnotherDataContext:
     def test_function_node_reads_current_rows_only(
         self, new_store: Callable[[], Store]
     ):
+        """Every read method of a function node returns only the rows of ``CURRENT``."""
         store = both_contexts_store(new_store)
         node = build_job(store).nodes["dbl"]
         assert rows_of(node.as_table()) == [2, 4]
@@ -706,6 +754,7 @@ class TestRowsOfAnotherDataContext:
     def test_current_rows_are_reused(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """With rows of both contexts stored, a run calls nothing and writes nothing."""
         store = both_contexts_store(new_store)
         before = snapshot(store)
 
@@ -719,6 +768,7 @@ class TestRowsOfAnotherDataContext:
     def test_operator_node_reads_current_rows_only(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """An operator node in ``REPLAY`` mode returns only the rows of ``CURRENT``."""
         store = both_contexts_store(new_store)
         job = build_job(store, with_operator=True, cache_mode=CacheMode.REPLAY)
         assert rows_of(job.nodes["sel"].get_all_records()) == [2, 4]
@@ -728,6 +778,7 @@ class TestRowsOfAnotherDataContext:
     def test_cached_source_reads_current_rows_only(
         self, new_store: Callable[[], Store]
     ):
+        """A cached source returns only the cached rows of ``CURRENT``."""
         store = both_contexts_store(new_store)
         source = _cached_source(store)
         assert rows_of(source.as_table(), "x") == [1, 2]
@@ -771,6 +822,7 @@ class TestRowsOfAnotherDataContext:
         orchestrator: Orchestrator,
         caplog: pytest.LogCaptureFixture,
     ):
+        """The pipeline and operator tables each get one warning counting skipped rows."""
         store = both_contexts_store(new_store)
         caplog.clear()  # the store was prepared by a run that reported too
         with caplog.at_level(logging.WARNING, logger="orcapod"):
@@ -828,6 +880,7 @@ class TestSideEffects:
     def test_an_old_layout_log_raises_and_nothing_is_delivered(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """A ``tdb_v1`` log raises an error naming the log, both contexts and the node."""
         store = _sink_store(new_store, copy_as_v02)
         before = snapshot(store)
 
@@ -853,6 +906,7 @@ class TestSideEffects:
     def test_logged_deliveries_of_another_data_context_raise(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """A ``tdb_v2`` log holding rows of ``OTHER`` raises and nothing is delivered."""
         store = _sink_store(new_store, copy_as_other_context)
         before = snapshot(store)
 
@@ -866,6 +920,7 @@ class TestSideEffects:
         assert info.value.record_path[-1] == "tdb_v2"
 
     def test_delta_log_files_are_untouched(self, tmp_path: pathlib.Path):
+        """The refused run leaves every file of the Delta store byte for byte."""
         _ = _sink_job(DeltaTableDatabase(tmp_path / "written")).run()
         delivered.clear()
         root = tmp_path / "store"
@@ -893,6 +948,7 @@ class TestSideEffects:
     def test_completions_logged_by_this_version_are_not_delivered_again(
         self, store: Store, orchestrator: Orchestrator
     ):
+        """A second sink run on the same store delivers nothing."""
         _ = _sink_job(store).run(orchestrator=orchestrator)
         delivered.clear()
         _ = _sink_job(store).run(orchestrator=orchestrator)
@@ -943,6 +999,7 @@ class TestSideEffectFunctionNodes:
     def test_old_layout_tables_raise_and_nothing_is_delivered(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """Old pipeline and result tables raise an error that names both of them."""
         store = _notify_store(new_store, copy_as_v02)
         before = snapshot(store)
 
@@ -962,6 +1019,9 @@ class TestSideEffectFunctionNodes:
     def test_rows_of_another_data_context_raise(
         self, new_store: Callable[[], Store], orchestrator: Orchestrator
     ):
+        """Current-layout tables holding rows of ``OTHER`` raise and nothing is
+        delivered.
+        """
         store = _notify_store(new_store, copy_as_other_context)
         before = snapshot(store)
 
@@ -997,6 +1057,7 @@ class TestSideEffectFunctionNodes:
     def test_store_of_this_version_is_reused_without_delivering(
         self, store: Store, orchestrator: Orchestrator
     ):
+        """A second run of the ``notify`` job on the same store delivers nothing."""
         _ = _notify_job(store).run(orchestrator=orchestrator)
         delivered.clear()
         _ = _notify_job(store).run(orchestrator=orchestrator)
@@ -1108,6 +1169,7 @@ class TestInputOfAnotherDataContext:
     """
 
     def test_function_node_raises_and_writes_nothing(self, store: Store):
+        """Running a function node over a stream of ``OTHER`` raises before any call."""
         node = FunctionJobNode(
             function_pod=double.pod,  # pyright: ignore[reportArgumentType]  # the decorator types .pod as the pod base class
             input_stream=_other_context_stream(),
@@ -1145,6 +1207,7 @@ class TestInputOfAnotherDataContext:
     def test_cached_function_raises_before_calling_it(
         self, store: Store, other_context: contexts.DataContext
     ):
+        """A cached function given a ``Data`` of ``OTHER`` raises and stores nothing."""
         cached = CachedDataFunction(double.pod.data_function, result_database=store)
 
         with pytest.raises(InputValidationError) as info:
@@ -1155,6 +1218,7 @@ class TestInputOfAnotherDataContext:
         assert reopened(store).list_sources() == []
 
     def test_stored_operator_node_raises_and_writes_nothing(self, store: Store):
+        """A logging operator node over a stream of ``OTHER`` raises and stores nothing."""
         node = OperatorJobNode(
             operator=SelectDataColumns(["x"]),
             input_streams=[_other_context_stream()],
@@ -1202,6 +1266,7 @@ class TestInputOfAnotherDataContext:
         assert tables == []
 
     def test_side_effect_pod_raises_before_delivering(self):
+        """A sink pod over a stream of ``OTHER`` raises and delivers nothing."""
         sink = sink_pod(_deliver)
         assert isinstance(sink, SideEffectPod)
 
@@ -1248,6 +1313,7 @@ class TestInputOfAnotherDataContext:
         }
 
     def test_cached_source_raises_and_writes_nothing(self, store: Store):
+        """A cached source of ``CURRENT`` over a source of ``OTHER`` raises on read."""
         table = pa.table({"k": ["a", "b"], "x": [1, 2]})
         source = CachedSource(
             ArrowTableSource(
@@ -1270,8 +1336,11 @@ class TestInputOfAnotherDataContext:
 
 
 class TestStoredDataContexts:
+    """``stored_data_contexts`` counts the rows of a table per data context."""
+
     @pytest.mark.parametrize("layout", LAYOUTS)
     def test_table_of_this_version(self, store: Store, layout: str):
+        """Each table kind written by this version holds two rows of ``CURRENT``."""
         run_everything(store)
         path = table_path(store, layout)
         assert stored_data_contexts(reopened(store), path) == {CURRENT: 2}
@@ -1280,6 +1349,7 @@ class TestStoredDataContexts:
     def test_table_holding_two_data_contexts(
         self, new_store: Callable[[], Store], layout: str
     ):
+        """A table with rows of both contexts reports two rows for each."""
         store = both_contexts_store(new_store)
         path = table_path(store, layout)
         assert stored_data_contexts(reopened(store), path) == {CURRENT: 2, OTHER: 2}
@@ -1287,6 +1357,7 @@ class TestStoredDataContexts:
     def test_old_layout_table_is_the_pre_v1_data_context(
         self, new_store: Callable[[], Store]
     ):
+        """Every table at a v0.2 layout counts its rows under ``PRE_V1``."""
         store = v02_store(new_store, with_sink=True)
         paths = reopened(store).list_sources()
         assert len(paths) == 5
@@ -1294,4 +1365,5 @@ class TestStoredDataContexts:
             assert stored_data_contexts(reopened(store), path) == {PRE_V1: 2}
 
     def test_missing_table_holds_nothing(self, store: Store):
+        """A path with no table gives an empty mapping."""
         assert stored_data_contexts(store, ("no", "such", "table")) == {}

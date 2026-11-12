@@ -259,6 +259,7 @@ class TestUnhashableColumnTypes:
         return pa.table({"k": ["a", "b"], "v": [1.0, 2.0], **extra})
 
     def test_fixed_size_list_column_is_hashed(self):
+        """A source accepts a ``fixed_size_list`` column and keeps its type."""
         table = self._table(rgb=pa.array([[1, 2, 3], [4, 5, 6]], self._FSL))
         source = ArrowTableSource(table, tag_columns=["k"])
         assert source.as_table().schema.field("rgb").type == self._FSL

@@ -84,6 +84,7 @@ class Thing:
     """A third-party value type stored as a string."""
 
     def __init__(self, text: str) -> None:
+        """Store ``text`` as the value."""
         self.text = text
 
 
@@ -99,21 +100,27 @@ def _thing_logical_type(
     )
 
     class LogicalThing(BaseLogicalType):
+        """Logical type for ``Thing`` built from the enclosing function's arguments."""
+
         logical_type_name = "thirdparty.thing"
         python_type = Thing
         _arrow: pa.ExtensionType = arrow_cls()
         _polars: pl.BaseExtension = polars_cls()
 
         def get_arrow_extension_type(self) -> pa.ExtensionType:
+            """Return the Arrow extension type instance made for this logical type."""
             return self._arrow
 
         def get_polars_extension_type(self) -> pl.BaseExtension:
+            """Return the Polars extension type instance made for this logical type."""
             return self._polars
 
         def python_to_storage(self, value: Any, converter: Any = None) -> str:
+            """Return the text of ``value`` as its storage value."""
             return value.text
 
         def storage_to_python(self, storage_value: Any, converter: Any = None) -> Thing:
+            """Return a ``Thing`` holding ``storage_value``."""
             return Thing(storage_value)
 
     return LogicalThing()
@@ -145,6 +152,7 @@ def _stored_column(
 
 @pytest.mark.parametrize(("python_type", "name"), ALL_BUILTINS)
 def test_builtin_type_writes_version_1(python_type: Any, name: str) -> None:
+    """Each built-in extension type has its expected name and writes ``VERSION_1``."""
     arrow_type = _extension_type(python_type)
     assert arrow_type.extension_name == name
     assert arrow_type.__arrow_ext_serialize__() == VERSION_1
@@ -154,6 +162,9 @@ def test_builtin_type_writes_version_1(python_type: Any, name: str) -> None:
 def test_builtin_identifier_is_declared_by_the_extension_type(
     python_type: Any, name: str
 ) -> None:
+    """``logical_type_identifier`` of a built-in type is its extension name with
+    ``VERSION_1``.
+    """
     logical_type = _converter().get_logical_type(python_type)
     assert logical_type is not None
     assert logical_type_identifier(logical_type) == LogicalTypeIdentifier(
@@ -162,6 +173,9 @@ def test_builtin_identifier_is_declared_by_the_extension_type(
 
 
 def test_identifier_text_is_name_and_hex_of_metadata() -> None:
+    """The identifier text is the name, a semicolon, and the metadata in hex (empty for
+    none).
+    """
     assert LogicalTypeIdentifier("orcapod.path", VERSION_1).text == (
         "orcapod.path;" + VERSION_1.hex()
     )
@@ -169,23 +183,30 @@ def test_identifier_text_is_name_and_hex_of_metadata() -> None:
 
 
 def test_extension_name_with_a_semicolon_is_refused() -> None:
+    """Registering a logical type whose name contains ``;`` raises ``ValueError``."""
     arrow_cls: Any = make_arrow_extension_type("bad;name", pa.large_string(), b"")
     polars_cls: Any = make_polars_extension_type("bad;name", pa.large_string())
 
     class Bad(BaseLogicalType):
+        """Logical type whose name contains a semicolon."""
+
         logical_type_name = "bad;name"
         python_type = Thing
 
         def get_arrow_extension_type(self) -> pa.ExtensionType:
+            """Return a new instance of the Arrow type named with a semicolon."""
             return arrow_cls()
 
         def get_polars_extension_type(self) -> pl.BaseExtension:
+            """Return a new instance of the Polars type named with a semicolon."""
             return polars_cls()
 
         def python_to_storage(self, value: Any, converter: Any = None) -> str:
+            """Return the text of ``value`` as its storage value."""
             return value.text
 
         def storage_to_python(self, storage_value: Any, converter: Any = None) -> Thing:
+            """Return a ``Thing`` holding ``storage_value``."""
             return Thing(storage_value)
 
     with pytest.raises(ValueError, match="';'"):
@@ -196,6 +217,9 @@ def test_extension_name_with_a_semicolon_is_refused() -> None:
 
 
 def test_identifier_round_trips_through_delta(tmp_path: pathlib.Path) -> None:
+    """A path column keeps its extension name and metadata in the Parquet files and when
+    read back.
+    """
     converter = _converter()
     path_type = _extension_type(pathlib.Path)
     table = pa.table(
@@ -223,6 +247,9 @@ def test_identifier_round_trips_through_delta(tmp_path: pathlib.Path) -> None:
 
 
 def test_metadata_alone_changes_the_schema_hash() -> None:
+    """Two contexts differing only in a type's metadata hash the type and its schema
+    differently.
+    """
     v1 = _fresh_context(_thing_logical_type(b'{"version":1}'))
     v2 = _fresh_context(_thing_logical_type(b'{"version":2}'))
     schema = Schema({"c": Thing})
@@ -235,6 +262,9 @@ def test_metadata_alone_changes_the_schema_hash() -> None:
 
 
 def test_metadata_alone_changes_a_generic_alias_hash() -> None:
+    """A schema with ``list[Thing]`` hashes differently when only the metadata of
+    ``Thing`` differs.
+    """
     v1 = _fresh_context(_thing_logical_type(b'{"version":1}'))
     v2 = _fresh_context(_thing_logical_type(b'{"version":2}'))
     schema = Schema({"c": list[Thing]})
@@ -244,10 +274,14 @@ def test_metadata_alone_changes_a_generic_alias_hash() -> None:
 
 
 def test_metadata_alone_changes_a_function_signature_hash() -> None:
+    """A function annotated with ``Thing`` hashes differently when only the type's
+    metadata differs.
+    """
     v1 = _fresh_context(_thing_logical_type(b'{"version":1}'))
     v2 = _fresh_context(_thing_logical_type(b'{"version":2}'))
 
     def takes_thing(thing: Thing) -> int:
+        """Return the length of the text of ``thing``."""
         return len(thing.text)
 
     assert v1.semantic_hasher.hash_object(
@@ -256,11 +290,15 @@ def test_metadata_alone_changes_a_function_signature_hash() -> None:
 
 
 def test_hashes_without_logical_types_do_not_depend_on_registered_types() -> None:
+    """A schema and a function using only plain types hash the same with an extra type
+    registered.
+    """
     plain = get_default_context()
     extended = _fresh_context(_thing_logical_type(b'{"version":2}'))
     schema = Schema({"a": int, "b": str, "c": list[float]})
 
     def plain_function(a: int, b: str = "x") -> float:
+        """Return ``a`` as a float."""
         return float(a)
 
     assert plain.semantic_hasher.hash_object(
@@ -275,11 +313,15 @@ class _ThingHandler:
     """Value hasher for ``Thing``: its text."""
 
     def handle(self, obj: Any, hasher: Any) -> Any:
+        """Return the text of ``obj`` as its hashable value."""
         return obj.text
 
 
 @pytest.mark.parametrize("with_value_hasher", [True, False])
 def test_metadata_alone_changes_the_row_hash(with_value_hasher: bool) -> None:
+    """The table hash of an extension column differs when only the type's metadata
+    differs.
+    """
     hashes = []
     for metadata in (b'{"version":1}', b'{"version":2}'):
         logical_type = _thing_logical_type(metadata)
@@ -311,6 +353,7 @@ def test_stored_tables_of_a_logical_type_pod_carry_the_identifier(
 
     @function_pod(output_keys="q")
     def shift(p: pathlib.Path) -> pathlib.Path:
+        """Return ``p`` with the component ``z`` appended."""
         return p / "z"
 
     paths = DictSource(
@@ -336,6 +379,9 @@ def test_stored_tables_of_a_logical_type_pod_carry_the_identifier(
 
 
 def test_unknown_metadata_in_field_metadata_names_column_and_identifiers() -> None:
+    """Loading a column with unreadable metadata raises an error naming the column, the
+    stored and the readable metadata.
+    """
     converter = _converter()
     table = _stored_column(
         b"orcapod.path", b'{"version":9}', pa.array(["/a"], pa.large_string())
@@ -355,6 +401,9 @@ def test_unknown_metadata_in_field_metadata_names_column_and_identifiers() -> No
 def test_unknown_metadata_in_a_parquet_file_is_an_explicit_error(
     tmp_path: pathlib.Path,
 ) -> None:
+    """Reading a Parquet file with unreadable metadata raises
+    ``LogicalTypeIdentifierError`` carrying both identifiers.
+    """
     get_default_context()  # registers the built-in extension types with pyarrow
     file = tmp_path / "t.parquet"
     pq.write_table(
@@ -387,6 +436,9 @@ _LEGACY_STORAGE = {
 def test_builtin_data_without_metadata_is_read_as_version_1(
     python_type: Any, name: str, metadata: bytes | None, tmp_path: pathlib.Path
 ) -> None:
+    """A built-in column stored with empty or no metadata is read as the current type on
+    both read channels.
+    """
     converter = _converter()
     current = _extension_type(python_type)
     stored = _stored_column(name.encode(), metadata, _LEGACY_STORAGE[name])
@@ -416,6 +468,9 @@ def test_array_without_metadata_is_refused() -> None:
 
 
 def test_third_party_type_reads_only_what_it_declares() -> None:
+    """Old metadata is refused unless the type declares it readable, and is then read as
+    the current type.
+    """
     strict = _converter(_fresh_context(_thing_logical_type(b'{"v":2}')))
     lenient = _converter(
         _fresh_context(_thing_logical_type(b'{"v":2}', also_reads=(b'{"v":1}',)))
@@ -467,6 +522,9 @@ def test_extension_typed_column_with_a_readable_older_identifier_is_read() -> No
 
 
 def test_list_wrapper_written_before_identifiers_is_read() -> None:
+    """A list column whose metadata records no element metadata is read as the current
+    list type.
+    """
     converter = _converter()
     current = _extension_type(list[pathlib.Path])
     legacy_metadata = json.dumps(
@@ -485,6 +543,9 @@ def test_list_wrapper_written_before_identifiers_is_read() -> None:
 
 
 def test_list_wrapper_of_an_unreadable_element_is_refused() -> None:
+    """A list column whose element metadata is unreadable raises
+    ``LogicalTypeIdentifierError``.
+    """
     converter = _converter()
     _extension_type(list[pathlib.Path])
     metadata = json.dumps(
@@ -507,12 +568,16 @@ def test_list_wrapper_of_an_unreadable_element_is_refused() -> None:
 
 
 def _file_value(tmp_path: pathlib.Path) -> Any:
+    """Write a text file under ``tmp_path`` and return it as an ``op.File``."""
     target = tmp_path / "f.txt"
     target.write_text("content")
     return op.File(target)
 
 
 def _directory_value(tmp_path: pathlib.Path) -> Any:
+    """Create a directory holding one file under ``tmp_path`` and return it as an
+    ``op.Directory``.
+    """
     target = tmp_path / "d"
     target.mkdir(exist_ok=True)
     (target / "f.txt").write_text("content")
