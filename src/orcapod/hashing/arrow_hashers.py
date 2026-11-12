@@ -174,32 +174,53 @@ class StarfixArrowHasher:
         Orcapod's own tables (streams, datagrams, rows), which ignore order on purpose.
         """
         return ContentHash(
-            method=self._hasher_id, digest=self._digest(table, ordered=False)
+            method=self._hasher_id,
+            digest=self._digest(
+                table, ordered_columns=False, ordered_struct_fields=False
+            ),
         )
 
-    def hash_table_ordered(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
+    def hash_table_ordered(
+        self, table: "pa.Table | pa.RecordBatch", *, struct_field_order: bool = True
+    ) -> ContentHash:
         """Hash an Arrow table (or ``RecordBatch``) as a value, order included.
 
         The same as ``hash_table`` (the same semantic preprocessing, so a ``File`` column is
-        hashed by its content), except that the order of the columns and of the fields of
-        every struct, at every depth, is part of the hash (starfix's ``ordered_columns``
-        and ``ordered_struct_fields`` options). The options are an input of the digest, so
-        the two hashes of one table never coincide, even for a one-column table. Value
-        types whose own equality depends on order build their hash on this digest (pandas
-        ``DataFrame`` and ``Series``); the ``ContentHash`` returned here carries this
-        hasher's label, and such a type uses the digest bytes only, under its own label.
+        hashed by its content), except that the order of the columns and, by default, of the
+        fields of every struct at every depth is part of the hash (starfix's
+        ``ordered_columns`` and ``ordered_struct_fields`` options). The options are an input
+        of the digest, so the hashes of one table under different options never coincide,
+        even for a one-column table. Value types whose own equality depends on order build
+        their hash on this digest (pandas ``DataFrame`` and ``Series``); the ``ContentHash``
+        returned here carries this hasher's label, and such a type uses the digest bytes
+        only, under its own label.
+
+        Args:
+            table: The table or record batch to hash.
+            struct_field_order: Whether the order of struct fields is part of the hash.
+                ``False`` is for a value type configured to ignore struct field order;
+                column order stays part of the hash.
         """
         return ContentHash(
-            method=self._hasher_id, digest=self._digest(table, ordered=True)
+            method=self._hasher_id,
+            digest=self._digest(
+                table, ordered_columns=True, ordered_struct_fields=struct_field_order
+            ),
         )
 
-    def _digest(self, table: "pa.Table | pa.RecordBatch", *, ordered: bool) -> bytes:
+    def _digest(
+        self,
+        table: "pa.Table | pa.RecordBatch",
+        *,
+        ordered_columns: bool,
+        ordered_struct_fields: bool,
+    ) -> bytes:
         """Preprocess ``table`` and return its starfix digest; the only starfix table call.
 
         Args:
             table: The table or record batch to hash.
-            ordered: Whether column order and struct field order are part of the digest
-                (starfix's ``ordered_columns`` and ``ordered_struct_fields``).
+            ordered_columns: Whether column order is part of the digest.
+            ordered_struct_fields: Whether struct field order is part of the digest.
 
         Returns:
             The starfix digest (version prefix included).
@@ -221,6 +242,6 @@ class StarfixArrowHasher:
         return ArrowDigester.hash_table(
             clean_table,
             include_metadata=include_meta,
-            ordered_columns=ordered,
-            ordered_struct_fields=ordered,
+            ordered_columns=ordered_columns,
+            ordered_struct_fields=ordered_struct_fields,
         )

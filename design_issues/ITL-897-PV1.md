@@ -27,7 +27,9 @@ not restore (`flags`, RangeIndex kind, index `freq`, unused MultiIndex levels, s
 storage, the `object` dtype of a column that reads back typed), which never counts, so
 `hash(read(write(v))) == hash(v)`. `PANDAS_IDENTITY_PROPERTIES` is the one list of these in
 code. The logical types were renamed `orcapod.pandas.dataframe` / `orcapod.pandas.series`
-(`{"version":1}`); the old names are no longer registered. Every pandas value hash moved
+with the shared ignore-list metadata of library value types (`{"ignore":[],"version":1}`,
+ITL-981; options `column_order`, `struct_field_order`, `series_name`, `attrs`, none ignored
+by default); the old names are no longer registered. Every pandas value hash moved
 once, before the v0.3 tag; stored bytes are unchanged. The investigation is in
 `superpowers/specs/2026-11-11-itl-897-pandas-hash-identity.md`. `pa.Table` values (same
 rule) are not included and remain order independent.

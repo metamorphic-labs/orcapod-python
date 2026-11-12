@@ -370,10 +370,15 @@ class TestIdentityProperties:
             _assert_fn(first)(first, second)
 
     def test_only_identity_properties_are_options(self) -> None:
-        from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
+        from orcapod.hashing.pandas_value_hash import (
+            PANDAS_DATAFRAME_OPTIONS,
+            PANDAS_IDENTITY_PROPERTIES,
+            PANDAS_SERIES_OPTIONS,
+        )
 
         options = {p.name for p in PANDAS_IDENTITY_PROPERTIES if p.option}
         assert options == {"column_order", "struct_field_order", "series_name", "attrs"}
+        assert options == PANDAS_DATAFRAME_OPTIONS | PANDAS_SERIES_OPTIONS
         assert all(p.identity for p in PANDAS_IDENTITY_PROPERTIES if p.option)
 
     def test_carrier_is_stated_exactly_for_identity_properties(self) -> None:

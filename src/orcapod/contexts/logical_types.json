@@ -1,5 +1,9 @@
 {
     "description": "Logical types registered in every data context, with the value handlers that hash their Python values. This file is not frozen: a logical type is versioned by its own identifier (Arrow extension name and metadata), not by the data context version, so adding one edits this file and no released data context manifest.",
+    "hash_ignore": {
+        "orcapod.pandas.dataframe": [],
+        "orcapod.pandas.series": []
+    },
     "logical_type_registry": {
         "_class": "orcapod.logical_types.registry.LogicalTypeRegistry",
         "_config": {
@@ -30,11 +34,11 @@
                 },
                 {
                     "_class": "orcapod.logical_types.pandas_type.LogicalPandasDataFrame",
-                    "_config": {}
+                    "_config": {"ignore": {"_ref": "hash_ignore:orcapod.pandas.dataframe"}}
                 },
                 {
                     "_class": "orcapod.logical_types.pandas_type.LogicalPandasSeries",
-                    "_config": {}
+                    "_config": {"ignore": {"_ref": "hash_ignore:orcapod.pandas.series"}}
                 }
             ],
             "factories": [
@@ -137,7 +141,7 @@
             },
             {
                 "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PandasDataFrameHandler",
-                "_config": {}
+                "_config": {"ignore": {"_ref": "hash_ignore:orcapod.pandas.dataframe"}}
             }
         ],
         [
@@ -146,7 +150,7 @@
             },
             {
                 "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PandasSeriesHandler",
-                "_config": {}
+                "_config": {"ignore": {"_ref": "hash_ignore:orcapod.pandas.series"}}
             }
         ]
     ]

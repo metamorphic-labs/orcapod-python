@@ -66,7 +66,7 @@
   "single_field.dataclass_with_structural.arrow_type": "extension<tests.test_hashing.golden.cases.GoldenHolder@a33f1b44d3e0da53c532f6399abac185eef00e451d0986fd57818bf8fff5bd0c>[struct<inner: struct<value: int64>, note: large_string>]",
   "single_field.dataclass_with_structural.schema_hash": "semantic_v1:688cc938c85561643eb299bb5016d514ed87ce194def5d14b31859f7cc0c24f8",
   "single_field.dataframe.arrow_type": "extension<orcapod.pandas.dataframe>[large_binary]",
-  "single_field.dataframe.schema_hash": "semantic_v1:86b0a7e9b410417226353c169cd1b4b636c060356b229adaa100d61a92c41f4a",
+  "single_field.dataframe.schema_hash": "semantic_v1:a0142f12b14a0f737faeb85628880ff6338bdb4aedacaa45f4e38985d8a693dc",
   "single_field.dict_str_int.arrow_type": "large_list<item: struct<key: large_string, value: int64>>",
   "single_field.dict_str_int.schema_hash": "semantic_v1:83829049be132dacfd0acad42babffed407e1852c9297b94d429bab6530801a8",
   "single_field.float.arrow_type": "double",

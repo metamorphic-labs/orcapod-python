@@ -164,8 +164,12 @@ class ArrowHasherProtocol(Protocol):
         """Hash a table ignoring column order and struct field order (streams, rows)."""
         ...
 
-    def hash_table_ordered(self, table: "pa.Table | pa.RecordBatch") -> ContentHash:
-        """Hash a table as a value: column order and struct field order are part of it."""
+    def hash_table_ordered(
+        self, table: "pa.Table | pa.RecordBatch", *, struct_field_order: bool = True
+    ) -> ContentHash:
+        """Hash a table as a value: column order is part of it, and struct field order
+        too unless ``struct_field_order`` is false.
+        """
         ...
 
 

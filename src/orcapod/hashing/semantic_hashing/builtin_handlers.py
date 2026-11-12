@@ -24,12 +24,22 @@ with all of the above handlers.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from typing_extensions import override
+
+from orcapod.hashing.pandas_value_hash import (
+    PANDAS_DATAFRAME_HASH_LABEL,
+    PANDAS_DATAFRAME_OPTIONS,
+    PANDAS_SERIES_HASH_LABEL,
+    PANDAS_SERIES_OPTIONS,
+)
 from orcapod.hashing.semantic_hashing.encoded import Encoded
 from orcapod.hashing.semantic_hashing.function_info_extractors import ParameterDefault
 from orcapod.logical_types.identifier import logical_type_identifier
+from orcapod.logical_types.ignore_list import IgnoreListHandler
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
 
@@ -444,23 +454,33 @@ class NumpyArrayHandler:
         )
 
 
-class PandasDataFrameHandler:
+class PandasDataFrameHandler(IgnoreListHandler):
     """Hasher for ``pd.DataFrame``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
     Delegates to ``pandas_frame_content_hash`` in ``orcapod.hashing.pandas_value_hash``, whose
     module docstring defines the ``pandas_dataframe_v1`` scheme. The hash is strict: column
     order, index levels and their order, label types, ``columns.names``, pandas dtypes,
     categorical categories, ``attrs`` and the values are all part of it. Only what storage
-    does not restore (``flags``, for example) is left out.
+    does not restore (``flags``, for example) is left out. A data context may configure
+    the hash to ignore the properties named in ``OPTIONS``.
 
     Args:
+        ignore: The property names ignored when a bare frame is hashed.
         arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
             digests the values. When ``None``, the default data context's ``arrow_hasher`` is
             resolved lazily at call time (breaking the circular dependency that would arise if
             the registry were constructed before the arrow hasher).
     """
 
-    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+    OPTIONS = PANDAS_DATAFRAME_OPTIONS
+    HASH_LABEL = PANDAS_DATAFRAME_HASH_LABEL
+
+    def __init__(
+        self,
+        ignore: Iterable[str] = (),
+        arrow_hasher: "ArrowHasherProtocol | None" = None,
+    ) -> None:
+        super().__init__(ignore)
         self._arrow_hasher = arrow_hasher
 
     def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
@@ -470,15 +490,16 @@ class PandasDataFrameHandler:
 
         return get_default_context().arrow_hasher  # type: ignore[return-value]
 
-    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
-        """Return the content hash of ``obj``.
+    @override
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the ``pandas_dataframe_v1`` digest of ``obj``.
 
         Args:
             obj: A ``pd.DataFrame`` instance.
-            hasher: Ignored. Present for protocol conformance.
+            ignore: The property names to ignore; a subset of ``OPTIONS``.
 
         Returns:
-            A ``ContentHash`` with method ``"pandas_dataframe_v1"``.
+            The 32-byte digest.
 
         Raises:
             TypeError: If ``obj`` is not a ``pd.DataFrame``.
@@ -493,24 +514,33 @@ class PandasDataFrameHandler:
             raise TypeError(
                 f"PandasDataFrameHandler: expected pd.DataFrame, got {type(obj)!r}"
             )
-        return pandas_frame_content_hash(obj, self._get_arrow_hasher())
+        return pandas_frame_content_hash(obj, self._get_arrow_hasher(), ignore).digest
 
 
-class PandasSeriesHandler:
+class PandasSeriesHandler(IgnoreListHandler):
     """Hasher for ``pd.Series``: Orcapod's pandas descriptor plus an ordered Arrow digest.
 
     Delegates to ``pandas_series_content_hash`` in ``orcapod.hashing.pandas_value_hash``
-    (``pandas_series_v1``). The name is part of the hash, typed (``0`` and ``"0"`` differ), as in
-    ``assert_series_equal``.
+    (``pandas_series_v1``). The name is part of the hash, typed (``0`` and ``"0"`` differ).
+    A data context may configure the hash to ignore the properties named in ``OPTIONS``.
 
     Args:
+        ignore: The property names ignored when a bare Series is hashed.
         arrow_hasher: An object satisfying ``ArrowHasherProtocol``; its ``hash_table_ordered``
             digests the values. When ``None``, the default data context's ``arrow_hasher`` is
             resolved lazily at call time (breaking the circular dependency that would arise if
             the registry were constructed before the arrow hasher).
     """
 
-    def __init__(self, arrow_hasher: "ArrowHasherProtocol | None" = None) -> None:
+    OPTIONS = PANDAS_SERIES_OPTIONS
+    HASH_LABEL = PANDAS_SERIES_HASH_LABEL
+
+    def __init__(
+        self,
+        ignore: Iterable[str] = (),
+        arrow_hasher: "ArrowHasherProtocol | None" = None,
+    ) -> None:
+        super().__init__(ignore)
         self._arrow_hasher = arrow_hasher
 
     def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
@@ -520,15 +550,16 @@ class PandasSeriesHandler:
 
         return get_default_context().arrow_hasher  # type: ignore[return-value]
 
-    def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
-        """Return the content hash of ``obj``.
+    @override
+    def digest(self, obj: Any, ignore: frozenset[str]) -> bytes:
+        """Return the ``pandas_series_v1`` digest of ``obj``.
 
         Args:
             obj: A ``pd.Series`` instance.
-            hasher: Ignored. Present for protocol conformance.
+            ignore: The property names to ignore; a subset of ``OPTIONS``.
 
         Returns:
-            A ``ContentHash`` with method ``"pandas_series_v1"``.
+            The 32-byte digest.
 
         Raises:
             TypeError: If ``obj`` is not a ``pd.Series``.
@@ -543,7 +574,7 @@ class PandasSeriesHandler:
             raise TypeError(
                 f"PandasSeriesHandler: expected pd.Series, got {type(obj)!r}"
             )
-        return pandas_series_content_hash(obj, self._get_arrow_hasher())
+        return pandas_series_content_hash(obj, self._get_arrow_hasher(), ignore).digest
 
 
 class PolarsExprHandler:
@@ -696,8 +727,8 @@ def register_builtin_python_type_handlers(
 
     import pandas as _pd
 
-    registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher))
-    registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher))
+    registry.register(_pd.DataFrame, PandasDataFrameHandler(arrow_hasher=arrow_hasher))
+    registry.register(_pd.Series, PandasSeriesHandler(arrow_hasher=arrow_hasher))
 
     import polars as _pl
 

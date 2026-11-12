@@ -21,6 +21,16 @@ storage of a string dtype, and the ``object`` dtype of a column that reads back 
 dtype. ``PANDAS_IDENTITY_PROPERTIES`` lists every property and whether it is identity; it
 is the one place that states the decision.
 
+Ignore lists
+------------
+A data context can configure the hash of each type to ignore some properties
+(``PANDAS_DATAFRAME_OPTIONS``, ``PANDAS_SERIES_OPTIONS``; the list is saved in the logical
+type's extension metadata, ``orcapod.logical_types.ignore_list``). The preimage keeps its
+shape: an ignored property is hashed with a fixed value. ``attrs`` becomes ``{}``,
+``series_name`` becomes ``null``, ``column_order`` hashes the columns sorted by the canonical
+JSON of their labels, and ``struct_field_order`` turns off starfix's struct field order
+option. Nothing is ignored by default.
+
 Hashing what storage restores
 -----------------------------
 An ``object`` column (or index level) whose values are not strings does not come back as
@@ -86,7 +96,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from orcapod.hashing.labelled_hash import labelled_content_hash
+from orcapod.hashing.labelled_hash import canonical_json, labelled_content_hash
 
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
@@ -257,6 +267,18 @@ list; ``tests/test_hashing/test_pandas_value_identity.py`` checks every entry ag
 of values. Changing an entry's ``identity`` changes existing hashes: it needs new labels and
 a new logical type identifier.
 """
+
+PANDAS_DATAFRAME_OPTIONS: frozenset[str] = frozenset(
+    {"attrs", "column_order", "struct_field_order"}
+)
+"""The properties a data context can configure a ``pd.DataFrame`` hash to ignore."""
+
+PANDAS_SERIES_OPTIONS: frozenset[str] = frozenset(
+    {"attrs", "series_name", "struct_field_order"}
+)
+"""The properties a data context can configure a ``pd.Series`` hash to ignore."""
+
+_NOTHING_IGNORED: frozenset[str] = frozenset()
 
 _MASKED_DTYPE_NAMES = frozenset(
     {
@@ -459,12 +481,15 @@ def _index_descriptor(index: pd.Index, dtypes: list[Any]) -> list[Any]:
 
 
 def _frame_descriptor(
-    df: pd.DataFrame, column_dtypes: list[Any], index_dtypes: list[Any]
+    df: pd.DataFrame,
+    column_dtypes: list[Any],
+    index_dtypes: list[Any],
+    ignore: frozenset[str],
 ) -> dict[str, Any]:
     return {
         "kind": "orcapod.pandas.dataframe",
         "height": len(df),
-        "attrs": _attrs_term(df.attrs),
+        "attrs": {} if "attrs" in ignore else _attrs_term(df.attrs),
         "columns": [
             _column_descriptor(label, dtype)
             for label, dtype in zip(df.columns, column_dtypes)
@@ -475,23 +500,40 @@ def _frame_descriptor(
 
 
 def _series_descriptor(
-    series: pd.Series, dtype: Any, index_dtypes: list[Any]
+    series: pd.Series, dtype: Any, index_dtypes: list[Any], ignore: frozenset[str]
 ) -> dict[str, Any]:
     return {
         "kind": "orcapod.pandas.series",
         "height": len(series),
-        "attrs": _attrs_term(series.attrs),
-        "name": pandas_label_descriptor(series.name),
+        "attrs": {} if "attrs" in ignore else _attrs_term(series.attrs),
+        "name": (
+            None if "series_name" in ignore else pandas_label_descriptor(series.name)
+        ),
         "dtype": pandas_dtype_descriptor(dtype),
         "index": _index_descriptor(series.index, index_dtypes),
     }
 
 
-def pandas_frame_descriptor(df: pd.DataFrame) -> dict[str, Any]:
+def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with its columns sorted by the canonical JSON of their labels.
+
+    This is the fixed column order a frame is hashed in when column order is ignored.
+    The sort is on typed label terms, so ``0`` and ``"0"`` have distinct places.
+    """
+    keys = [canonical_json(pandas_label_descriptor(label)) for label in df.columns]
+    order = sorted(range(len(keys)), key=keys.__getitem__)
+    return df.iloc[:, order]
+
+
+def pandas_frame_descriptor(
+    df: pd.DataFrame, ignore: frozenset[str] = _NOTHING_IGNORED
+) -> dict[str, Any]:
     """Return the descriptor of a DataFrame (see the module docstring).
 
     Args:
         df: The DataFrame.
+        ignore: The property names the hash ignores; a subset of
+            ``PANDAS_DATAFRAME_OPTIONS``.
 
     Returns:
         The descriptor as a JSON-serialisable dict.
@@ -500,15 +542,21 @@ def pandas_frame_descriptor(df: pd.DataFrame) -> dict[str, Any]:
         ValueError: If a label or dtype is outside the grammar (a dtype error names its
             column), or a column cannot be converted to Arrow.
     """
+    if "column_order" in ignore:
+        df = _in_canonical_column_order(df)
     _, column_dtypes, index_dtypes = _values_table(df)
-    return _frame_descriptor(df, column_dtypes, index_dtypes)
+    return _frame_descriptor(df, column_dtypes, index_dtypes, ignore)
 
 
-def pandas_series_descriptor(series: pd.Series) -> dict[str, Any]:
+def pandas_series_descriptor(
+    series: pd.Series, ignore: frozenset[str] = _NOTHING_IGNORED
+) -> dict[str, Any]:
     """Return the descriptor of a Series (see the module docstring).
 
     Args:
         series: The Series.
+        ignore: The property names the hash ignores; a subset of
+            ``PANDAS_SERIES_OPTIONS``.
 
     Returns:
         The descriptor as a JSON-serialisable dict.
@@ -518,11 +566,13 @@ def pandas_series_descriptor(series: pd.Series) -> dict[str, Any]:
             converted to Arrow.
     """
     _, (dtype,), index_dtypes = _values_table(series.to_frame(name="c0"))
-    return _series_descriptor(series, dtype, index_dtypes)
+    return _series_descriptor(series, dtype, index_dtypes, ignore)
 
 
 def pandas_frame_content_hash(
-    df: pd.DataFrame, arrow_hasher: ArrowHasherProtocol
+    df: pd.DataFrame,
+    arrow_hasher: ArrowHasherProtocol,
+    ignore: frozenset[str] = _NOTHING_IGNORED,
 ) -> ContentHash:
     """Return the ``pandas_dataframe_v1`` content hash of a DataFrame.
 
@@ -530,6 +580,9 @@ def pandas_frame_content_hash(
         df: The DataFrame.
         arrow_hasher: The data context's Arrow hasher, whose ``hash_table_ordered`` digests
             the values table.
+        ignore: The property names the hash ignores; a subset of
+            ``PANDAS_DATAFRAME_OPTIONS``. Each ignored property is hashed with a fixed
+            value in place of the frame's own, so the preimage keeps one shape.
 
     Returns:
         A ``ContentHash`` with method ``"pandas_dataframe_v1"``.
@@ -538,14 +591,20 @@ def pandas_frame_content_hash(
         ValueError: If a label or dtype is outside the grammar, or a column cannot be converted
             to Arrow.
     """
+    if "column_order" in ignore:
+        df = _in_canonical_column_order(df)
     values, column_dtypes, index_dtypes = _values_table(df)
-    descriptor = _frame_descriptor(df, column_dtypes, index_dtypes)
-    digest = arrow_hasher.hash_table_ordered(values).digest
+    descriptor = _frame_descriptor(df, column_dtypes, index_dtypes, ignore)
+    digest = arrow_hasher.hash_table_ordered(
+        values, struct_field_order="struct_field_order" not in ignore
+    ).digest
     return labelled_content_hash(PANDAS_DATAFRAME_HASH_LABEL, descriptor, digest)
 
 
 def pandas_series_content_hash(
-    series: pd.Series, arrow_hasher: ArrowHasherProtocol
+    series: pd.Series,
+    arrow_hasher: ArrowHasherProtocol,
+    ignore: frozenset[str] = _NOTHING_IGNORED,
 ) -> ContentHash:
     """Return the ``pandas_series_v1`` content hash of a Series.
 
@@ -553,6 +612,9 @@ def pandas_series_content_hash(
         series: The Series.
         arrow_hasher: The data context's Arrow hasher, whose ``hash_table_ordered`` digests
             the values table.
+        ignore: The property names the hash ignores; a subset of
+            ``PANDAS_SERIES_OPTIONS``. Each ignored property is hashed with a fixed value
+            in place of the Series' own, so the preimage keeps one shape.
 
     Returns:
         A ``ContentHash`` with method ``"pandas_series_v1"``.
@@ -562,6 +624,8 @@ def pandas_series_content_hash(
             converted to Arrow.
     """
     values, (dtype,), index_dtypes = _values_table(series.to_frame(name="c0"))
-    descriptor = _series_descriptor(series, dtype, index_dtypes)
-    digest = arrow_hasher.hash_table_ordered(values).digest
+    descriptor = _series_descriptor(series, dtype, index_dtypes, ignore)
+    digest = arrow_hasher.hash_table_ordered(
+        values, struct_field_order="struct_field_order" not in ignore
+    ).digest
     return labelled_content_hash(PANDAS_SERIES_HASH_LABEL, descriptor, digest)

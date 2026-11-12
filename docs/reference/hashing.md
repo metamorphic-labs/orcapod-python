@@ -1175,8 +1175,24 @@ dicts, lists, decimals, dates) is hashed as it is.
 A label or dtype outside the grammar raises `ValueError` naming it (a dtype error names its
 column). A value that cannot be converted to Arrow raises `ValueError`.
 
+**What a data context can make the hash ignore.** Nothing is ignored by default. The
+registration file (`orcapod/contexts/logical_types.json`, `hash_ignore`) can name, per type,
+properties the hash ignores. The list is saved in the logical type's extension metadata, so
+two lists are two logical types, and a column stored under another list is refused on read.
+The preimage keeps its shape: an ignored property is hashed with a fixed value.
+
+| Option | Type | When ignored |
+|---|---|---|
+| `column_order` | DataFrame | the columns are hashed sorted by the canonical JSON of their typed labels |
+| `series_name` | Series | `name` is hashed as `null` |
+| `struct_field_order` | both | starfix's `ordered_struct_fields` option is off for `D` |
+| `attrs` | both | `attrs` is hashed as `{}` |
+
+Every other property always counts, and the properties storage does not restore never do;
+neither kind is an option.
+
 **Names.** The logical types are `orcapod.pandas.dataframe` and `orcapod.pandas.series`
-with metadata `{"version":1}`. Before v0.3 they were stored as `pandas.dataframe` /
+with metadata `{"ignore":[],"version":1}` (the version and the ignore list). Before v0.3 they were stored as `pandas.dataframe` /
 `pandas.series`; those names are not registered any more, and a column stored under them is
 refused on read. Before v0.3 a pandas value was also hashed as an Arrow table (§9, order
 ignored), so a frame and the same frame with its columns reordered shared a hash, and a

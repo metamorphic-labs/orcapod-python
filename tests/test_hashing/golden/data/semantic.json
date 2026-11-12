@@ -19,7 +19,7 @@
   "type.dataclass": "semantic_v1:86baa1ef8dbf2518c6dcf7d188f6e20474248e9d8bc08d22b7fa0a4ed98bf8a8",
   "type.dataclass_subclass": "semantic_v1:a708010250b375859e12f0bf5df84f07aeac185c97dcc7a85431a75b92da7666",
   "type.dataclass_with_structural": "semantic_v1:82c2bb964c817a345467bb892979c137fc0217fc1cd73a9194a44bcaff0add51",
-  "type.dataframe": "semantic_v1:6be2c7b0509b098a51ed4a7c7504820511ea8993d4aa467f83ea9f16ecdd1843",
+  "type.dataframe": "semantic_v1:6ccd827bb3bccca86e95244612abe2bba6ff60c927ae2336d91380cfb34a8c2c",
   "type.dict_str_int": "semantic_v1:2f26c0edf323df8be4143a1965626399313409728cc8081378346c850757f7dd",
   "type.float": "semantic_v1:0059c08fc7dfe19dc8d095b7e95d56e8d377bbe49ac30376a00105eca2e7c75f",
   "type.int": "semantic_v1:24be397c58c33686e96b4f85a9f443fd2483564ec7dee1c14b96da3e60ec16ac",

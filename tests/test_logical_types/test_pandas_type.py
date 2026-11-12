@@ -48,11 +48,11 @@ class TestLogicalPandasDataFrameProtocol:
         lt = LogicalPandasDataFrame()
         assert lt.get_arrow_extension_type() is lt.get_arrow_extension_type()
 
-    def test_polars_ext_is_cached(self):
+    def test_polars_ext_is_the_same_type_every_time(self):
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
 
         lt = LogicalPandasDataFrame()
-        assert lt.get_polars_extension_type() is lt.get_polars_extension_type()
+        assert lt.get_polars_extension_type() == lt.get_polars_extension_type()
 
 
 class TestLogicalPandasDataFrameStorage:
@@ -169,11 +169,11 @@ class TestLogicalPandasSeriesProtocol:
         lt = LogicalPandasSeries()
         assert lt.get_arrow_extension_type() is lt.get_arrow_extension_type()
 
-    def test_polars_ext_is_cached(self):
+    def test_polars_ext_is_the_same_type_every_time(self):
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
 
         lt = LogicalPandasSeries()
-        assert lt.get_polars_extension_type() is lt.get_polars_extension_type()
+        assert lt.get_polars_extension_type() == lt.get_polars_extension_type()
 
 
 class TestLogicalPandasSeriesRoundTrip:

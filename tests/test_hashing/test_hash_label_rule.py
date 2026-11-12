@@ -36,7 +36,11 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.hashing import directory_hashers, pandas_value_hash
 from orcapod.hashing.file_hashers import FileHasher
 from orcapod.hashing.semantic_hashing import polars_expr
-from orcapod.hashing.semantic_hashing.builtin_handlers import NumpyArrayHandler
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    NumpyArrayHandler,
+    PandasDataFrameHandler,
+    PandasSeriesHandler,
+)
 from orcapod.operators import Join
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode, ContentHash
@@ -195,6 +199,7 @@ def renamed_labels(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
         context.arrow_hasher, "_hasher_id", RENAMED["arrow_v1"], raising=True
     )
     monkeypatch.setattr(NumpyArrayHandler, "HASH_LABEL", RENAMED["ndarray_v1"])
+    # The pandas labels: the definition, and the handlers that carry it.
     monkeypatch.setattr(
         pandas_value_hash,
         "PANDAS_DATAFRAME_HASH_LABEL",
@@ -203,6 +208,10 @@ def renamed_labels(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
     monkeypatch.setattr(
         pandas_value_hash, "PANDAS_SERIES_HASH_LABEL", RENAMED["pandas_series_v1"]
     )
+    monkeypatch.setattr(
+        PandasDataFrameHandler, "HASH_LABEL", RENAMED["pandas_dataframe_v1"]
+    )
+    monkeypatch.setattr(PandasSeriesHandler, "HASH_LABEL", RENAMED["pandas_series_v1"])
     monkeypatch.setattr(
         polars_expr, "POLARS_EXPR_HASH_LABEL", RENAMED["polars_expr_v1"]
     )

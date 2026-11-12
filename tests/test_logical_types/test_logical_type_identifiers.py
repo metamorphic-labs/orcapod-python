@@ -60,14 +60,15 @@ BUILTINS_WITH_EMPTY_LEGACY: list[tuple[Any, str]] = [
     (op.File, "orcapod.file"),
     (op.Directory, "orcapod.directory"),
 ]
-# pandas values were stored under ``pandas.dataframe`` / ``pandas.series`` before v0.3;
-# the current names never carried empty metadata (ITL-897).
-ALL_BUILTINS = [
-    *BUILTINS_WITH_EMPTY_LEGACY,
+ALL_BUILTINS = [*BUILTINS_WITH_EMPTY_LEGACY, (np.ndarray, "orcapod.ndarray")]
+# Library value types whose identifier carries an ignore list (ITL-981). pandas values
+# were stored under ``pandas.dataframe`` / ``pandas.series`` before v0.3; the current
+# names never carried empty metadata (ITL-897).
+BUILTINS_WITH_IGNORE_LIST: list[tuple[Any, str]] = [
     (pd.DataFrame, "orcapod.pandas.dataframe"),
     (pd.Series, "orcapod.pandas.series"),
-    (np.ndarray, "orcapod.ndarray"),
 ]
+VERSION_1_NOTHING_IGNORED = b'{"ignore":[],"version":1}'
 
 
 def _converter(context: DataContext | None = None) -> UniversalTypeConverter:
@@ -175,6 +176,21 @@ def test_builtin_identifier_is_declared_by_the_extension_type(
     assert logical_type is not None
     assert logical_type_identifier(logical_type) == LogicalTypeIdentifier(
         name, VERSION_1
+    )
+
+
+@pytest.mark.parametrize(("python_type", "name"), BUILTINS_WITH_IGNORE_LIST)
+def test_builtin_type_with_ignore_list_writes_version_1_and_its_list(
+    python_type: Any, name: str
+) -> None:
+    """A library value type writes its version and its (default: empty) ignore list."""
+    arrow_type = _extension_type(python_type)
+    assert arrow_type.extension_name == name
+    assert arrow_type.__arrow_ext_serialize__() == VERSION_1_NOTHING_IGNORED
+    logical_type = _converter().get_logical_type(python_type)
+    assert logical_type is not None
+    assert logical_type_identifier(logical_type) == LogicalTypeIdentifier(
+        name, VERSION_1_NOTHING_IGNORED
     )
 
 
