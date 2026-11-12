@@ -542,7 +542,8 @@ def npy_to_array(data: bytes) -> npt.NDArray[Any]:
 
     Returns:
         A new, writeable plain ``np.ndarray`` with the stored dtype (including
-        byte order and structured offsets), shape and contiguity.
+        byte order and structured offsets), shape and contiguity; padding
+        bytes between structured fields are zero.
 
     Raises:
         ValueError: If ``data`` is not a ``.npy`` file of format
@@ -555,7 +556,12 @@ def npy_to_array(data: bytes) -> npt.NDArray[Any]:
             f"{NPY_FORMAT_VERSION[0]}.{NPY_FORMAT_VERSION[1]}"
         )
     _require_declared_payload(data)
-    return npy_format.read_array(io.BytesIO(data), allow_pickle=False)
+    array = npy_format.read_array(io.BytesIO(data), allow_pickle=False)
+    if array.dtype.fields is not None and _has_padding(array.dtype):
+        # NumPy fills a structured array field by field, so the padding of the
+        # array it returns is whatever the new memory held, not the stored zeros.
+        array = _with_zeroed_padding(array)
+    return array
 
 
 def _byte_order_text(dtype: np.dtype[Any]) -> str:
