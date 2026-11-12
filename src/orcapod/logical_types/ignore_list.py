@@ -185,6 +185,7 @@ class _ExtensionFamily:
         self.options = options
         self._arrow_types: dict[tuple[str, ...], pa.ExtensionType] = {}
         self._polars_class: type[pl.BaseExtension] | None = None
+        self._polars_types: dict[tuple[str, ...], pl.BaseExtension] = {}
 
     def arrow_type(self, ignore: tuple[str, ...]) -> "pa.ExtensionType":
         """Return the Arrow extension type of a checked ignore list."""
@@ -253,9 +254,14 @@ class _ExtensionFamily:
 
     def polars_type(self, ignore: tuple[str, ...]) -> "pl.BaseExtension":
         """Return the Polars extension type of a checked ignore list."""
-        if self._polars_class is None:
-            self._polars_class = self._make_polars_class()
-        return self._polars_class(ignore_metadata(self.version, ignore).decode("ascii"))  # pyright: ignore[reportCallIssue]  # the synthesized class takes the metadata text
+        cached = self._polars_types.get(ignore)
+        if cached is None:
+            if self._polars_class is None:
+                self._polars_class = self._make_polars_class()
+            metadata = ignore_metadata(self.version, ignore).decode("ascii")
+            cached = self._polars_class(metadata)  # pyright: ignore[reportCallIssue]  # the synthesized class takes the metadata text
+            self._polars_types[ignore] = cached
+        return cached
 
     def _make_polars_class(self) -> type["pl.BaseExtension"]:
         name = self.extension_name
