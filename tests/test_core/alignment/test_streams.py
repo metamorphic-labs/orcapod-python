@@ -12,13 +12,8 @@ for every tie scenario and input order. Every read must also give every row exac
 equals ``as_table(cfg).slice(0, n)``; before a full read it sorts the rows the stream
 holds (ITL-1053).
 
-One known defect is marked ``xfail(strict=True)`` on exactly the cases it breaks:
-
-* ITL-1066: ``SideEffectPodStream.as_table`` raises when asked for the context key (and so
-  under ``all_info``), and ignores ``content_hash`` and ``sort_by_tags`` (only those
-  configurations of the side-effect stream).
-
-The defects fixed since (ITL-1045, ITL-1046, ITL-1065) keep their exact cases below.
+No case is marked: the defects these paths showed (ITL-1039, ITL-1045, ITL-1046,
+ITL-1065, ITL-1066) are fixed, and their exact cases run as ordinary tests.
 """
 
 from __future__ import annotations
@@ -34,7 +29,7 @@ from orcapod import function_pod
 from orcapod.core.executors import LocalPythonFunctionExecutor
 from orcapod.core.operators import Batch, GroupBy, Index
 from orcapod.core.sources import DerivedSource
-from orcapod.side_effects import SideEffectPod, SideEffectPodStream
+from orcapod.side_effects import SideEffectPod
 from orcapod.system_constants import constants
 
 from .checker import (
@@ -58,23 +53,6 @@ from .expectations import rows
 from .gate import GATE, ORDERS, new_gated_scale_pod, scale
 from .oracle import Oracle, Origin
 from .jobs import derive_y, pairs_function_tokens, stream_function_tokens
-
-ITL_1066 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1066: SideEffectPodStream.as_table raises on context, ignores "
-    "content_hash and sort_by_tags",
-)
-# The configurations ITL-1066 breaks: context (and so all_info and every config with
-# context) raises; content_hash is left out; sort_by_tags does not sort.
-ITL_1066_CONFIGS = {
-    "context",
-    "all_groups_unsorted",
-    "all_info",
-    "content_hash",
-    "content_hash_named",
-    "content_hash_sorted",
-    "sort_by_tags",
-}
 
 
 class ConcurrentLocalExecutor(LocalPythonFunctionExecutor):
@@ -181,12 +159,8 @@ def read(stream: Any, pattern: str) -> list[list[Any]]:
         return [list(stream.iter_data())]
     if pattern == "repeated":
         first = list(stream.iter_data())
-        # A full table between the reads; a side-effect stream's raises under all_info
-        # (ITL-1066, checked config by config in test_side_effect_stream_tables).
-        if isinstance(stream, SideEffectPodStream):
-            stream.as_table()
-        else:
-            stream.as_table(all_info=True)
+        # A full table between the reads.
+        stream.as_table(all_info=True)
         return [first, list(stream.iter_data())]
     if pattern == "interleaved":
         first = iter(stream.iter_data())
@@ -241,7 +215,7 @@ def test_every_row_of_a_stream_is_aligned(
 
     if kind == "side_effect":
         # Showing a side-effect stream never delivers: its head has no rows. Its tables
-        # are checked config by config in test_side_effect_stream_tables (ITL-1066).
+        # are checked config by config in test_side_effect_stream_tables.
         assert stream.head(100).as_table().num_rows == 0
         return
     failures = []
@@ -330,12 +304,6 @@ def test_index_after_aggregation_gives_each_element_its_own_token(
             input_order,
             name,
             id=f"{input_order}-{name}",
-            # An input already in tag order looks sorted unsorted: there the ignored
-            # sort_by_tags cannot be seen.
-            marks=[ITL_1066]
-            if name in ITL_1066_CONFIGS
-            and not (name == "sort_by_tags" and input_order == "sorted")
-            else [],
         )
         for input_order in INPUT_ORDERS
         for name in COLUMN_CONFIGS

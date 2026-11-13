@@ -157,3 +157,7 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   equal as_table(cfg).slice(0, n); previews check sorted configs among the held rows.
   6431 pass, 60 strict xfails (ITL-1066 only). #346 merges last; worker_done on the
   coordinator's word.
+* Nov 13 (later): merged main 3bc5e2af (#339), then 41798e87 (#362, ITL-1066). With
+  --runxfail all 60 ITL-1066 cases passed; marks removed. 6491 pass, no marks. Still to
+  come before #346 merges: #363 (ITL-1067), #364 (ITL-1068 warning filter), #365
+  (ITL-1070: GroupBy drops non-by tags).

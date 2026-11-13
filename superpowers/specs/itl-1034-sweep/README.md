@@ -18,4 +18,5 @@ results were measured on `main` at 003d2e82 (November 12, 2026).
 Status on `main` at 5c7a058f (November 13, 2026): fixed are ITL-1042 and ITL-1052 (#355),
 ITL-1043 (#352), ITL-1045 (#358), ITL-1046 (#353), ITL-1050 (#351), ITL-1060 (#356) and
 ITL-1065 (#360); their scripts now show the fixed behaviour. ITL-1047 and ITL-1066 are not
-fixed there; the suite marks only ITL-1066 (strict xfail).
+fixed there; the suite marks only ITL-1066 (strict xfail). Later, at 41798e87, ITL-1066 is
+fixed (#362) and the suite has no marks.
