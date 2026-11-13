@@ -365,3 +365,44 @@ def test_a_custom_hash_column_named_like_a_system_tag_is_kept() -> None:
     table = stream.as_table(columns=config)
     assert name in table.column_names
     assert stream.head(3, columns=config).table.equals(table.slice(0, 3))
+
+
+def test_system_tag_priority_follows_the_streams_own_order() -> None:
+    """Ties between equal tags use the system tags in the stream's own column order.
+
+    ``system_tag_columns`` given as ``["s2", "s1"]`` for a table that stores ``s1`` first:
+    the identity order of a tagless stream sorts by ``s2`` first, as before (ITL-1053).
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    table = pa.table(
+        [
+            pa.array(["a", "z"], pa.string()),
+            pa.array(["z", "a"], pa.string()),
+            pa.array([1, 2], pa.int64()),
+        ],
+        names=["s1", "s2", "x"],
+    )
+    stream = ArrowTableStream(table, tag_columns=[], system_tag_columns=["s2", "s1"])
+    ordered = stream.as_table(columns={"system_tags": True, "sort_by_tags": True})
+    assert ordered.column("x").to_pylist() == [2, 1]
+
+
+@pytest.mark.parametrize("name", ["_context_key", "_source_y", "_tag_digest"])
+def test_a_hash_column_named_like_another_column_group_is_kept(name: str) -> None:
+    """A requested hash name equal to a column the shaping drops or keeps still works."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    job = PipelineJob(name="names", store=InMemoryArrowDatabase())
+    with job:
+        pod_stream = triple.pod(_source(), label="node")
+    assert isinstance(pod_stream, FunctionPodStream)
+    job.run()
+    for target in (pod_stream, job.nodes["node"]):
+        for sort in (False, True):
+            config = {"content_hash": name, "sort_by_tags": sort}
+            table = target.as_table(columns=config)
+            assert table.column_names.count(name) == 1
+            head = target.head(3, columns=config)
+            assert head.table.equals(table.slice(0, 3))

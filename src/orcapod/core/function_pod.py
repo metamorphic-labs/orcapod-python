@@ -1522,30 +1522,40 @@ class FunctionPodStream(StreamBase):
             content_hashes: Returns the content hash of each row of ``table``; called
                 only when ``column_config`` asks for them.
         """
-        hash_column_name = None
-        if column_config.content_hash:
-            hash_column_name = (
-                "_content_hash"
-                if column_config.content_hash is True
-                else column_config.content_hash
-            )
-            table = table.append_column(hash_column_name, content_hashes())
+        hashes = None
         if column_config.sort_by_tags and self.keys()[0]:
+            # The hash travels with its row under a temporary name that no column has:
+            # the requested name may be one of the columns the shaping drops or keeps.
+            carrier = arrow_utils.unused_column_name(table, "__row_content_hash")
+            if column_config.content_hash:
+                table = table.append_column(carrier, content_hashes())
             # Before the system tags are dropped: they break ties between equal tags.
             table = arrow_utils.sort_by_tag_columns(table, self.keys()[0])
+            if column_config.content_hash:
+                hashes = table.column(carrier)
+                table = table.drop_columns([carrier])
+        elif column_config.content_hash:
+            hashes = content_hashes()
         drop_columns = []
         if not column_config.system_tags:
-            # The requested hash column stays, whatever its name starts with.
             drop_columns.extend(
                 c
                 for c in table.column_names
-                if c.startswith(constants.SYSTEM_TAG_PREFIX) and c != hash_column_name
+                if c.startswith(constants.SYSTEM_TAG_PREFIX)
             )
         if not column_config.source:
             drop_columns.extend(f"{constants.SOURCE_PREFIX}{c}" for c in self.keys()[1])
         if not column_config.context:
             drop_columns.append(constants.CONTEXT_KEY)
-        return table.drop([c for c in drop_columns if c in table.column_names])
+        shaped = table.drop([c for c in drop_columns if c in table.column_names])
+        if hashes is not None:
+            name = (
+                column_config.content_hash
+                if isinstance(column_config.content_hash, str)
+                else "_content_hash"
+            )
+            shaped = shaped.append_column(name, hashes)
+        return shaped
 
 
 class CallableWithPodProtocol(Protocol):

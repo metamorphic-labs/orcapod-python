@@ -624,28 +624,30 @@ class FunctionNodeBase(StreamBase):
                 order of ``table``; called only when ``column_config`` asks for them.
         """
         tag_keys = self.keys()[0]
-        hash_column_name = None
-        if column_config.content_hash:
-            hash_column_name = (
-                "_content_hash"
-                if column_config.content_hash is True
-                else column_config.content_hash
-            )
-            table = table.append_column(hash_column_name, content_hashes())
-        if column_config.sort_by_tags and tag_keys:
-            # The sort sees the hash column (it stays with its row) and the system tags
-            # (they break ties between equal tags).
-            table = arrow_utils.sort_by_tag_columns(table, tag_keys)
         hashes = None
-        if hash_column_name is not None:
-            # Set the hash column aside: a custom name could look like a meta column.
-            hashes = table.column(hash_column_name)
-            table = table.drop_columns([hash_column_name])
+        if column_config.sort_by_tags and tag_keys:
+            # The hash travels with its row under a temporary name that no column has:
+            # the requested name may be one of the columns the shaping drops or keeps.
+            carrier = arrow_utils.unused_column_name(table, "__row_content_hash")
+            if column_config.content_hash:
+                table = table.append_column(carrier, content_hashes())
+            # The sort sees the hash column and the system tags (they break ties).
+            table = arrow_utils.sort_by_tag_columns(table, tag_keys)
+            if column_config.content_hash:
+                hashes = table.column(carrier)
+                table = table.drop_columns([carrier])
+        elif column_config.content_hash:
+            hashes = content_hashes()
         shaped = arrow_utils.apply_column_config(
             table, dataclasses.replace(column_config, sort_by_tags=False), tag_keys
         )
-        if hash_column_name is not None and hashes is not None:
-            shaped = shaped.append_column(hash_column_name, hashes)
+        if hashes is not None:
+            name = (
+                column_config.content_hash
+                if isinstance(column_config.content_hash, str)
+                else "_content_hash"
+            )
+            shaped = shaped.append_column(name, hashes)
         return shaped
 
     def head(

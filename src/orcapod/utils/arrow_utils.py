@@ -1837,12 +1837,25 @@ def apply_column_config(
     return table.drop([c for c in drop_columns if c in table.column_names])
 
 
-def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
+def unused_column_name(table: "pa.Table", base: str) -> str:
+    """Return ``base``, with underscores added until no column of ``table`` has that name."""
+    name = base
+    while name in table.column_names:
+        name += "_"
+    return name
+
+
+def sort_by_tag_columns(
+    table: "pa.Table",
+    tag_keys: tuple[str, ...],
+    system_tag_keys: tuple[str, ...] | None = None,
+) -> "pa.Table":
     """Return ``table`` with its rows in tag order: the one sort every tag sort uses.
 
     The rows are ordered ascending by the tag columns ``tag_keys``, nulls last. Rows with
-    equal tags are then ordered by the system tag columns ``table`` has (they hold the
-    record ids), in column order, and rows still equal keep their input order, so the
+    equal tags are then ordered by the system tag columns ``system_tag_keys`` (default:
+    those ``table`` has, in column order; they hold the record ids), and rows still equal
+    keep their input order, so the
     result does not depend on the order the rows arrived in whenever the table has system
     tags. A table with neither is returned as it is. A caller that must keep the order of
     a stream with no regular tag column does not call this for it.
@@ -1854,14 +1867,21 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     Args:
         table: The table to sort.
         tag_keys: Names of the regular (non-system) tag columns, in sort priority.
+        system_tag_keys: Names of the system tag columns to break ties with, in priority;
+            names the table does not have are ignored. ``None`` means every system tag
+            column of ``table`` in column order.
 
     Returns:
         A new table with the same columns, rows in tag order.
     """
-    system_tags = [
-        c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
-    ]
-    keys = [*tag_keys, *(c for c in system_tags if c not in tag_keys)]
+    if system_tag_keys is None:
+        system_tag_keys = tuple(
+            c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
+        )
+    present = set(table.column_names)
+    keys = list(
+        dict.fromkeys([*tag_keys, *(c for c in system_tag_keys if c in present)])
+    )
     if not keys:
         return table
     try:
