@@ -9,7 +9,7 @@ of four entry points and, on the async ones, with the gate forcing a completion 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -237,8 +237,15 @@ def stream_function_tokens(
     Read from the ``Data`` objects ``iter_data`` yields (``source_info()``), a path that
     does not go through table assembly: the reference a table's tokens must match.
     """
+    return pairs_function_tokens(stream.iter_data(), column)
+
+
+def pairs_function_tokens(
+    pairs: Iterable[tuple[Any, Any]], column: str = "y"
+) -> dict[tuple[str, bytes], str]:
+    """The function token of ``column`` of each ``(tag, data)`` pair, keyed by record id."""
     tokens: dict[tuple[str, bytes], str] = {}
-    for tag, data in stream.iter_data():
+    for tag, data in pairs:
         system_tags = tag.as_dict(columns={"system_tags": True})
         (record_id,) = [
             v

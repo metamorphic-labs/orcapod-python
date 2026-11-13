@@ -286,17 +286,20 @@ def check_tables(
                     f"{table.num_rows} rows, the default configuration gives "
                     f"{expected_rows}"
                 )
-                if table.num_rows == 0 and not (
-                    case.expected and case.expected(sources)
+                # Every configured table, not only the default one: a configuration
+                # could repeat one whole group and leave out another, or give none.
+                if (covered := member_values(case, sources)) is not None:
+                    assert_members_cover(table, *covered)
+                # An empty table is right only when the fixture-derived rows are none.
+                if (
+                    table.num_rows == 0
+                    and case.expected is not None
+                    and not case.expected(sources)
                 ):
                     continue
                 assert_requested_columns(
                     table, config, layout, require_sorted=call != "head"
                 )
-                # Every configured table, not only the default one: a configuration
-                # could repeat one whole group and leave out another.
-                if (covered := member_values(case, sources)) is not None:
-                    assert_members_cover(table, *covered)
                 assert_rows_aligned(
                     table,
                     layout,

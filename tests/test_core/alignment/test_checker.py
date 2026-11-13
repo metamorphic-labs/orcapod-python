@@ -267,3 +267,12 @@ def test_a_batch_table_repeating_one_batch_instead_of_another_is_named() -> None
     assert_rows_aligned(repeated, layout, sources.oracle, batched.data_context)
     with pytest.raises(AssertionError, match="are not the input rows"):
         assert_members_cover(repeated, "x", xs)
+
+
+def test_an_empty_batch_table_fails_member_coverage() -> None:
+    """A Batch has no expected-rows rule; an empty table must still fail coverage."""
+    sources = make_sources("unique")
+    table = Batch(2)(sources.a).as_table()
+    xs = [o.values["x"] for o in sources.oracle.origins if o.source_id == "A"]
+    with pytest.raises(AssertionError, match="are not the input rows"):
+        assert_members_cover(table.slice(0, 0), "x", xs)

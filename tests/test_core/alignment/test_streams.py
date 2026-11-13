@@ -59,7 +59,7 @@ from .expectations import member as member_of
 from .expectations import rows
 from .gate import GATE, ORDERS, new_gated_scale_pod
 from .oracle import Oracle
-from .jobs import derive_y, stream_function_tokens
+from .jobs import derive_y, pairs_function_tokens, stream_function_tokens
 
 ITL_1065 = pytest.mark.xfail(
     strict=True,
@@ -436,15 +436,20 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
         derive_y(sources)
         stream = new_gated_scale_pod()(sources.a)
     GATE.disarm()
+    # The (tag, data) pairs that prepared the state: the reference the preview's function
+    # tokens must match, by record id (a partial stream is not read further for it).
+    prepared: list[Any] = []
     if state == "fresh_pod":
         available = 0
     elif state == "partial_pod":
         partial = iter(stream.iter_data())
-        next(partial), next(partial), next(partial)
+        prepared = [next(partial), next(partial), next(partial)]
         del partial
         available = 3
     elif state == "complete_pod":
         stream.as_table()
+        prepared = list(stream.iter_data())
+    tokens = pairs_function_tokens(prepared) if prepared else None
     computed_before = len(GATE.completed)
 
     origin_order = [member_of(o) for o in sources.oracle.origins if o.source_id == "A"]
@@ -469,6 +474,7 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
                     layout,
                     sources.oracle,
                     stream.data_context,
+                    function_tokens=tokens,
                     expected_rows=want,
                 )
             except AssertionError as exc:
