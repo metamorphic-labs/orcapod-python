@@ -210,9 +210,12 @@ Suite 10712 passed on 3.11, 3.12, 3.13; ruff, format, basedpyright exit 0; golde
 
 ## CodeRabbit round on 19ad76ce (coordinator approved a 2nd push: F3, F4 only)
 
-- [ ] F3: rowless head downstream of an unpolled declared-schema `PollingSource` fetched
+- [x] F3: rowless head downstream of an unpolled declared-schema `PollingSource` fetched
       when `source`/`meta`/`context`/`content_hash`/`all_info` was asked for. The private
       schema-IO check takes the head's `ColumnConfig`; regression test first (zero polls and
       fetches, `FunctionPodStream` and `SideEffectPodStream`).
-- [ ] F4: docstring on the nested `build` helper in `test_node_head.py`.
+- [x] F4: docstring on the nested `build` helper in `test_node_head.py`.
 - [ ] Decline F1 (ITL-1002), F2 (follow-up), linked-issues check (D2) in the threads.
+
+Also merged origin/main #337, #338 and #286 (no conflicts; golden and contexts identical to
+main). Suite 11029 passed on 3.11, 3.12, 3.13; basedpyright exit 0.
