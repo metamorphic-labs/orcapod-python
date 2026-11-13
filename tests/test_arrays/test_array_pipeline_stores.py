@@ -107,17 +107,7 @@ def split(x: np.ndarray) -> list[np.ndarray]:  # pyright: ignore[reportMissingTy
         ("in_memory", "sync"),
         ("in_memory", "async"),
         ("delta", "sync"),
-        pytest.param(
-            "delta",
-            "async",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "ITL-984: the Delta MERGE cannot coerce large_list<large_binary> "
-                    "against the stored list<binary> under the async orchestrator"
-                ),
-            ),
-        ),
+        ("delta", "async"),
     ],
 )
 def test_pod_output_list_of_arrays(tmp_path: Path, store: str, runner: str) -> None:
