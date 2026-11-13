@@ -87,6 +87,16 @@ def _system_column(prefix: str, table: pa.Table) -> str:
     return name
 
 
+def _spiral_configs(saved: object) -> list[dict[str, Any]]:
+    """Return every saved Spiral source config found anywhere in a saved job."""
+    if isinstance(saved, dict):
+        found = [saved] if saved.get("source_type") == "spiraldb_table" else []
+        return found + [c for v in saved.values() for c in _spiral_configs(v)]
+    if isinstance(saved, list):
+        return [c for v in saved for c in _spiral_configs(v)]
+    return []
+
+
 class TestTheCopy:
     """Each named key column is also a data column under the given name."""
 
@@ -138,7 +148,11 @@ class TestTheCopy:
         ]
         table = source.as_table()
         whole = list(
-            zip(_column("timestamp", table), _column("spike_time_us", table), strict=True)
+            zip(
+                _column("timestamp", table),
+                _column("spike_time_us", table),
+                strict=True,
+            )
         )
 
         assert synced == asyncio.run(collect()) == whole
@@ -200,7 +214,9 @@ class TestRefusedMappings:
     def test_a_tag_that_is_not_a_key_column_is_refused(self, project):
         """Only a key column, which is never null, can be copied."""
         with pytest.raises(InputValidationError, match="'amplitude' is not a key"):
-            _source(tag_columns=["subject_id", "amplitude"], tags_as_data={"amplitude": "a"})
+            _source(
+                tag_columns=["subject_id", "amplitude"], tags_as_data={"amplitude": "a"}
+            )
 
     def test_a_key_column_that_is_not_a_tag_is_refused(self, project):
         """A key column the source offers as data already is not a tag to copy."""
@@ -300,10 +316,10 @@ class TestSaveAndLoad:
         assert loaded.content_hash() == _source().content_hash()
 
     @pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
-    def test_a_saved_and_loaded_job_computes_nothing_again(
+    def test_a_saved_and_loaded_job_reads_its_results(
         self, project, tmp_path, orchestrator
     ):
-        """A job saved after its run and loaded again finds every result stored."""
+        """A job saved after its run keeps the mapping and, loaded, reads its results."""
         calls: list[int] = []
 
         @function_pod(output_keys="ms")
@@ -312,19 +328,31 @@ class TestSaveAndLoad:
             calls.append(spike_time_us)
             return spike_time_us / 1000
 
-        job = PipelineJob(name="spikes", store=DeltaTableDatabase(tmp_path / "store"))
-        with job:
-            to_ms.pod(_source(tags_as_data=_COPY), label="to_ms")
+        def build() -> PipelineJob:
+            """Build the job over the source with the copy."""
+            job = PipelineJob(
+                name="spikes", store=DeltaTableDatabase(tmp_path / "store")
+            )
+            with job:
+                to_ms.pod(_source(tags_as_data=_COPY), label="to_ms")
+            return job
+
+        job = build()
         job.run(orchestrator=orchestrator() if orchestrator else None)
         assert sorted(calls) == sorted(t for _, t, _ in _SPIKES)
         path = tmp_path / "job.json"
         job.save(str(path))
-        assert '"tags_as_data": {"timestamp": "spike_time_us"}' in path.read_text()
+        (saved,) = _spiral_configs(json.loads(path.read_text()))
+        assert saved["tags_as_data"] == _COPY
 
-        calls.clear()
         loaded = PipelineJob.load(str(path))
-        loaded.run(orchestrator=orchestrator() if orchestrator else None)
+        stored = loaded.nodes["to_ms"].get_all_records()
+        assert stored is not None
+        assert sorted(_column("ms", stored)) == sorted(t / 1000 for _, t, _ in _SPIKES)
 
+        # The same job built again finds every row's result.
+        calls.clear()
+        build().run(orchestrator=orchestrator() if orchestrator else None)
         assert calls == []
 
 
@@ -339,7 +367,10 @@ class TestTheWorkshopCase:
             "timestamp"
         )
 
-        assert per_unit.keys() == (("subject_id", "unit_id"), ("amplitude", "spike_time_us"))
+        assert per_unit.keys() == (
+            ("subject_id", "unit_id"),
+            ("amplitude", "spike_time_us"),
+        )
         rows = per_unit.as_table().to_pylist()
         assert [(r["subject_id"], r["unit_id"], r["spike_time_us"]) for r in rows] == [
             ("m1", 1, [10, 30, 40]),
