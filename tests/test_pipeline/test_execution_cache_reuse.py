@@ -216,6 +216,31 @@ def test_source_callback_rebinding_does_not_certify_old_rows(orchestrator) -> No
     assert job.nodes["grouped"].as_table().column("x").to_pylist() == [[18]]
 
 
+@pytest.mark.parametrize(
+    "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+def test_callback_replacing_operator_cache_invalidates_outer_completion(
+    orchestrator,
+) -> None:
+    """A direct call from on_node_end cannot poison the next unchanged job run."""
+    from orcapod.pipeline.observer import NoOpObserver
+
+    job = make_chain()
+    node = job.nodes["grouped"]
+    job.run(orchestrator=orchestrator())
+    expected = node.as_table()
+
+    class ReplaceCache(NoOpObserver):
+        def on_node_end(self, node_label, node_hash):
+            if node_label == "grouped":
+                node.execute(DictSource([{"g": 1, "x": 99}], tag_columns=["g"]))
+
+    job.run(orchestrator=orchestrator(), observer=ReplaceCache())
+    assert node._completed_execution is None
+    job.run(orchestrator=orchestrator())
+    assert node.as_table().equals(expected)
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_direct_operator_call_consumes_actual_inputs(asynchronous) -> None:
     """Declared graph inputs never authorize reuse for a direct node invocation."""

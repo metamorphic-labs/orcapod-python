@@ -115,6 +115,13 @@ included.
 
 ## Measured result
 
+CodeRabbit review follow-up: snapshot construction now memoizes each node within one
+traversal, and definition comparison visits each shared ancestor pair once. Proof
+validation also memoizes upstream checks within that call. Fresh traversals still detect
+callback changes. A nested untrusted node execution advances the invalidation generation
+so an outer trusted invocation cannot certify a replacement cache. Regression coverage
+includes twenty split/join stages and both sync and async nested execution.
+
 The 1,000-row benchmark compared base `89160c47` with this implementation using the
 same environment and in-memory result database. First warm runs (milliseconds):
 

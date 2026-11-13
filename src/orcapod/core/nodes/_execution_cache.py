@@ -26,6 +26,32 @@ class _Identity:
         return isinstance(other, _Identity) and self.value is other.value
 
 
+class _Definition:
+    """A shared snapshot DAG with comparison bounded by distinct ancestor pairs."""
+
+    def __init__(
+        self, local: tuple[Any, ...], upstreams: tuple[_Definition, ...] = ()
+    ) -> None:
+        self.local = local
+        self.upstreams = upstreams
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _Definition):
+            return False
+        pending: list[tuple[_Definition, _Definition]] = [(self, other)]
+        seen: set[tuple[int, int]] = set()
+        while pending:
+            left, right = pending.pop()
+            pair = (id(left), id(right))
+            if left is right or pair in seen:
+                continue
+            seen.add(pair)
+            if left.local != right.local or len(left.upstreams) != len(right.upstreams):
+                return False
+            pending.extend(zip(left.upstreams, right.upstreams, strict=True))
+        return True
+
+
 class _Run:
     """Freeze source bindings, configuration and graph edges before any callbacks."""
 
@@ -47,53 +73,93 @@ class _Run:
             self.aligned[id(node)] = tuple(id(p) for p in predecessors) == tuple(
                 id(p) for p in upstreams
             )
-        self.initial = {key: self.definition(node) for key, node in self.nodes.items()}
+        definitions: dict[int, _Definition | None] = {}
+        self.initial = {
+            key: self.definition(node, definitions) for key, node in self.nodes.items()
+        }
 
-    def definition(self, stream: Any) -> object | None:
+    def definition(
+        self, stream: Any, memo: dict[int, _Definition | None] | None = None
+    ) -> _Definition | None:
         """Describe the graph independently of whether its work has completed."""
+        if memo is None:
+            memo = {}
+        key = id(stream)
+        if key not in memo:
+            memo[key] = self._definition(stream, memo)
+        return memo[key]
+
+    def _definition(
+        self, stream: Any, memo: dict[int, _Definition | None]
+    ) -> _Definition | None:
+        """Build one node once per traversal, without retaining a stale traversal."""
         kind = type(stream)
         if kind in self.kinds["source_node"]:
-            bound = self.definition(stream.bound_source)
-            return None if bound is None else (_Identity(stream), bound)
+            bound = self.definition(stream.bound_source, memo)
+            return (
+                None if bound is None else _Definition((_Identity(stream),), (bound,))
+            )
         if kind in self.kinds["arrow"]:
-            return (_Identity(stream), stream.last_modified, stream.data_context_key)
+            return _Definition(
+                (_Identity(stream), stream.last_modified, stream.data_context_key)
+            )
         if kind in self.kinds["memory_source"]:
-            underlying = self.definition(stream._stream)
-            return None if underlying is None else (_Identity(stream), underlying)
+            underlying = self.definition(stream._stream, memo)
+            return (
+                None
+                if underlying is None
+                else _Definition((_Identity(stream),), (underlying,))
+            )
         if kind in self.kinds["spiral"] and stream._asof is not None:
-            return (_Identity(stream), stream._asof, stream.data_context_key)
+            return _Definition(
+                (_Identity(stream), stream._asof, stream.data_context_key)
+            )
         if kind not in self.kinds["computed"]:
             return None
-        upstreams = tuple(self.definition(s) for s in stream.upstreams)
+        upstreams = tuple(self.definition(s, memo) for s in stream.upstreams)
         if not upstreams or any(s is None for s in upstreams):
             return None
         producer = stream.producer
-        return (
-            upstreams,
-            getattr(stream, "_execution_generation", 0),
-            _Identity(producer),
-            producer.last_modified if producer is not None else None,
-            _Identity(getattr(stream, "_node_config", None)),
-            _Identity(getattr(stream, "_pipeline_database", None)),
-            _Identity(getattr(stream, "_ephemeral_cached_pod", None)),
-            stream.data_context_key,
+        return _Definition(
+            (
+                getattr(stream, "_execution_generation", 0),
+                _Identity(producer),
+                producer.last_modified if producer is not None else None,
+                _Identity(getattr(stream, "_node_config", None)),
+                _Identity(getattr(stream, "_pipeline_database", None)),
+                _Identity(getattr(stream, "_ephemeral_cached_pod", None)),
+                stream.data_context_key,
+            ),
+            cast(tuple[_Definition, ...], upstreams),
         )
 
-    def proof(self, node: Any) -> object | None:
+    def proof(self, node: Any) -> _Definition | None:
         """Require unchanged run-start inputs and successfully completed predecessors."""
+        return self._proof(node, {}, {})
+
+    def _proof(
+        self,
+        node: Any,
+        definitions: dict[int, _Definition | None],
+        proofs: dict[int, _Definition | None],
+    ) -> _Definition | None:
         key = id(node)
+        if key in proofs:
+            return proofs[key]
+        proofs[key] = None
         if key not in self.nodes or not self.aligned[key]:
             return None
-        definition = self.definition(node)
+        definition = self.definition(node, definitions)
         if definition is None or definition != self.initial[key]:
             return None
         for upstream in node.upstreams:
             if type(upstream) in self.kinds["computed"]:
-                proof = self.proof(upstream)
+                proof = self._proof(upstream, definitions, proofs)
                 if proof is None or proof != getattr(
                     upstream, "_completed_execution", None
                 ):
                     return None
+        proofs[key] = definition
         return definition
 
 
@@ -247,6 +313,11 @@ def track_completion(method: F) -> F:
     """Track completion without changing per-row execution, persistence or hooks."""
 
     def setup(node: Any, kwargs: dict[str, Any]) -> _TrackingObserver:
+        if _ACTIVE.get() is not node:
+            # An untrusted call may replace this node's output while an outer
+            # trusted call is suspended in a callback or another coroutine.
+            # The outer run-start definition must no longer certify that cache.
+            invalidate(node)
         if not is_current(node):
             node._entry_id_rows = {}
         observer = _TrackingObserver(kwargs.get("observer"), [])
