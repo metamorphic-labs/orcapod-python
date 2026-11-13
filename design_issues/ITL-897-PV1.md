@@ -25,7 +25,8 @@ section 10). Storage and hashing are separate and the hash is strict (developer,
 and 12, 2026): every property of a value counts, `attrs` included, except what storage does
 not restore (`flags`, RangeIndex kind, index `freq`, unused MultiIndex levels, string
 storage, the `object` dtype of a column that reads back typed, the type of an index level
-name), which never counts, so
+name, the types of labels of mixed type, an extension dtype of an index level), which never
+counts, so
 `hash(read(write(v))) == hash(v)`. `PANDAS_IDENTITY_PROPERTIES` is the one list of these in
 code. The logical types were renamed `orcapod.pandas.dataframe` / `orcapod.pandas.series`
 with the shared ignore-list metadata of library value types (`{"ignore":[],"version":1}`,

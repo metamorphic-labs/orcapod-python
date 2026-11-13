@@ -636,6 +636,11 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
                 pandas_dtype_descriptor(dtype)
             except ValueError as exc:
                 raise ValueError(f"column {label!r}: {exc}") from exc
+    if df.attrs:
+        # ``attrs`` are described on their own and are not needed in the table; what
+        # pyarrow does with ``attrs`` it cannot write depends on its version.
+        df = df.copy(deep=False)
+        df.attrs = {}
     try:
         table = pa.Table.from_pandas(df, preserve_index=True)
     except pa.ArrowInvalid as exc:

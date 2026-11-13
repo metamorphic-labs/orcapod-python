@@ -1318,7 +1318,8 @@ series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
          "name": <label>, "dtype": <dtype>,
          "index": [[<name>, <dtype>], ...]}
 
-<attrs> := attrs as the JSON object storage keeps; {} when empty or not writable as JSON
+<attrs> := attrs as the JSON object storage keeps ({1: "x"} is {"1": "x"}; a tuple is a
+           list); attrs with an entry JSON cannot write are refused
 <name>  := <str> | null                             an index level name as storage restores
                                                     it: its text
 <label> := <str> | null | {"bool": b} | {"int": n} | {"float": <float.hex()>}
@@ -1351,10 +1352,10 @@ the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 | MultiIndex level order (frame and Series) | yes | `D` (ordered) |
 | Struct field order in a `pd.ArrowDtype` struct column, at every depth | yes | `D` (ordered) |
 | Values, row order, row count, Arrow type (int width, datetime unit and timezone) | yes | `D` |
-| Index values, index level names (as the text storage writes), index dtype | yes | `D`, descriptor |
+| Index values, index level names (as the text storage writes), index dtype (as storage restores it) | yes | `D`, descriptor |
 | `columns.name` / `columns.names` | yes | descriptor |
 | Dtype of the column axis, per level (an `int64` versus an `object` Index of the same labels) | yes | descriptor |
-| Column label type (`0` versus `"0"`), MultiIndex columns versus flat labels | yes | descriptor |
+| Column label type where the labels have one type (`0` versus `"0"`), MultiIndex columns versus flat labels | yes | descriptor |
 | Series name, typed (`0` versus `"0"`); a frame versus its one-column Series | yes | descriptor |
 | pandas dtype where the Arrow values coincide: `Int64` versus `int64`, `boolean` versus `bool`, `string` versus `object` | yes | descriptor |
 | Categorical versus string; the category list, including unused categories; category order; `ordered` | yes | descriptor |
@@ -1362,12 +1363,13 @@ the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 | `-0.0` versus `0.0` | yes, although pandas calls them equal: the values are hashed as bytes | `D` |
 | `flags` | never: storage does not restore it | |
 | Type of an index level name (`1` versus `"1"`) | never: storage writes the name as text | |
+| Types of column labels of mixed type (`0` beside `"b"` versus `"0"` beside `"b"`) | never: storage writes such labels as text | |
+| A masked, string or Arrow dtype of an index level (`Int64` versus `int64`) | never: storage restores an index level as NumPy | |
 | `RangeIndex` versus an `int64` index with the same values | never: storage restores an `Index` | |
 | `freq` of a `DatetimeIndex` or `TimedeltaIndex` | never: storage does not restore it | |
 | Unused levels of a MultiIndex | never: storage does not restore them | |
 | Storage of a string dtype (`string[python]` versus `string[pyarrow]`) | never: storage restores `string[python]` | |
 | `object` dtype of a column that reads back as another dtype | never: see below | |
-| `attrs` that cannot be written as JSON | never: storage drops them, so they hash as `{}` | |
 | Key order of dicts in an `object` column | never: a `dict` is unordered | |
 
 **`object` columns are hashed in the form storage restores.** An `object` column or index
@@ -1387,10 +1389,37 @@ store. `columns.names` and a Series' name are restored with their types, so they
 part of the hash. A timestamp or duration label is the integer count in its own unit, with
 the unit.
 
-Storage refuses a value whose column labels and index names collide once written as text
-(the index name `1` with a column `"1"`; integer names of MultiIndex levels): Arrow would
-write two fields of one name and the value read back would have lost its index.
-`python_to_storage` raises `ValueError` listing the names.
+Two more consequences of the same rule:
+
+- **Column labels of mixed type hash as their text.** Storage restores labels of one type
+  with that type (`0, 1` stay integers), but writes labels of mixed type as text: the
+  columns `0, "b"` read back `"0", "b"`. So a frame with the columns `0, "b"` and one with
+  `"0", "b"` hash equal.
+- **An index level hashes as the NumPy level it reads back as.** Storage restores a column
+  with its masked, string or Arrow dtype, but an index level as NumPy: an `Int64` index
+  reads back `int64` (`float64` when it holds a missing value), a `string` index reads
+  back `object`. So an `Int64` index and the `int64` index with the same values hash
+  equal. Categorical, timezone-aware, period and interval index levels are restored and
+  keep their dtype.
+
+The descriptor holds the column labels, `columns.names`, a Series' name and the index names
+as read from the frame storage builds for the value's Arrow schema. The value's own labels
+and names must still be in the grammar: a label of another type raises `ValueError`.
+
+**`attrs` must be JSON.** Storage writes `attrs` as JSON. A key that is not text is written
+as text (`{1: "x"}` reads back `{"1": "x"}`, and hashes like it), and a tuple reads back as
+a list. `attrs` with an entry JSON cannot write (a `set`, an arbitrary object, a tuple as a
+key) are refused: the hash and `python_to_storage` raise `ValueError` naming the key, on
+every supported pyarrow version (pyarrow itself would drop the whole `attrs` with a
+warning, or raise `TypeError`, depending on its version). With `attrs` in the ignore list
+the hash does not read them.
+
+Storage refuses a value it would corrupt. Column labels and index names that collide
+once written as text (the index name `1` with a column `"1"`; integer names of MultiIndex
+levels) would be written as two fields of one name, and the value read back would have lost
+its index. Distinct labels that read back equal (the labels `True` and `False` both read
+back `True`) would come back as duplicates. `python_to_storage` raises `ValueError` in both
+cases.
 
 A label or dtype outside the grammar raises `ValueError` naming it (a dtype error names its
 column). A value that cannot be converted to Arrow raises `ValueError`.
