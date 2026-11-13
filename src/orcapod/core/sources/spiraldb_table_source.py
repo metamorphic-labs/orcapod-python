@@ -1,9 +1,9 @@
 """SpiralDBTableSource — a read-only RootSource that streams a SpiralDB table.
 
 The source is built from the table's metadata alone (schema, key columns, SpiralDB's
-table id): no row is read until one is asked for. Rows then arrive in batches, so a
-read holds one of SpiralDB's batches at a time whatever the table's size. The table's
-primary-key (key-schema) columns are the tag columns by default.
+table id): no row is read until one is asked for. Rows arrive in batches, and a
+completed pinned snapshot is retained for reuse. The table's primary-key
+(key-schema) columns are the tag columns by default.
 
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is handled externally — run ``spiral login`` once; pyspiral keeps
@@ -36,8 +36,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime
+import threading
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from orcapod.core.sources.base import RootSource
@@ -158,12 +159,14 @@ class SpiralDBTableSource(RootSource):
     ``content_hash``, ``pipeline_hash`` and ``to_config`` never read a row either.
 
     Rows are read when asked for (``iter_data``, ``async_iter_data``, ``as_table`` and
-    the dataframe methods). Each read is one scan of the table in key order. SpiralDB
-    sends it in batches whose sizes follow its stored fragments (they cannot be
-    chosen); the source hands each on in slices of at most ``batch_rows`` rows, so
-    iterating holds one SpiralDB batch, and the slice being processed, at a time.
-    ``as_table`` and the dataframe methods hold every row they return. Nothing is
-    cached: every read scans again.
+    the dataframe methods). The first complete read scans the table in key order.
+    SpiralDB sends batches whose sizes follow its stored fragments (they cannot be
+    chosen); the source hands each on in slices of at most ``batch_rows`` rows.
+    A pinned source retains those streams and their lazily built row objects for
+    later reads, using memory proportional to the snapshot. Failed or partial reads
+    are not retained. Concurrent initial readers may scan independently; the first
+    complete read publishes the retained snapshot. Sources without a pinned version
+    scan on every read because their freshness cannot be established.
 
     Display. ``head(n)`` and the notebook display (its ``head()``) read only the first
     ``n`` rows (``PREVIEW_ROWS``, 10, by default), in one scan to which ``max_rows`` does
@@ -277,6 +280,8 @@ class SpiralDBTableSource(RootSource):
         self._limit = limit
         self._max_rows = max_rows
         self._batch_rows = batch_rows
+        self._retained_streams: tuple[ArrowTableStream, ...] | None = None
+        self._snapshot_lock: threading.Lock = threading.Lock()
         self._given_asof = asof
         self._tags_as_data: dict[str, str] = dict(tags_as_data) if tags_as_data else {}
         location = f"SpiralDB project {project_id!r}, dataset {dataset!r}"
@@ -485,18 +490,44 @@ class SpiralDBTableSource(RootSource):
             for i in range(keys.num_rows)
         ]
 
-    def _batch_streams(self) -> Generator["ArrowTableStream", None, None]:
-        """Scan the table once and yield its rows as streams of at most ``batch_rows`` rows.
+    def _batch_streams(
+        self, cancelled: threading.Event | None = None
+    ) -> Generator["ArrowTableStream", None, None]:
+        """Reuse a completed pinned snapshot, or retain a successful full scan.
 
-        Each SpiralDB batch is held while its slices are yielded.
-
-        Raises:
-            SourceTooLargeError: If the read would return, or returns, more than
-                ``max_rows`` rows.
-            ValueError: If a batch's columns differ from the source's schema, or a
-                key column holds a null.
+        Concurrent initial readers scan independently. Publication is atomic and
+        first-completion wins; no lock is held across a scan or a consumer yield.
+        Closing or failing a partial read leaves no retained snapshot.
         """
-        return self._read_batches(limit=self._limit, max_rows=self._max_rows)
+        with self._snapshot_lock:
+            retained = self._retained_streams
+        if retained is not None:
+            yield from retained
+            return
+        streams: list[ArrowTableStream] = []
+        with closing(
+            self._read_batches(limit=self._limit, max_rows=self._max_rows)
+        ) as batches:
+            for stream in batches:
+                if self._asof is not None:
+                    streams.append(stream)
+                yield stream
+        if self._asof is not None:
+            with self._snapshot_lock:
+                if self._retained_streams is None and (
+                    cancelled is None or not cancelled.is_set()
+                ):
+                    self._retained_streams = tuple(streams)
+
+    def _stream_rows(
+        self, stream: ArrowTableStream
+    ) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """Initialize a batch's row memo before concurrent readers can reuse it."""
+        # ArrowTableStream initializes its memo only after iteration completes.
+        # Materialize just this batch under the lock; never hold it while yielding.
+        with self._snapshot_lock:
+            rows = list(stream.iter_data())
+        yield from rows
 
     def _read_batches(
         self, *, limit: int | None, max_rows: int | None
@@ -571,23 +602,26 @@ class SpiralDBTableSource(RootSource):
                     )
 
     def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
-        """Scan the table and yield its ``(tag, data)`` pairs, one batch held at a time."""
-        for stream in self._batch_streams():
-            yield from stream.iter_data()
+        """Yield ``(tag, data)`` pairs, reusing a completed pinned snapshot."""
+        with closing(self._batch_streams()) as streams:
+            for stream in streams:
+                yield from self._stream_rows(stream)
 
     async def async_iter_data(
         self,
     ) -> AsyncIterator["tuple[TagProtocol, DataProtocol]"]:
         """Yield the table's ``(tag, data)`` pairs, reading each batch off the event loop."""
-        streams = self._batch_streams()
+        cancelled = threading.Event()
+        streams = self._batch_streams(cancelled)
         try:
             while True:
                 stream = await asyncio.to_thread(next, streams, None)
                 if stream is None:
                     break
-                for pair in stream.iter_data():
+                for pair in self._stream_rows(stream):
                     yield pair
         finally:
+            cancelled.set()
             try:
                 streams.close()
             except ValueError:
@@ -601,7 +635,7 @@ class SpiralDBTableSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        """Scan the table and return its rows as one PyArrow table (all held in memory)."""
+        """Return one PyArrow table, reusing a completed pinned snapshot when available."""
         return self._whole_table(
             self._batch_streams(), columns=columns, all_info=all_info
         )
@@ -650,6 +684,28 @@ class SpiralDBTableSource(RootSource):
             schema_only = self._stream.as_table(columns=columns, all_info=all_info)
             return _Head(schema_only, False, self.row_count_estimate, True)
         head_limit = n if self._limit is None else min(n, self._limit)
+        with self._snapshot_lock:
+            retained = self._retained_streams
+        if retained is not None:
+            remaining = head_limit
+            total_rows = 0
+            previews: list[ArrowTableStream] = []
+            for stream in retained:
+                table = stream.as_table(columns={"source": True, "system_tags": True})
+                total_rows += table.num_rows
+                if remaining > 0:
+                    selected = table.slice(0, remaining)
+                    previews.append(
+                        ArrowTableStream(
+                            selected,
+                            tag_columns=self._tag_columns,
+                            system_tag_columns=self._system_tag_columns,
+                            data_context=self.data_context,
+                        )
+                    )
+                    remaining -= selected.num_rows
+            rows = self._whole_table(iter(previews), columns=columns, all_info=all_info)
+            return _Head(rows, True, total_rows, False)
         rows = self._whole_table(
             self._read_batches(limit=head_limit, max_rows=None),
             columns=columns,
@@ -668,6 +724,8 @@ class SpiralDBTableSource(RootSource):
         if not head.rows_read:
             return f"rows not read; the table has about {head.total_rows:,} rows"
         if not head.total_is_estimate:
+            if shown < head.total_rows:
+                return f"first {shown:,} rows of {head.total_rows:,}"
             return f"all {shown:,} row{'' if shown == 1 else 's'}"
         if self._where:
             condition = ", ".join(f"{c}={v!r}" for c, v in self._where.items())

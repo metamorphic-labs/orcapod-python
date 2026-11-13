@@ -115,13 +115,22 @@ Things to know about Spiral tables:
 Building a `SpiralDBTableSource` reads no rows. It reads the table's schema, key columns and
 table id, which takes about a second whatever the table's size. `output_schema()`, `keys()`,
 `content_hash()` and `pipeline_hash()` read no rows either. Rows are read when you ask for
-them, and every read scans the table again:
+them. The first complete read of a pinned version is retained for later reads:
 
 - `iter_data()` and a pipeline job hand the rows on in batches of at most `batch_rows`
   rows (default 8,192). SpiralDB sends a scan in batches that follow its stored fragments,
-  whose sizes cannot be chosen; one of them is held while its rows are handed on.
+  whose sizes cannot be chosen. Completed batch streams are retained in memory, and
+  their row objects and hashes are reused by later sync and async reads.
 - `as_table()`, `as_df()`, `as_polars_df()`, `as_pandas_df()` and `as_lazy_frame()` read
   the rows into memory and return them all.
+
+Retention uses memory proportional to the full snapshot, even with `iter_data()`;
+`batch_rows` bounds processing slices, not retained memory. Row objects are built only
+when iteration needs them, so a table-only read retains Arrow streams without eagerly
+constructing all row objects. Failed, cancelled, or partially consumed scans do not
+publish a snapshot. Concurrent initial readers may scan independently; the first
+complete read atomically publishes the retained snapshot. When no table version can
+be pinned, each read scans again rather than reusing potentially stale rows.
 
 To read part of a table, say so when you build the source. SpiralDB applies both
 restrictions before any row is transferred:
@@ -148,13 +157,15 @@ SpiralDB records for the table. That count can include deleted rows that are not
 compacted, so a table near the cap can be refused although a scan would return fewer rows;
 the error says so. The cap is there
 because a pipeline job keeps every row it processes in memory, about 5 KB per row for each
-node, so 100,000 rows cost about 0.5 GB per node. A table of millions of rows can be iterated
-with `max_rows=None`, but it cannot yet be run through a job on a laptop.
+node, so 100,000 rows cost about 0.5 GB per node. Removing the cap with `max_rows=None`
+also permits a source to retain a snapshot of any size; it does not provide bounded-memory
+iteration.
 
 **Looking at a table in a notebook.** A Spiral source shown at the end of a notebook cell
 (its `head()`, see [Looking at data](streams.md#looking-at-data)) reads only its first 10
 rows, in one scan to which the row cap does not apply, so a table of any size can be looked
-at; `head(n)` reads `n`. The header line says what is shown, for
+at; `head(n)` reads `n`. After a complete snapshot has been retained, previews use
+that snapshot and report its exact row count without another scan. The header line says what is shown, for
 example `SpiralDBTableSource[spike_event] — first 10 rows of about 63,349` (the table's
 recorded row count, read without scanning), `all 4 rows` when the source reads no more than
 that, or `first 10 matching rows (where unit_id=106); the table has about 63,349 rows` with
@@ -169,8 +180,8 @@ job, and `as_table()` after an async run) returns every row that any job with th
 pipeline has read from that table, not only the rows of the latest restriction. The rows
 sent downstream during a run are only the rows that run read.
 
-**Running again.** A second run scans the table again and computes nothing for the rows it
-has already seen. A source object keeps reading the version its table had when it was
+**Running again.** A second read reuses the completed pinned snapshot and its row
+objects; a second run computes nothing for the rows it has already seen. A source object keeps reading the version its table had when it was
 built, so rows added to the Spiral table afterwards are seen only by a new source: build
 the source (and the job around it) again, and the added rows are new keys, the only rows
 computed.

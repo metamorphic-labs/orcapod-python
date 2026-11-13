@@ -250,11 +250,11 @@ class TestConnector:
 
         with patch(_CONNECTOR, side_effect=connect):
             src = SpiralDBTableSource(_PROJECT_ID, _TABLE_NAME)
-            src.as_table()
             # iter_data is a generator function, so the read can be closed.
             unfinished = cast("Generator[Any, None, None]", src.iter_data())
             next(unfinished)  # a read that is not finished
             unfinished.close()
+            src.as_table()
             with pytest.raises(ValueError):
                 SpiralDBTableSource(_PROJECT_ID, "no_such_table")
         assert len(opened) == 4

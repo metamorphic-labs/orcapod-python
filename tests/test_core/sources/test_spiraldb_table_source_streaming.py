@@ -283,7 +283,7 @@ class TestRestrictions:
         source.as_table()
         list(source.iter_data())
 
-        assert [scan.kwargs["asof"] for scan in fake_pyspiral.scan_log] == [version] * 2
+        assert [scan.kwargs["asof"] for scan in fake_pyspiral.scan_log] == [version]
 
     def test_a_given_version_is_used(self, project):
         """A given ``asof`` is passed to the scan and kept in the config."""
@@ -727,3 +727,165 @@ class TestNotebookPreview:
         assert head.table.num_rows == 0
         assert head.table.num_columns == 3
         assert "tags: subject_id, timestamp" in html
+
+
+class TestCompletedSnapshotRetention:
+    """Only fully consumed, pinned reads are retained for subsequent consumers."""
+
+    def test_completed_read_reuses_scan_rows_and_hashes(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        assert fake_pyspiral.scan_log == []
+        first = list(source.iter_data())
+        hashes = [data.content_hash() for _, data in first]
+        source.as_table(all_info=True)
+
+        async def collect():
+            return [pair async for pair in source.async_iter_data()]
+
+        again = asyncio.run(collect())
+        assert len(fake_pyspiral.scan_log) == 1
+        assert all(a is b and x is y for (a, x), (b, y) in zip(first, again))
+        assert [data.content_hash() for _, data in again] == hashes
+
+    def test_table_first_read_initializes_shared_rows(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        source.as_table()
+        first = list(source.iter_data())
+        second = list(source.iter_data())
+        assert len(fake_pyspiral.scan_log) == 1
+        assert all(x is y for (_, x), (_, y) in zip(first, second))
+
+    def test_partial_read_is_not_published(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        partial = source.iter_data()
+        next(partial)
+        partial.close()
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_failed_read_retries(self, project, monkeypatch):
+        from orcapod.databases.spiraldb_connector import SpiralDBConnector
+
+        original = SpiralDBConnector.scan_batches
+        fail = True
+
+        def scan(connector, *args, **kwargs):
+            nonlocal fail
+            for batch in original(connector, *args, **kwargs):
+                yield batch
+                if fail:
+                    fail = False
+                    raise RuntimeError("interrupted scan")
+
+        monkeypatch.setattr(SpiralDBConnector, "scan_batches", scan)
+        source = SpiralDBTableSource(_PROJECT, "event")
+        with pytest.raises(RuntimeError, match="interrupted scan"):
+            list(source.iter_data())
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_overlapping_readers_never_share_partial_snapshot(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        partial = source.iter_data()
+        next(partial)
+        completed = list(source.iter_data())
+        partial.close()
+        again = list(source.iter_data())
+        assert len(completed) == len(again) == _ROWS
+        assert all(x is y for (_, x), (_, y) in zip(completed, again))
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_empty_pinned_snapshot_is_retained(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event", where={"subject_id": "absent"})
+        assert list(source.iter_data()) == []
+        assert source.as_table().num_rows == 0
+        assert len(fake_pyspiral.scan_log) == 1
+
+    def test_unpinned_source_keeps_reading(self, project, monkeypatch):
+        from orcapod.databases.spiraldb_connector import SpiralDBConnector
+
+        monkeypatch.setattr(SpiralDBConnector, "get_table_version", lambda *args: None)
+        source = SpiralDBTableSource(_PROJECT, "event")
+        assert len(list(source.iter_data())) == _ROWS
+        project.table("default.event").write(_rows([6]))
+        assert len(list(source.iter_data())) == _ROWS + 1
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_async_partial_read_is_not_published(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+
+        async def partial():
+            rows = source.async_iter_data()
+            await anext(rows)
+            await rows.aclose()
+
+        asyncio.run(partial())
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_concurrent_sync_and_async_consumers(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        source.as_table()
+
+        async def collect():
+            async def asynchronous():
+                return [pair async for pair in source.async_iter_data()]
+
+            return await asyncio.gather(
+                asyncio.to_thread(lambda: list(source.iter_data())), asynchronous()
+            )
+
+        first, second = asyncio.run(collect())
+        assert len(first) == len(second) == _ROWS
+        assert all(a is b and x is y for (a, x), (b, y) in zip(first, second))
+        assert len(fake_pyspiral.scan_log) == 1
+
+    def test_cancellation_during_scan_does_not_publish(self, project, monkeypatch):
+        import threading
+
+        from orcapod.databases.spiraldb_connector import SpiralDBConnector
+
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        original = SpiralDBConnector.scan_batches
+
+        def scan(connector, *args, **kwargs):
+            try:
+                entered.set()
+                assert release.wait(5)
+                yield from original(connector, *args, **kwargs)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(SpiralDBConnector, "scan_batches", scan)
+        source = SpiralDBTableSource(_PROJECT, "event")
+
+        async def cancel():
+            rows = source.async_iter_data()
+            task = asyncio.create_task(anext(rows))
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+
+        asyncio.run(cancel())
+        # The cancelled worker may have read one batch, never a full snapshot.
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(list(source.iter_data())) == _ROWS
+        assert finished.wait(5)
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_head_reuses_completed_snapshot(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        expected = source.head(2).as_table()
+        assert len(fake_pyspiral.scan_log) == 1
+        source.as_table()
+        assert source.head(2).as_table().equals(expected)
+        assert source.head(2).total_rows == _ROWS
+        assert source.head(2).total_is_estimate is False
+        assert len(fake_pyspiral.scan_log) == 2
