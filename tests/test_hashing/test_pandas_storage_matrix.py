@@ -70,6 +70,27 @@ INDEXES: dict[str, pd.Index] = {
     ),
 }
 
+# The index kinds crossed with every column dtype: one of each way storage treats an index
+# (kept, restored as NumPy, restored from a dictionary, named as text, several levels).
+# Every index kind is crossed with every column axis and every Series name.
+INDEXES_FOR_DTYPES: dict[str, pd.Index] = {
+    name: INDEXES[name]
+    for name in (
+        "range",
+        "object ints",
+        "string",
+        "Int64 with NA",
+        "boolean",
+        "categorical, object int categories",
+        "datetime UTC",
+        "period",
+        "int name",
+        "tuple name",
+        "multi Int64",
+        "multi mixed names",
+    )
+}
+
 # Column axes: two labels each.
 COLUMN_AXES: dict[str, pd.Index] = {
     "strings": pd.Index(["a", "b"], dtype=object),
@@ -225,11 +246,11 @@ class TestFrameHashSurvivesStorage:
         assert accepted > len(values) * 3 // 4
 
     def test_index_kinds_by_column_dtypes(self) -> None:
-        """Every index kind with every column dtype."""
+        """Index kinds of every treatment with every column dtype."""
         values = {
             f"index {i} / values {v}": _frame(index, COLUMN_AXES["strings"], column)
             for (i, index), (v, column) in itertools.product(
-                INDEXES.items(), COLUMN_VALUES.items()
+                INDEXES_FOR_DTYPES.items(), COLUMN_VALUES.items()
             )
         }
         unstable, accepted = _unstable(values)
@@ -279,11 +300,11 @@ class TestSeriesHashSurvivesStorage:
         assert accepted > len(values) * 3 // 4
 
     def test_index_kinds_by_dtypes(self) -> None:
-        """Every index kind with every dtype."""
+        """Index kinds of every treatment with every dtype."""
         values = {
             f"index {i} / values {v}": pd.Series(column, name="s").set_axis(index)
             for (i, index), (v, column) in itertools.product(
-                INDEXES.items(), COLUMN_VALUES.items()
+                INDEXES_FOR_DTYPES.items(), COLUMN_VALUES.items()
             )
         }
         unstable, accepted = _unstable(values)
