@@ -3,7 +3,9 @@
     "hash_ignore": {
         "orcapod.numpy.ndarray": [],
         "orcapod.pandas.dataframe": [],
-        "orcapod.pandas.series": []
+        "orcapod.pandas.series": [],
+        "orcapod.polars.dataframe": [],
+        "orcapod.polars.series": []
     },
     "logical_type_registry": {
         "_class": "orcapod.logical_types.registry.LogicalTypeRegistry",
@@ -44,6 +46,22 @@
                 {
                     "_class": "orcapod.logical_types.pandas_type.LogicalPandasSeries",
                     "_config": {"ignore": {"_ref": "hash_ignore:orcapod.pandas.series"}}
+                },
+                {
+                    "_class": "orcapod.logical_types.polars_type.LogicalPolarsDataFrame",
+                    "_config": {
+                        "ignore": {
+                            "_ref": "hash_ignore:orcapod.polars.dataframe"
+                        }
+                    }
+                },
+                {
+                    "_class": "orcapod.logical_types.polars_type.LogicalPolarsSeries",
+                    "_config": {
+                        "ignore": {
+                            "_ref": "hash_ignore:orcapod.polars.series"
+                        }
+                    }
                 }
             ],
             "factories": [
@@ -160,6 +178,32 @@
             {
                 "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PandasSeriesHandler",
                 "_config": {"ignore": {"_ref": "hash_ignore:orcapod.pandas.series"}}
+            }
+        ],
+        [
+            {
+                "_type": "polars.DataFrame"
+            },
+            {
+                "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PolarsDataFrameHandler",
+                "_config": {
+                    "ignore": {
+                        "_ref": "hash_ignore:orcapod.polars.dataframe"
+                    }
+                }
+            }
+        ],
+        [
+            {
+                "_type": "polars.Series"
+            },
+            {
+                "_class": "orcapod.hashing.semantic_hashing.builtin_handlers.PolarsSeriesHandler",
+                "_config": {
+                    "ignore": {
+                        "_ref": "hash_ignore:orcapod.polars.series"
+                    }
+                }
             }
         ]
     ]

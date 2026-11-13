@@ -80,10 +80,8 @@ Orcapod's own types follow the same contract as yours. Their metadata is the JSO
 | `numpy.ndarray` | `orcapod.numpy.ndarray` | `{"ignore":[],"version":1}` |
 | `pandas.DataFrame` | `orcapod.pandas.dataframe` | `{"ignore":[],"version":1}` |
 | `pandas.Series` | `orcapod.pandas.series` | `{"ignore":[],"version":1}` |
-
-The two pandas types are library value types: their metadata also lists the properties the
-data context configures their value hash to ignore (none by default), so two lists are two
-logical types.
+| `polars.DataFrame` | `orcapod.polars.dataframe` | `{"ignore":[],"version":1}` |
+| `polars.Series` | `orcapod.polars.series` | `{"ignore":[],"version":1}` |
 
 `{"version":N}` is the convention of the built-in types only. Your types may use any bytes.
 
