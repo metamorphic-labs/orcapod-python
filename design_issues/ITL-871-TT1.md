@@ -34,6 +34,5 @@ Known limits: within one in-memory run a downstream pod receives the very tensor
 pod returned (device and autograd history included); only stored or read-back values are in
 the stored form. NumPy arrays behave the same. A lazy negative view made by public PyTorch
 code (`x.conj().imag`) never covers its buffer, so its `neg_bit` is always stored and hashed
-as 0. A `list[torch.Tensor]` pod output cannot be written to Delta by the asynchronous
-orchestrator (ITL-984). A non-default ignore list works at the type converter and hasher
-level only: datagrams find their data context by key (ITL-981).
+as 0. A non-default ignore list works at the type converter and hasher level only: datagrams
+find their data context by key (ITL-981).

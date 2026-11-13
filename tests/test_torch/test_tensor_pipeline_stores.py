@@ -170,21 +170,7 @@ def test_pipeline_keeps_tensors_exact(tmp_path: Path, store: str, runner: str) -
 
 @pytest.mark.parametrize(
     ("store", "runner"),
-    [
-        pytest.param(
-            store,
-            runner,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="ITL-984: the async orchestrator cannot write a pod output "
-                "list[<logical type stored as large_binary>] to Delta",
-            )
-            if (store, runner) == ("delta", "async")
-            else (),
-        )
-        for store in sorted(STORES)
-        for runner in sorted(RUNNERS)
-    ],
+    [(store, runner) for store in sorted(STORES) for runner in sorted(RUNNERS)],
 )
 def test_pod_returning_a_list_of_tensors(
     tmp_path: Path, store: str, runner: str
