@@ -12,7 +12,7 @@ from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -279,7 +279,15 @@ class Index(UnaryOperator):
             )
 
         old_src = data.source_info().get(self.column)
-        new_src = f"{old_src}[{self.i}]" if old_src else None
+        new_src: SourceInfoValue
+        if isinstance(old_src, list):
+            # A many->one operator (Batch, GroupBy) left one token per member: the
+            # element's provenance is its own token, one list level removed (the
+            # inner list after two aggregations). ``effective_i`` is in range for
+            # the value, and a token list holds one entry per member.
+            new_src = old_src[effective_i] if effective_i < len(old_src) else None
+        else:
+            new_src = f"{old_src}[{self.i}]" if old_src else None
 
         element_field = pa.field(
             self.out or self.column,
