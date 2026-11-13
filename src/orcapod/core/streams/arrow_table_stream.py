@@ -289,6 +289,7 @@ class ArrowTableStream(StreamBase):
             output_table = output_table.slice(0, limit)
             data_context_table = data_context_table.slice(0, limit)
             source_info_table = source_info_table.slice(0, limit)
+        carrier = hash_column_name = None
         if columns_config.content_hash:
             hash_column_name = (
                 "_content_hash"
@@ -299,8 +300,12 @@ class ArrowTableStream(StreamBase):
             if limit is not None:
                 rows = itertools.islice(rows, limit)
             content_hashes = [str(data.content_hash()) for _, data in rows]
+            # The hash travels with its row under a temporary name that is no column
+            # group's (a requested name such as ``_tag_digest`` must not be taken for a
+            # system tag by the sort); it gets its requested name after the sort.
+            carrier = arrow_utils.unused_column_name(output_table, "__row_content_hash")
             output_table = output_table.append_column(
-                pa.field(hash_column_name, pa.large_string(), nullable=False),
+                pa.field(carrier, pa.large_string(), nullable=False),
                 pa.array(content_hashes, type=pa.large_string()),
             )
         table_stack = (output_table,)
@@ -310,10 +315,11 @@ class ArrowTableStream(StreamBase):
             table_stack += (source_info_table,)
 
         table = arrow_utils.hstack_tables(*table_stack)
-
-        if columns_config.sort_by_tags and (
+        sort_this = columns_config.sort_by_tags and (
             self._tag_columns or columns_config.system_tags
-        ):
+        )
+
+        if sort_this:
             # The presentation sort (not the identity order, see ``_identity_table``).
             # A stream with no tag column is sorted only when the system tags are asked
             # for. The system tags stay in the table through the sort: they break ties
@@ -321,6 +327,10 @@ class ArrowTableStream(StreamBase):
             table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
         if not columns_config.system_tags:
             table = table.drop_columns(list(self._system_tag_columns))
+        if carrier is not None and hash_column_name is not None:
+            table = table.rename_columns(
+                [hash_column_name if c == carrier else c for c in table.column_names]
+            )
         return table
 
     def clear_cache(self) -> None:

@@ -408,3 +408,23 @@ def test_the_presentation_sort_orders_a_list_tag_while_identity_keeps_stream_ord
     ]
     identity = stream.identity_structure()[1]
     assert identity.column("x").to_pylist() == [20, 10]
+
+
+def test_a_hash_column_named_like_a_system_tag_does_not_reorder_tied_rows() -> None:
+    """On an ``ArrowTableStream`` a requested ``_tag_digest`` is not a sort key.
+
+    Rows with equal tags keep their input order whatever the hash column is called.
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    table = pa.table(
+        [pa.array([1, 1, 1], pa.int64()), pa.array([3, 1, 2], pa.int64())],
+        names=["k", "x"],
+    )
+    stream = ArrowTableStream(table, tag_columns=["k"])
+    for name in (True, "_tag_digest", "digest"):
+        config = {"content_hash": name, "sort_by_tags": True}
+        shown = stream.as_table(columns=config)
+        assert shown.column("x").to_pylist() == [3, 1, 2]
+        assert shown.column_names[-1] == ("_content_hash" if name is True else name)
+        assert stream.head(2, columns=config).table.equals(shown.slice(0, 2))
