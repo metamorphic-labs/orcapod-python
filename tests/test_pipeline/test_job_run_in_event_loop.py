@@ -72,6 +72,7 @@ def stored_rows(job: PipelineJob) -> tuple[list[dict[str, Any]], list[dict[str, 
         [c for c in PER_RUN_COLUMNS if c in records.column_names]
     )
     table = job.nodes["doubled"].as_table(all_info=True)
+    table = table.drop_columns([c for c in PER_RUN_COLUMNS if c in table.column_names])
 
     def by_tag(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The rows sorted by their tag ``k``."""
