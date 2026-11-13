@@ -402,6 +402,7 @@ class TestIdentity:
         assert base.content_hash() != _experiment().content_hash()
 
     def test_content_hash_is_the_root_source_rule_plus_the_mapping(self):
+        """The identity structure is the root source rule followed by the sorted mapping."""
         derived = DerivedSource(_experiment(), tags_as_data=COPY)
         # identity_structure is the non-public entry point this test is about: the
         # structure is the root source rule followed by the sorted mapping items.
@@ -413,6 +414,7 @@ class TestIdentity:
         )
 
     def test_mappings_with_one_schema_have_different_content_hashes(self):
+        """Two mappings with one schema and one source_id still differ in content hash (ITL-1000)."""
         # ITL-1000: two tag columns of one type copied to one name give one schema
         # but different values, so with one explicit source_id the mapping must tell
         # the sources apart.
@@ -443,6 +445,7 @@ class TestIdentity:
         assert ca.column(rid_a).to_pylist() == cb.column(rid_b).to_pylist()
 
     def test_mapping_order_does_not_change_content_hash(self):
+        """The mapping enters the identity sorted, so its order does not matter."""
         a = DerivedSource(
             _experiment(),
             source_id="s",
