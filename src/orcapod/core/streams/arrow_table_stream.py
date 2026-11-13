@@ -10,7 +10,6 @@ from orcapod.core.datagrams import Data, Tag
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
-    head_column_config,
 )
 from orcapod.core.streams.head import StreamHead
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
@@ -241,14 +240,21 @@ class ArrowTableStream(StreamBase):
     ) -> StreamHead:
         """Return the first ``n`` rows of the table this stream holds.
 
-        Only those rows are assembled: content hashes, when asked for, are computed for
-        them alone. See ``StreamBase.head``.
+        Without sorting only those rows are assembled: content hashes, when asked for,
+        are computed for them alone. With ``sort_by_tags`` (or ``all_info``) the rows are
+        sorted first, as ``as_table`` sorts them, and the first ``n`` of those are
+        returned, so the head is always ``as_table(...)`` cut to ``n`` rows. See
+        ``StreamBase.head``.
         """
         check_head_size(n)
-        config = head_column_config(columns, all_info)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        if config.sort_by_tags:
+            table = self._assemble_table(config, limit=None).slice(0, n)
+        else:
+            table = self._assemble_table(config, limit=n)
         return StreamHead.of_rows(
             self,
-            self._assemble_table(config, limit=n),
+            table,
             tag_columns=self.keys(columns=config)[0],
             total_rows=self._table.num_rows,
         )

@@ -629,6 +629,20 @@ class TestNotebookPreview:
         assert (head.total_rows, head.total_is_estimate) == (25, True)
         assert len(head) == 10
 
+    def test_a_sorted_head_sorts_only_the_rows_it_read(self, big):
+        """``sort_by_tags`` sorts the one bounded read; it reads no more rows (ITL-1053)."""
+        source = SpiralDBTableSource(_PROJECT, "big", label="big")
+        tags = ["subject_id", "timestamp"]
+
+        unsorted_head = source.head()
+        sorted_head = source.head(columns={"sort_by_tags": True})
+
+        assert self._scan_limits() == [10, 10]
+        assert len(sorted_head) == 10
+        assert sorted_head.table.equals(
+            unsorted_head.table.sort_by([(name, "ascending") for name in tags])
+        )
+
     def test_an_unlabelled_source_is_shown_by_its_table_name(self, big):
         """With no label, the header names the table; the label itself is unchanged."""
         source = SpiralDBTableSource(_PROJECT, "big")

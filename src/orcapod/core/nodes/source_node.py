@@ -25,7 +25,6 @@ from orcapod.core.streams.head import (
 )
 from orcapod.core.streams.base import (
     check_head_size,
-    head_column_config,
 )
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -316,7 +315,7 @@ class SourceNodeBase(TraceableBase, ABC):
         """
         check_head_size(n)
         return self._head_without_rows(
-            head_column_config(columns, all_info),
+            ColumnConfig.handle_config(columns, all_info=all_info),
             HeadStatus.UNAVAILABLE,
             note="input slot; bind a source",
         )
@@ -637,7 +636,7 @@ class SourceJobNode(SourceNodeBase):
         if self._bound_source is None:
             check_head_size(n)
             return self._head_without_rows(
-                head_column_config(columns, all_info),
+                ColumnConfig.handle_config(columns, all_info=all_info),
                 HeadStatus.UNAVAILABLE,
                 note="no source bound",
             )

@@ -162,6 +162,33 @@ What each kind of object shows:
 | A pipeline blueprint node, an unbound input slot | none (`unavailable`) |
 | A side-effect stream | none: showing it never delivers its side effects |
 
+`head(n, columns=..., all_info=...)` takes the same column configuration as `as_table`,
+sorting included, and applies it to the rows it has before taking the first `n`. The default
+does not sort (so the notebook preview, which is the default `head()`, shows rows in the
+order the stream holds them, as `as_table()` does). With `sort_by_tags=True`, or
+`all_info=True`, rows are sorted by tag first:
+
+```python
+from orcapod.sources import DictSource
+
+unordered = DictSource(
+    data=[{"subject_id": f"mouse_{i:02d}", "age": 8 + i} for i in (3, 1, 2)],
+    tag_columns=["subject_id"],
+    label="unordered",
+)
+print(unordered.head(2).as_table().column("subject_id").to_pylist())
+# ['mouse_03', 'mouse_01']
+print(unordered.head(2, all_info=True).as_table().column("subject_id").to_pylist())
+# ['mouse_01', 'mouse_02']
+```
+
+A stream that has all of its rows (a job node's stored rows, a computed stream, an in-memory
+source) then gives exactly the first `n` rows of `as_table` with the same configuration,
+whatever order the rows were computed in. A stream that has only some of its rows sorts
+those: a source that reads a bounded number of rows (such as a `SpiralDBTableSource`) shows
+the rows it read, in tag order, and a stream computed only in part shows the rows computed so
+far in tag order. It is not "the first `n` rows in tag order" of rows it never read.
+
 A head of an operator is never the operator applied to the heads of its inputs: a group over
 the first ten rows has the wrong members. So an uncomputed stream shows its columns and
 "not computed" until `as_table()`, `iter_data()` or a job run computes it. An empty result

@@ -44,7 +44,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import check_head_size, head_column_config
+from orcapod.core.streams.base import check_head_size
 from orcapod.core.streams.head import HeadStatus, StreamHead
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import InputValidationError, SourceTooLargeError
@@ -693,7 +693,7 @@ class SpiralDBTableSource(RootSource):
         preview is this head. See ``StreamBase.head``.
         """
         check_head_size(n)
-        config = head_column_config(columns, all_info)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
         head = self._head(n, columns=config)
         tag_columns = self.keys(columns=config)[0]
         if not head.rows_read:
