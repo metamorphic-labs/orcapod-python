@@ -161,6 +161,9 @@ workflow.
 
 **Example:** cutting `v0.1.1` from `hotfix/0.1.x`:
 
+0. **Make sure the branch exists on `nauticalab`.** The workflow resolves the **Branch** input
+   only there. If `hotfix/0.1.x` is not on `nauticalab`, push it (on the developer's explicit go
+   only, never with `--force`): `git push nauticalab hotfix/0.1.x:hotfix/0.1.x`
 1. **Trigger the release workflow** — go to
    **[Actions → Release → Run workflow](https://github.com/nauticalab/orcapod-python/actions/workflows/release.yml)**
 2. In the **Use workflow from** dropdown, keep `main` selected (so the workflow version
