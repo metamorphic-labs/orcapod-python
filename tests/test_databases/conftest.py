@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 import pytest
 from minio import Minio
 
+_MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z"
+
 # Only install the stub if psycopg is not already importable.
 try:
     import psycopg  # noqa: F401
@@ -78,7 +80,9 @@ def minio_server():
         try:
             from testcontainers.minio import MinioContainer  # type: ignore[import]
 
-            with MinioContainer() as minio:
+            # The default image, minio/minio on Docker Hub, can no longer be pulled
+            # (ITL-1074); the same release is published on quay.io.
+            with MinioContainer(image=_MINIO_IMAGE) as minio:
                 client = minio.get_client()
                 bucket = "test-bucket"
                 client.make_bucket(bucket)
@@ -89,6 +93,10 @@ def minio_server():
                     "bucket": bucket,
                 }
         except Exception as exc:
+            if os.environ.get("CI"):
+                # In CI a container that cannot start must fail the run: a skip here
+                # left every S3 test unrun for months without anyone noticing.
+                raise
             pytest.skip(f"MinIO container could not be started: {exc}")
 
 
