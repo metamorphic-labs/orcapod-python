@@ -119,5 +119,9 @@ progress). `clear_cache` already clears it.
   `FunctionPodStream.is_stale` / `_input_read_to_end`; targeted suites pass (1472); repro and
   the ITL-1034 suite's interleaved cases (`--runxfail`, 117) pass. Docs, F19, F18 pointer and
   changelog fragment written. Next: merge origin/main, push, PR, Copilot.
+- Coordinator follow-up (msg_7bf21fb00ea3): added `as_table`/`head` during an open read and
+  an abandoned read followed by a reset. The latter found a gap two links up (`s <- s1 <- p`,
+  only `s1`'s generation noted): the in-progress rule now also asks a pod-stream input whether
+  it is stale. Merge origin/main after #358 (as_table clears a stale cache) and rerun.
 - The ITL-1034 branch's strict `ITL_1065` xfail marks will XPASS once this merges: that branch
   must drop them.

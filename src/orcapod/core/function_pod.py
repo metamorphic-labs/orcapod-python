@@ -1117,16 +1117,22 @@ class FunctionPodStream(StreamBase):
         """Whether the stream's results must be discarded before it is read again.
 
         Results in progress (a read has noted its input's state and not reached the
-        input's end) stay current while that state is unchanged and the pod did not
-        change: an upstream completing or computing for the first time while the stream
-        is read is not a change of its input (ITL-1065). Otherwise the stream is stale
-        when it, an upstream or its pod has no modified time or an upstream or its pod
-        is newer (``StreamBase.is_stale``).
+        input's end) stay current while that state is unchanged, the input is not
+        stale itself and the pod did not change: an upstream completing or computing for
+        the first time while the stream is read is not a change of its input (ITL-1065).
+        A pod-stream input is asked whether it is stale because its noted state, the
+        reset generation, does not move when a stream further up is reset; any other
+        input's modified time already reflects its upstreams. Otherwise the stream is
+        stale when it, an upstream or its pod has no modified time or an upstream or its
+        pod is newer (``StreamBase.is_stale``).
         """
         if self._input_state is None:
             return super().is_stale
         current = self._current_input_state()
         if current != self._input_state or None in current:
+            return True
+        upstream = self._input_stream
+        if isinstance(upstream, FunctionPodStream) and upstream.is_stale:
             return True
         own_time = self._modified_time
         pod_time = self._function_pod.last_modified

@@ -238,3 +238,87 @@ def test_a_reset_between_interleaved_reads_gives_one_state(
     assert {y // 1000 for y in ys.values()} == {1}
     for key, y in ys.items():
         assert zs[key] == 2 * y, key
+
+
+def h(z: int) -> int:
+    """Return ``z - 3``; counted."""
+    CALLS["h"] += 1
+    return z - 3
+
+
+def _over_stamped(through: str, executor: str) -> tuple[StreamProtocol, StreamProtocol]:
+    """The stamped stream and the last stream over it, ``through`` the given links.
+
+    ``pod_stream``: a pod reading the stamped stream. ``operator``: a pod over a join of
+    it (the pod call adds an automatic selection). ``pod_chain``: two pods, so the reset
+    is two links up from the last stream.
+    """
+    stamped_stream = _pod(stamped, "y", executor, cached=False)(_source(extra=False))
+    if through == "operator":
+        # A join adds data column ``q``, so the pod call adds an automatic selection.
+        last = _pod(g, "z", executor, cached=False)(Join()(stamped_stream, _other()))
+    else:
+        last = _pod(g, "z", executor, cached=False)(stamped_stream)
+    if through == "pod_chain":
+        last = _pod(h, "w", executor, cached=False)(last)
+    return stamped_stream, last
+
+
+def _derived(through: str, y: int) -> int:
+    """The last stream's value for a stamped value ``y``."""
+    return 2 * y - 3 if through == "pod_chain" else 2 * y
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+@pytest.mark.parametrize("through", ["pod_stream", "operator", "pod_chain"])
+def test_an_abandoned_read_does_not_hide_a_later_reset(
+    through: str, executor: str
+) -> None:
+    """A read left after one row stays resumable, and a reset after it is still seen.
+
+    The abandoned read keeps the stream's partial results and its open input; the next
+    read resumes it unless the input changed. Here the stamped stream is reset after the
+    read was abandoned, however far up it is, so the stream is stale and the next read
+    starts again from the new state.
+    """
+    stamped_stream, last = _over_stamped(through, executor)
+    output = "w" if through == "pod_chain" else "z"
+    abandoned = iter(last.iter_data())
+    _ = next(abandoned)
+    del abandoned
+    EPOCH[0] = 1
+    clear_cache = getattr(stamped_stream, "clear_cache")
+    clear_cache()
+    assert _stale(last)
+
+    values = _values(last, output)
+    assert not _stale(last)
+    ys = _values(stamped_stream, "y")
+    assert sorted(values) == sorted(ys) == sorted(IDS)
+    assert {y // 1000 for y in ys.values()} == {1}
+    for key, y in ys.items():
+        assert values[key] == _derived(through, y), key
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+@pytest.mark.parametrize("read", ["as_table", "head"])
+@pytest.mark.parametrize("upstream", UPSTREAMS)
+def test_a_table_or_head_during_an_open_read_computes_each_row_once(
+    upstream: str, read: str, executor: str
+) -> None:
+    """``as_table()`` or ``head()`` while an iterator is open shares the stream's results."""
+    stream = _stream(upstream, executor, cached=False)
+    first = iter(stream.iter_data())
+    first_rows = [next(first)]
+    if read == "as_table":
+        assert stream.as_table().num_rows == len(IDS)
+    else:
+        assert stream.head(100).table.num_rows >= 1
+    first_rows += list(first)
+    assert CALLS == _expected_calls(upstream)
+    assert not _stale(stream)
+    third_rows = list(stream.iter_data())
+    assert CALLS == _expected_calls(upstream)
+    assert _same_datagrams(first_rows, third_rows)
+    assert stream.as_table().num_rows == len(IDS)
+    assert CALLS == _expected_calls(upstream)
