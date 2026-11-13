@@ -279,14 +279,15 @@ def upstream_raising_stream(
     if upstream_started:
         assert failing_x != 0
         next(iter(upstream.iter_data()))
+    downstream_pod: Any = plus_one.pod
     if kind == "plain":
-        return plus_one.pod(upstream), downstream_calls
+        return downstream_pod(upstream), downstream_calls
     if kind == "concurrent":
-        stream = plus_one.pod(upstream)
+        stream = downstream_pod(upstream)
         stream.executor = ConcurrentLocalExecutor()
         return stream, downstream_calls
     if kind == "cached":
-        pod = CachedFunctionPod(plus_one.pod, result_database=InMemoryArrowDatabase())
+        pod = CachedFunctionPod(downstream_pod, result_database=InMemoryArrowDatabase())
         return pod(upstream), downstream_calls
     raise ValueError(kind)
 
