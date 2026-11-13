@@ -115,3 +115,22 @@ single constants, starfix ordered mode for the values digest. One push.
 - Linear: the sentence for ITL-966 gap 3 could not be written from this session (the tool
   call was denied); text is in the worker_done report.
 - Remaining: full suite 3.12 / 3.11 / 3.13, PR body, ONE push, CI, CodeRabbit round.
+
+## State on November 12, 2026, late (HOLD: no push until ITL-981 is on main)
+
+- Developer decisions since the first plan: storage is Polars' own `write_ipc` / `read_ipc`
+  (defaults pinned, `_IPC_COMPAT_LEVEL` is the one constant); the hash is strict by default;
+  names are `orcapod.polars.dataframe` / `orcapod.polars.series`; the descriptor `kind` is
+  the extension name; options `column_order`, `struct_field_order` (frame) and `series_name`,
+  `struct_field_order` (Series); an ignored `series_name` is the canonical value `""`.
+- PR branch (local, unpushed): main 25650c42 merged, rename, kind, no ITL-981 commits.
+- Local-only branch `local/itl-578-with-981`: the PR branch + merge of ITL-981 branch
+  64c63bfe + the wiring commit ("ignore-list identifiers and handlers ...") + this note.
+- When the coordinator says ITL-981 is on main: on the PR branch `git merge origin/main`,
+  cherry-pick the wiring commit and this note from the side branch, regenerate only the
+  `polars_*` golden entries (diff vs origin/main must add lines only), full suite on 3.12,
+  3.11, 3.13, ruff, basedpyright, PR body (draft in the session scratchpad; rewrite from
+  the PR sections if lost), ONE push, then CI and CodeRabbit readiness.
+- `tests/test_arrays/test_array_strict_hash.py` fails on the ITL-981 branch as fetched (its
+  NumPy type was not in it); not this PR's.
+- Not done: the sentence for ITL-966 gap 3 (Linear write denied in this session).
