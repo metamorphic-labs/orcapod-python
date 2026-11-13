@@ -2399,7 +2399,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "networkx" },
     { name = "numpy", specifier = ">=1.26.4" },
-    { name = "pandas", specifier = ">=2.2.3" },
+    { name = "pandas", specifier = ">=2.2.3,<3" },
     { name = "polars", specifier = ">=1.36.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'all'", specifier = ">=3.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgresql'", specifier = ">=3.0" },

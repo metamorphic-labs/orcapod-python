@@ -1381,6 +1381,9 @@ column, or any object given to the semantic hasher) is hashed by
 `pandas_frame_content_hash` / `pandas_series_content_hash` in
 `orcapod/hashing/pandas_value_hash.py`.
 
+The pandas dependency is capped below 3 (`pandas>=2.2.3,<3`) for v0.3.0: the hash and its
+round trip are verified on pandas 2 only. ITL-1054 lifts the cap.
+
 Storage and hashing are separate (developer, November 12, 2026). Storage is the library's
 own serialization: the Arrow IPC stream of `pa.Table.from_pandas(value,
 preserve_index=True)`, read back with `to_pandas()`. The hash is defined by Orcapod and is
