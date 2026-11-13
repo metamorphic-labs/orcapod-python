@@ -171,14 +171,17 @@ class StreamBase(TraceableBase):
         name_map: Mapping[str, str],
         drop_unmapped: bool = True,
         label: str | None = None,
+        tag_only: bool = False,
     ) -> StreamBase:
         """
         Maps the tags in this stream according to the provided name_map.
         If drop_unmapped is True, any tags that are not in the name_map will be dropped.
+        A referential tag is renamed in both roles unless tag_only is True; see
+        ``MapTags``.
         """
         from orcapod.core.operators import MapTags
 
-        return MapTags(name_map, drop_unmapped)(self, label=label)
+        return MapTags(name_map, drop_unmapped, tag_only=tag_only)(self, label=label)
 
     def map_data(
         self,

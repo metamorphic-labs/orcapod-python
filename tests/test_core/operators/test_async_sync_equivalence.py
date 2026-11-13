@@ -408,6 +408,21 @@ CASES = [
         lambda: DropNulls(),
         lambda: (source_a(referential=True),),
     ),
+    Case(
+        "ref_map_tags",
+        lambda: MapTags({"ta": "tb"}),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_map_tags_tag_only",
+        lambda: MapTags({"ta": "tb"}, tag_only=True),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_map_data",
+        lambda: MapData({"ta": "tb"}),
+        lambda: (source_a(referential=True),),
+    ),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 

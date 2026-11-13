@@ -293,15 +293,15 @@ def test_extraction_named_like_a_tag_raises() -> None:
     [
         (lambda: Batch(batch_size=2)(_a()), "ITL-1017"),
         (lambda: MergeJoin()(_a(), _b()), "ITL-1018"),
-        (lambda: MapTags({"x": "z"})(_a()), "ITL-1018"),
-        (lambda: MapData({"x": "z"})(_a()), "ITL-1018"),
-        (lambda: MapData({"a": "z"}, drop_unmapped=True)(_a()), "ITL-1018"),
     ],
-    ids=["batch", "merge_join", "map_tags", "map_data", "map_data_drop_unmapped"],
+    ids=["batch", "merge_join"],
 )
 def test_uncovered_operators_raise(call, issue: str) -> None:
     with pytest.raises(NotImplementedError, match=issue):
         call()
+
+
+# ── renames (developer decision, November 12, 2026) ─────────────────────────
 
 
 def test_renames_that_leave_references_alone_work() -> None:
@@ -315,10 +315,62 @@ def test_renames_that_leave_references_alone_work() -> None:
     assert stream_references(retagged) == ("x",)
 
 
+def test_map_tags_renames_a_referential_tag_in_both_roles() -> None:
+    renamed = MapTags({"x": "z"})(_a())
+    assert renamed.keys() == (("z",), ("z", "a"))
+    assert stream_references(renamed) == ("z",)
+    table = renamed.as_table(columns={"source": True})
+    assert "x" not in table.column_names and table.column_names.count("z") == 1
+    assert table.column("_source_z").to_pylist() == ["A::row_0::x", "A::row_1::x"]
+    # The prediction agrees with the result (checked against static_process).
+    op_ = MapTags({"x": "z"})
+    assert op_.output_schema(_a()) == op_.static_process(_a()).output_schema()
+
+
+def test_map_tags_tag_only_leaves_a_plain_tag_and_the_data_column() -> None:
+    renamed = MapTags({"x": "z"}, tag_only=True)(_a())
+    assert renamed.keys() == (("z",), ("x", "a"))
+    assert stream_references(renamed) == ()
+    for tag, data in renamed.iter_data():
+        assert tag["z"] == data["x"]
+    # ``tag_only`` enters the identity only when set.
+    assert (
+        MapTags({"x": "z"}).content_hash()
+        != MapTags({"x": "z"}, tag_only=True).content_hash()
+    )
+
+
+def test_map_data_is_a_data_only_move() -> None:
+    renamed = MapData({"x": "z"})(_a())
+    assert renamed.keys() == (("x",), ("z", "a"))
+    assert stream_references(renamed) == ()
+    for tag, data in renamed.iter_data():
+        assert tag["x"] == data["z"]
+    assert renamed.as_table(columns={"source": True}).column(
+        "_source_z"
+    ).to_pylist() == ["A::row_0::x", "A::row_1::x"]
+
+
+def test_map_data_dropping_an_unmapped_reference_leaves_a_plain_tag() -> None:
+    renamed = MapData({"a": "z"}, drop_unmapped=True)(_a())
+    assert renamed.keys() == (("x",), ("z",))
+
+
+def test_map_tags_dropping_an_unmapped_reference_keeps_its_data() -> None:
+    source = _ref([{"k": 1, "x": 1, "y": 2}], ["k", "x"], "M")
+    renamed = MapTags({"k": "kk"}, drop_unmapped=True)(source)
+    assert renamed.keys() == (("kk",), ("kk", "x", "y"))
+    assert stream_references(renamed) == ("kk",)
+
+
+def test_map_tags_on_plain_tags_is_unchanged() -> None:
+    plain = _a(tag_only_columns=True)
+    assert MapTags({"x": "z"})(plain).keys() == (("z",), ("a",))
+
+
 def test_uncovered_operators_still_work_on_plain_tags() -> None:
     plain = _a(tag_only_columns=True)
     assert Batch(batch_size=2)(plain).keys() == (("x",), ("a",))
-    assert MapTags({"x": "z"})(plain).keys() == (("z",), ("a",))
 
 
 def test_derived_source_over_a_referential_stream_raises() -> None:

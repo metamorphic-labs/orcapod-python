@@ -1,9 +1,11 @@
 """An EDI-shaped pipeline on referential tags, end to end (ITL-1023).
 
 Specification "Orcapod v0.4 — Referential Tags" (ITL-1004), section 15.7: two time series
-(spikes, gaze) share five key columns and each has its own timestamp; a third table is keyed
-on a subset of the keys. Both time series are grouped by the shared keys, the three are
-joined, and a function reads the timestamp lists and a key column by name. A source's
+(spikes, gaze) share five key columns and each has a key column ``timestamp`` (as the real
+EDI tables do); a third table is keyed on a subset of the keys. Both time series are grouped
+by the shared keys, each ``timestamp`` is renamed in both roles with ``map_tags`` (developer,
+November 12, 2026) so the join does not equate them, the three are joined, and a function
+reads the timestamp lists and a key column by name. A source's
 declared tags are referential by default (developer, November 12, 2026), so the keys and
 timestamps are data as well as tags, with no ``tags_as_data`` copy and no hand-written drop
 before the join. The third table keeps its tags plain (``tag_only_columns``), so the join
@@ -17,11 +19,13 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from typing import Any
 from pathlib import Path
 
 import pytest
 
 import orcapod as op
+from orcapod.core.operators import Join
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
@@ -39,7 +43,7 @@ SPIKES = [
         "session": "s1",
         "probe": "p0",
         "unit": unit,
-        "spike_time": t,
+        "timestamp": t,
         "amplitude": 0.5 + unit,
     }
     for unit in (1, 2)
@@ -53,7 +57,7 @@ GAZE = [
         "session": "s1",
         "probe": "p0",
         "unit": unit,
-        "gaze_time": t,
+        "timestamp": t,
         "gaze_x": 0.1 * t,
     }
     for unit in (1, 2)
@@ -72,13 +76,13 @@ def align(spike_time: list[int], gaze_time: list[int], unit: int) -> str:
     return f"unit {unit}: spikes {spike_time} gaze {gaze_time}"
 
 
-def _build(job: PipelineJob) -> None:
-    """Record the EDI-shaped pipeline in ``job``."""
+def _streams() -> tuple[Any, Any, Any]:
+    """Return the grouped spikes, the grouped gaze and the trials table."""
     spikes = op.sources.DictSource(
-        SPIKES, tag_columns=[*KEYS, "spike_time"], source_id="spikes"
+        SPIKES, tag_columns=[*KEYS, "timestamp"], source_id="spikes"
     )
     gaze = op.sources.DictSource(
-        GAZE, tag_columns=[*KEYS, "gaze_time"], source_id="gaze"
+        GAZE, tag_columns=[*KEYS, "timestamp"], source_id="gaze"
     )
     trials = op.sources.DictSource(
         TRIALS,
@@ -86,11 +90,36 @@ def _build(job: PipelineJob) -> None:
         tag_only_columns=["lab", "subject"],
         source_id="trials",
     )
+    # A referential tag renamed with map_tags is renamed in both roles.
+    spikes_by_unit = spikes.group_by(KEYS).map_tags(
+        {"timestamp": "spike_time"}, drop_unmapped=False
+    )
+    gaze_by_unit = gaze.group_by(KEYS).map_tags(
+        {"timestamp": "gaze_time"}, drop_unmapped=False
+    )
+    return spikes_by_unit, gaze_by_unit, trials
+
+
+def _build(job: PipelineJob) -> None:
+    """Record the EDI-shaped pipeline in ``job``."""
     with job:
-        spikes_by_unit = spikes.group_by(KEYS)
-        gaze_by_unit = gaze.group_by(KEYS)
         # Automatic join and automatic select of the pod call (ITL-807).
-        align.pod(spikes_by_unit, gaze_by_unit, trials, label="align")
+        align.pod(*_streams(), label="align")
+
+
+def test_the_join_merges_the_shared_keys_into_one_data_column_each() -> None:
+    joined = Join()(*_streams())
+    tags, data = joined.keys()
+    # Referential with referential (the five keys) and plain with referential
+    # (``lab`` and ``subject`` of the trials table): one data column each.
+    for key in KEYS:
+        assert key in tags and data.count(key) == 1
+    assert {"spike_time", "gaze_time"} <= set(tags) & set(data)
+    assert joined.as_table().column_names.count("unit") == 1
+    rows = {tag["unit"]: data for tag, data in joined.iter_data()}
+    assert rows[1]["spike_time"] == [10, 20, 30]
+    assert rows[1]["gaze_time"] == [2, 12]
+    assert rows[2]["condition"] == "dark"
 
 
 def _in_memory(_: Path) -> ArrowDatabaseProtocol:

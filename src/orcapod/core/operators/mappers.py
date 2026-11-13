@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.referential_tags import not_supported_yet, stream_references
+from orcapod.core.referential_tags import stream_references
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -22,7 +22,14 @@ class MapData(UnaryOperator):
     Operator that maps data in a stream using a user-defined function.
     The function is applied to each data in the stream, and the resulting data
     are returned as a new stream.
+
+    Renaming data is always a data-only move (developer, November 12, 2026,
+    ITL-1023): renaming the data column of a referential tag ``x`` gives the new
+    data column and leaves ``x`` a plain tag with the same values.
     """
+
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
         self, name_map: Mapping[str, str], drop_unmapped: bool = False, **kwargs
@@ -30,38 +37,6 @@ class MapData(UnaryOperator):
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         super().__init__(**kwargs)
-
-    # Referential tags (ITL-1023): handled when the renaming leaves them alone.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
-
-    def check_reference_support(self, *streams: StreamProtocol) -> None:
-        """Raise if the renaming would touch a referential tag (not supported yet).
-
-        Renaming a referential tag or its data column, or dropping it as unmapped,
-        is a rule the specification leaves open (section 10.1, ITL-1018). A renaming
-        that leaves every referential tag alone is supported.
-
-        Args:
-            *streams: The input stream.
-
-        Raises:
-            NotImplementedError: If a referential tag is renamed, renamed to, or
-                dropped as unmapped.
-        """
-        for stream in streams:
-            references = stream_references(stream)
-            touched = [
-                name
-                for name in references
-                if name in self.name_map
-                or name in self.name_map.values()
-                or self.drop_unmapped
-            ]
-            if touched:
-                raise not_supported_yet(
-                    f"{type(self).__name__} renaming referential tag(s) {touched}",
-                    "ITL-1018",
-                )
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this MapData operator to a config dict.
@@ -89,11 +64,16 @@ class MapData(UnaryOperator):
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
 
-        name_map = {
-            c: c
-            for c in table.column_names
-            if c not in data_columns and not c.startswith("")
-        }
+        # A referenced column keeps its tag under its own name, now plain; the
+        # renamed data column is a copy beside it (a data-only move).
+        references = stream_references(stream)
+        moved = {c: self.name_map[c] for c in references if c in self.name_map}
+        for old, new in moved.items():
+            index = table.schema.get_field_index(old)
+            table = table.add_column(
+                index + 1, table.schema.field(old).with_name(new), table.column(old)
+            )
+
         name_map = {
             tc: tc
             for tc in table.column_names
@@ -101,7 +81,7 @@ class MapData(UnaryOperator):
         }  # no renaming on tag columns
         for c in data_columns:
             if c in self.name_map:
-                name_map[c] = self.name_map[c]
+                name_map[c] = c if c in moved else self.name_map[c]
                 name_map[f"{constants.SOURCE_PREFIX}{c}"] = (
                     f"{constants.SOURCE_PREFIX}{self.name_map[c]}"
                 )
@@ -111,12 +91,24 @@ class MapData(UnaryOperator):
         renamed_table = table.rename_columns(name_map)
 
         if self.drop_unmapped and unmapped_columns:
-            renamed_table = renamed_table.drop_columns(list(unmapped_columns))
+            # An unmapped referential tag loses its data role and stays a plain tag.
+            renamed_table = renamed_table.drop_columns(
+                [c for c in unmapped_columns if c not in references]
+                + [
+                    f"{constants.SOURCE_PREFIX}{c}"
+                    for c in unmapped_columns
+                    if c in references
+                ]
+            )
 
         return ArrowTableStream(
             renamed_table,
             tag_columns=tag_columns,
-            reference_tags=stream_references(stream),
+            reference_tags=[
+                c
+                for c in references
+                if c not in moved and not (self.drop_unmapped and c in unmapped_columns)
+            ],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -210,46 +202,34 @@ class MapTags(UnaryOperator):
     Operator that maps tags in a stream using a user-defined function.
     The function is applied to each tag in the stream, and the resulting tags
     are returned as a new stream.
+
+    Referential tags (developer, November 12, 2026, ITL-1023): renaming a
+    referential tag renames its one column in both roles, so the reference
+    survives under the new name. With ``tag_only=True`` only the tag is renamed:
+    the data column keeps its name and the renamed tag is a plain tag with the
+    same values. A plain tag is renamed as before. A referential tag dropped as
+    unmapped keeps its data column.
+
+    Args:
+        name_map: Old tag name to new tag name.
+        drop_unmapped: Drop the tags ``name_map`` does not name.
+        tag_only: Rename referential tags in the tag role only.
     """
 
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(
-        self, name_map: Mapping[str, str], drop_unmapped: bool = False, **kwargs
+        self,
+        name_map: Mapping[str, str],
+        drop_unmapped: bool = False,
+        tag_only: bool = False,
+        **kwargs,
     ):
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
+        self.tag_only = tag_only
         super().__init__(**kwargs)
-
-    # Referential tags (ITL-1023): handled when the renaming leaves them alone.
-    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
-
-    def check_reference_support(self, *streams: StreamProtocol) -> None:
-        """Raise if the renaming would touch a referential tag (not supported yet).
-
-        Renaming a referential tag or its data column, or dropping it as unmapped,
-        is a rule the specification leaves open (section 10.1, ITL-1018). A renaming
-        that leaves every referential tag alone is supported.
-
-        Args:
-            *streams: The input stream.
-
-        Raises:
-            NotImplementedError: If a referential tag is renamed, renamed to, or
-                dropped as unmapped.
-        """
-        for stream in streams:
-            references = stream_references(stream)
-            touched = [
-                name
-                for name in references
-                if name in self.name_map
-                or name in self.name_map.values()
-                or self.drop_unmapped
-            ]
-            if touched:
-                raise not_supported_yet(
-                    f"{type(self).__name__} renaming referential tag(s) {touched}",
-                    "ITL-1018",
-                )
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this MapTags operator to a config dict.
@@ -263,11 +243,14 @@ class MapTags(UnaryOperator):
             "name_map": dict(self.name_map),
             "drop_unmapped": self.drop_unmapped,
         }
+        if self.tag_only:
+            config["config"]["tag_only"] = True
         return config
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         tag_columns, data_columns = stream.keys()
         missing_tags = set(tag_columns) - set(self.name_map.keys())
+        references = stream_references(stream)
 
         if not any(n in tag_columns for n in self.name_map):
             # nothing to rename in the tags, return stream as is
@@ -283,19 +266,46 @@ class MapTags(UnaryOperator):
             if tc in self.name_map or not self.drop_unmapped
         }  # rename the tag as necessary
         new_tag_columns = list(name_map.values())
+        renamed_refs = [c for c in references if c in self.name_map]
+        if self.tag_only:
+            # The renamed tag is a plain copy beside the data column, which keeps
+            # its name and its source info.
+            for old in renamed_refs:
+                index = table.schema.get_field_index(old)
+                new = self.name_map[old]
+                table = table.add_column(
+                    index + 1, table.schema.field(old).with_name(new), table.column(old)
+                )
+                name_map[new] = new
+                name_map[old] = old
+        else:
+            # One column in both roles: its data source info follows the name.
+            for old in renamed_refs:
+                name_map[f"{constants.SOURCE_PREFIX}{old}"] = (
+                    f"{constants.SOURCE_PREFIX}{self.name_map[old]}"
+                )
         for c in data_columns:
-            name_map[c] = c  # no renaming on data columns
+            name_map.setdefault(c, c)  # no renaming on other data columns
 
         renamed_table = table.rename_columns(name_map)
 
         if missing_tags and self.drop_unmapped:
-            # drop any tags that are not in the name map
-            renamed_table = renamed_table.drop_columns(list(missing_tags))
+            # drop any tags that are not in the name map; a referential one keeps
+            # its column as data.
+            renamed_table = renamed_table.drop_columns(
+                [c for c in missing_tags if c not in references]
+            )
 
+        if self.tag_only:
+            new_references = [c for c in references if c not in self.name_map]
+        else:
+            new_references = [self.name_map.get(c, c) for c in references]
+        if self.drop_unmapped:
+            new_references = [c for c in new_references if c in new_tag_columns]
         return ArrowTableStream(
             renamed_table,
             tag_columns=new_tag_columns,
-            reference_tags=stream_references(stream),
+            reference_tags=new_references,
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -339,6 +349,15 @@ class MapTags(UnaryOperator):
             for k, v in tag_schema.items()
             if k in self.name_map or not self.drop_unmapped
         }
+        if not self.tag_only:
+            # A referential tag's data column is renamed with it (one column).
+            references = set(stream_references(stream))
+            data_schema = Schema(
+                {
+                    self.name_map.get(k, k) if k in references else k: v
+                    for k, v in data_schema.items()
+                }
+            )
 
         return Schema(new_tag_schema), data_schema
 
@@ -375,13 +394,20 @@ class MapTags(UnaryOperator):
                     new_tag = tag.rename(rename_map)
                     if unmapped:
                         new_tag = new_tag.drop(*unmapped)
+                    # A referential tag's data column is renamed with it, unless
+                    # only the tag is renamed (ITL-1023).
+                    data_keys = data.keys()
+                    data_map = {k: v for k, v in rename_map.items() if k in data_keys}
+                    if data_map and not self.tag_only:
+                        data = data.rename(data_map)
                     await output.send((new_tag, data))
         finally:
             await output.close()
 
     def identity_structure(self) -> Any:
+        # ``tag_only`` enters only when set, so a plain renaming keeps its identity.
         return (
             self.__class__.__name__,
             self.name_map,
             self.drop_unmapped,
-        )
+        ) + ((("tag_only", True),) if self.tag_only else ())
