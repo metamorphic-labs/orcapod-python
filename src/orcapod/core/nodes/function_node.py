@@ -632,7 +632,7 @@ class FunctionNodeBase(StreamBase):
                 else column_config.content_hash
             )
             table = table.append_column(hash_column_name, content_hashes())
-        if column_config.sort_by_tags:
+        if column_config.sort_by_tags and tag_keys:
             # The sort sees the hash column (it stays with its row) and the system tags
             # (they break ties between equal tags).
             table = arrow_utils.sort_by_tag_columns(table, tag_keys)

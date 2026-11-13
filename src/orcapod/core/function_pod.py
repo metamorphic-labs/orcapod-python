@@ -1410,7 +1410,9 @@ class FunctionPodStream(StreamBase):
             # A complete computation: its table holds the rows; only the shown rows'
             # data are read, and only when their content hashes are asked for.
             def shown_content_hashes() -> pa.Array[Any]:
-                shown, _ = self._computed_prefix(wanted)
+                shown, _ = self._computed_prefix(
+                    wanted, contiguous=not config.sort_by_tags
+                )
                 return pa.array(
                     [data.content_hash().to_string() for _, data in shown],
                     type=pa.large_string(),
@@ -1436,7 +1438,7 @@ class FunctionPodStream(StreamBase):
         )
         if not finished and not self._cached_output_datas:
             return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
-        shown, total = self._computed_prefix(wanted)
+        shown, total = self._computed_prefix(wanted, contiguous=not config.sort_by_tags)
         status = HeadStatus.ROWS if finished else HeadStatus.PARTIAL
         if not shown:
             # Nothing to show (an empty result, inputs that all gave no output so far,
@@ -1471,30 +1473,39 @@ class FunctionPodStream(StreamBase):
         )
 
     def _computed_prefix(
-        self, limit: int
+        self, limit: int, contiguous: bool = True
     ) -> tuple[list[tuple[TagProtocol, DataProtocol]], int]:
         """Return the first ``limit`` output rows computed so far, and how many there are.
 
-        The rows are the contiguous run of computed inputs from the first, in the order
-        iteration yields them; an input whose output is ``None`` (filtered out) is
-        skipped, as iteration skips it. Only the first ``limit`` rows are collected.
+        By default the rows are the contiguous run of computed inputs from the first, in
+        the order iteration yields them; an input whose output is ``None`` (filtered out)
+        is skipped, as iteration skips it. Only the first ``limit`` rows are collected.
+        With ``contiguous=False`` the rows are every computed output, in input order,
+        also those after an input that has no output (a failure): a sorted head sorts the
+        rows it has.
 
         Args:
             limit: The largest number of rows to return.
+            contiguous: Stop at the first input with no cached output.
 
         Returns:
-            The rows, and the number of output rows in the whole computed run.
+            The rows, and the number of output rows counted.
         """
         shown: list[tuple[TagProtocol, DataProtocol]] = []
         total = 0
-        index = 0
-        while index in self._cached_output_datas:
+        indexes = (
+            iter(range(len(self._cached_output_datas) + 1))
+            if contiguous
+            else iter(sorted(self._cached_output_datas))
+        )
+        for index in indexes:
+            if index not in self._cached_output_datas:
+                break
             tag, data = self._cached_output_datas[index]
             if data is not None:
                 if total < limit:
                     shown.append((tag, data))
                 total += 1
-            index += 1
         return shown, total
 
     def _shape_table(
@@ -1511,6 +1522,7 @@ class FunctionPodStream(StreamBase):
             content_hashes: Returns the content hash of each row of ``table``; called
                 only when ``column_config`` asks for them.
         """
+        hash_column_name = None
         if column_config.content_hash:
             hash_column_name = (
                 "_content_hash"
@@ -1518,15 +1530,16 @@ class FunctionPodStream(StreamBase):
                 else column_config.content_hash
             )
             table = table.append_column(hash_column_name, content_hashes())
-        if column_config.sort_by_tags:
+        if column_config.sort_by_tags and self.keys()[0]:
             # Before the system tags are dropped: they break ties between equal tags.
             table = arrow_utils.sort_by_tag_columns(table, self.keys()[0])
         drop_columns = []
         if not column_config.system_tags:
+            # The requested hash column stays, whatever its name starts with.
             drop_columns.extend(
                 c
                 for c in table.column_names
-                if c.startswith(constants.SYSTEM_TAG_PREFIX)
+                if c.startswith(constants.SYSTEM_TAG_PREFIX) and c != hash_column_name
             )
         if not column_config.source:
             drop_columns.extend(f"{constants.SOURCE_PREFIX}{c}" for c in self.keys()[1])

@@ -297,7 +297,12 @@ class ArrowTableStream(StreamBase):
 
         table = arrow_utils.hstack_tables(*table_stack)
 
-        if columns_config.sort_by_tags:
+        if columns_config.sort_by_tags and (
+            self._tag_columns or columns_config.system_tags
+        ):
+            # A stream with no tag column is sorted only when the system tags are asked
+            # for (its identity, ``identity_structure``, depends on that order); the
+            # system tags stay in the table through the sort.
             # With the system tags still in the table: they break ties between equal tags.
             table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
         if not columns_config.system_tags:

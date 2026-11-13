@@ -306,10 +306,62 @@ def test_a_custom_content_hash_column_is_kept_by_a_nodes_head() -> None:
     assert head.table.equals(node.as_table(columns=config).slice(0, 3))
 
 
-def test_a_tagless_stream_keeps_its_order_when_sorted_with_system_tags() -> None:
-    """With no regular tag column the rows keep their order, system tags or not."""
+def test_a_tagless_source_head_follows_as_table_with_and_without_system_tags() -> None:
+    """With no regular tag column the rows keep their order unless system tags are asked.
+
+    Asked for, they are sorted by the system tags, as ``as_table`` sorts them (the
+    stream's identity depends on that); the head is that table cut to ``n`` rows.
+    """
     source = ArrowTableSource(
         _table().select(["x"]), tag_columns=[], source_id="untagged", label="untagged"
     )
-    table = source.head(8, all_info=True).table
-    assert table.column("x").to_pylist() == ORDER
+    plain = source.head(8, columns={"sort_by_tags": True}).table
+    assert plain.column("x").to_pylist() == ORDER
+    asked = source.head(8, all_info=True).table
+    assert asked.equals(source.as_table(all_info=True).slice(0, 8))
+
+
+def test_a_tagless_stream_with_system_tags_keeps_its_canonical_identity_order() -> None:
+    """A stream with no tag column is sorted by its system tags when they are asked for.
+
+    ``identity_structure`` hashes ``as_table(system_tags, sort_by_tags)``: that order,
+    system tags only, is part of the content hash and must not change (ITL-1053).
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    table = pa.table({"record_id": ["b", "c", "a"], "x": [1, 2, 3]})
+    stream = ArrowTableStream(table, tag_columns=[], system_tag_columns=["record_id"])
+    ordered = stream.as_table(columns={"system_tags": True, "sort_by_tags": True})
+    shown = next(c for c in ordered.column_names if c.endswith("record_id"))
+    assert ordered.column(shown).to_pylist() == ["a", "b", "c"]
+    plain = stream.as_table(columns={"sort_by_tags": True})
+    assert plain.column("x").to_pylist() == [1, 2, 3]
+
+
+def test_a_sorted_head_includes_rows_cached_after_a_missing_input() -> None:
+    """Sorting uses every output the stream holds, also those after an input with none."""
+    stream = triple.pod(_source())
+    assert isinstance(stream, FunctionPodStream)
+    rows = stream.iter_data()
+    for _ in range(4):
+        next(rows)
+    # A concurrent failure: the first input has no cached output, the others do.
+    # Private state on purpose: this test is about how head reads that gap.
+    del stream._cached_output_datas[0]
+    unsorted_head = stream.head(10)
+    sorted_head = stream.head(10, columns={"sort_by_tags": True})
+    assert len(unsorted_head) == 0
+    assert sorted_head.table.column("id").to_pylist() == [0, 2, 7]
+
+
+def test_a_custom_hash_column_named_like_a_system_tag_is_kept() -> None:
+    """A function pod stream keeps a requested hash column whatever its name starts with."""
+    from orcapod.system_constants import constants
+
+    name = f"{constants.SYSTEM_TAG_PREFIX}digest"
+    stream = triple.pod(_source())
+    assert isinstance(stream, FunctionPodStream)
+    config = {"content_hash": name, "sort_by_tags": True}
+    table = stream.as_table(columns=config)
+    assert name in table.column_names
+    assert stream.head(3, columns=config).table.equals(table.slice(0, 3))

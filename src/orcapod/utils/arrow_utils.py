@@ -1831,7 +1831,7 @@ def apply_column_config(
             if c.startswith(constants.META_PREFIX)
             and not any(c.startswith(p) for p in normalized_meta_prefixes)
         )
-    if column_config.sort_by_tags:
+    if column_config.sort_by_tags and tag_keys:
         # Before the system tags are dropped: they break ties between equal tags.
         table = sort_by_tag_columns(table, tag_keys)
     return table.drop([c for c in drop_columns if c in table.column_names])
@@ -1844,7 +1844,8 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     equal tags are then ordered by the system tag columns ``table`` has (they hold the
     record ids), in column order, and rows still equal keep their input order, so the
     result does not depend on the order the rows arrived in whenever the table has system
-    tags. A table with no regular tag column is returned as it is.
+    tags. A table with neither is returned as it is. A caller that must keep the order of
+    a stream with no regular tag column does not call this for it.
 
     Whole rows move together: a column added to ``table`` before the sort (a content hash)
     stays with its row. Column types and nullability are those of ``table``. Sort before
@@ -1857,12 +1858,12 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     Returns:
         A new table with the same columns, rows in tag order.
     """
-    if not tag_keys:
-        return table
     system_tags = [
         c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
     ]
     keys = [*tag_keys, *(c for c in system_tags if c not in tag_keys)]
+    if not keys:
+        return table
     try:
         return table.sort_by([(key, "ascending") for key in keys])
     except (pa.ArrowNotImplementedError, pa.ArrowTypeError):
