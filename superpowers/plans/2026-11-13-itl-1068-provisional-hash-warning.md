@@ -4,7 +4,17 @@ Branch `eywalker/itl-1068-warn-that-library-value-types-numpy-torch`. Refs ITL-1
 audit), ITL-1054. PR #339 (pandas handlers become `IgnoreListHandler`, pandas joins
 `hash_ignore`) must be merged into this branch before the pandas part is finished.
 
-Status: plan sent to coordinator (STEP 1), awaiting approval. No code yet.
+Status (2026-11-13): approved with notes (test "one line removes a type"; practical docs
+guidance; ITL-1069 only in design_issues; API reference page for warnings: none exists).
+Implemented and pushed: class, helper, declaration, both registries, tests, docs, changelog,
+rules, design issue. Revision of (b): the declared list is held per data context (logical type
+registry `_config` ref + `PythonTypeHandlerRegistry.declare_provisional`), not process-global,
+so a context without a name does not warn for it; only the issued set is process-global.
+Stored-read test reads through `PipelineJob.load` + node `as_table` (a raw Delta read never
+resolves the logical type). Remaining: merge main once #339 lands, then add
+`EXTENSION_NAME = LogicalPandasDataFrame.EXTENSION_NAME` / `LogicalPandasSeries...` to the
+two pandas handlers in builtin_handlers.py and a one-line pointer in hashing.md section 10;
+verified on a trial merge (41/41 new tests, hashing/logical_types/contexts suites green).
 
 ## (a) Warning class
 
