@@ -11,8 +11,6 @@ Known defects are marked ``xfail(strict=True)`` on exactly the cases they break:
 
 * ITL-1045: ``FunctionPodStream.as_table`` builds the table and its content hashes in two
   passes; an upstream reset in between attaches the new rows' hashes to the old table.
-* ITL-1046: ``Index`` after ``Batch`` or ``GroupBy`` gives the element the whole member
-  list's token instead of its own.
 """
 
 from __future__ import annotations
@@ -44,10 +42,6 @@ from .jobs import derive_y
 ITL_1045 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1045: as_table attaches a recomputed upstream's hashes to the old table",
-)
-ITL_1046 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1046: Index after Batch/GroupBy gives the element the list's token",
 )
 
 
@@ -209,7 +203,6 @@ def test_as_table_after_an_upstream_reset_keeps_each_hash_with_its_row() -> None
     assert table.column("_content_hash").to_pylist() == own
 
 
-@ITL_1046
 @pytest.mark.parametrize("aggregate", ["batch", "group_by"])
 def test_index_after_aggregation_gives_each_element_its_own_token(
     aggregate: str,
