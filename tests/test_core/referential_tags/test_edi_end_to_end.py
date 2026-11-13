@@ -91,12 +91,8 @@ def _streams() -> tuple[Any, Any, Any]:
         source_id="trials",
     )
     # A referential tag renamed with map_tags is renamed in both roles.
-    spikes_by_unit = spikes.group_by(KEYS).map_tags(
-        {"timestamp": "spike_time"}, drop_unmapped=False
-    )
-    gaze_by_unit = gaze.group_by(KEYS).map_tags(
-        {"timestamp": "gaze_time"}, drop_unmapped=False
-    )
+    spikes_by_unit = spikes.group_by(KEYS).map_tags({"timestamp": "spike_time"})
+    gaze_by_unit = gaze.group_by(KEYS).map_tags({"timestamp": "gaze_time"})
     return spikes_by_unit, gaze_by_unit, trials
 
 
