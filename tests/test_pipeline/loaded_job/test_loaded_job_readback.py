@@ -867,18 +867,24 @@ def test_in_memory_source_node_is_readable_after_bind(saved: pathlib.Path) -> No
 
 
 @pytest.mark.parametrize("method", ["as_table", "iter_data"])
-def test_loaded_replay_operator_reports_absent_cache_table(
+def test_loaded_replay_operator_reads_an_absent_cache_table_as_no_rows(
     tmp_path: pathlib.Path, method: str
 ) -> None:
-    """A missing REPLAY table must not look like a successful zero-row result."""
+    """The store is the source of truth: no table under the node's key is no rows.
+
+    The job file records the operator's run content hash (ITL-1043), so the loaded node
+    knows its key and reads as a running node does. A file without that hash raises
+    instead; see ``test_loaded_operator_cache.py``.
+    """
     from orcapod.types import CacheMode
 
     node = _loaded_operator_only_job(tmp_path).nodes["joined"]
     node.attach_databases(InMemoryArrowDatabase(), cache_mode=CacheMode.REPLAY)
-    with pytest.raises(RuntimeError, match="joined.*cache table is absent"):
-        result = getattr(node, method)()
-        if method == "iter_data":
-            list(result)
+    result = getattr(node, method)()
+    if method == "iter_data":
+        assert list(result) == []
+    else:
+        assert result.num_rows == 0
 
 
 def test_loaded_job_is_never_runnable(tmp_path: pathlib.Path) -> None:

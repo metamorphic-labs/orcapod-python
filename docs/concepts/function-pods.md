@@ -698,11 +698,13 @@ as before.
   The saved file does not record an operator's cache mode (follow-up ITL-977), so attach a
   loaded operator node in `CacheMode.REPLAY` to read the rows its run stored:
   `loaded.nodes["joined"].attach_databases(pipeline_database=store.at("<job name>"),
-  cache_mode=CacheMode.REPLAY)`. A loaded operator without a readable cache raises from
-  `as_table()` and `iter_data()`, naming the cause; it never shows stored rows as zero rows.
-  `head()` does not raise: it shows no rows and says why. Read its input
-  nodes instead (an in-memory input source must be bound first, see below), or build the job
-  from your code and attach the operator node in `CacheMode.REPLAY`.
+  cache_mode=CacheMode.REPLAY)`. The store is the source of truth: a loaded job shows what
+  the store holds for it. A loaded operator node reads exactly as the same node built from
+  your code and attached in `CacheMode.REPLAY`; when the store holds no rows under the
+  node's key (no table, or none of its rows), the answer is an empty result, as for that
+  node. A loaded operator not attached in `REPLAY` has no readable cache and raises from
+  `as_table()` and `iter_data()`; read its input nodes instead (an in-memory input source
+  must be bound first, see below), or build the job from your code.
 - A loaded node has the pipeline hash, content hash, table path and output schema its run
   had (a source node whose data was not saved gets its run's content hash once its source is
   bound). The file records which columns may be null (`T | None`), because the Arrow type text
@@ -710,10 +712,12 @@ as before.
   carry. Whether a file has these records is decided by the records themselves, not by the
   file's format version: a file without them (format `0.1.0`, or a `0.2.0` file written
   before they existed) still loads, but lossy: its schemas read every column as non-null,
-  and a loaded operator node cannot tell its run's stored rows apart, so reading them
-  raises. An empty record is not a missing one: it says that no column may be null. Saving
-  such a loaded job again does not record what its file did not. Upgrading such files is
-  left to a migration tool after v0.3.
+  and a loaded operator node cannot name its run's rows. When the store holds none under the
+  content hash the loaded job computes, `as_table()` and `iter_data()` raise, and `head()`
+  shows no rows and says why, rather than presenting stored rows as none. An empty record is
+  not a missing one: it says that no column may be null. Saving such a loaded job again does
+  not record what its file did not. Upgrading such files is left to a migration tool after
+  v0.3.
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs

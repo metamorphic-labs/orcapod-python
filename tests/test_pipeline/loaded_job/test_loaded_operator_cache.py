@@ -245,24 +245,40 @@ def _drop_both(data: dict[str, Any]) -> None:
     _drop_saved_operator_content_hash(data)
 
 
+UNKNOWN_KEY = (
+    r"'joined': the job file does not record the content hash of this node's run "
+    r".*ITL-1048"
+)
+
+
 @pytest.mark.parametrize("read", ["as_table", "iter_data"])
 @pytest.mark.parametrize("store_kind", STORES)
 @pytest.mark.parametrize("nullability", list(NULLABILITY))
 def test_without_the_run_content_hash_the_loaded_operator_raises(
     store_kind: str, nullability: str, read: str, tmp_path: pathlib.Path
 ) -> None:
-    """Stored rows the loaded node cannot identify as its run's never read as none."""
+    """A node that cannot name its run's rows never shows the stored rows as none."""
     store = _store(store_kind, tmp_path)
     job = _run(store, nullability)
     node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
-    with pytest.raises(
-        RuntimeError,
-        match=r"'joined': its cache table \(.*\) holds 2 stored rows, none of them "
-        r"under this node's content hash .* the job file does not record .*ITL-1048",
-    ):
+    with pytest.raises(RuntimeError, match=UNKNOWN_KEY) as excinfo:
         result = getattr(node, read)()
         if read == "iter_data":
             _ = list(result)
+    assert "holds 2 stored rows, none of them under the content hash" in str(
+        excinfo.value
+    )
+
+
+def test_without_the_run_content_hash_an_absent_table_raises_too(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Without its run's content hash, an absent table is no answer either."""
+    saved = _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path, _drop_both)
+    node = _load_replaying(saved, InMemoryArrowDatabase()).nodes["joined"]
+    with pytest.raises(RuntimeError, match=UNKNOWN_KEY) as excinfo:
+        _ = node.as_table()
+    assert "is absent from the attached store" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("store_kind", STORES)
@@ -276,16 +292,48 @@ def test_without_the_run_content_hash_head_says_why_it_shows_no_rows(
     head = node.head()
     assert head.status is HeadStatus.UNAVAILABLE
     assert head.table.num_rows == 0
-    assert "2 stored rows, none under its run's content hash" in head.header()
+    assert "does not record its run's content hash" in head.header()
     assert "ITL-1048" in head.header()
 
 
-def test_a_store_holding_only_other_runs_rows_is_named_as_the_cause(
+# ---------------------------------------------------------------------------
+# The store is the source of truth: a known key with no rows is an empty result
+# ---------------------------------------------------------------------------
+
+
+def _live_replaying(store: ArrowDatabaseProtocol, job: PipelineJob) -> Any:
+    """The join of ``job``'s definition rebuilt from code, in REPLAY over ``store``."""
+    rebuilt = PipelineJob.from_pipeline(job.pipeline, store=store)
+    rebuilt.bind(sources=job.sources)
+    node = rebuilt.nodes["joined"]
+    node.attach_databases(
+        pipeline_database=store.at(JOB_NAME), cache_mode=CacheMode.REPLAY
+    )
+    return node
+
+
+def _assert_reads_as_live_with_no_rows(loaded_node: Any, live_node: Any) -> None:
+    """The loaded node reads what a running node reads from the same store: no rows."""
+    for config in ({}, {"all_info": True}):
+        table = loaded_node.as_table(**config)
+        live = live_node.as_table(**config)
+        assert table.num_rows == 0
+        assert table.schema.equals(live.schema), (table.schema, live.schema)
+    assert list(loaded_node.iter_data()) == []
+    head = loaded_node.head()
+    assert head.status is HeadStatus.NOTHING_STORED
+    assert head.table.num_rows == 0
+    assert "the store holds no rows for its run" in head.header()
+    assert live_node.head().status is HeadStatus.NOTHING_STORED
+
+
+def test_a_store_holding_only_other_runs_rows_gives_an_empty_result(
     tmp_path: pathlib.Path,
 ) -> None:
-    """With the run's content hash recorded, rows of other runs only mean another store."""
+    """With its key known, a store without the run's rows answers: no rows."""
     saved_store = InMemoryArrowDatabase()
-    saved = _save(_run(saved_store, "non_null"), tmp_path)
+    job = _run(saved_store, "non_null")
+    saved = _save(job, tmp_path)
     # Another store whose table at the same path holds another run's rows.
     other_store = InMemoryArrowDatabase()
     other = PipelineJob(name=JOB_NAME, store=other_store)
@@ -313,23 +361,62 @@ def test_a_store_holding_only_other_runs_rows_is_named_as_the_cause(
     )
     _ = other.run()
     node = _load_replaying(saved, other_store).nodes["joined"]
-    with pytest.raises(RuntimeError, match=r"stored by other runs.*store"):
-        _ = node.as_table()
-    assert node.head().status is HeadStatus.UNAVAILABLE
+    _assert_reads_as_live_with_no_rows(node, _live_replaying(other_store, job))
 
 
-def test_an_absent_cache_table_shows_no_rows_in_head_and_raises_elsewhere(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize("nullability", list(NULLABILITY))
+def test_an_absent_cache_table_gives_an_empty_result(
+    nullability: str, tmp_path: pathlib.Path
 ) -> None:
-    """A store without the run's table: ``head()`` names it; ``as_table()`` raises."""
+    """With its key known, a store without the table answers: no rows, typed."""
+    job = _run(InMemoryArrowDatabase(), nullability)
+    empty_store = InMemoryArrowDatabase()
+    node = _load_replaying(_save(job, tmp_path), empty_store).nodes["joined"]
+    _assert_reads_as_live_with_no_rows(node, _live_replaying(empty_store, job))
+
+
+def _run_empty_join(store: ArrowDatabaseProtocol) -> PipelineJob:
+    """Run the operator-only job over inputs with no common ``id``: an empty join."""
+
+    def source(column: str, ids: list[int], source_id: str) -> ArrowTableSource:
+        """A non-null source with tag ``id`` and data ``column``."""
+        schema = pa.schema(
+            [
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field(column, pa.int64(), nullable=False),
+            ]
+        )
+        table = pa.table({"id": ids, column: [1] * len(ids)}, schema=schema)
+        return ArrowTableSource(table, tag_columns=["id"], source_id=source_id)
+
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        _ = Join()(
+            source("a", [0, 1], "src_a"),
+            source("b", [7, 8], "src_b_disjoint"),
+            label="joined",
+        )
+    # OperatorNode.attach_databases is the public way to turn on LOG / REPLAY mode.
+    job.nodes["joined"].attach_databases(
+        pipeline_database=store.at(JOB_NAME), cache_mode=CacheMode.LOG
+    )
+    _ = job.run()
+    return job
+
+
+@pytest.mark.parametrize("other_runs_stored", [False, True])
+def test_a_loaded_run_with_an_empty_result_reads_as_empty(
+    other_runs_stored: bool, tmp_path: pathlib.Path
+) -> None:
+    """A run whose result was empty (it stores nothing) reads back as empty."""
     store = InMemoryArrowDatabase()
-    saved = _save(_run(store, "non_null"), tmp_path)
-    node = _load_replaying(saved, InMemoryArrowDatabase()).nodes["joined"]
-    head = node.head()
-    assert head.status is HeadStatus.UNAVAILABLE
-    assert "cache table is absent" in head.header()
-    with pytest.raises(RuntimeError, match="'joined': the cache table is absent"):
-        _ = node.as_table()
+    if other_runs_stored:
+        # Another run of the same pipeline stores rows in the shared table.
+        _ = _run(store, "non_null", with_function=False)
+    job = _run_empty_join(store)
+    assert job.nodes["joined"].as_table().num_rows == 0
+    node = _load_replaying(_save(job, tmp_path), store).nodes["joined"]
+    _assert_reads_as_live_with_no_rows(node, _live_replaying(store, job))
 
 
 def test_an_empty_nullable_list_means_every_column_is_non_null(
@@ -478,7 +565,7 @@ def test_a_format_0_1_0_file_finds_its_join_table_and_never_shows_its_rows_as_no
     assert head.status is HeadStatus.UNAVAILABLE
     assert "ITL-1048" in head.header()
     with pytest.raises(
-        RuntimeError, match=r"'Join': its cache table .* the job file does not record"
+        RuntimeError, match=r"'Join': the job file does not record .*ITL-1048"
     ):
         _ = node.as_table()
 

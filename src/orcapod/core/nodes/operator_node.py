@@ -1151,10 +1151,15 @@ class OperatorJobNode(OperatorNodeBase):
             - Returns ``None`` if ``_cache_mode != CacheMode.REPLAY``
               (LOG/OFF modes may have stale historical records in the DB).
 
+        The store is the source of truth: a loaded node whose job file records its
+        run's content hash reads exactly as a node that runs does, so an absent table or
+        a table with no rows under that hash is an empty result.
+
         Raises:
-            RuntimeError: If a loaded REPLAY node's cache table is absent, or holds rows
-                none of which carries the node's content hash: a loaded node cannot
-                compute, so showing no rows would make stored results look dropped.
+            RuntimeError: If a loaded REPLAY node's job file does not record its run's
+                content hash and the store holds no rows under the hash the loaded job
+                computes: the node cannot name its run's rows, so an empty result would
+                make stored results look dropped.
         """
         if self._pipeline_database is None:
             return None
@@ -1164,50 +1169,29 @@ class OperatorJobNode(OperatorNodeBase):
         records = None if stored is None else self._filter_by_content_hash(stored)
         if (
             self._loaded
-            and stored is not None
-            and records is not None
-            and records.num_rows == 0
-            and stored.num_rows > 0
+            and self._saved_run_content_hash is None
+            and (records is None or records.num_rows == 0)
         ):
-            if self._saved_run_content_hash is None:
-                cause = (
-                    "the job file does not record the content hash of this node's run "
-                    "(a file saved before Orcapod recorded it), and the loaded job "
-                    "cannot reproduce it. Upgrading such files is left to the migration "
-                    "tool after v0.3 (ITL-1048); until then build the job from code and "
-                    "attach the node with CacheMode.REPLAY to read them."
-                )
-                head_cause = (
-                    "the job file does not record its run's content hash "
-                    "(an older file; ITL-1048)"
-                )
-            else:
-                cause = (
-                    "they were stored by other runs. Either this store does not hold "
-                    "the rows of the saved run (load with the store the run wrote), or "
-                    "the run produced no rows: an empty result stores nothing."
-                )
-                head_cause = "they are other runs' rows (another store, or its run produced none)"
+            found = (
+                "is absent from the attached store"
+                if stored is None
+                else f"holds {stored.num_rows} stored rows, none of them under the "
+                f"content hash the loaded job computes ({self.content_hash().to_string()})"
+            )
             raise _LoadedCacheUnreadableError(
-                f"OperatorJobNode {self.label!r}: its cache table "
-                f"({'/'.join(self._stored_table_path)}) holds {stored.num_rows} stored "
-                "rows, none of them under this node's content hash "
-                f"({self.content_hash().to_string()}): {cause}",
+                f"OperatorJobNode {self.label!r}: the job file does not record the "
+                "content hash of this node's run (a file saved before Orcapod recorded "
+                "it), so the loaded job cannot name the run's rows, and its cache table "
+                f"({'/'.join(self._stored_table_path)}) {found}. Upgrading such files is "
+                "left to the migration tool after v0.3 (ITL-1048); until then build the "
+                "job from code and attach the node with CacheMode.REPLAY to read them.",
                 head_note=(
-                    f"loaded node: {stored.num_rows} stored rows, none under its run's "
-                    f"content hash; {head_cause}"
+                    "loaded node: the job file does not record its run's content hash "
+                    "(an older file; ITL-1048)"
                 ),
             )
         if records is None:
-            if self._loaded:
-                raise _LoadedCacheUnreadableError(
-                    f"OperatorJobNode {self.label!r}: the cache table is absent "
-                    f"({'/'.join(self._stored_table_path)}). Load with the store "
-                    "that holds the saved operator results.",
-                    head_note="loaded node whose cache table is absent from the "
-                    "attached store",
-                )
-            if self._operator is None:
+            if self._operator is None and not self._loaded:
                 # Read-only (deserialized) node with no operator: cannot derive
                 # schema without a live operator. Return None so callers fall
                 # back to iter([]) / _make_empty_table() guarded paths.
@@ -1498,7 +1482,12 @@ class OperatorJobNode(OperatorNodeBase):
                 config, HeadStatus.UNAVAILABLE, note=exc.head_note
             )
         if stream is None or stream.as_table().num_rows == 0:
-            return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
+            return self._head_without_rows(
+                config,
+                HeadStatus.NOTHING_STORED,
+                # A loaded job cannot run: say what the store holds instead.
+                note="the store holds no rows for its run" if self._loaded else None,
+            )
         return stream.head(n, columns=config).for_stream(self, origin="stored")
 
     # ------------------------------------------------------------------
