@@ -169,7 +169,11 @@ def install() -> None:
             _wrap(cls, "compute_base_entry_id", "base_entry_id")
     for cls_name in dir(arrow_hashers):
         cls = getattr(arrow_hashers, cls_name)
-        if isinstance(cls, type) and "hash_table" in cls.__dict__:
+        if (
+            isinstance(cls, type)
+            and cls.__module__ == arrow_hashers.__name__  # not starfix's digester
+            and "hash_table" in cls.__dict__
+        ):
             _wrap(cls, "hash_table", "hash_table")
 
     for cls in (UnaryOperator, BinaryOperator, NonZeroInputOperator, Join):

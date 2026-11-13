@@ -110,6 +110,9 @@ def spiral_sources(root: Path):
     from tests.test_databases import fake_pyspiral
 
     sessions, experiments = tables()
+    # The fake hands out 2-row batches by default; SpiralDB's follow its stored
+    # fragments. 1,024 rows keeps per-batch counts from swamping per-row ones.
+    fake_pyspiral.scan_batch_rows = 1024
     project = fake_pyspiral.FakeSpiral().project(PROJECT)
     s = project.create_table("default.sessions", key_schema=sessions.select(["subject_id", "session"]).schema)
     s.write(sessions)
