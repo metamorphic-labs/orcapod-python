@@ -145,3 +145,8 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
   rule implemented (map_tags both roles, tag_only=True, map_data data-only). EDI test uses
   `timestamp` in both series. Existing tests pinned to `tag_only_columns=True` (79 files, 569
   call sites). Remaining: full suite on 3.11/3.12/3.13, basedpyright, final report.
+- 2026-11-13: fall-through (ReferenceFallThroughPod) per developer ruling; format 0.3.0 with
+  f51ce67c fixture; merged main through #349 (ITL-940 check exempts references). Final code
+  head 4473e2ef: CI green; local full suite 3.11/3.12/3.13 green (one intermittent
+  crash-recovery async test, unchanged from main); basedpyright 0 errors. Reported to the
+  coordinator (worker_done). Remaining work belongs to ITL-1009..1022.
