@@ -4,7 +4,7 @@ import hashlib
 import json
 import uuid
 from collections import defaultdict
-from collections.abc import Mapping, Collection, Sequence
+from collections.abc import Callable, Mapping, Collection, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
 from orcapod.system_constants import constants
@@ -1843,6 +1843,50 @@ def unused_column_name(table: "pa.Table", base: str) -> str:
     while name in table.column_names:
         name += "_"
     return name
+
+
+def with_content_hash_column(
+    table: "pa.Table",
+    content_hash: bool | str,
+    hashes: "Callable[[], pa.Array[Any]]",
+    shape: "Callable[[pa.Table], pa.Table]",
+    nullable: bool = True,
+) -> "pa.Table":
+    """Return ``shape(table)`` with the requested content-hash column attached.
+
+    The ONE mechanism by which a requested content-hash column is added while rows are
+    sorted or columns are filtered (ITL-1029, ITL-1053). The hash column is attached to
+    ``table`` before ``shape`` runs, so a sort moves every hash with its own row, and it
+    travels under a reserved temporary name that belongs to no column group, so that
+    neither the sort (a name starting with the system tag prefix is not a tie-break key)
+    nor the filtering (a name equal to ``_context_key`` or ``_source_y``) can mistake or
+    drop it. It gets its requested name last.
+
+    Args:
+        table: The rows, with every column ``shape`` needs.
+        content_hash: The column configuration's ``content_hash``: ``False`` for none,
+            ``True`` for ``_content_hash``, or the name of the column.
+        hashes: Returns the content hash of each row of ``table``, in its order, as a
+            ``large_string`` array. Called only when a content hash is requested.
+        shape: Sorts and filters the table (it must keep every column it does not drop
+            by its own rules, and must not read the hash column).
+        nullable: Whether the hash column's field is nullable.
+
+    Returns:
+        The shaped table, the content-hash column last under its requested name.
+    """
+    if not content_hash:
+        return shape(table)
+    name = content_hash if isinstance(content_hash, str) else "_content_hash"
+    carrier = unused_column_name(table, "row content hash")
+    carried = table.append_column(
+        pa.field(carrier, pa.large_string(), nullable=nullable),
+        hashes(),
+    )
+    shaped = shape(carried)
+    return shaped.rename_columns(
+        [name if column == carrier else column for column in shaped.column_names]
+    )
 
 
 def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":

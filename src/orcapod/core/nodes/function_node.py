@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import uuid
 from abc import abstractmethod
@@ -624,31 +623,15 @@ class FunctionNodeBase(StreamBase):
                 order of ``table``; called only when ``column_config`` asks for them.
         """
         tag_keys = self.keys()[0]
-        hashes = None
-        if column_config.sort_by_tags and tag_keys:
-            # The hash travels with its row under a temporary name that no column has:
-            # the requested name may be one of the columns the shaping drops or keeps.
-            carrier = arrow_utils.unused_column_name(table, "__row_content_hash")
-            if column_config.content_hash:
-                table = table.append_column(carrier, content_hashes())
-            # The sort sees the hash column and the system tags (they break ties).
-            table = arrow_utils.sort_by_tag_columns(table, tag_keys)
-            if column_config.content_hash:
-                hashes = table.column(carrier)
-                table = table.drop_columns([carrier])
-        elif column_config.content_hash:
-            hashes = content_hashes()
-        shaped = arrow_utils.apply_column_config(
-            table, dataclasses.replace(column_config, sort_by_tags=False), tag_keys
+        # The sort sees the hash column and the system tags (they break ties).
+        return arrow_utils.with_content_hash_column(
+            table,
+            column_config.content_hash,
+            content_hashes,
+            lambda carried: arrow_utils.apply_column_config(
+                carried, column_config, tag_keys
+            ),
         )
-        if hashes is not None:
-            name = (
-                column_config.content_hash
-                if isinstance(column_config.content_hash, str)
-                else "_content_hash"
-            )
-            shaped = shaped.append_column(name, hashes)
-        return shaped
 
     def head(
         self,
