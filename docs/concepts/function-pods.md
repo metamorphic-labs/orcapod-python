@@ -647,7 +647,7 @@ type.
 | `uuid.UUID` | `orcapod.uuid` | `large_binary` |
 | `orcapod.File` | `orcapod.file` | `large_string` |
 | `orcapod.Directory` | `orcapod.directory` | `large_string` |
-| `numpy.ndarray` | `orcapod.ndarray` | `struct` of dtype tag, shape and element bytes (see [Arrays](arrays.md)) |
+| `numpy.ndarray` | `orcapod.numpy.ndarray` | `large_binary` (`.npy` bytes, see [Arrays](arrays.md)) |
 | `pandas.DataFrame` | `pandas.dataframe` | `large_binary` (Arrow IPC stream) |
 | `pandas.Series` | `pandas.series` | `large_binary` (Arrow IPC stream) |
 | `polars.DataFrame` | `orcapod.polars.dataframe` | `large_binary` (Polars IPC file, `write_ipc`) |

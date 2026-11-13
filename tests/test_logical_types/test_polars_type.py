@@ -277,7 +277,7 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
     def test_polars_extension_dtype(self) -> None:
         logical_type = LogicalNumpyArray()
         ext = logical_type.get_polars_extension_type()
-        # The stored row of one array, in the storage type of ``orcapod.ndarray``.
+        # The stored row of one array, in the storage type of ``orcapod.numpy.ndarray``.
         storage = pa.array(
             [logical_type.python_to_storage(np.zeros(2))],
             type=logical_type.get_arrow_extension_type().storage_type,
@@ -285,7 +285,7 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
         stored = pl.from_arrow(storage)
         assert isinstance(stored, pl.Series)
         df = pl.DataFrame([stored.alias("arr").ext.to(ext)])
-        with pytest.raises(ValueError, match=r"'arr'.*orcapod\.ndarray"):
+        with pytest.raises(ValueError, match=r"'arr'.*orcapod\.numpy\.ndarray"):
             LogicalPolarsDataFrame().python_to_storage(df)
 
 
