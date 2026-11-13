@@ -19,15 +19,15 @@ def src(columns: dict[str, Any], tags: list[str], sid: str) -> ArrowTableSource:
     )
 
 
-def i64(*v: Any) -> "pa.Array[Any]":
+def i64(*v: Any) -> pa.Array[Any]:
     return pa.array(list(v), type=pa.int64())
 
 
-def f64(*v: Any) -> "pa.Array[Any]":
+def f64(*v: Any) -> pa.Array[Any]:
     return pa.array(list(v), type=pa.float64())
 
 
-def s(*v: Any) -> "pa.Array[Any]":
+def s(*v: Any) -> pa.Array[Any]:
     return pa.array(list(v), type=pa.large_string())
 
 
@@ -68,18 +68,30 @@ def async_rows(op: Any, *streams: Any) -> list[tuple[dict[str, Any], dict[str, A
     """
     from orcapod.channels import Channel
 
+    async def feed(stream: Any, channel: Any) -> None:
+        for row in stream.iter_data():
+            await channel.writer.send(row)
+        await channel.writer.close()
+
     async def run() -> list[tuple[dict[str, Any], dict[str, Any]]]:
         chans = [Channel(buffer_size=64) for _ in streams]
         out = Channel(buffer_size=64)
-        for st, ch in zip(streams, chans):
-            for row in st.iter_data():
-                await ch.writer.send(row)
-            await ch.writer.close()
-        await op.async_execute(
-            [c.reader for c in chans],
-            out.writer,
-            input_pipeline_hashes=[st.pipeline_hash() for st in streams],
+        # Feeders, the operator and the collector run together, so a bounded channel
+        # never blocks a feeder before its reader has started.
+        collected: list[Any] = []
+
+        async def collect() -> None:
+            collected.extend(await out.reader.collect())
+
+        await asyncio.gather(
+            *(feed(st, ch) for st, ch in zip(streams, chans)),
+            op.async_execute(
+                [c.reader for c in chans],
+                out.writer,
+                input_pipeline_hashes=[st.pipeline_hash() for st in streams],
+            ),
+            collect(),
         )
-        return [(t.as_dict(), d.as_dict()) for t, d in await out.reader.collect()]
+        return [(t.as_dict(), d.as_dict()) for t, d in collected]
 
     return asyncio.run(run())

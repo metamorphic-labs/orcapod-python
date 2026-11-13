@@ -8,9 +8,11 @@ implements what the spec marks Required or Proposed, and raises decisions only f
 spec marks Open or that the code makes impossible or ambiguous.
 **Developer decisions included** (November 12, 2026):
 - Every source's declared tags are referential **by default**.
-- Tags named in `tag_only_columns` (a subset of `tag_columns`) stay materialized and reproduce
-  v0.3 exactly. This is proven by the unchanged golden values, so the referential path is
-  additive.
+- Tags named in `tag_only_columns` (a subset of `tag_columns`) stay materialized and must
+  reproduce v0.3 exactly, so the referential path is additive. This is a requirement and a
+  proof obligation: it is proven once the golden fixtures, switched to `tag_only_columns`, pass
+  unchanged (ITL-1011, ITL-1012). This audit shows only that no hash input of a tag-only
+  stream changes (§3).
 - The change is a change of default behaviour.
 - `Join`'s three cases (§9.1) have equal standing.
 - At a pod boundary a reference whose data column does not survive becomes a plain tag (D1).
@@ -240,8 +242,16 @@ and raise, unless the function takes all keys. That is decision D2.
 
 **Stored-schema changes, named exactly.**
 - No stored table changes, and the descriptor format is unchanged.
-- Source configs gain `tag_only_columns` (§6.2), written only when non-empty. `from_config` for a
-  v0.3 config therefore gives the **new default**, consistent with the change of default.
+- Source configs gain `tag_only_columns` (§6.2). **Recommended rule (decision D8):**
+  - v0.4 `to_config` always writes the key, as an empty list when every tag is referential.
+  - A config **without** the key is a v0.3 config, and `from_config` /
+    `resolve_source_from_config` restores it with every declared tag tag-only, its v0.3
+    meaning.
+  - So a saved v0.3 job reloads with the content and pipeline hashes it saved. Otherwise its
+    sources would be rebuilt referentially and silently disagree with the saved descriptors
+    (`pipeline/job.py` `PipelineJob.save` embeds each source's `to_config()` beside the node
+    hashes).
+  - The referential default applies to sources built in code.
 
 **Legacy data.** A v0.3 table or saved job has disjoint `tag`/`data` sets, so it reads as
 plain tags only (§16.1). Nothing is reinterpreted.
@@ -504,16 +514,17 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 |---|---|---|---|---|---|
 | 0 | **ITL-940** (add to the project) | reject a tag/data name collision across inputs (`Join`, `MergeJoin`, sync and async), pod output = tag name, `Index`/`Pick` `out=` = tag name; regression tests `01 R2`, `R5`, `05 M2` | M | — | — |
 | 1 | **ITL-1009 + ITL-1010 (merge)** | `reference_names`, the validator, `StreamBase.reference_tags()`; `ArrowTableStream(reference_tags=)`; its identity term; `_rows_to_table` and `_materialize_*` deduplication; all 32 rebuild sites pass references; spec §15.1 tests | M | 0 | — |
-| 2a | **ITL-1011 + ITL-1012 (land together)** | builder `reference_tags`; every source's default; `tag_only_columns` (§6.2); `to_config`; golden fixtures switched, new entries; upgrade note | M | 1 | 2b-2e |
+| 2a | **ITL-1011 + ITL-1012, part 1** | builder `reference_tags`; `tag_only_columns` on every source (§6.2); `to_config` per D8; referential sources available but **not yet the default** | M | 1 | 2b-2e |
 | 2b | **ITL-1015** | select and drop by role; config, diagnostic, `binding_transitions`; §15.5 tests | S | 1 | 2a, 2c-2e |
 | 2c | **ITL-1016** | `Join` three cases, sync and async; field-level provenance per D5; §15.4 tests; `06 J1` pinned | M | 1 | 2a, 2b, 2d, 2e |
 | 2d | **ITL-1017** | `GroupBy` key scalar in data; `Batch` tests; §15.3 tests | S | 1 | others |
 | 2e | **ITL-1014** | tests only for the filters, `SemiJoin` and `DropNulls`; `Index`/`Pick` in-place rejection | S | 1 | others |
 | 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule; automatic join and select with references; §15.2 and §15.6 result-identity tests | M | 1, 2b; 2c for the automatic join | 4 |
 | 4 | **ITL-1019** | nodes, stores and saved jobs pass references; descriptor intersection; reuse across retagging (§15.6) | S | 1 | 3 |
+| 4b | **ITL-1012, part 2 (its last step), with ITL-1011** | **flip the default** to referential; golden fixtures switched to `tag_only_columns`, new entries; upgrade note | S | **1013, 1015, 1016, 1017, 1019** | — |
 | 5 | **ITL-1018** | `MergeJoin` (D4); the decided rename rules (§5.4), unless the ITL-1023 slice lands them | M | 1 | 6 |
 | 6 | **ITL-1020** | `tags_as_data` beside references (§6.3): docs and tests; no behaviour change | S | 2a | 5 |
-| 7 | **ITL-1021** | ediop and the notebook, without copies; EDI-shaped integration test (§15.7) | M | 2a, 2c, 2d, 3 | — |
+| 7 | **ITL-1021** | ediop and the notebook, without copies; EDI-shaped integration test (§15.7) | M | 4b | — |
 | 8 | **ITL-1022** | operator table in `docs/`; `streams.md:10-25`, `operators.md:31-33`, `sources.md`, `hashing.md`; CLAUDE.md and `.zed/rules` rule | S | all | — |
 
 **ITL-1023 (workshop slice, go/no-go November 14).** The thinnest path is ITL-1010 (+1009),
@@ -528,6 +539,11 @@ Each guard is one check against `reference_tags()` at `validate_inputs`. Estimat
 5-7 working days for one worker, which is tight for November 14. The audit's measurements
 (`02`, `06`) give the test shapes. The riskiest part is the 32-site rebuild; it is mechanical
 but touches every operator.
+
+**The default flip is the last step of ITL-1012.** It depends on ITL-1013, 1015, 1016, 1017
+and 1019. Flipped earlier, `main` would break: `pod(source)` (the automatic select raises),
+`source_a.join(source_b)` (shared keys collide), `GroupBy` on a key, and reloading a node.
+ITL-1023's integration branch carries everything at once and is unaffected.
 
 **Splits and merges.** Merge ITL-1009 into ITL-1010: with the intersection rule ITL-1009 is a
 helper and a validator, testable only with a stream. Land ITL-1011 with ITL-1012: the golden
@@ -629,6 +645,86 @@ needs a shape).**
 `tag_only_columns=[...]`, a subset of `tag_columns` (§6.2). Open for the ITL-1012 worker to
 propose: a shorthand for "all declared tags", useful for database sources whose tags default
 to primary keys.
+**D8. How a stored source config without `tag_only_columns` is restored** (a stored-config
+rule, §4).
+- (a) **Recommended.** v0.4 always writes the key; a config without it is v0.3 and restores
+  with every declared tag tag-only. Saved v0.3 jobs reload with their saved hashes.
+- (b) A config without the key gets the new default. Simpler, but a reloaded v0.3 job
+  rebuilds its sources referentially and no longer matches its saved hashes and table paths.
+
+---
+
+## 11. Rules under reconsideration (November 12)
+
+The developer may change two rules. For each, here is what changes against this document.
+
+### A. A referential tag stays referential through a function pod (instead of D1)
+
+The pod's output keeps the data role: output data = function outputs + the input's referenced
+columns. The result store is unchanged, and the node gives the data role back from the stored
+tag column on read.
+
+**Operator table (§5, §7):**
+- `FunctionPod.output_schema` adds the referenced input columns to the data schema.
+- The automatic select of `pod(...)` must **keep** referenced columns, so they are not made
+  plain before the pod. The pod then passes only its parameters to the function.
+- Output rows must carry `x` (from the input row) beside the outputs, and `_table_from_pairs`
+  must deduplicate it like `_rows_to_table`.
+- The output-collision rule is unchanged.
+- Downstream, a pod's output meets `Join` case 3 with sources.
+- Size: ITL-1013 grows from M to L.
+
+**Hash verdict (§3):**
+- Result identity is at risk. The memo key is the whole input `Data` hash
+  (`result_cache.py:217`, `function_node.py:140`, `:2407-2408`). If referenced keys stay in
+  `Data`, a function that does not read them gets a new key, and v0.3 results would not be
+  reused (spec §12.4).
+- So the pod must hash **its parameter projection** of the input `Data`, never the whole
+  row. For a tag-only stream that projection is the whole `Data` (ITL-807's strict contract),
+  so no golden value moves.
+- Pipeline hashes of pods over references change (new shapes only). No data context
+  version.
+
+**Node storage (§4):**
+- `pdb_v2` already holds `x` as a tag, and `rdb_v2` holds only outputs, so neither changes.
+- On read, `FunctionNode` rebuilds the output stream with `reference_tags` = the input's
+  references, and the data `x` *is* the stored tag column (`function_node.py:2891`).
+- The value is still written once.
+
+### B. `GroupBy`: a non-key referential tag becomes a data-only list column
+
+Under B:
+- A non-key referential tag loses its tag role and becomes a data-only list.
+- A non-key plain tag stays a list-valued tag, as in v0.3.
+- `Join` refuses a shared list-valued tag.
+
+**Operator table (§5):**
+- `GroupBy` on a non-key reference: output tags omit `x`, data `x` is `list[T]`, and the
+  output references are the referenced keys only. `unary_output_schema` (`group_by.py:302`)
+  and the rebuild (`:258`) change together.
+- The member sort still reads the input's non-key tags (`:192-215`), so the order is
+  unchanged.
+- `Batch` is not covered by B. Batch has no keys, so B's analogue would make every reference
+  a data-only list; it needs a ruling.
+- `Join` gets a new check: a shared tag that is list-valued in either input is refused when
+  the graph is built, from `output_schema`.
+
+**Hash verdict (§3):**
+- No golden entry moves. Plain non-key tags stay lists in v0.3 form, and the golden cases
+  join only ungrouped streams (`cases.py:1113`).
+- The new `Join` refusal is a behaviour change for v0.3 pipelines that join two grouped
+  streams on a shared list-valued tag. They get an error where they ran before. No hash
+  moves, but it belongs in the upgrade note.
+
+**Node storage (§4):**
+- Unchanged. `odb_v1` stores one flat table, and roles come from the descriptor.
+
+### Reconsideration: where each rule touches the slices
+
+- **A** touches only ITL-1013 and ITL-1019.
+- **B** touches only ITL-1017 and ITL-1016.
+
+Neither changes the representation (§2) or the stores (§4).
 
 ---
 

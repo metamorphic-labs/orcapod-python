@@ -18,7 +18,7 @@ document from the evidence.
 
 ---
 
-### Task 1: Representation sites
+## Task 1: Representation sites
 - [ ] Read `core/streams/arrow_table_stream.py`, `core/datagrams/*`, `types.py` (Schema, ColumnConfig),
   `utils/schema_utils.py`, `core/streams/base.py`.
 - [ ] grep every `keys()` / `output_schema` / `identity_structure` / `pipeline_identity_structure`
@@ -26,29 +26,29 @@ document from the evidence.
 - [ ] Script `01_representation.py`: build an `ArrowTableStream` with a column in both tag and
   data lists (if constructible) and record what each public method returns.
 
-### Task 2: Identity and hashes
+## Task 2: Identity and hashes
 - [ ] Read `core/base.py`, `core/sources/base.py`, `core/nodes/function_node.py`
   (`_build_record_id_preimage`), `core/function_pod.py`, `core/datagrams` content hash,
   `derived_source.py` (PR #336/#338 pattern).
 - [ ] Script `02_identity.py`: show which hash inputs contain the tag/data split.
 
-### Task 3: Storage
+## Task 3: Storage
 - [ ] Read FunctionNode / OperatorNode / CachedSource / DerivedSource write and read paths.
 - [ ] Script `03_storage.py`: stored columns of each table kind for a small pipeline.
 
-### Task 4: Operators
+## Task 4: Operators
 - [ ] For every file in `core/operators` and the FunctionPod call path, measure today's behaviour
   with a same-named tag and data column (`04_operators.py`), sync and async.
 - [ ] Join source-info of merged column: options.
 
-### Task 5–6: Sources and function pods
+## Task 5–6: Sources and function pods
 - [ ] Read `arrow_table_source.py`, `stream_builder.py`, `spiraldb_table_source.py`,
   `db_table_source.py`, `derived_source.py`; `function_pod.py` output collision (`05_function_pod.py`).
 
-### Task 7–9: Open questions, delivery plan, decisions
+## Task 7–9: Open questions, delivery plan, decisions
 - [ ] Answer section 17 from code; slice plan with sizes, dependencies, tests; decisions list.
 
-### Task 10: Finish
+## Task 10: Finish
 - [ ] Doc under ~900 lines; ruff on audit scripts; `uv run pytest tests/test_docs` not affected
   (superpowers is not a docs page); merge origin/main; push; PR `Refs ITL-1004`;
   `orca linear attach`; `orca worktree set --pr`; worker_done.
