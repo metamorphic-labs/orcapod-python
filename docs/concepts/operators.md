@@ -62,7 +62,7 @@ order of input streams does not affect the result. Join drops its inputs' meta
 and never appear in its output. Rows match on equality of every shared tag column, whatever
 its type (lists and structs compare element by element). A row with a null in any shared tag
 column matches nothing, a null list or struct included, and rows with null on both sides do
-not match each other; a null *inside* a list or struct is an ordinary element that equals
+not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` follow it too, on the sync and the async path, while `GroupBy` is the exception by design and puts null keys in one group); a null *inside* a list or struct is an ordinary element that equals
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
 
