@@ -1404,6 +1404,7 @@ def _make_polars_datagram_case(name: str) -> CaseFn:
     """
 
     def run() -> dict[str, Any]:
+        """Return the ``stream_summary`` of the Polars-valued source."""
         import polars as pl
 
         from orcapod.sources import DictSource

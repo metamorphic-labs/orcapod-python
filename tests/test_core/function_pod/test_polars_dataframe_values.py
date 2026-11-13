@@ -56,6 +56,7 @@ def _frame(n: int) -> pl.DataFrame:
 
 
 def _assert_exact(got: object, expected: pl.DataFrame) -> None:
+    """Assert ``got`` is a frame with the schema and values of ``expected``."""
     assert isinstance(got, pl.DataFrame)
     assert got.schema == expected.schema
     assert_frame_equal(got, expected)
@@ -70,20 +71,24 @@ def _frame_list(value: object) -> list[pl.DataFrame]:
 
 @function_pod(output_keys="df")
 def make_frame(n: int) -> pl.DataFrame:
+    """Return the test frame of height ``n``."""
     return _frame(n)
 
 
 @function_pod(output_keys="df")
 def add_row_index(df: pl.DataFrame) -> pl.DataFrame:
+    """Return ``df`` with a leading ``row`` index column."""
     return df.with_row_index("row", offset=0)
 
 
 @function_pod(output_keys="height")
 def frame_height(df: pl.DataFrame) -> int:
+    """Return the height of ``df``."""
     return df.height
 
 
 def _int_source() -> DictSource:
+    """Two rows tagged ``a`` and ``b`` with ``n`` of 1 and 3."""
     return DictSource(
         [{"k": "a", "n": 1}, {"k": "b", "n": 3}],
         tag_columns=["k"],
@@ -109,33 +114,41 @@ def test_pod_can_return_a_polars_dataframe() -> None:
 
     @function_pod(output_keys="df")
     def make(n: int) -> pl.DataFrame:
+        """Return a one-column frame of height ``n``."""
         return pl.DataFrame({"i": list(range(n))})
 
     assert make.pod is not None
 
 
 class TestPodValues:
+    """Pods that return and take ``pl.DataFrame`` values, alone and chained."""
+
     def test_pod_output(self) -> None:
+        """A pod returns frames that read back with the exact schema and values."""
         stream = make_frame.pod(_int_source())
         got = {tag["k"]: data["df"] for tag, data in stream.iter_data()}
         _assert_exact(got["a"], _frame(1))
         _assert_exact(got["b"], _frame(3))
 
     def test_output_schema_names_the_python_type(self) -> None:
+        """The output schema reports ``pl.DataFrame`` as the column's Python type."""
         _, data_schema = make_frame.pod(_int_source()).output_schema()
         assert data_schema["df"] is pl.DataFrame
 
     def test_pod_input(self) -> None:
+        """A pod reads a frame-valued source column and sees each frame's height."""
         stream = frame_height.pod(_frame_source())
         got = {tag["k"]: data["height"] for tag, data in stream.iter_data()}
         assert got == {"1": 1, "2": 2, "3": 3}
 
     def test_chained_pods(self) -> None:
+        """A frame passes through two pods and a third pod reads its height."""
         stream = frame_height.pod(add_row_index.pod(make_frame.pod(_int_source())))
         got = {tag["k"]: data["height"] for tag, data in stream.iter_data()}
         assert got == {"a": 1, "b": 3}
 
     def test_chained_frame_is_transformed_exactly(self) -> None:
+        """A pod's change to an upstream pod's frame reads back exactly."""
         stream = add_row_index.pod(make_frame.pod(_int_source()))
         got = {tag["k"]: data["df"] for tag, data in stream.iter_data()}
         _assert_exact(got["b"], _frame(3).with_row_index("row", offset=0))
@@ -171,8 +184,11 @@ class TestReturnedValueMustBeOfTheDeclaredType:
         ids=["pandas_frame", "polars_series", "lazy_frame", "arrow_table", "dict"],
     )
     def test_wrong_type_for_dataframe_is_refused(self, returned: object) -> None:
+        """A non-``pl.DataFrame`` value from a pod declared to return one is refused."""
+
         @function_pod(output_keys="df")
         def wrong(n: int) -> pl.DataFrame:
+            """Return ``returned``, which is not a ``pl.DataFrame``."""
             return cast(pl.DataFrame, returned)
 
         with pytest.raises(OutputTypeError, match="DataFrame"):
@@ -184,16 +200,22 @@ class TestReturnedValueMustBeOfTheDeclaredType:
         ids=["polars_frame", "pandas_series", "list"],
     )
     def test_wrong_type_for_series_is_refused(self, returned: object) -> None:
+        """A non-``pl.Series`` value from a pod declared to return one is refused."""
+
         @function_pod(output_keys="column")
         def wrong(n: int) -> pl.Series:
+            """Return ``returned``, which is not a ``pl.Series``."""
             return cast(pl.Series, returned)
 
         with pytest.raises(OutputTypeError, match="Series"):
             wrong.pod(_int_source()).as_table()
 
     def test_subclass_instance_is_accepted(self) -> None:
+        """A ``pl.DataFrame`` subclass instance is stored as a frame column."""
+
         @function_pod(output_keys="df")
         def sub(n: int) -> pl.DataFrame:
+            """Return a ``_FrameSubclass`` instance of height ``n``."""
             return _FrameSubclass({"i": pl.Series(list(range(n)), dtype=pl.Int8)})
 
         table = sub.pod(_int_source()).as_table()
@@ -204,7 +226,10 @@ class TestReturnedValueMustBeOfTheDeclaredType:
 
 
 class TestOperators:
+    """Frame-valued columns pass through operators unchanged."""
+
     def test_batch_over_frame_column(self) -> None:
+        """``Batch`` gathers the frames into lists, each member exact and in order."""
         stream = Batch(batch_size=2)(_frame_source())
         rows = [(tag["k"], data["df"]) for tag, data in stream.iter_data()]
         assert [keys for keys, _ in rows] == [["1", "2"], ["3"]]
@@ -213,10 +238,12 @@ class TestOperators:
             _assert_exact(got, _frame(n))
 
     def test_batch_output_type_is_a_list_of_frames(self) -> None:
+        """``Batch`` reports the frame column's type as ``list[pl.DataFrame]``."""
         _, data_schema = Batch(batch_size=2)(_frame_source()).output_schema()
         assert data_schema["df"] == list[pl.DataFrame]
 
     def test_group_by_over_frame_column(self) -> None:
+        """``GroupBy`` collects each group's frames into a list, each member exact."""
         stream = GroupBy(by=["g"])(_frame_source())
         got = {
             str(tag["g"]): _frame_list(data["df"]) for tag, data in stream.iter_data()
@@ -228,6 +255,7 @@ class TestOperators:
         _assert_exact(only_b, _frame(3))
 
     def test_join_passes_frames_through(self) -> None:
+        """``Join`` keeps the frames of matched rows exact beside the joined column."""
         weights = DictSource(
             [{"g": "a", "k": "1", "w": 10}, {"g": "b", "k": "3", "w": 30}],
             tag_columns=["g", "k"],
@@ -271,6 +299,7 @@ def _ordered_frame(*, swap_columns: bool, swap_fields: bool) -> pl.DataFrame:
 
 @function_pod(output_keys="df")
 def make_ordered_frame(swap_columns: bool, swap_fields: bool) -> pl.DataFrame:
+    """Return the ordered frame with the requested orders reversed."""
     return _ordered_frame(swap_columns=swap_columns, swap_fields=swap_fields)
 
 
@@ -292,6 +321,7 @@ _ORDERS = {
 
 
 def _order_source() -> DictSource:
+    """One row per entry of ``_ORDERS``, tagged by its name."""
     return DictSource(
         [
             {"k": k, "swap_columns": columns, "swap_fields": fields}
@@ -312,15 +342,18 @@ def _null_struct_frame(*, whole_struct_null: bool) -> pl.DataFrame:
 
 @function_pod(output_keys="df")
 def make_null_struct_frame(whole_struct_null: bool) -> pl.DataFrame:
+    """Return a one-row frame with a null struct or a struct of nulls."""
     return _null_struct_frame(whole_struct_null=whole_struct_null)
 
 
 @function_pod(output_keys="is_null")
 def struct_is_null(df: pl.DataFrame) -> bool:
+    """Return whether the first value of column ``s`` is null."""
     return bool(df["s"].is_null()[0])
 
 
 def _null_struct_source() -> DictSource:
+    """Two rows: one for a null struct, one for a struct of nulls."""
     return DictSource(
         [
             {"k": "null_struct", "whole_struct_null": True},
@@ -341,11 +374,14 @@ _ORCHESTRATORS = {
 
 
 class TestPipelineStores:
+    """Frames stored by a pipeline job read back exactly from each store."""
+
     @pytest.mark.parametrize("store_name", list(_STORES))
     @pytest.mark.parametrize("orchestrator_name", list(_ORCHESTRATORS))
     def test_frames_stored_and_read_back(
         self, store_name: str, orchestrator_name: str, tmp_path: Path
     ) -> None:
+        """Frames written by a job read back exactly, in each store and orchestrator."""
         job = PipelineJob(name="frames", store=_STORES[store_name](tmp_path))
         with job:
             frames = make_frame.pod(_int_source(), label="make")
@@ -451,6 +487,7 @@ class TestPipelineStores:
         ),
     )
     def test_sqlite_store(self, tmp_path: Path) -> None:
+        """Frames stored through ``SQLiteConnector`` read back exactly (ITL-877)."""
         connector = SQLiteConnector(str(tmp_path / "frames.sqlite"))
         job = PipelineJob(name="frames", store=ConnectorArrowDatabase(connector))
         with job:
@@ -508,6 +545,7 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
 
 
 def _run_pipeline_process(store_path: Path, marker: Path) -> dict[str, Any]:
+    """Run the pipeline script in a new process and return its printed JSON."""
     result = subprocess.run(
         [sys.executable, "-c", _CROSS_PROCESS_SCRIPT, str(store_path), str(marker)],
         capture_output=True,
@@ -537,16 +575,21 @@ def test_cached_rerun_in_new_process_hits_the_cache(tmp_path: Path) -> None:
 
 @function_pod(output_keys="column")
 def first_column(df: pl.DataFrame) -> pl.Series:
+    """Return the first column of ``df`` as a ``pl.Series``."""
     return df.to_series(0)
 
 
 @function_pod(output_keys="total")
 def series_sum(column: pl.Series) -> int:
+    """Return the sum of ``column`` as an ``int``."""
     return int(column.sum())
 
 
 class TestSeriesValues:
+    """``pl.Series`` values as pod outputs and inputs."""
+
     def test_pod_output_and_input(self, tmp_path: Path) -> None:
+        """A stored ``pl.Series`` keeps name, dtype and values, and a pod reads it."""
         job = PipelineJob(name="series", store=DeltaTableDatabase(tmp_path / "s"))
         with job:
             columns = first_column.pod(make_frame.pod(_int_source()), label="first")

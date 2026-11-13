@@ -27,11 +27,13 @@ from orcapod.logical_types.protocols import LogicalTypeProtocol
 
 
 def _round_trip(df: pl.DataFrame) -> pl.DataFrame:
+    """Return ``df`` after writing it to storage and reading it back."""
     lt = LogicalPolarsDataFrame()
     return lt.storage_to_python(lt.python_to_storage(df))
 
 
 def _assert_exact(back: pl.DataFrame, df: pl.DataFrame) -> None:
+    """Assert ``back`` equals ``df`` in schema and in values."""
     assert back.schema == df.schema
     assert_frame_equal(back, df)
 
@@ -119,34 +121,45 @@ _COLUMN_CASES: dict[str, Callable[[], pl.Series]] = {
 
 
 class TestLogicalPolarsDataFrameProtocol:
+    """Names and types ``LogicalPolarsDataFrame`` reports through the protocol."""
+
     def test_satisfies_protocol(self) -> None:
+        """A ``LogicalPolarsDataFrame`` is a ``LogicalTypeProtocol``."""
         assert isinstance(LogicalPolarsDataFrame(), LogicalTypeProtocol)
 
     def test_logical_type_name(self) -> None:
+        """The logical type name is ``orcapod.polars.dataframe``."""
         assert LogicalPolarsDataFrame().logical_type_name == "orcapod.polars.dataframe"
 
     def test_python_type(self) -> None:
+        """The Python type is ``pl.DataFrame``."""
         assert LogicalPolarsDataFrame().python_type is pl.DataFrame
 
     def test_arrow_extension_name(self) -> None:
+        """The Arrow extension type is named ``orcapod.polars.dataframe``."""
         ext = LogicalPolarsDataFrame().get_arrow_extension_type()
         assert ext.extension_name == "orcapod.polars.dataframe"
 
     def test_arrow_storage_type_is_large_binary(self) -> None:
+        """The Arrow extension type stores ``large_binary``."""
         ext = LogicalPolarsDataFrame().get_arrow_extension_type()
         assert ext.storage_type == pa.large_binary()
 
     def test_polars_extension_name(self) -> None:
+        """The Polars extension type is named ``orcapod.polars.dataframe``."""
         ext = LogicalPolarsDataFrame().get_polars_extension_type()
         assert ext.ext_name() == "orcapod.polars.dataframe"
 
     def test_extension_types_are_cached(self) -> None:
+        """Two instances share one Arrow extension type and equal Polars ones."""
         a, b = LogicalPolarsDataFrame(), LogicalPolarsDataFrame()
         assert a.get_arrow_extension_type() is b.get_arrow_extension_type()
         assert a.get_polars_extension_type() == b.get_polars_extension_type()
 
 
 class TestLogicalPolarsDataFrameStorage:
+    """The bytes a frame is stored as, and what is refused at write time."""
+
     def test_storage_is_polars_own_ipc_file(self) -> None:
         """The stored cell is what ``DataFrame.write_ipc`` writes with Polars' defaults."""
         df = pl.DataFrame({"x": [1, 2], "s": ["a", None]})
@@ -158,6 +171,7 @@ class TestLogicalPolarsDataFrameStorage:
         assert stored == native.getvalue()
 
     def test_stored_bytes_are_read_by_polars_read_ipc(self) -> None:
+        """``pl.read_ipc`` reads the stored bytes back as the exact frame."""
         df = pl.DataFrame({"x": pl.Series([1, 2], dtype=pl.Int8)})
         stored = LogicalPolarsDataFrame().python_to_storage(df)
         back = pl.read_ipc(io.BytesIO(stored), memory_map=False)
@@ -174,6 +188,7 @@ class TestLogicalPolarsDataFrameStorage:
         assert back.n_chunks() == 1
 
     def test_non_dataframe_raises_type_error(self) -> None:
+        """Storing a ``pl.Series`` or a pandas frame raises ``TypeError``."""
         lt = LogicalPolarsDataFrame()
         with pytest.raises(TypeError, match="pl.DataFrame"):
             lt.python_to_storage(pl.Series("x", [1]))
@@ -182,12 +197,16 @@ class TestLogicalPolarsDataFrameStorage:
 
 
 class TestLogicalPolarsDataFrameRoundTrip:
+    """Frames read back from storage with the exact schema and values."""
+
     @pytest.mark.parametrize("name", list(_COLUMN_CASES))
     def test_single_column_round_trip_is_exact(self, name: str) -> None:
+        """A one-column frame of each dtype case reads back exactly."""
         df = pl.DataFrame({name: _COLUMN_CASES[name]()})
         _assert_exact(_round_trip(df), df)
 
     def test_wide_frame_keeps_column_order_and_names(self) -> None:
+        """A frame of every dtype case keeps its unsorted column order and names."""
         # Column names are deliberately not in sorted order.
         names = list(reversed(_COLUMN_CASES))
         df = pl.DataFrame({name: _COLUMN_CASES[name]() for name in names})
@@ -196,12 +215,14 @@ class TestLogicalPolarsDataFrameRoundTrip:
         _assert_exact(back, df)
 
     def test_enum_category_order_is_kept(self) -> None:
+        """An ``Enum`` column keeps its categories in their declared order."""
         df = pl.DataFrame({"e": pl.Series(["a"], dtype=pl.Enum(["c", "a", "b"]))})
         back = _round_trip(df)
         assert back.schema["e"] == pl.Enum(["c", "a", "b"])
         assert back.schema["e"].categories.to_list() == ["c", "a", "b"]  # pyright: ignore[reportAttributeAccessIssue] # Enum dtype has categories
 
     def test_empty_frame_keeps_schema(self) -> None:
+        """A zero-row frame reads back with its full schema."""
         df = pl.DataFrame(
             schema={
                 "i": pl.Int8,
@@ -215,6 +236,7 @@ class TestLogicalPolarsDataFrameRoundTrip:
         _assert_exact(back, df)
 
     def test_zero_column_frame(self) -> None:
+        """A frame with no columns reads back with shape ``(0, 0)``."""
         df = pl.DataFrame()
         back = _round_trip(df)
         assert back.shape == (0, 0)
@@ -225,16 +247,19 @@ class TestLogicalPolarsDataFrameRoundTrip:
         _assert_exact(_round_trip(df), df)
 
     def test_empty_name_next_to_column_0(self) -> None:
+        """Columns named ``""`` and ``column_0`` both keep their names."""
         df = pl.DataFrame({"": [1], "column_0": [2]})
         _assert_exact(_round_trip(df), df)
 
     def test_chunked_frame_round_trips(self) -> None:
+        """A frame in two chunks reads back exactly."""
         df = pl.concat(
             [pl.DataFrame({"x": [1, None]}), pl.DataFrame({"x": [3]})], rechunk=False
         )
         _assert_exact(_round_trip(df), df)
 
     def test_sliced_frame_round_trips(self) -> None:
+        """A slice of a frame reads back exactly."""
         df = pl.DataFrame({"s": ["a", "b", "c", "d"], "l": [[1], [2], [3], [4]]})
         sliced = df.slice(1, 2)
         _assert_exact(_round_trip(sliced), sliced)
@@ -254,6 +279,7 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
     def test_top_level_unsupported_dtype(
         self, series: pl.Series, dtype_text: str
     ) -> None:
+        """An ``Object``, ``Int128`` or ``UInt128`` column raises, naming the column."""
         df = pl.DataFrame([pl.Series("ok", [1, 2]), series])
         with pytest.raises(ValueError, match=rf"'col'.*{dtype_text}"):
             LogicalPolarsDataFrame().python_to_storage(df)
@@ -261,6 +287,7 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
     # Polars 1.41 cannot build an Object nested in a List or Struct, so nested rejection is
     # exercised with Int128, which it can nest.
     def test_int128_nested_in_list(self) -> None:
+        """``Int128`` inside a list of arrays raises, naming the column."""
         df = pl.DataFrame(
             [pl.Series("nested", [[[1]]], dtype=pl.List(pl.Array(pl.Int128, 1)))]
         )
@@ -268,6 +295,7 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
             LogicalPolarsDataFrame().python_to_storage(df)
 
     def test_int128_nested_in_struct(self) -> None:
+        """``Int128`` in a struct field raises, naming the column."""
         df = pl.DataFrame(
             [pl.Series("st", [{"v": 1}], dtype=pl.Struct({"v": pl.Int128}))]
         )
@@ -275,6 +303,7 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
             LogicalPolarsDataFrame().python_to_storage(df)
 
     def test_polars_extension_dtype(self) -> None:
+        """A Polars extension dtype column raises, naming the column and extension."""
         logical_type = LogicalNumpyArray()
         ext = logical_type.get_polars_extension_type()
         # The stored row of one array, in the storage type of ``orcapod.numpy.ndarray``.
@@ -290,7 +319,10 @@ class TestLogicalPolarsDataFrameRejectsLossyDtypes:
 
 
 class TestLogicalPolarsSeries:
+    """``LogicalPolarsSeries`` names, exact round trip and refusals."""
+
     def test_protocol_and_names(self) -> None:
+        """The Series logical type satisfies the protocol and reports its names."""
         lt = LogicalPolarsSeries()
         assert isinstance(lt, LogicalTypeProtocol)
         assert lt.logical_type_name == "orcapod.polars.series"
@@ -302,6 +334,7 @@ class TestLogicalPolarsSeries:
 
     @pytest.mark.parametrize("name", list(_COLUMN_CASES))
     def test_round_trip_is_exact(self, name: str) -> None:
+        """A Series of each dtype case reads back with its name, dtype and values."""
         lt = LogicalPolarsSeries()
         series = _COLUMN_CASES[name]().alias(name)
         back = lt.storage_to_python(lt.python_to_storage(series))
@@ -311,11 +344,13 @@ class TestLogicalPolarsSeries:
 
     @pytest.mark.parametrize("name", ["", "metric", "with space"])
     def test_name_is_kept(self, name: str) -> None:
+        """A Series keeps its name, the empty name included."""
         lt = LogicalPolarsSeries()
         series = pl.Series(name, [1, 2], dtype=pl.UInt8)
         assert lt.storage_to_python(lt.python_to_storage(series)).name == name
 
     def test_empty_series(self) -> None:
+        """An empty ``Enum`` Series reads back with its dtype."""
         lt = LogicalPolarsSeries()
         series = pl.Series("e", [], dtype=pl.Enum(["a", "b"]))
         back = lt.storage_to_python(lt.python_to_storage(series))
@@ -323,11 +358,13 @@ class TestLogicalPolarsSeries:
         assert back.dtype == pl.Enum(["a", "b"])
 
     def test_unsupported_dtype_is_rejected(self) -> None:
+        """An ``Int128`` Series raises ``ValueError`` naming the Series."""
         with pytest.raises(ValueError, match=r"'big'.*Int128"):
             LogicalPolarsSeries().python_to_storage(
                 pl.Series("big", [1], dtype=pl.Int128)
             )
 
     def test_non_series_raises_type_error(self) -> None:
+        """Storing a ``pl.DataFrame`` as a Series raises ``TypeError``."""
         with pytest.raises(TypeError, match="pl.Series"):
             LogicalPolarsSeries().python_to_storage(pl.DataFrame({"x": [1]}))

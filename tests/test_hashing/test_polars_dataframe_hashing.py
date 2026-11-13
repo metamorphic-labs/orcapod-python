@@ -66,6 +66,7 @@ def _data_hash(value: pl.DataFrame | pl.Series) -> str:
 
 
 def _all_distinct(values: list[pl.DataFrame] | list[pl.Series]) -> bool:
+    """Return whether every value has a different content hash."""
     hashes = [_data_hash(value) for value in values]
     return len(set(hashes)) == len(hashes)
 
@@ -75,10 +76,14 @@ _XSTRUCT = pl.Struct({"x": pl.Int8})
 
 
 class TestEqualFramesHashEqual:
+    """Frames with the same logical content have the same hash."""
+
     def test_same_frame_twice(self) -> None:
+        """A frame and its clone hash the same."""
         assert _data_hash(_BASE) == _data_hash(_BASE.clone())
 
     def test_chunk_layout_does_not_matter(self) -> None:
+        """A frame split into two chunks hashes like its single-chunk copy."""
         chunked = pl.concat([_BASE.slice(0, 1), _BASE.slice(1, 2)], rechunk=False)
         assert chunked.n_chunks() == 2
         assert _data_hash(chunked) == _data_hash(chunked.rechunk())
@@ -93,12 +98,14 @@ class TestEqualFramesHashEqual:
         assert _data_hash(direct) == _data_hash(nulled)
 
     def test_slice_offset_does_not_matter(self) -> None:
+        """A sliced frame hashes like a fresh frame holding the same rows."""
         wide = pl.DataFrame({"s": ["z", "a", "b"], "l": [[0], [1], [2, 3]]})
         assert _data_hash(wide.slice(1)) == _data_hash(
             pl.DataFrame({"s": ["a", "b"], "l": [[1], [2, 3]]})
         )
 
     def test_default_categoricals_hash_equal(self) -> None:
+        """``pl.Categorical`` and ``pl.Categorical()`` columns hash the same."""
         values = ["b", "a"]
         assert _data_hash(
             pl.DataFrame({"c": pl.Series(values, dtype=pl.Categorical)})
@@ -107,6 +114,7 @@ class TestEqualFramesHashEqual:
     def test_value_read_back_from_a_database_hashes_the_same(
         self, tmp_path: Path
     ) -> None:
+        """A frame read back from a Delta store hashes like the original."""
         expected = pl.DataFrame(
             {
                 "e": pl.Series(["a", None], dtype=pl.Enum(["b", "a"])),
@@ -117,6 +125,7 @@ class TestEqualFramesHashEqual:
 
         @function_pod(output_keys="v")
         def make(n: int) -> pl.DataFrame:
+            """Return the first ``n`` rows of the expected frame."""
             return expected.head(n)
 
         job = PipelineJob(name="h", store=DeltaTableDatabase(tmp_path / "store"))
@@ -128,14 +137,19 @@ class TestEqualFramesHashEqual:
 
 
 class TestDifferentFramesHashDifferent:
+    """Frames that differ in anything a pod can observe hash differently."""
+
     def test_value(self) -> None:
+        """Changing one value changes the hash."""
         changed = _BASE.with_columns(pl.Series("x", [1, 2, 4]))
         assert _data_hash(changed) != _data_hash(_BASE)
 
     def test_column_name(self) -> None:
+        """Renaming a column changes the hash."""
         assert _data_hash(_BASE.rename({"x": "z"})) != _data_hash(_BASE)
 
     def test_row_order(self) -> None:
+        """Reversing the rows changes the hash."""
         assert _data_hash(_BASE.reverse()) != _data_hash(_BASE)
 
     def test_column_order(self) -> None:
@@ -162,6 +176,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_struct_field_order_in_series(self) -> None:
+        """Two Series whose struct fields are in a different order hash differently."""
         ab = pl.Series("s", [{"a": 1, "b": "x"}])
         assert _data_hash(ab) != _data_hash(
             ab.struct.unnest().select("b", "a").to_struct("s")
@@ -225,6 +240,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_integer_width_and_signedness(self) -> None:
+        """Integer columns of different width or signedness hash differently."""
         frames = [
             _BASE.with_columns(pl.col("x").cast(dtype))
             for dtype in (pl.Int64, pl.Int32, pl.Int8, pl.UInt8, pl.UInt64)
@@ -232,6 +248,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_float_width(self) -> None:
+        """``Float16``, ``Float32`` and ``Float64`` columns hash differently."""
         values = [1.5, 2.5]
         frames = [
             pl.DataFrame({"f": pl.Series(values, dtype=dtype)})
@@ -240,6 +257,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_enum_category_order_is_identity(self) -> None:
+        """Enums with the same categories in a different order hash differently."""
         values = ["a", "b"]
         ab = pl.DataFrame({"e": pl.Series(values, dtype=pl.Enum(["a", "b"]))})
         ba = pl.DataFrame({"e": pl.Series(values, dtype=pl.Enum(["b", "a"]))})
@@ -253,6 +271,7 @@ class TestDifferentFramesHashDifferent:
         assert _data_hash(ab) != _data_hash(abz)
 
     def test_enum_series_categories_are_identity(self) -> None:
+        """Series whose ``Enum`` categories differ in order or number hash apart."""
         values = ["a"]
         series = [
             pl.Series("e", values, dtype=pl.Enum(["a", "b"])),
@@ -262,6 +281,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(series)
 
     def test_string_categorical_and_enums_all_differ(self) -> None:
+        """``String``, ``Categorical`` and each ``Enum`` column hash differently."""
         values = ["a", "b"]
         frames = [
             pl.DataFrame({"c": pl.Series(values, dtype=dtype)})
@@ -276,11 +296,13 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_string_and_binary(self) -> None:
+        """A string column and a binary column of the same bytes hash differently."""
         assert _data_hash(pl.DataFrame({"s": ["a"]})) != _data_hash(
             pl.DataFrame({"s": [b"a"]})
         )
 
     def test_decimal_precision_and_scale(self) -> None:
+        """Decimal columns of different precision or scale hash differently."""
         values = [decimal.Decimal("1.25")]
         frames = [
             pl.DataFrame({"d": pl.Series(values, dtype=pl.Decimal(p, s))})
@@ -289,6 +311,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_datetime_unit_and_time_zone(self) -> None:
+        """Datetime columns of different unit or time zone hash differently."""
         when = [dt.datetime(2020, 1, 1)]
         frames = [
             pl.DataFrame({"t": pl.Series(when, dtype=dtype)})
@@ -302,6 +325,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_duration_unit(self) -> None:
+        """Duration columns of different unit hash differently."""
         delta = [dt.timedelta(seconds=1)]
         frames = [
             pl.DataFrame({"d": pl.Series(delta, dtype=pl.Duration(unit))})
@@ -310,6 +334,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_array_list_and_array_shape(self) -> None:
+        """A ``List``, an ``Array`` and arrays of other shapes hash differently."""
         frames = [
             pl.DataFrame({"v": pl.Series([[1, 2]], dtype=pl.List(pl.Int16))}),
             pl.DataFrame({"v": pl.Series([[1, 2]], dtype=pl.Array(pl.Int16, 2))}),
@@ -323,6 +348,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_struct_field_dtype(self) -> None:
+        """Struct columns whose field dtype differs hash differently."""
         frames = [
             pl.DataFrame({"s": pl.Series([{"a": 1}], dtype=pl.Struct({"a": inner}))})
             for inner in (pl.Int64, pl.Int32, pl.UInt8)
@@ -330,6 +356,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_null_column_height_and_name(self) -> None:
+        """``Null`` columns of different height or name hash differently."""
         frames = [
             pl.DataFrame({"n": pl.Series([None, None], dtype=pl.Null)}),
             pl.DataFrame({"n": pl.Series([None, None, None], dtype=pl.Null)}),
@@ -338,6 +365,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_null_and_all_null_columns(self) -> None:
+        """All-null ``Null``, ``Boolean`` and ``String`` columns hash differently."""
         frames = [
             pl.DataFrame({"n": pl.Series([None], dtype=pl.Null)}),
             pl.DataFrame({"n": pl.Series([None], dtype=pl.Boolean)}),
@@ -346,6 +374,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_nested_null_list_lengths(self) -> None:
+        """Lists of nulls differ by list length and by inner dtype."""
         frames = [
             pl.DataFrame({"l": pl.Series([[None]], dtype=pl.List(pl.Null))}),
             pl.DataFrame({"l": pl.Series([[None, None]], dtype=pl.List(pl.Null))}),
@@ -354,6 +383,7 @@ class TestDifferentFramesHashDifferent:
         assert _all_distinct(frames)
 
     def test_empty_frames_with_different_schemas(self) -> None:
+        """Empty frames with different schemas, and the zero-column frame, differ."""
         frames = [
             pl.DataFrame(schema={"x": pl.Int64}),
             pl.DataFrame(schema={"x": pl.Int32}),
@@ -364,12 +394,16 @@ class TestDifferentFramesHashDifferent:
 
 
 class TestSeriesHashing:
+    """Content hashing of ``pl.Series`` values."""
+
     def test_equal_series_hash_equal(self) -> None:
+        """A Series split into two chunks hashes like its single-chunk copy."""
         s = pl.Series("m", [1, None, 3], dtype=pl.Int16)
         chunked = pl.concat([s.slice(0, 1), s.slice(1, 2)], rechunk=False)
         assert _data_hash(chunked) == _data_hash(s)
 
     def test_name_dtype_and_values_all_matter(self) -> None:
+        """Changing a Series' name, dtype or values changes the hash."""
         series = [
             pl.Series("m", [1, 2], dtype=pl.Int16),
             pl.Series("n", [1, 2], dtype=pl.Int16),
@@ -380,6 +414,7 @@ class TestSeriesHashing:
         assert _all_distinct(series)
 
     def test_series_and_one_column_frame_differ(self) -> None:
+        """A Series and its one-column frame hash differently."""
         s = pl.Series("m", [1, 2])
         assert _data_hash(s) != _data_hash(s.to_frame())
 
@@ -388,6 +423,7 @@ class TestHashLabel:
     """Each label names its algorithm and is defined once, beside it (the hash label rule)."""
 
     def test_dataframe_hash_label(self) -> None:
+        """A frame's hash carries the handler's label ``polars_dataframe_v1``."""
         hasher = get_default_context().semantic_hasher
         frame_hash = hasher.hash_object(pl.DataFrame({"a": [1]}))
         assert (
@@ -397,6 +433,7 @@ class TestHashLabel:
         )
 
     def test_series_hash_label(self) -> None:
+        """A Series' hash carries the handler's label ``polars_series_v1``."""
         hasher = get_default_context().semantic_hasher
         series_hash = hasher.hash_object(pl.Series("a", [1]))
         assert (
@@ -405,6 +442,7 @@ class TestHashLabel:
 
 
 def _canonical_json(value: Any) -> bytes:
+    """Encode ``value`` as compact UTF-8 JSON with sorted keys."""
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -421,6 +459,7 @@ class TestHashDefinition:
     _STRUCT = pl.Struct({"u": pl.Int8, "v": pl.String})
 
     def _frame(self) -> pl.DataFrame:
+        """A frame with an ``Int64`` column and a struct column holding nulls."""
         return pl.DataFrame(
             {
                 "x": pl.Series([1, 2, 3], dtype=pl.Int64),
@@ -433,6 +472,7 @@ class TestHashDefinition:
 
     @staticmethod
     def _ordered_digest(frame: pl.DataFrame) -> bytes:
+        """Return the starfix digest of ``frame`` in ordered mode."""
         return ArrowDigester.hash_table(
             frame.to_arrow(compat_level=pl.CompatLevel.oldest()),
             ordered_columns=True,
@@ -440,6 +480,7 @@ class TestHashDefinition:
         )
 
     def test_frame(self) -> None:
+        """A frame's hash equals the one recomputed from the documented definition."""
         frame = self._frame()
         descriptor = _canonical_json(
             {
@@ -458,6 +499,7 @@ class TestHashDefinition:
         assert got == ContentHash(PolarsDataFrameHandler.HASH_LABEL, expected)
 
     def test_series(self) -> None:
+        """A Series' hash equals the one recomputed from the documented definition."""
         series = self._frame()["s"]
         descriptor = _canonical_json(
             {
@@ -495,6 +537,7 @@ class TestIgnorableProperties:
     _FIELDS = {"u": pl.Int8, "v": pl.String}
 
     def _frame(self, *, swap_columns: bool, swap_fields: bool) -> pl.DataFrame:
+        """A two-column frame of structs; each order can be reversed alone."""
         fields = dict(reversed(self._FIELDS.items())) if swap_fields else self._FIELDS
         frame = pl.DataFrame(
             {
@@ -507,6 +550,7 @@ class TestIgnorableProperties:
         return frame.select("b", "a") if swap_columns else frame
 
     def test_option_names(self) -> None:
+        """Handlers and logical types declare the same ignorable option names."""
         frame_options = {"column_order", "struct_field_order"}
         series_options = {"series_name", "struct_field_order"}
         assert PolarsDataFrameHandler.OPTIONS == frame_options
@@ -515,18 +559,21 @@ class TestIgnorableProperties:
         assert LogicalPolarsSeries.OPTIONS == series_options
 
     def test_unknown_option_is_refused(self) -> None:
+        """An option that belongs to the other value type raises ``ValueError``."""
         with pytest.raises(ValueError, match="series_name"):
             PolarsDataFrameHandler(ignore=["series_name"])
         with pytest.raises(ValueError, match="column_order"):
             LogicalPolarsSeries(ignore=["column_order"])
 
     def test_default_context_is_strict(self) -> None:
+        """The default context hashes frames and Series with an empty ignore list."""
         frame = self._frame(swap_columns=False, swap_fields=False)
         hasher = get_default_context().semantic_hasher
         assert hasher.hash_object(frame).to_string() == _frame_hash(frame)
         assert hasher.hash_object(frame["a"]).to_string() == _series_hash(frame["a"])
 
     def test_ignoring_column_order(self) -> None:
+        """Ignoring column order equates reordered columns but not reordered fields."""
         base = self._frame(swap_columns=False, swap_fields=False)
         swapped = self._frame(swap_columns=True, swap_fields=False)
         assert _frame_hash(base) != _frame_hash(swapped)
@@ -536,6 +583,7 @@ class TestIgnorableProperties:
         assert _frame_hash(base, "column_order") != _frame_hash(both, "column_order")
 
     def test_ignoring_struct_field_order(self) -> None:
+        """Ignoring struct field order equates reordered fields but not columns."""
         base = self._frame(swap_columns=False, swap_fields=False)
         swapped = self._frame(swap_columns=False, swap_fields=True)
         option = "struct_field_order"
@@ -546,12 +594,14 @@ class TestIgnorableProperties:
         assert _frame_hash(base, option) != _frame_hash(both, option)
 
     def test_ignoring_both_orders(self) -> None:
+        """Ignoring both orders equates a frame with both orders reversed."""
         base = self._frame(swap_columns=False, swap_fields=False)
         both = self._frame(swap_columns=True, swap_fields=True)
         options = ("column_order", "struct_field_order")
         assert _frame_hash(base, *options) == _frame_hash(both, *options)
 
     def test_ignoring_series_name(self) -> None:
+        """Ignoring the Series name equates renamed Series but not other values."""
         one, other = pl.Series("m", [1, 2]), pl.Series("n", [1, 2])
         assert _series_hash(one) != _series_hash(other)
         assert _series_hash(one, "series_name") == _series_hash(other, "series_name")
@@ -561,6 +611,7 @@ class TestIgnorableProperties:
         )
 
     def test_series_struct_field_order(self) -> None:
+        """Ignoring struct field order equates Series with reordered fields."""
         one = self._frame(swap_columns=False, swap_fields=False)["a"]
         other = self._frame(swap_columns=False, swap_fields=True)["a"]
         option = "struct_field_order"
@@ -587,6 +638,7 @@ class TestIgnorableProperties:
         swapped = self._frame(swap_columns=True, swap_fields=False)
 
         def column_hash(context: DataContext, frame: pl.DataFrame) -> str:
+            """Hash of a one-row table holding ``frame``, under ``context``."""
             table = context.type_converter.python_dicts_to_arrow_table(
                 [{"c": frame}], python_schema={"c": pl.DataFrame}
             )
@@ -618,6 +670,7 @@ class TestLogicalTypeIdentifier:
         ],
     )
     def test_identifier(self, python_type: type, name: str) -> None:
+        """Each Polars Arrow type is identified by its name, ignore list and version."""
         converter = get_default_context().type_converter
         arrow_type = converter.python_type_to_arrow_type(python_type)
         assert isinstance(arrow_type, pa.ExtensionType)
@@ -631,6 +684,7 @@ class TestLogicalTypeIdentifier:
     def test_polars_extension_carries_the_same_metadata(
         self, logical_type: LogicalPolarsDataFrame | LogicalPolarsSeries
     ) -> None:
+        """The Polars extension type carries the ignore list and version as metadata."""
         polars_ext = logical_type.get_polars_extension_type()
         assert polars_ext.ext_metadata() == '{"ignore":[],"version":1}'
 
@@ -643,6 +697,7 @@ class TestLogicalTypeIdentifier:
         context = get_default_context()
 
         def column_hash(arrow_type: pa.DataType) -> str:
+            """Hash of a one-column table of ``rows`` nulls typed ``arrow_type``."""
             storage_type = (
                 arrow_type.storage_type
                 if isinstance(arrow_type, pa.ExtensionType)
@@ -663,7 +718,10 @@ class TestLogicalTypeIdentifier:
 
 
 class TestHashTimeRejection:
+    """Values that cannot be hashed are refused with an error naming the cause."""
+
     def test_object_column_is_rejected_naming_the_column(self) -> None:
+        """A frame with an ``Object`` column raises, naming the column and dtype."""
         df = pl.DataFrame(
             [pl.Series("ok", [1]), pl.Series("obj", [object()], dtype=pl.Object)]
         )
@@ -672,6 +730,7 @@ class TestHashTimeRejection:
             hasher.hash_object(df)
 
     def test_series_outside_the_grammar_is_rejected_naming_it(self) -> None:
+        """A Series holding ``Int128`` raises, naming the Series and the dtype."""
         series = pl.Series("big", [[1]], dtype=pl.List(pl.Int128))
         hasher = get_default_context().semantic_hasher
         with pytest.raises(ValueError, match=r"'big'.*Int128"):
@@ -732,6 +791,7 @@ _CROSS_PROCESS_SCRIPT = textwrap.dedent(
 
 @pytest.mark.parametrize("seed", ["0", "12345"])
 def test_hash_is_identical_across_processes(seed: str) -> None:
+    """Two fresh processes and this one compute the same hash, for each hash seed."""
     env = {**os.environ, "PYTHONHASHSEED": seed}
     runs = [
         subprocess.run(
@@ -767,6 +827,7 @@ class TestDescriptorGrammar:
     """The descriptor is Orcapod's own grammar; pin it so it cannot drift silently."""
 
     def test_nested_dtype_encoding(self) -> None:
+        """A nested struct dtype encodes to the pinned descriptor."""
         dtype = pl.Struct(
             {
                 "e": pl.Enum(["y", "x"]),
@@ -791,11 +852,13 @@ class TestDescriptorGrammar:
         }
 
     def test_categorical_categories_encoding(self) -> None:
+        """A ``Categorical``'s name, namespace and physical type are encoded."""
         dtype = pl.Categorical(pl.Categories("units", "lab", pl.UInt8))
         assert polars_dtype_descriptor(dtype) == {
             "categorical": ["units", "lab", "uint8"]
         }
 
     def test_dtype_outside_the_grammar_names_the_dtype(self) -> None:
+        """A dtype outside the grammar raises ``ValueError`` naming it."""
         with pytest.raises(ValueError, match=r"Int128"):
             polars_dtype_descriptor(pl.List(pl.Int128))
