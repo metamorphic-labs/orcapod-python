@@ -108,6 +108,9 @@ class StreamHead:
             ``"stored"`` (a job node's store).
         note: For a head without rows, the explanation shown instead of the default;
             for a head with rows, a remark shown after the row count.
+        description: When given, the whole text after the name in the header, written
+            by a stream that words its own rows (a table-backed source naming its
+            ``where``); otherwise the header is built from the fields above.
     """
 
     table: pa.Table
@@ -119,6 +122,7 @@ class StreamHead:
     total_is_estimate: bool = False
     origin: str = "held"
     note: str | None = None
+    description: str | None = None
 
     @classmethod
     def of_rows(
@@ -132,6 +136,7 @@ class StreamHead:
         total_is_estimate: bool = False,
         origin: str = "held",
         note: str | None = None,
+        description: str | None = None,
     ) -> StreamHead:
         """Return a head with rows of ``stream``."""
         return cls(
@@ -144,6 +149,7 @@ class StreamHead:
             total_is_estimate=total_is_estimate,
             origin=origin,
             note=note,
+            description=description,
         )
 
     @classmethod
@@ -200,7 +206,7 @@ class StreamHead:
 
     def header(self) -> str:
         """Return the one-line description shown above the rows."""
-        return f"{self.kind}[{self.label}] — {self._describe()}"
+        return f"{self.kind}[{self.label}] — {self.description or self._describe()}"
 
     def _describe(self) -> str:
         shown = self.table.num_rows
@@ -255,10 +261,12 @@ class StreamHead:
         return "tags: " + ", ".join(self.tag_columns)
 
     def _repr_html_(self) -> str:
-        parts = [f"<div><strong>{html.escape(self.header())}</strong></div>"]
+        parts = [
+            f"<div><strong>{html.escape(self.header(), quote=False)}</strong></div>"
+        ]
         tags = self._tags_line()
         if tags:
-            parts.append(f"<div><small>{html.escape(tags)}</small></div>")
+            parts.append(f"<div><small>{html.escape(tags, quote=False)}</small></div>")
         if self.table.num_columns:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
             with pl.Config(fmt_str_lengths=_MAX_TEXT):
@@ -321,7 +329,7 @@ def head_of(
 def render_error_html(stream: Any, error: BaseException) -> str:
     """Return the preview of a stream whose ``head`` raised: its name and the error."""
     title = f"{type(stream).__name__}[{display_name(stream)}] — could not read: {error}"
-    return f"<div><strong>{html.escape(title)}</strong></div>"
+    return f"<div><strong>{html.escape(title, quote=False)}</strong></div>"
 
 
 def _rows(count: int) -> str:

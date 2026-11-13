@@ -397,3 +397,8 @@ renders `SpiralDBTableSource[spike_event] — first 10 rows of about 63,349`.
   characters while rendering (coordinator input from the ITL-990 workshop rundown).
 - A rowless head does not read its schema when that would poll a source upstream
   (`schema_requires_io`); it then has no columns and says so (CodeRabbit round 1).
+- #333 merged first (main eeeb993e). Its `StreamBase._preview` / `_preview_header`, `view()` and
+  `StreamView` are gone; `SpiralDBTableSource.head()` wraps its bounded `_head` read and uses
+  `_head_note` (still the one place for its wording) as the header text, through
+  `StreamHead.description`. An unlabelled Spiral source is shown by its table name. #333's
+  display tests now go through `head()` / `header()`; their scan assertions are unchanged.
