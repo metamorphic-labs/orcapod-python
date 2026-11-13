@@ -204,9 +204,33 @@ def layout(job: PipelineJob, view: View, config: dict[str, Any]) -> Layout:
         data_keys=tuple(data_keys),
         members=members,
         content_hash_column=content_hash_column(config),
+        # ITL-1059: a plain DerivedSource has null source info by design (for now).
+        null_tokens=view.call == "as_source",
     )
 
 
 def natural_keys(scenario: str, input_order: str) -> list[int]:
     """The keys of A's rows in input order: the order a sync run computes them in."""
     return keys_a(scenario, input_order)
+
+
+def stream_function_tokens(
+    stream: Any, column: str = "y"
+) -> dict[tuple[str, bytes], str]:
+    """Each row's function token for ``column``, keyed by the row's record id.
+
+    Read from the ``Data`` objects ``iter_data`` yields (``source_info()``), a path that
+    does not go through table assembly: the reference a table's tokens must match.
+    """
+    tokens: dict[tuple[str, bytes], str] = {}
+    for tag, data in stream.iter_data():
+        system_tags = tag.as_dict(columns={"system_tags": True})
+        (record_id,) = [
+            v
+            for k, v in system_tags.items()
+            if k.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+        ]
+        token = data.source_info()[column]
+        assert isinstance(token, str) and isinstance(record_id, bytes)
+        tokens[(column, record_id)] = token
+    return tokens

@@ -39,8 +39,10 @@ from orcapod.types import CacheMode
 
 from .checker import (
     Layout,
+    assert_requested_columns,
     assert_rows_aligned,
     assert_same_rows_by_identity,
+    rows_table,
 )
 from .fixtures import COLUMN_CONFIGS, INPUT_ORDERS, SCENARIOS
 from .gate import ORDERS
@@ -178,13 +180,23 @@ def check_every_config(
     oracle: Any,
     tokens: dict[tuple[str, bytes], str] | None,
 ) -> None:
-    """Check ``view`` under every column configuration; name every one that fails."""
+    """Check ``view`` under every column configuration; name every one that fails.
+
+    Every configuration must give the rows the default one gives (``head`` at most 100)
+    and the per-row columns it asks for.
+    """
     failures: list[str] = []
+    baseline = produce(job, view, {}).num_rows
+    expected_rows = min(baseline, 100) if view.call == "head" else baseline
     for name, config in configs_for(view):
         table = produce(job, view, config)
         view_layout: Layout = layout(job, view, config)
         context = job.nodes[view.node].data_context
         try:
+            assert table.num_rows == expected_rows, (
+                f"{table.num_rows} rows, the default configuration gives {expected_rows}"
+            )
+            assert_requested_columns(table, config, view_layout.content_hash_column)
             assert_rows_aligned(
                 table, view_layout, oracle, context, function_tokens=tokens
             )
@@ -379,25 +391,25 @@ def pattern_keys() -> list[RunKey]:
     ]
 
 
-def read_node(node: Any, pattern: str) -> list[Any]:
-    """Read ``node`` in ``pattern``; return the rows of the last full read."""
+def read_node(node: Any, pattern: str) -> list[list[Any]]:
+    """Read ``node`` in ``pattern``; return the rows of every full read it made."""
     if pattern == "partial_then_full":
         partial = iter(node.iter_data())
         next(partial, None)
         del partial
-        return list(node.iter_data())
+        return [list(node.iter_data())]
     if pattern == "repeated":
-        list(node.iter_data())
+        first = list(node.iter_data())
         node.as_table(all_info=True)
         node.as_table()
-        return list(node.iter_data())
+        return [first, list(node.iter_data())]
     first = iter(node.iter_data())
     second = iter(node.iter_data())
-    seen = [row for row in itertools.islice(first, 1)]
-    list(itertools.islice(second, 2))
-    seen += list(first)
-    list(second)
-    return seen
+    seen_first = list(itertools.islice(first, 1))
+    seen_second = list(itertools.islice(second, 2))
+    seen_first += list(first)
+    seen_second += list(second)
+    return [seen_first, seen_second]
 
 
 @pytest.mark.parametrize("pattern", READ_PATTERNS)
@@ -410,6 +422,17 @@ def test_a_node_read_in_any_pattern_stays_aligned(
     """Partial, repeated and interleaved reads give every row once, each aligned."""
     run = runs(key)
     node = run.job.nodes[view.node]
-    rows = read_node(node, pattern)
-    assert len(rows) == node.as_table().num_rows, "a read lost or repeated rows"
-    check_every_config(run.job, view, run.sources.oracle, function_tokens(run.job))
+    reads = read_node(node, pattern)
+    tokens = function_tokens(run.job)
+    view_layout = layout(run.job, view, {})
+    for rows in reads:
+        assert len(rows) == node.as_table().num_rows, "a read lost or repeated rows"
+        # The rows the iteration yielded, not only the tables built afterwards.
+        assert_rows_aligned(
+            rows_table(rows),
+            view_layout,
+            run.sources.oracle,
+            node.data_context,
+            function_tokens=tokens,
+        )
+    check_every_config(run.job, view, run.sources.oracle, tokens)

@@ -7,6 +7,7 @@ and the checker must name that column.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -22,6 +23,9 @@ from .checker import (
     assert_same_rows_by_identity,
 )
 from .fixtures import TAG_COLUMNS, make_sources
+from .gate import new_gated_scale_pod
+from .jobs import derive_y, make_run, stream_function_tokens
+from .records import assert_records_aligned
 from .oracle import Oracle
 
 
@@ -128,3 +132,66 @@ def test_identity_comparison_ignores_row_order_but_not_cell_moves() -> None:
     assert_same_rows_by_identity(table, reversed_rows)
     with pytest.raises(AssertionError):
         assert_same_rows_by_identity(table, rotated(table, "x"))
+
+
+def test_a_null_token_beside_a_value_is_named() -> None:
+    table, layout, oracle, context = source_table()
+    index = table.column_names.index("_source_x")
+    tokens = table.column("_source_x").to_pylist()
+    tokens[0] = None
+    nulled = table.set_column(
+        index, table.field("_source_x"), pa.array(tokens, type=pa.large_string())
+    )
+    with pytest.raises(AssertionError, match="column '_source_x': null token"):
+        assert_rows_aligned(nulled, layout, oracle, context)
+
+
+def test_a_system_tag_that_is_no_source_id_or_record_id_fails() -> None:
+    table, layout, oracle, context = source_table()
+    extra = table.append_column(
+        f"{constants.SYSTEM_TAG_PREFIX}unexplained", pa.array(range(table.num_rows))
+    )
+    with pytest.raises(AssertionError, match="no alignment rule"):
+        assert_rows_aligned(extra, layout, oracle, context)
+
+
+def test_rotated_function_tokens_are_named_against_the_same_run() -> None:
+    """A function output's tokens are matched by record id with the run's own rows."""
+    sources = make_sources("unique")
+    derive_y(sources)
+    stream = new_gated_scale_pod()(sources.a)
+    table = stream.as_table(columns={"source": True, "system_tags": True})
+    tags, data = stream.keys()
+    layout = Layout(tag_keys=tuple(tags), data_keys=tuple(data))
+    tokens = stream_function_tokens(stream)
+    assert_rows_aligned(
+        table, layout, sources.oracle, stream.data_context, function_tokens=tokens
+    )
+    with pytest.raises(AssertionError, match="column '_source_y': token"):
+        assert_rows_aligned(
+            rotated(table, "_source_y"),
+            layout,
+            sources.oracle,
+            stream.data_context,
+            function_tokens=tokens,
+        )
+
+
+def test_stored_records_with_a_swapped_output_id_are_named(tmp_path: Path) -> None:
+    """A record whose (``__data_id``, ``_source_y``) pair is another row's is caught."""
+    run = make_run("unique", "shuffled", "sync", None, "in_memory", tmp_path)
+    records = run.job.nodes["scaled"].get_all_records(all_info=True)
+    assert records is not None
+    assert_records_aligned(run.job, run.sources, records)
+    swapped = records
+    for column in ("__data_id", "_source_y"):
+        index = swapped.column_names.index(column)
+        values = swapped.column(column).to_pylist()
+        values[0], values[1] = values[1], values[0]
+        swapped = swapped.set_column(
+            index,
+            swapped.field(column),
+            pa.array(values, type=swapped.field(column).type),
+        )
+    with pytest.raises(AssertionError, match="column '__data_id'"):
+        assert_records_aligned(run.job, run.sources, swapped)

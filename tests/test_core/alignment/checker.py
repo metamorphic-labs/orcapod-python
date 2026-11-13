@@ -22,7 +22,7 @@ per-row column cannot slip by unchecked.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,6 +48,9 @@ class Layout:
         merged: Columns holding one element per input (``MergeJoin``), each element from
             another input of the same row.
         content_hash_column: The content hash column's name when it is not the default.
+        null_tokens: Whether a source-info cell may be null beside a value. Only for a
+            plain ``DerivedSource`` (``node.as_source()``), whose source info is null in
+            every row by the current design (ITL-1059); every other view fails on it.
     """
 
     tag_keys: tuple[str, ...]
@@ -55,6 +58,7 @@ class Layout:
     members: frozenset[str] = frozenset()
     merged: frozenset[str] = frozenset()
     content_hash_column: str = DEFAULT_CONTENT_HASH_COLUMN
+    null_tokens: bool = False
 
 
 @dataclass
@@ -178,6 +182,17 @@ class _RowChecker:
             return tokens
         return [value]
 
+    def _check_present_token(self, column: str, value: Any, token: str | None) -> None:
+        """A source-info cell that is present must not be null beside a value."""
+        name = f"{constants.SOURCE_PREFIX}{column}"
+        if name not in self.row or token is not None:
+            return
+        if self.layout.null_tokens:
+            # ITL-1059: a plain DerivedSource has null source info by design (for now).
+            self.checked.add(name)
+        elif value is not None:
+            self.fail(name, f"null token beside the value {value!r}")
+
     def resolve_data(self) -> None:
         """Find each data element's origin; all columns of a member must agree."""
         count = self._member_count()
@@ -188,6 +203,7 @@ class _RowChecker:
             for position, (value, token) in enumerate(
                 zip(elements, tokens, strict=True)
             ):
+                self._check_present_token(column, value, token)
                 origin = self._resolve(column, value, token)
                 if origin is None:
                     continue
@@ -367,7 +383,9 @@ def assert_rows_aligned(
         if c not in known
         and c != hash_column
         and c != constants.CONTEXT_KEY
-        and not c.startswith(constants.SYSTEM_TAG_PREFIX)
+        # Only source-id / record-id pairs: any other system tag has no rule.
+        and not c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
+        and not c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
         and not (
             c.startswith(constants.SOURCE_PREFIX)
             and c[len(constants.SOURCE_PREFIX) :] in layout.data_keys
@@ -403,7 +421,34 @@ def assert_rows_aligned(
         raise AssertionError(
             f"{len(failures)} misaligned cells in {table.num_rows} rows:\n  {shown}"
         )
+    # Every column must have been compared in some row: a column no rule reached is a
+    # column the check said nothing about.
+    if table.num_rows:
+        assert_all_columns_checked(table, checked)
     return checked
+
+
+def assert_requested_columns(
+    table: pa.Table, config: Mapping[str, Any], hash_column: str
+) -> None:
+    """Assert ``table`` has the per-row columns ``config`` asks for.
+
+    A table that silently left out a requested column would be checked on fewer
+    columns than asked: the content hash column and the context key are required
+    whenever the configuration (or ``all_info``) asks for them.
+
+    Args:
+        table: The produced table.
+        config: The keyword arguments the table was asked with (``columns``,
+            ``all_info``).
+        hash_column: The name the content hash column must have.
+    """
+    columns = config.get("columns", {})
+    all_info = bool(config.get("all_info"))
+    if all_info or columns.get("content_hash"):
+        assert hash_column in table.column_names, f"no {hash_column!r} column"
+    if all_info or columns.get("context"):
+        assert constants.CONTEXT_KEY in table.column_names, "no context key column"
 
 
 def assert_all_columns_checked(table: pa.Table, checked: Collection[str]) -> None:
@@ -452,3 +497,21 @@ def assert_same_rows_by_identity(
     assert left_rows.keys() == right_rows.keys(), "the tables hold different records"
     for key, row in left_rows.items():
         assert row == right_rows[key], f"record {key!r}: {row} != {right_rows[key]}"
+
+
+def rows_table(pairs: Iterable[tuple[Any, Any]]) -> pa.Table:
+    """The ``(tag, data)`` rows an iteration yielded, as one table with every group.
+
+    Each row's own Arrow tables (tag with system tags; data with source info and context)
+    side by side, so the rows ``iter_data`` yields are checked like a produced table.
+    """
+    from orcapod.utils import arrow_utils
+
+    tables = [
+        arrow_utils.hstack_tables(
+            tag.as_table(columns={"system_tags": True}),
+            data.as_table(columns={"source": True, "context": True}),
+        )
+        for tag, data in pairs
+    ]
+    return pa.concat_tables(tables, promote_options="permissive")
