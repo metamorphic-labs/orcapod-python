@@ -141,3 +141,15 @@ def test_async_path_yields_the_same_tokens_as_the_sync_path() -> None:
         return [data.source_info()["first"] for _, data in await out.reader.collect()]
 
     assert asyncio.run(run()) == sync_tokens
+
+
+def test_zero_row_result_has_every_token_type_of_a_non_empty_one() -> None:
+    # Two aggregations: the projected token is one list level, the others keep theirs.
+    twice = Batch(2)(GroupBy(["k"])(_source()))
+    for out in ("first", None):
+        non_empty = Index("x", 0, out=out)(twice)
+        empty = Index("x", 9, out=out)(twice)
+        assert empty.as_table().num_rows == 0
+        empty_schema = empty.as_table(columns={"source": True}).schema
+        full_schema = non_empty.as_table(columns={"source": True}).schema
+        assert empty_schema == full_schema
