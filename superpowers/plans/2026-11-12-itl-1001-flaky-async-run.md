@@ -42,6 +42,13 @@ easily while the loop is blocked in the 100-row Delta commit. The committed batc
 (100 records, 100+ results); nothing is lost. The library never promised that row x starts only
 after the batches before it are committed.
 
+Measured (scratch probe, uninterrupted async runs, 250 rows, 100 per commit): rows started
+when the second node commit begins (flush 3): 223, 223, 223, 223, 239. So the thread pool
+runs 24 to 40 rows ahead of recording (16-row result channel plus rows in flight); 234 is
+inside that range. Natural rate on macOS: 0 / 510 under 3 processes (the CI failures were on
+Linux). A slow first commit (scratch adversary, 0.3 s) did not change it (0 / 60): what matters
+is the lag at the second commit, not the time the loop is blocked.
+
 ## Plan
 
 1. Regression test for ITL-1029 (public interface): a job whose function makes the first row
