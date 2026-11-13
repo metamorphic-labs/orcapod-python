@@ -1203,7 +1203,7 @@ class FunctionPodStream(StreamBase):
             return self._head_without_rows(
                 config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        if has_results and schema_requires_io(self):
+        if has_results and schema_requires_io(self, config):
             # The input gave no rows, so its columns are still known only by polling
             # it: show the result as computed, without columns.
             finished = not self._needs_iterator and self._cached_input_iterator is None

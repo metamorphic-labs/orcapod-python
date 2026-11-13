@@ -445,9 +445,9 @@ class DerivedSource(RootSource):
         tag_keys = self._origin.keys()[0]
         return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
 
-    def _schema_requires_io(self) -> bool:
-        """Whether reading the schema would poll: as for the origin."""
-        return schema_requires_io(self._origin)
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading the schema with ``config`` would poll: as for the origin."""
+        return schema_requires_io(self._origin, config)
 
     def head(
         self,

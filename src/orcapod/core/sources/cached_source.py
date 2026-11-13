@@ -412,9 +412,9 @@ class CachedSource(RootSource):
         assert self._cached_stream is not None
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
 
-    def _schema_requires_io(self) -> bool:
-        """Whether reading the schema would poll: as for the wrapped source."""
-        return schema_requires_io(self._source)
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading the schema with ``config`` would poll: as for the wrapped source."""
+        return schema_requires_io(self._source, config)
 
     def head(
         self,

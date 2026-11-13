@@ -281,6 +281,7 @@ def test_head_keeps_the_tag_arrow_type_of_the_input(
     )
 
     def build(store: ArrowDatabaseProtocol) -> PipelineJob:
+        """Build a job of ``triple`` over the narrow-tag source on ``store``."""
         job = PipelineJob(name="itl991_types", store=store)
         with job:
             _ = triple.pod(

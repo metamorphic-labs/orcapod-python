@@ -444,11 +444,20 @@ class PollingSource(RootSource, Generic[T]):
         self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
 
-    def _schema_requires_io(self) -> bool:
-        """True while no schema was declared and nothing was polled: only a poll
-        tells the columns then."""
-        no_schema = self._tag_schema is None or self._data_schema is None
-        return no_schema and not self._batches
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading the schema with ``config`` would poll.
+
+        True while nothing was polled and either no schema was declared, or ``config``
+        asks for a column group known only from rows (source info, meta, context,
+        content hashes): only a poll tells those columns then.
+        """
+        if self._batches:
+            return False
+        if self._tag_schema is None or self._data_schema is None:
+            return True
+        return bool(
+            config.meta or config.source or config.context or config.content_hash
+        )
 
     def head(
         self,

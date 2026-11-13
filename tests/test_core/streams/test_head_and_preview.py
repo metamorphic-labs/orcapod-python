@@ -432,6 +432,48 @@ def test_downstream_of_an_unpolled_source_never_polls() -> None:
     assert "columns not known until its source is polled" in head.header()
 
 
+@pytest.mark.parametrize(
+    ("columns", "all_info"),
+    [
+        (ColumnConfig(source=True), False),
+        (ColumnConfig(meta=True), False),
+        (ColumnConfig(context=True), False),
+        (ColumnConfig(content_hash=True), False),
+        (None, True),
+    ],
+    ids=["source", "meta", "context", "content_hash", "all_info"],
+)
+@pytest.mark.parametrize("kind", ["function_pod", "side_effect"])
+def test_downstream_head_never_polls_for_data_columns(
+    kind: str, columns: ColumnConfig | None, all_info: bool
+) -> None:
+    """Asking for data-dependent columns downstream of an unpolled source never polls.
+
+    A declared schema gives the user columns, but source info, meta, context and
+    content hashes are known only from polled rows: the head then shows no columns.
+    """
+    fake = _FakeDynamicSource(declared=Schema({"id": int, "val": int}))
+    source = PollingSource(fake, tag_columns="id")
+
+    def deliver(val: int) -> None:
+        """The side effect; refusing a delivery."""
+        raise AssertionError(f"delivered {val}")
+
+    @function_pod(output_keys="out")
+    def copy(val: int) -> int:
+        """Return ``val``; refusing a call."""
+        raise AssertionError(f"called with {val}")
+
+    stream = (
+        copy.pod(source) if kind == "function_pod" else SideEffectPod(deliver)(source)
+    )
+    head = stream.head(columns=columns, all_info=all_info)
+    assert (fake.polls, fake.fetches) == (0, 0)
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.table.num_columns == 0
+    assert "columns not known until its source is polled" in head.header()
+
+
 def test_cached_source_head_writes_nothing() -> None:
     """A cached source's head writes nothing to its cache store."""
     store = InMemoryArrowDatabase()

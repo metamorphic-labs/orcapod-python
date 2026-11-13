@@ -207,3 +207,12 @@ and its empty branch moved into main's (the now-dead "no tag tables" fallback dr
 function_node.py: #334's `_table_from_pairs` removed, main's kept in place. New test
 `test_head_keeps_the_tag_arrow_type_of_the_input` (int8 tag, both orchestrators and stores).
 Suite 10712 passed on 3.11, 3.12, 3.13; ruff, format, basedpyright exit 0; golden unchanged.
+
+## CodeRabbit round on 19ad76ce (coordinator approved a 2nd push: F3, F4 only)
+
+- [ ] F3: rowless head downstream of an unpolled declared-schema `PollingSource` fetched
+      when `source`/`meta`/`context`/`content_hash`/`all_info` was asked for. The private
+      schema-IO check takes the head's `ColumnConfig`; regression test first (zero polls and
+      fetches, `FunctionPodStream` and `SideEffectPodStream`).
+- [ ] F4: docstring on the nested `build` helper in `test_node_head.py`.
+- [ ] Decline F1 (ITL-1002), F2 (follow-up), linked-issues check (D2) in the threads.

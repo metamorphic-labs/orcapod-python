@@ -41,13 +41,18 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def schema_requires_io(stream: object) -> bool:
-    """Whether reading ``stream``'s schema would read or poll a source.
+def schema_requires_io(stream: object, config: ColumnConfig) -> bool:
+    """Whether reading ``stream``'s schema with ``config`` would read or poll a source.
 
     A stream that does not say (``_schema_requires_io``) is taken not to.
+
+    Args:
+        stream: The stream whose schema would be read.
+        config: The column groups the schema would be read with: source info, meta,
+            context and content hashes may be known only from rows.
     """
     check = getattr(stream, "_schema_requires_io", None)
-    return bool(check()) if callable(check) else False
+    return bool(check(config)) if callable(check) else False
 
 
 def check_head_size(n: int) -> None:
@@ -546,7 +551,7 @@ class StreamBase(TraceableBase):
         When reading the schema would poll a source (``schema_requires_io``), the head
         has no columns either, and the note says so.
         """
-        if schema_requires_io(self):
+        if schema_requires_io(self, config):
             return StreamHead.without_rows(
                 self,
                 status,
@@ -566,13 +571,14 @@ class StreamBase(TraceableBase):
         """The name a preview header shows: the label. Never used as an identity."""
         return self.label
 
-    def _schema_requires_io(self) -> bool:
-        """Whether reading this stream's schema would read or poll a source.
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading this stream's schema with ``config`` would read or poll a source.
 
-        True when an upstream's would: a ``PollingSource`` that declared no schema and
-        has not polled yet answers its schema only by polling.
+        True when an upstream's would: a ``PollingSource`` that has not polled yet
+        answers its schema only by polling when it declared no schema, or when
+        ``config`` asks for a column group known only from rows.
         """
-        return any(schema_requires_io(upstream) for upstream in self.upstreams)
+        return any(schema_requires_io(upstream, config) for upstream in self.upstreams)
 
     def _repr_html_(self) -> str:
         """Render ``head()`` for a notebook; never computes."""

@@ -620,9 +620,11 @@ class SourceJobNode(SourceNodeBase):
             )
         return self._bound_source.iter_data()
 
-    def _schema_requires_io(self) -> bool:
-        """Whether reading the schema would poll: as for the bound source."""
-        return self._bound_source is not None and schema_requires_io(self._bound_source)
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Whether reading the schema with ``config`` would poll: as for the bound source."""
+        return self._bound_source is not None and schema_requires_io(
+            self._bound_source, config
+        )
 
     def head(
         self,
