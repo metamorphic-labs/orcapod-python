@@ -54,6 +54,7 @@ from .fixtures import (
     keys_a,
     make_sources,
 )
+from .expectations import member as member_of
 from .expectations import rows
 from .gate import GATE, ORDERS, new_gated_scale_pod
 from .oracle import Oracle
@@ -377,3 +378,88 @@ def test_side_effect_stream_tables(
         stream.data_context,
         expected_rows=rows(sources.oracle, "A"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Previews before a full read
+# ---------------------------------------------------------------------------
+
+# The configurations a preview is checked under. head() shows rows in stream order and,
+# on main, refuses sort_by_tags and does not sort under all_info; PR #354 (ITL-1053)
+# makes it sort among the rows it has, so the sorted configurations are left out here
+# and EXPECTED_HEAD below is the one place to follow it when it merges.
+HEAD_CONFIGS = {
+    name: config
+    for name, config in COLUMN_CONFIGS.items()
+    if not config.get("all_info") and not config.get("columns", {}).get("sort_by_tags")
+}
+HEAD_SIZES = (0, 2, 4, 100)
+
+
+def expected_head(origin_order: list[Any], available: int, n: int) -> list[Any]:
+    """The rows a head of ``n`` shows: the first ``min(n, available)`` in stream order.
+
+    ``origin_order`` is the stream's rows in input order; ``available`` how many of them
+    the stream holds (a source all of them; a pod those computed so far).
+    """
+    return [(member,) for member in origin_order[: min(n, available)]]
+
+
+PREVIEW_STATES = ("fresh_source", "fresh_pod", "partial_pod", "complete_pod")
+
+
+@pytest.mark.parametrize("state", PREVIEW_STATES)
+@pytest.mark.parametrize("input_order", INPUT_ORDERS)
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
+    scenario: str, input_order: str, state: str
+) -> None:
+    """``head(n)`` of a fresh source, a fresh, partly or fully computed pod stream."""
+    sources = make_sources(scenario, input_order)
+    if state == "fresh_source":
+        stream: Any = sources.a
+        available = len(keys_a(scenario, input_order))
+    else:
+        derive_y(sources)
+        stream = new_gated_scale_pod()(sources.a)
+    GATE.disarm()
+    if state == "fresh_pod":
+        available = 0
+    elif state == "partial_pod":
+        partial = iter(stream.iter_data())
+        next(partial), next(partial), next(partial)
+        del partial
+        available = 3
+    elif state == "complete_pod":
+        stream.as_table()
+        available = len(keys_a(scenario, input_order))
+    computed_before = len(GATE.completed)
+
+    origin_order = [member_of(o) for o in sources.oracle.origins if o.source_id == "A"]
+    tags, data = stream.keys()
+    failures = []
+    for name, config in HEAD_CONFIGS.items():
+        layout = Layout(
+            tag_keys=tuple(tags),
+            data_keys=tuple(data),
+            content_hash_column=content_hash_column(config),
+        )
+        for n in HEAD_SIZES:
+            table = stream.head(n, **config).as_table()
+            want = expected_head(origin_order, available, n)
+            try:
+                assert table.num_rows == len(want), f"{table.num_rows} rows"
+                if not want:
+                    continue
+                assert_requested_columns(table, config, layout, require_sorted=False)
+                assert_rows_aligned(
+                    table,
+                    layout,
+                    sources.oracle,
+                    stream.data_context,
+                    expected_rows=want,
+                )
+            except AssertionError as exc:
+                failures.append(f"head({n}) [{name}] {exc}")
+    assert len(GATE.completed) == computed_before, "a preview computed rows"
+    assert not failures, "\n".join(failures)

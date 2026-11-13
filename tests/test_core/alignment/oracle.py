@@ -109,6 +109,7 @@ class Oracle:
         *,
         tag_columns: Sequence[str],
         record_id_column: str | None = None,
+        tokens: Sequence[str] | None = None,
     ) -> None:
         """Register the rows of a source from the table the test gave it.
 
@@ -117,10 +118,15 @@ class Oracle:
             table: The table the test gave the source, in its row order.
             tag_columns: The source's tag columns.
             record_id_column: The source's record id column, if any.
+            tokens: Each row's provenance token, for a source with its own documented
+                token recipe (SpiralDB: the labelled Arrow hash of the row's key),
+                computed by the test from its own rows.
         """
         data_columns = [c for c in table.column_names if c not in tag_columns]
         for index, values in enumerate(table.to_pylist()):
-            if record_id_column is not None:
+            if tokens is not None:
+                token = tokens[index]
+            elif record_id_column is not None:
                 token = f"{record_id_column}={values[record_id_column]}"
             else:
                 token = f"row_{index}"

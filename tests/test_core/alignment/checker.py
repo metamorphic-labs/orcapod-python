@@ -614,3 +614,19 @@ def assert_sorted_by_tags(table: pa.Table, tag_keys: Sequence[str]) -> None:
         sorted(tuples, key=key(True)),
         sorted(tuples, key=key(False)),
     ), f"rows not in tag order: {tuples}"
+
+
+def assert_members_cover(
+    table: pa.Table, column: str, expected: Collection[Any]
+) -> None:
+    """Assert the flattened member values of ``column`` are ``expected``, each once.
+
+    For a many-to-one operator whose groups depend on arrival order (``Batch``): each row
+    is aligned by itself, so a table that repeated one whole group and left out another
+    would pass every per-row check; its members must still be the input's rows.
+    """
+    flattened = [x for xs in table.column(column).to_pylist() for x in xs]
+    assert sorted(flattened) == sorted(expected), (
+        f"the members of {column!r} {sorted(flattened)} are not the input rows "
+        f"{sorted(expected)}"
+    )

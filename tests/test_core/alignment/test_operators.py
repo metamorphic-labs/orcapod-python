@@ -44,6 +44,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 
 from .checker import (
     Layout,
+    assert_members_cover,
     assert_requested_columns,
     assert_rows_aligned,
     assert_same_rows_by_identity,
@@ -292,6 +293,10 @@ def check_tables(
                 assert_requested_columns(
                     table, config, layout, require_sorted=call != "head"
                 )
+                # Every configured table, not only the default one: a configuration
+                # could repeat one whole group and leave out another.
+                if (covered := member_values(case, sources)) is not None:
+                    assert_members_cover(table, *covered)
                 assert_rows_aligned(
                     table,
                     layout,
@@ -304,31 +309,20 @@ def check_tables(
     return failures
 
 
-def check_members_cover_the_input(case: OpCase, stream: Any, sources: Sources) -> None:
-    """A many-to-one operator's members hold every input row exactly once.
-
-    Each row is aligned by itself, so an output that lost or repeated a whole group
-    (a batch) would pass that check; the flattened members of all rows must be the
-    input's rows.
-    """
+def member_values(case: OpCase, sources: Sources) -> tuple[str, list[Any]] | None:
+    """The member column of a many-to-one case and the input values it must cover."""
     if case.covers is None:
-        return
+        return None
     column, source_id = case.covers
-    flattened = [x for xs in stream.as_table().column(column).to_pylist() for x in xs]
-    expected = [
+    return column, [
         o.values[column] for o in sources.oracle.origins if o.source_id == source_id
     ]
-    assert sorted(flattened) == sorted(expected), (
-        f"{case.name}: the members {sorted(flattened)} are not the input rows "
-        f"{sorted(expected)}"
-    )
 
 
 def check_stream(case: OpCase, stream: Any, sources: Sources) -> None:
     """Check ``as_table`` and ``head`` of ``stream`` under every column configuration."""
     failures = check_tables(case, stream, sources, with_head=True)
     assert not failures, f"{case.name}: " + "\n".join(failures)
-    check_members_cover_the_input(case, stream, sources)
 
 
 READ_PATTERNS = ("fresh", "partial_then_full", "repeated")
@@ -415,7 +409,6 @@ def test_operator_nodes_are_aligned_and_async_equals_sync(
         nodes[orchestrator] = node
         failures = check_tables(case, node, sources, with_head=False)
         assert not failures, f"{orchestrator}: " + "\n".join(failures)
-        check_members_cover_the_input(case, node, sources)
     if case.keyed_by_record_ids:
         sync, async_ = nodes["sync"], nodes["async"]
         assert_same_rows_by_identity(

@@ -18,6 +18,7 @@ from orcapod.system_constants import constants
 
 from .checker import (
     Layout,
+    assert_members_cover,
     assert_requested_columns,
     assert_all_columns_checked,
     assert_rows_aligned,
@@ -249,3 +250,20 @@ def test_an_empty_join_fails_its_expected_rows() -> None:
             joined.data_context,
             expected_rows=expected,
         )
+
+
+def test_a_batch_table_repeating_one_batch_instead_of_another_is_named() -> None:
+    """Each batch row is aligned by itself; the members must still cover the input."""
+    sources = make_sources("unique")
+    batched = Batch(2)(sources.a)
+    table = batched.as_table(columns={"source": True, "system_tags": True})
+    xs = [o.values["x"] for o in sources.oracle.origins if o.source_id == "A"]
+    assert_members_cover(table, "x", xs)
+    repeated = table.take([0, 0, 2])
+    tag_keys, data_keys = batched.keys()
+    layout = Layout(
+        tag_keys=tag_keys, data_keys=data_keys, members=frozenset(tag_keys + data_keys)
+    )
+    assert_rows_aligned(repeated, layout, sources.oracle, batched.data_context)
+    with pytest.raises(AssertionError, match="are not the input rows"):
+        assert_members_cover(repeated, "x", xs)
