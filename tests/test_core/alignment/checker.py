@@ -625,7 +625,7 @@ def assert_members_cover(
     is aligned by itself, so a table that repeated one whole group and left out another
     would pass every per-row check; its members must still be the input's rows.
     """
-    flattened = [x for xs in table.column(column).to_pylist() for x in xs]
+    flattened = [x for xs in table.column(column).to_pylist() for x in xs or []]
     assert sorted(flattened) == sorted(expected), (
         f"the members of {column!r} {sorted(flattened)} are not the input rows "
         f"{sorted(expected)}"

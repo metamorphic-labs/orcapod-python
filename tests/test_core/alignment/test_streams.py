@@ -14,9 +14,10 @@ Known defects are marked ``xfail(strict=True)`` on exactly the cases they break:
 * ITL-1066: ``SideEffectPodStream.as_table`` raises when asked for the context key (and so
   under ``all_info``), and ignores ``content_hash`` and ``sort_by_tags`` (only those
   configurations of the side-effect stream).
-* ITL-1065: two interleaved iterations of a function pod stream behind an operator stream
-  (the automatic select) recompute a row the first iteration already yielded (the
-  row-by-row path, interleaved reads).
+* ITL-1065: a function pod stream behind an operator stream (the automatic select) turns
+  stale during or after a partial read: two interleaved iterations recompute a row the
+  first already yielded (row-by-row path, interleaved reads), and a preview after a
+  partial read shows no rows (the partial-pod preview).
 
 * ITL-1045: ``FunctionPodStream.as_table`` builds the table and its content hashes in two
   passes; an upstream reset in between attaches the new rows' hashes to the old table.
@@ -408,7 +409,19 @@ def expected_head(origin_order: list[Any], available: int, n: int) -> list[Any]:
 PREVIEW_STATES = ("fresh_source", "fresh_pod", "partial_pod", "complete_pod")
 
 
-@pytest.mark.parametrize("state", PREVIEW_STATES)
+@pytest.mark.parametrize(
+    "state",
+    [
+        pytest.param(
+            state,
+            id=state,
+            # ITL-1065: after a partial read of a pod stream fed by an operator stream
+            # (the automatic select), the stream is stale and its head shows no rows.
+            marks=[ITL_1065] if state == "partial_pod" else [],
+        )
+        for state in PREVIEW_STATES
+    ],
+)
 @pytest.mark.parametrize("input_order", INPUT_ORDERS)
 @pytest.mark.parametrize("scenario", list(SCENARIOS))
 def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
@@ -416,9 +429,9 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
 ) -> None:
     """``head(n)`` of a fresh source, a fresh, partly or fully computed pod stream."""
     sources = make_sources(scenario, input_order)
+    available = len(keys_a(scenario, input_order))
     if state == "fresh_source":
         stream: Any = sources.a
-        available = len(keys_a(scenario, input_order))
     else:
         derive_y(sources)
         stream = new_gated_scale_pod()(sources.a)
@@ -432,7 +445,6 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
         available = 3
     elif state == "complete_pod":
         stream.as_table()
-        available = len(keys_a(scenario, input_order))
     computed_before = len(GATE.completed)
 
     origin_order = [member_of(o) for o in sources.oracle.origins if o.source_id == "A"]
