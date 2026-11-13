@@ -656,7 +656,10 @@ source was configured. `PipelineJob.load(path)` reads it back, for example in a 
 session, so that you can read the results the job stored. The file also records
 `orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
 a development checkout gives a development version). It is informational: loading never
-depends on it, and a file without it loads as before.
+depends on it. Adding the field moved the file format version from `0.1.0` to `0.2.0`; a
+`0.1.0` file, written by v0.2.0, still loads as before, and any other version is rejected.
+The reverse does not hold: v0.2.0 cannot load a file saved by v0.3.0, because hashes differ
+between the two releases.
 
 For example:
 
