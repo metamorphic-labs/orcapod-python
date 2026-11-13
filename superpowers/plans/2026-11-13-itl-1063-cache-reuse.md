@@ -39,7 +39,7 @@ Files: `design_issues/ITL-1063-CR1.md`, `changelog.d/ITL-1063.md`, approved desi
 - [x] Benchmark flat and grouped repeated jobs with function/operator/hash counters and compare to baseline. Use operation-count assertions, not flaky timing thresholds, in tests.
 - [x] Run `uv run ruff check .`, `uv run ruff format --check .`, `uv run basedpyright`, and `uv run pytest tests/`; inspect exit codes and logs.
 - [x] Request independent review; resolve correctness findings and rerun affected checks.
-- [ ] Commit with conventional message, push issue branch, create PR against main linking ITL-1063, and inspect CI. Include measurements and decisions; do not merge.
+- [x] Commit with conventional message, push issue branch, create PR against main linking ITL-1063, and inspect CI. Include measurements and decisions; do not merge.
 
 ## Authorization and decisions
 
@@ -48,3 +48,5 @@ Developer approved the design, issue creation and implementation through PR. Exi
 Remaining performance investigation is captured in ITL-1064; it does not block this correctness and reuse fix.
 
 Final verification: 11,625 tests passed, 119 skipped, 19 expected failures; basedpyright zero errors; Ruff lint/format and repository documentation checks pass.
+
+Delivery: PR https://github.com/metamorphic-labs/orcapod-python/pull/359 opened against main. Initial CI inspected: tests pending; no merge performed.
