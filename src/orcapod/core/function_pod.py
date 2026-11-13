@@ -17,7 +17,6 @@ from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
-    head_column_config,
     schema_requires_io,
 )
 from orcapod.core.streams.head import (
@@ -1109,6 +1108,34 @@ class FunctionPodStream(StreamBase):
             self._set_modified_time(None)
         else:
             self._update_modified_time()
+        # The read is complete: from now on the stream is judged by its modified time.
+        self._input_state = None
+
+    @property
+    def is_stale(self) -> bool:
+        """Whether the stream's results must be discarded before it is read again.
+
+        Results in progress (a read has noted its input's state and not reached the
+        input's end) stay current while that state is unchanged, the input is not
+        stale itself and the pod did not change: an upstream completing or computing for
+        the first time while the stream is read is not a change of its input (ITL-1065).
+        A pod-stream input is asked whether it is stale because its noted state, the
+        reset generation, does not move when a stream further up is reset; any other
+        input's modified time already reflects its upstreams. Otherwise the stream is
+        stale when it, an upstream or its pod has no modified time or an upstream or its
+        pod is newer (``StreamBase.is_stale``).
+        """
+        if self._input_state is None:
+            return super().is_stale
+        current = self._current_input_state()
+        if current != self._input_state or None in current:
+            return True
+        upstream = self._input_stream
+        if isinstance(upstream, FunctionPodStream) and upstream.is_stale:
+            return True
+        own_time = self._modified_time
+        pod_time = self._function_pod.last_modified
+        return own_time is None or pod_time is None or pod_time > own_time
 
     def clear_cache(self) -> None:
         """Discard all in-memory cached state."""
@@ -1335,6 +1362,12 @@ class FunctionPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> pa.Table:
+        # A stale cache is cleared before any of it is used: the table and the content
+        # hashes are then built from the same rows, and they are the current ones
+        # (ITL-1045). ``iter_data`` clears a stale cache too, but only after the
+        # cached table would already have been read.
+        if self.is_stale:
+            self.clear_cache()
         if self._cached_output_table is None:
             self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
         assert self._cached_output_table is not None, (
@@ -1369,11 +1402,17 @@ class FunctionPodStream(StreamBase):
         the first of the result. After an iteration that stopped part way they are the
         rows computed so far (``PARTIAL``). Before any computation, or once an input
         changed, there are none. A ``CachedFunctionPod``'s result store is not looked
-        up: that needs the input rows' hashes, i.e. reading the input. See
-        ``StreamBase.head``.
+        up: that needs the input rows' hashes, i.e. reading the input. With
+        ``sort_by_tags`` (or ``all_info``) the rows held are sorted by tag and the first
+        ``n`` of those returned: after a complete computation that is
+        ``as_table(...).slice(0, n)``; after a partial one, the rows computed so far in
+        tag order ("the rows it has", not the first ``n`` of the whole result in tag
+        order). See ``StreamBase.head``.
         """
         check_head_size(n)
-        config = head_column_config(columns, all_info)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        # Sorting needs every row held, not only the first n: read them all (in memory).
+        wanted = len(self._cached_output_datas) if config.sort_by_tags else n
         has_results = bool(self._cached_output_datas) or (
             self._cached_output_table is not None
         )
@@ -1405,7 +1444,9 @@ class FunctionPodStream(StreamBase):
             # A complete computation: its table holds the rows; only the shown rows'
             # data are read, and only when their content hashes are asked for.
             def shown_content_hashes() -> pa.Array[Any]:
-                shown, _ = self._computed_prefix(n)
+                shown, _ = self._computed_prefix(
+                    wanted, contiguous=not config.sort_by_tags
+                )
                 return pa.array(
                     [data.content_hash().to_string() for _, data in shown],
                     type=pa.large_string(),
@@ -1414,8 +1455,12 @@ class FunctionPodStream(StreamBase):
             return StreamHead.of_rows(
                 self,
                 self._shape_table(
-                    self._cached_output_table.slice(0, n), config, shown_content_hashes
-                ),
+                    self._cached_output_table
+                    if config.sort_by_tags
+                    else self._cached_output_table.slice(0, n),
+                    config,
+                    shown_content_hashes,
+                ).slice(0, n),
                 tag_columns=tag_columns,
                 total_rows=self._cached_output_table.num_rows,
                 origin="computed",
@@ -1427,7 +1472,7 @@ class FunctionPodStream(StreamBase):
         )
         if not finished and not self._cached_output_datas:
             return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
-        shown, total = self._computed_prefix(n)
+        shown, total = self._computed_prefix(wanted, contiguous=not config.sort_by_tags)
         status = HeadStatus.ROWS if finished else HeadStatus.PARTIAL
         if not shown:
             # Nothing to show (an empty result, inputs that all gave no output so far,
@@ -1454,7 +1499,7 @@ class FunctionPodStream(StreamBase):
                     [data.content_hash().to_string() for _, data in shown],
                     type=pa.large_string(),
                 ),
-            ),
+            ).slice(0, n),
             tag_columns=tag_columns,
             total_rows=total,
             status=status,
@@ -1462,30 +1507,39 @@ class FunctionPodStream(StreamBase):
         )
 
     def _computed_prefix(
-        self, limit: int
+        self, limit: int, contiguous: bool = True
     ) -> tuple[list[tuple[TagProtocol, DataProtocol]], int]:
         """Return the first ``limit`` output rows computed so far, and how many there are.
 
-        The rows are the contiguous run of computed inputs from the first, in the order
-        iteration yields them; an input whose output is ``None`` (filtered out) is
-        skipped, as iteration skips it. Only the first ``limit`` rows are collected.
+        By default the rows are the contiguous run of computed inputs from the first, in
+        the order iteration yields them; an input whose output is ``None`` (filtered out)
+        is skipped, as iteration skips it. Only the first ``limit`` rows are collected.
+        With ``contiguous=False`` the rows are every computed output, in input order,
+        also those after an input that has no output (a failure): a sorted head sorts the
+        rows it has.
 
         Args:
             limit: The largest number of rows to return.
+            contiguous: Stop at the first input with no cached output.
 
         Returns:
-            The rows, and the number of output rows in the whole computed run.
+            The rows, and the number of output rows counted.
         """
         shown: list[tuple[TagProtocol, DataProtocol]] = []
         total = 0
-        index = 0
-        while index in self._cached_output_datas:
+        indexes = (
+            iter(range(len(self._cached_output_datas) + 1))
+            if contiguous
+            else iter(sorted(self._cached_output_datas))
+        )
+        for index in indexes:
+            if index not in self._cached_output_datas:
+                break
             tag, data = self._cached_output_datas[index]
             if data is not None:
                 if total < limit:
                     shown.append((tag, data))
                 total += 1
-            index += 1
         return shown, total
 
     def _shape_table(
@@ -1502,48 +1556,29 @@ class FunctionPodStream(StreamBase):
             content_hashes: Returns the content hash of each row of ``table``; called
                 only when ``column_config`` asks for them.
         """
-        drop_columns = []
-        if not column_config.system_tags:
-            # TODO: get system tags more effiicently
-            drop_columns.extend(
-                [
+
+        def shape(carried: pa.Table) -> pa.Table:
+            if column_config.sort_by_tags and self.keys()[0]:
+                # Before the system tags are dropped: they break ties between equal tags.
+                carried = arrow_utils.sort_by_tag_columns(carried, self.keys()[0])
+            drop_columns = []
+            if not column_config.system_tags:
+                drop_columns.extend(
                     c
-                    for c in table.column_names
+                    for c in carried.column_names
                     if c.startswith(constants.SYSTEM_TAG_PREFIX)
-                ]
-            )
-        if not column_config.source:
-            drop_columns.extend(f"{constants.SOURCE_PREFIX}{c}" for c in self.keys()[1])
-        if not column_config.context:
-            drop_columns.append(constants.CONTEXT_KEY)
+                )
+            if not column_config.source:
+                drop_columns.extend(
+                    f"{constants.SOURCE_PREFIX}{c}" for c in self.keys()[1]
+                )
+            if not column_config.context:
+                drop_columns.append(constants.CONTEXT_KEY)
+            return carried.drop([c for c in drop_columns if c in carried.column_names])
 
-        output_table = table.drop([c for c in drop_columns if c in table.column_names])
-
-        if column_config.content_hash:
-            hash_column_name = (
-                "_content_hash"
-                if column_config.content_hash is True
-                else column_config.content_hash
-            )
-            output_table = output_table.append_column(
-                hash_column_name, content_hashes()
-            )
-
-        if column_config.sort_by_tags:
-            # TODO: reimplement using polars natively
-            output_table_schema = output_table.schema
-            output_table = (
-                pl.DataFrame(output_table)
-                .sort(by=self.keys()[0], descending=False)
-                .to_arrow()
-            )
-            output_table = arrow_utils.restore_schema_nullability(
-                output_table, output_table_schema
-            )
-            # output_table = output_table.sort_by(
-            #     [(column, "ascending") for column in self.keys()[0]]
-            # )
-        return output_table
+        return arrow_utils.with_content_hash_column(
+            table, column_config.content_hash, content_hashes, shape
+        )
 
 
 class CallableWithPodProtocol(Protocol):
