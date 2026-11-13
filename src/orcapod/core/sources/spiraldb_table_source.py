@@ -41,6 +41,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -219,6 +220,9 @@ class SpiralDBTableSource(RootSource):
         config: OrcaPod configuration.
         overrides: Optional pyspiral client config overrides passed through to
             ``SpiralDBConnector``, e.g. ``{"server.url": "http://api.spiraldb.dev"}``.
+        tag_only_columns: Tag columns kept as tags only, not data, exactly as in
+            v0.3; ``True`` for all of them. Every other tag column is referential:
+            also a data column of the same name (ITL-1023).
         tags_as_data: Maps a key column that is a tag column of this source to the
             name of a data column that receives a copy of it, as in
             ``DerivedSource``. ``None`` (default) or an empty mapping copies nothing.
@@ -255,6 +259,7 @@ class SpiralDBTableSource(RootSource):
         config: "OrcapodConfig | None" = None,
         overrides: dict[str, str] | None = None,
         tags_as_data: Mapping[str, str] | None = None,
+        tag_only_columns: TagOnlyColumns = (),
     ) -> None:
         for name, value in (("limit", limit), ("max_rows", max_rows)):
             if value is not None and not _is_positive_int(value):
@@ -317,6 +322,8 @@ class SpiralDBTableSource(RootSource):
             )
         if self._source_id is None:
             self._source_id = f"{project_id}/{dataset}.{table_name}@{self._table_id}"
+        # Every declared tag is referential unless kept tag-only (ITL-1023).
+        self._reference_tags = source_reference_tags(resolved_tags, tag_only_columns)
 
         # A zero-row stream with the table's columns answers every schema question.
         self._builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
@@ -326,6 +333,7 @@ class SpiralDBTableSource(RootSource):
                 tag_columns=resolved_tags,
                 source_id=self._source_id,
                 system_tag_columns=system_tag_columns,
+                reference_tags=self._reference_tags,
             )
         except ValueError as exc:
             raise ValueError(f"{location}, table {table_name!r}: {exc}") from exc
@@ -345,10 +353,14 @@ class SpiralDBTableSource(RootSource):
                 tag_columns=template.tag_columns,
                 source_id=self._source_id,
                 system_tag_columns=template.system_tag_columns,
+                reference_tags=self._reference_tags,
             )
         self._stream = template.stream
         self._schema_hash = template.schema_hash
         self._tag_columns = template.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in self._tag_columns if c not in self._reference_tags
+        )
         self._system_tag_columns = template.system_tag_columns
 
     def _check_tags_as_data(
@@ -568,6 +580,7 @@ class SpiralDBTableSource(RootSource):
                         schema_hash=self._schema_hash,
                         source_id=self.source_id,
                         provenance_tokens=tokens,
+                        reference_tags=self._reference_tags,
                     )
 
     def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
@@ -624,6 +637,7 @@ class SpiralDBTableSource(RootSource):
             table=pa.concat_tables(tables),
             tag_columns=self._tag_columns,
             system_tag_columns=self._system_tag_columns,
+            reference_tags=self._reference_tags,
         )
         return whole.as_table(columns=columns, all_info=all_info)
 
@@ -741,6 +755,7 @@ class SpiralDBTableSource(RootSource):
             "table_name": self._table_name,
             "table_id": self._table_id,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),
             "where": _locationto_config(self._where),
             "limit": self._limit,
@@ -774,6 +789,7 @@ class SpiralDBTableSource(RootSource):
             table_name=config["table_name"],
             dataset=config.get("dataset", "default"),
             tag_columns=config.get("tag_columns"),
+            tag_only_columns=config.get("tag_only_columns", True),
             system_tag_columns=config.get("system_tag_columns", ()),
             where=_locationfrom_config(config.get("where") or {}),
             limit=config.get("limit"),

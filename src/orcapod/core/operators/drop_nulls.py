@@ -5,8 +5,9 @@ from __future__ import annotations
 import types
 import typing
 from collections.abc import Collection, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
+from orcapod.core.referential_tags import stream_references
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.base import UnaryOperator
@@ -92,6 +93,9 @@ class DropNulls(UnaryOperator):
         ValueError: If ``columns`` is an empty collection.
     """
 
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(
         self, columns: str | Collection[str] | None = None, **kwargs: Any
     ) -> None:
@@ -154,10 +158,13 @@ class DropNulls(UnaryOperator):
         """
         if self.columns is not None:
             return self.columns
+        # A referential tag is one column in both lists: named once.
         return tuple(
-            name
-            for name in (*tag_columns, *data_columns)
-            if not name.startswith(constants.META_PREFIX)
+            dict.fromkeys(
+                name
+                for name in (*tag_columns, *data_columns)
+                if not name.startswith(constants.META_PREFIX)
+            )
         )
 
     # ------------------------------------------------------------------
@@ -306,6 +313,7 @@ class DropNulls(UnaryOperator):
         return ArrowTableStream(
             self._narrow_table(table, self._target_columns(tag_columns, data_columns)),
             tag_columns=tag_columns,
+            reference_tags=stream_references(stream),
             data_context=stream.data_context,  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
         )
 

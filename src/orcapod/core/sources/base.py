@@ -129,6 +129,19 @@ class RootSource(StreamBase):
             "data_schema": serialize_schema(data_schema, type_converter),
         }
 
+    def _tag_only_config(self) -> dict[str, Any]:
+        """Return ``tag_only_columns`` for ``to_config``, when any tag is referential.
+
+        A source whose tags are all plain writes nothing, so its config is the one
+        v0.3 wrote; a config without the key reads back with every tag plain
+        (``tag_only_columns=True``), as v0.3 configs mean.
+        """
+        tag_columns = tuple(getattr(self, "_tag_columns", ()))
+        tag_only = tuple(getattr(self, "_tag_only_columns", tag_columns))
+        if tag_only == tag_columns:
+            return {}
+        return {"tag_only_columns": list(tag_only)}
+
     def pipeline_identity_structure(self) -> Any:
         """Return (tag_schema, data_schema) as the pipeline identity for this
         source.  Schema-only: no data content is included, so sources with

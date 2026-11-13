@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -26,6 +26,9 @@ class Batch(UnaryOperator):
     """
     Base class for all operators.
     """
+
+    # Referential tags (ITL-1023): not handled yet.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = "ITL-1017"
 
     def __init__(self, batch_size: int = 0, drop_partial_batch: bool = False, **kwargs):
         if batch_size < 0:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, get_origin
+from typing import Any, ClassVar, TYPE_CHECKING, get_origin
 
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.referential_tags import stream_references
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -93,6 +94,9 @@ class GroupBy(UnaryOperator):
         by: Tag column names to group on.  Must be non-empty, free of
             duplicates, and must all be scalar tag columns of the input stream.
     """
+
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, by: Collection[str], **kwargs: Any) -> None:
         by_tuple = tuple(by)
@@ -255,10 +259,14 @@ class GroupBy(UnaryOperator):
         # Every input tag stays a tag (ITL-955): the non-key ones are the
         # list-valued member columns built above.  Declaring only `self.by`
         # here would let them fall into the data group.
+        # A referential tag is one column, so its tag and data roles get the same
+        # treatment by construction: a key stays scalar in both, a non-key becomes
+        # the same list in both, in the same member order (specification section 8).
         return ArrowTableStream(
             grouped_table,
             tag_columns=tag_columns,
             data_context=stream.data_context,
+            reference_tags=stream_references(stream),
         )
 
     # ------------------------------------------------------------------
@@ -299,6 +307,9 @@ class GroupBy(UnaryOperator):
                 # A non-key tag stays a tag, list-valued (ITL-955).
                 out_tag_types[name] = list[col_type]
 
-        out_data_types = {name: list[t] for name, t in data_types.items()}
+        # A referential group key is scalar as data too (specification section 8.1).
+        out_data_types = {
+            name: t if name in self.by else list[t] for name, t in data_types.items()
+        }
 
         return Schema(out_tag_types), Schema(out_data_types)

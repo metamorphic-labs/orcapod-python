@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.databases.storage_utils import delta_to_pyarrow_dataset
 from orcapod.types import PathLike
@@ -34,6 +35,7 @@ class DeltaTableSource(RootSource):
         system_tag_columns: Collection[str] = (),
         record_id_column: str | None = None,
         source_id: str | None = None,
+        tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
         resolved = Path(delta_table_path).resolve()
@@ -60,6 +62,7 @@ class DeltaTableSource(RootSource):
         result = builder.build(
             table,
             tag_columns=tag_columns,
+            reference_tags=source_reference_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             record_id_column=record_id_column,
             system_tag_columns=system_tag_columns,
@@ -67,6 +70,9 @@ class DeltaTableSource(RootSource):
 
         self._stream = result.stream
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.reference_tags
+        )
         self._system_tag_columns = result.system_tag_columns
         self._record_id_column = record_id_column
         if self._source_id is None:
@@ -78,6 +84,7 @@ class DeltaTableSource(RootSource):
             "source_type": "delta_table",
             "delta_table_path": str(self._delta_table_path),
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),
             "record_id_column": self._record_id_column,
             "source_id": self.source_id,
@@ -92,6 +99,7 @@ class DeltaTableSource(RootSource):
         return cls(
             delta_table_path=config["delta_table_path"],
             tag_columns=config.get("tag_columns", ()),
+            tag_only_columns=config.get("tag_only_columns", True),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_column=config.get("record_id_column"),
             source_id=config.get("source_id"),

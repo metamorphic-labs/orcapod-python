@@ -13,6 +13,7 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
+from orcapod.core.referential_tags import materialization_diagnostic_off
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
@@ -26,7 +27,7 @@ from orcapod.core.streams.head import (
     StreamHead,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import StoreError, TypeIdentityError
+from orcapod.errors import InputValidationError, StoreError, TypeIdentityError
 from orcapod.utils.store_errors import keep_store_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -724,7 +725,10 @@ class _FunctionPodBase(TraceableBase):
                 self.label,
                 dropped,
             )
-            input_stream = SelectDataColumns(columns=kept)(input_stream)
+            # The select is Orcapod's own step: the referential tags it turns into
+            # plain tags are not reported (ITL-1023).
+            with materialization_diagnostic_off():
+                input_stream = SelectDataColumns(columns=kept)(input_stream)
         return self.process(input_stream, label=label)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
@@ -741,10 +745,36 @@ class _FunctionPodBase(TraceableBase):
         )
         # validate that incoming_data_schema is valid
         self._validate_input_schema(incoming_data_schema)
+        self._check_output_names(tag_schema)
         # The output schema of the FunctionPodProtocol is determined by the data function
         # TODO: handle and extend to include additional columns
         # Namely, the source columns
+        # A pod's output data is the function's outputs only, so every referential tag
+        # of the input is a plain tag of the output, with the same values (developer,
+        # November 12, 2026, ITL-1023).
         return tag_schema, self.data_function.output_data_schema
+
+    def _check_output_names(self, tag_names: Collection[str]) -> None:
+        """Raise if a function output is named like a tag of the input (section 6.2).
+
+        A function produces new values; it never replaces, rebinds or removes a tag,
+        referential or plain. Checked when the pipeline is built.
+
+        Args:
+            tag_names: The tag columns of the pod's input.
+
+        Raises:
+            InputValidationError: If an output name equals a tag name.
+        """
+        clashes = [
+            name for name in self.data_function.output_data_schema if name in tag_names
+        ]
+        if clashes:
+            raise InputValidationError(
+                f"Function output {clashes} conflicts with existing tag(s) of the "
+                "same name. Resolve the tag binding (drop or rename the tag) before "
+                "producing a data column with the same name."
+            )
 
 
 class FunctionPod(_FunctionPodBase):
@@ -834,7 +864,9 @@ class FunctionPod(_FunctionPodBase):
         input_stream = self.handle_input_streams(*streams)
 
         # perform input stream schema validation
+        tag_keys, _ = input_stream.keys()
         self._validate_input_schema(input_stream.output_schema()[1])
+        self._check_output_names(tag_keys)
         self.tracker_manager.record_function_pod_invocation(
             self, input_stream, label=label
         )

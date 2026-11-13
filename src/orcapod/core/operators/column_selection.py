@@ -1,9 +1,10 @@
 import logging
 from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.referential_tags import stream_references, warn_materialized
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -39,6 +40,9 @@ class SelectTagColumns(UnaryOperator):
     Operator that selects specified columns from a stream.
     """
 
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
         self.strict = strict
@@ -71,11 +75,17 @@ class SelectTagColumns(UnaryOperator):
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
 
-        modified_table = table.drop_columns(list(tags_to_drop))
+        # A dropped referential tag leaves its column as plain data (specification
+        # section 10, "Drop tag": remove the tag, retain data independently).
+        references = stream_references(stream)
+        modified_table = table.drop_columns(
+            [c for c in tags_to_drop if c not in references]
+        )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=new_tag_columns,
+            reference_tags=[c for c in references if c in new_tag_columns],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -160,6 +170,9 @@ class SelectDataColumns(UnaryOperator):
     Operator that selects specified columns from a stream.
     """
 
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
         self.strict = strict
@@ -195,13 +208,18 @@ class SelectDataColumns(UnaryOperator):
         associated_source_fields = [
             f"{constants.SOURCE_PREFIX}{c}" for c in data_columns_to_drop
         ]
-        data_columns_to_drop.extend(associated_source_fields)
-
-        modified_table = table.drop_columns(data_columns_to_drop)
+        # A referential tag whose data column is removed keeps its column as a plain
+        # tag with the same values (specification section 7.2).
+        references = stream_references(stream)
+        modified_table = table.drop_columns(
+            [c for c in data_columns_to_drop if c not in references]
+            + associated_source_fields
+        )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=tag_columns,
+            reference_tags=[c for c in references if c not in data_columns_to_drop],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -217,6 +235,10 @@ class SelectDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to select are present or use strict=False to ignore missing columns"
             )
+        warn_materialized(
+            "SelectDataColumns",
+            [c for c in stream_references(stream) if c not in self.columns],
+        )
 
     def unary_output_schema(
         self,
@@ -288,6 +310,9 @@ class DropTagColumns(UnaryOperator):
     Operator that drops specified columns from a stream.
     """
 
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
         self.strict = strict
@@ -323,11 +348,17 @@ class DropTagColumns(UnaryOperator):
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
 
-        modified_table = table.drop_columns(list(columns_to_drop))
+        # A dropped referential tag leaves its column as plain data (specification
+        # section 10, "Drop tag": remove the tag, retain data independently).
+        references = stream_references(stream)
+        modified_table = table.drop_columns(
+            [c for c in columns_to_drop if c not in references]
+        )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=new_tag_columns,
+            reference_tags=[c for c in references if c in new_tag_columns],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -415,6 +446,9 @@ class DropDataColumns(UnaryOperator):
     Operator that drops specified columns from a stream.
     """
 
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
         self.strict = strict
@@ -448,17 +482,21 @@ class DropDataColumns(UnaryOperator):
         associated_source_columns = [
             f"{constants.SOURCE_PREFIX}{c}" for c in columns_to_drop
         ]
-        columns_to_drop.extend(associated_source_columns)
-
         table = stream.as_table(
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
-
-        modified_table = table.drop_columns(columns_to_drop)
+        # A referential tag whose data column is removed keeps its column as a plain
+        # tag with the same values (specification section 7.2).
+        references = stream_references(stream)
+        modified_table = table.drop_columns(
+            [c for c in columns_to_drop if c not in references]
+            + associated_source_columns
+        )
 
         return ArrowTableStream(
             modified_table,
             tag_columns=tag_columns,
+            reference_tags=[c for c in references if c not in columns_to_drop],
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
@@ -473,6 +511,10 @@ class DropDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to drop are present or use strict=False to ignore missing columns"
             )
+        warn_materialized(
+            "DropDataColumns",
+            [c for c in stream_references(stream) if c in self.columns],
+        )
 
     def unary_output_schema(
         self,

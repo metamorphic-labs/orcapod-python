@@ -5,6 +5,7 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -38,6 +39,7 @@ class DataFrameSource(RootSource):
         system_tag_columns: Collection[str] = (),
         source_id: str | None = None,
         schema: pa.Schema | None = None,
+        tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -77,6 +79,7 @@ class DataFrameSource(RootSource):
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
+            reference_tags=source_reference_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             system_tag_columns=system_tag_columns,
@@ -84,6 +87,9 @@ class DataFrameSource(RootSource):
 
         self._stream = result.stream
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.reference_tags
+        )
         if self._source_id is None:
             self._source_id = result.source_id
 
@@ -92,6 +98,7 @@ class DataFrameSource(RootSource):
         return {
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "source_id": self.source_id,
             **self._identity_config(),
         }

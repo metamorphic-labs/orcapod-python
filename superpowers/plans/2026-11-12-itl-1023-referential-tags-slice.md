@@ -16,7 +16,7 @@ table whose name is in both role lists (spec 4.3 as code: binding = `tag_keys �
 No change to `types.Schema` or to the `(tag_schema, data_schema)` tuple: `x` appears in both
 halves of `output_schema()` / `keys()` at graph-build time. `ArrowTableStream(table,
 tag_columns, reference_tags=...)` makes data = non-tags ∪ references. Sources default every
-declared tag to referential; `materialized_tags=[...]` (approved name, coordinator Nov 12)
+declared tag to referential; `tag_only_columns=[...]` (approved name, coordinator Nov 12)
 keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference exists.
 
 **Tech Stack:** Python 3.11-3.13, PyArrow, Polars, pytest, uv.
@@ -26,16 +26,16 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
 ## Decisions (go into the PR body's DECISIONS section)
 
 1. Representation: name intersection, one physical column, no Schema change (audit, firm).
-2. Option name `materialized_tags: Collection[str]` on sources; subset of `tag_columns`; unknown
+2. Option name `tag_only_columns: Collection[str]` on sources (developer's choice, Nov 12); subset of `tag_columns`; unknown
    name → `ValueError`. Builder (`SourceStreamBuilder.build`) takes explicit `reference_tags`
-   (default `()` = plain); sources compute `reference_tags = tag_columns - materialized_tags`.
+   (default `()` = plain); sources compute `reference_tags = tag_columns - tag_only_columns`.
 3. ListSource / DerivedSource / CachedSource tags stay plain (computed values, or stored records).
-4. Function pod output data = (input data columns that are referential tags, passed through
-   unchanged with their source info) + function outputs. Spec 6.1 "tags and bindings pass
-   through"; Orcapod pods drop input data otherwise, so the pass-through is what keeps the
-   binding valid. The result store keeps only function outputs (result identity unchanged,
-   spec 12.4); on read from the node's store the referenced column comes back from the stored
-   tag column. Output name equal to any tag name → `InputValidationError` at build time.
+4. Pod boundary (developer decision, November 12, 2026, replaces my first plan): a pod's output
+   data stays the function's outputs; every referential tag of the input becomes a PLAIN tag
+   (same value and type) in the pod's output schema. No diagnostic at a pod boundary
+   (coordinator). Output name equal to any tag name raises at build time. No change to what a
+   node stores or to function-result identity. The 'fall-through / append' convenience is a
+   separate issue, out of scope.
 5. Join merged source-info (spec 9.4): the merged column's `_source_x` keeps the tokens of
    every referential input, as `large_list<large_string>` in canonical input order (a list
    input contributes its elements). Plain+referential keeps the referential side's column as is.
@@ -61,7 +61,7 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
 - Modify `src/orcapod/core/sources/stream_builder.py` (+ `arrow_table_source.py`,
   `dict_source.py`, `csv_source.py`, `data_frame_source.py`, `delta_table_source.py`,
   `db_table_source.py`, `spiraldb_table_source.py`, `polling_source.py`): default referential,
-  `materialized_tags` option, to_config.
+  `tag_only_columns` option, to_config.
 - Modify `src/orcapod/core/operators/static_output_pod.py` (guard, `_rows_to_table` dedupe),
   `pipeline/sync_orchestrator.py` (dedupe, pass references).
 - Modify operators: `join.py`, `group_by.py`, `column_selection.py`, `filters.py`,
@@ -72,7 +72,7 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
   `test_schema_rules.py`, `test_sources.py`, `test_function_pods.py`, `test_join.py`,
   `test_group_by.py`, `test_select_drop.py`, `test_row_preserving.py`, `test_not_yet.py`,
   `test_hashes.py`; additions to `tests/test_core/operators/test_async_sync_equivalence.py`.
-- Golden fixtures: `tests/test_hashing/golden/cases.py` switch to `materialized_tags=` — values
+- Golden fixtures: `tests/test_hashing/golden/cases.py` switch to `tag_only_columns=` — values
   must stay byte-identical (run golden test before and after).
 - `changelog.d/ITL-1023.md`, `design_issues/ITL-1023-RT1.md` (slice limitations),
   `docs/concepts/referential-tags.md` (short; states identities not frozen).
@@ -82,12 +82,12 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
 ### Task 0: failing end-to-end EDI-shaped test
 - [ ] `tests/test_core/referential_tags/test_edi_end_to_end.py`: spikes (k1..k5, spike_time,
   amplitude) and gaze (k1..k5, gaze_time, gx) as `DictSource` with tag_columns keys + time
-  (referential by default); `trials` keyed on (k1, k2) with explicit `materialized_tags`;
+  (referential by default); `trials` keyed on (k1, k2) with explicit `tag_only_columns`;
   `GroupBy(k1..k5)` on both; `pod(spikes_g, gaze_g, trials)` (automatic join + select) with
   `def align(spike_time: list[int], gaze_time: list[int], k1: str) -> int`; `PipelineJob` on
   `InMemoryArrowDatabase` and on `DeltaTableDatabase(tmp_path)`; sync and async orchestrators;
   assert values, that `k1` is a tag and data, call counter = n groups on run 1 and 0 on run 2.
-- [ ] Run → fails (`materialized_tags` unknown / tags not data). Commit, push, open draft PR
+- [ ] Run → fails (`tag_only_columns` unknown / tags not data). Commit, push, open draft PR
   (Refs ITL-1023), send progress message.
 
 ### Task 1: representation + shared validator
@@ -96,12 +96,12 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
 - [ ] Implement in `arrow_table_stream.py` and `referential_tags.py`.
 
 ### Task 2: sources
-- [ ] Tests: DictSource default referential; `materialized_tags` gives v0.3 schema/hashes
+- [ ] Tests: DictSource default referential; `tag_only_columns` gives v0.3 schema/hashes
   equal to the builder's plain form; unknown name raises.
 - [ ] Implement builder `reference_tags`, each source's option, to_config.
 
 ### Task 3: hashes
-- [ ] Golden fixtures switch to `materialized_tags=` (all sites with tag_columns in cases.py);
+- [ ] Golden fixtures switch to `tag_only_columns=` (all sites with tag_columns in cases.py);
   run golden suite: no value moves.
 - [ ] Identity term in ArrowTableStream; test referential vs plain over one table differ;
   spec 12.4 test: function not reading `x` has equal input data hash / result store hit
@@ -138,4 +138,6 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
   issue entry; docs page; merge origin/main; PR body with DECISIONS; worker_done.
 
 ## Status log
-- 2026-11-12: plan written; branch created from origin/main f51ce67c; option name approved.
+- 2026-11-12: plan written; branch created from origin/main f51ce67c.
+- 2026-11-12: developer: option is `tag_only_columns`; references become plain tags at a pod boundary.
+- Task 0 done: fc22de6a, draft PR #342.

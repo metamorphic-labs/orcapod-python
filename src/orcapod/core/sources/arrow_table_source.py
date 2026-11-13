@@ -5,6 +5,7 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -79,6 +80,7 @@ class ArrowTableSource(RootSource):
         system_tag_columns: Collection[str] = (),
         record_id_column: str | None = None,
         infer_nullable: bool = False,
+        tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -96,6 +98,7 @@ class ArrowTableSource(RootSource):
         result = builder.build(
             table,
             tag_columns=tag_columns,
+            reference_tags=source_reference_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             record_id_column=record_id_column,
@@ -106,6 +109,9 @@ class ArrowTableSource(RootSource):
         self._schema_hash = result.schema_hash
         self._table_hash = result.table_hash
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.reference_tags
+        )
         self._system_tag_columns = result.system_tag_columns
         self._record_id_column = record_id_column
 
@@ -117,6 +123,7 @@ class ArrowTableSource(RootSource):
         return {
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "source_id": self.source_id,
             **self._identity_config(),
         }

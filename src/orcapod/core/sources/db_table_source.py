@@ -16,6 +16,7 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -56,6 +57,9 @@ class DBTableSource(RootSource):
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: Orcapod configuration (controls hash character counts, etc.).
+        tag_only_columns: Tag columns kept as tags only, not data, exactly as in
+            v0.3; ``True`` for all of them. Every other tag column is referential:
+            also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If the table is not found, has no PK columns and none are
@@ -73,6 +77,7 @@ class DBTableSource(RootSource):
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
+        tag_only_columns: TagOnlyColumns = (),
         *,
         _query: str | None = None,
     ) -> None:
@@ -139,6 +144,9 @@ class DBTableSource(RootSource):
         result = builder.build(
             table,
             tag_columns=resolved_tag_columns,
+            reference_tags=source_reference_tags(
+                resolved_tag_columns, tag_only_columns
+            ),
             source_id=self._source_id,
             record_id_column=record_id_column,
             system_tag_columns=system_tag_columns,
@@ -146,6 +154,9 @@ class DBTableSource(RootSource):
 
         self._stream = result.stream
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.reference_tags
+        )
         self._system_tag_columns = result.system_tag_columns
         if self._source_id is None:
             self._source_id = result.source_id
@@ -157,6 +168,7 @@ class DBTableSource(RootSource):
             "connector": self._connector.to_config(),
             "table_name": self._table_name,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),
             "record_id_column": self._record_id_column,
             "source_id": self.source_id,

@@ -23,6 +23,7 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from orcapod import contexts
+from orcapod.core.referential_tags import not_supported_yet, stream_references
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
@@ -928,7 +929,13 @@ class OperatorJobNode(OperatorNodeBase):
     # ------------------------------------------------------------------
 
     def _store_output_stream(self, stream: StreamProtocol) -> None:
-        """Materialize stream and store in the pipeline database with per-row dedup."""
+        """Materialize stream and store in the pipeline database with per-row dedup.
+
+        Raises:
+            NotImplementedError: If the stream has a referential tag (ITL-1019).
+        """
+        if stream_references(stream):
+            raise not_supported_yet("Operator node storage", "ITL-1019")
         pipeline_database = self._pipeline_database
         if pipeline_database is None:
             raise RuntimeError(
@@ -1112,6 +1119,8 @@ class OperatorJobNode(OperatorNodeBase):
             if cols_to_drop:
                 records_table = records_table.drop(cols_to_drop)
         tag_keys = self.keys()[0]
+        if records is not None and stream_references(self):
+            raise not_supported_yet("Operator node storage", "ITL-1019")
         # Stored rows are this node's: give them its data context, not the default.
         return ArrowTableStream(
             records_table, tag_columns=tag_keys, data_context=self.data_context
@@ -1225,6 +1234,8 @@ class OperatorJobNode(OperatorNodeBase):
                 records = records.drop(cols_to_drop)
 
         tag_keys = self.keys()[0]
+        if stream_references(self):
+            raise not_supported_yet("Operator node storage", "ITL-1019")
         self._cached_output_stream = ArrowTableStream(
             records, tag_columns=tag_keys, data_context=self.data_context
         )
@@ -1314,7 +1325,9 @@ class OperatorJobNode(OperatorNodeBase):
             return pa.table({})
         empty_records = self._make_empty_table()
         tag_keys = self.keys()[0]
-        empty_stream = ArrowTableStream(empty_records, tag_columns=tag_keys)
+        empty_stream = ArrowTableStream(
+            empty_records, tag_columns=tag_keys, reference_tags=stream_references(self)
+        )
         return empty_stream.as_table(columns=columns, all_info=all_info)
 
     def head(
@@ -1582,6 +1595,7 @@ class OperatorJobNode(OperatorNodeBase):
                     self._make_empty_table(),
                     tag_columns=self.keys()[0],
                     data_context=self.data_context,
+                    reference_tags=stream_references(self),
                 )
 
             self._update_modified_time()

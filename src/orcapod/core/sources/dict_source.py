@@ -4,6 +4,7 @@ from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.referential_tags import TagOnlyColumns, source_reference_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.types import DataValue, SchemaLike
 from orcapod.utils import arrow_utils
@@ -34,6 +35,7 @@ class DictSource(RootSource):
         system_tag_columns: Collection[str] = (),
         data_schema: SchemaLike | pa.Schema | None = None,
         source_id: str | None = None,
+        tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
@@ -63,6 +65,7 @@ class DictSource(RootSource):
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
+            reference_tags=source_reference_tags(tag_columns, tag_only_columns),
             source_id=self._source_id,
             source_kind=self.SOURCE_KIND,
             system_tag_columns=system_tag_columns,
@@ -70,6 +73,9 @@ class DictSource(RootSource):
 
         self._stream = result.stream
         self._tag_columns = result.tag_columns
+        self._tag_only_columns = tuple(
+            c for c in result.tag_columns if c not in result.reference_tags
+        )
         if self._source_id is None:
             self._source_id = result.source_id
 
@@ -78,6 +84,7 @@ class DictSource(RootSource):
         return {
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
+            **self._tag_only_config(),
             "source_id": self.source_id,
             **self._identity_config(),
         }

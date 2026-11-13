@@ -1,11 +1,17 @@
 import asyncio
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import (
     NonZeroInputOperator,
     require_shared_arrow_type,
+)
+from orcapod.core.referential_tags import (
+    check_namespaces,
+    merged_source_tokens,
+    reference_names,
+    stream_references,
 )
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
@@ -28,7 +34,15 @@ else:
     pl = LazyModule("polars")
 
 
+# Temporary name of the right input's source info of a merged referential column
+# during the join (``static_process``); never in an output.
+_MERGED_SOURCE_PREFIX = "__join_merged_source__"
+
+
 class Join(NonZeroInputOperator):
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
     @property
     def kernel_id(self) -> tuple[str, ...]:
         """
@@ -94,29 +108,75 @@ class Join(NonZeroInputOperator):
         Args:
             *streams: Two or more input streams.
 
+        Referential tags (specification section 9): a shared tag ``x`` that is
+        referential in either input is referential in the output. When it is
+        referential in both, their data columns ``x`` are merged into one: the join
+        equated the tags, so the values are equal (section 9.3). Every other data
+        column shared by two inputs is still an error, and so is a plain tag of one
+        input named like a data column of another (section 4.3).
+
         Returns:
             The ``(tag_schema, data_schema)`` of the joined user columns.
 
         Raises:
-            InputValidationError: If two inputs share a data column.
+            InputValidationError: If two inputs share a data column that is not the
+                target of a referential tag both of them join on, a merged column's
+                types differ, or a plain tag would share a name with a data column.
         """
         ordered_streams = self.order_input_streams(*streams)
         stream = ordered_streams[0]
         tag_schema, data_schema = stream.output_schema()
         data_schema = self._without_meta_fields(data_schema)
+        references = set(reference_names(tag_schema, data_schema))
         for other_stream in ordered_streams[1:]:
             other_tag_schema, other_data_schema = other_stream.output_schema()
             other_data_schema = self._without_meta_fields(other_data_schema)
-            tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
-            intersection_data_schema = schema_utils.intersection_schemas(
-                data_schema, other_data_schema
+            other_references = set(reference_names(other_tag_schema, other_data_schema))
+            merged = self._merged_references(
+                tag_schema, references, other_tag_schema, other_references
             )
-            data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
-            if intersection_data_schema:
+            shared_data = set(data_schema) & set(other_data_schema)
+            if shared_data - merged:
                 raise InputValidationError(
-                    f"Datas should not have overlapping keys, but {data_schema.keys()} found in {stream} and {other_stream}."
+                    f"Datas should not have overlapping keys, but {sorted(shared_data - merged)} found in {stream} and {other_stream}."
                 )
+            for name in sorted(merged):
+                if data_schema[name] != other_data_schema[name]:
+                    raise InputValidationError(
+                        f"Join: referential tag {name!r} has type "
+                        f"{data_schema[name]} in one input and "
+                        f"{other_data_schema[name]} in another"
+                    )
+            tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
+            data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
+            references |= other_references
+            check_namespaces(tag_schema, data_schema, references)
         return tag_schema, data_schema
+
+    @staticmethod
+    def _merged_references(
+        tags: Collection[str],
+        references: Collection[str],
+        other_tags: Collection[str],
+        other_references: Collection[str],
+    ) -> set[str]:
+        """Return the data columns two join inputs merge into one (section 9.5).
+
+        A data column is merged when it is the target of a referential tag in both
+        inputs and that tag is a join key (a tag of both inputs). ``Join`` joins on
+        every shared tag, so the second condition holds for every shared reference.
+
+        Args:
+            tags: The first input's tag names.
+            references: The first input's referential tags.
+            other_tags: The second input's tag names.
+            other_references: The second input's referential tags.
+
+        Returns:
+            The names of the merged data columns.
+        """
+        keys = set(tags) & set(other_tags)
+        return keys & set(references) & set(other_references)
 
     def _predict_system_tag_schema(self, *streams: StreamProtocol) -> Schema:
         """Predict the system tag columns that the join would produce.
@@ -168,6 +228,7 @@ class Join(NonZeroInputOperator):
         stream = ordered_streams[0]
 
         tag_keys, _ = [set(k) for k in stream.keys()]
+        references = set(stream_references(stream))
         table = self._without_meta(
             stream.as_table(columns={"source": True, "system_tags": True})
         )
@@ -200,6 +261,21 @@ class Join(NonZeroInputOperator):
             next_ref_schema = next_table.schema
 
             common_tag_keys = tag_keys.intersection(next_tag_keys)
+            next_references = set(stream_references(next_stream))
+            merged = self._merged_references(
+                tag_keys, references, next_tag_keys, next_references
+            )
+            # The merged columns are join keys, so the join keeps one of each. Their
+            # source info is kept from both sides: the right side's is set aside
+            # under a temporary name and merged after the join (section 9.4).
+            right_source = {
+                f"{constants.SOURCE_PREFIX}{name}": f"{_MERGED_SOURCE_PREFIX}{name}"
+                for name in sorted(merged)
+            }
+            if right_source:
+                next_table = next_table.rename_columns(
+                    [right_source.get(c, c) for c in next_table.column_names]
+                )
             # A shared tag key must have one Arrow type in both inputs (up to
             # layout); otherwise Polars would join and keep one side's type.
             for key in sorted(common_tag_keys):
@@ -222,8 +298,11 @@ class Join(NonZeroInputOperator):
             table = arrow_utils.restore_schema_nullability(
                 table, table_ref_schema, next_ref_schema
             )
+            for left_name, right_name in right_source.items():
+                table = self._merge_source_columns(table, left_name, right_name)
 
             tag_keys.update(next_tag_keys)
+            references |= next_references
 
         # reorder columns to bring tag columns to the front
         # TODO: come up with a better algorithm
@@ -238,7 +317,8 @@ class Join(NonZeroInputOperator):
         # keys from ``tag_columns``, so both must follow it. No hash or record
         # ID depends on column order.
         tag_order = list(tag_schema.keys())
-        data_order = list(data_schema.keys())
+        # A referential tag's column is laid out once, among the tags.
+        data_order = [name for name in data_schema if name not in tag_schema]
         listed = {*tag_order, *data_order}
         result_table = table.select(
             tag_order
@@ -248,7 +328,39 @@ class Join(NonZeroInputOperator):
         return ArrowTableStream(
             result_table,
             tag_columns=tuple(tag_order),
+            reference_tags=reference_names(tag_schema, data_schema),
         )
+
+    @staticmethod
+    def _merge_source_columns(
+        table: "pa.Table", left_name: str, right_name: str
+    ) -> "pa.Table":
+        """Replace two source-info columns of one merged data column by their merge.
+
+        Args:
+            table: The joined table.
+            left_name: The left side's source-info column; replaced in place.
+            right_name: The right side's source-info column; removed.
+
+        Returns:
+            The table with ``left_name`` holding both sides' tokens
+            (``merged_source_tokens``) as ``large_list<large_string>``.
+        """
+        merged = pa.array(
+            [
+                merged_source_tokens(left, right)
+                for left, right in zip(
+                    table.column(left_name).to_pylist(),
+                    table.column(right_name).to_pylist(),
+                )
+            ],
+            type=pa.large_list(pa.large_string()),
+        )
+        index = table.schema.get_field_index(left_name)
+        table = table.set_column(
+            index, pa.field(left_name, merged.type, nullable=True), merged
+        )
+        return table.drop_columns([right_name])
 
     @staticmethod
     def _without_meta(table: "pa.Table") -> "pa.Table":
@@ -756,16 +868,25 @@ class Join(NonZeroInputOperator):
         return Tag(table, system_tags=system_tags, data_context=data_context_key)
 
     @staticmethod
-    def _merge_data(left: DataProtocol, right: DataProtocol) -> DataProtocol:
+    def _merge_data(
+        left_tag: TagProtocol,
+        left: DataProtocol,
+        right_tag: TagProtocol,
+        right: DataProtocol,
+    ) -> DataProtocol:
         """Merge two data datagrams as Arrow, left columns first.
 
         Every column keeps the Arrow type it already has, and the source info
         of both sides is carried over. Neither side's meta columns are, as in
-        ``static_process`` (``_without_meta``).
+        ``static_process`` (``_without_meta``). A data column that is the target
+        of a referential tag on both sides, joined on, is kept once, with the
+        source info of both (``merged_source_tokens``, as ``static_process``).
 
         Args:
+            left_tag: The left row's tag.
             left: The canonically earlier data (in a staggered join, the
                 result of the joins so far).
+            right_tag: The right row's tag.
             right: The later data.
 
         Returns:
@@ -773,18 +894,33 @@ class Join(NonZeroInputOperator):
 
         Raises:
             InputValidationError: If both sides have a data column of the same
-                name.
+                name that is not such a reference.
         """
         from orcapod.core.datagrams import Data
 
         left_table, right_table = left.as_table(), right.as_table()
-        if overlap := set(left_table.column_names) & set(right_table.column_names):
+        merged = Join._merged_references(
+            left_tag.keys(),
+            reference_names(left_tag.keys(), left_table.column_names),
+            right_tag.keys(),
+            reference_names(right_tag.keys(), right_table.column_names),
+        )
+        overlap = set(left_table.column_names) & set(right_table.column_names)
+        if overlap - merged:
             raise InputValidationError(
-                f"Join: inputs share data columns {sorted(overlap)}."
+                f"Join: inputs share data columns {sorted(overlap - merged)}."
             )
+        source_info = {**left.source_info(), **right.source_info()}
+        if merged:
+            right_table = right_table.drop_columns(sorted(merged))
+            left_info, right_info = left.source_info(), right.source_info()
+            for name in merged:
+                source_info[name] = merged_source_tokens(
+                    left_info.get(name), right_info.get(name)
+                )
         return Data(
             arrow_utils.hstack_tables(left_table, right_table),
-            source_info={**left.source_info(), **right.source_info()},
+            source_info=source_info,
             data_context=left.data_context_key,
         )
 
@@ -820,7 +956,7 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt)
+        return merged_tag, Join._merge_data(left_tag, left_pkt, right_tag, right_pkt)
 
     @staticmethod
     def _merge_pair_passthrough(
@@ -847,7 +983,7 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_pkt, right_pkt)
+        return merged_tag, Join._merge_data(left_tag, left_pkt, right_tag, right_pkt)
 
     @staticmethod
     def _sort_merged_system_tags(merged_sys: dict) -> dict:

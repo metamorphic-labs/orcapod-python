@@ -201,6 +201,7 @@ class SyncPipelineOrchestrator:
         Returns:
             An ArrowTableStream.
         """
+        from orcapod.core.referential_tags import stream_references
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         if not buf:
@@ -218,12 +219,15 @@ class SyncPipelineOrchestrator:
                 tag_columns=tag_keys,
                 producer=upstream_node.producer,
                 upstreams=upstream_node.upstreams,
+                reference_tags=stream_references(upstream_node),
             )
 
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
         # Each row keeps its own system tags and source info.
-        full_table, user_tag_keys = StaticOutputOperatorPod._rows_to_table(buf)
+        full_table, user_tag_keys, references = StaticOutputOperatorPod._rows_to_table(
+            buf
+        )
 
         # Pass the upstream node's producer and upstreams so the
         # materialized stream inherits the correct identity_structure
@@ -238,6 +242,7 @@ class SyncPipelineOrchestrator:
             tag_columns=user_tag_keys,
             producer=producer,
             upstreams=upstreams,
+            reference_tags=references,
         )
 
     @staticmethod

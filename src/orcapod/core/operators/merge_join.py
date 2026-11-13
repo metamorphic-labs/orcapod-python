@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.streams import ArrowTableStream
@@ -150,6 +150,9 @@ class MergeJoin(BinaryOperator):
     MergeJoin is commutative: MergeJoin(A, B) produces the same result as
     MergeJoin(B, A), achieved by sorting merged values and system tag values.
     """
+
+    # Referential tags (ITL-1023): not handled yet.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = "ITL-1018"
 
     @property
     def kernel_id(self) -> tuple[str, ...]:

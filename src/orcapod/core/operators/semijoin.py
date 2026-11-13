@@ -1,7 +1,8 @@
 import math
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
+from orcapod.core.referential_tags import stream_references
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.streams import ArrowTableStream
@@ -61,6 +62,9 @@ class SemiJoin(BinaryOperator):
 
     The output stream preserves the schema of the left stream exactly.
     """
+
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -130,6 +134,7 @@ class SemiJoin(BinaryOperator):
         return ArrowTableStream(
             semi_joined_table,
             tag_columns=tuple(left_tag_schema.keys()),
+            reference_tags=stream_references(left_stream),
         )
 
     def binary_output_schema(
