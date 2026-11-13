@@ -487,7 +487,13 @@ class LogicalTypeRegistry:
             # class, registered or deferred.
             entry = self._deferred_by_python_name.get(qualified_name(base))
             if entry is not None:
-                return self._load_deferred(entry)
+                loaded = self._load_deferred(entry)
+                # The same exact-type rule as for a registered type: such a type
+                # of a base class is not a match, and the walk goes on.
+                if base is python_type or not getattr(
+                    loaded, "exact_python_type_only", False
+                ):
+                    return loaded
         # A snapshot: a deferred type loaded by another thread adds an entry.
         for registered_type, registered_lt in tuple(self._by_python_type.items()):
             if getattr(registered_lt, "exact_python_type_only", False):

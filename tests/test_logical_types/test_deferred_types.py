@@ -165,3 +165,35 @@ def test_deferred_type_of_a_subclass_wins_over_a_registered_base_type() -> None:
     assert type(registry.get_by_python_type(fx.SubThing)) is fx.LogicalSubThing
     # The answer is the same once the deferred type is loaded.
     assert type(registry.get_by_python_type(fx.SubThing)) is fx.LogicalSubThing
+
+
+def test_deferred_exact_type_is_never_returned_for_a_subclass() -> None:
+    """A deferred type that matches its class exactly is not used for a subclass.
+
+    The answer is the same whether the subclass or the class is looked up first.
+    """
+
+    def registry() -> LogicalTypeRegistry:
+        return LogicalTypeRegistry(
+            deferred_logical_types=[
+                {
+                    "python_type": f"{_MOD}.ExactThing",
+                    "extension_name": fx.EXACT_EXTENSION_NAME,
+                    "logical_type": f"{_MOD}.LogicalExactThing",
+                    "requires": "polars",
+                }
+            ]
+        )
+
+    subclass_first = registry()
+    assert subclass_first.get_by_python_type(fx.SubExactThing) is None
+    assert isinstance(
+        subclass_first.get_by_python_type(fx.ExactThing), fx.LogicalExactThing
+    )
+    assert subclass_first.get_by_python_type(fx.SubExactThing) is None
+
+    class_first = registry()
+    assert isinstance(
+        class_first.get_by_python_type(fx.ExactThing), fx.LogicalExactThing
+    )
+    assert class_first.get_by_python_type(fx.SubExactThing) is None

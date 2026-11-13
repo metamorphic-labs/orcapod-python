@@ -16,6 +16,7 @@ pytest.importorskip("torch")
 import pyarrow as pa  # noqa: E402
 import torch  # noqa: E402
 
+from orcapod.contexts import get_default_context  # noqa: E402
 from orcapod.errors import UnsupportedValueError  # noqa: E402
 from orcapod.sources import ArrowTableSource, DictSource  # noqa: E402
 from tests.test_torch.tensor_cases import (  # noqa: E402
@@ -369,3 +370,15 @@ def test_an_inference_tensor_that_requires_grad_is_stored() -> None:
     assert got.requires_grad and not got.is_inference()
     assert torch.equal(got.detach(), torch.arange(3.0))
     assert value.is_inference() and value.requires_grad
+
+
+def test_hashing_leaves_the_callers_storage_resizable() -> None:
+    """Hashing and storing do not pin the caller's storage (``resize_`` still works)."""
+    value = torch.arange(3.0)
+    source = _source(value)
+    source.as_table()
+    for _, data in source.iter_data():
+        data.content_hash()
+    get_default_context().semantic_hasher.hash_object(value)
+    value.resize_(4)
+    assert tuple(value.shape) == (4,)

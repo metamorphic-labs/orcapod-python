@@ -120,3 +120,28 @@ class LogicalSubThing(LogicalThing):
     )
     logical_type_name: str = SUB_EXTENSION_NAME
     python_type: type = SubThing
+
+
+EXACT_EXTENSION_NAME = "orcapod_test.deferred_exact_thing"
+
+
+class ExactThing:
+    """A value type whose logical type matches the class exactly, never a subclass."""
+
+
+class SubExactThing(ExactThing):
+    """A subclass: it must not resolve to ``LogicalExactThing``."""
+
+
+class LogicalExactThing(LogicalThing):
+    """Deferred logical type for ``ExactThing`` only."""
+
+    _arrow_ext_class = make_arrow_extension_type(
+        EXACT_EXTENSION_NAME, pa.large_string()
+    )
+    _polars_ext_class = make_polars_extension_type(
+        EXACT_EXTENSION_NAME, pa.large_string()
+    )
+    logical_type_name: str = EXACT_EXTENSION_NAME
+    python_type: type = ExactThing
+    exact_python_type_only: bool = True

@@ -285,9 +285,10 @@ def canonical_tensor(value: Any) -> tuple[str, tuple[int, ...], memoryview]:
     """Return the dtype tag, shape and canonical element bytes of a tensor.
 
     The bytes are the elements in C order, little-endian, packed, read from a
-    detached CPU copy or view with lazy conjugate and negative bits resolved.
-    They are the input of the element digest ``E``. ``value`` itself is never
-    modified.
+    detached CPU copy with lazy conjugate and negative bits resolved. They are
+    the input of the element digest ``E``. ``value`` itself is never modified, and
+    its memory is never handed to NumPy (that would make its storage
+    non-resizable).
 
     Args:
         value: A ``torch.Tensor``.
@@ -304,6 +305,10 @@ def canonical_tensor(value: Any) -> tuple[str, tuple[int, ...], memoryview]:
     if t.device.type != "cpu":
         t = t.to("cpu")
     t = t.resolve_conj().resolve_neg().contiguous()
+    if t.untyped_storage().data_ptr() == value.untyped_storage().data_ptr():
+        # Still the caller's memory. ``Tensor.numpy()`` below makes the storage it
+        # exports non-resizable, so it must not be the caller's: take a copy.
+        t = t.clone()
     if tag == "complex32":
         # NumPy has no complex32: each element's real then imaginary binary16.
         t = torch.view_as_real(t)
