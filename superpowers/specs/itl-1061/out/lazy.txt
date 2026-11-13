@@ -1,0 +1,37 @@
+### lazy: first as_table()
+
+metric                             -         TOTAL
+Tag.new                         2000          2000
+Data.new                        6000          6000
+ats.new                            5             5
+ats.iter.build                     1             1
+op.static_process                  5             5
+hstack_tables                   4007          4007
+fn.call                         4000          4000
+
+### lazy: second as_table()
+
+metric                         TOTAL
+
+### lazy: list(iter_data())
+
+metric                             -         TOTAL
+Data.new                        2000          2000
+fn.call                         2000          2000
+
+### lazy: head()
+
+metric                             -         TOTAL
+hstack_tables                     21            21
+
+### lazy: same steps rebuilt, as_table()
+
+metric                             -         TOTAL
+Tag.new                         2000          2000
+Data.new                        6000          6000
+ats.new                            5             5
+ats.iter.build                     1             1
+op.static_process                  5             5
+hstack_tables                   4007          4007
+fn.call                         4000          4000
+

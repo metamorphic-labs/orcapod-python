@@ -1,0 +1,42 @@
+### after compile, before any run
+sessions     SourceJobNode    last_modified=09:45:07.059182 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.735372)
+experiments  SourceJobNode    last_modified=09:45:07.059171 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.742802)
+drop_nulls   OperatorJobNode  last_modified=09:45:07.061037 is_stale=False upstreams=[SourceJobNode] _cached_output_stream=None
+group_by     OperatorJobNode  last_modified=09:45:07.061039 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=None
+map_tags     OperatorJobNode  last_modified=09:45:07.061041 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=None
+join         OperatorJobNode  last_modified=09:45:07.061042 is_stale=False upstreams=[SourceJobNode,OperatorJobNode] _cached_output_stream=None
+accuracy     FunctionJobNode  last_modified=09:45:07.061094 is_stale=False upstreams=[OperatorJobNode] _cached_output_datas=0
+grade        FunctionJobNode  last_modified=09:45:07.061106 is_stale=False upstreams=[FunctionJobNode] _cached_output_datas=0
+
+### after job.run() #1
+sessions     SourceJobNode    last_modified=09:45:07.059182 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.735372)
+experiments  SourceJobNode    last_modified=09:45:07.059171 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.742802)
+drop_nulls   OperatorJobNode  last_modified=09:45:08.989579 is_stale=False upstreams=[SourceJobNode] _cached_output_stream=ArrowTableStream
+group_by     OperatorJobNode  last_modified=09:45:09.475440 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=ArrowTableStream
+map_tags     OperatorJobNode  last_modified=09:45:09.874456 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=ArrowTableStream
+join         OperatorJobNode  last_modified=09:45:10.497800 is_stale=False upstreams=[SourceJobNode,OperatorJobNode] _cached_output_stream=ArrowTableStream
+accuracy     FunctionJobNode  last_modified=09:45:19.540156 is_stale=False upstreams=[OperatorJobNode] _cached_output_datas=2000
+grade        FunctionJobNode  last_modified=09:45:24.334861 is_stale=False upstreams=[FunctionJobNode] _cached_output_datas=2000
+
+### after job.run() #2
+sessions     SourceJobNode    last_modified=09:45:07.059182 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.735372)
+experiments  SourceJobNode    last_modified=09:45:07.059171 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.742802)
+drop_nulls   OperatorJobNode  last_modified=09:45:25.401508 is_stale=False upstreams=[SourceJobNode] _cached_output_stream=ArrowTableStream
+group_by     OperatorJobNode  last_modified=09:45:25.902525 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=ArrowTableStream
+map_tags     OperatorJobNode  last_modified=09:45:26.280794 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=ArrowTableStream
+join         OperatorJobNode  last_modified=09:45:26.910001 is_stale=False upstreams=[SourceJobNode,OperatorJobNode] _cached_output_stream=ArrowTableStream
+accuracy     FunctionJobNode  last_modified=09:45:28.446010 is_stale=False upstreams=[OperatorJobNode] _cached_output_datas=2000
+grade        FunctionJobNode  last_modified=09:45:29.302966 is_stale=False upstreams=[FunctionJobNode] _cached_output_datas=2000
+
+### after job.bind(sources={'experiments': same id, CHANGED rows})
+sessions     SourceJobNode    last_modified=09:45:07.059182 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:06.735372)
+experiments  SourceJobNode    last_modified=09:45:07.059171 is_stale=n/a   upstreams=[] bound_source=ArrowTableSource (src last_modified 09:45:29.530882)
+drop_nulls   OperatorJobNode  last_modified=09:45:25.401508 is_stale=False upstreams=[SourceJobNode] _cached_output_stream=ArrowTableStream
+group_by     OperatorJobNode  last_modified=09:45:25.902525 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=ArrowTableStream
+map_tags     OperatorJobNode  last_modified=09:45:26.280794 is_stale=False upstreams=[OperatorJobNode] _cached_output_stream=ArrowTableStream
+join         OperatorJobNode  last_modified=09:45:26.910001 is_stale=False upstreams=[SourceJobNode,OperatorJobNode] _cached_output_stream=ArrowTableStream
+accuracy     FunctionJobNode  last_modified=09:45:28.446010 is_stale=False upstreams=[OperatorJobNode] _cached_output_datas=2000
+grade        FunctionJobNode  last_modified=09:45:29.302966 is_stale=False upstreams=[FunctionJobNode] _cached_output_datas=2000
+
+a skip on 'not is_stale and holds a result' would skip: ['drop_nulls', 'group_by', 'map_tags', 'join', 'accuracy', 'grade']
+today's run #3 picked up the change: True

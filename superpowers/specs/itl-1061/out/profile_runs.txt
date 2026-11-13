@@ -1,0 +1,33 @@
+### job.run() #1: wall 25.50 s, load 3.1
+   25.37 s cum         1 calls  sync_orchestrator.py:run
+   16.84 s cum         2 calls  function_node.py:execute
+   12.02 s cum      4000 calls  function_node.py:_process_data_internal
+    5.48 s cum     25558 calls  arrow_table_stream.py:iter_data
+    4.54 s cum         5 calls  operator_node.py:execute
+    4.38 s cum     29543 calls  tag_data.py:__init__
+    3.62 s cum      4000 calls  function_node.py:compute_base_entry_id
+    2.77 s cum         2 calls  source_node.py:execute
+    2.64 s cum     25543 calls  tag_data.py:__init__
+    2.21 s cum        13 calls  static_output_pod.py:_rows_to_table
+    1.38 s cum         8 calls  spiraldb_table_source.py:_key_tokens
+    1.38 s cum    192510 calls  arrow_utils.py:hstack_tables
+    1.15 s cum         5 calls  static_output_pod.py:_materialize_to_stream
+    0.03 s cum         8 calls  stream_builder.py:attach_provenance
+    0.00 s cum         2 calls  function_node.py:get_cached_results
+
+### job.run() #2: wall 13.17 s, load 3.3
+   13.07 s cum         1 calls  sync_orchestrator.py:run
+    5.43 s cum     25558 calls  arrow_table_stream.py:iter_data
+    4.58 s cum         5 calls  operator_node.py:execute
+    4.48 s cum         2 calls  function_node.py:execute
+    3.45 s cum      4000 calls  function_node.py:compute_base_entry_id
+    2.83 s cum         2 calls  source_node.py:execute
+    2.64 s cum     25543 calls  tag_data.py:__init__
+    2.61 s cum     25543 calls  tag_data.py:__init__
+    2.19 s cum        13 calls  static_output_pod.py:_rows_to_table
+    1.43 s cum         8 calls  spiraldb_table_source.py:_key_tokens
+    1.15 s cum         5 calls  static_output_pod.py:_materialize_to_stream
+    0.92 s cum    156363 calls  arrow_utils.py:hstack_tables
+    0.03 s cum         8 calls  stream_builder.py:attach_provenance
+    0.00 s cum         2 calls  function_node.py:get_cached_results
+

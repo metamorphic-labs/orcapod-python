@@ -1,0 +1,68 @@
+### job.run() #1, same job object
+
+metric                  SelectDataColumns           accuracy         drop_nulls        experiments              grade           group_by               join           map_tags           sessions                  -              TOTAL
+node.execute                            1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+rows.out                             2000               2000               5543               6000               2000               2000               2000               2000               2000                  0              25543
+source.iter                             0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+base_entry_id                           0               2000                  0                  0               2000                  0                  0                  0                  0                  0               4000
+hash_table                              0               8000                  0                  0               8000                  0                  0                  0                  0                  0              16000
+Tag.new                              2000               2000               5543               6000               2000               2000               2000               2000               2000                  0              25543
+Data.new                             2000               4000               5543               6000               4000               2000               2000               2000               2000                  0              29543
+ats.new                                 2                  0                  2                  0                  0                  2                  2                  2                  0                  8                 18
+ats.iter.build                          1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+op.process                              1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+op.static_process                       1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+rows_to_table                           1                  0                  1                  0                  0                  1                  1                  1                  0                  8                 13
+materialize_to_stream                   1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+hstack_tables                        8002              22090              22174                  0              22057               8002               8003               8002                  0              94180             192510
+fn.call                                 0                 30                  0                  0                 19                  0                  0                  0                  0                  0                 49
+db.read                                 0               4001                  0                  0               4001                  0                  0                  0                  0                  0               8002
+db.write                                0               4060                  0                  0               4038                  0                  0                  0                  0                  0               8098
+db.flush                                0                 21                  0                  0                 21                  0                  0                  0                  0                  2                 44
+
+### job.run() #2, same job object
+
+metric                  SelectDataColumns           accuracy         drop_nulls        experiments              grade           group_by               join           map_tags           sessions                  -              TOTAL
+node.execute                            1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+rows.out                             2000               2000               5543               6000               2000               2000               2000               2000               2000                  0              25543
+source.iter                             0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+base_entry_id                           0               2000                  0                  0               2000                  0                  0                  0                  0                  0               4000
+hash_table                              0               4000                  0                  0               4000                  0                  0                  0                  0                  0               8000
+Tag.new                              2000               2000               5543                  0               2000               2000               2000               2000                  0                  0              17543
+Data.new                             2000               2000               5543                  0               2000               2000               2000               2000                  0                  0              17543
+ats.new                                 2                  0                  2                  0                  0                  2                  2                  2                  0                  8                 18
+ats.iter.build                          1                  1                  1                  0                  1                  1                  1                  1                  0                  0                  7
+ats.iter.cached                         0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+op.process                              1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+op.static_process                       1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+rows_to_table                           1                  0                  1                  0                  0                  1                  1                  1                  0                  8                 13
+materialize_to_stream                   1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+hstack_tables                        8002               4000              22174                  0               4000               8002               8003               8002                  0              94180             156363
+db.flush                                0                  1                  0                  0                  1                  0                  0                  0                  0                  2                  4
+
+### reading job.nodes['grade'].as_table() after the runs
+
+metric                             -         TOTAL
+hstack_tables                   8001          8001
+
+### job.run() on a NEW job object, same store
+
+metric                  SelectDataColumns           accuracy         drop_nulls        experiments              grade           group_by               join           map_tags           sessions                  -              TOTAL
+node.execute                            1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+rows.out                             2000               2000               5543               6000               2000               2000               2000               2000               2000                  0              25543
+source.iter                             0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+base_entry_id                           0               2000                  0                  0               2000                  0                  0                  0                  0                  0               4000
+hash_table                              0               4000                  0                  0               4000                  0                  0                  0                  0                  0               8000
+Tag.new                              2000               4000               5543                  0               4000               2000               2000               2000                  0                  0              21543
+Data.new                             2000               4000               5543                  0               4000               2000               2000               2000                  0                  0              21543
+ats.new                                 2                  1                  2                  0                  1                  2                  2                  2                  0                  8                 20
+ats.iter.build                          1                  2                  1                  0                  2                  1                  1                  1                  0                  0                  9
+ats.iter.cached                         0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+op.process                              1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+op.static_process                       1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+rows_to_table                           1                  0                  1                  0                  0                  1                  1                  1                  0                  8                 13
+materialize_to_stream                   1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+hstack_tables                        8002               4000              22174                  0               4000               8002               8003               8002                  0              94180             156363
+db.read                                 0                  2                  0                  0                  2                  0                  0                  0                  0                  0                  4
+db.flush                                0                  1                  0                  0                  1                  0                  0                  0                  0                  2                  4
+

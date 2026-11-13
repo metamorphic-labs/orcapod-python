@@ -1,0 +1,63 @@
+### job.run() #1, same job object
+
+metric                  SelectDataColumns           accuracy         drop_nulls        experiments              grade           group_by               join           map_tags           sessions                  -              TOTAL
+node.execute                            1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+source.iter                             0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+base_entry_id                           0               2000                  0                  0               2000                  0                  0                  0                  0                  0               4000
+hash_table                              0               8000                  0                  0               6000                  0                  0                  0                  0                  0              14000
+Tag.new                                 0                  0               5543               6000                  0               2000               2000                  0               2000                  0              17543
+Data.new                                0               2000               5543               6000               2000               2000               2000                  0               2000                  0              21543
+ats.new                                 1                  0                  1                  0                  0                  3                  1                  1                  0                  0                  7
+ats.iter.build                          0                  0                  0                  1                  0                  1                  0                  0                  1                  0                  3
+op.static_process                       0                  0                  0                  0                  0                  1                  0                  0                  0                  0                  1
+rows_to_table                           1                  0                  1                  0                  0                  2                  1                  1                  0                  0                  6
+materialize_to_stream                   1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+hstack_tables                        8001              24282              46173                  0              24192              30175              18001               8001                  0                  0             158825
+fn.call                                 0                 94                  0                  0                 64                  0                  0                  0                  0                  0                158
+db.read                                 0               4001                  0                  0               4001                  0                  0                  0                  0                  0               8002
+db.write                                0               4188                  0                  0               4128                  0                  0                  0                  0                  0               8316
+db.flush                                0                 21                  0                  0                 21                  0                  0                  0                  0                  2                 44
+
+### job.run() #2, same job object
+
+metric                  SelectDataColumns           accuracy         drop_nulls        experiments              grade           group_by               join           map_tags           sessions                  -              TOTAL
+node.execute                            1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+source.iter                             0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+base_entry_id                           0               2000                  0                  0               2000                  0                  0                  0                  0                  0               4000
+hash_table                              0               4000                  0                  0               4000                  0                  0                  0                  0                  0               8000
+Tag.new                                 0               2000               5543                  0               2000               2000               2000                  0                  0                  0              13543
+Data.new                                0               2000               5543                  0               2000               2000               2000                  0                  0                  0              13543
+ats.new                                 1                  1                  1                  0                  1                  3                  1                  1                  0                  0                  9
+ats.iter.build                          0                  1                  0                  0                  1                  1                  0                  0                  0                  0                  3
+ats.iter.cached                         0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+op.static_process                       0                  0                  0                  0                  0                  1                  0                  0                  0                  0                  1
+rows_to_table                           1                  0                  1                  0                  0                  2                  1                  1                  0                  0                  6
+materialize_to_stream                   1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+hstack_tables                        8001               4000              46173                  0               4000              30175              18001               8001                  0                  0             118351
+db.read                                 0                  2                  0                  0                  2                  0                  0                  0                  0                  0                  4
+db.flush                                0                  1                  0                  0                  1                  0                  0                  0                  0                  2                  4
+
+### reading job.nodes['grade'].as_table() after the runs
+
+metric                             -         TOTAL
+hstack_tables                   8001          8001
+
+### job.run() on a NEW job object, same store
+
+metric                  SelectDataColumns           accuracy         drop_nulls        experiments              grade           group_by               join           map_tags           sessions                  -              TOTAL
+node.execute                            1                  1                  1                  1                  1                  1                  1                  1                  1                  0                  9
+source.iter                             0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+base_entry_id                           0               2000                  0                  0               2000                  0                  0                  0                  0                  0               4000
+hash_table                              0               4000                  0                  0               4000                  0                  0                  0                  0                  0               8000
+Tag.new                                 0               2000               5543                  0               2000               2000               2000                  0                  0                  0              13543
+Data.new                                0               2000               5543                  0               2000               2000               2000                  0                  0                  0              13543
+ats.new                                 1                  1                  1                  0                  1                  3                  1                  1                  0                  0                  9
+ats.iter.build                          0                  1                  0                  0                  1                  1                  0                  0                  0                  0                  3
+ats.iter.cached                         0                  0                  0                  1                  0                  0                  0                  0                  1                  0                  2
+op.static_process                       0                  0                  0                  0                  0                  1                  0                  0                  0                  0                  1
+rows_to_table                           1                  0                  1                  0                  0                  2                  1                  1                  0                  0                  6
+materialize_to_stream                   1                  0                  1                  0                  0                  1                  1                  1                  0                  0                  5
+hstack_tables                        8001               4000              46173                  0               4000              30175              18001               8001                  0                  0             118351
+db.read                                 0                  2                  0                  0                  2                  0                  0                  0                  0                  0                  4
+db.flush                                0                  1                  0                  0                  1                  0                  0                  0                  0                  2                  4
+
