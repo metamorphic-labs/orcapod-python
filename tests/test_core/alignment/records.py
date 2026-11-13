@@ -86,7 +86,9 @@ def assert_records_aligned(job: PipelineJob, sources: Sources) -> None:
             if row[tag] != origin.values[tag]:
                 fail(tag, f"{row[tag]!r}, its row has {origin.values[tag]!r}")
         if row["_source_x"] != f"A::{origin.token}::x":
-            fail("_source_x", f"{row['_source_x']!r} does not name row {origin.token!r}")
+            fail(
+                "_source_x", f"{row['_source_x']!r} does not name row {origin.token!r}"
+            )
         if row["y"] != oracle.expected_value("y", origin):
             fail("y", f"{row['y']!r} is not the output for row {origin.token!r}")
         _, datagram, column = split_token(row["_source_y"])

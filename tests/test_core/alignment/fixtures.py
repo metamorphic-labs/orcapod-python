@@ -29,7 +29,14 @@ TAG_COLUMNS = ("g", "n")
 # Each scenario's rows of A as (g, n, x), in a "shuffled" order that is neither tag order
 # nor data order.
 SCENARIOS: dict[str, list[tuple[str | None, int | None, int]]] = {
-    "unique": [("d", 4, 5), ("b", 2, 2), ("f", 6, 0), ("a", 1, 4), ("e", 5, 1), ("c", 3, 3)],
+    "unique": [
+        ("d", 4, 5),
+        ("b", 2, 2),
+        ("f", 6, 0),
+        ("a", 1, 4),
+        ("e", 5, 1),
+        ("c", 3, 3),
+    ],
     "duplicate": [
         ("b", 1, 5),
         ("a", 1, 2),

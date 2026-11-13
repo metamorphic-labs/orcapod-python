@@ -132,10 +132,14 @@ class _RowChecker:
             source, row_token, token_column = split_token(token)
             if column in self.oracle.derivations:
                 if token_column != column:
-                    self.fail(token_name, f"token {token!r} names column {token_column!r}")
+                    self.fail(
+                        token_name, f"token {token!r} names column {token_column!r}"
+                    )
             else:
                 if token_column != self.oracle.base_name(column):
-                    self.fail(token_name, f"token {token!r} names column {token_column!r}")
+                    self.fail(
+                        token_name, f"token {token!r} names column {token_column!r}"
+                    )
                 from_token = self.oracle.by_token.get((source, row_token))
                 if from_token is None:
                     self.fail(token_name, f"token {token!r} names no source row")
@@ -340,7 +344,9 @@ def assert_rows_aligned(
         AssertionError: Naming every misaligned row and column (the first few).
     """
     if require_rows:
-        assert table.num_rows > 0, "the table has no rows: the check would check nothing"
+        assert table.num_rows > 0, (
+            "the table has no rows: the check would check nothing"
+        )
     hasher = data_context.arrow_hasher
     context_key = data_context.context_key
     hash_column = layout.content_hash_column
