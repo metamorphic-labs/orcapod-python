@@ -481,3 +481,59 @@ def test_a_format_0_1_0_file_finds_its_join_table_and_never_shows_its_rows_as_no
         RuntimeError, match=r"'Join': its cache table .* the job file does not record"
     ):
         _ = node.as_table()
+
+
+# ---------------------------------------------------------------------------
+# get_cached_output on a loaded node (CodeRabbit, PR #352)
+# ---------------------------------------------------------------------------
+
+
+def test_get_cached_output_of_a_loaded_node_reads_its_runs_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``get_cached_output()`` on a loaded REPLAY node returns its run's rows."""
+    store = InMemoryArrowDatabase()
+    job = _run(store, "nullable_tag")
+    node = _load_replaying(_save(job, tmp_path), store).nodes["joined"]
+    cached = node.get_cached_output()
+    assert cached is not None
+    assert _sorted(cached.as_table()).equals(_sorted(job.nodes["joined"].as_table()))
+
+
+def test_get_cached_output_of_a_loaded_node_never_caches_unreadable_rows_as_none(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``get_cached_output()`` raises as ``as_table()`` does; later reads raise too."""
+    store = InMemoryArrowDatabase()
+    job = _run(store, "nullable_tag")
+    node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
+    with pytest.raises(RuntimeError, match="the job file does not record"):
+        _ = node.get_cached_output()
+    with pytest.raises(RuntimeError, match="the job file does not record"):
+        _ = node.as_table()
+
+
+# ---------------------------------------------------------------------------
+# A file whose nodes record nullability unevenly (CodeRabbit, PR #352)
+# ---------------------------------------------------------------------------
+
+
+def test_saving_again_drops_only_the_records_its_file_lacked(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A node without a record stays unrecorded; the other nodes keep theirs."""
+    store = InMemoryArrowDatabase()
+
+    def drop_src_a(data: dict[str, Any]) -> None:
+        """Remove the records of source node ``src_a`` only."""
+        for descriptor in data["pipeline"]["nodes"].values():
+            if descriptor["label"] == "src_a":
+                del descriptor["output_schema"]["nullable"]
+                del descriptor["source_config"]["nullable"]
+
+    saved = _save(_run(store, "nullable_tag_and_data"), tmp_path, drop_src_a)
+    resaved = tmp_path / "resaved.json"
+    PipelineJob.load(str(saved), store=store).save(resaved)
+    assert _recorded_fields(resaved) == _recorded_fields(saved)
+    assert _recorded_fields(resaved)["src_a"] is None
+    assert _recorded_fields(resaved)["src_b"] == {"tag": ["id"], "data": ["b"]}

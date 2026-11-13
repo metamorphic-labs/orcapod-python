@@ -20,7 +20,7 @@ Options 2 and 3 (saved operator run content hash; saved top-level nullability, r
 - 2026-11-12: investigation done and reported (commit 5b07349d); option 1 approved and
   done (c7e3e4d6). Developer then chose option 3 (all three). Tasks 1-5 implemented locally;
   presence of the `nullable` record / the operator's entry in `node_job_content_hashes`
-  decides lossless vs lossy load (never the version number). Pipeline._nullability_recorded
+  decides lossless vs lossy load (never the version number). Pipeline._unrecorded_*_nullability (per node)
   keeps a lossy file lossy on re-save; OperatorJobNode._run_content_hash() is None for a
   loaded node without a saved run hash, so re-save leaves it out.
 - PUSH RULE (coordinator): do not push the format fields until PR #345 (ITL-1026, format

@@ -1183,10 +1183,11 @@ class OperatorJobNode(OperatorNodeBase):
                 )
             else:
                 cause = (
-                    "they were stored by other runs: this store does not hold the rows "
-                    "of the saved run. Load with the store the run wrote."
+                    "they were stored by other runs. Either this store does not hold "
+                    "the rows of the saved run (load with the store the run wrote), or "
+                    "the run produced no rows: an empty result stores nothing."
                 )
-                head_cause = "they are other runs' rows (another store)"
+                head_cause = "they are other runs' rows (another store, or its run produced none)"
             raise _LoadedCacheUnreadableError(
                 f"OperatorJobNode {self.label!r}: its cache table "
                 f"({'/'.join(self._stored_table_path)}) holds {stored.num_rows} stored "
@@ -1320,8 +1321,17 @@ class OperatorJobNode(OperatorNodeBase):
         """Load cached results from DB, skip computation.
 
         If no cached records exist yet, produces an empty stream with
-        the correct schema (zero rows, correct columns).
+        the correct schema (zero rows, correct columns). A loaded node reads through
+        ``_load_cached_stream_from_db``, which raises when its run's rows cannot be
+        read, so an unreadable cache is never kept as an empty stream.
         """
+        if self._loaded:
+            stream = self._load_cached_stream_from_db()
+            if stream is None:
+                raise self._no_stored_results_error()
+            self._cached_output_stream = stream
+            self._update_modified_time()
+            return
         records = self._read_stored_records()
         if records is None:
             records = self._make_empty_table()

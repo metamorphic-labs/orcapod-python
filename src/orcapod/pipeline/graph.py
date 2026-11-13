@@ -68,10 +68,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     operator_node_class = OperatorNode
     side_effect_node_class = SideEffectNode
 
-    # False for a pipeline loaded from a file that does not record which columns may
-    # be null (ITL-1043): its schemas are lossy, so saving it again must not record
-    # their nullability as known.
-    _nullability_recorded: bool = True
+    # The nodes (by hash key) of a pipeline loaded from a file whose descriptor did not
+    # record which columns may be null (ITL-1043), in the output schema and in the
+    # source config. Their schemas are lossy, so saving again must not record them.
+    _unrecorded_output_nullability: frozenset[str] = frozenset()
+    _unrecorded_source_nullability: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -221,9 +222,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         descriptor["operator_config"] = node._operator.to_config()
                     descriptor["table_scope"] = node._table_scope
 
-            if not self._nullability_recorded:
-                # Loaded from a file without the record: what is known is unknown.
+            # A node loaded from a file without the record: its nullability is unknown.
+            if content_hash_str in self._unrecorded_output_nullability:
                 del descriptor["output_schema"]["nullable"]
+            if content_hash_str in self._unrecorded_source_nullability:
                 descriptor.get("source_config", {}).pop("nullable", None)
             nodes[content_hash_str] = descriptor
 
@@ -296,11 +298,19 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
-        # A file written before nullability was recorded (ITL-1043) restores every
-        # column as non-null: lossy. Saving the loaded pipeline keeps it unrecorded.
-        nullability_recorded = all(
-            "nullable" in (descriptor.get("output_schema") or {})
-            for descriptor in nodes_data.values()
+        # A descriptor written before nullability was recorded (ITL-1043) restores
+        # every column as non-null: lossy. Saving the loaded pipeline keeps it
+        # unrecorded, node by node.
+        unrecorded_output_nullability = frozenset(
+            node_hash
+            for node_hash, descriptor in nodes_data.items()
+            if "nullable" not in (descriptor.get("output_schema") or {})
+        )
+        unrecorded_source_nullability = frozenset(
+            node_hash
+            for node_hash, descriptor in nodes_data.items()
+            if "source_config" in descriptor
+            and "nullable" not in descriptor["source_config"]
         )
 
         for node_hash in topo_order:
@@ -454,7 +464,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
-        pipeline._nullability_recorded = nullability_recorded
+        pipeline._unrecorded_output_nullability = unrecorded_output_nullability
+        pipeline._unrecorded_source_nullability = unrecorded_source_nullability
         pipeline._persistent_node_map = dict(reconstructed)
 
         nodes_by_label: dict[str, GraphNode] = {}
@@ -538,7 +549,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         clone._node_graph = self._node_graph
         clone._auto_compile = self._auto_compile
         clone._compiled = self._compiled
-        clone._nullability_recorded = self._nullability_recorded
+        clone._unrecorded_output_nullability = self._unrecorded_output_nullability
+        clone._unrecorded_source_nullability = self._unrecorded_source_nullability
         # Mutable per-execution state — own copy so runs don't interfere
         clone._nodes = dict(self._nodes)
         return clone
