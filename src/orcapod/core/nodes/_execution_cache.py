@@ -150,6 +150,9 @@ class _Run:
         return _Definition(
             (
                 getattr(stream, "_execution_generation", 0),
+                getattr(
+                    getattr(stream, "_data_function", None), "_activation_generation", 0
+                ),
                 _Identity(producer),
                 producer.last_modified if producer is not None else None,
                 _Identity(getattr(stream, "_node_config", None)),

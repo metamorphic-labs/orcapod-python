@@ -1167,7 +1167,10 @@ class FunctionJobNode(RetainedRowsMixin, FunctionNodeBase):
         )
 
     def _begin_run(self) -> None:
-        """Make a node that delivers side effects look for older completions again.
+        """Refresh filtered activation state and recheck side-effect completions.
+
+        Filtered inputs are revisited after an activation change; successful
+        stored results remain reusable under their existing keys.
 
         Tables written before v0.3 can appear in a store between two runs of one
         node object. Such a node must find them before it delivers anything, so it
@@ -1178,6 +1181,20 @@ class FunctionJobNode(RetainedRowsMixin, FunctionNodeBase):
             SideEffectLogDataContextError: If this node delivers side effects and
                 completions it cannot match exist; nothing has been delivered then.
         """
+        # A None cache entry means the function filtered this input, not a
+        # persisted null-valued result. Reactivation must revisit those inputs.
+        # Keep successful results: activation does not change their stored keys.
+        activation = getattr(self._data_function, "_activation_generation", None)
+        if activation != getattr(self, "_cached_activation_generation", None):
+            self._cached_output_datas = {
+                key: row
+                for key, row in self._cached_output_datas.items()
+                if row[1] is not None
+            }
+            self._cached_output_table = None
+            self._cached_content_hash_column = None
+            self._completed_execution = None
+            self._cached_activation_generation = activation
         if self._delivers_side_effects:
             self._stale_tables_checked = False
             self._account_for_stale_tables()

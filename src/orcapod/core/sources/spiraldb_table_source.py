@@ -642,7 +642,8 @@ class SpiralDBTableSource(RootSource):
                 stream = await asyncio.to_thread(next, streams, None)
                 if stream is None:
                     break
-                for pair in self._stream_rows(stream):
+                rows = await asyncio.to_thread(list, self._stream_rows(stream))
+                for pair in rows:
                     yield pair
         finally:
             cancelled.set()

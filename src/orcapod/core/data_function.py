@@ -420,6 +420,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             executor = LocalPythonFunctionExecutor()
 
         self._function = function
+        self._activation_generation = 0
         self._is_async = inspect.iscoroutinefunction(function)
         # Reject functions with variadic parameters -- PythonDataFunction maps
         # data keys to named parameters, so the full parameter set must be fixed.
@@ -591,8 +592,16 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         return self._active
 
     def set_active(self, active: bool = True) -> None:
-        """Set the active state. If False, ``call`` returns None for every data."""
+        """Set the active state; disabled calls return None for every input.
+
+        Actual changes tell job nodes to revisit their filtered completions on
+        the next run. Repeating the same state preserves current results.
+        """
+        if active == self._active:
+            return
         self._active = active
+        self._activation_generation += 1
+        self._update_modified_time()
 
     @property
     def is_async(self) -> bool:
@@ -959,6 +968,11 @@ class DataFunctionWrapper(DataFunctionBase[E]):
         if kwargs.get("data_context") is None:
             kwargs["data_context"] = getattr(data_function, "data_context", None)
         super().__init__(**kwargs)
+
+    @property
+    def _activation_generation(self) -> int:
+        """Propagate the wrapped function's activation changes through cache wrappers."""
+        return getattr(self._data_function, "_activation_generation", 0)
 
     def computed_label(self) -> str | None:
         return self._data_function.label

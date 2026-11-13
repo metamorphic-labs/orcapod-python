@@ -121,3 +121,109 @@ def test_row_factory_preserves_source_values_with_table_nullability() -> None:
     from_rows, _ = StaticOutputOperatorPod._rows_to_table([(Tag({"k": 1}), retained)])
     from_table, _ = StaticOutputOperatorPod._rows_to_table([(Tag({"k": 1}), decoded)])
     assert from_rows.equals(from_table, check_metadata=True)
+
+
+def test_row_factory_preserves_nondefault_context_in_export() -> None:
+    """Retained rows and context-inclusive exports identify the same decoder."""
+    from dataclasses import replace
+    from orcapod import contexts
+    from orcapod.system_constants import constants
+
+    context = replace(contexts.get_default_context(), context_key="test:retained:rows")
+    pairs = [
+        (Tag({"k": 1}, data_context=context), Data({"x": 2}, data_context=context))
+    ]
+    stream = ArrowTableStream.from_rows(pairs)
+    assert stream.as_table(columns={"context": True})[
+        constants.CONTEXT_KEY
+    ].to_pylist() == [context.context_key]
+    stream.clear_cache()
+    assert list(stream.iter_data())[0][1].data_context_key == context.context_key
+
+
+def test_row_factory_rejects_provenance_override() -> None:
+    """A row-preserving factory cannot override the backing table independently."""
+    import pytest
+
+    pairs = [(Tag({"k": 1}), Data({"x": 2}, source_info={"x": "original"}))]
+    with pytest.raises(ValueError, match="source_info"):
+        ArrowTableStream.from_rows(pairs, source_info={"x": "replacement"})
+
+
+def test_row_factory_rejects_context_override() -> None:
+    """A single-context stream cannot silently relabel retained rows."""
+    from dataclasses import replace
+    from orcapod import contexts
+    import pytest
+
+    context = replace(contexts.get_default_context(), context_key="test:retained:other")
+    with pytest.raises(ValueError, match="context"):
+        ArrowTableStream.from_rows(rows(), data_context=context)
+
+
+def test_row_factory_rejects_system_tag_relabeling() -> None:
+    """Column relabeling belongs before constructing retained canonical rows."""
+    import pytest
+
+    with pytest.raises(ValueError, match="system_tag_columns"):
+        ArrowTableStream.from_rows(rows(), system_tag_columns=["k"])
+
+
+def test_row_factory_accepts_tagless_nondefault_stream_rows() -> None:
+    """Empty tags still belong to the row's context when a stream is retained."""
+    from dataclasses import replace
+    import pyarrow as pa
+    from orcapod import contexts
+
+    context = replace(
+        contexts.get_default_context(), context_key="test:retained:tagless"
+    )
+    source = ArrowTableStream(pa.table({"x": [1]}), data_context=context)
+    stream = ArrowTableStream.from_rows(list(source.iter_data()))
+    assert list(stream.iter_data())[0][0].data_context_key == context.context_key
+
+
+def test_storage_view_preserves_lazily_assigned_uuid() -> None:
+    """The view shares identity even when no caller has requested the UUID yet."""
+    original = Data({"x": 1})
+    view = original.storage_view()
+    assert view.datagram_uuid == original.datagram_uuid
+
+
+def test_row_factory_preserves_unregistered_subclass_context() -> None:
+    """Canonicalizing a subclass must keep its context object, not resolve its key."""
+    from dataclasses import replace
+    from orcapod import contexts
+    from orcapod.system_constants import constants
+
+    class CustomTag(Tag):
+        pass
+
+    class CustomData(Data):
+        pass
+
+    context = replace(
+        contexts.get_default_context(), context_key="test:retained:subclass"
+    )
+    for tag_type, data_type in [
+        (CustomTag, Data),
+        (Tag, CustomData),
+        (CustomTag, CustomData),
+    ]:
+        stream = ArrowTableStream.from_rows(
+            [
+                (
+                    tag_type({"k": 1}, data_context=context),
+                    data_type({"x": 2}, data_context=context),
+                )
+            ]
+        )
+        assert stream.data_context is context
+        assert stream.as_table(columns={"context": True})[
+            constants.CONTEXT_KEY
+        ].to_pylist() == [context.context_key]
+        for clear in (False, True):
+            if clear:
+                stream.clear_cache()
+            [(tag, data)] = list(stream.iter_data())
+            assert tag.data_context_key == data.data_context_key == context.context_key

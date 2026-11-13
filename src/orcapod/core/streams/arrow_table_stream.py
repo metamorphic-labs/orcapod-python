@@ -38,7 +38,8 @@ def stored_tag(tag: TagProtocol) -> TagProtocol:
     if type(tag) is Tag:
         return tag.storage_view(include_meta=False)
     return Tag(
-        tag.as_table(columns={"system_tags": True}), data_context=tag.data_context_key
+        tag.as_table(columns={"system_tags": True}),
+        data_context=getattr(tag, "data_context", tag.data_context_key),
     )
 
 
@@ -47,7 +48,8 @@ def stored_data(data: DataProtocol) -> DataProtocol:
     if type(data) is Data:
         return data.storage_view(include_meta=False)
     return Data(
-        data.as_table(columns={"source": True}), data_context=data.data_context_key
+        data.as_table(columns={"source": True}),
+        data_context=getattr(data, "data_context", data.data_context_key),
     )
 
 
@@ -70,7 +72,8 @@ def rows_to_table(
         if field.name.startswith(constants.SOURCE_PREFIX):
             schema = schema.set(i, field.with_nullable(data.column(i).null_count > 0))
     data = pa.Table.from_arrays(data.columns, schema=schema)
-    return arrow_utils.hstack_tables(tags, data), tuple(rows[0][0].keys())
+    table = arrow_utils.hstack_tables(tags, data) if tags.num_columns else data
+    return table, tuple(rows[0][0].keys())
 
 
 class ArrowTableStream(StreamBase):
@@ -197,13 +200,32 @@ class ArrowTableStream(StreamBase):
         and excludes metadata. Live subclass values are decoded as their stored
         declared types. Source-field nullability is normalized across the combined
         table; individual rows retain their own source schema. Payload values and
-        hashes are unchanged. Empty inputs require an explicit schema via __init__.
+        hashes are unchanged. All rows must share this stream's data context.
+        Source-info overrides and system-tag relabeling are rejected: transform
+        the rows first. Empty inputs require an explicit schema via __init__.
         """
+        if kwargs.get("source_info") is not None:
+            raise ValueError("from_rows does not accept source_info overrides")
+        if kwargs.get("system_tag_columns"):
+            raise ValueError("from_rows does not accept system_tag_columns relabeling")
         stored = [(stored_tag(tag), stored_data(data)) for tag, data in rows]
         table, tags = rows_to_table(stored)
         kwargs.setdefault(
             "data_context",
             getattr(stored[0][1], "data_context", stored[0][1].data_context_key),
+        )
+        context = contexts.resolve_context(kwargs["data_context"])
+        if any(
+            tag.data_context_key != context.context_key
+            or data.data_context_key != context.context_key
+            for tag, data in stored
+        ):
+            raise ValueError(
+                "from_rows requires rows and stream to share a data context"
+            )
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([data.data_context_key for _, data in stored], pa.large_string()),
         )
         stream = cls(table, tag_columns=tags, **kwargs)
         stream._cached_elements = stored
@@ -442,7 +464,7 @@ class ArrowTableStream(StreamBase):
                         )
                     else:
                         # A fresh empty tag per row, so rows never share one object.
-                        tag = Tag({})
+                        tag = Tag({}, data_context=self.data_context)
 
                     data = Data(
                         data_batch.slice(i, 1),  # type: ignore

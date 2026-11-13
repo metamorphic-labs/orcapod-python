@@ -1005,3 +1005,70 @@ class TestSnapshotRetentionControls:
         assert built[0]() is None
         assert built[1]() is None
         rows.close()
+
+
+def test_async_row_materialization_runs_off_event_loop(project, monkeypatch):
+    """Batch row creation and its memo lock run in a worker, not on the loop."""
+    import threading
+
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    source = SpiralDBTableSource(_PROJECT, "event")
+    loop_thread = threading.get_ident()
+    materialization_threads = []
+    original = ArrowTableStream.iter_data
+
+    def rows(stream):
+        materialization_threads.append(threading.get_ident())
+        assert threading.get_ident() != loop_thread
+        yield from original(stream)
+
+    monkeypatch.setattr(ArrowTableStream, "iter_data", rows)
+
+    async def collect():
+        return [pair async for pair in source.async_iter_data()]
+
+    first = asyncio.run(collect())
+    second = asyncio.run(collect())
+    assert len(first) == len(second) == _ROWS
+    assert materialization_threads
+    assert all(thread != loop_thread for thread in materialization_threads)
+    assert all(a is b for (_, a), (_, b) in zip(first, second))
+    assert len(fake_pyspiral.scan_log) == 1
+
+
+def test_cancellation_during_async_row_materialization_does_not_retain(
+    project, monkeypatch
+):
+    """Cancellation stays responsive while a worker owns the row-memo lock."""
+    import threading
+
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    source = SpiralDBTableSource(_PROJECT, "event")
+    entered = threading.Event()
+    release = threading.Event()
+    original = ArrowTableStream.iter_data
+
+    def rows(stream):
+        entered.set()
+        assert release.wait(5)
+        yield from original(stream)
+
+    monkeypatch.setattr(ArrowTableStream, "iter_data", rows)
+
+    async def cancel():
+        iterator = source.async_iter_data()
+        task = asyncio.ensure_future(anext(iterator))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+        finally:
+            release.set()
+
+    asyncio.run(cancel())
+    assert len(list(source.iter_data())) == _ROWS
+    assert len(list(source.iter_data())) == _ROWS
+    assert len(fake_pyspiral.scan_log) == 2

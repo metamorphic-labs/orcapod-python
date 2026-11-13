@@ -1046,6 +1046,8 @@ class Datagram(ContentIdentifiableBase):
             include_meta or not self._meta
         ):
             return self
+        # copy() carries the cached UUID; establish it before preserving identity.
+        _ = self.datagram_uuid
         view = self.copy(preserve_id=True)
         view._data_dict = None
         view._data_python_schema = None

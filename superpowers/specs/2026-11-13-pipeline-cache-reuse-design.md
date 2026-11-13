@@ -172,3 +172,18 @@ The original benchmark above remains a historical comparison against `89160c47`.
 A new run after integrating main again records zero warm Arrow hashes, user function
 calls and GroupBy calls in all four cases. Timing collected alongside validation is
 not a replacement for isolated measurements on the actual ediop dataset.
+
+## Further CodeRabbit review
+
+- Activation changes advance a function generation and freshness timestamp. A job
+  removes retained absent-output entries when that generation changes, preserving
+  successful cached results. Completion proofs include activation state so downstream
+  empty outputs cannot hide a reactivated function. Repeated unchanged activation
+  preserves the warm cache.
+- Async Spiral reads construct batch rows and acquire the snapshot lock in a worker
+  thread, keeping the event loop responsive, including during cancellation.
+- The row factory exports the retained context explicitly and requires consistent row
+  and stream contexts. It rejects provenance overrides and system-tag relabeling that
+  would silently make table and row views disagree; callers transform rows first.
+  Empty tags inherit their stream context. Storage views initialize a lazy UUID before
+  copying so original and view retain the same identity.
