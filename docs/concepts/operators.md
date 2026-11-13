@@ -66,6 +66,8 @@ not match each other; a null *inside* a list or struct is an ordinary element th
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
 
+A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
+
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
 pipeline-hash order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same
