@@ -8,10 +8,12 @@ implements what the spec marks Required or Proposed, and raises decisions only f
 spec marks Open or that the code makes impossible or ambiguous.
 **Developer decisions included** (November 12, 2026):
 - Every source's declared tags are referential **by default**.
-- An explicitly chosen plain (materialized) tag mode reproduces v0.3 exactly. This is proven
-  by the unchanged golden values, so the referential path is additive.
+- Tags named in `tag_only_columns` (a subset of `tag_columns`) stay materialized and reproduce
+  v0.3 exactly. This is proven by the unchanged golden values, so the referential path is
+  additive.
 - The change is a change of default behaviour.
 - `Join`'s three cases (§9.1) have equal standing.
+- At a pod boundary a reference whose data column does not survive becomes a plain tag (D1).
 
 **Code audited:** `origin/main` at `f51ce67c`.
 **Measurements:** `superpowers/specs/itl-1004-audit/` holds each script (run with `uv run`) and
@@ -51,7 +53,7 @@ its output (`.out`). Every example below comes from those outputs.
    system-tag column names, function-node pipeline record ids, and pipeline/operator/cached
    table paths. Unchanged: source ids, source record ids, row `Data` hashes and results of
    functions that read no key, and result table paths. A user reproduces v0.3 exactly by
-   naming the tags with the explicit plain-tag option (§6.2).
+   also naming the tags in `tag_only_columns` (§6.2).
 4. **Storage.** No stored-table layout changes. A referenced value is written once in every
    table kind. The binding is recovered on read by the same intersection rule from the saved
    `{tag, data}` descriptor.
@@ -164,7 +166,7 @@ What remains open is whether to add an *explicit* marker on `Schema` (decision D
 
 ### 3.1 Which identities see a binding
 
-| Identity | Hash input (file:line) | Sees a binding? | Explicit plain-tag source vs v0.3 |
+| Identity | Hash input (file:line) | Sees a binding? | Source with `tag_only_columns` vs v0.3 |
 |---|---|---|---|
 | Root `pipeline_hash` | `(tag_schema, data_schema)` (`core/sources/base.py:132-139`) | **Yes**, through the pair. `04 I1`: tag-only `b9e6…`, data-only `95a5…`, referential `cc81…` | identical |
 | Root `content_hash` | `(class, output_schema(), source_id)` (`base.py:88-90`) | **Yes** (`04 I3`) | identical |
@@ -183,7 +185,7 @@ The pattern of PRs #336 and #338 adds a term to an identity structure only when 
 given. Here the pattern needs only one explicit term, the `ArrowTableStream` one; everywhere
 else the binding enters as the name in both schema halves, absent in the plain mode. Proof
 obligations for ITL-1011:
-- every existing golden entry is unchanged, with the fixtures switched to the plain-tag option
+- every existing golden entry is unchanged, with the fixtures switched to `tag_only_columns`
   (§6.2);
 - new golden entries pin the referential default.
 
@@ -208,7 +210,7 @@ nothing about it moves.
 So retagging works as the spec intends (§2.2, §12.2): pipeline records are re-established
 under new paths, and results are found again. No migration step is required: the v0.3
 pipeline tables stay where they are, with current layouts, so they are not reported stale and
-are not read. The upgrade note names the plain-tag option for anyone who wants the old paths.
+are not read. The upgrade note names `tag_only_columns` for anyone who wants the old paths.
 
 One consequence is not covered by the result cache. `pod.process(source)` and
 `pod(source, strict=True)` (ITL-807's exact form) now see every key as an extra data column
@@ -236,7 +238,7 @@ and raise, unless the function takes all keys. That is decision D2.
 
 **Stored-schema changes, named exactly.**
 - No stored table changes, and the descriptor format is unchanged.
-- Source configs gain the plain-tag option (§6.2), written only when used. `from_config` for a
+- Source configs gain `tag_only_columns` (§6.2), written only when non-empty. `from_config` for a
   v0.3 config therefore gives the **new default**, consistent with the change of default.
 
 **Legacy data.** A v0.3 table or saved job has disjoint `tag`/`data` sets, so it reads as
@@ -387,38 +389,40 @@ Two further consequences:
   (ITL-1012). A plain all-tags source still raises, as in v0.3 (`06 H3`).
 - **The automatic join and select (ITL-807)** work as described in §5.1 and §3.3.
 
-### 6.2 The explicit plain-tag option (API shape, ITL-1012)
+### 6.2 The explicit tag-only option: `tag_only_columns` (DECIDED, ITL-1012)
 
-The previous behaviour must be reachable on every source through one option with one name.
-Options:
+The developer chose the name and shape (November 12, 2026):
+- `tag_columns=[...]` lists **all** tags, referential by default.
+- `tag_only_columns=[...]` names the subset kept as tags only (materialized, not data).
+- A name in `tag_only_columns` that is not in `tag_columns` raises `ValueError`.
+- The option has the same name on every source.
+- In prose the spec's terms "materialized" and "referential" stay for the concepts.
 
-| | Form | v0.3 equivalent | Mixed plain and referential in one source (§11.3: `lab` plain, `timestamp` referential) | Primary-key default (DB sources) |
-|---|---|---|---|---|
-| (a) **Recommended** | `tag_columns=[...]` (referential) and `plain_tag_columns=[...]` (materialized); a name in at most one | `ArrowTableSource(t, plain_tag_columns=["k"])` | yes | `plain_tag_columns=None` and `tag_columns=None` → keys referential; v0.3 = list the keys in `plain_tag_columns` |
-| (b) | `tag_columns=[...]` and `tag_binding="referential" \| "plain"` (source-wide) | `tag_columns=["k"], tag_binding="plain"` | no: needs a select or drop afterwards | `tag_binding="plain"` alone reproduces v0.3 |
-| (c) | `tag_columns={"k": "plain", "t": "ref"}` or a list | a mapping | yes | awkward |
+| Need | Call |
+|---|---|
+| v0.3 behaviour, byte-identical | `ArrowTableSource(t, tag_columns=["k"], tag_only_columns=["k"])` |
+| Mixed (§11.3: `lab` a label, `timestamp` referential) | `tag_columns=["lab", "timestamp"], tag_only_columns=["lab"]` |
+| DB sources with primary keys as the default tags | `tag_columns=None` gives the keys, referential. The v0.3 form lists the keys in both arguments. A shorthand for "all declared tags" (for example `tag_only_columns="all"`) would save listing them; that is the ITL-1012 worker's proposal to make |
 
-(a) is recommended because §11.3 needs both kinds on one source, and the name says what the
-column is. Name alternatives are `materialized_tag_columns` (the spec's word) and
-`label_columns`; "plain" is shorter and is the developer's word. For DB sources, (a) can add
-`plain_tag_columns="keys"` so v0.3 keys need not be listed by hand; that is the developer's
-call.
+Implementation: each source computes `reference_tags = tag_columns − tag_only_columns`
+and passes it to the builder (§6.1). `to_config` writes `tag_only_columns` only when it is
+non-empty.
 
 **Golden fixtures (`tests/test_hashing/golden/cases.py`).**
-- The 16 `tag_columns=` call sites switch to `plain_tag_columns=`. No fixture moves or is
-  renamed, and every entry stays byte-identical.
-- The two `SourceStreamBuilder` / `DerivedSource` cases (`:584-633`) need no edit: the builder
-  is explicit, and `DerivedSource` keeps its origin's binding once the origin fixture is
-  plain.
+- Each of the 15 source constructions with `tag_columns=` gains `tag_only_columns=` naming
+  the same columns. No fixture moves or is renamed, and every entry stays byte-identical.
+- The builder call (`:596`) and the `DerivedSource` case (`:618-633`) need no edit: the
+  builder is explicit, and `DerivedSource` keeps its origin's binding once the origin fixture
+  is tag-only.
 - `ListSource` (`:1699`) depends on D6.
 - New entries pin the referential default for each source kind, `Join` case 3, and `GroupBy`
   on a referential key.
 
-**Upgrade note (changelog fragment of ITL-1012), draft:** "Declared tag columns are now
-referential: each is also a data column of the same name, stored once, so a function pod can
-read it. This changes the schemas and hashes of pipelines that use `tag_columns`; computed
-function results are reused. To keep a tag as a plain label, with the v0.3 schemas and hashes,
-pass it as `plain_tag_columns=[...]`."
+**Upgrade note (changelog fragment of ITL-1012), draft.** "Declared tag columns are now
+referential by default: each is also a data column of the same name, stored once, so a
+function pod can read it. This changes the schemas and hashes of pipelines that use
+`tag_columns`; stored function results are reused. To keep a tag as a label only, with the
+v0.3 schemas and hashes, also name it in `tag_only_columns=[...]`."
 
 ### 6.3 `tags_as_data` (spec §11.5, §16: legacy meaning kept, explicit migration)
 
@@ -492,7 +496,7 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 |---|---|---|---|---|---|
 | 0 | **ITL-940** (add to the project) | reject a tag/data name collision across inputs (`Join`, `MergeJoin`, sync and async), pod output = tag name, `Index`/`Pick` `out=` = tag name; regression tests `01 R2`, `R5`, `05 M2` | M | — | — |
 | 1 | **ITL-1009 + ITL-1010 (merge)** | `reference_names`, the validator, `StreamBase.reference_tags()`; `ArrowTableStream(reference_tags=)`; its identity term; `_rows_to_table` and `_materialize_*` deduplication; all 32 rebuild sites pass references; spec §15.1 tests | M | 0 | — |
-| 2a | **ITL-1011 + ITL-1012 (land together)** | builder `reference_tags`; every source's default; `plain_tag_columns` (§6.2); `to_config`; golden fixtures switched, new entries; upgrade note | M | 1 | 2b-2e |
+| 2a | **ITL-1011 + ITL-1012 (land together)** | builder `reference_tags`; every source's default; `tag_only_columns` (§6.2); `to_config`; golden fixtures switched, new entries; upgrade note | M | 1 | 2b-2e |
 | 2b | **ITL-1015** | select and drop by role; config, diagnostic, `binding_transitions`; §15.5 tests | S | 1 | 2a, 2c-2e |
 | 2c | **ITL-1016** | `Join` three cases, sync and async; field-level provenance per D5; §15.4 tests; `06 J1` pinned | M | 1 | 2a, 2b, 2d, 2e |
 | 2d | **ITL-1017** | `GroupBy` key scalar in data; `Batch` tests; §15.3 tests | S | 1 | others |
@@ -518,7 +522,7 @@ but touches every operator.
 
 **Splits and merges.** Merge ITL-1009 into ITL-1010: with the intersection rule ITL-1009 is a
 helper and a validator, testable only with a stream. Land ITL-1011 with ITL-1012: the golden
-fixture switch is the proof ITL-1011 asks for, and it needs the plain-tag option. ITL-1013
+fixture switch is the proof ITL-1011 asks for, and it needs `tag_only_columns`. ITL-1013
 depends on ITL-1015 (the automatic select). Add ITL-940 to the project as the first issue.
 
 **Blocked by other issues?**
@@ -612,11 +616,10 @@ needs a shape).**
   fixture edit, and the upgrade note says so.
 - (b) Referential like every source, with a plain option added to `ListSource`.
 
-**D7. The plain-tag option's name and form (§6.2).**
-- (a) **Recommended.** `plain_tag_columns=[...]` beside `tag_columns`, the same on every
-  source, plus optionally `plain_tag_columns="keys"` on database sources.
-- (b) The source-wide `tag_binding="plain"`.
-- (c) A mapping.
+**D7. The tag-only option: DECIDED** (developer, November 12, 2026). It is
+`tag_only_columns=[...]`, a subset of `tag_columns` (§6.2). Open for the ITL-1012 worker to
+propose: a shorthand for "all declared tags", useful for database sources whose tags default
+to primary keys.
 
 ---
 
