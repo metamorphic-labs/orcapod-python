@@ -115,4 +115,9 @@ progress). `clear_cache` already clears it.
 
 ## Notes for a successor
 
-- Status: (update as work proceeds)
+- Status (2026-11-13): tests (b5247136) failed 8 sequential cases before the fix; fix in
+  `FunctionPodStream.is_stale` / `_input_read_to_end`; targeted suites pass (1472); repro and
+  the ITL-1034 suite's interleaved cases (`--runxfail`, 117) pass. Docs, F19, F18 pointer and
+  changelog fragment written. Next: merge origin/main, push, PR, Copilot.
+- The ITL-1034 branch's strict `ITL_1065` xfail marks will XPASS once this merges: that branch
+  must drop them.
