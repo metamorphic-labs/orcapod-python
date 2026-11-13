@@ -24,6 +24,4 @@ concatenated by name; rows that disagree on a column's Arrow type raise
 `InputValidationError` naming the column and both types, never a widened type. No stored value, record id or hash changes. The zero-row table of a
 node that has not run is still built from the Python output schema (the ITL-912 problem, for
 function nodes).
-The Delta store's own type changes (unsigned to signed, `timestamp[s/ms/ns]` to `[us]`, a zone
-to UTC) are the second part of ITL-928; until they are fixed, rows read from a Delta store and
-rows computed in the same run can disagree, which now raises.
+The Delta store's own type changes are entry DT1 (`design_issues/ITL-928-DT1.md`).

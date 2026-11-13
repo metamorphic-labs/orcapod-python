@@ -21,11 +21,11 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.sources import CachedSource
 from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import InputValidationError
 from orcapod.sources import ArrowTableSource
 from orcapod.types import CacheMode
 from orcapod.utils import arrow_utils
 
-PART_B = "ITL-928 part B: the Delta store does not keep this Arrow type"
 
 _T = [
     dt.datetime(2026, 3, 24, 17, 54, 17, 123456) + dt.timedelta(days=i)
@@ -61,18 +61,6 @@ COLUMNS: dict[str, pa.Array[Any]] = {
         pa.struct([("u", pa.uint16()), ("t", pa.timestamp("ms"))]),
     ),
 }
-# Types the Delta writer converts on main: a read gives another type back.
-CHANGED = {
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "timestamp[s]",
-    "timestamp[ms]",
-    "timestamp[us, New_York]",
-    "large_list<uint32>",
-    "struct<u: uint16, t: timestamp[ms]>",
-}
 
 
 def _written_and_read(tmp_path: pathlib.Path, column: pa.Array[Any]) -> pa.Table:
@@ -90,10 +78,8 @@ def _written_and_read(tmp_path: pathlib.Path, column: pa.Array[Any]) -> pa.Table
 
 @pytest.mark.parametrize("name", list(COLUMNS))
 def test_a_read_returns_the_written_type_and_values(
-    name: str, tmp_path: pathlib.Path, request: pytest.FixtureRequest
+    name: str, tmp_path: pathlib.Path
 ) -> None:
-    if name in CHANGED:
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
     column = COLUMNS[name]
 
     read = _written_and_read(tmp_path, column)
@@ -104,7 +90,6 @@ def test_a_read_returns_the_written_type_and_values(
     assert read.column("c").to_pylist() == column.to_pylist()
 
 
-@pytest.mark.xfail(reason=PART_B, strict=True)
 @pytest.mark.parametrize(
     "column",
     [
@@ -122,7 +107,6 @@ def test_an_unsigned_value_above_the_signed_range_round_trips(
     assert read.column("c").to_pylist() == column.to_pylist()
 
 
-@pytest.mark.xfail(reason=PART_B, strict=True)
 def test_nanosecond_timestamps_keep_their_digits(tmp_path: pathlib.Path) -> None:
     column = pa.array(
         [1_700_000_000_123_456_789, 1, 1_700_000_000_000_000_001], pa.timestamp("ns")
@@ -134,7 +118,6 @@ def test_nanosecond_timestamps_keep_their_digits(tmp_path: pathlib.Path) -> None
     assert read.column("c").to_pylist() == column.to_pylist()
 
 
-@pytest.mark.xfail(reason=PART_B, strict=True)
 @pytest.mark.parametrize(
     "column",
     [
@@ -200,11 +183,9 @@ def _chained_job(root: pathlib.Path, table: pa.Table) -> PipelineJob:
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("name", list(TAGS))
 def test_a_rerun_on_the_same_store_writes_no_pipeline_rows(
-    name: str, mode: str, tmp_path: pathlib.Path, request: pytest.FixtureRequest
+    name: str, mode: str, tmp_path: pathlib.Path
 ) -> None:
     """The ITL-990 case: source -> pod -> pod, run twice; a fresh job reads 3 rows."""
-    if name != "int8":
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     table = _source_table(TAGS[name])
@@ -226,11 +207,7 @@ def test_a_rerun_on_the_same_store_writes_no_pipeline_rows(
 
 
 @pytest.mark.parametrize("name", list(TAGS))
-def test_a_fresh_job_reads_the_tag_type(
-    name: str, tmp_path: pathlib.Path, request: pytest.FixtureRequest
-) -> None:
-    if name != "int8":
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
+def test_a_fresh_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
     table = _source_table(TAGS[name])
     _chained_job(tmp_path, table).run()
 
@@ -245,11 +222,7 @@ def test_a_fresh_job_reads_the_tag_type(
 
 
 @pytest.mark.parametrize("name", list(TAGS))
-def test_a_loaded_job_reads_the_tag_type(
-    name: str, tmp_path: pathlib.Path, request: pytest.FixtureRequest
-) -> None:
-    if name != "int8":
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
+def test_a_loaded_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
     job = _chained_job(tmp_path / "store", _source_table(TAGS[name]))
     job.run()
     job.save(tmp_path / "job.json")
@@ -264,10 +237,8 @@ def test_a_loaded_job_reads_the_tag_type(
 
 @pytest.mark.parametrize("name", list(TAGS))
 def test_an_operator_replay_reads_the_tag_type(
-    name: str, tmp_path: pathlib.Path, request: pytest.FixtureRequest
+    name: str, tmp_path: pathlib.Path
 ) -> None:
-    if name != "int8":
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
     table = pa.Table.from_arrays(
         [TAGS[name], pa.array([1, 2, 3], pa.int64()), pa.array([4, 5, 6], pa.int64())],
         schema=pa.schema(
@@ -298,11 +269,7 @@ def test_an_operator_replay_reads_the_tag_type(
 
 
 @pytest.mark.parametrize("name", list(TAGS))
-def test_a_cached_source_reads_the_tag_type(
-    name: str, tmp_path: pathlib.Path, request: pytest.FixtureRequest
-) -> None:
-    if name != "int8":
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
+def test_a_cached_source_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
     table = _source_table(TAGS[name])
 
     def cached() -> CachedSource:
@@ -314,3 +281,130 @@ def test_a_cached_source_reads_the_tag_type(
     cached().as_table()
 
     assert cached().as_table().schema.field("k").type == TAGS[name].type
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "uint32",
+        "timestamp[ms]",
+        "timestamp[us, New_York]",
+        "large_list<uint32>",
+        "struct<u: uint16, t: timestamp[ms]>",
+    ],
+)
+def test_appends_and_merges_keep_the_type(name: str, tmp_path: pathlib.Path) -> None:
+    """A second commit (append) and a third with a stored id (merge) keep the type."""
+    column = COLUMNS[name]
+    ids = pa.array([b"a", b"b", b"c"], pa.large_binary())
+    rows = pa.table({"id": ids, "c": column})
+    store = DeltaTableDatabase(tmp_path)
+    store.add_records(("t",), rows.slice(0, 1), record_id_column="id", flush=True)
+    store.add_records(("t",), rows.slice(1, 1), record_id_column="id", flush=True)
+    # Holds an id already stored, so the commit is a MERGE.
+    store.add_records(
+        ("t",),
+        rows.slice(1, 2),
+        record_id_column="id",
+        skip_duplicates=True,
+        flush=True,
+    )
+
+    for reader in (store, DeltaTableDatabase(tmp_path)):
+        read = reader.get_all_records(("t",), record_id_column="id")
+        assert read is not None
+        read = read.sort_by("id")
+        assert read.schema.field("c").type == arrow_utils.normalize_to_large_types(
+            column.type
+        )
+        assert read.column("c").to_pylist() == column.to_pylist()
+        one = reader.get_record_by_id(("t",), b"b", record_id_column="id")
+        assert one is not None
+        assert one.schema.field("c").type == read.schema.field("c").type
+
+
+def test_nanoseconds_cannot_be_appended_to_a_table_written_before_the_fix(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A build before ITL-928 stored ``timestamp[ns]`` as ``timestamp[us]``.
+
+    The integer form this build writes differs from that stored type, so the append
+    is refused (nothing is written) and the store must be rebuilt.
+    """
+    from deltalake import write_deltalake
+
+    column = pa.array([1_700_000_000_123_456_000], pa.timestamp("ns"))
+    write_deltalake(
+        str(tmp_path / "t"),
+        pa.table({"__record_id": pa.array([b"a"], pa.large_binary()), "c": column}),
+    )
+    store = DeltaTableDatabase(tmp_path)
+    store.add_records(
+        ("t",),
+        pa.table({"id": pa.array([b"b"], pa.large_binary()), "c": column}),
+        record_id_column="id",
+    )
+
+    with pytest.raises(InputValidationError, match="'c'"):
+        store.flush()
+
+
+@pytest.mark.parametrize(
+    ("stored", "incoming"),
+    [
+        (pa.array([1], pa.uint32()), pa.array([2], pa.int32())),
+        (pa.array([1], pa.timestamp("ns")), pa.array([2], pa.int64())),
+        (pa.array([1], pa.int64()), pa.array([2], pa.timestamp("ns"))),
+        (pa.array([1], pa.timestamp("ms")), pa.array([2], pa.timestamp("us"))),
+    ],
+    ids=["uint32<-int32", "ns<-int64", "int64<-ns", "ms<-us"],
+)
+def test_an_append_of_another_type_is_refused(
+    stored: pa.Array[Any], incoming: pa.Array[Any], tmp_path: pathlib.Path
+) -> None:
+    """Written in the same Delta form, two types are still two types."""
+    store = DeltaTableDatabase(tmp_path)
+    store.add_records(
+        ("t",),
+        pa.table({"id": pa.array([b"a"], pa.large_binary()), "c": stored}),
+        record_id_column="id",
+        flush=True,
+    )
+    store.add_records(
+        ("t",),
+        pa.table({"id": pa.array([b"b"], pa.large_binary()), "c": incoming}),
+        record_id_column="id",
+    )
+
+    with pytest.raises(InputValidationError, match="'c'"):
+        store.flush()
+
+
+def test_unsigned_rows_append_to_a_signed_column_without_a_recorded_type(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A column with no recorded type may hold an unsigned column a build before
+    ITL-928 wrote (Delta's ``int32`` for ``uint32``): appending to it is not refused,
+    as before. Such a store must be rebuilt (developer, November 12, 2026)."""
+    store = DeltaTableDatabase(tmp_path)
+    store.add_records(
+        ("t",),
+        pa.table(
+            {"id": pa.array([b"a"], pa.large_binary()), "c": pa.array([1], pa.int32())}
+        ),
+        record_id_column="id",
+        flush=True,
+    )
+    store.add_records(
+        ("t",),
+        pa.table(
+            {"id": pa.array([b"b"], pa.large_binary()), "c": pa.array([2], pa.uint32())}
+        ),
+        record_id_column="id",
+        flush=True,
+    )
+
+    read = DeltaTableDatabase(tmp_path).get_all_records(("t",), record_id_column="id")
+    assert read is not None
+    assert read.schema.field("c").type == pa.int32()
+    assert read.sort_by("id").column("c").to_pylist() == [1, 2]

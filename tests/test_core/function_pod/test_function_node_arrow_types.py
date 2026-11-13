@@ -84,27 +84,6 @@ TAG_COLUMNS: dict[str, Callable[[], pa.Array[Any]]] = {
     "Path": lambda: _logical(pathlib.Path, [pathlib.Path(p) for p in "abc"]),
 }
 
-# Types the Delta store cannot write at all (part B of ITL-928).
-DELTA_CANNOT_WRITE = {
-    "date64",
-    "time32[s]",
-    "time64[us]",
-    "duration[s]",
-    "duration[us]",
-}
-# Types the Delta store writes as another type, so a read back differs (part B).
-DELTA_CHANGES = {
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "timestamp[s]",
-    "timestamp[ms]",
-    "timestamp[ns]",
-    "timestamp[us, New_York]",
-}
-PART_B = "ITL-928 part B: the Delta store does not keep this Arrow type"
-
 
 @function_pod(output_keys="y")
 def double(x: int) -> int:
@@ -158,11 +137,6 @@ def _build(store, table: pa.Table, *, chained: bool = False) -> PipelineJob:
     return job
 
 
-def _xfail_delta(request: pytest.FixtureRequest, name: str, store: str) -> None:
-    if store == "delta" and name in DELTA_CANNOT_WRITE:
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
-
-
 # ---------------------------------------------------------------------------
 # as_table() after a run: the node's own rows (part A)
 # ---------------------------------------------------------------------------
@@ -172,9 +146,8 @@ def _xfail_delta(request: pytest.FixtureRequest, name: str, store: str) -> None:
 @pytest.mark.parametrize("store", ["memory", "delta"])
 @pytest.mark.parametrize("name", list(TAG_COLUMNS))
 def test_as_table_after_run_keeps_tag_type(
-    name: str, store: str, mode: str, tmp_path: pathlib.Path, request
+    name: str, store: str, mode: str, tmp_path: pathlib.Path
 ) -> None:
-    _xfail_delta(request, name, store)
     job = _build(_new_store(store, tmp_path), _source_table(name))
     _run(job, mode)
 
@@ -252,10 +225,8 @@ def test_as_table_mixing_stored_and_new_rows_keeps_tag_type() -> None:
 @pytest.mark.parametrize("store", ["memory", "delta"])
 @pytest.mark.parametrize("name", list(TAG_COLUMNS))
 def test_store_read_back_keeps_tag_type(
-    name: str, store: str, tmp_path: pathlib.Path, request
+    name: str, store: str, tmp_path: pathlib.Path
 ) -> None:
-    if store == "delta" and name in DELTA_CANNOT_WRITE | DELTA_CHANGES:
-        request.applymarker(pytest.mark.xfail(reason=PART_B, strict=True))
     database = _new_store(store, tmp_path)
     table = _source_table(name)
     _build(database, table).run()
@@ -273,16 +244,43 @@ def test_store_read_back_keeps_tag_type(
     assert fresh.as_table().schema.field("k").type == _expected(name)
 
 
-def test_rows_disagreeing_on_a_tag_type_raise_naming_the_column(
+def _as_written_before_the_fix(root: pathlib.Path) -> None:
+    """Rewrite every Delta table under ``root`` as a build before ITL-928 left it.
+
+    Such a build stored a ``uint32`` column as Delta's ``int32`` with no recorded type.
+    """
+    import deltalake
+
+    # The recorded-type key is what this test removes; it is not public API.
+    from orcapod.databases.delta_arrow_types import ARROW_TYPE_KEY
+
+    for log in root.rglob("_delta_log"):
+        table = deltalake.DeltaTable(str(log.parent)).to_pyarrow_table()
+        fields = [
+            f.with_metadata(
+                {k: v for k, v in (f.metadata or {}).items() if k != ARROW_TYPE_KEY}
+            )
+            for f in table.schema
+        ]
+        deltalake.write_deltalake(
+            str(log.parent),
+            pa.Table.from_arrays(table.columns, schema=pa.schema(fields)),
+            mode="overwrite",
+            schema_mode="overwrite",
+        )
+
+
+def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
     tmp_path: pathlib.Path,
 ) -> None:
     """Rows of one node never make a column of a type none of them has.
 
-    Until part B, a Delta store gives a ``uint32`` tag back as ``int32``: rows served
-    from the store and rows computed now then disagree, and the node says so instead
-    of picking a type. Part B makes this case agree (the store keeps ``uint32``).
+    A Delta store written before ITL-928 gives a ``uint32`` tag back as ``int32``:
+    rows served from it and rows computed now disagree, and the node says so instead
+    of picking a type. Such a store must be rebuilt.
     """
     _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    _as_written_before_the_fix(tmp_path)
     job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
     job.run()
 
@@ -293,3 +291,17 @@ def test_rows_disagreeing_on_a_tag_type_raise_naming_the_column(
     assert "'k'" in message
     assert "int32" in message
     assert "uint32" in message
+
+
+def test_new_rows_over_a_store_written_after_the_fix_keep_the_tag_type(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The same run over a store this build wrote: one table, typed as the input."""
+    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    job.run()
+
+    table = job.nodes["double"].as_table()
+
+    assert table.num_rows == 3
+    assert table.schema.field("k").type == pa.uint32()
