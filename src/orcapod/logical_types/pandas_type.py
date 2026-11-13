@@ -25,6 +25,7 @@ from orcapod.hashing.pandas_value_hash import (
     PANDAS_DATAFRAME_OPTIONS,
     PANDAS_SERIES_OPTIONS,
     PANDAS_UNNAMED_SERIES_COLUMN,
+    pandas_attrs_as_stored,
 )
 from orcapod.logical_types.ignore_list import IgnoreListLogicalType
 
@@ -174,9 +175,11 @@ class LogicalPandasDataFrame(IgnoreListLogicalType):
             schema, index, and data.
 
         Raises:
-            ValueError: If any column cannot be converted to an Arrow type, or column
-                labels and index names collide once written as text.
+            ValueError: If any column cannot be converted to an Arrow type, column
+                labels and index names would not read back as they are (they collide
+                once written as text), or ``attrs`` cannot be written as JSON.
         """
+        pandas_attrs_as_stored(value.attrs)  # refuses attrs that are not JSON
         try:
             table = pa.Table.from_pandas(value, preserve_index=True)
         except pa.lib.ArrowInvalid as exc:
@@ -248,8 +251,9 @@ class LogicalPandasSeries(IgnoreListLogicalType):
 
         Raises:
             ValueError: If ``value.name`` equals the reserved sentinel, the Series
-                values cannot be converted to an Arrow type, or the name and the index
-                names collide once written as text.
+                values cannot be converted to an Arrow type, the name and the index
+                names collide once written as text, or ``attrs`` cannot be written as
+                JSON.
         """
         if value.name == _SERIES_UNNAMED_SENTINEL:
             raise ValueError(
@@ -258,6 +262,7 @@ class LogicalPandasSeries(IgnoreListLogicalType):
                 "Rename the Series before storing it."
             )
         col_name = value.name if value.name is not None else _SERIES_UNNAMED_SENTINEL
+        pandas_attrs_as_stored(value.attrs)  # refuses attrs that are not JSON
         df = value.to_frame(name=col_name)
         try:
             table = pa.Table.from_pandas(df, preserve_index=True)

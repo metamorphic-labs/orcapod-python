@@ -36,6 +36,7 @@ def _frame(reverse: bool) -> pd.DataFrame:
 
 @function_pod(output_keys="df")
 def make_frame(reverse: bool) -> pd.DataFrame:
+    """The frame of ``_frame`` in the asked order."""
     return _frame(reverse)
 
 
@@ -118,6 +119,7 @@ _EXPECTED = {"fwd": "a/i", "rev": "b/j"}
 def _run(
     store: ArrowDatabaseProtocol, orchestrator_name: str, rows: list[tuple[str, bool]]
 ) -> PipelineJob:
+    """Run ``make_frame -> leading_names`` over ``rows`` on ``store`` with the named orchestrator."""
     source = DictSource(
         [{"k": key, "reverse": reverse} for key, reverse in rows], tag_columns=["k"]
     )
@@ -132,9 +134,12 @@ def _run(
 @pytest.mark.parametrize("store_name", list(_STORES))
 @pytest.mark.parametrize("orchestrator_name", list(_ORCHESTRATORS))
 class TestPandasColumnOrder:
+    """Column order of a frame in a pipeline, on every store and orchestrator."""
+
     def test_frames_stored_with_their_order(
         self, store_name: str, orchestrator_name: str, tmp_path: Path
     ) -> None:
+        """A stored frame reads back with its own column and level order."""
         job = _run(
             _STORES[store_name](tmp_path),
             orchestrator_name,

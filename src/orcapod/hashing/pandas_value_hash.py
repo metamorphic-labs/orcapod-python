@@ -91,8 +91,10 @@ Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone,
              | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
              | "arrow"                                  pd.ArrowDtype; the type is in the digest
 
-``<attrs>`` is ``attrs`` as the JSON object it is stored as (``{}`` when it is empty or
-cannot be written as JSON, which is when storage drops it). ``kind`` is the name of the
+``<attrs>`` is ``attrs`` as the JSON object it is stored as: ``{1: "x"}`` is
+``{"1": "x"}`` and a tuple is a list. ``attrs`` with an entry JSON cannot write (a ``set``,
+a tuple as a key) are refused with ``ValueError`` naming the key, by the hash and by
+storage alike. ``kind`` is the name of the
 value's logical type.
 
 A period alias is pandas' own period frequency string (``"M"``, ``"Q-DEC"``, as in
@@ -300,12 +302,6 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
         "(object ints read back int64)",
     ),
     PandasIdentityProperty(
-        "attrs_not_json",
-        False,
-        "",
-        "attrs that cannot be written as JSON: storage drops them, so they hash as {}",
-    ),
-    PandasIdentityProperty(
         "dict_key_order",
         False,
         "",
@@ -472,16 +468,35 @@ def _column_descriptor(label: Any, dtype: Any) -> list[Any]:
     return [pandas_label_descriptor(label), dtype_term]
 
 
-def _attrs_term(attrs: Any) -> Any:
-    """Return ``attrs`` as the JSON object storage keeps, ``{}`` when storage drops it.
+def pandas_attrs_as_stored(attrs: Any) -> Any:
+    """Return ``attrs`` as the JSON object storage keeps, refusing what JSON cannot hold.
 
-    pyarrow writes ``attrs`` as JSON and writes ``{}`` when it cannot, so a value read back
-    has the JSON form: ``{1: "x"}`` reads back ``{"1": "x"}``, a tuple reads back a list.
+    Storage writes ``attrs`` as JSON, so a value read back has the JSON form:
+    ``{1: "x"}`` reads back ``{"1": "x"}`` and a tuple reads back a list. An entry JSON
+    cannot write (a ``set``, an arbitrary object, a tuple as a key) is refused here, by
+    Orcapod, so that storing and hashing behave alike on every pyarrow version: pyarrow
+    would drop the whole ``attrs`` with a warning, or raise ``TypeError``, depending on its
+    version.
+
+    Args:
+        attrs: The ``attrs`` dict of a DataFrame or Series.
+
+    Returns:
+        ``attrs`` in the form it reads back from storage in.
+
+    Raises:
+        ValueError: If an entry cannot be written as JSON; the message names its key.
     """
-    try:
-        return json.loads(json.dumps(attrs))
-    except (TypeError, ValueError):
-        return {}
+    for key, value in attrs.items():
+        try:
+            json.dumps({key: value})
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"attrs[{key!r}] cannot be written as JSON, so storage cannot keep it "
+                f"({exc}). Use JSON values (text, numbers, booleans, None, lists, "
+                "dicts with text keys) or remove the entry."
+            ) from exc
+    return json.loads(json.dumps(attrs))
 
 
 def _restored_form(
@@ -675,7 +690,7 @@ def _frame_descriptor(
     return {
         "kind": "orcapod.pandas.dataframe",
         "height": len(df),
-        "attrs": {} if "attrs" in ignore else _attrs_term(df.attrs),
+        "attrs": {} if "attrs" in ignore else pandas_attrs_as_stored(df.attrs),
         "columns": [
             _column_descriptor(label, dtype)
             for label, dtype in zip(axes.column_labels, stored.column_dtypes)
@@ -706,7 +721,7 @@ def _series_descriptor(
     return {
         "kind": "orcapod.pandas.series",
         "height": len(series),
-        "attrs": {} if "attrs" in ignore else _attrs_term(series.attrs),
+        "attrs": {} if "attrs" in ignore else pandas_attrs_as_stored(series.attrs),
         "name": (
             pandas_label_descriptor(stored.axes.column_labels[0]) if named else None
         ),

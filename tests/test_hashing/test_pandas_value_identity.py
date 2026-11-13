@@ -28,22 +28,27 @@ from orcapod.logical_types import LogicalPandasDataFrame, LogicalPandasSeries
 
 
 def _content_hash(value: Any) -> Any:
+    """The semantic hash of ``value`` under the default data context."""
     return get_default_context().semantic_hasher.hash_object(value)
 
 
 def _hash(value: Any) -> str:
+    """The semantic hash of ``value`` as text (label and hex digest)."""
     return _content_hash(value).to_string()
 
 
 def _frame() -> pd.DataFrame:
+    """Columns ``a`` (ints) and ``b`` (strings), two rows, default index."""
     return pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
 
 
 def _multi_index() -> pd.MultiIndex:
+    """A two-level index named ``i``, ``j``."""
     return pd.MultiIndex.from_tuples([(0, "p"), (1, "q")], names=["i", "j"])
 
 
 def _struct_frame(order: list[str]) -> pd.DataFrame:
+    """One ``pd.ArrowDtype`` struct column whose fields are in ``order``."""
     types = {"u": pa.int64(), "v": pa.large_string()}
     struct = pa.struct([(name, types[name]) for name in order])
     array = pa.array([{"u": 1, "v": "x"}], struct)
@@ -51,12 +56,14 @@ def _struct_frame(order: list[str]) -> pd.DataFrame:
 
 
 def _with_columns_name(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    """A copy of ``df`` whose column axis is named ``name``."""
     out = df.copy()
     out.columns = out.columns.rename(name)
     return out
 
 
 def _with_attrs(value: Any, attrs: dict[Any, Any] | None = None) -> Any:
+    """A copy of ``value`` with ``attrs`` (default ``{'unit': 'mV'}``)."""
     out = value.copy()
     out.attrs = {"unit": "mV"} if attrs is None else attrs
     return out
@@ -70,11 +77,13 @@ def _daily(with_freq: bool) -> pd.DataFrame:
 
 
 def _categorical(categories: list[str], ordered: bool = False) -> pd.DataFrame:
+    """One categorical column with the given categories and ordered flag."""
     values = pd.Categorical(["x", "y"], categories=categories, ordered=ordered)
     return pd.DataFrame({"a": values})
 
 
 def _timestamp_labels(tz: str | None) -> pd.DataFrame:
+    """A frame whose column labels are timestamps, naive or in ``tz``."""
     labels = pd.DatetimeIndex(pd.to_datetime(["2020-01-01", "2020-01-02"]))
     return pd.DataFrame(
         [[1, 2]], columns=labels if tz is None else labels.tz_localize(tz)
@@ -217,7 +226,6 @@ EQUAL: dict[str, tuple[Any, Any]] = {
             {"a": [1, 2], "b": ["x", "y"]}, index=pd.Index([0, 1], dtype="int64")
         ),
     ),
-    "attrs not JSON": (_frame(), _with_attrs(_frame(), {"o": {1, 2}})),
     "attrs key order": (
         _with_attrs(_frame(), {"a": 1, "b": 2}),
         _with_attrs(_frame(), {"b": 2, "a": 1}),
@@ -353,7 +361,6 @@ PROPERTY_OF_PAIR: dict[str, str] = {
     "RangeIndex vs Index[int64]": "index_kind",
     "attrs": "attrs",
     "Series attrs": "attrs",
-    "attrs not JSON": "attrs_not_json",
     "index freq": "index_freq",
     "unused MultiIndex levels": "index_unused_levels",
     "string storage": "string_storage",
@@ -367,10 +374,13 @@ PROPERTY_OF_PAIR: dict[str, str] = {
 
 
 def _assert_fn(value: Any) -> Callable[[Any, Any], None]:
+    """pandas' assert function for the kind of ``value``."""
     return assert_series_equal if isinstance(value, pd.Series) else assert_frame_equal
 
 
 class TestFollowsPandasEquality:
+    """Values pandas tells apart hash apart; values it calls equal hash equal."""
+
     @pytest.mark.parametrize("name", list(DISTINCT))
     def test_pandas_distinguishes_the_pair(self, name: str) -> None:
         """Precondition: pandas' assert function says the two values differ."""
@@ -380,16 +390,19 @@ class TestFollowsPandasEquality:
 
     @pytest.mark.parametrize("name", list(DISTINCT))
     def test_distinct_values_hash_differently(self, name: str) -> None:
+        """The two values of a ``DISTINCT`` pair hash differently."""
         first, second = DISTINCT[name]
         assert _hash(first) != _hash(second)
 
     @pytest.mark.parametrize("name", list(EQUAL))
     def test_pandas_calls_the_pair_equal(self, name: str) -> None:
+        """Precondition: pandas' assert function accepts the pair."""
         first, second = EQUAL[name]
         _assert_fn(first)(first, second)
 
     @pytest.mark.parametrize("name", list(EQUAL))
     def test_equal_values_hash_equal(self, name: str) -> None:
+        """The two values of an ``EQUAL`` pair hash equal."""
         first, second = EQUAL[name]
         assert _hash(first) == _hash(second)
 
@@ -398,6 +411,7 @@ class TestIdentityProperties:
     """``PANDAS_IDENTITY_PROPERTIES`` is the decision; every entry is checked on a pair."""
 
     def _pairs(self) -> dict[str, tuple[Any, Any]]:
+        """Every pair of this module, by name."""
         pairs = {**DISTINCT, **EQUAL}
         pairs.update({name: pair for name, (pair, _) in EXCEPTIONS.items()})
         pairs["frame vs its one-column Series"] = (
@@ -407,6 +421,7 @@ class TestIdentityProperties:
         return pairs
 
     def test_every_property_is_exercised_and_agrees(self) -> None:
+        """Each declared property has a pair, and the pair's hashes agree with it."""
         from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
 
         declared = {p.name: p.identity for p in PANDAS_IDENTITY_PROPERTIES}
@@ -434,6 +449,7 @@ class TestIdentityProperties:
             _assert_fn(first)(first, second)
 
     def test_only_identity_properties_are_options(self) -> None:
+        """An ignore-list option is always an identity property."""
         from orcapod.hashing.pandas_value_hash import (
             PANDAS_DATAFRAME_OPTIONS,
             PANDAS_IDENTITY_PROPERTIES,
@@ -446,6 +462,7 @@ class TestIdentityProperties:
         assert all(p.identity for p in PANDAS_IDENTITY_PROPERTIES if p.option)
 
     def test_carrier_is_stated_exactly_for_identity_properties(self) -> None:
+        """An identity property names what carries it; any other names nothing."""
         from orcapod.hashing.pandas_value_hash import PANDAS_IDENTITY_PROPERTIES
 
         for prop in PANDAS_IDENTITY_PROPERTIES:
@@ -453,19 +470,30 @@ class TestIdentityProperties:
 
 
 class TestLabels:
+    """The hash labels of the two pandas types."""
+
     def test_dataframe_label(self) -> None:
+        """A frame's hash has the DataFrame label."""
         assert _content_hash(_frame()).method == "pandas_dataframe_v1"
 
     def test_series_label(self) -> None:
+        """A Series' hash has the Series label."""
         assert _content_hash(pd.Series([1, 2])).method == "pandas_series_v1"
 
     def test_frame_and_its_one_column_series_differ(self) -> None:
+        """A frame and its one-column Series are different values."""
         assert _hash(pd.DataFrame({"a": [1, 2]})) != _hash(pd.Series([1, 2], name="a"))
 
 
 class TestOutsideTheGrammar:
+    """Labels and dtypes the descriptor grammar does not cover."""
+
     def test_unsupported_label_type_raises(self) -> None:
+        """A label or name of an arbitrary class raises, naming the class."""
+
         class Label:
+            """A hashable class the grammar does not know."""
+
             def __hash__(self) -> int:
                 return 1
 
@@ -480,11 +508,53 @@ class TestOutsideTheGrammar:
             _hash(pd.Series([1], name="s", index=pd.Index([0], name=Label())))
 
     def test_unsupported_dtype_raises_naming_the_column(self) -> None:
+        """A dtype outside the grammar raises, naming its column."""
         frame = pd.DataFrame({"s": pd.arrays.SparseArray([0, 1])})
         with pytest.raises(ValueError, match="'s'"):
             _hash(frame)
 
+    @pytest.mark.parametrize(
+        "value",
+        [_with_attrs(_frame(), {"unit": "mV", "o": {1, 2}}), pd.Series([1, 2])],
+        ids=["frame", "series"],
+    )
+    def test_attrs_that_are_not_json_are_refused(self, value: Any) -> None:
+        """``attrs`` storage cannot write as JSON raise, naming the key."""
+        value = _with_attrs(value, {"unit": "mV", "o": {1, 2}})
+        with pytest.raises(ValueError, match=r"attrs\['o'\]"):
+            _hash(value)
+        logical = (
+            LogicalPandasSeries()
+            if isinstance(value, pd.Series)
+            else LogicalPandasDataFrame()
+        )
+        with warnings.catch_warnings():
+            # Refused by Orcapod, before pyarrow sees the value: pyarrow 23 would warn
+            # and write {}, pyarrow 22 would raise TypeError.
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match=r"attrs\['o'\]"):
+                logical.python_to_storage(value)
+
+    def test_attrs_key_that_is_not_a_json_key_is_refused(self) -> None:
+        """A key JSON cannot write (a tuple) raises, naming the key."""
+        with pytest.raises(ValueError, match=r"attrs\[\(1, 2\)\]"):
+            _hash(_with_attrs(_frame(), {(1, 2): "x"}))
+
+    def test_attrs_with_a_key_that_is_not_text_are_accepted(self) -> None:
+        """``{1: "x"}`` is written as ``{"1": "x"}`` and hashed in that form."""
+        assert _hash(_with_attrs(_frame(), {1: "x"})) == _hash(
+            _with_attrs(_frame(), {"1": "x"})
+        )
+
+    def test_attrs_that_are_not_json_do_not_matter_when_attrs_are_ignored(self) -> None:
+        """With ``attrs`` in the ignore list the hash does not read them."""
+        from orcapod.hashing.pandas_value_hash import pandas_frame_descriptor
+
+        frame = _with_attrs(_frame(), {"o": {1, 2}})
+        assert pandas_frame_descriptor(frame, frozenset({"attrs"}))["attrs"] == {}
+
     def test_date_label_hashes(self) -> None:
+        """A ``datetime.date`` label is in the grammar."""
         assert _hash(pd.DataFrame([[1]], columns=pd.Index([dt.date(2020, 1, 1)])))
 
 
@@ -503,6 +573,8 @@ STORABLE_FRAMES: dict[str, Any] = {
 
 
 class TestStorage:
+    """A storable value hashes the same after the storage round trip."""
+
     @pytest.mark.parametrize("name", list(STORABLE_FRAMES))
     def test_frame_hash_survives_storage(self, name: str) -> None:
         """A frame read back from storage keeps its cache key."""
@@ -522,6 +594,7 @@ class TestStorage:
         ids=["swapped levels", "unnamed", "categorical int name"],
     )
     def test_series_hash_survives_storage(self, value: pd.Series) -> None:
+        """A storable Series hashes the same after storage."""
         logical = LogicalPandasSeries()
         back = logical.storage_to_python(logical.python_to_storage(value))
         assert_series_equal(back, value)
@@ -529,6 +602,7 @@ class TestStorage:
 
 
 def _object(values: list[Any]) -> pd.Series:
+    """``values`` as an ``object`` Series."""
     return pd.Series(values, dtype=object)
 
 
@@ -564,7 +638,6 @@ CHANGED_BY_STORAGE: dict[str, Any] = {
     "flags": _frame().set_flags(allows_duplicate_labels=False),
     "unused MultiIndex levels": EQUAL["unused MultiIndex levels"][1],
     "attrs read back as JSON": _with_attrs(_frame(), {1: "x", "t": (1, 2)}),
-    "attrs not JSON": _with_attrs(_frame(), {"o": {1, 2}}),
     "Series string[pyarrow]": pd.Series(
         pd.array(["x"], dtype="string[pyarrow]"), name="s"
     ),
@@ -604,6 +677,7 @@ class TestHashOfWhatStorageRestores:
 
     @pytest.mark.parametrize("name", list(CHANGED_BY_STORAGE))
     def test_value_changed_by_storage_keeps_its_hash(self, name: str) -> None:
+        """A value storage changes hashes like the value read back."""
         value = CHANGED_BY_STORAGE[name]
         back = _stored_and_read(value)
         # Precondition: the round trip does change something pandas can see.
@@ -620,6 +694,7 @@ class TestHashOfWhatStorageRestores:
 
     @pytest.mark.parametrize("name", list(OBJECT_KEPT_BY_STORAGE))
     def test_object_column_kept_by_storage_keeps_its_hash(self, name: str) -> None:
+        """An ``object`` column that reads back ``object`` keeps its hash."""
         value = OBJECT_KEPT_BY_STORAGE[name]
         back = _stored_and_read(value)
         assert back["a"].dtype == object
@@ -664,6 +739,7 @@ class TestDescriptorGrammar:
     """
 
     def test_frame_descriptor(self) -> None:
+        """Pin of a frame's descriptor."""
         from orcapod.hashing.pandas_value_hash import pandas_frame_descriptor
 
         frame = pd.DataFrame(
@@ -700,6 +776,7 @@ class TestDescriptorGrammar:
         }
 
     def test_frame_descriptor_of_a_column_multiindex(self) -> None:
+        """The column axis has one dtype term per level."""
         from orcapod.hashing.pandas_value_hash import pandas_frame_descriptor
 
         columns = pd.MultiIndex.from_arrays(
@@ -709,6 +786,7 @@ class TestDescriptorGrammar:
         assert descriptor["columns_dtypes"] == [{"numpy": "int32"}, {"numpy": "object"}]
 
     def test_index_names_are_described_as_storage_restores_them(self) -> None:
+        """An index name is its text; a Series name stays typed."""
         from orcapod.hashing.pandas_value_hash import (
             pandas_frame_descriptor,
             pandas_series_descriptor,
@@ -723,6 +801,7 @@ class TestDescriptorGrammar:
         assert descriptor["name"] == {"int": 2}
 
     def test_series_descriptor(self) -> None:
+        """Pin of a Series' descriptor."""
         from orcapod.hashing.pandas_value_hash import pandas_series_descriptor
 
         series = pd.Series(
@@ -743,6 +822,7 @@ class TestDescriptorGrammar:
         }
 
     def test_label_grammar(self) -> None:
+        """Pin of the label terms."""
         from orcapod.hashing.pandas_value_hash import pandas_label_descriptor
 
         assert pandas_label_descriptor("a") == "a"
@@ -785,6 +865,7 @@ class TestDescriptorGrammar:
         assert pandas_label_descriptor(pd.NaT) == {"nat": "datetime"}
 
     def test_dtype_grammar(self) -> None:
+        """Pin of the dtype terms."""
         from orcapod.hashing.pandas_value_hash import pandas_dtype_descriptor
 
         assert pandas_dtype_descriptor(np.dtype("datetime64[ns]")) == {
