@@ -442,6 +442,11 @@ def pandas_dtype_descriptor(dtype: Any) -> Any:
             }
         }
     if isinstance(dtype, pd.ArrowDtype):
+        if pa.types.is_null(dtype.pyarrow_dtype):
+            # The values table digests an Arrow ``null`` column as an all-null
+            # ``large_string`` column (``_restored_form``), so the Arrow type no longer
+            # separates it from a ``large_string`` column of ``None``; the term does.
+            return {"arrow": "null"}
         return "arrow"
     if isinstance(dtype, pd.StringDtype):
         # The storage (python / pyarrow) is not kept by the stored form, so it is not

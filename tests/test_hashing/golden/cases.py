@@ -409,6 +409,12 @@ SEMANTIC_VALUES: dict[str, Any] = {
         pd.array([None, None], dtype=pd.ArrowDtype(pa.decimal128(5, 2)))
     ),
     "dataframe.null_object": pd.DataFrame({"c": pd.Series([None, None], dtype=object)}),
+    "series.null_arrow_null": pd.Series(
+        pd.array([None, None], dtype=pd.ArrowDtype(pa.null()))
+    ),
+    "series.null_arrow_large_string": pd.Series(
+        pd.array([None, None], dtype=pd.ArrowDtype(pa.large_string()))
+    ),
 }
 
 

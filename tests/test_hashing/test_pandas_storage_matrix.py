@@ -211,6 +211,7 @@ COLUMN_VALUES: dict[str, Any] = {
         [None, None], dtype=pd.ArrowDtype(pa.decimal128(5, 2))
     ),
     "object all null": pd.Series([None, None], dtype=object),
+    "arrow null all null": pd.array([None, None], dtype=pd.ArrowDtype(pa.null())),
     "object timedeltas": pd.Series([dt.timedelta(days=1), None], dtype=object),
     "object timestamps UTC": pd.Series(
         [pd.Timestamp("2020-01-01", tz="UTC"), None], dtype=object

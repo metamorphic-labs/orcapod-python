@@ -83,3 +83,28 @@ class TestNullColumnIdentity:
         assert _hash(_object([None, None])) != _hash(
             pd.Series([None, None], dtype="string")
         )
+
+
+def _arrow(arrow_type: pa.DataType, rows: int) -> pd.Series:
+    return pd.Series(pd.array([None] * rows, dtype=pd.ArrowDtype(arrow_type)))
+
+
+@pytest.mark.parametrize("rows", [0, 2])
+class TestArrowNullDtypeStaysDistinct:
+    """``pd.ArrowDtype(pa.null())`` is not ``pd.ArrowDtype(pa.large_string())``."""
+
+    def test_series_hash_differently(self, rows: int) -> None:
+        """Both dtypes survive storage, so both count in the hash."""
+        assert _hash(_arrow(pa.null(), rows)) != _hash(_arrow(pa.large_string(), rows))
+
+    def test_dataframe_columns_hash_differently(self, rows: int) -> None:
+        null = _arrow(pa.null(), rows).to_frame("c")
+        text = _arrow(pa.large_string(), rows).to_frame("c")
+        assert _hash(null) != _hash(text)
+
+    @pytest.mark.parametrize("arrow_type", [pa.null(), pa.large_string()])
+    def test_round_trip(self, rows: int, arrow_type: pa.DataType) -> None:
+        series = _arrow(arrow_type, rows)
+        frame = series.to_frame("c")
+        assert _hash(series) == _hash(_through_storage(series))
+        assert _hash(frame) == _hash(_through_storage(frame))

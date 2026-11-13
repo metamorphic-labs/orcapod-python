@@ -1434,6 +1434,8 @@ series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
          | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
          | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
          | "arrow"                                  pd.ArrowDtype; the type is in D
+         | {"arrow": "null"}                        pd.ArrowDtype(pa.null()): D digests it as
+                                                    all-null large_string
 ```
 
 `kind` is the name of the value's logical type (its Arrow extension name).
@@ -1520,6 +1522,11 @@ More consequences of the same rule:
   `"string"`) stays different. Other all-null or empty columns (Arrow string, timestamp,
   integer, list or struct, `Int64`, `string`, categorical) keep their own types and are
   unchanged.
+  A `pd.ArrowDtype(pa.null())` column has its own dtype descriptor, `{"arrow": "null"}`
+  (every other `pd.ArrowDtype` is the term `"arrow"`; its Arrow type is in the values
+  table), so it never hashes like a `pd.ArrowDtype(pa.large_string())` column of `None`.
+  A `pd.ArrowDtype` of a nested type with a `null` child (`list<null>`, `struct<a: null>`)
+  is still refused by the hash, as before.
 - **A timezone is the text storage writes for it** (`"UTC"`, `"Europe/Berlin"`,
   `"+01:00"`), whatever class holds it: `datetime.timezone(timedelta(hours=1))` is read
   back as another class of the same offset, and both hash equal.
