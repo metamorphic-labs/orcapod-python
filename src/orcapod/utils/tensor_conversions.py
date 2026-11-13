@@ -16,6 +16,7 @@ been imported.
 
 from __future__ import annotations
 
+import sys
 import warnings
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -83,23 +84,27 @@ def describe(conversions: Iterable[str]) -> str:
     return " ".join(conversions)
 
 
-def _error_filter_active(message: str) -> bool:
-    """Whether the active warning filters turn ``ValueConversionWarning`` into an error.
+def _error_filter_active(message: str, module: str, lineno: int) -> bool:
+    """Whether the active warning filters turn this warning into an error.
 
-    Reads ``warnings.filters`` as Python does: the first filter that matches the
-    category and the message decides. A filter restricted to a module is skipped,
-    because the module that the warning is attributed to is the caller's.
+    Reads ``warnings.filters`` as Python does: the first filter whose category,
+    message pattern, module pattern and line number match decides.
 
     Args:
         message: The warning text.
+        module: Name of the module the warning is attributed to.
+        lineno: Line number the warning is attributed to.
 
     Returns:
         True when that filter's action is ``"error"``.
     """
-    for action, text, category, module, _lineno in warnings.filters:
-        if module is not None or not issubclass(ValueConversionWarning, category):
-            continue
-        if text is None or text.match(message):
+    for action, text, category, module_pattern, line in warnings.filters:
+        if (
+            issubclass(ValueConversionWarning, category)
+            and (text is None or text.match(message))
+            and (module_pattern is None or module_pattern.match(module))
+            and line in (0, lineno)
+        ):
             return action == "error"
     return False
 
@@ -125,10 +130,12 @@ def warn_once(
         conversions: The conversions of the value (``tensor_conversions``).
         message: The warning text.
     """
-    if all((scope, c) in issued for c in conversions) and not _error_filter_active(
-        message
-    ):
-        return
+    if all((scope, c) in issued for c in conversions):
+        # The frame the warning is attributed to (``stacklevel=3`` below).
+        frame = sys._getframe(2)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
+        module = frame.f_globals.get("__name__", "<string>")
+        if not _error_filter_active(message, module, frame.f_lineno):
+            return
     warnings.warn(message, ValueConversionWarning, stacklevel=3)
     issued.update((scope, c) for c in conversions)
 

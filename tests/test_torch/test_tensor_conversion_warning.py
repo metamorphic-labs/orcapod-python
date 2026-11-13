@@ -257,6 +257,25 @@ def test_an_error_filter_set_after_a_reported_conversion_still_raises() -> None:
     assert conversion_warnings(caught) == []
 
 
+def test_a_module_restricted_error_filter_set_later_still_raises() -> None:
+    """A later error filter with a module pattern is honoured like any other."""
+    with_grad = make_with_grad()
+    with pytest.warns(ValueConversionWarning):
+        run(with_grad, source_of([torch.ones(2)]))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=ValueConversionWarning, module=r".*")
+        with pytest.raises(ValueConversionWarning, match="'with_grad' output 'y'"):
+            run(with_grad, source_of([torch.ones(2)]))
+    # A filter for another module does not apply.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings(
+            "error", category=ValueConversionWarning, module=r"no_such_module_xyz"
+        )
+        run(with_grad, source_of([torch.ones(2)]))
+    assert conversion_warnings(caught) == []
+
+
 @dataclasses.dataclass
 class Fit:
     """A user class with a tensor field."""
