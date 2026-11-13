@@ -29,7 +29,8 @@ operators, `PipelineJob`, `node.as_table / head / get_all_records / as_source`).
   `node.as_table(all_info=True)` shows each row with the hash of the mirrored row.
 * The sync path is affected too whenever `sort_by_tags` permutes the rows (input not in tag
   order): `_shape_table` sorts, then appends hashes in `iter_data` order. Same site, same fix.
-* Node `head()` goes through `_shape_table` too (`_head_of_pairs`): same site.
+* Node `head()` goes through `_shape_table` too, but `head_column_config` forces
+  `sort_by_tags=False`, so it is aligned (sweep).
 * `_content_hash` recomputes as `data_context.arrow_hasher.hash_table(row.select(data_keys)).to_string()`
   on a one-row slice of the produced table (verified equal on source and node tables).
 * Source tokens: `"<source_id>::<token>::<column>"`, token `"<col>=<value>"` with
@@ -140,3 +141,7 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
 
 ## Progress notes
 (Successors: append here.)
+
+* Helpers + checker self-test done (16 pass). Sweep done (subagent). Second defect found and
+  sent to coordinator (msg_c718d4fe9800): FunctionPodStream resumed iterator re-enumerates
+  from 0 (function_pod.py:1043/1069) and drops rows; awaiting decision to fix here.
