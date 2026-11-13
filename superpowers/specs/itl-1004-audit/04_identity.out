@@ -1,0 +1,34 @@
+=== I1. pipeline_hash of a root = hash((tag_schema, data_schema))
+--- x tag only: output_schema / pipeline_hash
+    (Schema({'session': str | None, 'x': int | None}), Schema({'y': float | None}))
+    b9e64f95eca6847a
+--- x data only: output_schema / pipeline_hash
+    (Schema({'session': str | None}), Schema({'x': int | None, 'y': float | None}))
+    95a52202a35fa95b
+--- x referential: output_schema / pipeline_hash
+    (Schema({'session': str | None, 'x': int | None}), Schema({'x': int | None, 'y': float | None}))
+    cc818c22c966b639
+
+=== I2. Schema-pair hash: the three shapes are distinct, no extra identity term
+--- hash_object((tag_schema, data_schema))
+    tag{x} data{y}: e3b13da3a40743d1
+    tag{} data{x,y}: 8ccaa63afa168bd3
+    tag{x} data{x,y}: 3d4503d18110c78b
+
+=== I3. Root content_hash = (class, output_schema, source_id): sees the binding
+--- content hashes (same source_id 'S')
+    tag only: 006efb368b7aec35
+    data only: ca14dfaa13bab7e2
+    referential: c53cd5c9cfed363d
+
+=== I4. Function-result identity: the Data hash a function would receive
+--- per-row Data content hash, x untagged vs x referential (data columns x, y)
+    True
+--- per-row Tag content hash, x materialized vs x referential (tag columns session, x)
+    True
+
+=== I5. Record-id preimage input = tag.as_table(system_tags) + input data hash
+--- tag table of row 0, x materialized vs x referential: same columns?
+    (['session', 'x', '_tag_source_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4', '_tag_record_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4'], ['session', 'x', '_tag_source_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4', '_tag_record_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4'])
+--- system tag column names (embed the source schema hash, computed at build)
+    (('_tag_source_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4', '_tag_record_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4'), ('_tag_source_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4', '_tag_record_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4'))

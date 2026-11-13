@@ -1,0 +1,81 @@
+=== R1. A stream cannot name one column as both tag and data
+--- ArrowTableSource(x, y; tag_columns=[x])
+    keys: tags=('x',) data=('y',)
+    schema: tags={'x': int | None} data={'y': float | None}
+    as_table columns: ['x', 'y']
+    rows: [({'x': 1}, {'y': 0.1}), ({'x': 2}, {'y': 0.2})]
+--- ArrowTableStream over a table with two physical columns named x, tag_columns=[x]
+    RAISES KeyError: 'Field "x" exists 2 times in schema'
+    (raised at pyarrow/table.pxi:1735)
+
+=== R2. Join: input A has TAG x, input B has DATA x (ITL-940 shape)
+--- Join().output_schema(A, B)
+    (Schema({'k': int | None, 'x': int | None}), Schema({'x': int | None, 'b': float | None, 'a': float | None}))
+--- Join()(A, B) read
+    RAISES KeyError: 'Field "x" exists 2 times in schema'
+    (raised at pyarrow/table.pxi:1735)
+--- Join async rows
+    [({'k': 1, 'x': 1}, {'x': 1, 'b': 0.5, 'a': 0.1}), ({'k': 2, 'x': 1}, {'x': 2, 'b': 0.6, 'a': 0.1}), ({'k': 1, 'x': 2}, {'x': 1, 'b': 0.5, 'a': 0.2}), ({'k': 2, 'x': 2}, {'x': 2, 'b': 0.6, 'a': 0.2})]
+--- MergeJoin()(A, B) read
+    RAISES KeyError: 'Field "x" exists 2 times in schema'
+    (raised at pyarrow/table.pxi:1735)
+--- SemiJoin()(A, B) read
+    keys: tags=('x',) data=('a',)
+    schema: tags={'x': int | None} data={'a': float | None}
+    as_table columns: ['x', 'a']
+    rows: [({'x': 1}, {'a': 0.1}), ({'x': 2}, {'a': 0.2})]
+
+=== R3. Join: both inputs have DATA x (the collision)
+--- Join().output_schema(C, D)
+    RAISES InputValidationError: Datas should not have overlapping keys, but KeysView(Schema({'x': int | None, 'v': float | None})) found in ArrowTableSource and ArrowTableSource.
+    (raised at orcapod/core/operators/join.py:116)
+--- Join async rows
+    RAISES ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    (raised at /Users/eywalker/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/asyncio/taskgroups.py:164)
+--- MergeJoin()(C, D) read (colliding data -> list)
+    keys: tags=('u',) data=('x', 'v')
+    schema: tags={'u': int | None} data={'x': list[int | None], 'v': float | None}
+    as_table columns: ['u', 'x', 'v']
+    rows: [({'u': 5}, {'x': [1, 1], 'v': 1.0}), ({'u': 6}, {'x': [2, 2], 'v': 2.0})]
+
+=== R4. MapTags / MapData renaming onto a name of the other namespace
+--- MapTags({x: y})(E)
+    RAISES InputValidationError: Renaming {'x': 'y'} would cause collisions with existing columns: overlapping data columns: {'y'}.
+    (raised at orcapod/core/operators/mappers.py:254)
+--- MapData({y: x})(E)
+    RAISES InputValidationError: Renaming {'y': 'x'} would cause collisions with existing columns: overlapping tag columns: {'x'}.
+    (raised at orcapod/core/operators/mappers.py:104)
+
+=== R5. Function pod output named like an input TAG
+--- make_x.pod.output_schema(E)
+    (Schema({'x': int | None}), Schema({'x': float}))
+--- make_x.pod(E) read
+    RAISES ValueError: Duplicate column name 'x' found in input tables.
+    (raised at orcapod/utils/arrow_utils.py:682)
+
+=== R6. DerivedSource(tags_as_data={x: x}) (same name)
+--- DerivedSource(E, tags_as_data={'x': 'x'})
+    RAISES InputValidationError: tags_as_data: cannot copy tag 'x' to 'x', which is already a column. Choose a new name.
+    (raised at orcapod/core/sources/derived_source.py:99)
+--- DerivedSource(E, tags_as_data={'x': 'x_copy'})
+    keys: tags=('x',) data=('y', 'x_copy')
+    schema: tags={'x': int | None} data={'y': float | None, 'x_copy': int | None}
+    as_table columns: ['x', 'y', 'x_copy']
+    rows: [({'x': 1}, {'y': 0.1, 'x_copy': 1}), ({'x': 2}, {'y': 0.2, 'x_copy': 2})]
+
+=== R7. GroupBy / Batch over the 'copy' shape (tag t_x, data x)
+--- GroupBy(by=[t_unit])(G)
+    keys: tags=('t_unit', 't_time') data=('unit', 'time', 'amp')
+    schema: tags={'t_unit': int | None, 't_time': list[int | None]} data={'unit': list[int | None], 'time': list[int | None], 'amp': list[float | None]}
+    as_table columns: ['t_unit', 't_time', 'unit', 'time', 'amp']
+    rows: [({'t_unit': 1, 't_time': [10, 30]}, {'unit': [1, 1], 'time': [10, 30], 'amp': [0.1, 0.3]}), ({'t_unit': 2, 't_time': [20]}, {'unit': [2], 'time': [20], 'amp': [0.2]})]
+--- Batch(batch_size=2)(G)
+    keys: tags=('t_unit', 't_time') data=('unit', 'time', 'amp')
+    schema: tags={'t_unit': list[int | None], 't_time': list[int | None]} data={'unit': list[int | None], 'time': list[int | None], 'amp': list[float | None]}
+    as_table columns: ['t_unit', 't_time', 'unit', 'time', 'amp']
+    rows: [({'t_unit': [1, 1], 't_time': [30, 10]}, {'unit': [1, 1], 'time': [30, 10], 'amp': [0.3, 0.1]}), ({'t_unit': [2], 't_time': [20]}, {'unit': [2], 'time': [20], 'amp': [0.2]})]
+
+=== R8. Function pod with a tag name as a parameter (tags are not inputs)
+--- uses_tag.pod(E) (x is a tag of E)
+    RAISES ValueError: Incoming data schema Schema({'y': float | None}) is not compatible with expected input schema Schema({'x': int | None}): column 'y' is not a parameter of the function
+    (raised at orcapod/core/function_pod.py:259)

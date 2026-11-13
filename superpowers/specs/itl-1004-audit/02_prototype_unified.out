@@ -1,0 +1,138 @@
+=== P0. The prototype stream R: tags session, x(ref); data x, y
+--- describe(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': str | None, 'x': int | None} data={'x': int | None, 'y': float | None}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': 's1', 'x': 20}, {'x': 20, 'y': 0.2}), ({'session': 's1', 'x': 10}, {'x': 10, 'y': 0.1}), ({'session': 's2', 'x': 30}, {'x': 30, 'y': 0.3})]
+--- R.pipeline_hash()
+    semantic_v1:cc818c22c966b6399a83946db7fd429c71819ad4524a7f74f265b101cfb3746c
+--- R.as_table(all_info=True) columns
+    ['session', 'x', 'y', '_tag_source_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4', '_tag_record_id::b9e64f95eca6847ae34f9d4993c3baea005192b7d2f8a7fc545cbc2c2b4ac8c4', '_content_hash', '_context_key', '_source_y', '_source_x']
+
+=== P1. Row filters (spec: preserve)
+--- PolarsFilter(constraints={'x': 20})(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': str | None, 'x': int | None} data={'x': int | None, 'y': float | None}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': 's1', 'x': 20}, {'y': 0.2})]
+--- DropNulls(['x'])(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': str | None, 'x': <class 'int'>} data={'x': <class 'int'>, 'y': float | None}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': 's1', 'x': 20}, {'y': 0.2}), ({'session': 's1', 'x': 10}, {'y': 0.1}), ({'session': 's2', 'x': 30}, {'y': 0.3})]
+--- DropNulls()(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': <class 'str'>, 'x': <class 'int'>} data={'x': <class 'int'>, 'y': <class 'float'>}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': 's1', 'x': 20}, {'y': 0.2}), ({'session': 's1', 'x': 10}, {'y': 0.1}), ({'session': 's2', 'x': 30}, {'y': 0.3})]
+--- SemiJoin()(R, M[tag x materialized])
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': str | None, 'x': int | None} data={'x': int | None, 'y': float | None}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': 's1', 'x': 10}, {'y': 0.1}), ({'session': 's2', 'x': 30}, {'y': 0.3})]
+
+=== P2. Select / Drop (spec: removing the target materializes the tag)
+--- SelectDataColumns(['y'])(R)
+    RAISES ValueError: Specified tag columns {'x'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+--- DropDataColumns(['x'])(R)
+    RAISES ValueError: Specified tag columns {'x'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+--- DropTagColumns(['x'])(R)  (spec: data x kept)
+    keys: tags=('session',) data=('x', 'y')
+    schema: tags={'session': str | None} data={'x': int | None, 'y': float | None}
+    as_table columns: ['session', 'y']
+    rows: [({'session': 's1'}, {'y': 0.2}), ({'session': 's1'}, {'y': 0.1}), ({'session': 's2'}, {'y': 0.3})]
+--- SelectTagColumns(['session'])(R)
+    keys: tags=('session',) data=('x', 'y')
+    schema: tags={'session': str | None} data={'x': int | None, 'y': float | None}
+    as_table columns: ['session', 'y']
+    rows: [({'session': 's1'}, {'y': 0.2}), ({'session': 's1'}, {'y': 0.1}), ({'session': 's2'}, {'y': 0.3})]
+
+=== P3. Renames
+--- MapTags({'x': 'x2'})(R)
+    RAISES ValueError: Specified tag columns {'x2'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+--- MapData({'x': 'x2'})(R)
+    RAISES ValueError: Specified tag columns {'x'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+--- MapTags({'session': 'sess'})(R)
+    keys: tags=('sess', 'x') data=('x', 'y')
+    schema: tags={'sess': str | None, 'x': int | None} data={'x': int | None, 'y': float | None}
+    as_table columns: ['sess', 'x', 'y']
+    rows: [({'sess': 's1', 'x': 20}, {'y': 0.2}), ({'sess': 's1', 'x': 10}, {'y': 0.1}), ({'sess': 's2', 'x': 30}, {'y': 0.3})]
+
+=== P4. GroupBy (spec: key scalar in both roles, non-key list in both, one order)
+--- GroupBy(['x'])(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': list[str | None], 'x': int | None} data={'x': list[int | None], 'y': list[float | None]}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': ['s1'], 'x': 10}, {'y': [0.1]}), ({'session': ['s1'], 'x': 20}, {'y': [0.2]}), ({'session': ['s2'], 'x': 30}, {'y': [0.3]})]
+--- GroupBy(['x']).output_schema(R) (prediction)
+    (Schema({'session': list[str | None], 'x': int | None}), Schema({'x': list[int | None], 'y': list[float | None]}))
+--- GroupBy(['session'])(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': str | None, 'x': list[int | None]} data={'x': list[int | None], 'y': list[float | None]}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': 's1', 'x': [10, 20]}, {'y': [0.1, 0.2]}), ({'session': 's2', 'x': [30]}, {'y': [0.3]})]
+--- GroupBy(['session']).output_schema(R)
+    (Schema({'session': str | None, 'x': list[int | None]}), Schema({'x': list[int | None], 'y': list[float | None]}))
+--- GroupBy(['session']) async rows
+    RAISES ValueError: Duplicate column name 'x' found in input tables.
+    (raised at orcapod/utils/arrow_utils.py:682)
+--- Batch(2)(R)
+    keys: tags=('session', 'x') data=('x', 'y')
+    schema: tags={'session': list[str | None], 'x': list[int | None]} data={'x': list[int | None], 'y': list[float | None]}
+    as_table columns: ['session', 'x', 'y']
+    rows: [({'session': ['s1', 's1'], 'x': [20, 10]}, {'y': [0.2, 0.1]}), ({'session': ['s2'], 'x': [30]}, {'y': [0.3]})]
+
+=== P5. Join
+--- Join().output_schema(R, M)
+    (Schema({'x': int | None, 'session': str | None}), Schema({'w': float | None, 'x': int | None, 'y': float | None}))
+--- Join()(R, M) [ref x + materialized x]
+    RAISES KeyError: 'Field "x" exists 2 times in schema'
+    (raised at pyarrow/table.pxi:1735)
+--- Join async (R, M)
+    [({'x': 10, 'session': 's1'}, {'w': 1.0, 'x': 10, 'y': 0.1}), ({'x': 30, 'session': 's2'}, {'w': 3.0, 'x': 30, 'y': 0.3})]
+--- Join().output_schema(R, R2) [ref + ref]
+    RAISES InputValidationError: Datas should not have overlapping keys, but KeysView(Schema({'x': int | None, 'z': float | None, 'y': float | None})) found in ArrowTableSource and ArrowTableSource.
+    (raised at orcapod/core/operators/join.py:116)
+--- Join()(R, R2)
+    RAISES InputValidationError: Input streams are not compatible: Datas should not have overlapping keys, but KeysView(Schema({'x': int | None, 'z': float | None, 'y': float | None})) found in ArrowTableSource and ArrowTableSource.
+    (raised at orcapod/core/operators/join.py:46)
+--- Join().output_schema(R, N[data x, no tag x])
+    RAISES InputValidationError: Datas should not have overlapping keys, but KeysView(Schema({'x': int | None, 'y': float | None})) found in ArrowTableSource and ArrowTableSource.
+    (raised at orcapod/core/operators/join.py:116)
+--- MergeJoin()(R, R2)
+    RAISES KeyError: 'Field "x" exists 2 times in schema'
+    (raised at pyarrow/table.pxi:1735)
+
+=== P6. Function pods
+--- uses_x.pod(R)
+    keys: tags=('session', 'x') data=('z',)
+    schema: tags={'session': str | None, 'x': int | None} data={'z': <class 'float'>}
+    as_table columns: ['session', 'x', 'z']
+    rows: [({'session': 's1', 'x': 20}, {'z': 20.2}), ({'session': 's1', 'x': 10}, {'z': 10.1}), ({'session': 's2', 'x': 30}, {'z': 30.3})]
+--- uses_y.pod(R) (automatic select drops data x)
+    RAISES ValueError: Specified tag columns {'x'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+--- uses_y.pod.process(R) (strict: extra data x)
+    RAISES ValueError: Incoming data schema Schema({'x': int | None, 'y': float | None}) is not compatible with expected input schema Schema({'y': float | None}): column 'x' is not a parameter of the function
+    (raised at orcapod/core/function_pod.py:259)
+--- writes_x.pod.output_schema(R)
+    RAISES ValueError: Incoming data schema Schema({'x': int | None, 'y': float | None}) is not compatible with expected input schema Schema({'y': float | None}): column 'x' is not a parameter of the function
+    (raised at orcapod/core/function_pod.py:259)
+--- writes_x.pod(R)
+    RAISES ValueError: Specified tag columns {'x'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+--- data hash of the row passed to uses_y: same with and without the reference?
+    RAISES ValueError: Specified tag columns {'x'} are not present in the table.
+    (raised at orcapod/core/streams/arrow_table_stream.py:104)
+
+=== P7. Index over a grouped referential list
+--- Index('x', 0)(GroupBy(session)(R))
+    RAISES KeyError: 'x'
+    (raised at orcapod/core/datagrams/datagram.py:334)
+--- Index('x', 0, out='x0')(...)
+    RAISES KeyError: 'x'
+    (raised at orcapod/core/datagrams/datagram.py:334)
