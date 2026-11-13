@@ -118,6 +118,7 @@ class TestFoldSeparatesMembers:
         source = DictSource(
             data=[{"g": 1, "k": 1, "x": 10}, {"g": 1, "k": 2, "x": 20}],
             tag_columns=["g", "k"],
+            tag_only_columns=True,
             source_id="members",
         )
         member_tokens = (
@@ -525,7 +526,10 @@ class TestNamedtupleFieldOrder:
 def _xy_source() -> DictSource:
     """Return a source with tag columns k, j and data columns x, y."""
     return DictSource(
-        data=[{"k": 1, "j": 2, "x": 1, "y": 2}], tag_columns=["k", "j"], source_id="s"
+        data=[{"k": 1, "j": 2, "x": 1, "y": 2}],
+        tag_columns=["k", "j"],
+        tag_only_columns=True,
+        source_id="s",
     )
 
 
@@ -578,7 +582,10 @@ class TestColumnSelectionIdentity:
 def _weights(source_id: str, weight: float) -> DictSource:
     """Return a one-row source with tag k and data w under ``source_id``."""
     return DictSource(
-        data=[{"k": 1, "w": weight}], tag_columns=["k"], source_id=source_id
+        data=[{"k": 1, "w": weight}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id=source_id,
     )
 
 
@@ -634,7 +641,10 @@ class TestRecordIdType:
     def test_source_stream_and_tag_agree(self) -> None:
         """A source's stream and its Tag objects give record ids one type."""
         source = DictSource(
-            data=[{"k": 1, "x": 1}, {"k": 2, "x": 2}], tag_columns=["k"], source_id="s"
+            data=[{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
         )
         stream_types = _record_id_types(source.as_table(columns={"system_tags": True}))
         tag, _ = next(iter(source.iter_data()))
@@ -644,7 +654,10 @@ class TestRecordIdType:
     def test_batch_keeps_the_type(self) -> None:
         """Batch keeps the record-id type."""
         source = DictSource(
-            data=[{"k": 1, "x": 1}, {"k": 2, "x": 2}], tag_columns=["k"], source_id="s"
+            data=[{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
         )
         batched = Batch(batch_size=2)(source)
         assert _record_id_types(batched.as_table(columns={"system_tags": True})) == {
@@ -667,6 +680,7 @@ class TestRecordIdType:
             return DictSource(
                 data=[{"k": i, "x": i, "y": i} for i in range(2)],
                 tag_columns=["k"],
+                tag_only_columns=True,
                 source_id="s",
             )
 

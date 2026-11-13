@@ -96,7 +96,9 @@ def build_job(
     """A job with function node ``dbl`` and optionally a stored operator ``sel`` and a sink."""
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
-        source = DictSource(data=ROWS, tag_columns=["k"], source_id="src")
+        source = DictSource(
+            data=ROWS, tag_columns=["k"], tag_only_columns=True, source_id="src"
+        )
         out = double.pod(source, label="dbl")
         if with_operator:
             SelectDataColumns(["double"])(out, label="sel")
@@ -116,7 +118,9 @@ def _cached_source(store: Store) -> CachedSource:
     """A two-row source cached in ``store``."""
     table = pa.table({"k": ["a", "b"], "x": [1, 2]})
     return CachedSource(
-        ArrowTableSource(table, tag_columns=["k"], source_id="fixed"),
+        ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="fixed"
+        ),
         cache_database=store,
     )
 
@@ -351,7 +355,9 @@ class TestColumnAndLayout:
         """A ``cache_path`` given to ``CachedSource`` gets ``sdb_v1`` appended."""
         table = pa.table({"k": ["a"], "x": [1]})
         source = CachedSource(
-            ArrowTableSource(table, tag_columns=["k"], source_id="fixed"),
+            ArrowTableSource(
+                table, tag_columns=["k"], tag_only_columns=True, source_id="fixed"
+            ),
             cache_database=store,
             cache_path=("my", "cache"),
         )
@@ -434,7 +440,12 @@ def _stored_function_versions(store: Store, pod: Any) -> list[str]:
     """Run ``pod`` over ``ROWS`` in a job and return the versions its result rows hold."""
     job = PipelineJob(name=JOB_NAME, store=store)
     with job:
-        pod(DictSource(data=ROWS, tag_columns=["k"], source_id="src"), label="fn")
+        pod(
+            DictSource(
+                data=ROWS, tag_columns=["k"], tag_only_columns=True, source_id="src"
+            ),
+            label="fn",
+        )
     _ = job.run()
     records = reopened(store).get_all_records(table_path(store, "rdb_v2"))
     assert records is not None
@@ -466,7 +477,12 @@ class TestFunctionVersionColumn:
             job = PipelineJob(name=JOB_NAME, store=database)
             with job:
                 triple_v3_7.pod(
-                    DictSource(data=ROWS, tag_columns=["k"], source_id="src"),
+                    DictSource(
+                        data=ROWS,
+                        tag_columns=["k"],
+                        tag_only_columns=True,
+                        source_id="src",
+                    ),
                     label="fn",
                 )
             return job
@@ -890,6 +906,7 @@ def _sink_job(store: Store) -> PipelineJob:
         source = DictSource(
             data=[{"k": "a", "double": 2}, {"k": "b", "double": 4}],
             tag_columns=["k"],
+            tag_only_columns=True,
             source_id="src",
         )
         sink = sink_pod(_deliver)
@@ -1011,6 +1028,7 @@ def _notify_job(store: Store) -> PipelineJob:
         source = DictSource(
             data=[{"k": "a", "double": 2}, {"k": "b", "double": 4}],
             tag_columns=["k"],
+            tag_only_columns=True,
             source_id="src",
         )
         notify.pod(source, label="notify")
@@ -1118,6 +1136,7 @@ class TestSideEffectFunctionNodes:
         source = DictSource(
             data=[{"k": "a", "double": 2}, {"k": "b", "double": 4}],
             tag_columns=["k"],
+            tag_only_columns=True,
             source_id="src",
         )
         node = FunctionJobNode(
@@ -1262,7 +1281,9 @@ class TestInputOfAnotherDataContext:
 
         node = FunctionJobNode(
             function_pod=double.pod,  # pyright: ignore[reportArgumentType]  # the decorator types .pod as the pod base class
-            input_stream=DictSource(data=ROWS, tag_columns=["k"], source_id="src"),
+            input_stream=DictSource(
+                data=ROWS, tag_columns=["k"], tag_only_columns=True, source_id="src"
+            ),
             pipeline_database=store,
             result_database=store,
         )
@@ -1411,7 +1432,11 @@ class TestInputOfAnotherDataContext:
         table = pa.table({"k": ["a", "b"], "x": [1, 2]})
         source = CachedSource(
             ArrowTableSource(
-                table, tag_columns=["k"], source_id="fixed", data_context=OTHER
+                table,
+                tag_columns=["k"],
+                tag_only_columns=True,
+                source_id="fixed",
+                data_context=OTHER,
             ),
             cache_database=store,
         )
@@ -1428,7 +1453,11 @@ class TestInputOfAnotherDataContext:
         table = pa.table({"k": ["a", "b"], "x": [1, 2]})
         source = CachedSource(
             ArrowTableSource(
-                table, tag_columns=["k"], source_id="fixed", data_context=OTHER
+                table,
+                tag_columns=["k"],
+                tag_only_columns=True,
+                source_id="fixed",
+                data_context=OTHER,
             ),
             cache_database=store,
             data_context=CURRENT,

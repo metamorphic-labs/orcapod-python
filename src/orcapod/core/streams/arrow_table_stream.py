@@ -50,7 +50,7 @@ class ArrowTableStream(StreamBase):
         producer: PodProtocol | None = None,
         upstreams: tuple[StreamProtocol, ...] = (),
         reference_tags: Collection[str] = (),
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Wrap ``table`` as a stream.
 

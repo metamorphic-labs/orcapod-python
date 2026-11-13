@@ -31,7 +31,9 @@ def persistent_node():
             "value": pa.array([1, 2], type=pa.int64()),
         }
     )
-    src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+    src = ArrowTableSource(
+        table, tag_columns=["key"], tag_only_columns=True, infer_nullable=True
+    )
     pod = FunctionPod(PythonDataFunction(double_value, output_keys="result"))
     return FunctionJobNode(
         pod,
@@ -79,7 +81,9 @@ def ephemeral_node():
             "value": pa.array([1], type=pa.int64()),
         }
     )
-    src = ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+    src = ArrowTableSource(
+        table, tag_columns=["key"], tag_only_columns=True, infer_nullable=True
+    )
     pod = FunctionPod(PythonDataFunction(double_value, output_keys="result"))
     node = FunctionJobNode(
         pod,
@@ -189,7 +193,9 @@ class TestProcessDataInternalEmptyData:
                 "value": pa.array([1], type=pa.int64()),
             }
         )
-        ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+        ArrowTableSource(
+            table, tag_columns=["key"], tag_only_columns=True, infer_nullable=True
+        )
 
         def triple_value(result: int) -> int:
             return result * 3
@@ -239,7 +245,9 @@ class TestProcessDataInternalEmptyData:
                 "value": pa.array([1], type=pa.int64()),
             }
         )
-        ArrowTableSource(table, tag_columns=["key"], infer_nullable=True)
+        ArrowTableSource(
+            table, tag_columns=["key"], tag_only_columns=True, infer_nullable=True
+        )
 
         def triple_value(result: int) -> int:
             return result * 3

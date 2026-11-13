@@ -13,11 +13,13 @@ database = DeltaTableDatabase("./local_database")
 source1 = DictSource(
     [{"id": 0, "x": 5}, {"id": 1, "x": 10}, {"id": 2, "x": 15}],
     tag_columns=["id"],
+    tag_only_columns=True,
     source_id="source1",
 )
 source2 = DictSource(
     [{"id": 0, "y": 3}, {"id": 2, "y": 6}, {"id": 4, "y": 9}],
     tag_columns=["id"],
+    tag_only_columns=True,
     source_id="source2",
 )
 

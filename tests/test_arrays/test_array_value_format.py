@@ -33,14 +33,18 @@ IDENTIFIER_TEXT = (
 
 def stored(value: Any) -> bytes:
     """The stored cell of a one-row ``x`` column."""
-    table = DictSource(data=[{"k": "r", "x": value}], tag_columns=["k"]).as_table()
+    table = DictSource(
+        data=[{"k": "r", "x": value}], tag_columns=["k"], tag_only_columns=True
+    ).as_table()
     chunk = table.column("x").chunk(0)
     assert isinstance(chunk, pa.ExtensionArray)
     return chunk.storage[0].as_py()
 
 
 def read_back(value: Any) -> Any:
-    source = DictSource(data=[{"k": "r", "x": value}], tag_columns=["k"])
+    source = DictSource(
+        data=[{"k": "r", "x": value}], tag_columns=["k"], tag_only_columns=True
+    )
     return next(iter(source.iter_data()))[1].as_dict()["x"]
 
 
@@ -49,7 +53,9 @@ def semantic_hash(value: Any) -> Any:
 
 
 def data_hash(value: Any) -> Any:
-    source = DictSource(data=[{"k": "r", "x": value}], tag_columns=["k"])
+    source = DictSource(
+        data=[{"k": "r", "x": value}], tag_columns=["k"], tag_only_columns=True
+    )
     return next(iter(source.iter_data()))[1].content_hash()
 
 
@@ -61,7 +67,7 @@ def data_hash(value: Any) -> Any:
 def test_column_type_is_orcapod_numpy_ndarray_over_large_binary() -> None:
     """An array column is ``orcapod.numpy.ndarray`` over ``large_binary`` with the ignore list."""
     table = DictSource(
-        data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"]
+        data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"], tag_only_columns=True
     ).as_table()
     ext = table.schema.field("x").type
     assert isinstance(ext, pa.ExtensionType)
@@ -424,7 +430,9 @@ def test_table_token_carries_the_identifier_and_the_digest() -> None:
     hasher = get_default_context().arrow_hasher
     assert isinstance(hasher, StarfixArrowHasher)
     array = np.arange(3.0)
-    table = DictSource(data=[{"k": "r", "x": array}], tag_columns=["k"]).as_table()
+    table = DictSource(
+        data=[{"k": "r", "x": array}], tag_columns=["k"], tag_only_columns=True
+    ).as_table()
     # Non-public helper: this test is about the token the hasher builds for a cell.
     processed = hasher._process_table_columns(table.select(["x"]))  # pyright: ignore[reportPrivateUsage]
     token = processed.column("x")[0].as_py()
@@ -494,7 +502,11 @@ def test_unsupported_arrays_are_refused_naming_column_and_dtype(
 ) -> None:
     """Unsupported arrays are refused at write time, naming the column and the dtype."""
     with pytest.raises(ValueError, match="'payload'") as info:
-        DictSource(data=[{"k": "r", "payload": value}], tag_columns=["k"]).as_table()
+        DictSource(
+            data=[{"k": "r", "payload": value}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+        ).as_table()
     assert reason.lower() in str(info.value).lower()
 
 
@@ -525,7 +537,7 @@ def test_a_cell_that_is_not_a_stored_array_raises_naming_the_column(
     )
     # The first read of the value (hashing the source rows) must fail naming the column.
     with pytest.raises((ValueError, RuntimeError), match="'x'"):
-        source = ArrowTableSource(table, tag_columns=["k"])
+        source = ArrowTableSource(table, tag_columns=["k"], tag_only_columns=True)
         for _, data in source.iter_data():
             data.as_dict()
 
@@ -541,7 +553,7 @@ def _source_of_cell(cell: bytes) -> ArrowTableSource:
             "x": pa.ExtensionArray.from_storage(ext, storage),
         }
     )
-    return ArrowTableSource(table, tag_columns=["k"])
+    return ArrowTableSource(table, tag_columns=["k"], tag_only_columns=True)
 
 
 def test_a_cell_that_declares_more_than_it_holds_is_refused_before_allocation() -> None:
@@ -614,7 +626,7 @@ def test_a_stored_object_array_is_never_unpickled() -> None:
         }
     )
     with pytest.raises((ValueError, RuntimeError), match="allow_pickle=False"):
-        source = ArrowTableSource(table, tag_columns=["k"])
+        source = ArrowTableSource(table, tag_columns=["k"], tag_only_columns=True)
         for _, data in source.iter_data():
             data.as_dict()
 
@@ -632,7 +644,9 @@ def test_scalar_returned_for_declared_ndarray_is_refused_at_the_pod() -> None:
         return x * 2  # a 0-d input gives a NumPy scalar
 
     source = DictSource(
-        data=[{"k": "a", "x": np.array(7.5, np.float32)}], tag_columns=["k"]
+        data=[{"k": "a", "x": np.array(7.5, np.float32)}],
+        tag_columns=["k"],
+        tag_only_columns=True,
     )
     with pytest.raises(TypeError, match="float32.*'y'.*ndarray"):
         list(double.pod(source).iter_data())
@@ -645,7 +659,9 @@ def test_none_returned_for_optional_ndarray_is_accepted() -> None:
     def nothing(x: np.ndarray) -> np.ndarray | None:  # pyright: ignore[reportMissingTypeArgument]  # the bare np.ndarray annotation is under test
         return None
 
-    source = DictSource(data=[{"k": "a", "x": np.arange(2.0)}], tag_columns=["k"])
+    source = DictSource(
+        data=[{"k": "a", "x": np.arange(2.0)}], tag_columns=["k"], tag_only_columns=True
+    )
     assert [d.as_dict()["y"] for _, d in nothing.pod(source).iter_data()] == [None]
 
 
@@ -666,11 +682,13 @@ def test_merge_join_orders_arrays_by_their_value_hash() -> None:
     left = DictSource(
         data=[{"k": "a", "x": large}, {"k": "b", "x": other}],
         tag_columns=["k"],
+        tag_only_columns=True,
         source_id="l",
     )
     right = DictSource(
         data=[{"k": "a", "x": small}, {"k": "b", "x": small}],
         tag_columns=["k"],
+        tag_only_columns=True,
         source_id="r",
     )
     for pair in ((left, right), (right, left)):
@@ -688,8 +706,18 @@ def test_merge_join_orders_arrays_that_differ_only_in_field_order() -> None:
     """``MergeJoin`` orders arrays that differ only in field order the same way for either input order."""
     ab = np.array([(1, 2.0)], dtype=[("a", "<i4"), ("b", "<f8")])
     ba = np.array([(2.0, 1)], dtype=[("b", "<f8"), ("a", "<i4")])
-    left = DictSource(data=[{"k": "a", "x": ba}], tag_columns=["k"], source_id="l")
-    right = DictSource(data=[{"k": "a", "x": ab}], tag_columns=["k"], source_id="r")
+    left = DictSource(
+        data=[{"k": "a", "x": ba}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="l",
+    )
+    right = DictSource(
+        data=[{"k": "a", "x": ab}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="r",
+    )
     outs: list[Any] = [
         next(d.as_dict()["x"] for _, d in MergeJoin()(*pair).iter_data())
         for pair in ((left, right), (right, left))
@@ -705,9 +733,17 @@ def test_merge_join_keeps_memory_order_and_byte_order_of_each_side() -> None:
     """Merged arrays read back as each side gave them."""
     base = np.arange(6, dtype=np.float32).reshape(2, 3)
     fortran_big = np.asfortranarray(base.astype(">f4"))
-    left = DictSource(data=[{"k": "a", "x": base}], tag_columns=["k"], source_id="l")
+    left = DictSource(
+        data=[{"k": "a", "x": base}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="l",
+    )
     right = DictSource(
-        data=[{"k": "a", "x": fortran_big}], tag_columns=["k"], source_id="r"
+        data=[{"k": "a", "x": fortran_big}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="r",
     )
     got: Any = next(d.as_dict()["x"] for _, d in MergeJoin()(left, right).iter_data())
     assert sorted(x.dtype.str for x in got) == ["<f4", ">f4"]
@@ -724,7 +760,9 @@ def test_pick_on_an_array_column_raises_input_validation_error() -> None:
     from orcapod.errors import InputValidationError
     from orcapod.operators import Pick
 
-    source = DictSource(data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"])
+    source = DictSource(
+        data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"], tag_only_columns=True
+    )
     with pytest.raises(InputValidationError, match="'x'.*does not support pick"):
         Pick("x", "dtype")(source)
 
@@ -740,7 +778,9 @@ def test_pick_on_an_array_column_raises_while_building_a_pipeline(
     from orcapod.errors import InputValidationError
     from orcapod.operators import Pick
 
-    source = DictSource(data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"])
+    source = DictSource(
+        data=[{"k": "r", "x": np.arange(3.0)}], tag_columns=["k"], tag_only_columns=True
+    )
     job = PipelineJob(name="pick", store=InMemoryArrowDatabase())
     with pytest.raises(InputValidationError, match="'x'"), job:
         Pick("x", "dtype")(source)

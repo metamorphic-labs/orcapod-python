@@ -89,7 +89,7 @@ rule_store = InMemoryArrowDatabase()
 rule_job = PipelineJob(name="my_pipeline", store=rule_store)
 with rule_job:
     numbers = DictSource(
-        data=[{"k": "a", "x": 1}], tag_columns=["k"], source_id="numbers"
+        data=[{"k": "a", "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="numbers"
     )
     _ = double.pod(numbers, label="double")
 rule_job.run()
@@ -144,12 +144,12 @@ from orcapod.side_effects import SideEffectPod, InvocationContext
 
 scores = DictSource(
     [{"student": "alice", "math": 90}, {"student": "bob", "math": 75}],
-    tag_columns=["student"],
+    tag_columns=["student"], tag_only_columns=True,
     source_id="scores_v1",
 )
 attendance = DictSource(
     [{"student": "alice", "days": 180}, {"student": "bob", "days": 160}],
-    tag_columns=["student"],
+    tag_columns=["student"], tag_only_columns=True,
     source_id="attendance_v1",
 )
 
@@ -588,7 +588,7 @@ from orcapod.sources import DictSource
 def dict_row_hash(value):
     source = DictSource(
         data=[{"k": "r", "m": value}],
-        tag_columns=["k"],
+        tag_columns=["k"], tag_only_columns=True,
         data_schema={"k": str, "m": dict[str, int]},
     )
     _, data = next(iter(source.iter_data()))
@@ -1252,7 +1252,7 @@ def double_for_contexts(x: int) -> int:
 context_store = InMemoryArrowDatabase()
 context_job = PipelineJob(name="contexts_demo", store=context_store)
 with context_job:
-    rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"])
+    rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"], tag_only_columns=True)
     _ = double_for_contexts.pod(rows, label="dbl")
 context_job.run()
 

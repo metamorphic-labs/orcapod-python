@@ -52,7 +52,7 @@ stream = DictSource(
         {"subject_id": "mouse_01", "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 ```
 
@@ -117,7 +117,7 @@ subjects = DictSource(
         {"subject_id": f"mouse_{i:02d}", "age": 8 + i, "weight": 20.0 + i}
         for i in range(1, 26)
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
     label="subjects",
 )
 
@@ -196,7 +196,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "age": 12, "weight": 25.3},
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Default: user-facing columns only
@@ -228,7 +228,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Schema inspection

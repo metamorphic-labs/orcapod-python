@@ -20,12 +20,14 @@ identities exactly.
 from __future__ import annotations
 
 import warnings
+import weakref
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
 
 from orcapod.errors import InputValidationError
+from orcapod.types import SourceInfoValue
 
 # Diagnostic emitted when a structural operator materializes a reference (section 7.4).
 # ``"warn"`` emits a ``ReferenceMaterializationWarning``; ``"silent"`` emits nothing. The
@@ -42,6 +44,11 @@ class ReferenceMaterializationWarning(UserWarning):
 _diagnostic_off: ContextVar[bool] = ContextVar(
     "reference_materialization_off", default=False
 )
+
+
+# The operations that already reported, by id, holding the object so the id is not
+# reused while the entry exists.
+_reported: "weakref.WeakValueDictionary[int, object]" = weakref.WeakValueDictionary()
 
 
 @contextmanager
@@ -126,21 +133,28 @@ def check_namespaces(
             )
 
 
-def warn_materialized(operation: str, names: Iterable[str]) -> None:
+def warn_materialized(operation: object, names: Iterable[str]) -> None:
     """Report that ``operation`` turned the referential tags ``names`` into plain tags.
 
-    Its job is the diagnostic of section 7.4, so it takes the operation's name. Emits
-    nothing when ``names`` is empty or ``reference_materialization`` is ``"silent"``.
+    Its job is the diagnostic of section 7.4, so it takes the operation. It reports
+    once per operation object: a job validates its operators again when it builds and
+    runs its nodes, and that is not a new structural step. An operation built while
+    ``materialization_diagnostic_off`` is active (Orcapod's own step) never reports.
+    Emits nothing when ``names`` is empty or ``reference_materialization`` is
+    ``"silent"``.
 
     Args:
-        operation: The structural operation, for the message.
+        operation: The structural operation (an operator instance).
         names: The tags that became plain.
     """
     names = tuple(names)
-    if not names or reference_materialization == "silent" or _diagnostic_off.get():
+    if not names or id(operation) in _reported:
+        return
+    _reported[id(operation)] = operation
+    if reference_materialization == "silent" or _diagnostic_off.get():
         return
     warnings.warn(
-        f"{operation}: the data column of referential tag(s) {list(names)} was removed; "
+        f"{type(operation).__name__}: the data column of referential tag(s) {list(names)} was removed; "
         "they are now plain tags with the same values (set "
         "orcapod.core.referential_tags.reference_materialization = 'silent' to hide this)",
         ReferenceMaterializationWarning,
@@ -205,7 +219,9 @@ def source_reference_tags(
     return tuple(name for name in tags if name not in plain)
 
 
-def merged_source_tokens(left: object, right: object) -> list[str | None]:
+def merged_source_tokens(
+    left: SourceInfoValue, right: SourceInfoValue
+) -> list[SourceInfoValue]:
     """Return the source info of a data column merged by a join, keeping both inputs'.
 
     Section 9.4: a join that merges the data columns of two referential tags keeps the
@@ -225,13 +241,13 @@ def merged_source_tokens(left: object, right: object) -> list[str | None]:
         NotImplementedError: If a value is a list nested more than one level
             (ITL-1016).
     """
-    merged: list[str | None] = []
+    merged: list[SourceInfoValue] = []
     for value in (left, right):
-        items = value if isinstance(value, list) else [value]
-        for item in items:  # pyright: ignore[reportUnknownVariableType]  # a token or a list of tokens
+        items: list[SourceInfoValue] = value if isinstance(value, list) else [value]
+        for item in items:
             if isinstance(item, list):
                 raise not_supported_yet(
                     "Join of nested source info of a referential tag", "ITL-1016"
                 )
-            merged.append(item)  # pyright: ignore[reportUnknownArgumentType]  # a token
+            merged.append(item)
     return merged

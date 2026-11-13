@@ -70,7 +70,10 @@ def _rewrite_job_file(
 def _dict_source() -> DictSource:
     """Return a two-row in-memory source with tag ``id`` and data ``x``."""
     return DictSource(
-        [{"id": 0, "x": 5}, {"id": 1, "x": 10}], tag_columns=["id"], source_id="dsrc"
+        [{"id": 0, "x": 5}, {"id": 1, "x": 10}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="dsrc",
     )
 
 
@@ -129,7 +132,11 @@ def test_datetime_output_feeding_an_operator_loads_with_its_type(
         """Return a UTC timestamp derived from *x*."""
         return datetime.datetime(2026, 1, x % 28 + 1, tzinfo=datetime.timezone.utc)
 
-    other = DictSource([{"id": 0, "y": 1}, {"id": 1, "y": 2}], tag_columns=["id"])
+    other = DictSource(
+        [{"id": 0, "y": 1}, {"id": 1, "y": 2}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+    )
 
     def record() -> None:
         """Record the pipeline under test."""
@@ -207,6 +214,7 @@ def test_path_output_feeding_join_still_allows_job_load(tmp_path: pathlib.Path) 
         other = DictSource(
             [{"id": 0, "y": 1}, {"id": 1, "y": 2}],
             tag_columns=["id"],
+            tag_only_columns=True,
             source_id="other",
         )
         Join()(paths, other, label="joined")
@@ -536,6 +544,7 @@ def test_store_with_only_another_runs_records_is_a_mismatched_store(
         other = DictSource(
             [{"id": 0, "x": 7}, {"id": 1, "x": 8}],
             tag_columns=["id"],
+            tag_only_columns=True,
             source_id="other",
         )
         _ = double.pod(other, label="dbl")
@@ -663,8 +672,18 @@ def _loaded_operator_only_job(tmp_path: pathlib.Path) -> PipelineJob:
 
     def record() -> None:
         """Join two CSV sources, which are rebuilt on load."""
-        left = CSVSource(str(tmp_path / "a.csv"), tag_columns=["id"], source_id="a")
-        right = CSVSource(str(tmp_path / "b.csv"), tag_columns=["id"], source_id="b")
+        left = CSVSource(
+            str(tmp_path / "a.csv"),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="a",
+        )
+        right = CSVSource(
+            str(tmp_path / "b.csv"),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="b",
+        )
         _ = Join()(left, right, label="joined")
 
     job = PipelineJob.load(_save_small_job(tmp_path, record))

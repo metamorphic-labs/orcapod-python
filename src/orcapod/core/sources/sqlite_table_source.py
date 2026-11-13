@@ -25,6 +25,7 @@ import os
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.referential_tags import TagOnlyColumns
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -66,6 +67,9 @@ class SQLiteTableSource(DBTableSource):
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
+        tag_only_columns: Tag columns kept as tags only, not data, exactly as in
+            v0.3; ``True`` for all of them. Every other tag column is referential:
+            also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If the table is not found or is empty.
@@ -83,6 +87,7 @@ class SQLiteTableSource(DBTableSource):
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: "OrcapodConfig | None" = None,
+        tag_only_columns: TagOnlyColumns = (),
     ) -> None:
         self._db_path = db_path
         connector = SQLiteConnector(db_path)
@@ -115,6 +120,7 @@ class SQLiteTableSource(DBTableSource):
                 label=label,
                 data_context=data_context,
                 config=config,
+                tag_only_columns=tag_only_columns,
                 _query=_query,
             )
         finally:
@@ -150,6 +156,7 @@ class SQLiteTableSource(DBTableSource):
             db_path=config["db_path"],
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
+            tag_only_columns=config.get("tag_only_columns", True),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_column=config.get("record_id_column"),
             source_id=config.get("source_id"),

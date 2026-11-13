@@ -937,18 +937,14 @@ class Join(NonZeroInputOperator):
         right_rest = right_table.drop_columns(
             [c for c in referential if c in right_table.column_names]
         )
-        references = pa.table(
-            {
-                name: (
-                    left_table if name in left_table.column_names else right_table
-                ).column(name)
-                for name in referential
-            },
+        owners = [
+            left_table if name in left_table.column_names else right_table
+            for name in referential
+        ]
+        references = pa.Table.from_arrays(
+            [owner.column(name) for owner, name in zip(owners, referential)],
             schema=pa.schema(
-                (
-                    left_table if name in left_table.column_names else right_table
-                ).schema.field(name)
-                for name in referential
+                [owner.schema.field(name) for owner, name in zip(owners, referential)]
             ),
         )
         return Data(

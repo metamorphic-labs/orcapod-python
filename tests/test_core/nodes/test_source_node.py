@@ -149,7 +149,9 @@ class TestSourceNodeInterface:
         from orcapod.core.sources.dict_source import DictSource
 
         node = SourceNode(name="x", tag_schema=tag_schema, data_schema=data_schema)
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         node.validate(src)  # must not raise
 
     def test_validate_incompatible_raises(self, tag_schema, data_schema):
@@ -157,7 +159,9 @@ class TestSourceNodeInterface:
         from orcapod.core.sources.dict_source import DictSource
 
         node = SourceNode(name="x", tag_schema=tag_schema, data_schema=data_schema)
-        src = DictSource(data=[{"id": 1, "wrong": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "wrong": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         with pytest.raises(SourceSpecMismatchError):
             node.validate(src)
 
@@ -196,7 +200,9 @@ class TestSourceJobNode:
         from orcapod.core.nodes.source_node import SourceJobNode
         from orcapod.core.sources.dict_source import DictSource
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         job_node = SourceJobNode(
             name="x", tag_schema=tag_schema, data_schema=data_schema, bound_source=src
         )
@@ -207,7 +213,9 @@ class TestSourceJobNode:
         from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
         from orcapod.core.sources.dict_source import DictSource
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         node = SourceNode(name="x", tag_schema=tag_schema, data_schema=data_schema)
         job_node = SourceJobNode(
             name="x", tag_schema=tag_schema, data_schema=data_schema, bound_source=src
@@ -233,7 +241,9 @@ class TestSourceJobNode:
             name="x", tag_schema=tag_schema, data_schema=data_schema
         )
         assert job_node.bound_source is None
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         job_node.bound_source = src
         assert job_node.bound_source is src
 
@@ -249,7 +259,9 @@ class TestSourceJobNode:
         )
         schema_hash = job_node.content_hash()  # populates cache with schema-based hash
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         job_node.bound_source = src  # should clear the cache
 
         bound_hash = job_node.content_hash()
@@ -275,7 +287,9 @@ class TestSourceNodeAsTable:
         from orcapod.core.nodes.source_node import SourceJobNode
         from orcapod.core.sources.dict_source import DictSource
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         job_node = SourceJobNode(
             name="x", tag_schema=tag_schema, data_schema=data_schema, bound_source=src
         )
@@ -371,7 +385,9 @@ class TestSourceNodeColumnConfig:
         from orcapod.core.sources.dict_source import DictSource
         from orcapod.types import ColumnConfig
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         unbound = SourceJobNode(
             name="x", tag_schema=tag_schema, data_schema=data_schema
         )
@@ -405,7 +421,9 @@ class TestSourceNodeColumnConfig:
         from orcapod.core.nodes.source_node import SourceJobNode
         from orcapod.core.sources.dict_source import DictSource
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         job_node = SourceJobNode(
             name="x", tag_schema=tag_schema, data_schema=data_schema, bound_source=src
         )
@@ -436,7 +454,9 @@ class TestSourceNodeColumnConfig:
         from orcapod.core.nodes.source_node import SourceJobNode
         from orcapod.core.sources.dict_source import DictSource
 
-        src = DictSource(data=[{"id": 1, "value": 1.0}], tag_columns=["id"])
+        src = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
         job_node = SourceJobNode(
             name="x", tag_schema=tag_schema, data_schema=data_schema, bound_source=src
         )

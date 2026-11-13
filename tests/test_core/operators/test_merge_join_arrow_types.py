@@ -521,9 +521,11 @@ class TestDisagreeingInputs:
         """A CSV ``string`` column colliding with a dict ``large_string`` one merges."""
         csv_path = tmp_path / "labels.csv"
         csv_path.write_text("id,label\n1,a\n2,b\n")
-        csv_source = CSVSource(str(csv_path), tag_columns=["id"])
+        csv_source = CSVSource(str(csv_path), tag_columns=["id"], tag_only_columns=True)
         dict_source = DictSource(
-            [{"id": 1, "label": "x"}, {"id": 2, "label": "y"}], tag_columns=["id"]
+            [{"id": 1, "label": "x"}, {"id": 2, "label": "y"}],
+            tag_columns=["id"],
+            tag_only_columns=True,
         )
         assert csv_source.as_table().schema.field("label").type == pa.string()
         assert dict_source.as_table().schema.field("label").type == pa.large_string()
@@ -553,6 +555,7 @@ def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
             }
         ),
         tag_columns=["probe"],
+        tag_only_columns=True,
     )
     right = ArrowTableSource(
         _table(
@@ -563,6 +566,7 @@ def _sources(rows: int) -> tuple[StreamProtocol, StreamProtocol]:
             }
         ),
         tag_columns=["probe"],
+        tag_only_columns=True,
     )
     if rows:
         return left, right

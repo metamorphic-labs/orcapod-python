@@ -72,7 +72,8 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _source(**kwargs: Any) -> SpiralDBTableSource:
-    """Return a source over the ``spike`` table."""
+    """Return a source over the ``spike`` table, its tags plain as in v0.3 (ITL-1023)."""
+    kwargs.setdefault("tag_only_columns", True)
     return SpiralDBTableSource(_PROJECT, "spike", **kwargs)
 
 

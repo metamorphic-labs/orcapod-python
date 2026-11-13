@@ -18,7 +18,7 @@ source = DictSource(
         {"experiment": "exp_002", "temperature": 22.3, "pressure": 0.98},
         {"experiment": "exp_003", "temperature": 19.8, "pressure": 1.05},
     ],
-    tag_columns=["experiment"],
+    tag_columns=["experiment"], tag_only_columns=True,
     source_id="lab_results",
 )
 ```
@@ -187,7 +187,7 @@ source = DictSource(
         {"experiment": "exp_002", "temperature": 22.3, "pressure": 0.98},
         {"experiment": "exp_003", "temperature": 19.8, "pressure": 1.05},
     ],
-    tag_columns=["experiment"],
+    tag_columns=["experiment"], tag_only_columns=True,
     source_id="lab_results",
 )
 

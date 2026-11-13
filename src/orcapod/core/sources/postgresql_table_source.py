@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.referential_tags import TagOnlyColumns
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.databases.postgresql_connector import PostgreSQLConnector
 
@@ -54,6 +55,9 @@ class PostgreSQLTableSource(DBTableSource):
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
+        tag_only_columns: Tag columns kept as tags only, not data, exactly as in
+            v0.3; ``True`` for all of them. Every other tag column is referential:
+            also a data column of the same name (ITL-1023).
 
     Raises:
         ValueError: If the table is not found, is empty, or has no PK and
@@ -72,6 +76,7 @@ class PostgreSQLTableSource(DBTableSource):
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
+        tag_only_columns: TagOnlyColumns = (),
     ) -> None:
         self._dsn = dsn  # store before try — needed by to_config even if super() raises
         connector = PostgreSQLConnector(
@@ -88,6 +93,7 @@ class PostgreSQLTableSource(DBTableSource):
                 label=label,
                 data_context=data_context,
                 config=config,
+                tag_only_columns=tag_only_columns,
             )
         finally:
             try:
@@ -120,6 +126,7 @@ class PostgreSQLTableSource(DBTableSource):
             dsn=config["dsn"],
             table_name=config["table_name"],
             tag_columns=config.get("tag_columns"),
+            tag_only_columns=config.get("tag_only_columns", True),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_column=config.get("record_id_column"),
             source_id=config.get("source_id"),

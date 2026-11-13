@@ -68,7 +68,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3, "height": 0.12},
         {"subject_id": "mouse_02", "weight": 22.1, "height": 0.10},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Apply the function pod to the source stream
@@ -108,7 +108,7 @@ wide = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3, "height": 0.12, "age": 12},
         {"subject_id": "mouse_02", "weight": 22.1, "height": 0.10, "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(wide)  # 'age' is not a parameter: it is dropped
@@ -200,7 +200,7 @@ from orcapod.errors import OutputTypeError
 def halve(weight: float) -> int:
     return weight / 2  # a float, although the function says it returns an int
 
-weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"])
+weights = DictSource(data=[{"subject_id": "mouse_01", "weight": 25.3}], tag_columns=["subject_id"], tag_only_columns=True)
 
 try:
     list(halve.pod(weights).iter_data())
@@ -313,7 +313,7 @@ db = InMemoryArrowDatabase()
 
 job = PipelineJob(name="bmi_demo", store=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -347,7 +347,7 @@ mice.append({"subject_id": "mouse_03", "weight": 27.8, "height": 0.11})
 
 job = PipelineJob(name="bmi_demo", store=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -413,7 +413,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator
 
 job = PipelineJob(name="bmi_async", store=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run(orchestrator=AsyncPipelineOrchestrator())
@@ -452,7 +452,7 @@ import asyncio
 
 job = PipelineJob(name="bmi_awaited", store=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 
@@ -477,7 +477,7 @@ Running the same job again computes nothing new, and the summary says so:
 ```python
 job = PipelineJob(name="bmi_demo", store=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -499,7 +499,7 @@ def careless_bmi(weight: float, height: float) -> float:
 
 job = PipelineJob(name="bmi_typo", store=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     careless_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -665,7 +665,7 @@ workdir = Path(tempfile.mkdtemp())  # any directory you keep
 
 job = PipelineJob(name="bmi_demo", store=DeltaTableDatabase(workdir / "store"))
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -817,7 +817,7 @@ def count_rows(readings: pl.DataFrame) -> int:
 
 recordings = DictSource(
     data=[{"session": "s1", "n_samples": 2}, {"session": "s2", "n_samples": 3}],
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 readings = load_readings.pod(recordings)
 for tag, data in readings.iter_data():
@@ -842,14 +842,14 @@ weights = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 heights = DictSource(
     data=[
         {"subject_id": "mouse_01", "height": 0.12},
         {"subject_id": "mouse_02", "height": 0.10},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(weights, heights)
@@ -873,7 +873,7 @@ Two consequences:
 ```python
 chosen = DictSource(
     data=[{"subject_id": "mouse_02", "cohort": "b"}],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 result = compute_bmi.pod(weights, heights, chosen)

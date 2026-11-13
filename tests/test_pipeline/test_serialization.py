@@ -27,7 +27,9 @@ def spec_pipeline(tmp_path):
                 data: pa.array([1], type=pa.int64()),
             }
         )
-        return ArrowTableSource(tbl, tag_columns=[tag], infer_nullable=True)
+        return ArrowTableSource(
+            tbl, tag_columns=[tag], tag_only_columns=True, infer_nullable=True
+        )
 
     src_a = _src("key", "value")
     src_b = _src("key", "score")
@@ -155,6 +157,7 @@ class TestPipelineBlueprintLoad:
                 }
             ),
             tag_columns=["key"],
+            tag_only_columns=True,
             infer_nullable=True,
         )
         src_b = ArrowTableSource(
@@ -165,6 +168,7 @@ class TestPipelineBlueprintLoad:
                 }
             ),
             tag_columns=["key"],
+            tag_only_columns=True,
             infer_nullable=True,
         )
         store = InMemoryArrowDatabase()
@@ -203,7 +207,9 @@ def compiled_pipeline():
                 data: pa.array([1], type=pa.int64()),
             }
         )
-        return ArrowTableSource(tbl, tag_columns=[tag], infer_nullable=True)
+        return ArrowTableSource(
+            tbl, tag_columns=[tag], tag_only_columns=True, infer_nullable=True
+        )
 
     from orcapod.core.operators import Join
 

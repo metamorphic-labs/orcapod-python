@@ -236,7 +236,7 @@ class SelectDataColumns(UnaryOperator):
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to select are present or use strict=False to ignore missing columns"
             )
         warn_materialized(
-            "SelectDataColumns",
+            self,
             [c for c in stream_references(stream) if c not in self.columns],
         )
 
@@ -512,7 +512,7 @@ class DropDataColumns(UnaryOperator):
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to drop are present or use strict=False to ignore missing columns"
             )
         warn_materialized(
-            "DropDataColumns",
+            self,
             [c for c in stream_references(stream) if c in self.columns],
         )
 

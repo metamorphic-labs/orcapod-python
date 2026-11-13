@@ -38,7 +38,7 @@ source = DictSource(
         {"name": "Bob", "age": 25},
         {"name": "Charlie", "age": 35},
     ],
-    tag_columns=["name"],
+    tag_columns=["name"], tag_only_columns=True,
     source_id="people",
 )
 

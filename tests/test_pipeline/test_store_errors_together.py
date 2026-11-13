@@ -92,6 +92,7 @@ def build_job(store_path: Path, keys: str, *, reader_first: bool) -> PipelineJob
     source = ArrowTableSource(
         pa.table({"k": list(keys), "x": list(range(1, len(keys) + 1))}),
         tag_columns=["k"],
+        tag_only_columns=True,
         infer_nullable=True,
     )
     job = PipelineJob(name="together", store=DeltaTableDatabase(base_path=store_path))

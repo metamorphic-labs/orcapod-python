@@ -59,7 +59,9 @@ def _source(rows: int = 25) -> ArrowTableSource:
             ]
         ),
     )
-    return ArrowTableSource(table, tag_columns=["id"], source_id="nums", label="nums")
+    return ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=True, source_id="nums", label="nums"
+    )
 
 
 def _store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
@@ -285,7 +287,9 @@ def test_head_keeps_the_tag_arrow_type_of_the_input(
         job = PipelineJob(name="itl991_types", store=store)
         with job:
             _ = triple.pod(
-                ArrowTableSource(table, tag_columns=["id"], source_id="narrow"),
+                ArrowTableSource(
+                    table, tag_columns=["id"], tag_only_columns=True, source_id="narrow"
+                ),
                 label="triple",
             )
         return job

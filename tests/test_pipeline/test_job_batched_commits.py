@@ -74,6 +74,7 @@ def build_job(store: Any, n_rows: int, pod: Any = double) -> PipelineJob:
         source = DictSource(
             data=[{"k": i, "x": i} for i in range(n_rows)],
             tag_columns=["k"],
+            tag_only_columns=True,
             source_id="src",
         )
         pod.pod(source, label="dbl")
@@ -155,7 +156,10 @@ def test_a_cached_pod_used_on_its_own_commits_every_row(tmp_path: Path) -> None:
         result_database=DeltaTableDatabase(tmp_path),
     )
     source = DictSource(
-        data=[{"k": i, "x": i} for i in range(4)], tag_columns=["k"], source_id="src"
+        data=[{"k": i, "x": i} for i in range(4)],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="src",
     )
     for tag, data in source.iter_data():
         cached.process_data(tag, data)
@@ -333,6 +337,7 @@ def test_records_read_right_after_the_run_are_complete(
         source = DictSource(
             data=[{"k": "b", "x": 2}, {"k": "c", "x": 3}],
             tag_columns=["k"],
+            tag_only_columns=True,
             source_id=source_id,
         )
         double.pod(source, label="double")
@@ -370,6 +375,7 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
             source = DictSource(
                 data=[{"k": i, "x": i} for i in range(5)],
                 tag_columns=["k"],
+                tag_only_columns=True,
                 source_id="src",
             )
             counted_double.pod(source, label="dbl")
@@ -551,7 +557,12 @@ def test_a_failed_commit_of_writes_pending_before_the_run_stops_it_first(
     job = PipelineJob(name="batched", store=store)  # pyright: ignore[reportArgumentType]  # failing wrapper of a real store
     with job:
         counted_double.pod(
-            DictSource(data=[{"k": 1, "x": 1}], tag_columns=["k"], source_id="src"),
+            DictSource(
+                data=[{"k": 1, "x": 1}],
+                tag_columns=["k"],
+                tag_only_columns=True,
+                source_id="src",
+            ),
             label="dbl",
         )
     with pytest.raises(StoreWriteError) as info:

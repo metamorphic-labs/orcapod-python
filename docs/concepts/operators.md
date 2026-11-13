@@ -76,7 +76,7 @@ subjects = DictSource(
         {"subject_id": "mouse_01", "age": 12},
         {"subject_id": "mouse_02", "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 measurements = DictSource(
@@ -84,7 +84,7 @@ measurements = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 join = Join()
@@ -110,14 +110,14 @@ scale_a = DictSource(
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 scale_b = DictSource(
     data=[
         {"subject_id": "mouse_01", "weight": 24.9},
         {"subject_id": "mouse_02", "weight": 22.6},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 merged = MergeJoin()(scale_a, scale_b)
@@ -147,14 +147,14 @@ all_subjects = DictSource(
         {"subject_id": "mouse_02", "age": 8},
         {"subject_id": "mouse_03", "age": 15},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 weighed = DictSource(
     data=[
         {"subject_id": "mouse_01", "weight": 25.3},
         {"subject_id": "mouse_02", "weight": 22.1},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 only_weighed = SemiJoin()(all_subjects, weighed)
@@ -178,7 +178,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "age": 12},
         {"subject_id": "mouse_02", "age": 8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 batch = Batch()
@@ -214,7 +214,7 @@ source = DictSource(
         {"subject_id": "mouse_01", "probe": "imec1", "spike_count": 980},
         {"subject_id": "mouse_02", "probe": "imec0", "spike_count": 1450},
     ],
-    tag_columns=["subject_id", "probe"],
+    tag_columns=["subject_id", "probe"], tag_only_columns=True,
 )
 
 grouped = GroupBy(by=["subject_id"])(source)
@@ -282,7 +282,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 select = SelectDataColumns(columns=["weight"])
@@ -401,7 +401,7 @@ recordings = ArrowTableSource(
             ]
         ),
     ),
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 print(recordings.output_schema()[1])
 # Schema({'start_ms': int | None})
@@ -475,7 +475,7 @@ visits = ArrowTableSource(
             "notes": pa.array([None, "noisy", None, "ok"], pa.large_string()),
         }
     ),
-    tag_columns=["session"],
+    tag_columns=["session"], tag_only_columns=True,
 )
 print(visits.output_schema())
 # (Schema({'session': str | None}), Schema({'start_ms': int | None, 'notes': str | None}))
@@ -580,7 +580,7 @@ def counts(values):
             "count": pa.array(values, type=pa.int8()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["subject_id"])
+    return ArrowTableSource(table, tag_columns=["subject_id"], tag_only_columns=True)
 
 merged = MergeJoin()(counts([1, 2]), counts([3, 4]))
 print(merged.as_table().schema.field("count").type)

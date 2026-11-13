@@ -353,7 +353,7 @@ experiments = DictSource(
         {"subject_id": "m1", "session_start": start_2, "experiment_index": 0,
          "experiment_start": datetime(2026, 1, 6, 9, 32, tzinfo=timezone.utc)},
     ],
-    tag_columns=["subject_id", "session_start", "experiment_index"],
+    tag_columns=["subject_id", "session_start", "experiment_index"], tag_only_columns=True,
     source_id="experiments",
 )
 
@@ -452,7 +452,7 @@ from orcapod.sources import DictSource
 
 source = DictSource(
     data=[{"subject_id": "mouse_01", "age": 12, "weight": 25.3}],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
     source_id="mice",
 )
 
@@ -490,7 +490,7 @@ source = DictSource(
         {"subject_id": "mouse_02", "age": 8, "weight": 22.1},
         {"subject_id": "mouse_03", "age": 15, "weight": 27.8},
     ],
-    tag_columns=["subject_id"],
+    tag_columns=["subject_id"], tag_only_columns=True,
 )
 
 # Inspect the schema
