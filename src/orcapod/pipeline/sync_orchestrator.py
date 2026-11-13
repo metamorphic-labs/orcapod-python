@@ -10,6 +10,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Literal
 
+from orcapod.core.nodes._execution_cache import execute_node, verified_graph_execution
 from orcapod.errors import StoreError, TypeIdentityError
 from orcapod.pipeline.result import OrchestratorResult
 from orcapod.utils import arrow_utils
@@ -41,12 +42,29 @@ class SyncPipelineOrchestrator:
     buffer management, and stream materialization between nodes.
     """
 
+    @staticmethod
+    def _execution_snapshot_types() -> dict[str, tuple[type, ...]]:
+        """Known immutable source implementations and completion-aware node kinds."""
+        from orcapod.core.nodes import FunctionJobNode, OperatorJobNode, SourceJobNode
+        from orcapod.core.sources import ArrowTableSource, DictSource, ListSource
+        from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+        return {
+            "source_node": (SourceJobNode,),
+            "computed": (FunctionJobNode, OperatorJobNode),
+            "arrow": (ArrowTableStream,),
+            "memory_source": (ArrowTableSource, DictSource, ListSource),
+            "spiral": (SpiralDBTableSource,),
+        }
+
     def __init__(
         self,
         error_policy: Literal["continue", "fail_fast"] = "continue",
     ) -> None:
         self._error_policy = error_policy
 
+    @verified_graph_execution
     def run(
         self,
         graph: GraphProtocol[Any],
@@ -89,14 +107,18 @@ class SyncPipelineOrchestrator:
             for node in topo_order:
                 current = node
                 if is_source_node(node):
-                    buffers[node] = node.execute(observer=effective_observer)
+                    buffers[node] = execute_node(
+                        node, node.execute, observer=effective_observer
+                    )
                 elif is_function_node(node) or is_side_effect_function_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)
                     upstream_node = list(graph.predecessors(node))[0]
                     input_stream = self._materialize_as_stream(
                         upstream_buf, upstream_node
                     )
-                    buffers[node] = node.execute(
+                    buffers[node] = execute_node(
+                        node,
+                        node.execute,
                         input_stream,
                         observer=effective_observer,
                         error_policy=self._error_policy,
@@ -108,8 +130,8 @@ class SyncPipelineOrchestrator:
                         self._materialize_as_stream(buf, upstream_node)
                         for buf, upstream_node in upstream_buffers
                     ]
-                    buffers[node] = node.execute(
-                        *input_streams, observer=effective_observer
+                    buffers[node] = execute_node(
+                        node, node.execute, *input_streams, observer=effective_observer
                     )
                 elif is_side_effect_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)
@@ -117,7 +139,9 @@ class SyncPipelineOrchestrator:
                     input_stream = self._materialize_as_stream(
                         upstream_buf, upstream_node
                     )
-                    buffers[node] = node.execute(
+                    buffers[node] = execute_node(
+                        node,
+                        node.execute,
                         input_stream,
                         observer=effective_observer,
                         run_id=run_id,
@@ -204,6 +228,7 @@ class SyncPipelineOrchestrator:
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         if not buf:
+            upstream_node._sync_row_views = {}
             # Build an empty stream preserving declared field nullability.
             tag_schema, data_schema = upstream_node.output_schema(
                 columns={"system_tags": True, "source": True}
@@ -218,6 +243,7 @@ class SyncPipelineOrchestrator:
                 tag_columns=tag_keys,
                 producer=upstream_node.producer,
                 upstreams=upstream_node.upstreams,
+                data_context=upstream_node.data_context,
             )
 
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
@@ -233,12 +259,54 @@ class SyncPipelineOrchestrator:
         producer = upstream_node.producer
         upstreams = upstream_node.upstreams
 
-        return ArrowTableStream(
+        stream = ArrowTableStream(
             full_table,
             tag_columns=user_tag_keys,
             producer=producer,
             upstreams=upstreams,
+            data_context=upstream_node.data_context,
         )
+        # Sync boundaries have always exposed the Arrow-stored representation.
+        # A dict-born Data can still hold a subclass with fields omitted by its
+        # declared storage type. Keep a separate, memoized storage view instead of
+        # mutating the live row (async and standalone paths still see that row).
+        from orcapod.core.datagrams import Data, Tag
+
+        previous = getattr(upstream_node, "_sync_row_views", {})
+        retained = {}
+        stored_rows = []
+
+        def stored_view(row: Any, row_type: type) -> Any:
+            cached = previous.get(id(row))
+            if cached is not None and cached[0] is row:
+                stored = cached[1]
+            elif type(row) is row_type:
+                # _rows_to_table above has materialized this exact Arrow table.
+                # Copying preserves source/meta/context and its cached hashes;
+                # only the view's Python representation is decoded anew.
+                stored = row.copy()
+                stored._data_dict = None
+                stored._data_python_schema = None
+                setattr(
+                    stored,
+                    "_stored_row_origin",
+                    getattr(row, "_stored_row_origin", row),
+                )
+            else:
+                stored = row_type(
+                    row.as_table(
+                        columns={"source": True, "meta": True, "system_tags": True}
+                    ),
+                    data_context=upstream_node.data_context,
+                )
+            retained[id(row)] = (row, stored)
+            return stored
+
+        for tag, data in buf:
+            stored_rows.append((stored_view(tag, Tag), stored_view(data, Data)))
+        upstream_node._sync_row_views = retained
+        stream._cached_elements = stored_rows
+        return stream
 
     @staticmethod
     def _gc_buffers(

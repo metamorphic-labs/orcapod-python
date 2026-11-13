@@ -277,7 +277,15 @@ class StaticOutputOperatorPod(TraceableBase):
         table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
-        return ArrowTableStream(table, tag_columns=tag_keys)
+        stream = ArrowTableStream(
+            table,
+            tag_columns=tag_keys,
+            data_context=getattr(
+                rows[0][1], "data_context", rows[0][1].data_context_key
+            ),
+        )
+        stream._cached_elements = list(rows)
+        return stream
 
     @staticmethod
     def _materialize_input_stream(

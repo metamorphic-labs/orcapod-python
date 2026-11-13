@@ -19,6 +19,10 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from orcapod.channels import BroadcastChannel, Channel
+from orcapod.core.nodes._execution_cache import (
+    async_execute_node,
+    verified_graph_execution,
+)
 from orcapod.errors import StoreError, StoreWriteError, TypeIdentityError
 from orcapod.pipeline.result import OrchestratorResult
 from orcapod.utils.store_errors import keep_store_error
@@ -58,6 +62,13 @@ class AsyncPipelineOrchestrator:
     Args:
         buffer_size: Channel buffer size. Defaults to 64.
     """
+
+    @staticmethod
+    def _execution_snapshot_types() -> dict[str, tuple[type, ...]]:
+        """Use the same immutable snapshot boundary as synchronous execution."""
+        from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+
+        return SyncPipelineOrchestrator._execution_snapshot_types()
 
     def __init__(
         self,
@@ -173,6 +184,7 @@ class AsyncPipelineOrchestrator:
             pipeline_uri=pipeline_uri,
         )
 
+    @verified_graph_execution
     async def _run_async(
         self,
         graph: "GraphProtocol[Any]",
@@ -244,7 +256,12 @@ class AsyncPipelineOrchestrator:
                         _start_node(
                             tg,
                             node,
-                            node.async_execute(writer, observer=effective_observer),
+                            async_execute_node(
+                                node,
+                                node.async_execute,
+                                writer,
+                                observer=effective_observer,
+                            ),
                         )
                     elif is_function_node(node) or is_side_effect_function_node(node):
                         predecessors = in_edges.get(node, [])
@@ -256,7 +273,9 @@ class AsyncPipelineOrchestrator:
                         _start_node(
                             tg,
                             node,
-                            node.async_execute(
+                            async_execute_node(
+                                node,
+                                node.async_execute,
                                 input_reader,
                                 writer,
                                 observer=effective_observer,
@@ -279,8 +298,12 @@ class AsyncPipelineOrchestrator:
                         _start_node(
                             tg,
                             node,
-                            node.async_execute(
-                                input_readers, writer, observer=effective_observer
+                            async_execute_node(
+                                node,
+                                node.async_execute,
+                                input_readers,
+                                writer,
+                                observer=effective_observer,
                             ),
                         )
                     elif is_side_effect_node(node):
@@ -293,7 +316,9 @@ class AsyncPipelineOrchestrator:
                         _start_node(
                             tg,
                             node,
-                            node.async_execute(
+                            async_execute_node(
+                                node,
+                                node.async_execute,
                                 [input_reader],
                                 writer,
                                 observer=effective_observer,

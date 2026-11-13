@@ -25,6 +25,13 @@ from abc import abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
+from orcapod.core.nodes._execution_cache import (
+    publish_completion,
+    can_retain_rows,
+    invalidate,
+    is_current,
+    track_completion,
+)
 from orcapod import contexts
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -41,7 +48,7 @@ from orcapod.core.streams.head import (
     StreamHead,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.core.datagrams.tag_data import EmptyData, Tag
+from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
     InputValidationError,
@@ -1484,6 +1491,7 @@ class FunctionJobNode(FunctionNodeBase):
 
     def clear_cache(self) -> None:
         """Clear in-memory output caches, content hash cache, and node identity path cache."""
+        invalidate(self)
         super().clear_cache()
         self._cached_output_datas.clear()
         self._cached_output_table = None
@@ -1836,6 +1844,7 @@ class FunctionJobNode(FunctionNodeBase):
         tag_out, result = self._process_data_internal(tag, data)
         return tag_out, result
 
+    @track_completion
     def execute(
         self,
         input_stream: StreamProtocol,
@@ -2294,9 +2303,35 @@ class FunctionJobNode(FunctionNodeBase):
         Returns:
             A bytes value in ``b"{method}:{digest}"`` format.
         """
-        return self.data_context.arrow_hasher.hash_table(
+        if (
+            not can_retain_rows(self)
+            or type(tag) is not Tag
+            or type(input_data) not in (Data, EmptyData)
+        ):
+            return self.data_context.arrow_hasher.hash_table(
+                self._build_entry_id_preimage(tag, input_data)
+            ).to_prefixed_digest()
+        # Hold the actual immutable rows, not bare ids that could be recycled.
+        rows = getattr(self, "_entry_id_rows", None)
+        if rows is None:
+            rows = self._entry_id_rows = {}
+        # A sync storage view shares its origin's exact Arrow table and hashes.
+        # Recognize that representation-only boundary across orchestrators too.
+        tag_identity = getattr(tag, "_stored_row_origin", tag)
+        row_identity = getattr(input_data, "_stored_row_origin", input_data)
+        key = (id(tag_identity), id(row_identity), self.data_context_key)
+        cached = rows.get(key)
+        if (
+            cached is not None
+            and cached[0] is tag_identity
+            and cached[1] is row_identity
+        ):
+            return cached[2]
+        entry_id = self.data_context.arrow_hasher.hash_table(
             self._build_entry_id_preimage(tag, input_data)
         ).to_prefixed_digest()
+        rows[key] = (tag_identity, row_identity, entry_id)
+        return entry_id
 
     def compute_pipeline_entry_id(
         self,
@@ -3246,6 +3281,7 @@ class FunctionJobNode(FunctionNodeBase):
     # Async channel execution
     # ------------------------------------------------------------------
 
+    @track_completion
     async def async_execute(
         self,
         input_channel: ReadableChannel[tuple[TagProtocol, DataProtocol]],
@@ -3338,14 +3374,14 @@ class FunctionJobNode(FunctionNodeBase):
                     execution_pod = self._cached_function_pod
 
                 # Load pipeline DB → in-memory cache keyed by base_entry_id.
-                loaded = self._load_cached_entries()
+                loaded = {} if is_current(self) else self._load_cached_entries()
                 self._cached_output_datas.update(loaded)
                 if loaded:
                     self._cached_output_table = None
                     self._cached_content_hash_column = None
                 cached_by_base_entry_id: dict[
-                    bytes, tuple[TagProtocol, DataProtocol]
-                ] = dict(loaded)
+                    bytes, tuple[TagProtocol, DataProtocol | None]
+                ] = dict(self._cached_output_datas)
 
                 # Intermediate channels (bounded for backpressure).
                 compute_channel: Channel[tuple[TagProtocol, DataProtocol]] = Channel(
@@ -3379,7 +3415,8 @@ class FunctionJobNode(FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
-                                await output.send((cached_tag, cached_data))
+                                if cached_data is not None:
+                                    await output.send((cached_tag, cached_data))
                             else:
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
@@ -3557,6 +3594,7 @@ class FunctionJobNode(FunctionNodeBase):
             # the finally closes the output, so every downstream node, which stamps
             # after it has seen that close, is newer than this one (ITL-1042).
             self._update_modified_time()
+            publish_completion(self, observer)
         except Exception as run_error:
             self._commit_after_failure(run_error)
             raise

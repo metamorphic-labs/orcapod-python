@@ -37,7 +37,7 @@ import asyncio
 import dataclasses
 import datetime
 import threading
-from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Collection, Generator, Iterator, Mapping
 from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -601,7 +601,7 @@ class SpiralDBTableSource(RootSource):
                         provenance_tokens=tokens,
                     )
 
-    def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
+    def iter_data(self) -> Generator[tuple[TagProtocol, DataProtocol], None, None]:
         """Yield ``(tag, data)`` pairs, reusing a completed pinned snapshot."""
         with closing(self._batch_streams()) as streams:
             for stream in streams:
@@ -609,7 +609,7 @@ class SpiralDBTableSource(RootSource):
 
     async def async_iter_data(
         self,
-    ) -> AsyncIterator["tuple[TagProtocol, DataProtocol]"]:
+    ) -> AsyncGenerator[tuple[TagProtocol, DataProtocol], None]:
         """Yield the table's ``(tag, data)`` pairs, reading each batch off the event loop."""
         cancelled = threading.Event()
         streams = self._batch_streams(cancelled)

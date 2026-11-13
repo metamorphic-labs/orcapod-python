@@ -1,6 +1,6 @@
 # Reuse completed work across pipeline runs
 
-Status: proposed for developer approval. Implementation and PR requested November 13, 2026.
+Status: approved November 13, 2026; implementation tracked as ITL-1063.
 
 ## Problem and evidence
 
@@ -73,7 +73,59 @@ the snapshot-memory tradeoff in the PR description.
 
 ## Tracking and delivery
 
-No matching open Linear issue was found in the cache/rerun searches. Create a dedicated
-issue and design-issue entry once approved, use the issue's branch name, write the detailed
-implementation plan, add failing regressions, implement, review and open a PR against main.
-No deployment, release or merge is included.
+ITL-1063 tracks the approved implementation. The branch is
+`eywalker/itl-1063-reuse-completed-pipeline-work-and-row`; the implementation plan is
+`superpowers/plans/2026-11-13-itl-1063-cache-reuse.md`. No deployment, release or merge is
+included.
+
+## Decisions made during implementation
+
+- Keep concurrent initial Spiral reads independent rather than holding a lock across
+  consumer yields. The first completed read publishes its snapshot atomically; incomplete
+  or cancelled reads never publish. Later readers reuse its row objects. This avoids
+  deadlocks when iterators overlap or a sync consumer runs on the async event-loop thread.
+- Retain batch streams rather than eagerly constructing rows for a table-only read.
+  Row iteration initializes each retained batch's row memo under a short lock. Unknown
+  table versions are not cached. A retained head uses the snapshot without another scan.
+- Scope complete-execution reuse to trusted orchestrator graph execution. Direct node
+  execution may receive inputs different from its declared upstreams, so declared graph
+  state alone cannot certify those calls.
+- Use conservative known snapshot support. Custom and polling sources must not be
+  considered unchanged merely because their identity hash or construction timestamp is
+  unchanged. Preserve ordinary execution for them.
+- Continue per-row function observer callbacks and summary accounting instead of skipping
+  the entire job. Warm runs may still perform linear iteration; the regression criterion
+  is no repeated user computation, operator computation, or row hashing for unchanged
+  supported snapshots.
+- The developer explicitly authorized judgment calls while away; review findings are
+  resolved within this scope and decisions are recorded here and in the PR.
+- Freeze graph definitions before callbacks and require a one-use orchestrator invocation
+  ticket. Source rebinding during callbacks and nested direct calls cannot certify stale
+  buffered rows as current work.
+- Warm async operators drain their input channels and wait for upstream task success
+  before replaying retained output. Channel closure alone also occurs on failure and is
+  insufficient evidence. Cold and unknown-source execution retain the streaming path.
+- Preserve actual object references in identity comparisons and entry-ID memoization;
+  do not rely on reusable integer object addresses or transfer hashes to new values.
+- Preserve the sync path's historical Arrow-decoded values with a retained storage view
+  for each Tag/Data object. Keep the original object untouched, so this fix does not alter
+  async/standalone subclass behavior tracked by ITL-978. The view shares the original
+  exact Arrow representation and hashes, and identity memoization recognizes that origin.
+  Explicit invalidation clears the retained views; replaced buffers discard old entries.
+
+## Measured result
+
+The 1,000-row benchmark compared base `89160c47` with this implementation using the
+same environment and in-memory result database. First warm runs (milliseconds):
+
+| Pipeline | Before | After | Arrow hash calls before / after | GroupBy calls before / after |
+| --- | ---: | ---: | ---: | ---: |
+| Flat sync | 275.82 | 19.58 | 2000 / 0 | 0 / 0 |
+| Flat async | 233.72 | 5.40 | 1000 / 0 | 0 / 0 |
+| Grouped sync | 29.22 | 16.86 | 20 / 0 | 1 / 0 |
+| Grouped async | 31.24 | 2.38 | 20 / 0 | 1 / 0 |
+
+Warm user-function calls were zero both before and after. These are local illustrative
+timings, not performance guarantees; operation counts are regression-tested. Sync still
+materializes Arrow tables at node boundaries, and both paths retain traversal/callback
+cost. No constant-time, cross-process or newly constructed job guarantee is claimed.

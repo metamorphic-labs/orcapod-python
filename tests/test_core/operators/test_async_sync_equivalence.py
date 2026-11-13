@@ -777,8 +777,6 @@ META_XFAIL: dict[str, str] = {
     "group_by": _MATERIALIZE_DROPS_META,
     "polars_filter": _MATERIALIZE_DROPS_META,
     "select_data_columns": _SYNC_DROPS_META,
-    "index": _SYNC_DROPS_META,
-    "pick": _SYNC_DROPS_META,
 }
 META_CASES = [
     pytest.param(

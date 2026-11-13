@@ -866,7 +866,7 @@ class TestCompletedSnapshotRetention:
 
         async def cancel():
             rows = source.async_iter_data()
-            task = asyncio.create_task(anext(rows))
+            task = asyncio.ensure_future(anext(rows))
             assert await asyncio.to_thread(entered.wait, 5)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -888,4 +888,28 @@ class TestCompletedSnapshotRetention:
         assert source.head(2).as_table().equals(expected)
         assert source.head(2).total_rows == _ROWS
         assert source.head(2).total_is_estimate is False
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_first_completed_scan_remains_retained_when_other_reader_finishes(
+        self, project
+    ):
+        """A slower initial scan cannot replace the first completed snapshot."""
+        source = SpiralDBTableSource(_PROJECT, "event")
+        slower = source.iter_data()
+        first_row = next(slower)
+        winner = list(source.iter_data())
+        loser = [first_row, *slower]
+        retained = list(source.iter_data())
+
+        assert len(winner) == len(loser) == len(retained) == _ROWS
+        assert [tag.as_dict() for tag, _ in loser] == [
+            tag.as_dict() for tag, _ in winner
+        ]
+        assert [data.as_dict() for _, data in loser] == [
+            data.as_dict() for _, data in winner
+        ]
+        assert all(
+            tag is retained_tag and data is retained_data
+            for (tag, data), (retained_tag, retained_data) in zip(winner, retained)
+        )
         assert len(fake_pyspiral.scan_log) == 2

@@ -22,6 +22,13 @@ from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from orcapod.core.nodes._execution_cache import (
+    publish_completion,
+    invalidate,
+    is_current,
+    track_completion,
+    upstreams_succeeded,
+)
 from orcapod import contexts
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -741,6 +748,7 @@ class OperatorJobNode(OperatorNodeBase):
 
     def clear_cache(self) -> None:
         """Clear output caches and node identity path cache."""
+        invalidate(self)
         super().clear_cache()  # clears _node_identity_path_cache + _update_modified_time
         self._cached_output_stream = None
         self._cached_output_table = None
@@ -1279,6 +1287,7 @@ class OperatorJobNode(OperatorNodeBase):
         self._replay_from_cache()
         return self._cached_output_stream
 
+    @track_completion
     def execute(
         self,
         *input_streams: StreamProtocol,
@@ -1305,6 +1314,12 @@ class OperatorJobNode(OperatorNodeBase):
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
         ctx_obs.on_node_start(node_label, node_hash)
+
+        if is_current(self) and self._cached_output_stream is not None:
+            output = list(self._cached_output_stream.iter_data())
+            self._update_modified_time()
+            ctx_obs.on_node_end(node_label, node_hash)
+            return output
 
         # Check REPLAY cache first
         cached_output = self.get_cached_output()
@@ -1643,6 +1658,7 @@ class OperatorJobNode(OperatorNodeBase):
     # Async channel execution
     # ------------------------------------------------------------------
 
+    @track_completion
     async def async_execute(
         self,
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
@@ -1695,6 +1711,23 @@ class OperatorJobNode(OperatorNodeBase):
                 ctx_obs.on_node_end(node_label, node_hash)
                 return  # finally block closes output
 
+            buffered_inputs: list[list[tuple[TagProtocol, DataProtocol]]] | None = None
+            if is_current(self) and self._cached_output_stream is not None:
+                # Drain every input concurrently. EOF alone is insufficient: an
+                # upstream closes its channel on failure too. Never deliver cached
+                # rows (and downstream side effects) before producers succeeded.
+                buffered_inputs = list(
+                    await asyncio.gather(*(reader.collect() for reader in inputs))
+                )
+                if not await upstreams_succeeded(self):
+                    return
+                if is_current(self):
+                    for row in self._cached_output_stream.iter_data():
+                        await output.send(row)
+                    self._update_modified_time()
+                    ctx_obs.on_node_end(node_label, node_hash)
+                    return
+
             # Delegate to the operator, forward its rows downstream and keep them.
             intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
             should_store = (
@@ -1715,10 +1748,30 @@ class OperatorJobNode(OperatorNodeBase):
                     collected.append(item)
                     await output.send(item)
 
+            replay_channels: list[Channel[tuple[TagProtocol, DataProtocol]]] = []
+            if buffered_inputs is not None:
+                replay_channels = [Channel(buffer_size=16) for _ in buffered_inputs]
+                inputs = [channel.reader for channel in replay_channels]
+
+            async def feed_buffer(
+                rows: list[tuple[TagProtocol, DataProtocol]],
+                channel: Channel[tuple[TagProtocol, DataProtocol]],
+            ) -> None:
+                try:
+                    for row in rows:
+                        await channel.writer.send(row)
+                finally:
+                    await channel.writer.close()
+
             hashes = [s.pipeline_hash() for s in self._input_streams]
             operator = cast(StaticOutputOperatorPod, self._operator)
             try:
                 async with asyncio.TaskGroup() as tg:
+                    if buffered_inputs is not None:
+                        for rows, channel in zip(
+                            buffered_inputs, replay_channels, strict=True
+                        ):
+                            tg.create_task(feed_buffer(rows, channel))
                     tg.create_task(
                         operator.async_execute(
                             inputs,
@@ -1755,5 +1808,6 @@ class OperatorJobNode(OperatorNodeBase):
             self._update_modified_time()
 
             ctx_obs.on_node_end(node_label, node_hash)
+            publish_completion(self, observer)
         finally:
             await output.close()

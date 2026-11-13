@@ -146,7 +146,9 @@ class TestMaterializationAlignsColumnsByName:
 
     def test_orchestrator_materialize_as_stream(self) -> None:
         """The orchestrator materializer emits rows in the first row's column order."""
-        upstream = SimpleNamespace(producer=None, upstreams=())
+        upstream = SimpleNamespace(
+            producer=None, upstreams=(), data_context=Data({"v": 10}).data_context
+        )
         stream = SyncPipelineOrchestrator._materialize_as_stream(
             _rows_with_swapped_tag_order(), upstream
         )

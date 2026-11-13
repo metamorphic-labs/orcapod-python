@@ -13,7 +13,12 @@ from orcapod.core.streams.base import (
     head_column_config,
 )
 from orcapod.core.streams.head import StreamHead
-from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    PodProtocol,
+    StreamProtocol,
+    TagProtocol,
+)
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
@@ -140,7 +145,7 @@ class ArrowTableStream(StreamBase):
         self._all_tag_schema = all_tag_schema
         self._data_schema = data_schema
 
-        self._cached_elements: list[tuple[TagProtocol, Data]] | None = None
+        self._cached_elements: list[tuple[TagProtocol, DataProtocol]] | None = None
         self._update_modified_time()  # set modified time to now
 
     def identity_structure(self) -> Any:
@@ -316,7 +321,7 @@ class ArrowTableStream(StreamBase):
         """
         self._cached_elements = None
 
-    def iter_data(self) -> Iterator[tuple[TagProtocol, Data]]:
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Iterates over the rows of the stream as ``(Tag, Data)`` pairs.
 
         Every row of the backing table is yielded exactly once, in table order,
