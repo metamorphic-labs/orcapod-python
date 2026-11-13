@@ -15,9 +15,10 @@ spec marks Open or that the code makes impossible or ambiguous.
   stream changes (§3).
 - The change is a change of default behaviour.
 - `Join`'s three cases (§9.1) have equal standing.
-- Pod boundary (D1). With `pod.process(...)`, and `pod(..., strict=True)`, a reference whose
-  data column does not survive becomes a plain tag. With `pod(...)`, an automatic step around
-  the pod gives the input's references back their data role (§11). Full append is deferred
+- Pod boundary (D1). With `pod.process(...)` and `pod(..., strict=True)`, a reference whose
+  data column does not survive becomes a plain tag. `pod(...)` uses a **variant of the function
+  pod** that emits each row's referenced columns beside the function's outputs, so they stay
+  referential. It is not a join and not an inserted operator (§11). Full append is deferred
   (ITL-1025).
 - `GroupBy` follows spec §8 unchanged; `Join` gets no special rule for list-valued tags.
 - Saved jobs carry version information that pins behaviour (§4).
@@ -497,8 +498,8 @@ Functions that read the copy recompute once, because the column name is in the `
 - **Tags pass through** (`function_pod.py:739-747`). The output data is only the function's
   outputs (`:747`), so a reference's target never survives a pod, whether or not it was read.
   Measured: `uses_x.pod(R)` outputs tags `(session, x)`, data `(z,)`. Decided (D1): with
-  `process` the tag becomes plain at the boundary; with `pod(...)` an automatic step gives the
-  references back their data role (§11).
+  `process` the tag becomes plain at the boundary; `pod(...)` uses the fall-through variant of
+  the pod, and the references stay referential (§11).
 - **An output name that collides with a tag (§6.2, Required).**
   - Today `output_schema` accepts it (`01 R5`:
     `(Schema({'x': int | None}), Schema({'x': float}))`), and reading fails with
@@ -541,7 +542,7 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 | 2c | **ITL-1016** | `Join` three cases, sync and async; field-level provenance per D5; §15.4 tests; `06 J1` pinned | M | 1 | 2a, 2b, 2d, 2e |
 | 2d | **ITL-1017** | `GroupBy` key scalar in data; `Batch` tests; §15.3 tests | S | 1 | others |
 | 2e | **ITL-1014** | tests only for the filters, `SemiJoin` and `DropNulls`; `Index`/`Pick` in-place rejection | S | 1 | others |
-| 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule (plain under `process`); automatic join and select with references; the `ReferenceFallThrough` step on `pod(...)` (§11, after its duplicate-tag test is agreed); §15.2 and §15.6 result-identity tests | M+M | 1, 2b; 2c and 2d for the automatic join and the fall-through | 4 |
+| 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule (plain under `process`); automatic join and select with references; the fall-through variant of the pod on `pod(...)` (§11) with its equivalence test; §15.2 and §15.6 result-identity tests | M+M | 1, 2b; 2c and 2d for the automatic join and the fall-through | 4 |
 | 4 | **ITL-1019** | nodes, stores and saved jobs pass references; descriptor intersection; reuse across retagging (§15.6) | S | 1 | 3 |
 | 4b | **ITL-1012, part 2 (its last step), with ITL-1011** | **flip the default** to referential; golden fixtures switched to `tag_only_columns`, new entries; upgrade note | S | **1013, 1015, 1016, 1017, 1019** | — |
 | 5 | **ITL-1018** | `MergeJoin` (D4); the decided rename rules (§5.4), unless the ITL-1023 slice lands them | M | 1 | 6 |
@@ -609,10 +610,11 @@ retains the input data `x`"), and in Orcapod it never does. The decision:
   does not survive becomes a **plain tag** (same value and type), visible in the output
   schema. No automation. The `strict` reading is the coordinator's; the developer may
   correct it.
-- **`pod(stream)`:** an automatic step **around** the pod, of the ITL-807 family and visible
-  in the graph, gives the input's referential keys their data role back. The pod node, what
-  it stores and function-result identity are unchanged. Only referential key columns fall
-  through; full append is deferred (ITL-1025). The mechanism is proposed in §11.
+- **`pod(stream)`:** a **variant of the function pod** (or a thin wrapper) processes one
+  (tag, data) pair at a time. It calls the function exactly as the plain pod does, then emits
+  the tag unchanged and, as data, the outputs plus the row's own referenced columns. Function
+  results are shared with the plain pod. Only referential key columns fall through; full
+  append is deferred (ITL-1025). See §11.
 - **The diagnostic** is the coordinator's call. Recommended none at the pod boundary or in
   the automatic select: the `reference_materialization` warning is for a select or drop the
   user wrote (a rename never warns, §5.4).
@@ -680,59 +682,73 @@ whose same-named tags mean different things must be renamed. What `Join` does to
 shared list-valued tag (correct match, wrong match, or a join-engine error, sync and async)
 is for the ITL-1023 worker to measure and report.
 
-### A. Pod boundary: references fall through on `pod(...)` only
+### A. Pod boundary: references fall through on `pod(...)`, as a variant of the pod
 
-What the code must do (D1):
-- `process` and `strict`: the tag becomes plain.
-- `pod(...)`: an automatic step after the pod restores the data role of the input's
-  referential keys.
+The developer's ruling: the fall-through is an abbreviated form of a legal composition, done
+by a variant of the function pod. It is **not** a join and **not** an inserted operator.
 
-**Correctness constraints for that step:**
-- Pod output rows are one-to-one with input rows, except rows whose function returned
-  nothing, which the pod skips (`function_pod.py:1047-1054`).
-- User tags are not unique per row, so a tag join of the output back onto the input can
-  multiply rows.
-- A literal `Join` of a stream with its own ancestor would extend and duplicate system-tag
-  names.
+**The composition it abbreviates** (each step obeys the boundary: no tag enters a function;
+no operator makes data that is not existing data):
+1. Add a unique temporary tag per row.
+2. Send one copy through the plain pod. The automatic select makes the unread references
+   plain; the read ones are consumed, and either way the pod's output has them as plain tags.
+3. Join the pod's output back onto the input, restricted to its tags and referenced columns,
+   on the temporary tag. This is `Join` case 2, plain with referential (§5.1), so the
+   referenced data comes from the input's data column.
+4. Drop the temporary tag.
 
-**Proposed mechanism: a binary structural step `ReferenceFallThrough(names)(pod_output,
-pod_input)`**, inserted by `_FunctionPodBase.__call__` beside ITL-807's automatic join and
-select:
-- **Row alignment by the full system tag tuple.**
-  - The pod passes each input row's tag through unchanged, system tags included
-    (`function_pod.py:1047-1054`: it yields the input `tag` object).
-  - The tuple of system-tag columns (`source_id`/`record_id` per input position) identifies
-    the input row. Source record ids are `uuid5(source_id::token)` and unique per source row
-    (`stream_builder.py:97-116`). A join pairs them, and `GroupBy`/`Batch` fold them into one
-    digest per group.
-  - The step matches output to input on that tuple. It needs no user tag, so duplicate user
-    tags cannot multiply rows.
-  - An input row the pod skipped has no output row and is dropped, as the pod dropped it.
-- **System tags are name-preserving (rule 1).** Both inputs carry the same system-tag
-  columns, so the output keeps the pod output's columns unchanged. This is not a `Join`:
-  nothing is renamed or extended.
-- **Data comes from data.** Each restored data element and its `_source_x` come from the
-  pod *input's* data column `x`. No data element comes from a tag value (ITL-955), and
-  field-level provenance survives. A unary "re-reference the plain tag column" step was
-  considered and rejected: it would turn a tag column into data (against ITL-955), and it
-  cannot restore `_source_x`, which only the input's `Data` holds.
-- **Identity.** `("ReferenceFallThrough", sorted(names))`, with ordered arguments (output,
-  input). It is a new node in the graph. The pod node, its pipeline table and its results are
-  unchanged. A stream without references inserts no step, so no v0.3 graph or hash changes.
-- **Storage.** As an operator node it writes an `odb_v1` table like any operator. It stores
-  `x` once, as the referential column.
-- **Size: M**, sync plus async (barrier `async_execute` first). It belongs in ITL-1013, after
-  ITL-1016 and ITL-1017.
+**The variant, one (tag, data) pair at a time** (`pod(stream)`, the `__call__` path that
+already adds ITL-807's automatic join and select):
+- **The function sees exactly what the plain pod gives it.** The variant projects the row's
+  `Data` to the function's parameters and runs the plain pod's per-row path on that
+  projection. The memo key (`result_cache.py:217`) and the result store (`rdb_v2` at the
+  function uri) are therefore the plain pod's, so results are shared.
+- **What it emits.** The input tag unchanged (system tags included, as the plain pod does,
+  `function_pod.py:1043-1054`). As data: the function's outputs plus the row's referenced
+  columns, with their `_source_*` taken from the row's `Data`.
+- **What carries the referenced columns.** ITL-807's automatic select must keep referenced
+  columns in the variant's input. Only non-referenced extra columns are dropped.
+- **Rows.** Row count and order are the pod's: a row whose function returned nothing is
+  skipped, as in the plain pod. There is no real join, no extended system-tag name, and no
+  row multiplication from duplicate user tags.
 
-**Test, required before building (duplicate user tags):**
-- A source with rows `(session=s1, x=10, y=1)` and `(session=s1, x=20, y=2)`: user tag
-  `session` duplicated, `x` referential, `y` data.
-- `pod(...)` with a function reading only `y` returns exactly two rows, with data
-  `x = [10, 20]` aligned to `y`.
-- `pod.process(...)` (or `strict=True`) returns two rows with `x` a plain tag.
-- The pod node's stored records equal those of the `process` form.
-- The same holds after a `Join` of two sources (two record ids per row), on the sync and
-  async paths.
+**Consequences:**
+- **Output schema.** Data = outputs ∪ referenced input columns. Tags = input tags. The
+  references of the output = those of the input.
+- **A function output named like a referenced column (or any tag)** still raises (§7).
+- **Pipeline identity.** It differs from the plain pod's **only when references are
+  present**. Add the term `("reference_fall_through", sorted(names))` to the pod stream's or
+  node's identity only when the set is non-empty (the #336/#338 pattern). With no referential
+  tag in the input, the variant is indistinguishable from the plain pod: same schema, same
+  hashes, same node path and stored tables, no golden move.
+- **Function-result identity and the result store.** Shared with the plain pod. A retagged
+  pipeline, or a `process` call over the same rows, finds the same results.
+- **`FunctionNode` and the job path.**
+  - The pipeline record (`pdb_v2`, `function_node.py:2337-2461`) stores the row's tags,
+    which include `x`, plus the input's `_source_*` columns (`:2390-2396`).
+  - For the variant those must be the `_source_*` of the full input `Data`, referenced
+    columns included, not only the projection's, so `_source_x` is kept.
+  - The value of `x` is stored once, as the tag column. On read the node gives that column
+    its data role back (`reference_tags` = the input's references, `function_node.py:2891`).
+  - Nothing is stored twice, and the table is at its own `pipeline_hash` path whenever
+    references are present.
+- **`strict=True`.** It uses the plain pod, as `process` does (the coordinator's reading of
+  ITL-807; the developer may correct it).
+- **Size: M**, in ITL-1013, after ITL-1016, because its equivalence test uses `Join` case 2.
+
+**Tests:**
+- **Equivalence.** On a source with duplicate user tags (`session=s1` on two rows, `x`
+  referential, `y` data), compare `pod(source)` with the composition above, built with a
+  temporary tag-only row-id column, `pod.process`, `Join` and `DropTagColumns`. User tags,
+  data, references and rows must match. System-tag *names* differ by construction (the
+  composition's `Join` extends them), so compare those separately: the variant keeps the
+  pod's names.
+- **No references.** `pod(source)` over a tag-only source equals today's `pod(source)` in
+  schema, `pipeline_hash`, `content_hash`, node path and stored tables.
+- **Result sharing.** Run `pod(source)` and then `pod.process(source)` (or the reverse) over
+  one result store. The second run computes nothing.
+- **Job path.** Saved, reloaded and read back, the variant node gives the same table with
+  `x` referential. Both sync and async.
 
 ---
 
