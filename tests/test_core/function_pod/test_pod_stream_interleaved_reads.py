@@ -197,49 +197,6 @@ def _values(stream: StreamProtocol, column: str) -> dict[int, int]:
     }
 
 
-@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
-@pytest.mark.parametrize("through", ["pod_stream", "operator"])
-def test_a_reset_between_interleaved_reads_gives_one_state(
-    through: str, executor: str
-) -> None:
-    """A reset of the input between two interleaved reads is a change of content.
-
-    The stamped stream is reset after the first read took one row. The second read then
-    starts again from the new state, and once both reads are drained the stream is current
-    and every read of it is of the new state only.
-    """
-    stamped_stream = _pod(stamped, "y", executor, cached=False)(_source(extra=False))
-    if through == "pod_stream":
-        input_stream: StreamProtocol = stamped_stream
-    else:
-        # A join adds data column ``q``, so the pod call adds an automatic selection.
-        input_stream = Join()(stamped_stream, _other())
-    last = _pod(g, "z", executor, cached=False)(input_stream)
-
-    first = iter(last.iter_data())
-    second = iter(last.iter_data())
-    _ = next(first)
-    EPOCH[0] = 1
-    clear_cache = getattr(stamped_stream, "clear_cache")
-    clear_cache()
-    second_rows = [next(second) for _ in range(3)]
-    _ = list(first)
-    second_rows += list(second)
-    assert not _stale(last)
-
-    CALLS.clear()
-    third_rows = list(last.iter_data())
-    assert CALLS == Counter()
-    assert _same_datagrams(second_rows, third_rows)
-    zs = _values(last, "z")
-    ys = _values(stamped_stream, "y")
-    assert CALLS == Counter()
-    assert sorted(zs) == sorted(ys) == sorted(IDS)
-    assert {y // 1000 for y in ys.values()} == {1}
-    for key, y in ys.items():
-        assert zs[key] == 2 * y, key
-
-
 def h(z: int) -> int:
     """Return ``z - 3``; counted."""
     CALLS["h"] += 1
@@ -267,6 +224,44 @@ def _over_stamped(through: str, executor: str) -> tuple[StreamProtocol, StreamPr
 def _derived(through: str, y: int) -> int:
     """The last stream's value for a stamped value ``y``."""
     return 2 * y - 3 if through == "pod_chain" else 2 * y
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+@pytest.mark.parametrize("through", ["pod_stream", "operator", "pod_chain"])
+def test_a_reset_between_interleaved_reads_gives_one_state(
+    through: str, executor: str
+) -> None:
+    """A reset of the input between two interleaved reads is a change of content.
+
+    The stamped stream, one or two links up, is reset after the first read took one row.
+    The second read then starts again from the new state, and once both reads are drained
+    the stream is current and every read of it is of the new state only.
+    """
+    stamped_stream, last = _over_stamped(through, executor)
+    output = "w" if through == "pod_chain" else "z"
+    first = iter(last.iter_data())
+    second = iter(last.iter_data())
+    _ = next(first)
+    EPOCH[0] = 1
+    clear_cache = getattr(stamped_stream, "clear_cache")
+    clear_cache()
+    assert _stale(last)
+    second_rows = [next(second) for _ in range(3)]
+    _ = list(first)
+    second_rows += list(second)
+    assert not _stale(last)
+
+    CALLS.clear()
+    third_rows = list(last.iter_data())
+    assert CALLS == Counter()
+    assert _same_datagrams(second_rows, third_rows)
+    values = _values(last, output)
+    ys = _values(stamped_stream, "y")
+    assert CALLS == Counter()
+    assert sorted(values) == sorted(ys) == sorted(IDS)
+    assert {y // 1000 for y in ys.values()} == {1}
+    for key, y in ys.items():
+        assert values[key] == _derived(through, y), key
 
 
 @pytest.mark.parametrize("executor", ["sequential", "concurrent"])
