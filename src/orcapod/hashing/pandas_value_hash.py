@@ -42,6 +42,9 @@ elements can change (a list ``[1, None]`` reads back ``[1.0, nan]``), so the Arr
 what was read back is digested. Any other ``object`` column that reads back as ``object``
 (strings, bytes, decimals, dates) is hashed as it is.
 
+A categorical column is described with the categories storage restores: they are read back
+from the Arrow dictionary, so ``object`` categories ``[1, 2]`` are described as ``int64``.
+
 The same holds for the axes. Storage writes the name of an index level as text, so the names
 ``1`` and ``"1"`` are one name once read back and hash equal; the name described is the one
 storage restores. (``columns.names`` and a Series' name are restored with their types, so
@@ -504,7 +507,8 @@ def _restored_form(
 ) -> tuple[Any, pa.ChunkedArray[Any]]:
     """Return the dtype and Arrow column a field has once read back from storage.
 
-    A column changes only when it is ``object``; an index level can change whatever its
+    A column changes only when it is ``object`` or categorical (the dtype of the
+    categories is the one the Arrow dictionary restores); an index level can change whatever its
     dtype, because storage restores an index level as NumPy (``Int64`` reads back ``int64``,
     or ``float64`` when it holds a missing value; ``string`` reads back ``object``). The
     field's Arrow column is converted to pandas the way storage does. When the result has
@@ -521,6 +525,11 @@ def _restored_form(
     Returns:
         The dtype to describe and the Arrow column to digest.
     """
+    if isinstance(dtype, pd.CategoricalDtype):
+        # The categories are restored from the Arrow dictionary, so their dtype can
+        # change (``object`` categories ``[1, 2]`` read back ``int64``); the codes and
+        # the dictionary that are digested do not.
+        return column.to_pandas().dtype, column
     if not index_level and dtype != np.dtype(object):
         return dtype, column
     restored = column.to_pandas()
@@ -748,8 +757,10 @@ def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
     The sort is on the terms of the labels as storage restores them, so a frame and the
     frame read back from storage are sorted alike.
     """
+    empty = df.iloc[:0]
+    empty.attrs = {}  # not needed for the labels; see ``_values_table``
     try:
-        schema = pa.Table.from_pandas(df.iloc[:0], preserve_index=True).schema
+        schema = pa.Table.from_pandas(empty, preserve_index=True).schema
     except pa.ArrowInvalid as exc:
         raise ValueError(f"cannot convert to Arrow. Original error: {exc}") from exc
     labels = _restored_axes(schema, df).column_labels

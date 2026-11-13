@@ -1389,7 +1389,7 @@ store. `columns.names` and a Series' name are restored with their types, so they
 part of the hash. A timestamp or duration label is the integer count in its own unit, with
 the unit.
 
-Two more consequences of the same rule:
+Three more consequences of the same rule:
 
 - **Column labels of mixed type hash as their text.** Storage restores labels of one type
   with that type (`0, 1` stay integers), but writes labels of mixed type as text: the
@@ -1401,6 +1401,11 @@ Two more consequences of the same rule:
   back `object`. So an `Int64` index and the `int64` index with the same values hash
   equal. Categorical, timezone-aware, period and interval index levels are restored and
   keep their dtype.
+- **The categories of a categorical are described with the dtype storage restores.** The
+  categories are read back from the Arrow dictionary: `object` categories `[1, 2]` read
+  back `int64`, and `string` categories read back `object`. So a categorical with `object`
+  categories `[1, 2]` and one with `int64` categories `[1, 2]` hash equal. The category
+  list, its order, unused categories and `ordered` are restored and count.
 
 The descriptor holds the column labels, `columns.names`, a Series' name and the index names
 as read from the frame storage builds for the value's Arrow schema. The value's own labels

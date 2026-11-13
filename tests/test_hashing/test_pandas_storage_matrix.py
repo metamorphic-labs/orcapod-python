@@ -44,6 +44,12 @@ INDEXES: dict[str, pd.Index] = {
     "bool": pd.Index([True, False]),
     "arrow int64": pd.Index(pd.array([5, 6], dtype="int64[pyarrow]")),
     "categorical": pd.CategoricalIndex(["p", "q"]),
+    "categorical, object int categories": pd.CategoricalIndex(
+        [1, 2], categories=pd.Index([1, 2], dtype=object)
+    ),
+    "categorical, string dtype categories": pd.CategoricalIndex(
+        ["p", "q"], categories=pd.Index(["p", "q"], dtype="string")
+    ),
     "datetime": pd.DatetimeIndex(["2020-01-01", "2020-01-02"]),
     "datetime s": pd.DatetimeIndex(["2020-01-01", "2020-01-02"]).as_unit("s"),
     "datetime UTC": pd.DatetimeIndex(["2020-01-01", "2020-01-02"], tz="UTC"),
@@ -110,6 +116,25 @@ COLUMN_VALUES: dict[str, Any] = {
     "object dicts": pd.Series([{"u": 1, "v": [1, None]}, {"u": 2, "v": []}]),
     "categorical": pd.Categorical(["x", "y"], categories=["y", "x", "z"]),
     "ordered categorical": pd.Categorical(["x", "y"], ordered=True),
+    "categorical, object int categories": pd.Categorical(
+        [1, 2], categories=pd.Index([2, 1, 3], dtype=object)
+    ),
+    "categorical, int32 categories": pd.Categorical(
+        [1, 2], categories=pd.Index([1, 2], dtype="int32")
+    ),
+    "categorical, float categories": pd.Categorical([0.5, None], categories=[0.5, 1.5]),
+    "categorical, object bool categories": pd.Categorical(
+        [True, False], categories=pd.Index([True, False], dtype=object)
+    ),
+    "categorical, string dtype categories": pd.Categorical(
+        ["x", "y"], categories=pd.Index(["x", "y"], dtype="string")
+    ),
+    "categorical, datetime categories": pd.Categorical(
+        pd.to_datetime(["2020-01-01", "2020-01-02"])
+    ),
+    "categorical, Int64 categories": pd.Categorical(
+        [1, 2], categories=pd.Index([1, 2], dtype="Int64")
+    ),
     "datetime": pd.to_datetime(["2020-01-01", None]),
     "datetime UTC": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize("UTC"),
     "timedelta": pd.to_timedelta(["1s", None]),

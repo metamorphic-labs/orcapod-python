@@ -479,10 +479,18 @@ class PandasDataFrameHandler(IgnoreListHandler):
         ignore: Iterable[str] = (),
         arrow_hasher: "ArrowHasherProtocol | None" = None,
     ) -> None:
+        """Create the handler.
+
+        Args:
+            ignore: The property names the hash ignores; must be options of the type.
+            arrow_hasher: The Arrow hasher that digests the values table; the default
+                data context's when ``None``.
+        """
         super().__init__(ignore)
         self._arrow_hasher = arrow_hasher
 
     def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
+        """Return the Arrow hasher given at construction, or the default data context's."""
         if self._arrow_hasher is not None:
             return self._arrow_hasher
         from orcapod.contexts import get_default_context
@@ -539,10 +547,18 @@ class PandasSeriesHandler(IgnoreListHandler):
         ignore: Iterable[str] = (),
         arrow_hasher: "ArrowHasherProtocol | None" = None,
     ) -> None:
+        """Create the handler.
+
+        Args:
+            ignore: The property names the hash ignores; must be options of the type.
+            arrow_hasher: The Arrow hasher that digests the values table; the default
+                data context's when ``None``.
+        """
         super().__init__(ignore)
         self._arrow_hasher = arrow_hasher
 
     def _get_arrow_hasher(self) -> "ArrowHasherProtocol":
+        """Return the Arrow hasher given at construction, or the default data context's."""
         if self._arrow_hasher is not None:
             return self._arrow_hasher
         from orcapod.contexts import get_default_context

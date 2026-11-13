@@ -522,6 +522,7 @@ class TestHashTableOrdered:
     """``hash_table_ordered`` = ``hash_table`` with column and struct field order included."""
 
     def test_column_order_is_part_of_the_hash(self):
+        """Reordered columns: equal under ``hash_table``, different under ``hash_table_ordered``."""
         table = pa.table({"a": [1, 2], "b": ["x", "y"]})
         reordered = table.select(["b", "a"])
         hasher = _make_hasher()
@@ -529,6 +530,7 @@ class TestHashTableOrdered:
         assert hasher.hash_table_ordered(table) != hasher.hash_table_ordered(reordered)
 
     def test_struct_field_order_is_part_of_the_hash(self):
+        """Reordered struct fields differ under ``hash_table_ordered`` only."""
         first = pa.table({"s": pa.array([{"u": 1, "v": "x"}], _UV)})
         second = pa.table({"s": pa.array([{"v": "x", "u": 1}], _VU)})
         hasher = _make_hasher()
@@ -536,23 +538,27 @@ class TestHashTableOrdered:
         assert hasher.hash_table_ordered(first) != hasher.hash_table_ordered(second)
 
     def test_nested_struct_field_order_is_part_of_the_hash(self):
+        """Struct field order counts inside a list too."""
         first = pa.table({"s": pa.array([[{"u": 1, "v": "x"}]], pa.large_list(_UV))})
         second = pa.table({"s": pa.array([[{"v": "x", "u": 1}]], pa.large_list(_VU))})
         hasher = _make_hasher()
         assert hasher.hash_table_ordered(first) != hasher.hash_table_ordered(second)
 
     def test_chunking_is_not_part_of_the_hash(self):
+        """A table and the same table in two chunks hash equal."""
         table = pa.table({"a": [1, 2], "b": ["x", "y"]})
         rechunked = pa.concat_tables([table.slice(0, 1), table.slice(1, 1)])
         hasher = _make_hasher()
         assert hasher.hash_table_ordered(table) == hasher.hash_table_ordered(rechunked)
 
     def test_ordered_and_unordered_hashes_never_coincide(self):
+        """The two modes give different hashes for one table."""
         table = pa.table({"a": [1, 2]})
         hasher = _make_hasher()
         assert hasher.hash_table_ordered(table) != hasher.hash_table(table)
 
     def test_record_batch_hashes_like_its_table(self):
+        """A record batch hashes like the table it came from."""
         table = pa.table({"a": [1, 2], "b": ["x", "y"]})
         hasher = _make_hasher()
         assert hasher.hash_table_ordered(

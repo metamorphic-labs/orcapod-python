@@ -13,18 +13,26 @@ from orcapod.hashing.labelled_hash import canonical_json, labelled_content_hash
 
 
 class TestCanonicalJson:
+    """The canonical JSON text a descriptor is hashed as."""
+
     def test_sorted_keys_compact_separators(self) -> None:
+        """Keys are sorted and the separators have no spaces."""
         assert canonical_json({"b": [1, 2], "a": None}) == b'{"a":null,"b":[1,2]}'
 
     def test_non_ascii_kept_as_utf8(self) -> None:
+        """Non-ASCII text is written as UTF-8, not escaped."""
         assert canonical_json({"k": "é"}) == '{"k":"é"}'.encode()
 
     def test_list_order_kept(self) -> None:
+        """The order of a list is kept."""
         assert canonical_json(["b", "a"]) == b'["b","a"]'
 
 
 class TestLabelledContentHash:
+    """The hash built from a label, a descriptor and a values digest."""
+
     def test_method_and_digest(self) -> None:
+        """The label is the method only; the digest covers descriptor and values digest."""
         result = labelled_content_hash("thing_v1", {"a": 1}, b"digest")
         assert result.method == "thing_v1"
         assert result.digest == hashlib.sha256(b'{"a":1}\x00digest').digest()

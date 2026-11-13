@@ -35,16 +35,19 @@ SERIES_NAME = "orcapod.pandas.series"
 
 
 def _frame() -> pd.DataFrame:
+    """Columns ``a`` (ints) and ``b`` (strings), two rows."""
     return pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
 
 
 def _with_attrs(value: Any) -> Any:
+    """A copy of ``value`` with ``attrs`` set."""
     out = value.copy()
     out.attrs = {"unit": "mV"}
     return out
 
 
 def _struct_series(order: list[str]) -> pd.Series:
+    """A ``pd.ArrowDtype`` struct Series whose fields are in ``order``."""
     types = {"u": pa.int64(), "v": pa.large_string()}
     struct = pa.struct([(name, types[name]) for name in order])
     array = pa.array([{"u": 1, "v": "x"}], struct)
@@ -52,6 +55,7 @@ def _struct_series(order: list[str]) -> pd.Series:
 
 
 def _struct_frame(order: list[str]) -> pd.DataFrame:
+    """A frame with one ``pd.ArrowDtype`` struct column whose fields are in ``order``."""
     return pd.DataFrame({"s": _struct_series(order)})
 
 
@@ -84,6 +88,7 @@ def _context(tmp_path: Path, ignore: dict[str, list[str]]) -> DataContext:
 
 
 def _converter(context: DataContext) -> UniversalTypeConverter:
+    """A type converter whose pandas types and handlers use the given ignore lists."""
     converter = context.type_converter
     assert isinstance(converter, UniversalTypeConverter)
     return converter
@@ -94,6 +99,7 @@ class TestHandlers:
 
     @pytest.mark.parametrize("option", list(FRAME_PAIRS))
     def test_frame_option_makes_the_pair_equal_and_only_then(self, option: str) -> None:
+        """A frame option makes its pair hash equal; without it the pair differs."""
         first, second = FRAME_PAIRS[option]
         handler = PandasDataFrameHandler()
         assert handler.hash_ignoring(first, []) != handler.hash_ignoring(second, [])
@@ -109,6 +115,7 @@ class TestHandlers:
     def test_series_option_makes_the_pair_equal_and_only_then(
         self, option: str
     ) -> None:
+        """A Series option makes its pair hash equal; without it the pair differs."""
         first, second = SERIES_PAIRS[option]
         handler = PandasSeriesHandler()
         assert handler.hash_ignoring(first, []) != handler.hash_ignoring(second, [])
@@ -121,6 +128,7 @@ class TestHandlers:
             )
 
     def test_unnamed_and_named_series_are_equal_when_the_name_is_ignored(self) -> None:
+        """With ``series_name`` ignored, a named and an unnamed Series hash equal."""
         handler = PandasSeriesHandler(ignore=["series_name"])
         assert handler.handle(pd.Series([1, 2]), None) == handler.handle(  # pyright: ignore[reportArgumentType]  # the hasher argument is unused
             pd.Series([1, 2], name="x"),
@@ -128,9 +136,11 @@ class TestHandlers:
         )
 
     def test_everything_else_still_counts_when_column_order_is_ignored(self) -> None:
+        """Ignoring column order leaves values, labels, dtypes and the index in the hash."""
         handler = PandasDataFrameHandler(ignore=["column_order"])
 
         def digest(frame: pd.DataFrame) -> bytes:
+            """The digest of ``frame`` with column order ignored."""
             return handler.hash_ignoring(frame, ["column_order"]).digest
 
         base = _frame()
@@ -149,12 +159,14 @@ class TestHandlers:
         assert digest(pair) != digest(pd.DataFrame({"a": [3, 4], "b": [1, 2]}))
 
     def test_the_label_is_the_same_under_every_list(self) -> None:
+        """The hash label does not depend on the ignore list."""
         handler = PandasDataFrameHandler()
         assert (
             handler.hash_ignoring(_frame(), ["attrs"]).method == "pandas_dataframe_v1"
         )
 
     def test_a_name_that_is_not_an_option_of_the_type_is_refused(self) -> None:
+        """A name the type does not offer raises."""
         with pytest.raises(ValueError, match="series_name"):
             PandasDataFrameHandler(ignore=["series_name"])
         with pytest.raises(ValueError, match="column_order"):
@@ -163,6 +175,7 @@ class TestHandlers:
             LogicalPandasDataFrame(ignore=["flags"])
 
     def test_handler_and_logical_type_offer_the_same_options(self) -> None:
+        """The handler and the logical type of one pandas type offer the same options."""
         assert PandasDataFrameHandler.OPTIONS == LogicalPandasDataFrame.OPTIONS
         assert PandasSeriesHandler.OPTIONS == LogicalPandasSeries.OPTIONS
         assert PandasDataFrameHandler.OPTIONS == {
@@ -178,7 +191,10 @@ class TestHandlers:
 
 
 class TestIdentifier:
+    """The extension identifier of the pandas logical types under each ignore list."""
+
     def test_the_list_is_in_the_extension_metadata_sorted(self) -> None:
+        """The ignore list is written into the extension metadata, sorted."""
         logical = LogicalPandasDataFrame(ignore=["column_order", "attrs"])
         arrow_type = logical.get_arrow_extension_type()
         assert arrow_type.extension_name == FRAME_NAME
@@ -188,12 +204,14 @@ class TestIdentifier:
         )
 
     def test_two_lists_are_two_arrow_types(self) -> None:
+        """Two ignore lists give two Arrow extension types."""
         strict = LogicalPandasSeries().get_arrow_extension_type()
         loose = LogicalPandasSeries(ignore=["series_name"]).get_arrow_extension_type()
         assert strict != loose
         assert strict.__arrow_ext_serialize__() == b'{"ignore":[],"version":1}'
 
     def test_storage_is_the_same_under_every_list(self) -> None:
+        """The stored bytes do not depend on the ignore list."""
         frame = _with_attrs(_reordered(_frame()))
         strict = LogicalPandasDataFrame()
         loose = LogicalPandasDataFrame(ignore=["attrs", "column_order"])
@@ -208,6 +226,7 @@ class TestDataContext:
     """The list a data context configures, end to end through its public objects."""
 
     def test_default_context_ignores_nothing(self) -> None:
+        """The default data context ignores no property."""
         hasher = get_default_context().semantic_hasher
         for first, second in [*FRAME_PAIRS.values(), *SERIES_PAIRS.values()]:
             assert hasher.hash_object(first) != hasher.hash_object(second)
@@ -215,6 +234,7 @@ class TestDataContext:
     def test_configured_list_is_used_for_bare_values_and_for_cells(
         self, tmp_path: Path
     ) -> None:
+        """A configured list applies to a value given to the hasher and to a cell of a table."""
         context = _context(tmp_path, {FRAME_NAME: ["column_order"]})
         first, second = FRAME_PAIRS["column_order"]
         assert context.semantic_hasher.hash_object(
@@ -222,6 +242,7 @@ class TestDataContext:
         ) == context.semantic_hasher.hash_object(second)
 
         def table(value: pd.DataFrame, of: DataContext) -> pa.Table:
+            """A one-column table holding ``value`` as a logical value."""
             return of.type_converter.python_dicts_to_arrow_table(
                 [{"x": value}], python_schema={"x": pd.DataFrame}
             )
@@ -247,6 +268,7 @@ class TestDataContext:
         ) != default.arrow_hasher.hash_table(table(first, default))
 
     def test_series_list_is_configured_separately(self, tmp_path: Path) -> None:
+        """The Series list is configured apart from the frame list."""
         context = _context(tmp_path, {SERIES_NAME: ["series_name"]})
         first, second = SERIES_PAIRS["series_name"]
         hasher = context.semantic_hasher
@@ -257,6 +279,7 @@ class TestDataContext:
     def test_a_column_stored_under_another_list_is_refused(
         self, tmp_path: Path
     ) -> None:
+        """A column stored under another ignore list is refused on read."""
         loose = _context(tmp_path, {FRAME_NAME: ["column_order"]})
         stored = loose.type_converter.python_dicts_to_arrow_table(
             [{"x": _frame()}], python_schema={"x": pd.DataFrame}
@@ -292,5 +315,6 @@ class TestDataContext:
     def test_an_unknown_name_in_the_configuration_is_refused(
         self, tmp_path: Path
     ) -> None:
+        """A configured name that is not an option raises."""
         with pytest.raises(ContextValidationError, match="flags"):
             _context(tmp_path, {FRAME_NAME: ["flags"]})

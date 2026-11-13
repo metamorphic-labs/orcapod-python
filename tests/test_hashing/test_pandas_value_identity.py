@@ -495,6 +495,7 @@ class TestOutsideTheGrammar:
             """A hashable class the grammar does not know."""
 
             def __hash__(self) -> int:
+                """Any constant: the class only needs to be hashable."""
                 return 1
 
         with pytest.raises(ValueError, match="Label"):
@@ -552,6 +553,9 @@ class TestOutsideTheGrammar:
 
         frame = _with_attrs(_frame(), {"o": {1, 2}})
         assert pandas_frame_descriptor(frame, frozenset({"attrs"}))["attrs"] == {}
+        # Also with column order ignored, which probes the schema on its own.
+        both = frozenset({"attrs", "column_order"})
+        assert pandas_frame_descriptor(frame, both)["attrs"] == {}
 
     def test_date_label_hashes(self) -> None:
         """A ``datetime.date`` label is in the grammar."""
