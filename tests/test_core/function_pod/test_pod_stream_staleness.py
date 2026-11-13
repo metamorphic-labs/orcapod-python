@@ -13,20 +13,21 @@ from __future__ import annotations
 import contextlib
 from collections import Counter
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, Self
 from unittest import mock
 
 import pyarrow as pa
 import pytest
 
+from orcapod import function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
-from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.executors.base import PythonFunctionExecutorBase
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.protocols.core_protocols import FunctionPodProtocol, StreamProtocol
+from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 from orcapod.streams import HeadStatus
 
 # Rows of the source, not in tag order.
@@ -86,14 +87,28 @@ class _ConcurrentExecutor(PythonFunctionExecutorBase):
         """Take the concurrent read path."""
         return True
 
+    def with_options(self, **opts: Any) -> Self:
+        """Return this executor: it has no options."""
+        return self
+
     def execute_callable(
-        self, fn: Callable[..., Any], kwargs: dict[str, Any], *args: Any, **kw: Any
+        self,
+        fn: Callable[..., Any],
+        kwargs: dict[str, Any],
+        executor_options: dict[str, Any] | None = None,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
     ) -> Any:
         """Call ``fn``."""
         return fn(**kwargs)
 
     async def async_execute_callable(
-        self, fn: Callable[..., Any], kwargs: dict[str, Any], *args: Any, **kw: Any
+        self,
+        fn: Callable[..., Any],
+        kwargs: dict[str, Any],
+        executor_options: dict[str, Any] | None = None,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
     ) -> Any:
         """Call ``fn``."""
         return fn(**kwargs)
@@ -124,15 +139,14 @@ def _source() -> ArrowTableSource:
 
 def _pod(
     link: int, executor: str, store: InMemoryArrowDatabase | None
-) -> FunctionPodProtocol:
+) -> FunctionPod | CachedFunctionPod:
     """The pod of link ``link``; with ``store``, a cached pod storing its results there."""
     function, _, output = LINKS[link]
-    data_function = PythonDataFunction(
-        function,
+    pod = function_pod(
         output_keys=output,
         executor=_ConcurrentExecutor() if executor == "concurrent" else None,
-    )
-    pod = FunctionPod(data_function)
+    )(function).pod
+    assert isinstance(pod, FunctionPod)
     if store is None:
         return pod
     return CachedFunctionPod(pod, result_database=store)
