@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 from collections import Counter
 from collections.abc import Callable, Iterator
-from typing import Any, Self
+from typing import Any, Self, cast
 from unittest import mock
 
 import pyarrow as pa
@@ -281,4 +281,57 @@ def test_a_reset_upstream_still_recomputes_the_chain(
     CALLS.clear()
     assert [data.as_dict() for _, data in streams[-1].iter_data()] == expected
     assert sum(CALLS.values()) == length * len(IDS)
+    assert _stale(streams) == [False] * length
+
+
+EPOCH = [0]
+
+
+def _values(stream: StreamProtocol, column: str) -> dict[int, int]:
+    """Each row's ``column`` value, keyed by its ``id`` tag, read with ``iter_data``."""
+    return {
+        cast(int, tag.as_dict()["id"]): cast(int, data.as_dict()[column])
+        for tag, data in stream.iter_data()
+    }
+
+
+def stamped(x: int) -> int:
+    """Return ``x`` tagged with the current epoch: a function whose values change."""
+    CALLS["stamped"] += 1
+    return 1000 * EPOCH[0] + x
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+@pytest.mark.parametrize("length", [2, 3])
+def test_an_upstream_reset_during_a_read_leaves_the_reader_stale(
+    length: int, executor: str
+) -> None:
+    """A reset of the first stream in the middle of a read is never reported as current.
+
+    The read is finished after the reset; the last stream is then stale, and its next read
+    gives rows computed from one state of the first stream only.
+    """
+    EPOCH[0] = 0
+    first = function_pod(
+        output_keys="y",
+        executor=_ConcurrentExecutor() if executor == "concurrent" else None,
+    )(stamped).pod.process(_source())
+    streams: list[StreamProtocol] = [first]
+    for link in range(1, length):
+        streams.append(_pod(link, executor, None).process(streams[-1]))
+    reader = iter(streams[-1].iter_data())
+    _ = [next(reader) for _ in range(2)]
+    EPOCH[0] = 1
+    clear_cache = getattr(first, "clear_cache")
+    clear_cache()
+    _ = list(reader)
+    assert getattr(streams[-1], "is_stale")
+    last = _values(streams[-1], "z" if length == 2 else "w")
+    ys = _values(first, "y")
+    assert sorted(last) == sorted(ys) == sorted(IDS)
+    # Every row of the first stream is of the state after the reset ...
+    assert {y // 1000 for y in ys.values()} == {1}
+    # ... and every row of the last stream was computed from that row.
+    for key, y in ys.items():
+        assert last[key] == (2 * y if length == 2 else 2 * y - 3), key
     assert _stale(streams) == [False] * length
