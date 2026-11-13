@@ -97,12 +97,22 @@ class TestNamesThatCollideAsText:
         ids=["integer level names", "level names 1 and '1'", "column '1', index 1"],
     )
     def test_frame_is_refused(self, frame: pd.DataFrame):
+        """Index level names, or an index name and a column label, with one text."""
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
 
         with pytest.raises(ValueError, match="'1'"):
             LogicalPandasDataFrame().python_to_storage(frame)
 
+    def test_labels_read_back_as_duplicates_are_refused(self):
+        """The labels ``True`` and ``False`` are written as text and both read back ``True``."""
+        from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+        frame = pd.DataFrame({True: [1], False: [2]})
+        with pytest.raises(ValueError, match="True"):
+            LogicalPandasDataFrame().python_to_storage(frame)
+
     def test_series_is_refused(self):
+        """A Series named ``"1"`` whose index is named ``1``: one field name twice."""
         from orcapod.logical_types.pandas_type import LogicalPandasSeries
 
         series = pd.Series([5], name="1", index=pd.Index([0], name=1))

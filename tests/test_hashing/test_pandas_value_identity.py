@@ -282,6 +282,26 @@ EXCEPTIONS: dict[str, tuple[tuple[Any, Any], bool]] = {
         (pd.Series([1, 2]).rename_axis(1), pd.Series([1, 2]).rename_axis("1")),
         True,
     ),
+    # Storage writes column labels of mixed type as text.
+    "mixed labels 0 vs '0'": (
+        (pd.DataFrame({0: [1], "b": [2]}), pd.DataFrame({"0": [1], "b": [2]})),
+        True,
+    ),
+    # Storage restores an index level as NumPy.
+    "Int64 index vs int64 index": (
+        (
+            pd.DataFrame({"a": [1, 2]}, index=pd.Index([5, 6], dtype="Int64")),
+            pd.DataFrame({"a": [1, 2]}, index=pd.Index([5, 6], dtype="int64")),
+        ),
+        True,
+    ),
+    "string index vs object index": (
+        (
+            pd.DataFrame({"a": [1, 2]}, index=pd.Index(["p", "q"], dtype="string")),
+            pd.DataFrame({"a": [1, 2]}, index=pd.Index(["p", "q"], dtype=object)),
+        ),
+        True,
+    ),
     # The hash is strict where pandas calls the pair equal.
     "-0.0 vs 0.0": ((pd.DataFrame({"a": [0.0]}), pd.DataFrame({"a": [-0.0]})), False),
     "attrs": ((_frame(), _with_attrs(_frame())), False),
@@ -301,6 +321,9 @@ PROPERTY_OF_PAIR: dict[str, str] = {
     "column axis dtype object vs string": "columns_dtype",
     "column axis level dtype int64 vs int32": "columns_dtype",
     "index name 1 vs '1'": "index_name_type",
+    "mixed labels 0 vs '0'": "mixed_label_type",
+    "Int64 index vs int64 index": "index_extension_dtype",
+    "string index vs object index": "index_extension_dtype",
     "Series index name 1 vs '1'": "index_name_type",
     "index name": "index_names",
     "MultiIndex level names": "index_names",

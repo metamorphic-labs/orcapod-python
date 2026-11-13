@@ -14,6 +14,7 @@ the DataFrame round-trip.
 from __future__ import annotations
 
 import io
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -46,23 +47,58 @@ column stored under them is refused on read, never read as the current types.
 """
 
 
-def _require_distinct_field_names(table: pa.Table) -> None:
-    """Raise if two fields of the Arrow form of a pandas value have one name.
+def _require_restorable_axes(table: pa.Table, frame: pd.DataFrame) -> None:
+    """Raise if the frame read back from ``table`` would not have ``frame``'s axes.
 
-    Arrow writes column labels and index level names as text, so the index name ``1``
-    collides with the column ``"1"``, and integer level names collide with each other. The
-    value read back from such a table has lost its index: the levels come back as columns.
+    Arrow writes some column labels and every index level name as text. Two cases corrupt
+    a value silently, so they are refused before anything is written:
+
+    - Two fields get one name: the index name ``1`` beside the column ``"1"``, or integer
+      names of MultiIndex levels. The frame read back has lost its index (the levels come
+      back as columns).
+    - Distinct labels read back equal: the labels ``True`` and ``False`` are written as
+      text and both read back ``True``.
+
+    The check builds the frame storage would restore for the table's schema; no rows are
+    converted.
+
+    Args:
+        table: ``pa.Table.from_pandas(frame, preserve_index=True)``.
+        frame: The frame about to be stored.
 
     Raises:
-        ValueError: If a field name occurs twice; the message lists the names.
+        ValueError: If a field name occurs twice (the message lists the names), or the
+            frame read back would have another number of columns or index levels, or
+            duplicate column labels the frame does not have.
     """
-    names = table.schema.names
-    repeated = sorted({name for name in names if names.count(name) > 1})
+    counts = Counter(table.schema.names)
+    repeated = sorted(name for name, count in counts.items() if count > 1)
     if repeated:
         raise ValueError(
             f"column labels and index names collide once written as text: {repeated}. "
             "Storage could not restore the index. Rename the index levels (integer "
             "level names are a common cause) or the columns."
+        )
+    try:
+        restored = table.schema.empty_table().to_pandas()
+    except (TypeError, ValueError, NotImplementedError, pa.ArrowException):
+        return  # Not a case this check is about; reading reports it.
+    if (
+        restored.shape[1] != frame.shape[1]
+        or restored.index.nlevels != frame.index.nlevels
+    ):
+        raise ValueError(
+            "the value read back from storage would have "
+            f"{restored.shape[1]} column(s) and {restored.index.nlevels} index "
+            f"level(s), not {frame.shape[1]} and {frame.index.nlevels}. Rename the "
+            "columns or the index levels."
+        )
+    if frame.columns.is_unique and not restored.columns.is_unique:
+        labels = sorted({repr(label) for label in restored.columns})
+        raise ValueError(
+            "distinct column labels would read back from storage as duplicates: "
+            f"{labels}. Rename the columns (labels of mixed or bool type are written "
+            "as text)."
         )
 
 
@@ -149,7 +185,7 @@ class LogicalPandasDataFrame(IgnoreListLogicalType):
                 f"Check for columns with mixed or non-Arrow-serialisable types. "
                 f"Original error: {exc}"
             ) from exc
-        _require_distinct_field_names(table)
+        _require_restorable_axes(table, value)
         return _table_to_ipc_bytes(table)
 
     def storage_to_python(
@@ -231,7 +267,7 @@ class LogicalPandasSeries(IgnoreListLogicalType):
                 f"Check for non-Arrow-serialisable values. "
                 f"Original error: {exc}"
             ) from exc
-        _require_distinct_field_names(table)
+        _require_restorable_axes(table, df)
         return _table_to_ipc_bytes(table)
 
     def storage_to_python(

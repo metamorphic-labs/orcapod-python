@@ -191,7 +191,10 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
         "the same labels)",
     ),
     PandasIdentityProperty(
-        "index_dtype", True, "digest and descriptor", "the dtype of each index level"
+        "index_dtype",
+        True,
+        "digest and descriptor",
+        "the dtype of each index level, as storage restores it",
     ),
     PandasIdentityProperty(
         "columns_names", True, "descriptor", "columns.names, one per column level"
@@ -200,7 +203,8 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
         "label_type",
         True,
         "descriptor",
-        "the type of a column label (0 vs '0'; a MultiIndex tuple vs its text)",
+        "the type of a column label where the labels have one type (0 vs '0'; a "
+        "MultiIndex tuple vs its text)",
     ),
     PandasIdentityProperty(
         "series_name", True, "descriptor", "a Series' name, typed", option=True
@@ -243,6 +247,20 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
     ),
     PandasIdentityProperty(
         "flags", False, "", "flags.allows_duplicate_labels: storage does not restore it"
+    ),
+    PandasIdentityProperty(
+        "mixed_label_type",
+        False,
+        "",
+        "the types of column labels of mixed type (0 beside 'b'): storage writes such "
+        "labels as text",
+    ),
+    PandasIdentityProperty(
+        "index_extension_dtype",
+        False,
+        "",
+        "a masked, string or Arrow dtype of an index level (Int64 vs int64): storage "
+        "restores an index level as NumPy",
     ),
     PandasIdentityProperty(
         "index_name_type",
