@@ -88,7 +88,11 @@ def snapshot(job) -> dict[str, tuple[str, str, str, str]]:
     return out
 
 
-def compare(name: str, ref: dict, other: dict) -> None:
+def compare(
+    name: str,
+    ref: dict[str, tuple[str, str, str, str]],
+    other: dict[str, tuple[str, str, str, str]],
+) -> None:
     for label in sorted(ref):
         r, o = ref[label], other.get(label)
         flags = (

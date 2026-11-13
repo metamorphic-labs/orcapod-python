@@ -53,6 +53,7 @@ print("same table path:", lnode._stored_table_path == node._stored_table_path)
 raw = store.at(NAME).get_all_records(
     lnode._stored_table_path, record_id_column=node.HASH_COLUMN_NAME
 )
+assert raw is not None, "the run stored no table at the loaded path"
 stored = set(pc.unique(raw.column(constants.NODE_CONTENT_HASH_COL)).to_pylist())
 print("stored rows:", raw.num_rows)
 print("stored __node_content_hash:", stored)
