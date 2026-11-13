@@ -25,8 +25,12 @@ logger = logging.getLogger(__name__)
 # Format version
 # ---------------------------------------------------------------------------
 
-PIPELINE_FORMAT_VERSION = "0.1.0"
-SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0"})
+# 0.3.0: the first format in which a source's tags may be referential (ITL-1023). A
+# file at an earlier version holds v0.3 sources: their configs carry no
+# ``tag_only_columns`` and read back with every declared tag plain, so their saved
+# hashes match. 0.2.0 is v0.3.0's own format (ITL-1026).
+PIPELINE_FORMAT_VERSION = "0.3.0"
+SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
 
 # ---------------------------------------------------------------------------
 # LoadStatus
@@ -1044,5 +1048,6 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # PipelineJob format version
 # ---------------------------------------------------------------------------
 
-PIPELINE_JOB_FORMAT_VERSION = "0.1.0"
-SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0"})
+# 0.3.0 with referential tags (ITL-1023); see ``PIPELINE_FORMAT_VERSION``.
+PIPELINE_JOB_FORMAT_VERSION = "0.3.0"
+SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})

@@ -141,3 +141,7 @@ keeps chosen tags plain, exactly v0.3. Hash terms enter only when a reference ex
 - 2026-11-12: plan written; branch created from origin/main f51ce67c.
 - 2026-11-12: developer: option is `tag_only_columns`; references become plain tags at a pod boundary.
 - Task 0 done: fc22de6a, draft PR #342.
+- 2026-11-12: Tasks 1-8 implemented (02b62358, c3c5e995, c42eece8, 853da828). Developer rename
+  rule implemented (map_tags both roles, tag_only=True, map_data data-only). EDI test uses
+  `timestamp` in both series. Existing tests pinned to `tag_only_columns=True` (79 files, 569
+  call sites). Remaining: full suite on 3.11/3.12/3.13, basedpyright, final report.

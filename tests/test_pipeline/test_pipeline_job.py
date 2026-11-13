@@ -653,7 +653,7 @@ class TestPipelineJobSerialization:
         path = tmp_path / "completed.json"
         job.save(str(path))
         data = json.loads(path.read_text())
-        assert data["orcapod_pipeline_job_version"] == "0.1.0"
+        assert data["orcapod_pipeline_job_version"] == "0.3.0"
 
     def test_save_includes_run_block(self, store, tmp_path):
         """Unsaved template has status=pending and null run fields."""

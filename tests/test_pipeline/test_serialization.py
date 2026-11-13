@@ -267,8 +267,8 @@ class TestNewSerializationFormat:
         with open(save_path) as f:
             data = json.load(f)
 
-        assert data.get("orcapod_pipeline_version") == "0.1.0", (
-            f"Expected version '0.1.0', got {data.get('orcapod_pipeline_version')!r}"
+        assert data.get("orcapod_pipeline_version") == "0.3.0", (
+            f"Expected version '0.3.0', got {data.get('orcapod_pipeline_version')!r}"
         )
 
     def test_unsupported_version_raises(self, tmp_path, compiled_pipeline):
