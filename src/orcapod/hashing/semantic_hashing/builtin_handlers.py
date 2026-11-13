@@ -29,9 +29,13 @@ from uuid import UUID
 
 from orcapod.hashing.semantic_hashing.encoded import Encoded
 from orcapod.hashing.semantic_hashing.function_info_extractors import ParameterDefault
-from orcapod.logical_types.array_format import NDARRAY_OPTIONS
+from orcapod.logical_types.array_format import NDARRAY_EXTENSION_NAME, NDARRAY_OPTIONS
 from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.logical_types.ignore_list import IgnoreListHandler
+from orcapod.logical_types.polars_type import (
+    POLARS_DATAFRAME_EXTENSION_NAME,
+    POLARS_SERIES_EXTENSION_NAME,
+)
 from orcapod.types import ContentHash, Schema
 from orcapod.utils.canonical_type_names import canonical_type_name
 
@@ -420,6 +424,7 @@ class NumpyArrayHandler(IgnoreListHandler):
             array is hashed (the data context's list for the type).
     """
 
+    EXTENSION_NAME = NDARRAY_EXTENSION_NAME
     OPTIONS = NDARRAY_OPTIONS
     HASH_LABEL = "ndarray_v1"
     """``ContentHash.method`` of an ndarray hash."""
@@ -617,6 +622,7 @@ class PolarsDataFrameHandler(IgnoreListHandler):
     ``struct_field_order``.
     """
 
+    EXTENSION_NAME = POLARS_DATAFRAME_EXTENSION_NAME
     OPTIONS = frozenset({"column_order", "struct_field_order"})
     HASH_LABEL = "polars_dataframe_v1"
     """``ContentHash.method`` of a ``pl.DataFrame`` hash."""
@@ -658,6 +664,7 @@ class PolarsSeriesHandler(IgnoreListHandler):
     ``struct_field_order``.
     """
 
+    EXTENSION_NAME = POLARS_SERIES_EXTENSION_NAME
     OPTIONS = frozenset({"series_name", "struct_field_order"})
     HASH_LABEL = "polars_series_v1"
     """``ContentHash.method`` of a ``pl.Series`` hash."""

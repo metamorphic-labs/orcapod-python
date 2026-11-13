@@ -27,7 +27,7 @@ import pytest
 import torch
 
 import orcapod.contexts as contexts_package
-from orcapod import function_pod
+from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.contexts.core import DataContext
 from orcapod.contexts.registry import JSONDataContextRegistry
@@ -87,7 +87,9 @@ def recorded() -> Iterator[list[warnings.WarningMessage]]:
 
 
 def _warned_names(caught: list[warnings.WarningMessage]) -> list[str]:
-    return sorted(name for w in caught for name in NAMES if f"{name} " in str(w.message))
+    return sorted(
+        name for w in caught for name in NAMES if f"{name} " in str(w.message)
+    )
 
 
 def _registration() -> dict[str, Any]:
@@ -174,19 +176,31 @@ def test_a_source_column_of_the_type_warns_once(name: str) -> None:
     assert again == []
 
 
-@pytest.mark.parametrize("name", NAMES)
-def test_a_function_pod_output_of_the_type_warns_once(name: str) -> None:
-    def make(k: int) -> Any:
+def _producer(name: str) -> Any:
+    """A function pod ``make(n: int)`` whose output ``y`` is of the type ``name``."""
+
+    def make(n: int) -> Any:
         return _value(name)
 
     make.__annotations__["return"] = PYTHON_TYPES[name]
-    source = _quiet(
-        lambda: DictSource(data=[{"k": 1}, {"k": 2}], tag_columns=["k"], source_id="k")
+    return function_pod(output_keys="y")(make)
+
+
+def _numbers() -> DictSource:
+    return DictSource(
+        data=[{"k": i, "n": i} for i in range(3)], tag_columns=["k"], source_id="n"
     )
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_a_function_pod_output_of_the_type_warns_once(name: str) -> None:
+    source = _quiet(_numbers)
     with recorded() as caught:
-        pod = function_pod(output_keys="y")(make)
+        pod = _producer(name)
         pod.pod(source).as_table()
     assert _warned_names(caught) == [name]
+    # Defining the pod is the use: the warning points at that line of user code.
+    assert caught[0].filename == __file__
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -201,23 +215,23 @@ def test_a_function_pod_input_of_the_type_warns_once(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_reading_a_stored_column_of_the_type_warns_once(
+def test_reading_stored_results_of_the_type_warns_once(
     name: str, tmp_path: Path
 ) -> None:
-    def write() -> None:
-        converter = get_default_context().type_converter
-        table = converter.python_dicts_to_arrow_table(
-            [{"x": _value(name)}], python_schema={"x": PYTHON_TYPES[name]}
-        )
-        DeltaTableDatabase(base_path=tmp_path).add_record(
-            ("values",), "r1", table, flush=True
-        )
+    """A loaded job, whose pods are not saved, reads a stored column of the type."""
 
-    _quiet(write)
+    def run_and_save() -> None:
+        job = PipelineJob(name="values", store=DeltaTableDatabase(tmp_path / "store"))
+        with job:
+            _producer(name).pod(_numbers(), label="make")
+        job.run()
+        job.save(tmp_path / "job.json")
+
+    _quiet(run_and_save)
     with recorded() as caught:
-        table = DeltaTableDatabase(base_path=tmp_path).get_all_records(("values",))
-    assert table is not None
-    assert isinstance(table.schema.field("x").type, pa.ExtensionType)
+        loaded = PipelineJob.load(tmp_path / "job.json")
+        table = loaded.nodes["make"].as_table()
+    assert table.num_rows == 3
     assert _warned_names(caught) == [name]
 
 
