@@ -60,7 +60,7 @@ jobs:
       SPIRAL_WORKLOAD_ID: ${{ secrets.SPIRAL_WORKLOAD_ID }}
       SPIRAL_INTEGRATION_TESTS: "1"
       SPIRAL_PROJECT_ID: ${{ vars.SPIRAL_PROJECT_ID || 'test-orcapod-362211' }}
-      SPIRAL_SERVER_URL: ${{ vars.SPIRAL_SERVER_URL || 'http://api.spiraldb.dev' }}
+      SPIRAL_SERVER_URL: https://api.spiraldb.dev  # TRIAL ITL-1008
 
     steps:
       - name: Check for SPIRAL_WORKLOAD_ID
