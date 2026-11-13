@@ -1211,24 +1211,29 @@ ContentHash("pandas_dataframe_v1" | "pandas_series_v1",
   struct field order**.
 - `descriptor` is canonical JSON (sorted keys, `,` and `:` separators, UTF-8) in a grammar
   Orcapod owns, built from the pandas objects themselves. It carries what the Arrow values
-  do not show: `attrs`, typed labels, `columns.names`, index level names and the pandas
-  dtypes.
+  do not show: `attrs`, typed labels, `columns.names`, the dtype of the column axis, index
+  level names and the pandas dtypes.
 - The label never enters the computation; only the bytes of `D` do.
 
 ```text
 frame:  {"kind": "orcapod.pandas.dataframe", "height": <rows>, "attrs": <attrs>,
          "columns": [[<label>, <dtype>], ...],      in column order
          "columns_names": [<label>, ...],           columns.names, one per column level
-         "index": [[<label>, <dtype>], ...]}        index levels in order: name, dtype
+         "columns_dtypes": [<dtype>, ...],          column axis, one per column level
+         "index": [[<name>, <dtype>], ...]}         index levels in order: name, dtype
 series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
          "name": <label>, "dtype": <dtype>,
-         "index": [[<label>, <dtype>], ...]}
+         "index": [[<name>, <dtype>], ...]}
 
 <attrs> := attrs as the JSON object storage keeps; {} when empty or not writable as JSON
+<name>  := <str> | null                             an index level name as storage restores
+                                                    it: its text
 <label> := <str> | null | {"bool": b} | {"int": n} | {"float": <float.hex()>}
          | {"tuple": [<label>, ...]}
-         | {"timestamp": [<epoch value>, <unit>, <tz or null>]} | {"date": <iso date>}
-         | {"timedelta": [<value>, <unit>]} | {"period": [<ordinal>, <period alias>]}
+         | {"timestamp": [<count since the epoch, in unit>, <unit>, <tz or null>]}
+         | {"date": <iso date>}
+         | {"timedelta": [<count, in unit>, <unit>]}
+         | {"period": [<ordinal>, <period alias>]}
          | {"nat": "datetime" | "timedelta"}
 <dtype> := {"numpy": <numpy dtype name>}
          | {"masked": "Int8" | ... | "UInt64" | "Float32" | "Float64" | "boolean"}
@@ -1253,8 +1258,9 @@ the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 | MultiIndex level order (frame and Series) | yes | `D` (ordered) |
 | Struct field order in a `pd.ArrowDtype` struct column, at every depth | yes | `D` (ordered) |
 | Values, row order, row count, Arrow type (int width, datetime unit and timezone) | yes | `D` |
-| Index values, index level names, index dtype | yes | `D`, descriptor |
+| Index values, index level names (as the text storage writes), index dtype | yes | `D`, descriptor |
 | `columns.name` / `columns.names` | yes | descriptor |
+| Dtype of the column axis, per level (an `int64` versus an `object` Index of the same labels) | yes | descriptor |
 | Column label type (`0` versus `"0"`), MultiIndex columns versus flat labels | yes | descriptor |
 | Series name, typed (`0` versus `"0"`); a frame versus its one-column Series | yes | descriptor |
 | pandas dtype where the Arrow values coincide: `Int64` versus `int64`, `boolean` versus `bool`, `string` versus `object` | yes | descriptor |
@@ -1262,6 +1268,7 @@ the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 | `attrs` (as the JSON object storage keeps: `{1: "x"}` is `{"1": "x"}`) | yes, although pandas' equality ignores it | descriptor |
 | `-0.0` versus `0.0` | yes, although pandas calls them equal: the values are hashed as bytes | `D` |
 | `flags` | never: storage does not restore it | |
+| Type of an index level name (`1` versus `"1"`) | never: storage writes the name as text | |
 | `RangeIndex` versus an `int64` index with the same values | never: storage restores an `Index` | |
 | `freq` of a `DatetimeIndex` or `TimedeltaIndex` | never: storage does not restore it | |
 | Unused levels of a MultiIndex | never: storage does not restore them | |
@@ -1274,8 +1281,23 @@ the value that was written. `PANDAS_IDENTITY_PROPERTIES` in
 level whose values are not strings does not read back as `object`: `[1, 2]` reads back
 `int64`, `[1, None]` reads back `float64`, `datetime` objects read back `datetime64[us]`.
 Such a column is described and digested in the form it reads back in, so it hashes like the
-typed column it becomes. An `object` column that reads back as `object` (strings, bytes,
-dicts, lists, decimals, dates) is hashed as it is.
+typed column it becomes. An `object` column of lists or dicts stays `object`, but its
+elements can change (a list `[1, None]` reads back `[1.0, nan]`), so the Arrow form of what
+is read back is digested. Any other `object` column that reads back as `object` (strings,
+bytes, decimals, dates) is hashed as it is.
+
+**The axes are described as storage restores them.** Storage writes the name of an index
+level as text. The index names `1` and `"1"` are therefore one name once read back, and
+**they hash equal**: a hash that told them apart would change when the value is read from a
+store. `columns.names` and a Series' name are restored with their types, so they stay typed
+(`0` versus `"0"` differ). The dtype of each level of the column axis is restored, so it is
+part of the hash. A timestamp or duration label is the integer count in its own unit, with
+the unit.
+
+Storage refuses a value whose column labels and index names collide once written as text
+(the index name `1` with a column `"1"`; integer names of MultiIndex levels): Arrow would
+write two fields of one name and the value read back would have lost its index.
+`python_to_storage` raises `ValueError` listing the names.
 
 A label or dtype outside the grammar raises `ValueError` naming it (a dtype error names its
 column). A value that cannot be converted to Arrow raises `ValueError`.
