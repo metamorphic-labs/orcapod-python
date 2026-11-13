@@ -3,8 +3,9 @@
 ``hash(read(write(v))) == hash(v)`` is the rule that makes a stored pandas value a cache hit.
 It fails whenever storage changes a property the hash counts, and such properties are easy to
 miss one at a time: an ``Int64`` index reads back ``int64``, mixed column labels read back as
-text. So this module checks the rule over the product of index kinds, column label kinds and
-column dtypes, for frames and Series.
+text. So this module checks the rule for every index kind, column axis and column dtype it
+lists, each on its own, and over the products of representatives of each, for frames and
+Series.
 
 A value storage does not accept (the write or the read raises) is outside the rule and is
 left out; each test asserts that most of its matrix was accepted, so it cannot pass empty.
@@ -13,8 +14,10 @@ left out; each test asserts that most of its matrix was accepted, so it cannot p
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import itertools
 import warnings
+import zoneinfo
 from typing import Any
 
 import numpy as np
@@ -53,6 +56,26 @@ INDEXES: dict[str, pd.Index] = {
     "datetime": pd.DatetimeIndex(["2020-01-01", "2020-01-02"]),
     "datetime s": pd.DatetimeIndex(["2020-01-01", "2020-01-02"]).as_unit("s"),
     "datetime UTC": pd.DatetimeIndex(["2020-01-01", "2020-01-02"], tz="UTC"),
+    "datetime fixed offset": pd.DatetimeIndex(
+        ["2020-01-01", "2020-01-02"], tz=dt.timezone(dt.timedelta(hours=1))
+    ),
+    "datetime zoneinfo": pd.DatetimeIndex(
+        ["2020-01-01", "2020-01-02"], tz=zoneinfo.ZoneInfo("Europe/Berlin")
+    ),
+    "arrow string": pd.Index(pd.array(["p", "q"], dtype=pd.ArrowDtype(pa.string()))),
+    "arrow timestamp": pd.Index(
+        pd.array(
+            pd.to_datetime(["2020-01-01", "2020-01-02"]),
+            dtype=pd.ArrowDtype(pa.timestamp("us")),
+        )
+    ),
+    "UInt8": pd.Index([5, 6], dtype="UInt8"),
+    "float32": pd.Index([0.5, 1.5], dtype="float32"),
+    "uint16": pd.Index([5, 6], dtype="uint16"),
+    "object mixed": pd.Index([5, "q"], dtype=object),
+    "object dates": pd.Index([dt.date(2020, 1, 1), dt.date(2020, 1, 2)], dtype=object),
+    "object None and str": pd.Index([None, "q"], dtype=object),
+    "float with nan": pd.Index([0.5, np.nan]),
     "timedelta": pd.TimedeltaIndex(["1s", "2s"]),
     "period": pd.period_range("2020-01", periods=2, freq="M"),
     "interval": pd.interval_range(0, 2),
@@ -68,27 +91,6 @@ INDEXES: dict[str, pd.Index] = {
     "multi mixed names": pd.MultiIndex.from_tuples(
         [(0, "p"), (1, "q")], names=[1.5, "j"]
     ),
-}
-
-# The index kinds crossed with every column dtype: one of each way storage treats an index
-# (kept, restored as NumPy, restored from a dictionary, named as text, several levels).
-# Every index kind is crossed with every column axis and every Series name.
-INDEXES_FOR_DTYPES: dict[str, pd.Index] = {
-    name: INDEXES[name]
-    for name in (
-        "range",
-        "object ints",
-        "string",
-        "Int64 with NA",
-        "boolean",
-        "categorical, object int categories",
-        "datetime UTC",
-        "period",
-        "int name",
-        "tuple name",
-        "multi Int64",
-        "multi mixed names",
-    )
 }
 
 # Column axes: two labels each.
@@ -108,6 +110,15 @@ COLUMN_AXES: dict[str, pd.Index] = {
     "timestamps": pd.DatetimeIndex(["2020-01-01", "2020-01-02"]),
     "timestamps s": pd.DatetimeIndex(["2020-01-01", "2020-01-02"]).as_unit("s"),
     "timestamps UTC": pd.DatetimeIndex(["2020-01-01", "2020-01-02"], tz="UTC"),
+    "timestamps fixed offset": pd.DatetimeIndex(
+        ["2020-01-01", "2020-01-02"], tz=dt.timezone(dt.timedelta(hours=1))
+    ),
+    "arrow string": pd.Index(pd.array(["a", "b"], dtype=pd.ArrowDtype(pa.string()))),
+    "Int64": pd.Index([0, 1], dtype="Int64"),
+    "uint8": pd.Index([0, 1], dtype="uint8"),
+    "categorical": pd.CategoricalIndex(["a", "b"]),
+    "timedeltas": pd.TimedeltaIndex(["1s", "2s"]),
+    "periods": pd.period_range("2020-01", periods=2, freq="M"),
     "named": pd.Index(["a", "b"], dtype=object, name="features"),
     "int name": pd.Index(["a", "b"], dtype=object, name=3),
     "multi": pd.MultiIndex.from_tuples([("a", 1), ("a", 2)]),
@@ -164,6 +175,71 @@ COLUMN_VALUES: dict[str, Any] = {
     "period": pd.period_range("2020-01", periods=2, freq="M"),
     "interval": pd.arrays.IntervalArray.from_breaks([0, 1, 2]),
     "arrow int64": pd.array([1, None], dtype="int64[pyarrow]"),
+    "arrow string": pd.array(["x", None], dtype=pd.ArrowDtype(pa.string())),
+    "arrow large_string": pd.array(["x", "y"], dtype=pd.ArrowDtype(pa.large_string())),
+    "arrow bool": pd.array([True, None], dtype="bool[pyarrow]"),
+    "arrow double": pd.array([0.5, None], dtype="double[pyarrow]"),
+    "arrow timestamp": pd.array(
+        pd.to_datetime(["2020-01-01", None]),
+        dtype=pd.ArrowDtype(pa.timestamp("us")),
+    ),
+    "arrow timestamp UTC": pd.array(
+        pd.to_datetime(["2020-01-01", None]).tz_localize("UTC"),
+        dtype=pd.ArrowDtype(pa.timestamp("ns", tz="UTC")),
+    ),
+    "arrow list": pd.Series([[1, 2], None], dtype=pd.ArrowDtype(pa.list_(pa.int64()))),
+    "arrow binary": pd.array([b"x", None], dtype=pd.ArrowDtype(pa.binary())),
+    "arrow decimal": pd.array(
+        [decimal.Decimal("1.50"), None], dtype=pd.ArrowDtype(pa.decimal128(5, 2))
+    ),
+    "arrow date32": pd.array(
+        [dt.date(2020, 1, 1), None], dtype=pd.ArrowDtype(pa.date32())
+    ),
+    "arrow duration": pd.array(
+        [dt.timedelta(seconds=1), None], dtype=pd.ArrowDtype(pa.duration("s"))
+    ),
+    "arrow dictionary": pd.Series(
+        ["x", "y"], dtype=pd.ArrowDtype(pa.dictionary(pa.int8(), pa.string()))
+    ),
+    "UInt8 with NA": pd.array([1, None], dtype="UInt8"),
+    "Float32 with NA": pd.array([0.5, None], dtype="Float32"),
+    "float32": np.array([0.5, 1.5], dtype="float32"),
+    "uint16": np.array([1, 2], dtype="uint16"),
+    "complex128": np.array([1 + 2j, 3 - 1j]),
+    "object decimals": pd.Series([decimal.Decimal("1.5"), None], dtype=object),
+    "object timedeltas": pd.Series([dt.timedelta(days=1), None], dtype=object),
+    "object timestamps UTC": pd.Series(
+        [pd.Timestamp("2020-01-01", tz="UTC"), None], dtype=object
+    ),
+    "object mixed numbers": pd.Series([1, 2.5], dtype=object),
+    "object tuples": pd.Series([(1, 2), (3, 4)], dtype=object),
+    "object sets": pd.Series([{1, 2}, {3}], dtype=object),
+    "object arrays": pd.Series([np.array([1, 2]), np.array([3])], dtype=object),
+    "datetime s": pd.to_datetime(["2020-01-01", None]).as_unit("s"),
+    "datetime fixed offset": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize(
+        dt.timezone(dt.timedelta(hours=1))
+    ),
+    "datetime timezone.utc": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize(
+        dt.timezone.utc
+    ),
+    "datetime zoneinfo": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize(
+        zoneinfo.ZoneInfo("Europe/Berlin")
+    ),
+    "datetime tz name": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize(
+        "America/New_York"
+    ),
+    "datetime pytz fixed": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize(
+        "+05:30"
+    ),
+    "timedelta s": pd.to_timedelta(["1s", "2s"]).as_unit("s"),
+    "period D": pd.period_range("2020-01-01", periods=2, freq="D"),
+    "interval float left": pd.arrays.IntervalArray.from_breaks(
+        [0.0, 1.0, 2.0], closed="left"
+    ),
+    "interval datetime": pd.arrays.IntervalArray.from_breaks(
+        pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"])
+    ),
+    "sparse": pd.arrays.SparseArray([0, 1]),
     "arrow struct": pd.Series(
         pa.array([{"u": 1, "v": "x"}, None]),
         dtype=pd.ArrowDtype(pa.struct([("u", pa.int64()), ("v", pa.string())])),
@@ -232,44 +308,122 @@ def _frame(index: pd.Index, columns: pd.Index, values: Any) -> pd.DataFrame:
     return frame.set_axis(columns, axis=1)
 
 
+# Representatives for the cross products: one of each way storage treats a kind (kept,
+# restored in another form, restored from a dictionary, written as text, several levels).
+# Every kind is also checked once on its own.
+INDEX_REPRESENTATIVES = (
+    "range",
+    "object ints",
+    "string",
+    "Int64 with NA",
+    "categorical, object int categories",
+    "datetime fixed offset",
+    "arrow string",
+    "period",
+    "int name",
+    "tuple name",
+    "multi Int64",
+    "multi mixed names",
+)
+COLUMN_AXIS_REPRESENTATIVES = (
+    "strings",
+    "string dtype",
+    "ints",
+    "object ints",
+    "mixed int and str",
+    "timestamps fixed offset",
+    "arrow int8",
+    "int name",
+    "multi named",
+)
+COLUMN_VALUE_REPRESENTATIVES = (
+    "int64",
+    "Int64 with NA",
+    "string[pyarrow]",
+    "object strings",
+    "object ints with None",
+    "object lists",
+    "object dicts",
+    "categorical, object int categories",
+    "datetime fixed offset",
+    "arrow string",
+    "arrow decimal",
+    "period",
+    "interval",
+)
+
+
+def _chosen(kinds: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    """The entries of ``kinds`` with the given names."""
+    return {name: kinds[name] for name in names}
+
+
+def _assert_stable(values: dict[str, Any], *, accepted_at_least: int) -> None:
+    """Assert the round-trip rule on ``values`` and that storage accepted enough of them."""
+    unstable, accepted = _unstable(values)
+    assert unstable == []
+    assert accepted >= accepted_at_least
+
+
 class TestFrameHashSurvivesStorage:
-    """Frames over index kinds, column axes and column dtypes, two at a time."""
+    """Frames over index kinds, column axes and column dtypes."""
+
+    def test_every_index_kind(self) -> None:
+        """Each index kind, on a plain frame."""
+        values = {
+            f"index {i}": _frame(index, COLUMN_AXES["strings"], COLUMN_VALUES["int64"])
+            for i, index in INDEXES.items()
+        }
+        _assert_stable(values, accepted_at_least=len(values) - 2)
+
+    def test_every_column_axis(self) -> None:
+        """Each column axis, on a plain frame."""
+        values = {
+            f"columns {c}": _frame(INDEXES["range"], columns, COLUMN_VALUES["int64"])
+            for c, columns in COLUMN_AXES.items()
+        }
+        _assert_stable(values, accepted_at_least=len(values) - 6)
+
+    def test_every_column_dtype(self) -> None:
+        """Each column dtype, on a plain frame."""
+        values = {
+            f"values {v}": _frame(INDEXES["range"], COLUMN_AXES["strings"], column)
+            for v, column in COLUMN_VALUES.items()
+        }
+        _assert_stable(values, accepted_at_least=len(values) - 8)
 
     def test_index_kinds_by_column_axes(self) -> None:
-        """Every index kind with every column axis."""
+        """Representative index kinds with representative column axes."""
         values = {
             f"index {i} / columns {c}": _frame(index, columns, COLUMN_VALUES["int64"])
             for (i, index), (c, columns) in itertools.product(
-                INDEXES.items(), COLUMN_AXES.items()
+                _chosen(INDEXES, INDEX_REPRESENTATIVES).items(),
+                _chosen(COLUMN_AXES, COLUMN_AXIS_REPRESENTATIVES).items(),
             )
         }
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted > len(values) * 3 // 4
+        _assert_stable(values, accepted_at_least=len(values) * 3 // 4)
 
     def test_index_kinds_by_column_dtypes(self) -> None:
-        """Index kinds of every treatment with every column dtype."""
+        """Representative index kinds with representative column dtypes."""
         values = {
             f"index {i} / values {v}": _frame(index, COLUMN_AXES["strings"], column)
             for (i, index), (v, column) in itertools.product(
-                INDEXES_FOR_DTYPES.items(), COLUMN_VALUES.items()
+                _chosen(INDEXES, INDEX_REPRESENTATIVES).items(),
+                _chosen(COLUMN_VALUES, COLUMN_VALUE_REPRESENTATIVES).items(),
             )
         }
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted > len(values) * 3 // 4
+        _assert_stable(values, accepted_at_least=len(values) * 3 // 4)
 
     def test_column_axes_by_column_dtypes(self) -> None:
-        """Every column axis with every column dtype."""
+        """Representative column axes with representative column dtypes."""
         values = {
             f"columns {c} / values {v}": _frame(INDEXES["range"], columns, column)
             for (c, columns), (v, column) in itertools.product(
-                COLUMN_AXES.items(), COLUMN_VALUES.items()
+                _chosen(COLUMN_AXES, COLUMN_AXIS_REPRESENTATIVES).items(),
+                _chosen(COLUMN_VALUES, COLUMN_VALUE_REPRESENTATIVES).items(),
             )
         }
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted > len(values) * 3 // 4
+        _assert_stable(values, accepted_at_least=len(values) * 3 // 4)
 
     def test_attrs(self) -> None:
         """Frames and Series with ``attrs`` storage keeps as JSON."""
@@ -281,46 +435,56 @@ class TestFrameHashSurvivesStorage:
             series.attrs = attrs
             values[f"frame attrs {name}"] = frame
             values[f"series attrs {name}"] = series
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted == len(values)
+        _assert_stable(values, accepted_at_least=len(values))
 
 
 class TestSeriesHashSurvivesStorage:
-    """Series over index kinds, names and dtypes, two at a time."""
+    """Series over index kinds, names and dtypes."""
+
+    def test_every_index_kind(self) -> None:
+        """Each index kind, on a plain Series."""
+        values = {
+            f"index {i}": pd.Series([1, 2], index=index, name="s")
+            for i, index in INDEXES.items()
+        }
+        _assert_stable(values, accepted_at_least=len(values) - 2)
+
+    def test_every_dtype(self) -> None:
+        """Each dtype, on a plain Series."""
+        values = {
+            f"values {v}": pd.Series(column, name="s")
+            for v, column in COLUMN_VALUES.items()
+        }
+        _assert_stable(values, accepted_at_least=len(values) - 8)
 
     def test_index_kinds_by_names(self) -> None:
-        """Every index kind with every kind of Series name."""
+        """Representative index kinds with every kind of Series name."""
         values = {
             f"index {i} / name {n}": pd.Series([1, 2], index=index, name=series_name)
             for (i, index), (n, series_name) in itertools.product(
-                INDEXES.items(), SERIES_NAMES.items()
+                _chosen(INDEXES, INDEX_REPRESENTATIVES).items(), SERIES_NAMES.items()
             )
         }
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted > len(values) * 3 // 4
+        _assert_stable(values, accepted_at_least=len(values) * 3 // 4)
 
     def test_index_kinds_by_dtypes(self) -> None:
-        """Index kinds of every treatment with every dtype."""
+        """Representative index kinds with representative dtypes."""
         values = {
             f"index {i} / values {v}": pd.Series(column, name="s").set_axis(index)
             for (i, index), (v, column) in itertools.product(
-                INDEXES_FOR_DTYPES.items(), COLUMN_VALUES.items()
+                _chosen(INDEXES, INDEX_REPRESENTATIVES).items(),
+                _chosen(COLUMN_VALUES, COLUMN_VALUE_REPRESENTATIVES).items(),
             )
         }
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted > len(values) * 3 // 4
+        _assert_stable(values, accepted_at_least=len(values) * 3 // 4)
 
     def test_names_by_dtypes(self) -> None:
-        """Every kind of Series name with every dtype."""
+        """Every kind of Series name with representative dtypes."""
         values = {
             f"name {n} / values {v}": pd.Series(column, name=series_name)
             for (n, series_name), (v, column) in itertools.product(
-                SERIES_NAMES.items(), COLUMN_VALUES.items()
+                SERIES_NAMES.items(),
+                _chosen(COLUMN_VALUES, COLUMN_VALUE_REPRESENTATIVES).items(),
             )
         }
-        unstable, accepted = _unstable(values)
-        assert unstable == []
-        assert accepted > len(values) * 3 // 4
+        _assert_stable(values, accepted_at_least=len(values) * 3 // 4)

@@ -1429,7 +1429,8 @@ series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
 <dtype> := {"numpy": <numpy dtype name>}
          | {"masked": "Int8" | ... | "UInt64" | "Float32" | "Float64" | "boolean"}
          | "string"                                 pd.StringDtype, any storage
-         | {"datetimetz": [<unit>, <tz>]}
+         | {"datetimetz": [<unit>, <tz>]}            <tz>: the text storage writes:
+                                                    "UTC", "Europe/Berlin", "+01:00"
          | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
          | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
          | "arrow"                                  pd.ArrowDtype; the type is in D
@@ -1486,7 +1487,7 @@ store. `columns.names` and a Series' name are restored with their types, so they
 part of the hash. A timestamp or duration label is the integer count in its own unit, with
 the unit.
 
-Three more consequences of the same rule:
+More consequences of the same rule:
 
 - **Column labels of mixed type hash as their text.** Storage restores labels of one type
   with that type (`0, 1` stay integers), but writes labels of mixed type as text: the
@@ -1503,6 +1504,13 @@ Three more consequences of the same rule:
   back `int64`, and `string` categories read back `object`. So a categorical with `object`
   categories `[1, 2]` and one with `int64` categories `[1, 2]` hash equal. The category
   list, its order, unused categories and `ordered` are restored and count.
+- **A column is described with the dtype its Arrow schema restores.** A
+  `pd.ArrowDtype(pa.string())` column reads back as `string`, so the two hash equal. An
+  Arrow decimal column reads back as `object` holding `Decimal` values and is hashed in
+  that form. Other `pd.ArrowDtype` columns are restored as they are.
+- **A timezone is the text storage writes for it** (`"UTC"`, `"Europe/Berlin"`,
+  `"+01:00"`), whatever class holds it: `datetime.timezone(timedelta(hours=1))` is read
+  back as another class of the same offset, and both hash equal.
 
 The descriptor holds the column labels, `columns.names`, a Series' name and the index names
 as read from the frame storage builds for the value's Arrow schema. The value's own labels

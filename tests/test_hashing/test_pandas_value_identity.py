@@ -919,6 +919,14 @@ class TestDescriptorGrammar:
         assert pandas_dtype_descriptor(pd.DatetimeTZDtype("ns", "UTC")) == {
             "datetimetz": ["ns", "UTC"]
         }
+        # A timezone is the text storage writes, whatever class holds it.
+        plus_one = dt.timezone(dt.timedelta(hours=1))
+        assert pandas_dtype_descriptor(pd.DatetimeTZDtype("ns", plus_one)) == {
+            "datetimetz": ["ns", "+01:00"]
+        }
+        assert pandas_dtype_descriptor(pd.DatetimeTZDtype("ns", dt.timezone.utc)) == {
+            "datetimetz": ["ns", "UTC"]
+        }
         # The storage of a string dtype is not restored by storage, so it is not a term.
         assert pandas_dtype_descriptor(pd.StringDtype("pyarrow")) == "string"
         assert pandas_dtype_descriptor(pd.StringDtype("python")) == "string"

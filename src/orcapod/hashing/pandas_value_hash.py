@@ -91,7 +91,8 @@ Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone,
     <dtype> := {"numpy": <numpy dtype name>}
              | {"masked": "Int8" | ... | "UInt64" | "Float32" | "Float64" | "boolean"}
              | "string"                                 pd.StringDtype, any storage
-             | {"datetimetz": [<unit>, <tz>]}
+             | {"datetimetz": [<unit>, <tz>]}            <tz>: the text storage writes,
+                                                        "UTC", "Europe/Berlin", "+01:00"
              | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
              | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
              | "arrow"                                  pd.ArrowDtype; the type is in the digest
@@ -353,6 +354,16 @@ _MASKED_DTYPE_NAMES = frozenset(
 )
 
 
+def _timezone_text(tz: dt.tzinfo) -> str:
+    """Return the text storage writes for a timezone: ``"UTC"``, ``"Europe/Berlin"``, ``"+01:00"``.
+
+    It is Arrow's own text for the timezone, so it does not depend on which timezone
+    class holds it: ``datetime.timezone(timedelta(hours=1))`` is read back from storage
+    as another class of the same offset, and both are ``"+01:00"``.
+    """
+    return pa.lib.tzinfo_to_string(tz)
+
+
 def _count_in_own_unit(moment: pd.Timestamp | pd.Timedelta) -> int:
     """Return the integer count of a timestamp or duration in its own unit.
 
@@ -394,7 +405,7 @@ def pandas_label_descriptor(label: Any) -> Any:
         timestamp = pd.Timestamp(label)
         if not isinstance(timestamp, pd.Timestamp):  # NaT
             return {"nat": "datetime"}
-        tz = None if timestamp.tz is None else str(timestamp.tz)
+        tz = None if timestamp.tz is None else _timezone_text(timestamp.tz)
         return {"timestamp": [_count_in_own_unit(timestamp), timestamp.unit, tz]}
     if isinstance(label, dt.date):
         return {"date": label.isoformat()}
@@ -436,7 +447,7 @@ def pandas_dtype_descriptor(dtype: Any) -> Any:
         # part of the term.
         return "string"
     if isinstance(dtype, pd.DatetimeTZDtype):
-        return {"datetimetz": [dtype.unit, str(dtype.tz)]}
+        return {"datetimetz": [dtype.unit, _timezone_text(dtype.tz)]}
     if isinstance(dtype, pd.PeriodDtype):
         # The period alias ("M", "Q-DEC"), as in Period.freqstr; not the offset alias
         # ("ME", "QE-DEC") that dtype.freq.freqstr gives since pandas 2.2.
@@ -537,8 +548,12 @@ def _restored_form(
     restored = column.to_pandas()
     if restored.dtype != dtype:
         return restored.dtype, pa.chunked_array([pa.Array.from_pandas(restored)])
-    if dtype == np.dtype(object) and pa.types.is_nested(column.type):
+    if dtype == np.dtype(object) and (
+        pa.types.is_nested(column.type) or pa.types.is_decimal(column.type)
+    ):
         # A list or dict cell can change inside: ``[1, None]`` reads back ``[1.0, nan]``.
+        # Decimals read back as ``Decimal`` objects, whose Arrow precision is then taken
+        # from the values, not from the type they were written with.
         return dtype, pa.chunked_array([pa.Array.from_pandas(restored)])
     return dtype, column
 
@@ -554,12 +569,17 @@ class _StoredAxes:
         column_axis_dtypes: The dtype of each level of the column axis.
         index_names: The name of each index level. Storage writes a name as text, so
             ``1`` and ``"1"`` are both ``"1"`` here.
+        schema_dtypes: The dtype storage restores for each column as far as the schema
+            alone decides it (a ``pd.ArrowDtype`` string column is restored as
+            ``string``). It is right for every column that is neither ``object`` nor
+            categorical; the dtype of those depends on the values.
     """
 
     column_labels: list[Any]
     columns_names: list[Any]
     column_axis_dtypes: list[Any]
     index_names: list[Any]
+    schema_dtypes: list[Any]
 
 
 @dataclass(frozen=True)
@@ -591,6 +611,7 @@ def _axes_of(frame: pd.DataFrame) -> _StoredAxes:
         columns_names=list(frame.columns.names),
         column_axis_dtypes=_level_dtypes(frame.columns),
         index_names=list(frame.index.names),
+        schema_dtypes=list(frame.dtypes),
     )
 
 
@@ -663,6 +684,13 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
     names = [f"c{position}" for position in range(width)] + [
         f"i{position}" for position in range(index.nlevels)
     ]
+    axes = _restored_axes(table.schema, df)
+    for position, schema_dtype in enumerate(axes.schema_dtypes):
+        own = dtypes[position]
+        if own != np.dtype(object) and not isinstance(own, pd.CategoricalDtype):
+            # The schema decides what such a column reads back as: a ``pd.ArrowDtype``
+            # string column reads back ``string``, an Arrow decimal column ``object``.
+            dtypes[position] = schema_dtype
     restored = [
         _restored_form(dtype, table.column(position), index_level=position >= width)
         for position, dtype in enumerate(dtypes)
@@ -672,7 +700,7 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
     return values, _StoredForm(
         column_dtypes=restored_dtypes[:width],
         index_dtypes=restored_dtypes[width:],
-        axes=_restored_axes(table.schema, df),
+        axes=axes,
     )
 
 
