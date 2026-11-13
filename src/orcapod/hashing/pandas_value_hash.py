@@ -71,7 +71,9 @@ Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone,
     frame:  {"kind": "orcapod.pandas.dataframe", "height": <rows>, "attrs": <attrs>,
              "columns": [[<label>, <dtype>], ...],      in column order
              "columns_names": [<label>, ...],           columns.names, one per column level
-             "columns_dtypes": [<dtype>, ...],          column axis, one per column level
+             "columns_dtypes": [<dtype>, ...],          column axis, one per column level;
+                                                        a pd.ArrowDtype level is
+                                                        {"arrow": <Arrow type text>}
              "index": [[<name>, <dtype>], ...]}         index levels in order: name, dtype
     series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
              "name": <label>, "dtype": <dtype>,
@@ -645,11 +647,6 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
                 pandas_dtype_descriptor(dtype)
             except ValueError as exc:
                 raise ValueError(f"column {label!r}: {exc}") from exc
-    if df.attrs:
-        # ``attrs`` are described on their own and are not needed in the table; what
-        # pyarrow does with ``attrs`` it cannot write depends on its version.
-        df = df.copy(deep=False)
-        df.attrs = {}
     try:
         table = pa.Table.from_pandas(df, preserve_index=True)
     except pa.ArrowInvalid as exc:
@@ -677,6 +674,17 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
         index_dtypes=restored_dtypes[width:],
         axes=_restored_axes(table.schema, df),
     )
+
+
+def _axis_dtype_descriptor(dtype: Any) -> Any:
+    """Return the dtype term of one level of the column axis.
+
+    A ``pd.ArrowDtype`` is described with its Arrow type: storage restores it, and unlike
+    a column's Arrow type it is not in the values digest (labels are not digested).
+    """
+    if isinstance(dtype, pd.ArrowDtype):
+        return {"arrow": str(dtype.pyarrow_dtype)}
+    return pandas_dtype_descriptor(dtype)
 
 
 def _index_descriptor(stored: _StoredForm) -> list[Any]:
@@ -711,7 +719,7 @@ def _frame_descriptor(
         ],
         "columns_names": [pandas_label_descriptor(name) for name in axes.columns_names],
         "columns_dtypes": [
-            pandas_dtype_descriptor(dtype) for dtype in axes.column_axis_dtypes
+            _axis_dtype_descriptor(dtype) for dtype in axes.column_axis_dtypes
         ],
         "index": _index_descriptor(stored),
     }
@@ -744,10 +752,21 @@ def _series_descriptor(
     }
 
 
+def _without_attrs(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a frame over the same data as ``df`` with empty ``attrs``; nothing is copied.
+
+    ``attrs`` are described on their own and are not needed in the Arrow table. They must
+    not travel with the frame the hash works on: pandas deep-copies ``attrs`` in almost
+    every operation (``attrs`` holding a lock cannot be copied at all), and what pyarrow
+    does with ``attrs`` it cannot write depends on its version. ``df`` is left as it is.
+    """
+    return pd.DataFrame(df, copy=False)
+
+
 def _series_as_stored_frame(series: pd.Series) -> pd.DataFrame:
-    """Return the one-column frame storage writes for a Series."""
+    """Return the one-column frame storage writes for a Series, with empty ``attrs``."""
     name = PANDAS_UNNAMED_SERIES_COLUMN if series.name is None else series.name
-    return series.to_frame(name=name)
+    return pd.Series(series, copy=False).to_frame(name=name)
 
 
 def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
@@ -757,10 +776,8 @@ def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
     The sort is on the terms of the labels as storage restores them, so a frame and the
     frame read back from storage are sorted alike.
     """
-    empty = df.iloc[:0]
-    empty.attrs = {}  # not needed for the labels; see ``_values_table``
     try:
-        schema = pa.Table.from_pandas(empty, preserve_index=True).schema
+        schema = pa.Table.from_pandas(df.iloc[:0], preserve_index=True).schema
     except pa.ArrowInvalid as exc:
         raise ValueError(f"cannot convert to Arrow. Original error: {exc}") from exc
     labels = _restored_axes(schema, df).column_labels
@@ -786,9 +803,10 @@ def pandas_frame_descriptor(
         ValueError: If a label or dtype is outside the grammar (a dtype error names its
             column), or a column cannot be converted to Arrow.
     """
+    bare = _without_attrs(df)
     if "column_order" in ignore:
-        df = _in_canonical_column_order(df)
-    _, stored = _values_table(df)
+        bare = _in_canonical_column_order(bare)
+    _, stored = _values_table(bare)
     return _frame_descriptor(df, stored, ignore)
 
 
@@ -835,9 +853,10 @@ def pandas_frame_content_hash(
         ValueError: If a label or dtype is outside the grammar, or a column cannot be converted
             to Arrow.
     """
+    bare = _without_attrs(df)
     if "column_order" in ignore:
-        df = _in_canonical_column_order(df)
-    values, stored = _values_table(df)
+        bare = _in_canonical_column_order(bare)
+    values, stored = _values_table(bare)
     descriptor = _frame_descriptor(df, stored, ignore)
     digest = arrow_hasher.hash_table_ordered(
         values, struct_field_order="struct_field_order" not in ignore

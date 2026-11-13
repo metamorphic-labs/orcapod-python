@@ -99,6 +99,8 @@ COLUMN_AXES: dict[str, pd.Index] = {
     "int32": pd.Index([0, 1], dtype="int32"),
     "object ints": pd.Index([0, 1], dtype=object),
     "floats": pd.Index([0.5, 1.5]),
+    "arrow int8": pd.Index([0, 1], dtype="int8[pyarrow]"),
+    "arrow double": pd.Index([0.5, 1.5], dtype="double[pyarrow]"),
     "mixed int and str": pd.Index([0, "b"], dtype=object),
     "mixed int and float": pd.Index([1, 2.5], dtype=object),
     "None and str": pd.Index([None, "b"], dtype=object),

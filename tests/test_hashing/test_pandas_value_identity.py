@@ -123,6 +123,10 @@ DISTINCT: dict[str, tuple[Any, Any]] = {
         pd.DataFrame([[1, 2]], columns=pd.Index(["a", "b"], dtype=object)),
         pd.DataFrame([[1, 2]], columns=pd.Index(["a", "b"], dtype="string")),
     ),
+    "column axis Arrow dtype int8 vs int64": (
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, 2], dtype="int8[pyarrow]")),
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, 2], dtype="int64[pyarrow]")),
+    ),
     "column axis level dtype int64 vs int32": (
         pd.DataFrame(
             [[1, 2]],
@@ -328,6 +332,7 @@ PROPERTY_OF_PAIR: dict[str, str] = {
     "column axis dtype int64 vs int32": "columns_dtype",
     "column axis dtype object vs string": "columns_dtype",
     "column axis level dtype int64 vs int32": "columns_dtype",
+    "column axis Arrow dtype int8 vs int64": "columns_dtype",
     "index name 1 vs '1'": "index_name_type",
     "mixed labels 0 vs '0'": "mixed_label_type",
     "Int64 index vs int64 index": "index_extension_dtype",
@@ -556,6 +561,34 @@ class TestOutsideTheGrammar:
         # Also with column order ignored, which probes the schema on its own.
         both = frozenset({"attrs", "column_order"})
         assert pandas_frame_descriptor(frame, both)["attrs"] == {}
+
+    def test_ignored_attrs_are_never_copied(self) -> None:
+        """With ``attrs`` ignored, ``attrs`` that cannot even be copied do not matter.
+
+        pandas deep-copies ``attrs`` in almost every operation, and a lock cannot be
+        copied; the hash must not touch them, for a frame or a Series, also with column
+        order ignored.
+        """
+        import threading
+
+        from orcapod.hashing.pandas_value_hash import (
+            pandas_frame_descriptor,
+            pandas_series_descriptor,
+        )
+
+        frame = _frame()
+        frame.attrs = {"lock": threading.Lock()}
+        for ignore in ({"attrs"}, {"attrs", "column_order"}):
+            assert pandas_frame_descriptor(frame, frozenset(ignore))["attrs"] == {}
+        series = pd.Series([1, 2], name="s")
+        series.attrs = {"lock": threading.Lock()}
+        assert pandas_series_descriptor(series, frozenset({"attrs"}))["attrs"] == {}
+        # Not ignored: refused like any other attrs that are not JSON.
+        with pytest.raises(ValueError, match=r"attrs\['lock'\]"):
+            _hash(frame)
+        with pytest.raises(ValueError, match=r"attrs\['lock'\]"):
+            _hash(series)
+        assert list(frame.attrs) == ["lock"]
 
     def test_date_label_hashes(self) -> None:
         """A ``datetime.date`` label is in the grammar."""
@@ -788,6 +821,14 @@ class TestDescriptorGrammar:
         )
         descriptor = pandas_frame_descriptor(pd.DataFrame([[1, 2]], columns=columns))
         assert descriptor["columns_dtypes"] == [{"numpy": "int32"}, {"numpy": "object"}]
+
+    def test_frame_descriptor_of_an_arrow_column_axis(self) -> None:
+        """A ``pd.ArrowDtype`` column axis is described with its Arrow type."""
+        from orcapod.hashing.pandas_value_hash import pandas_frame_descriptor
+
+        columns = pd.Index([1, 2], dtype="int8[pyarrow]")
+        descriptor = pandas_frame_descriptor(pd.DataFrame([[1, 2]], columns=columns))
+        assert descriptor["columns_dtypes"] == [{"arrow": "int8"}]
 
     def test_index_names_are_described_as_storage_restores_them(self) -> None:
         """An index name is its text; a Series name stays typed."""

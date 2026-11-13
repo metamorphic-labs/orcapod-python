@@ -1407,7 +1407,9 @@ ContentHash("pandas_dataframe_v1" | "pandas_series_v1",
 frame:  {"kind": "orcapod.pandas.dataframe", "height": <rows>, "attrs": <attrs>,
          "columns": [[<label>, <dtype>], ...],      in column order
          "columns_names": [<label>, ...],           columns.names, one per column level
-         "columns_dtypes": [<dtype>, ...],          column axis, one per column level
+         "columns_dtypes": [<dtype>, ...],          column axis, one per column level; a
+                                                    pd.ArrowDtype level is
+                                                    {"arrow": <Arrow type text>}
          "index": [[<name>, <dtype>], ...]}         index levels in order: name, dtype
 series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
          "name": <label>, "dtype": <dtype>,
@@ -1512,7 +1514,8 @@ a list. `attrs` with an entry JSON cannot write (a `set`, an arbitrary object, a
 key) are refused: the hash and `python_to_storage` raise `ValueError` naming the key, on
 every supported pyarrow version (pyarrow itself would drop the whole `attrs` with a
 warning, or raise `TypeError`, depending on its version). With `attrs` in the ignore list
-the hash does not read them.
+the hash does not read them (it never copies them either, so `attrs` that cannot be copied
+do not matter then).
 
 Storage refuses a value it would corrupt. Column labels and index names that collide
 once written as text (the index name `1` with a column `"1"`; integer names of MultiIndex
