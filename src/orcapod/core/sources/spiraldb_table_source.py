@@ -209,9 +209,6 @@ class SpiralDBTableSource(RootSource):
             memory, about 5 KB per row and node.
         batch_rows: The most rows handed on at once while iterating (default 8,192).
             A SpiralDB batch larger than this is held while its slices are handed on.
-        tags_as_data: Maps a key column that is a tag column of this source to the
-            name of a data column that receives a copy of it, as in
-            ``DerivedSource``. ``None`` (default) or an empty mapping copies nothing.
         source_id: Canonical source name for the registry and provenance tokens.
             Defaults to ``"<project_id>/<dataset>.<table_name>@<table id>"``.
         label: Human-readable label for this source node.
@@ -219,6 +216,9 @@ class SpiralDBTableSource(RootSource):
         config: OrcaPod configuration.
         overrides: Optional pyspiral client config overrides passed through to
             ``SpiralDBConnector``, e.g. ``{"server.url": "http://api.spiraldb.dev"}``.
+        tags_as_data: Maps a key column that is a tag column of this source to the
+            name of a data column that receives a copy of it, as in
+            ``DerivedSource``. ``None`` (default) or an empty mapping copies nothing.
 
     Raises:
         ValueError: If the table is not found, has no key schema, a tag column or a
@@ -246,12 +246,12 @@ class SpiralDBTableSource(RootSource):
         asof: int | None = None,
         max_rows: int | None = DEFAULT_MAX_ROWS,
         batch_rows: int = DEFAULT_BATCH_ROWS,
-        tags_as_data: Mapping[str, str] | None = None,
         source_id: str | None = None,
         label: str | None = None,
         data_context: "str | contexts.DataContext | None" = None,
         config: "OrcapodConfig | None" = None,
         overrides: dict[str, str] | None = None,
+        tags_as_data: Mapping[str, str] | None = None,
     ) -> None:
         for name, value in (("limit", limit), ("max_rows", max_rows)):
             if value is not None and not _is_positive_int(value):

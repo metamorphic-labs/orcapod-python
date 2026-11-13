@@ -151,7 +151,7 @@ def test_tags_as_data_gives_each_unit_its_spike_times_in_time_order():
     assert "spike_time_us" in per_unit.keys()[1]
     rows = per_unit.as_table().to_pylist()
     assert len(rows) > 1
-    assert sum(len(r["spike_time_us"]) for r in rows) == 20_000
+    assert sum(len(r["spike_time_us"]) for r in rows) == spikes.as_table().num_rows
     for row in rows:
         assert row["spike_time_us"] == sorted(row["spike_time_us"])
 

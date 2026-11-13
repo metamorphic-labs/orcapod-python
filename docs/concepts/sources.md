@@ -205,8 +205,9 @@ The copies are data columns, so they are part of the schema, the `content_hash` 
 `pipeline_hash`; the mapping itself is part of the `content_hash` too, because two mappings
 can give the same schema while the copy holds different values. The `source_id` and every
 row's record id are the same as without the option. Compared with
-`DerivedSource(spikes, tags_as_data=...)`, which reads the whole table when it is built,
-the option keeps a Spiral source.
+`DerivedSource(spikes, tags_as_data=...)`, which reads the whole table as soon as its schema
+or rows are asked for (building a job asks for the schema), the option keeps a Spiral source,
+whose schema is known without a scan.
 
 **Known limitations.**
 
