@@ -190,8 +190,14 @@ class OperatorNodeBase(StreamBase):
         return super().content_hash(hasher)
 
     def pipeline_hash(self, hasher=None) -> ContentHash:
-        """Return the pipeline hash, using stored value in read-only mode."""
-        if self._operator is None and self._stored_pipeline_hash is not None:
+        """Return the pipeline hash; a node rebuilt from a descriptor returns the saved one.
+
+        A node rebuilt with its operator still returns the saved value: its inputs are
+        rebuilt from the saved schemas, which do not keep every property that the run's
+        inputs hashed (ITL-1043: a column's nullability), so recomputing could give
+        another value and another table path than the run's.
+        """
+        if self._stored_pipeline_hash is not None:
             return ContentHash.from_string(self._stored_pipeline_hash)
         return super().pipeline_hash(hasher)
 
@@ -481,6 +487,8 @@ class OperatorNode(OperatorNodeBase):
                 table_scope=table_scope,
             )
             node._descriptor = descriptor
+            # The run's pipeline hash, not one recomputed from the rebuilt inputs.
+            node._stored_pipeline_hash = descriptor.get("pipeline_hash")
             node._load_status = LoadStatus.FULL
             return node
 
@@ -800,6 +808,9 @@ class OperatorJobNode(OperatorNodeBase):
                     cache_mode=cache_mode,
                 )
             node._descriptor = descriptor
+            # The run's pipeline hash, not one recomputed from the rebuilt inputs: it
+            # names the table the run's rows are stored in.
+            node._stored_pipeline_hash = descriptor.get("pipeline_hash")
             node._load_status = LoadStatus.FULL
             node._loaded = True
             return node
@@ -1030,6 +1041,21 @@ class OperatorJobNode(OperatorNodeBase):
             still present and without the ``__data_context`` column, or ``None``
             when the table does not exist.
         """
+        records = self._read_current_context_records()
+        if records is None:
+            return None
+        return self._filter_by_content_hash(records)
+
+    def _read_current_context_records(self) -> "pa.Table | None":
+        """Read every row of this node's stored table written under the current data context.
+
+        The rows of every run that shares the table, before ``_filter_by_content_hash``
+        keeps this node's. Rows of another data context are left out and reported once.
+
+        Returns:
+            The rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL`` and without
+            the ``__data_context`` column, or ``None`` when the table does not exist.
+        """
         assert self._pipeline_database is not None
         self._account_for_stale_tables()
         records = self._pipeline_database.get_all_records(
@@ -1045,7 +1071,7 @@ class OperatorJobNode(OperatorNodeBase):
                 self._pipeline_database.base_path + self._stored_table_path,
                 stored_rows - records.num_rows,
             )
-        return self._filter_by_content_hash(records.drop([constants.DATA_CONTEXT_COL]))
+        return records.drop([constants.DATA_CONTEXT_COL])
 
     def _make_empty_table(self) -> "pa.Table":
         """Build a zero-row PyArrow table matching this node's full output schema.
@@ -1081,13 +1107,33 @@ class OperatorJobNode(OperatorNodeBase):
               (LOG/OFF modes may have stale historical records in the DB).
 
         Raises:
-            RuntimeError: If a loaded REPLAY node's cache table is absent.
+            RuntimeError: If a loaded REPLAY node's cache table is absent, or holds rows
+                none of which carries the node's content hash: a loaded node cannot
+                compute, so showing no rows would make stored results look dropped.
         """
         if self._pipeline_database is None:
             return None
         if self._cache_mode != CacheMode.REPLAY:
             return None
-        records = self._read_stored_records()
+        stored = self._read_current_context_records()
+        records = None if stored is None else self._filter_by_content_hash(stored)
+        if (
+            self._loaded
+            and stored is not None
+            and records is not None
+            and records.num_rows == 0
+            and stored.num_rows > 0
+        ):
+            raise RuntimeError(
+                f"OperatorJobNode {self.label!r}: its cache table "
+                f"({'/'.join(self._stored_table_path)}) holds {stored.num_rows} stored "
+                "rows, none of them under this node's content hash "
+                f"({self.content_hash().to_string()}). They were stored by other runs, "
+                "or by this job's run under a content hash the loaded job cannot "
+                "reproduce (an input source whose data was not saved with the job). "
+                "Build the job from code and attach the node with CacheMode.REPLAY to "
+                "read them."
+            )
         if records is None:
             if self._loaded:
                 raise RuntimeError(
