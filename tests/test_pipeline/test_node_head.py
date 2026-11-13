@@ -222,3 +222,20 @@ def test_operator_node_cache_modes() -> None:
     log_head = log.head()
     assert log_head.status is HeadStatus.NOT_COMPUTED
     assert "not replayed" in log_head.header()
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_an_operator_node_with_an_empty_result_reads_as_computed(
+    orchestrator: str,
+) -> None:
+    """After a run that produced no rows, an operator node is computed and empty."""
+    from orcapod.core.operators import PolarsFilter
+
+    job = PipelineJob(name="itl991_empty", store=InMemoryArrowDatabase())
+    with job:
+        _ = PolarsFilter(constraints={"x": -1})(_source(), label="none")
+    _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    head = job.nodes["none"].head()
+    assert head.status is HeadStatus.ROWS
+    assert len(head) == 0
+    assert head.table.column_names == ["id", "x"]

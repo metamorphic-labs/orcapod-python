@@ -1563,12 +1563,20 @@ class OperatorJobNode(OperatorNodeBase):
             # does, and store it in LOG mode (sync DB write, post-hoc). A run
             # with no rows replaces an earlier run's output too: the node then
             # reads as a zero-row table.
-            self._cached_output_stream = None
             if collected:
                 stream = StaticOutputOperatorPod._materialize_to_stream(collected)
                 self._cached_output_stream = stream
                 if should_store:
                     self._store_output_stream(stream)
+            else:
+                # A completed run with no rows keeps a typed zero-row result, as the
+                # sync path does, so the node reads as computed and empty (not as
+                # never run). Nothing is stored for it.
+                self._cached_output_stream = ArrowTableStream(
+                    self._make_empty_table(),
+                    tag_columns=self.keys()[0],
+                    data_context=self.data_context,
+                )
 
             self._update_modified_time()
 

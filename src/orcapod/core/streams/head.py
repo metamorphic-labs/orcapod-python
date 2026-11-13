@@ -312,17 +312,24 @@ def head_of(
 ) -> StreamHead:
     """Return ``head`` (another stream's) shown as ``stream``.
 
+    A ``StreamHead`` keeps every field. Any other result of ``head`` (a
+    ``StreamHeadProtocol``) is adapted from what that protocol gives: its rows, status
+    and total.
+
     Args:
-        head: What another stream's ``head`` returned: a ``StreamHead``.
+        head: What another stream's ``head`` returned.
         stream: The stream, source or node that shows those rows as its own.
         origin: Another origin for the rows, if given.
         note: Another note, if given.
-
-    Raises:
-        TypeError: If ``head`` is not a ``StreamHead``.
     """
     if not isinstance(head, StreamHead):
-        raise TypeError(f"head() returned {type(head).__name__}, not a StreamHead")
+        head = StreamHead(
+            table=head.table,
+            status=HeadStatus(head.status),
+            kind=type(stream).__name__,
+            label=display_name(stream),
+            total_rows=head.total_rows,
+        )
     return head.for_stream(stream, origin=origin, note=note)
 
 

@@ -604,3 +604,32 @@ def test_cached_source_keeps_the_wrapped_explanation_when_it_has_no_rows() -> No
     )
     head = source.head()
     assert "nothing polled yet" in head.header()
+
+
+def test_head_of_adapts_any_head_the_protocol_allows() -> None:
+    """A head that is not a ``StreamHead`` but follows the protocol is adapted."""
+    from orcapod.core.streams.head import head_of
+
+    class _PlainHead:
+        """A minimal ``StreamHeadProtocol`` result."""
+
+        table = _table(2)
+        status = "rows"
+        total_rows = 2
+
+        def header(self) -> str:
+            return "plain"
+
+        def as_table(self) -> pa.Table:
+            return self.table
+
+        def as_polars_df(self) -> Any:
+            return None
+
+        def _repr_html_(self) -> str:
+            return ""
+
+    source = _source()
+    head = head_of(_PlainHead(), source)
+    assert head.status is HeadStatus.ROWS
+    assert head.header() == "ArrowTableSource[readings] — all 2 rows"
