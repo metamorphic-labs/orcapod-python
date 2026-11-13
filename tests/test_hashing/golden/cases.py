@@ -1918,3 +1918,28 @@ def pipeline_tagless_producerless_stream() -> dict[str, Any]:
         .content_hash()
         .to_string(),
     }
+
+
+@case("pipeline", "list_tag_producerless_stream")
+def pipeline_list_tag_producerless_stream() -> dict[str, Any]:
+    """Pin the content hash of a stream with a list-valued tag and no producer (ITL-1053).
+
+    Arrow cannot order a list column, so the stream's identity hashes its rows in the
+    order given: the hash of the same rows in two orders differs.
+
+    Returns:
+        The content hash for two orders of the same rows.
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    def stream(ks: list[list[int]], xs: list[int]) -> ArrowTableStream:
+        table = pa.table(
+            [pa.array(ks, pa.large_list(pa.int64())), pa.array(xs, pa.int64())],
+            names=["k", "x"],
+        )
+        return ArrowTableStream(table, tag_columns=["k"])
+
+    return {
+        "as_given": stream([[2], [1]], [20, 10]).content_hash().to_string(),
+        "reversed": stream([[1], [2]], [10, 20]).content_hash().to_string(),
+    }

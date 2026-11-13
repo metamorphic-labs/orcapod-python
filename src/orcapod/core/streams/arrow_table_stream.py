@@ -304,8 +304,13 @@ class ArrowTableStream(StreamBase):
             # for (its identity, ``identity_structure``, depends on that order); the
             # system tags stay in the table through the sort.
             # With the system tags still in the table: they break ties between equal tags.
+            # A tag type Arrow cannot order (a list) keeps the stream's order: the
+            # identity of the stream hashes this table and must not move.
             table = arrow_utils.sort_by_tag_columns(
-                table, tuple(self._tag_columns), self._system_tag_columns
+                table,
+                tuple(self._tag_columns),
+                self._system_tag_columns,
+                order_unsortable=False,
             )
         if not columns_config.system_tags:
             table = table.drop_columns(list(self._system_tag_columns))

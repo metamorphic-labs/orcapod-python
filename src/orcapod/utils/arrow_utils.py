@@ -1849,6 +1849,7 @@ def sort_by_tag_columns(
     table: "pa.Table",
     tag_keys: tuple[str, ...],
     system_tag_keys: tuple[str, ...] | None = None,
+    order_unsortable: bool = True,
 ) -> "pa.Table":
     """Return ``table`` with its rows in tag order: the one sort every tag sort uses.
 
@@ -1870,6 +1871,9 @@ def sort_by_tag_columns(
         system_tag_keys: Names of the system tag columns to break ties with, in priority;
             names the table does not have are ignored. ``None`` means every system tag
             column of ``table`` in column order.
+        order_unsortable: What to do with a type Arrow cannot order (a list tag):
+            ``True`` orders it with Polars (nulls last, input order among equals);
+            ``False`` returns ``table`` in its input order.
 
     Returns:
         A new table with the same columns, rows in tag order.
@@ -1887,6 +1891,8 @@ def sort_by_tag_columns(
     try:
         return table.sort_by([(key, "ascending") for key in keys])
     except (pa.ArrowNotImplementedError, pa.ArrowTypeError):
+        if not order_unsortable:
+            return table
         # Arrow cannot order this type (a list tag): order by Polars, nulls last, and
         # keep the input order of equal rows.
         import polars as pl

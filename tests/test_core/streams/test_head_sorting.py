@@ -406,3 +406,19 @@ def test_a_hash_column_named_like_another_column_group_is_kept(name: str) -> Non
             assert table.column_names.count(name) == 1
             head = target.head(3, columns=config)
             assert head.table.equals(table.slice(0, 3))
+
+
+def test_a_stream_with_list_tags_keeps_its_order_and_its_identity() -> None:
+    """Arrow cannot order a list tag: an ``ArrowTableStream`` keeps its rows' order.
+
+    Its identity hashes that table, so ordering it would move the content hash (ITL-1053).
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    table = pa.table(
+        [pa.array([[2], [1]], pa.large_list(pa.int64())), pa.array([20, 10])],
+        names=["k", "x"],
+    )
+    stream = ArrowTableStream(table, tag_columns=["k"])
+    for config in ({"sort_by_tags": True}, {"system_tags": True, "sort_by_tags": True}):
+        assert stream.as_table(columns=config).column("x").to_pylist() == [20, 10]
