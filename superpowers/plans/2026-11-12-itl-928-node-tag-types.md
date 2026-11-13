@@ -29,6 +29,9 @@ casts back on every read.
   (body: ITL-928 part A, no magic word). Rows disagreeing on a column type raise
   InputValidationError (coordinator option 1). Part B will be a SECOND PR on top, after the
   developer's decision; still no Delta code. Next: CodeRabbit rounds + CI on #335.
+- 2026-11-12: Part B APPROVED by the developer (decisions 1 (i), 2 (i)) and implemented on the
+  same branch (`src/orcapod/databases/delta_arrow_types.py`); merged origin/main with #330;
+  full suite 10352 passed. PR #335 now says Fixes ITL-928. Next: CodeRabbit rounds + CI.
 - Audit scripts: `.untracked/measure.py` (tags, all read points, `[sync|async] [memory|delta|sqlite]`),
   `.untracked/measure2.py` (data columns, all-info columns, operator node, CachedSource),
   `.untracked/rerun_ids.py` (consequence 2), `.untracked/repro_flush_poison.py`.
