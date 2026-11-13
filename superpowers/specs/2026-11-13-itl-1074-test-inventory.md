@@ -1,7 +1,7 @@
 # Test inventory: skipped, expected-to-fail, deselected and failing tests (ITL-1074)
 
 Date: 2026-11-13. Base: `main` at `41798e87`. Facts come from the full CI job logs of the
-`Run Tests` workflow on `main` (run 43483054834, commit `3bc5e2af`, the last run with complete
+`Run Tests` workflow on `main` (run 43483054834, commit `3bc5e2af`; 12461 passed there, 12519 on this PR's head, the last run with complete
 logs at the time of writing), the `Run PostgreSQL Tests` and `Run Objective Tests` workflows of
 the same commit, the static marks in the tree, and local runs of the files that hold xfails
 (`--runxfail`, Python 3.12). `gh run view --log` truncates these logs at 78%; the full log is
@@ -40,7 +40,7 @@ the same commit, the static marks in the tree, and local runs of the files that 
 |---|---|---|---|---|
 | Live Spiral source: `tests/test_core/sources/test_spiraldb_table_source_live.py` | 8 | "Set ORCAPOD_SPIRAL_LIVE_PROJECT to run" | The variable is set nowhere in `.github/`. The tests need a real Spiral project holding a `spike_event` table of more than 1,000 rows, credentials and network. | Correct to skip in `Run Tests`. Could run in the `spiral-integration` job once that job works and a project with the table exists (needs a developer decision and Spiral data). |
 | Spiral connector integration: `test_spiraldb_connector_integration.py` | 9 | "Set SPIRAL_INTEGRATION_TESTS=1" | Run by the `spiral-integration` job (push to `main` only), which sets the variable. In that job all 9 **fail** (section 3.2). | Correct to skip in `Run Tests`; the job that runs them is broken. |
-| S3 / MinIO: `test_delta_table_database_s3.py` (7), `test_list_table_paths.py::test_s3_lists_tables_and_nested_tables` (1) | 8 | "MinIO container could not be started: ..." | See 3.3. The fixture starts MinIO with testcontainers and skips on any exception; in CI it always fails, so the S3 path is never tested. | Should run in CI but does not. |
+| S3 / MinIO: `test_delta_table_database_s3.py` (7), `test_list_table_paths.py::test_s3_lists_tables_and_nested_tables` (1) | 8 | "MinIO container could not be started: 404 ... pull access denied for minio/minio" | See 3.3. The fixture starts MinIO with testcontainers and skips on any exception; in CI the image cannot be pulled, so the S3 path is never tested. | Should run in CI but does not; needs a CI decision (3.3). |
 | Delta tables under special-character roots: `test_delta_native_fs_read.py` (`x#y`, `q?r`, two tests each) | 4 | "deltalake cannot write a table at ..." | `_write_or_skip` skips when `deltalake` itself cannot write a table under a root named `x#y` or `q?r`. The other six special names run and pass. | Correct to skip: a limit of `deltalake`, not of Orcapod. Re-check on each `deltalake` upgrade. |
 | GPU tensors: `test_tensor_round_trip.py` (MPS, CUDA), `test_tensor_conversion_warning.py` (CUDA or MPS) | 3 | "needs MPS / CUDA / a CUDA or MPS device" | GitHub's Ubuntu runners have no GPU and no MPS. | Correct to skip. Running them needs a GPU runner (a paid CI service): not recommended before v0.3.0. |
 
@@ -59,26 +59,40 @@ Every recent push to `main` fails the `Run Tests` workflow. The three pytest job
 
 ### 3.2 `spiral-integration` fails: all 9 tests, `HTTP request failed: error sending request`
 The job points the Spiral client at `SPIRAL_SERVER_URL`, a repository variable set to
-`http://api.spiraldb.dev` (March 2026), and the workflow's own default is the same. From this
+`http://api.spiraldb.dev` (March 2026); the workflow's own default is the same. From this
 machine `http://api.spiraldb.dev` answers "Empty reply from server" while
-`https://api.spiraldb.dev` answers (HTTP 404 on `/`, so the host is up). The likely fix is the
-repository variable (and the workflow default, the docstrings and the tests that mention the
-URL) moving to `https`. Changing a repository variable is outside this PR; recommendation in the
-report to the developer.
+`https://api.spiraldb.dev` answers (HTTP 404 on `/`, so the host is up). Evidence from CI: a
+`workflow_dispatch` run of this branch with the URL set to `https` (run 43492939109, job
+132129691920) reaches the server and fails differently, all 9 tests with
+`401 Unauthorized`. So `http` was the connection failure; the next failure is
+authentication (probably the OIDC workload trust being configured for `main` pushes, since this
+was a dispatch on a branch; unverified). This PR changes the workflow to `https` (the
+repository variable is no longer read, so it can be deleted) and the URL in two docstrings and
+the integration test's default. Whether the 9 tests then pass on `main` is only known after
+the merge. Tracked by ITL-1008.
 
 ### 3.3 S3 tests are skipped everywhere in CI
-The skip text in the `-v` log is cut off. This PR's CI prints the full reason with `-rs`;
-section 2 is updated from it (see "S3 reason" below).
+The full reason in this PR's CI log: `404 Client Error ... images/create?tag=RELEASE.2022-12-02T19-19-22Z&fromImage=minio/minio: pull access denied for minio/minio, repository does not exist`.
+`testcontainers` 4.14.2 defaults to the Docker Hub image `minio/minio:RELEASE.2022-12-02T19-19-22Z`,
+which Docker Hub no longer serves. The fixture turns every start failure into a skip, so no one noticed.
+Tried in this PR: the same tag from `quay.io/minio/minio` (CI run of commit `b9f5e0a`): `unknown: failed to resolve reference`
+(not served anonymously either); the change was reverted. Options, all outside "a few lines of test code": a MinIO
+image another registry still serves (for example a pinned `bitnamilegacy/minio`, whose entrypoint and env names differ
+from the ones `MinioContainer` sets), the `minio` server binary downloaded in the workflow and `MINIO_ENDPOINT` set (the
+fixture already supports that), or a different S3 emulator (`moto`, a new dependency). Recommendation: the binary +
+`MINIO_ENDPOINT` route (no new dependency, about 10 lines of workflow), and make the fixture fail instead of skip when `CI`
+is set, as `test_ci_has_torch.py` does for torch. That needs a decision on where the binary comes from.
 
 ### 3.4 Wrong or closed issue named by an xfail
-- `test_delta_append_types.py` (4 xfails) cites ITL-916, which is "A Delta table directory whose
+- `test_delta_append_types.py` (4 xfails) cited ITL-916 (now ITL-1076), which is "A Delta table directory whose
   `_delta_log` is missing is treated as absent and then overwritten". The real failure is
   `deltalake` refusing a `fixed_size_list<int64, 2>` append: "expected List(Field { name:
   "element" ... }) but found List(Field { name: "item" ... })". Different problem.
-- `test_write_side_registration.py` (2 xfails) cites PLT-1732, which Linear maps to ITL-173
+- `test_write_side_registration.py` (2 xfails) cited PLT-1732 (now ITL-1077), which Linear maps to ITL-173
   (Done). ITL-173 scoped nested containers out ("`list[list[UUID]]` in v0.2"), so the limit it
   fixed is not the one these tests hit (`dict[..., list[T]]` of a logical type), which remains.
-- `test-objective/unit/test_sources.py` (7 xfails) names no issue.
+- `test-objective/unit/test_sources.py` (7 xfails) named no issue (now ITL-1078).
+The marks in this PR cite ITL-1076, ITL-1077 and ITL-1078.
 
 ## 4. Expected to fail (28 = 21 in `tests/` + 7 in `test-objective/`)
 
@@ -104,11 +118,36 @@ name an exception.
 failed in the three pytest jobs of the run read here, and no test is marked flaky or retried
 in the tree.
 
-## 6. Slowest tests
-The logs read here ran without `--durations`, so they carry none. This PR adds
-`--durations=20` to the CI invocation; the table below is filled from its logs.
+## 6. Slowest tests (CI, Python 3.12, run 43487290031; durations differ by runner)
+
+| Seconds | Phase | Test |
+|---|---|---|
+| 29.27 | call | `test_torch/test_tensor_conversion_warning.py::test_ten_thousand_rows_give_one_warning` |
+| 26.38 | call | `test_databases/test_delta_exit.py::test_process_exits_after_reading_a_local_delta_store[delta_table_source]` |
+| 21.84 | call | `test_databases/test_delta_exit.py::test_process_exits_after_reading_a_local_delta_store[database_get_all_records]` |
+| 13.99 | call | `test_torch/test_tensor_hash_stability.py::test_tensor_hashes_stable_across_processes_and_hash_seeds` |
+| 13.73 | call | `test_docs/test_mkdocs_build.py::test_mkdocs_build_strict` |
+| 12.53 | call | `test_hashing/test_function_default_hashing.py::TestAcrossProcessesAndHashSeeds::test_set_and_dict_defaults_hash_equally_under_every_seed` |
+| 9.25 | setup | `test_core/operators/test_join_tag_order.py::test_operand_order_does_not_change_columns[merge_join]` |
+| 9.24 | setup | `test_core/operators/test_join_tag_order.py::test_operand_order_does_not_change_columns[join]` |
+| 9.02 | call | `test_hashing/test_wrong_hash_findings.py::TestStructureHasherProcessIndependence::test_set_with_str_equal_items` |
+| 8.85 | call | `test_torch/test_tensor_cached_rerun.py::test_cached_rerun_in_fresh_process[async]` |
+| 8.37 | call | `test_torch/test_tensor_cached_rerun.py::test_cached_rerun_in_fresh_process[sync]` |
+| 7.71 | call | `test_pipeline/test_job_crash_recovery.py::test_crash_between_result_and_pipeline_commits` |
+| 6.24 | call | `test_user_types/test_workshop_scenarios.py::test_w6_restart_with_changed_fields_recomputes` |
+| 5.99 | call | `test_arrays/test_array_hash_stability.py::test_array_hashes_stable_across_processes_and_hash_seeds` |
+| 5.92 | call | `test_pipeline/test_job_store_scaling.py::test_store_work_per_row_does_not_grow_with_rows[sync-in_memory]` |
+| 5.21 | call | `test_pipeline/test_job_crash_recovery.py::test_crash_mid_batch_keeps_committed_batches[async]` |
+| 5.18 | call | `test_examples/test_examples.py::test_example_runs[async_vs_sync_pipeline.py]` |
+| 5.09 | call | `test_pipeline/test_job_crash_recovery.py::test_crash_mid_batch_keeps_committed_batches[sync]` |
+| 4.98 | call | `test_pipeline/test_job_crash_recovery.py::test_crash_mid_batch_keeps_committed_batches[async-late-row]` |
+| 4.97 | call | `test_hashing/test_cross_process_stability.py::TestSemanticHashCrossProcess::test_semantic_hash_independent_of_pythonhashseed` |
+
+The whole job takes 11 to 15 minutes; these 20 are about 4 minutes of it.
 
 ## 7. Changes in this PR
 - `.github/workflows/run-tests.yml`: `-rsxX --durations=20`, so every skip and xfail reason and the 20
-  slowest tests are printed in the job log.
+  slowest tests are printed in the job log; the Spiral server URL is `https` (3.2).
+- Xfail reasons cite ITL-1076, ITL-1077, ITL-1078 (3.4).
+- CI counts of this PR's head: 12519 passed, 32 skipped, 21 xfailed, 77 deselected on 3.11, 3.12 and 3.13.
 - This document.
