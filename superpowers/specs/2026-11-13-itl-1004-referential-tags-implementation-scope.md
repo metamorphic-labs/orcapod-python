@@ -261,18 +261,19 @@ and raise, unless the function takes all keys. That is decision D2.
   none. Both format versions were already `"0.1.0"` at v0.2.0, so they were not bumped
   across the v0.2-to-v0.3 hash changes. The context key will not change in v0.4 (§3.2), so
   it cannot tell v0.3 from v0.4.
-- **The rule (decision D8):**
-  - v0.4 bumps both format versions in the change that flips the source default (the last
-    step of ITL-1012).
-  - Loading a `"0.1.0"` file pins v0.3 meaning: every declared tag tag-only. The saved
-    content and pipeline hashes then match.
+- **The rule (D8, decided by the developer).**
+  - v0.3.0 itself (ITL-1026) bumps `PIPELINE_JOB_FORMAT_VERSION` and
+    `PIPELINE_FORMAT_VERSION` from `"0.1.0"` to `"0.2.0"`, and writes an informational
+    `orcapod_version` field.
+  - The referential-tag default (the last step of ITL-1012) bumps both to **`"0.3.0"`**, the
+    first format in which a source may be referential.
+  - Files at `"0.1.0"` and `"0.2.0"` load with v0.3 meaning: every declared source tag is
+    tag-only, and the saved content and pipeline hashes match.
+  - v0.4 accepts `"0.1.0"`, `"0.2.0"` and `"0.3.0"` on load. The ITL-1023 integration branch
+    writes `"0.3.0"` already.
   - A standalone source config (a `to_config()` dict outside a job or pipeline file) carries
-    no version, so v0.4 adds a `config_version` to source configs if those must reload
-    across versions.
-  - Sent to the coordinator before the v0.3.0 tag: nothing is strictly required in v0.3.0,
-    but writing `orcapod_version` (the package version) beside both format versions costs
-    about two lines and no hash. It lets v0.4 tell v0.3.0 files from files written by the
-    ITL-1023 integration branch, which uses format `"0.1.0"` with referential tags.
+    no version. If such configs must reload across versions, v0.4 adds a `config_version`
+    to them.
 
 **Legacy data.** A v0.3 table or saved job has disjoint `tag`/`data` sets, so it reads as
 plain tags only (§16.1). Nothing is reinterpreted.
@@ -660,14 +661,12 @@ needs a shape).**
 `tag_only_columns=[...]`, a subset of `tag_columns` (§6.2). Open for the ITL-1012 worker to
 propose: a shorthand for "all declared tags", useful for database sources whose tags default
 to primary keys.
-**D8. Version pinning of saved files (decided in principle by the developer; the mechanism
-needs approval).**
-- (a) **Recommended.** v0.4 bumps `PIPELINE_JOB_FORMAT_VERSION` and `PIPELINE_FORMAT_VERSION`
-  with the default flip, and `"0.1.0"` loads with v0.3 tag meaning. v0.3.0 adds
-  `orcapod_version` before its tag (informational). v0.4 adds `config_version` to standalone
-  source configs.
-- (b) Rely on the format-version bump alone. Files from the ITL-1023 integration branch
-  (format `"0.1.0"`, referential tags) would then be misread as v0.3.
+**D8. Version pinning of saved files: DECIDED** (developer, November 12, 2026; §4).
+- v0.3.0 writes format `"0.2.0"` and `orcapod_version` (ITL-1026).
+- The referential default writes `"0.3.0"`.
+- `"0.1.0"` and `"0.2.0"` load with v0.3 tag meaning.
+- Open: a `config_version` on standalone source configs, if they must reload across
+  versions.
 
 ---
 
