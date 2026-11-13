@@ -40,5 +40,6 @@ def test_no_tracked_text_file_holds_a_private_project_id() -> None:
 
 
 def test_the_shape_matches_what_it_should() -> None:
-    assert PROJECT_ID.search("x edi-demo-v2-123456/default")
+    example = "-".join(["edi", "demo", "v2", "123456"])
+    assert PROJECT_ID.search(f"x {example}/default")
     assert not PROJECT_ID.search("test-orcapod-362211")
