@@ -31,6 +31,7 @@ from orcapod.core.nodes._execution_cache import (
     is_current,
     track_completion,
 )
+from orcapod.core.nodes._retained_rows import RetainedRowsMixin
 from orcapod import contexts
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -222,7 +223,7 @@ def _bare_digest(hash_string: str) -> str:
 _TAG_NODE_INPUT_REF = "_tag_node_input_ref"
 
 
-def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
+def _with_datagram_id(data: DataProtocol, datagram_id: uuid.UUID) -> Data:
     """Return ``data`` rebuilt with ``datagram_id`` as its datagram id.
 
     A stored row read back is built by a stream, which gives every row a fresh id.
@@ -1038,7 +1039,7 @@ class _JoinedRecords(NamedTuple):
     empty_taginfo_rows: dict[bytes, dict]
 
 
-class FunctionJobNode(FunctionNodeBase):
+class FunctionJobNode(RetainedRowsMixin, FunctionNodeBase):
     """DB-backed execution node for function pod invocations.
 
     Created by ``PipelineJob`` at run time; never recorded inside a plain
@@ -1905,6 +1906,8 @@ class FunctionJobNode(FunctionNodeBase):
         if self._function_pod is None:
             raise self._cannot_compute_error()
 
+        was_current = is_current(self)
+        missed_cache = False
         self._begin_run()
         # A whole-input condition, not a row failure: the error policy does not apply.
         require_same_data_context(
@@ -1948,6 +1951,7 @@ class FunctionJobNode(FunctionNodeBase):
                         output.append((tag_out, result))
                     continue
 
+                missed_cache = True
                 pkt_logger = ctx_obs.create_data_logger(tag, data)
                 try:
                     tag_out, result = self._process_data_internal(
@@ -2007,7 +2011,8 @@ class FunctionJobNode(FunctionNodeBase):
         ctx_obs.on_node_end(node_label, node_hash)
         # Mark this node as freshly computed so subsequent iter_data() calls
         # skip the is_stale check and serve results directly from the in-memory cache.
-        self._update_modified_time()
+        if not (was_current and not missed_cache and is_current(self)):
+            self._update_modified_time()
         return output
 
     def _process_data_internal(
@@ -2339,8 +2344,8 @@ class FunctionJobNode(FunctionNodeBase):
             rows = self._entry_id_rows = {}
         # A sync storage view shares its origin's exact Arrow table and hashes.
         # Recognize that representation-only boundary across orchestrators too.
-        tag_identity = getattr(tag, "_stored_row_origin", tag)
-        row_identity = getattr(input_data, "_stored_row_origin", input_data)
+        tag_identity = getattr(tag, "storage_origin", tag)
+        row_identity = getattr(input_data, "storage_origin", input_data)
         key = (id(tag_identity), id(row_identity), self.data_context_key)
         cached = rows.get(key)
         if (
@@ -3348,6 +3353,8 @@ class FunctionJobNode(FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        was_current = is_current(self)
+        missed_cache = self._cached_function_pod is None
         try:
             self._begin_run()
         except StoreError:
@@ -3430,6 +3437,7 @@ class FunctionJobNode(FunctionNodeBase):
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
+                    nonlocal missed_cache
                     try:
                         async for tag, data in input_channel:
                             base_entry_id = self.compute_base_entry_id(tag, data)
@@ -3452,6 +3460,7 @@ class FunctionJobNode(FunctionNodeBase):
                                 if cached_data is not None:
                                     await output.send((cached_tag, cached_data))
                             else:
+                                missed_cache = True
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,
@@ -3627,7 +3636,8 @@ class FunctionJobNode(FunctionNodeBase):
             # The run is complete: stamp the node as the sync execute() does, before
             # the finally closes the output, so every downstream node, which stamps
             # after it has seen that close, is newer than this one (ITL-1042).
-            self._update_modified_time()
+            if not (was_current and not missed_cache and is_current(self)):
+                self._update_modified_time()
             publish_completion(self, observer)
         except Exception as run_error:
             self._commit_after_failure(run_error)

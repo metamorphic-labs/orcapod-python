@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import itertools
 import logging
-from collections.abc import Collection, Iterator
-from typing import TYPE_CHECKING, Any
+from collections.abc import Collection, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Self
 
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
@@ -31,6 +31,46 @@ else:
 
 
 logger = logging.getLogger(__name__)
+
+
+def stored_tag(tag: TagProtocol) -> TagProtocol:
+    """Retain the exact stored tag representation, excluding metadata."""
+    if type(tag) is Tag:
+        return tag.storage_view(include_meta=False)
+    return Tag(
+        tag.as_table(columns={"system_tags": True}), data_context=tag.data_context_key
+    )
+
+
+def stored_data(data: DataProtocol) -> DataProtocol:
+    """Retain the exact stored data representation, excluding metadata."""
+    if type(data) is Data:
+        return data.storage_view(include_meta=False)
+    return Data(
+        data.as_table(columns={"source": True}), data_context=data.data_context_key
+    )
+
+
+def rows_to_table(
+    rows: Sequence[tuple[TagProtocol, DataProtocol]],
+) -> tuple["pa.Table", tuple[str, ...]]:
+    """Combine rows in order, preserving per-row provenance and field flags."""
+    import pyarrow as pa
+
+    if not rows:
+        raise ValueError("Cannot materialize an empty list of rows into a stream")
+    tags = arrow_utils.concat_tables_by_name(
+        [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
+    )
+    data = arrow_utils.concat_tables_by_name(
+        [packet.as_table(columns={"source": True}) for _, packet in rows]
+    )
+    schema = data.schema
+    for i, field in enumerate(schema):
+        if field.name.startswith(constants.SOURCE_PREFIX):
+            schema = schema.set(i, field.with_nullable(data.column(i).null_count > 0))
+    data = pa.Table.from_arrays(data.columns, schema=schema)
+    return arrow_utils.hstack_tables(tags, data), tuple(rows[0][0].keys())
 
 
 class ArrowTableStream(StreamBase):
@@ -146,6 +186,28 @@ class ArrowTableStream(StreamBase):
 
         self._cached_elements: list[tuple[TagProtocol, DataProtocol]] | None = None
         self._update_modified_time()  # set modified time to now
+
+    @classmethod
+    def from_rows(
+        cls, rows: Sequence[tuple[TagProtocol, DataProtocol]], **kwargs: Any
+    ) -> Self:
+        """Build a stream and retain the same canonical rows used for its table.
+
+        Like existing row materialization, this includes source/system columns
+        and excludes metadata. Live subclass values are decoded as their stored
+        declared types. Source-field nullability is normalized across the combined
+        table; individual rows retain their own source schema. Payload values and
+        hashes are unchanged. Empty inputs require an explicit schema via __init__.
+        """
+        stored = [(stored_tag(tag), stored_data(data)) for tag, data in rows]
+        table, tags = rows_to_table(stored)
+        kwargs.setdefault(
+            "data_context",
+            getattr(stored[0][1], "data_context", stored[0][1].data_context_key),
+        )
+        stream = cls(table, tag_columns=tags, **kwargs)
+        stream._cached_elements = stored
+        return stream
 
     def identity_structure(self) -> Any:
         if self._producer is not None:

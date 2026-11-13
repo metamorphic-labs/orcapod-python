@@ -136,3 +136,39 @@ Warm user-function calls were zero both before and after. These are local illust
 timings, not performance guarantees; operation counts are regression-tested. Sync still
 materializes Arrow tables at node boundaries, and both paths retain traversal/callback
 cost. No constant-time, cross-process or newly constructed job guarantee is claimed.
+
+## Claude/eywalker review and latest-main integration
+
+Merged main `5c7a058f` (including stored data-ID readback, stale table-cache,
+sorted previews, interleaved stream reads, crash-recovery isolation and Join fixes)
+without rewriting the published branch.
+
+- Completed-work reuse now also requires the existing `not node.is_stale` gate.
+  Proven no-op function/operator executions preserve timestamps; actual work, failures,
+  unknown sources and changed bindings keep normal freshness updates. Source nodes
+  follow their bound source freshness and explicitly invalidate on rebinding/clearing.
+- `Datagram.storage_view()` owns conversion to declared stored values. Nodes own
+  memoized views through a release method; `ArrowTableStream.from_rows()` owns its
+  row buffer. Orchestration no longer mutates datagram internals or stream buffers.
+  Source-field nullability still normalizes across a combined table, whereas each
+  retained row keeps its own source schema. Regression coverage verifies identical
+  source values, payload hashes and materialized stored schemas.
+- Retention remains the default, matching the requested reusable streams. It is O(N),
+  not bounded streaming memory. `job.clear_cache()` releases node and bound-source
+  memory without deleting persistent results; `include_sources=False` keeps shared
+  source snapshots. Spiral `retain_snapshot=False` opts out; source `clear_cache()`
+  does not repin and generation checks prevent an in-flight read from republishing.
+- Keep the exact supported-source allowlist, document it and log one INFO explanation
+  per run for unsupported sources. A general source snapshot capability remains a
+  separately designed follow-up in ITL-1064; timestamps alone are not sufficient.
+- Restore Index/Pick metadata expected-failure markers and historical metadata
+  exclusion at materialization boundaries; no stored hash/schema migration is added.
+- Added store-write failure, dangling-reference repair/failure and true None-datagram
+  regressions for both orchestrators. A function returning a Python None value is
+  distinct from producing no datagram. All decorated execute methods take observer
+  keyword-only, so positional-observer wrapping is not a supported missing path.
+
+The original benchmark above remains a historical comparison against `89160c47`.
+A new run after integrating main again records zero warm Arrow hashes, user function
+calls and GroupBy calls in all four cases. Timing collected alongside validation is
+not a replacement for isolated measurements on the actual ediop dataset.

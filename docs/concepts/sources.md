@@ -132,6 +132,18 @@ publish a snapshot. Concurrent initial readers may scan independently; the first
 complete read atomically publishes the retained snapshot. When no table version can
 be pinned, each read scans again rather than reusing potentially stale rows.
 
+For streaming-only reads, pass `retain_snapshot=False`. Each iteration then scans again
+and releases consumed batch streams, retaining only the current SpiralDB batch and its
+processing slice. SpiralDB controls the underlying batch size; `batch_rows` bounds the
+slice size. Whole-table methods such as `as_table()` still materialize their returned
+rows, and pipeline jobs can retain their own outputs. The option is saved in source
+configuration and defaults to `True`.
+
+Call `source.clear_cache()` to release a retained snapshot. This does not change the
+pinned `asof` version. Existing readers can finish with the data they already hold, but
+a scan started before clearing cannot republish its snapshot. A later full read can
+retain the same version again. Construct a new source to select a newer table version.
+
 To read part of a table, say so when you build the source. SpiralDB applies both
 restrictions before any row is transferred:
 

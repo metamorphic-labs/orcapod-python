@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any, TypeVar, cast
 
 F = TypeVar("F", bound=Callable[..., Any])
+logger = logging.getLogger(__name__)
 
 
 class _Identity:
@@ -77,6 +79,17 @@ class _Run:
         self.initial = {
             key: self.definition(node, definitions) for key, node in self.nodes.items()
         }
+        disabled = [
+            f"{getattr(node, 'label', type(node).__name__)} ({type(node.bound_source).__name__})"
+            for key, node in self.nodes.items()
+            if type(node) in self.kinds["source_node"] and self.initial[key] is None
+        ]
+        if disabled:
+            logger.info(
+                "Completed-work reuse disabled for sources without a supported retained "
+                "snapshot: %s",
+                ", ".join(disabled),
+            )
 
     def definition(
         self, stream: Any, memo: dict[int, _Definition | None] | None = None
@@ -97,7 +110,12 @@ class _Run:
         if kind in self.kinds["source_node"]:
             bound = self.definition(stream.bound_source, memo)
             return (
-                None if bound is None else _Definition((_Identity(stream),), (bound,))
+                None
+                if bound is None
+                else _Definition(
+                    (_Identity(stream), getattr(stream, "_execution_generation", 0)),
+                    (bound,),
+                )
             )
         if kind in self.kinds["arrow"]:
             return _Definition(
@@ -110,9 +128,18 @@ class _Run:
                 if underlying is None
                 else _Definition((_Identity(stream),), (underlying,))
             )
-        if kind in self.kinds["spiral"] and stream._asof is not None:
+        if (
+            kind in self.kinds["spiral"]
+            and stream._asof is not None
+            and stream._retain_snapshot
+        ):
             return _Definition(
-                (_Identity(stream), stream._asof, stream.data_context_key)
+                (
+                    _Identity(stream),
+                    stream._asof,
+                    stream._snapshot_generation,
+                    stream.data_context_key,
+                )
             )
         if kind not in self.kinds["computed"]:
             return None
@@ -250,6 +277,7 @@ def is_current(node: Any) -> bool:
         and run is not None
         and previous is not None
         and previous == run.proof(node)
+        and not node.is_stale
     )
 
 
@@ -266,7 +294,9 @@ def invalidate(node: Any) -> None:
     """Forget completion and row memoization after an explicit cache clear."""
     node._completed_execution = None
     node._execution_generation = getattr(node, "_execution_generation", 0) + 1
-    node._sync_row_views = {}
+    clear_rows = getattr(node, "clear_retained_rows", None)
+    if clear_rows is not None:
+        clear_rows()
     node._entry_id_rows = {}
 
 

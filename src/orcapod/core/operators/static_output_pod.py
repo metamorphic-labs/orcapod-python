@@ -226,30 +226,9 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        from orcapod.system_constants import constants
-        from orcapod.utils import arrow_utils
+        from orcapod.core.streams.arrow_table_stream import rows_to_table
 
-        if not rows:
-            raise ValueError("Cannot materialize an empty list of rows into a stream")
-
-        tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
-        data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
-
-        # Rows may list the same columns in a different order (cached vs
-        # freshly computed), so match columns by name.
-        combined_tags = arrow_utils.concat_tables_by_name(tag_tables)
-        combined_data = arrow_utils.concat_tables_by_name(data_tables)
-
-        data_schema = combined_data.schema
-        for i, field in enumerate(data_schema):
-            if field.name.startswith(constants.SOURCE_PREFIX):
-                nullable = combined_data.column(i).null_count > 0
-                data_schema = data_schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        # Same arrays, new field flags: no cast, so no value or type can change.
-        combined_data = pa.Table.from_arrays(combined_data.columns, schema=data_schema)
-
-        full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
-        return full_table, tuple(rows[0][0].keys())
+        return rows_to_table(rows)
 
     @staticmethod
     def _materialize_to_stream(
@@ -273,18 +252,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
-        # No ``source_info`` argument: the table's own ``_source_*`` columns
-        # pass through, one value per row.
-        stream = ArrowTableStream(
-            table,
-            tag_columns=tag_keys,
-            data_context=getattr(
-                rows[0][1], "data_context", rows[0][1].data_context_key
-            ),
-        )
-        stream._cached_elements = list(rows)
-        return stream
+        return ArrowTableStream.from_rows(rows)
 
     @staticmethod
     def _materialize_input_stream(

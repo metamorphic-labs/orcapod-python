@@ -860,6 +860,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     # run()
     # ------------------------------------------------------------------
 
+    def clear_cache(self, *, include_sources: bool = True) -> None:
+        """Release in-memory node caches without deleting persisted results.
+
+        When include_sources is true, also release bound sources that expose
+        clear_cache(). Shared source objects are cleared once; other jobs using
+        those objects will also lose that retained working set. Original source
+        data and pinned versions are preserved. Call between job executions.
+        """
+        seen: set[int] = set()
+        for node in self._nodes.values():
+            clear = getattr(node, "clear_cache", None)
+            if clear is not None:
+                clear()
+            source = getattr(node, "bound_source", None)
+            if include_sources and source is not None and id(source) not in seen:
+                seen.add(id(source))
+                clear_source = getattr(source, "clear_cache", None)
+                if clear_source is not None:
+                    clear_source()
+
     def run(
         self,
         orchestrator: "SyncPipelineOrchestrator | AsyncPipelineOrchestrator | None" = None,

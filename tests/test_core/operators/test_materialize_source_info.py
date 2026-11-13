@@ -156,6 +156,16 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
     )
+    # Recreate the historical table round trip at the new materialization API too.
+    # Patching only the old helper no longer constructs an old-format store.
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    def historical_stream(cls, rows, **kwargs):
+        table, tag_keys = broadcasting(rows)
+        kwargs.setdefault("data_context", rows[0][1].data_context_key)
+        return cls(table, tag_columns=tag_keys, **kwargs)
+
+    monkeypatch.setattr(ArrowTableStream, "from_rows", classmethod(historical_stream))
 
 
 def _stored_source(node: OperatorJobNode, column: str = "x") -> list[Any]:

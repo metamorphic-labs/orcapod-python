@@ -299,6 +299,45 @@ print(table.to_pandas())
 # 2   mouse_03   15    27.8
 ```
 
+## Reusing completed pipeline work
+
+An unchanged `PipelineJob` reuses completed work when its nodes are not stale and
+their inputs are supported retained snapshots. The completion record proves that a
+whole execution succeeded with those graph inputs; it does not replace `is_stale`.
+A reused result keeps its modification time, so lazy streams over that node remain
+current. Rebinding a source, clearing a cache, changing the producer, or observing a
+newer upstream invalidates reuse. Unknown freshness stays conservative.
+
+The supported concrete source classes are `ArrowTableStream`, `ArrowTableSource`,
+`DictSource`, `ListSource`, and `SpiralDBTableSource` with a pinned version and
+`retain_snapshot=True`. Subclasses and other sources, including `CSVSource`,
+`DataFrameSource`, `DeltaTableSource`, `CachedSource`, `DerivedSource` and polling
+sources, do not currently get completed-work reuse. Their ordinary per-row result
+cache still works. One info-level log per run lists source bindings that disable the
+fast path. A Delta table's version is not yet an execution snapshot capability; it
+must be integrated explicitly before it can safely qualify.
+
+Reuse has a memory cost beyond the source snapshot. Nodes retain entry IDs and row
+views for their latest buffers, in addition to output caches. A boundary may retain
+both live Python values and an Arrow-decoded view of the declared stored type; Arrow
+buffers are shared. The row-view mapping can hold two entries per input pair, and a
+function node can retain an entry ID per pair. Memory therefore grows with processed
+rows and graph width; `materialize_results=False` only releases orchestrator result
+buffers, not these reusable node caches.
+
+Call `job.clear_cache()` between executions to release node caches and clear bound
+sources that support cache release. Persistent database results, original source data
+and pinned versions are preserved. `job.clear_cache(include_sources=False)` keeps the
+source snapshots. Clearing a shared source also releases that source's retained rows
+for its other consumers. A later run can recover persisted function results but must
+rebuild cleared rows and operator outputs.
+
+For bounded source iteration, a Spiral source can use `retain_snapshot=False`; this
+also disables completed-work reuse downstream. See [Sources](sources.md) for the
+snapshot lifetime and streaming limits. Warm job execution still traverses rows and
+callbacks, and sync execution still materializes tables; reuse is not a constant-time
+whole-job shortcut or a cache of new jobs across processes.
+
 ## How it connects to other concepts
 
 - [Sources](sources.md) produce streams from external data

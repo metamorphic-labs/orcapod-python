@@ -29,6 +29,7 @@ from orcapod.core.nodes._execution_cache import (
     track_completion,
     upstreams_succeeded,
 )
+from orcapod.core.nodes._retained_rows import RetainedRowsMixin
 from orcapod import contexts
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -616,7 +617,7 @@ class OperatorNode(OperatorNodeBase):
 # ---------------------------------------------------------------------------
 
 
-class OperatorJobNode(OperatorNodeBase):
+class OperatorJobNode(RetainedRowsMixin, OperatorNodeBase):
     """DB-backed execution node for operator pod invocations.
 
     Stream node representing an operator invocation with optional DB persistence.
@@ -1316,7 +1317,7 @@ class OperatorJobNode(OperatorNodeBase):
 
         if is_current(self) and self._cached_output_stream is not None:
             output = list(self._cached_output_stream.iter_data())
-            self._update_modified_time()
+            # Replaying unchanged output is not a content modification.
             ctx_obs.on_node_end(node_label, node_hash)
             return output
 
@@ -1723,7 +1724,7 @@ class OperatorJobNode(OperatorNodeBase):
                 if is_current(self):
                     for row in self._cached_output_stream.iter_data():
                         await output.send(row)
-                    self._update_modified_time()
+                    # Keep the completed result's timestamp on a proven replay.
                     ctx_obs.on_node_end(node_label, node_hash)
                     return
 

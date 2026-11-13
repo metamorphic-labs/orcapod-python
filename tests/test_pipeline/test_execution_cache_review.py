@@ -22,6 +22,7 @@ class Node:
     """A completion-aware node with observable definition reads."""
 
     data_context_key = "test"
+    is_stale = False
 
     def __init__(self, *upstreams: Any) -> None:
         self.upstreams = upstreams

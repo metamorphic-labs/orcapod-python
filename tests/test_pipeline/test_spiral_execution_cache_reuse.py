@@ -65,3 +65,39 @@ def test_pinned_grouped_job_reuses_scan_rows_and_hashes(
         assert summary.nodes["total"].reused == 5
         assert len(fake_pyspiral.scan_log) == 1
         assert job.nodes["total"].as_table(all_info=True).equals(before)
+
+
+@pytest.mark.parametrize("retain_snapshot", [False, True])
+@pytest.mark.parametrize(
+    "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+def test_source_release_or_optout_prevents_completed_operator_reuse(
+    tmp_path: Path, retain_snapshot: bool, orchestrator
+) -> None:
+    """A source-only clear invalidates downstream proofs; an opt-out never creates one."""
+    with fake_pyspiral.install(tmp_path / "spiral"):
+        project = fake_pyspiral.FakeSpiral().project("release-integration")
+        project.create_table(
+            "default.events", key_schema=pa.schema([("g", pa.int64())])
+        ).write(pa.table({"g": [1, 2], "x": [3, 4]}))
+        source = SpiralDBTableSource(
+            "release-integration", "events", retain_snapshot=retain_snapshot
+        )
+        with PipelineJob(name="release", store=InMemoryArrowDatabase()) as job:
+            total.pod(source.group_by(["g"]), label="total")
+        fake_pyspiral.scan_log.clear()
+        assert job.run(orchestrator=orchestrator()).ok
+        if retain_snapshot:
+            source.clear_cache()
+        calls = 0
+        original = GroupBy.unary_static_process
+
+        def counted(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(self, *args, **kwargs)
+
+        with patch.object(GroupBy, "unary_static_process", counted):
+            assert job.run(orchestrator=orchestrator()).ok
+        assert len(fake_pyspiral.scan_log) == 2
+        assert calls == 1

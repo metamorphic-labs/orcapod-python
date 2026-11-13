@@ -64,6 +64,8 @@ class Datagram(ContentIdentifiableBase):
     # Construction
     # ------------------------------------------------------------------
 
+    _stored_row_origin: Datagram | None = None
+
     def __init__(
         self,
         data: Mapping[str, DataValue] | pa.Table | pa.RecordBatch,
@@ -1025,6 +1027,34 @@ class Datagram(ContentIdentifiableBase):
     # ------------------------------------------------------------------
     # 8. Utility Operations
     # ------------------------------------------------------------------
+
+    @property
+    def storage_origin(self) -> Datagram:
+        """Original row whose exact stored representation this view shares."""
+        return self if self._stored_row_origin is None else self._stored_row_origin
+
+    def storage_view(self, *, include_meta: bool = True) -> Self:
+        """Expose Arrow-decoded values without modifying the live Python values.
+
+        A declared base type can store fewer fields than its live subclass. This
+        view uses that stored type, shares immutable Arrow buffers and hashes,
+        and preserves provenance. Callers own retention of the returned view.
+        Metadata may be omitted to match a materialization boundary's columns.
+        """
+        self._ensure_data_table()
+        if (self._data_dict is None or self.storage_origin is not self) and (
+            include_meta or not self._meta
+        ):
+            return self
+        view = self.copy(preserve_id=True)
+        view._data_dict = None
+        view._data_python_schema = None
+        view._stored_row_origin = self.storage_origin
+        if not include_meta:
+            view._meta = {}
+            view._meta_python_schema = Schema()
+            view._meta_table = None
+        return view
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         """Return a shallow copy of this datagram.

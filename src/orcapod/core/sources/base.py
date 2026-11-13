@@ -178,6 +178,12 @@ class RootSource(StreamBase):
         """Delegate to the underlying stream's keys."""
         return self._stream.keys(columns=columns, all_info=all_info)
 
+    def clear_cache(self) -> None:
+        """Release retained rows in a delegated stream, keeping source data intact."""
+        clear = getattr(getattr(self, "_stream", None), "clear_cache", None)
+        if clear is not None:
+            clear()
+
     def iter_data(self):
         """Delegate to the underlying stream's iter_data."""
         return self._stream.iter_data()

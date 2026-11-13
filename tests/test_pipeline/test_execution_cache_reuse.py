@@ -348,6 +348,7 @@ class Child(Base):
 def test_sync_storage_views_are_retained_without_mutating_originals() -> None:
     """The sync boundary decodes the declared type once while preserving live originals."""
     from types import SimpleNamespace
+    from orcapod.core.nodes._retained_rows import RetainedRowsMixin
 
     from orcapod.core.datagrams import Data, Tag
 
@@ -360,9 +361,11 @@ def test_sync_storage_views_are_retained_without_mutating_originals() -> None:
     tag = Tag(
         {"k": cast(DataValue, cast(object, Child(2, 88)))}, python_schema={"k": Base}
     )
-    upstream = SimpleNamespace(
-        producer=None, upstreams=(), data_context=original.data_context
-    )
+
+    class Upstream(RetainedRowsMixin, SimpleNamespace):
+        pass
+
+    upstream = Upstream(producer=None, upstreams=(), data_context=original.data_context)
     first = SyncPipelineOrchestrator._materialize_as_stream([(tag, original)], upstream)
     second = SyncPipelineOrchestrator._materialize_as_stream(
         [(tag, original)], upstream

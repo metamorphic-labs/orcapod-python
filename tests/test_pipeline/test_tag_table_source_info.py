@@ -174,18 +174,16 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
     )
-    # The old materializer rebuilt row objects from this corrupted table. Modern
-    # materializers preserve the original rows, so recreate that historical read
-    # path too; otherwise this fixture would no longer write an old-format store.
+    # Recreate the historical table round trip at the new materialization API too.
+    # Patching only the old helper no longer constructs an old-format store.
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
-    original_iter = ArrowTableStream.iter_data
+    def historical_stream(cls, rows, **kwargs):
+        table, tag_keys = broadcasting(rows)
+        kwargs.setdefault("data_context", rows[0][1].data_context_key)
+        return cls(table, tag_columns=tag_keys, **kwargs)
 
-    def historical_rows(self: ArrowTableStream):
-        self._cached_elements = None
-        yield from original_iter(self)
-
-    monkeypatch.setattr(ArrowTableStream, "iter_data", historical_rows)
+    monkeypatch.setattr(ArrowTableStream, "from_rows", classmethod(historical_stream))
 
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])

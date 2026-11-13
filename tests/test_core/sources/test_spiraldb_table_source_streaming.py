@@ -939,3 +939,69 @@ class TestCompletedSnapshotRetention:
             for (tag, data), (retained_tag, retained_data) in zip(winner, retained)
         )
         assert len(fake_pyspiral.scan_log) == 2
+
+
+class TestSnapshotRetentionControls:
+    """Retention can be disabled or released without changing the pinned version."""
+
+    def test_opt_out_reads_again_and_round_trips(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event", retain_snapshot=False)
+        config = source.to_config()
+        assert config["retain_snapshot"] is False
+        restored = SpiralDBTableSource.from_config(config)
+        assert fake_pyspiral.scan_log == []
+        first = list(restored.iter_data())
+        second = list(restored.iter_data())
+        assert len(first) == len(second) == _ROWS
+        assert len(fake_pyspiral.scan_log) == 2
+        assert all(a is not b for (_, a), (_, b) in zip(first, second))
+
+    def test_clear_releases_snapshot_without_repinning(self, project, monkeypatch):
+        from orcapod.databases.spiraldb_connector import SpiralDBConnector
+
+        source = SpiralDBTableSource(_PROJECT, "event")
+        first = list(source.iter_data())
+        pinned_version = fake_pyspiral.scan_log[0].kwargs["asof"]
+        monkeypatch.setattr(SpiralDBConnector, "get_table_version", lambda *args: 99)
+        source.clear_cache()
+        second = list(source.iter_data())
+        assert len(second) == _ROWS
+        assert [scan.kwargs["asof"] for scan in fake_pyspiral.scan_log] == [
+            pinned_version,
+            pinned_version,
+        ]
+        assert all(a is not b for (_, a), (_, b) in zip(first, second))
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_read_started_before_clear_cannot_republish(self, project):
+        source = SpiralDBTableSource(_PROJECT, "event")
+        older = source.iter_data()
+        next(older)
+        source.clear_cache()
+        assert len(list(older)) == _ROWS - 1
+        assert len(list(source.iter_data())) == _ROWS
+        assert len(fake_pyspiral.scan_log) == 2
+
+    def test_streaming_opt_out_releases_consumed_batches(self, project, monkeypatch):
+        import weakref
+
+        from orcapod.core.sources.stream_builder import SourceStreamBuilder
+
+        built = []
+        original = SourceStreamBuilder.attach_provenance
+
+        def attach(builder, *args, **kwargs):
+            stream = original(builder, *args, **kwargs)
+            built.append(weakref.ref(stream))
+            return stream
+
+        source = SpiralDBTableSource(_PROJECT, "event", retain_snapshot=False)
+        monkeypatch.setattr(SourceStreamBuilder, "attach_provenance", attach)
+        rows = source.iter_data()
+        for _ in range(5):
+            next(rows)
+        assert len(built) == 3
+        assert built[0]() is None
+        assert built[1]() is None
+        rows.close()

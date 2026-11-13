@@ -166,7 +166,9 @@ class SpiralDBTableSource(RootSource):
     later reads, using memory proportional to the snapshot. Failed or partial reads
     are not retained. Concurrent initial readers may scan independently; the first
     complete read publishes the retained snapshot. Sources without a pinned version
-    scan on every read because their freshness cannot be established.
+    scan on every read because their freshness cannot be established. Set
+    ``retain_snapshot=False`` for streaming reads that release consumed batches.
+    ``clear_cache()`` releases retained data without changing the pinned version.
 
     Display. ``head(n)`` and the notebook display (its ``head()``) read only the first
     ``n`` rows (``PREVIEW_ROWS``, 10, by default), in one scan to which ``max_rows`` does
@@ -215,6 +217,10 @@ class SpiralDBTableSource(RootSource):
             memory, about 5 KB per row and node.
         batch_rows: The most rows handed on at once while iterating (default 8,192).
             A SpiralDB batch larger than this is held while its slices are handed on.
+        retain_snapshot: Retain completed pinned reads for reuse (default True).
+            False keeps streaming reads to the current SpiralDB batch and processing
+            slice, scanning again on each read. Whole-table methods still materialize
+            their result. ``clear_cache()`` releases retained rows without repinning.
         source_id: Canonical source name for the registry and provenance tokens.
             Defaults to ``"<project_id>/<dataset>.<table_name>@<table id>"``.
         label: Human-readable label for this source node.
@@ -258,6 +264,7 @@ class SpiralDBTableSource(RootSource):
         config: "OrcapodConfig | None" = None,
         overrides: dict[str, str] | None = None,
         tags_as_data: Mapping[str, str] | None = None,
+        retain_snapshot: bool = True,
     ) -> None:
         for name, value in (("limit", limit), ("max_rows", max_rows)):
             if value is not None and not _is_positive_int(value):
@@ -280,6 +287,8 @@ class SpiralDBTableSource(RootSource):
         self._limit = limit
         self._max_rows = max_rows
         self._batch_rows = batch_rows
+        self._retain_snapshot: bool = retain_snapshot
+        self._snapshot_generation: int = 0
         self._retained_streams: tuple[ArrowTableStream, ...] | None = None
         self._snapshot_lock: threading.Lock = threading.Lock()
         self._given_asof = asof
@@ -490,6 +499,17 @@ class SpiralDBTableSource(RootSource):
             for i in range(keys.num_rows)
         ]
 
+    def clear_cache(self) -> None:
+        """Release retained rows without changing the pinned table version.
+
+        Existing readers may finish using their own references, but reads started
+        before this call cannot republish the cleared snapshot. A later complete
+        read can retain the same pinned version again when retention is enabled.
+        """
+        with self._snapshot_lock:
+            self._retained_streams = None
+            self._snapshot_generation += 1
+
     def _batch_streams(
         self, cancelled: threading.Event | None = None
     ) -> Generator["ArrowTableStream", None, None]:
@@ -501,6 +521,8 @@ class SpiralDBTableSource(RootSource):
         """
         with self._snapshot_lock:
             retained = self._retained_streams
+            generation = self._snapshot_generation
+        retain = self._retain_snapshot and self._asof is not None
         if retained is not None:
             yield from retained
             return
@@ -509,13 +531,15 @@ class SpiralDBTableSource(RootSource):
             self._read_batches(limit=self._limit, max_rows=self._max_rows)
         ) as batches:
             for stream in batches:
-                if self._asof is not None:
+                if retain:
                     streams.append(stream)
                 yield stream
-        if self._asof is not None:
+        if retain:
             with self._snapshot_lock:
-                if self._retained_streams is None and (
-                    cancelled is None or not cancelled.is_set()
+                if (
+                    self._retained_streams is None
+                    and generation == self._snapshot_generation
+                    and (cancelled is None or not cancelled.is_set())
                 ):
                     self._retained_streams = tuple(streams)
 
@@ -730,7 +754,9 @@ class SpiralDBTableSource(RootSource):
         if not head.total_is_estimate:
             if shown < head.total_rows:
                 if sorted_by_tags:
-                    return f"{shown:,} rows read, sorted by tags, of {head.total_rows:,}"
+                    return (
+                        f"{shown:,} rows read, sorted by tags, of {head.total_rows:,}"
+                    )
                 return f"first {shown:,} rows of {head.total_rows:,}"
             all_rows = f"all {shown:,} row{'' if shown == 1 else 's'}"
             return f"{all_rows}, sorted by tags" if sorted_by_tags else all_rows
@@ -821,6 +847,7 @@ class SpiralDBTableSource(RootSource):
             "asof": self._given_asof,
             "max_rows": self._max_rows,
             "batch_rows": self._batch_rows,
+            "retain_snapshot": self._retain_snapshot,
             "tags_as_data": dict(self._tags_as_data) or None,
             "source_id": self.source_id,
             **self._identity_config(),
@@ -854,6 +881,7 @@ class SpiralDBTableSource(RootSource):
             asof=config.get("asof"),
             max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),
             batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
+            retain_snapshot=config.get("retain_snapshot", True),
             tags_as_data=config.get("tags_as_data"),
             source_id=config.get("source_id"),
             label=config.get("label"),

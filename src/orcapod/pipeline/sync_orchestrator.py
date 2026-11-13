@@ -225,10 +225,16 @@ class SyncPipelineOrchestrator:
         Returns:
             An ArrowTableStream.
         """
-        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+        from orcapod.core.streams.arrow_table_stream import (
+            ArrowTableStream,
+            stored_data,
+            stored_tag,
+        )
 
         if not buf:
-            upstream_node._sync_row_views = {}
+            clear_rows = getattr(upstream_node, "clear_retained_rows", None)
+            if clear_rows is not None:
+                clear_rows()
             # Build an empty stream preserving declared field nullability.
             tag_schema, data_schema = upstream_node.output_schema(
                 columns={"system_tags": True, "source": True}
@@ -246,67 +252,15 @@ class SyncPipelineOrchestrator:
                 data_context=upstream_node.data_context,
             )
 
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-
-        # Each row keeps its own system tags and source info.
-        full_table, user_tag_keys = StaticOutputOperatorPod._rows_to_table(buf)
-
-        # Pass the upstream node's producer and upstreams so the
-        # materialized stream inherits the correct identity_structure
-        # and pipeline_identity_structure (via StreamBase delegation).
-        # This ensures downstream operators produce correct system tag
-        # column names (which embed pipeline hashes of their inputs).
-        producer = upstream_node.producer
-        upstreams = upstream_node.upstreams
-
-        stream = ArrowTableStream(
-            full_table,
-            tag_columns=user_tag_keys,
-            producer=producer,
-            upstreams=upstreams,
+        retain_rows = getattr(upstream_node, "retain_storage_rows", None)
+        return ArrowTableStream.from_rows(
+            retain_rows(buf, tag_view=stored_tag, data_view=stored_data)
+            if retain_rows is not None
+            else buf,
+            producer=upstream_node.producer,
+            upstreams=upstream_node.upstreams,
             data_context=upstream_node.data_context,
         )
-        # Sync boundaries have always exposed the Arrow-stored representation.
-        # A dict-born Data can still hold a subclass with fields omitted by its
-        # declared storage type. Keep a separate, memoized storage view instead of
-        # mutating the live row (async and standalone paths still see that row).
-        from orcapod.core.datagrams import Data, Tag
-
-        previous = getattr(upstream_node, "_sync_row_views", {})
-        retained = {}
-        stored_rows = []
-
-        def stored_view(row: Any, row_type: type) -> Any:
-            cached = previous.get(id(row))
-            if cached is not None and cached[0] is row:
-                stored = cached[1]
-            elif type(row) is row_type:
-                # _rows_to_table above has materialized this exact Arrow table.
-                # Copying preserves source/meta/context and its cached hashes;
-                # only the view's Python representation is decoded anew.
-                stored = row.copy()
-                stored._data_dict = None
-                stored._data_python_schema = None
-                setattr(
-                    stored,
-                    "_stored_row_origin",
-                    getattr(row, "_stored_row_origin", row),
-                )
-            else:
-                stored = row_type(
-                    row.as_table(
-                        columns={"source": True, "meta": True, "system_tags": True}
-                    ),
-                    data_context=upstream_node.data_context,
-                )
-            retained[id(row)] = (row, stored)
-            return stored
-
-        for tag, data in buf:
-            stored_rows.append((stored_view(tag, Tag), stored_view(data, Data)))
-        upstream_node._sync_row_views = retained
-        stream._cached_elements = stored_rows
-        return stream
 
     @staticmethod
     def _gc_buffers(

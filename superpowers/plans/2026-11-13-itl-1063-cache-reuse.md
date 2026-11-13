@@ -50,3 +50,15 @@ Remaining performance investigation is captured in ITL-1064; it does not block t
 Final verification: 11,625 tests passed, 119 skipped, 19 expected failures; basedpyright zero errors; Ruff lint/format and repository documentation checks pass.
 
 Delivery: PR https://github.com/metamorphic-labs/orcapod-python/pull/359 opened against main. Initial CI inspected: tests pending; no merge performed.
+
+## Review revision plan (authorized autonomous follow-through)
+
+- [x] Integrate current main while preserving published review history.
+- [x] Reconcile completed proofs with existing freshness and preserve no-op timestamps.
+- [x] Move retained row ownership/conversion to node/datagram/stream APIs.
+- [x] Add job/source release and explicit Spiral retention opt-out.
+- [x] Document source eligibility and conservative fallback diagnostics.
+- [x] Verify failed writes, dangling refs, None datagrams and metadata compatibility.
+- [ ] Finish latest-main full suite/type/lint checks, publish and reply to all threads.
+- [ ] Repeat CodeRabbit review until the latest revision has no actionable additions.
+- [ ] Update the explanatory Page with final decisions and validation.

@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import functools
 import logging
+from datetime import datetime
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.nodes._execution_cache import invalidate
+from orcapod.core.nodes._retained_rows import RetainedRowsMixin
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -502,7 +505,7 @@ class SourceNode(SourceNodeBase):
         )
 
 
-class SourceJobNode(SourceNodeBase):
+class SourceJobNode(RetainedRowsMixin, SourceNodeBase):
     """Execution-ready source node wrapping an optional concrete stream.
 
     Used inside ``PipelineJob._persistent_node_map``.  The ``_concrete``
@@ -578,10 +581,31 @@ class SourceJobNode(SourceNodeBase):
 
     @bound_source.setter
     def bound_source(self, value: StreamProtocol | None) -> None:
-        """Bind *value* as the concrete source and invalidate both hash caches."""
+        """Bind a source, making an actual rebinding visible to freshness readers."""
+        if value is self._bound_source:
+            return
         self._bound_source = value
+        self.clear_cache()
+
+    @property
+    def last_modified(self) -> datetime | None:
+        """Follow the binding and its source; unknown source freshness stays unknown."""
+        bound = getattr(self, "_bound_source", None)
+        if bound is None or bound.last_modified is None:
+            return None
+        own_time = super().last_modified
+        return (
+            bound.last_modified
+            if own_time is None
+            else max(own_time, bound.last_modified)
+        )
+
+    def clear_cache(self) -> None:
+        """Invalidate retained rows, identity caches and this binding's freshness."""
+        invalidate(self)
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()
+        self._update_modified_time()
 
     # ------------------------------------------------------------------
     # Identity — delegate to bound source when set
