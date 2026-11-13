@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import dataclasses
 import logging
 from abc import abstractmethod
@@ -1037,6 +1038,12 @@ class FunctionPodStream(StreamBase):
                 if data is not None:
                     yield tag, data
 
+    def _pod_base(self) -> "_FunctionPodBase":
+        """The stream's pod, with its row hooks: every function pod is a ``_FunctionPodBase``."""
+        pod = self._function_pod
+        assert isinstance(pod, _FunctionPodBase), type(pod)
+        return pod
+
     def _iter_data_sequential(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]:
@@ -1065,12 +1072,16 @@ class FunctionPodStream(StreamBase):
                 # Mark completion by releasing the iterator
                 self._cached_input_iterator = None
                 return
-            # The stream's pod is always a _FunctionPodBase; the protocol does not
-            # declare this private hook (the same access was in the baseline before
-            # ITL-1039 re-indented it).
-            tag, output_data = self._function_pod._invoke_with_hooks(  # pyright: ignore[reportAttributeAccessIssue]
-                tag, data
-            )
+            try:
+                out_tag, output_data = self._pod_base()._invoke_with_hooks(tag, data)
+            except BaseException:
+                # The row was taken from the input but not computed: put it back, so
+                # the next read computes it instead of skipping it.
+                self._cached_input_iterator = itertools.chain(
+                    [(input_index, (tag, data))], input_iter
+                )
+                raise
+            tag = out_tag
             self._cached_output_datas[input_index] = (tag, output_data)
             if output_data is not None:
                 yield tag, output_data
@@ -1090,37 +1101,55 @@ class FunctionPodStream(StreamBase):
             for i, (tag, data) in input_iter
             if i not in self._cached_output_datas
         ]
-        self._cached_input_iterator = None
+        # Submit uncached data concurrently via async_process_data. Every row that
+        # returns is cached; a row whose function raised stays in the input, so the
+        # next read computes it again, and the first error is raised after the others
+        # are cached.
+        try:
+            if to_compute:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
 
-        # Submit uncached data concurrently via async_process_data.
-        if to_compute:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None:
-                # Already in event loop — fall back to sequential sync
-                results = [
-                    self._function_pod._invoke_with_hooks(tag, pkt)
-                    for _, tag, pkt in to_compute
-                ]
-            else:
-
-                async def _gather() -> list[tuple[TagProtocol, DataProtocol | None]]:
-                    return list(
-                        await asyncio.gather(
-                            *[
-                                self._function_pod._async_invoke_with_hooks(tag, pkt)
-                                for _, tag, pkt in to_compute
-                            ]
+                if loop is not None:
+                    # Already in event loop — fall back to sequential sync
+                    for i, tag, pkt in to_compute:
+                        self._cached_output_datas[i] = (
+                            self._pod_base()._invoke_with_hooks(tag, pkt)
                         )
-                    )
+                else:
 
-                results = asyncio.run(_gather())
+                    async def _gather() -> list[
+                        tuple[TagProtocol, DataProtocol | None] | BaseException
+                    ]:
+                        return list(
+                            await asyncio.gather(
+                                *[
+                                    self._pod_base()._async_invoke_with_hooks(tag, pkt)
+                                    for _, tag, pkt in to_compute
+                                ],
+                                return_exceptions=True,
+                            )
+                        )
 
-            for (i, _, _), (tag, output_data) in zip(to_compute, results, strict=True):
-                self._cached_output_datas[i] = (tag, output_data)
+                    first_error: BaseException | None = None
+                    for (i, _, _), result in zip(
+                        to_compute, asyncio.run(_gather()), strict=True
+                    ):
+                        if isinstance(result, BaseException):
+                            first_error = first_error or result
+                        else:
+                            self._cached_output_datas[i] = result
+                    if first_error is not None:
+                        raise first_error
+        finally:
+            remaining = [
+                (i, (tag, pkt))
+                for i, tag, pkt in to_compute
+                if i not in self._cached_output_datas
+            ]
+            self._cached_input_iterator = iter(remaining) if remaining else None
 
         # Yield every row in input order, those an earlier iteration computed included.
         for i in range(len(self._cached_output_datas)):

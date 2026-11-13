@@ -186,3 +186,51 @@ def test_a_job_node_read_partially_then_in_full_has_every_row(
     table = node.as_table()
     assert sorted(zip(table["k"].to_pylist(), table["y"].to_pylist())) == EVERY_ROW
     assert sorted(CALLS) == list(range(ROWS))
+
+
+def raising_once_pod(failing_x: int) -> Any:
+    """A fresh pod of ``times_ten`` that raises the first time it sees ``failing_x``."""
+    failed: list[int] = []
+
+    @function_pod(output_keys="y")
+    def times_ten(x: int) -> int:
+        """Return ``10 * x``; raise once for ``failing_x``."""
+        if x == failing_x and not failed:
+            failed.append(x)
+            raise RuntimeError(f"transient failure for x={x}")
+        CALLS.append(x)
+        return 10 * x
+
+    return times_ten.pod
+
+
+def raising_once_stream(kind: str, failing_x: int) -> Any:
+    """A stream of ``kind`` whose function raises once, for ``failing_x``."""
+    pod = raising_once_pod(failing_x)
+    if kind == "plain":
+        return pod(source())
+    if kind == "concurrent":
+        stream = pod(source())
+        stream.executor = ConcurrentLocalExecutor()
+        return stream
+    if kind == "cached":
+        return CachedFunctionPod(pod, result_database=InMemoryArrowDatabase())(source())
+    raise ValueError(kind)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("failing_x", [0, 2, ROWS - 1])
+def test_a_row_whose_function_raised_is_computed_again_by_the_next_read(
+    kind: str, failing_x: int
+) -> None:
+    """A failed row is not lost: the next read computes it and yields every row."""
+    rows = raising_once_stream(kind, failing_x)
+
+    with pytest.raises(RuntimeError, match="transient failure"):
+        list(rows.iter_data())
+
+    assert pairs(rows.iter_data()) == EVERY_ROW
+    assert pairs(rows.iter_data()) == EVERY_ROW, "a third read replays the cache"
+    table = rows.as_table()
+    assert sorted(zip(table["k"].to_pylist(), table["y"].to_pylist())) == EVERY_ROW
+    assert sorted(CALLS) == list(range(ROWS)), "each row is computed once"
