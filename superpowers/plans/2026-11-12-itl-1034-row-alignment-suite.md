@@ -145,3 +145,9 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
 * Helpers + checker self-test done (16 pass). Sweep done (subagent). Second defect found and
   sent to coordinator (msg_c718d4fe9800): FunctionPodStream resumed iterator re-enumerates
   from 0 (function_pod.py:1043/1069) and drops rows; awaiting decision to fix here.
+* Nov 13: suite complete (6100 tests: nodes, operators, streams, job, checker). ITL-1029
+  fixed on main by #344 (cases pass unmarked). ITL-1039 (#348) and ITL-1040/838 (#350)
+  merged; their marks removed. Remaining strict xfails name open issues only: ITL-1042,
+  ITL-1043, ITL-1045, ITL-1046, ITL-1050. PR #346 body holds the matrix, runtime, sweep
+  table and defect list. Left: CodeRabbit rounds and CI on #346, then worker_done. When
+  an open issue's fix merges, merge main and drop its marks (they XPASS strictly).

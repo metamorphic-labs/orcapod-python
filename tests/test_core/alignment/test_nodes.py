@@ -17,8 +17,6 @@ a job loaded with ``PipelineJob.load``, after writes in input order and in force
 Known defects, each filed, are marked ``xfail(strict=True)`` on exactly the cases they
 break, so a case passes the day its defect is fixed only by dropping its mark:
 
-* ITL-1040: an async run stores an extra ``_source_<dropped column>`` in the function
-  node's records (the stored-records check, async runs only).
 * ITL-1042: after an async run an operator node's ``head()`` says "not computed" and
   shows no rows (``joined.head`` and ``grouped.head`` after an async run or rerun).
 * ITL-1043: a loaded job cannot read a cached operator node (``joined`` in a loaded job).
@@ -65,10 +63,6 @@ from .jobs import (
 
 RunKey = tuple[str, str, str, str, str]
 
-ITL_1040 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1040: an async run stores an extra _source_<dropped column> column",
-)
 ITL_1042 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1042: after an async run an operator node's head() shows no rows",
@@ -227,9 +221,7 @@ def test_the_gate_realised_the_order(
     assert runs(key).completed == expected
 
 
-@pytest.mark.parametrize(
-    "key", run_keys(lambda key: [ITL_1040] if is_async(key) else [])
-)
+@pytest.mark.parametrize("key", run_keys())
 def test_stored_records_are_aligned(key: RunKey, runs: Callable[[RunKey], Run]) -> None:
     """The function node's stored records: hashes, tokens and ids belong to their rows."""
     from .records import assert_records_aligned
