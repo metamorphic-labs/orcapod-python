@@ -1436,9 +1436,11 @@ series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
                                                     "UTC", "Europe/Berlin", "+01:00"
          | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
          | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
-         | "arrow"                                  pd.ArrowDtype; the type is in D
-         | {"arrow": "null"}                        pd.ArrowDtype(pa.null()): D digests it as
-                                                    all-null large_string
+         | {"arrow": <Arrow type text>}             pd.ArrowDtype of a non-nested Arrow type:
+                                                    str(type), "large_binary", "null",
+                                                    "timestamp[ns, tz=UTC]"
+         | "arrow"                                  pd.ArrowDtype of a nested, dictionary or
+                                                    run-end type: the type is in D only
 ```
 
 `kind` is the name of the value's logical type (its Arrow extension name).
@@ -1512,7 +1514,7 @@ More consequences of the same rule:
 - **A column is described with the dtype its Arrow schema restores.** A
   `pd.ArrowDtype(pa.string())` column reads back as `string`, so the two hash equal. An
   Arrow decimal column reads back as `object` holding `Decimal` values and is hashed in
-  that form. Other `pd.ArrowDtype` columns are restored as they are.
+  that form. Other `pd.ArrowDtype` columns are restored as they are, with their exact Arrow type.
 - **A column that reads back as Arrow `null` is digested as an all-null `large_string`
   column.** Starfix refuses a `null` column, and storage cannot restore the type of a column
   with no value: an all-null or empty `pd.ArrowDtype` decimal column reads back as `object`
@@ -1525,9 +1527,15 @@ More consequences of the same rule:
   `"string"`) stays different. Other all-null or empty columns (Arrow string, timestamp,
   integer, list or struct, `Int64`, `string`, categorical) keep their own types and are
   unchanged.
-  A `pd.ArrowDtype(pa.null())` column has its own dtype descriptor, `{"arrow": "null"}`
-  (every other `pd.ArrowDtype` is the term `"arrow"`; its Arrow type is in the values
-  table), so it never hashes like a `pd.ArrowDtype(pa.large_string())` column of `None`.
+  A `pd.ArrowDtype` of a non-nested Arrow type is described by its Arrow type text, so
+  `pd.ArrowDtype(pa.null())` (`{"arrow": "null"}`) never hashes like a
+  `pd.ArrowDtype(pa.large_string())` column of `None`, and `binary` and `large_binary`
+  columns (which storage restores as themselves, although D unifies large and non-large
+  variants) hash differently. A decimal column is the exception that shows the rule: storage
+  restores it as `object`, so two precisions hash equal. A nested `pd.ArrowDtype` (list,
+  struct, map, union), a dictionary or a run-end type keeps the bare term `"arrow"`; none
+  reads back today, and ITL-1054 decides what identifies one (so a `list` and a `large_list`
+  column hash equal until then).
   A `pd.ArrowDtype` of a nested type with a `null` child (`list<null>`, `struct<a: null>`)
   is still refused by the hash, as before.
 - **A timezone is the text storage writes for it** (`"UTC"`, `"Europe/Berlin"`,

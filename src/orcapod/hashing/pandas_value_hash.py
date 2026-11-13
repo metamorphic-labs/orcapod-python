@@ -95,7 +95,12 @@ Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone,
                                                         "UTC", "Europe/Berlin", "+01:00"
              | {"categorical": {"categories": [<dtype>, [<label>, ...]], "ordered": <bool>}}
              | {"period": <period alias>} | {"interval": [<subtype dtype>, <closed>]}
-             | "arrow"                                  pd.ArrowDtype; the type is in the digest
+             | {"arrow": <Arrow type text>}             pd.ArrowDtype of a non-nested Arrow
+                                                        type: str(type), e.g. "large_binary",
+                                                        "decimal128(10, 2)", "null"
+             | "arrow"                                  pd.ArrowDtype of a nested, dictionary
+                                                        or run-end type: the type is in the
+                                                        digest only (ITL-1054)
 
 ``<attrs>`` is ``attrs`` as the JSON object it is stored as: ``{1: "x"}`` is
 ``{"1": "x"}`` and a tuple is a list. ``attrs`` with an entry JSON cannot write (a ``set``,
@@ -442,12 +447,18 @@ def pandas_dtype_descriptor(dtype: Any) -> Any:
             }
         }
     if isinstance(dtype, pd.ArrowDtype):
-        if pa.types.is_null(dtype.pyarrow_dtype):
-            # The values table digests an Arrow ``null`` column as an all-null
-            # ``large_string`` column (``_restored_form``), so the Arrow type no longer
-            # separates it from a ``large_string`` column of ``None``; the term does.
-            return {"arrow": "null"}
-        return "arrow"
+        arrow_type = dtype.pyarrow_dtype
+        if (
+            pa.types.is_nested(arrow_type)
+            or pa.types.is_dictionary(arrow_type)
+            or pa.types.is_run_end_encoded(arrow_type)
+        ):
+            # No nested Arrow dtype reads back today; ITL-1054 decides what identifies one.
+            return "arrow"
+        # Storage restores the exact Arrow type, but the values digest unifies large and
+        # non-large variants, so the type text is the term (``null`` included: the digest sees an all-null ``large_string`` there, see
+        # ``_restored_form``, and the term keeps it apart from a ``large_string`` column).
+        return {"arrow": str(arrow_type)}
     if isinstance(dtype, pd.StringDtype):
         # The storage (python / pyarrow) is not kept by the stored form, so it is not
         # part of the term.

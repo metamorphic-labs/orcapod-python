@@ -945,3 +945,99 @@ class TestDescriptorGrammar:
             )
             == "arrow"
         )
+
+
+def _arrow_series(values: list[Any], arrow_type: pa.DataType) -> pd.Series:
+    """A named ``pd.ArrowDtype`` Series of ``values`` typed ``arrow_type``."""
+    return pd.Series(values, dtype=pd.ArrowDtype(arrow_type), name="s")
+
+
+class TestArrowDtypeLeafTypeIsIdentity:
+    """A ``pd.ArrowDtype`` of a non-nested Arrow type keeps its exact type in the identity.
+
+    Storage restores the dtype with its exact Arrow type (``binary`` and ``large_binary`` come
+    back as themselves), so the type is part of the hash, although the Arrow value digest
+    unifies large and non-large variants (ITL-897, review of PR #339).
+    """
+
+    PAIRS: dict[str, tuple[pa.DataType, pa.DataType]] = {
+        "binary": (pa.binary(), pa.large_binary()),
+        "timestamp_tz": (
+            pa.timestamp("ns", tz="UTC"),
+            pa.timestamp("ns", tz="Europe/Berlin"),
+        ),
+    }
+
+    @staticmethod
+    def _values(name: str) -> list[Any]:
+        """The values of pair ``name`` in a form both of its types accept."""
+        if name == "timestamp_tz":
+            return [pd.Timestamp("2020-01-01", tz="UTC"), None]
+        return [b"x", None]
+
+    @pytest.mark.parametrize("name", list(PAIRS))
+    @pytest.mark.parametrize("kind", ["series", "frame"])
+    def test_the_two_types_hash_differently_and_round_trip_equal(
+        self, name: str, kind: str
+    ) -> None:
+        """Two exact Arrow types give two hashes; each hashes the same after storage."""
+        first, second = self.PAIRS[name]
+        values = self._values(name)
+        built = [_arrow_series(values, t) for t in (first, second)]
+        if kind == "frame":
+            built = [s.to_frame() for s in built]
+        assert _hash(built[0]) != _hash(built[1])
+        for value in built:
+            assert _hash(_stored_and_read(value)) == _hash(value)
+
+    @pytest.mark.parametrize("kind", ["series", "frame"])
+    def test_decimal_precision_is_not_identity(self, kind: str) -> None:
+        """Storage reads a decimal column back as ``object``, so its precision is not kept.
+
+        By the strict rule (only what storage keeps counts) two precisions hash equal, and the
+        term is the restored ``object`` dtype's, not an Arrow type text.
+        """
+        import decimal
+
+        values = [decimal.Decimal("1.50"), None]
+        built = [
+            _arrow_series(values, pa.decimal128(precision, 2)) for precision in (10, 12)
+        ]
+        if kind == "frame":
+            built = [s.to_frame() for s in built]
+        assert _hash(built[0]) == _hash(built[1])
+        assert _hash(_stored_and_read(built[0])) == _hash(built[0])
+
+    def test_nested_arrow_dtypes_keep_the_bare_term(self) -> None:
+        """A nested ``pd.ArrowDtype`` is described by the bare term, large or not.
+
+        ITL-1054 decides the identity of nested Arrow dtypes (none reads back today), so the
+        large and non-large list stay equal until then.
+        """
+        from orcapod.hashing.pandas_value_hash import pandas_dtype_descriptor
+
+        for nested in (
+            pa.list_(pa.int64()),
+            pa.large_list(pa.int64()),
+            pa.struct([("s", pa.string())]),
+            pa.map_(pa.string(), pa.int64()),
+        ):
+            assert pandas_dtype_descriptor(pd.ArrowDtype(nested)) == "arrow"
+        values = [[1, 2], None]
+        assert _hash(_arrow_series(values, pa.list_(pa.int64()))) == _hash(
+            _arrow_series(values, pa.large_list(pa.int64()))
+        )
+
+    def test_leaf_terms(self) -> None:
+        """The term of a leaf type is its Arrow type text (``null`` included)."""
+        from orcapod.hashing.pandas_value_hash import pandas_dtype_descriptor
+
+        # Non-public descriptor function: the test is about the grammar itself.
+        for leaf, text in (
+            (pa.binary(), "binary"),
+            (pa.large_binary(), "large_binary"),
+            (pa.null(), "null"),
+            (pa.decimal128(10, 2), "decimal128(10, 2)"),
+            (pa.timestamp("ns", tz="UTC"), "timestamp[ns, tz=UTC]"),
+        ):
+            assert pandas_dtype_descriptor(pd.ArrowDtype(leaf)) == {"arrow": text}
