@@ -426,8 +426,18 @@ Both orchestrators store the same rows, with the same record ids and hashes.
 
 A notebook kernel already runs an event loop. There, `job.run(...)` runs the job on a
 separate thread and waits for it, so the cell blocks until the run ends, as it does with the
-sync orchestrator. The interrupt button stops the run: rows already stored stay stored, and
-the next run computes only the rest.
+sync orchestrator. The interrupt button cancels the run: rows already stored stay stored, and
+the next run computes only the rest. A function that is in the middle of a row cannot be
+interrupted, so the cell waits until it returns. If it does not return (a function that
+loops forever, say), press the interrupt button again: the cell stops waiting at once, with a
+warning that the function in that node has not returned yet. The run is already cancelled,
+so nothing more is written to the store when the function does return. To stop the function
+itself, restart the kernel.
+
+An `async def` function must not block (with `time.sleep`, a busy loop or another blocking
+call). It runs on the event loop's own thread, so while it blocks, the cancellation cannot
+run. In that case the warning says so: rows already in progress may still be stored when
+the function returns, before the run stops.
 
 In async code, await the run instead, so the event loop stays free while it runs:
 `await job.run_async()` (the async orchestrator is its default). This also works at the top

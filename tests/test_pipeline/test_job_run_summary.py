@@ -8,6 +8,7 @@ traceback. A clean run stays quiet.
 
 from __future__ import annotations
 
+import ast
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -96,15 +97,18 @@ def make_job(store: Any, pod: Any, label: str, n_rows: int = 4) -> PipelineJob:
 
 @pytest.fixture(params=list(ORCHESTRATORS))
 def orchestrator(request: pytest.FixtureRequest) -> Any:
+    """Each orchestrator, freshly built."""
     return ORCHESTRATORS[request.param]()
 
 
 @pytest.fixture(params=list(STORES))
 def store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
+    """Each store kind, empty."""
     return STORES[request.param](tmp_path / "store")
 
 
 def test_some_rows_fail(store: Any, orchestrator: Any) -> None:
+    """Rows that fail are counted and reported once; the others are computed and stored."""
     job = make_job(store, even_only, "evens")
     with pytest.warns(RowFailuresWarning) as caught:
         summary = run(job, orchestrator)
@@ -125,6 +129,7 @@ def test_some_rows_fail(store: Any, orchestrator: Any) -> None:
 
 
 def test_every_row_fails(store: Any, orchestrator: Any) -> None:
+    """A function failing on every row is reported with its error, not as an empty success."""
     job = make_job(store, always_fails, "broken")
     with pytest.warns(RowFailuresWarning, match="4 of 4 rows failed in node 'broken'"):
         summary = run(job, orchestrator)
@@ -140,6 +145,7 @@ def test_every_row_fails(store: Any, orchestrator: Any) -> None:
 
 
 def test_clean_run_is_quiet(store: Any, orchestrator: Any) -> None:
+    """A run without failed rows issues no warning and counts every row as computed."""
     job = make_job(store, double, "doubled")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -152,6 +158,7 @@ def test_clean_run_is_quiet(store: Any, orchestrator: Any) -> None:
 
 
 def test_rerun_counts_rows_from_the_store(store: Any, orchestrator: Any) -> None:
+    """Running again counts the stored rows as from the store and computes only the new row."""
     run(make_job(store, double, "doubled"), orchestrator)
     summary = run(make_job(store, double, "doubled", n_rows=5), orchestrator)
 
@@ -159,6 +166,7 @@ def test_rerun_counts_rows_from_the_store(store: Any, orchestrator: Any) -> None
 
 
 def test_fail_fast_still_raises(store: Any) -> None:
+    """``error_policy='fail_fast'`` raises the row's error as before."""
     job = make_job(store, even_only, "evens")
     with pytest.raises(ValueError, match="odd x="):
         job.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))
@@ -167,6 +175,7 @@ def test_fail_fast_still_raises(store: Any) -> None:
 def test_print_traceback_shows_the_function_frame(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """``print_traceback`` prints the traceback down to the user's function."""
     job = make_job(InMemoryArrowDatabase(), always_fails, "broken")
     with pytest.warns(RowFailuresWarning):
         run(job, SyncPipelineOrchestrator())
@@ -180,6 +189,7 @@ def test_print_traceback_shows_the_function_frame(
 
 
 def test_notebook_representation_names_the_failing_node() -> None:
+    """The notebook table names the failing node, its error type and message."""
     job = make_job(InMemoryArrowDatabase(), even_only, "evens")
     with pytest.warns(RowFailuresWarning):
         summary = run(job, SyncPipelineOrchestrator())
@@ -191,6 +201,7 @@ def test_notebook_representation_names_the_failing_node() -> None:
 
 
 def test_run_async_returns_the_same_summary(store: Any) -> None:
+    """``run_async`` returns the summary, warns, and keeps it as ``last_run``."""
     import asyncio
 
     job = make_job(store, even_only, "evens")
@@ -223,3 +234,17 @@ def test_node_with_empty_input_counts_zero_rows(store: Any, orchestrator: Any) -
     assert node_counts(summary, "broken") == (0, 0, 4)
     assert node_counts(summary, "after") == (0, 0, 0)
     assert "after: 0 rows: 0 computed, 0 from store, 0 failed" in repr(summary)
+
+
+def test_traceback_pointer_is_valid_python_for_any_label() -> None:
+    """A label with quotes still gives a call that runs and prints the traceback."""
+    label = "weight\"2's"
+    job = make_job(InMemoryArrowDatabase(), always_fails, label)
+    with pytest.warns(RowFailuresWarning) as caught:
+        summary = run(job, SyncPipelineOrchestrator())
+
+    pointer = repr(summary).splitlines()[-1].split("Full traceback: ", 1)[1]
+    assert pointer in str(caught[0].message)
+    call = ast.parse(pointer, mode="eval").body
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[0]) == label

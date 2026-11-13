@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import threading
 import time
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,7 @@ def run_inside_running_loop(job: PipelineJob) -> None:
     """
 
     async def notebook_cell() -> None:
+        """A notebook cell: the job run inside the kernel's running loop."""
         job.run(orchestrator=AsyncPipelineOrchestrator())
 
     asyncio.run(notebook_cell())
@@ -71,6 +74,7 @@ def stored_rows(job: PipelineJob) -> tuple[list[dict[str, Any]], list[dict[str, 
     table = job.nodes["doubled"].as_table(all_info=True)
 
     def by_tag(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The rows sorted by their tag ``k``."""
         return sorted(rows, key=lambda row: row["k"])
 
     return by_tag(records.to_pylist()), by_tag(table.to_pylist())
@@ -80,6 +84,7 @@ def stored_rows(job: PipelineJob) -> tuple[list[dict[str, Any]], list[dict[str, 
 def test_run_inside_running_loop_stores_what_a_script_run_stores(
     store_kind: str, tmp_path: Path
 ) -> None:
+    """A run from inside a running loop stores the same rows, ids and hashes as a script run."""
     script_job = make_job(STORES[store_kind](tmp_path / "script"))
     script_job.run(orchestrator=AsyncPipelineOrchestrator())
 
@@ -92,6 +97,7 @@ def test_run_inside_running_loop_stores_what_a_script_run_stores(
 
 
 def test_rerun_inside_running_loop_reuses_stored_rows(tmp_path: Path) -> None:
+    """A second run inside a running loop reads the stored rows and changes none of them."""
     store = DeltaTableDatabase(tmp_path / "store")
     first_job = make_job(store)
     run_inside_running_loop(first_job)
@@ -111,18 +117,23 @@ def test_store_error_inside_running_loop_reaches_the_caller(tmp_path: Path) -> N
         """A store whose every write fails."""
 
         def __init__(self, inner: Any) -> None:
+            """Wrap ``inner``."""
             self._inner = inner
 
         def at(self, *path_components: str) -> FailingWrites:
+            """A view whose writes fail too."""
             return FailingWrites(self._inner.at(*path_components))
 
         def add_record(self, *args: Any, **kwargs: Any) -> Any:
+            """Fail."""
             raise OSError("disk unavailable")
 
         def add_records(self, *args: Any, **kwargs: Any) -> Any:
+            """Fail."""
             raise OSError("disk unavailable")
 
         def __getattr__(self, name: str) -> Any:
+            """Delegate everything else."""
             return getattr(self._inner, name)
 
     job = make_job(FailingWrites(InMemoryArrowDatabase()))
@@ -134,6 +145,7 @@ def test_run_inside_running_loop_returns_to_the_loop(tmp_path: Path) -> None:
     """The loop that called the run keeps working after it (a notebook's next cell)."""
 
     async def two_cells() -> int:
+        """Run a job, then use the loop again, as the next cell would."""
         job = make_job(InMemoryArrowDatabase())
         job.run(orchestrator=AsyncPipelineOrchestrator())
         await asyncio.sleep(0)
@@ -146,12 +158,14 @@ def test_run_inside_running_loop_returns_to_the_loop(tmp_path: Path) -> None:
 def test_await_run_async_stores_what_a_script_run_stores(
     store_kind: str, tmp_path: Path
 ) -> None:
+    """``await job.run_async()`` stores the same rows, ids and hashes as a script run."""
     script_job = make_job(STORES[store_kind](tmp_path / "script"))
     script_job.run(orchestrator=AsyncPipelineOrchestrator())
 
     async_job = make_job(STORES[store_kind](tmp_path / "async"))
 
     async def async_code() -> None:
+        """Async code awaiting the run."""
         await async_job.run_async()
 
     asyncio.run(async_code())
@@ -160,6 +174,7 @@ def test_await_run_async_stores_what_a_script_run_stores(
 
 
 def test_run_async_refuses_the_sync_orchestrator() -> None:
+    """``run_async`` with a sync orchestrator raises ``TypeError`` naming ``job.run``."""
     job = make_job(InMemoryArrowDatabase())
     with pytest.raises(TypeError, match=r"job\.run"):
         _ = asyncio.run(
@@ -193,6 +208,7 @@ def test_interrupt_while_running_inside_a_loop_stops_the_run() -> None:
         slow_and_interrupted.pod(source, label="slow")
 
     async def notebook_cell() -> None:
+        """A notebook cell: the job run inside the kernel's running loop."""
         job.run(orchestrator=AsyncPipelineOrchestrator())
 
     # A bare loop, as a kernel has: asyncio.run would install its own SIGINT handler.
@@ -207,3 +223,190 @@ def test_interrupt_while_running_inside_a_loop_stops_the_run() -> None:
     assert calls_when_stopped < N_SLOW_ROWS
     time.sleep(0.2)
     assert len(slow_calls) == calls_when_stopped
+
+
+STORE_WRITES = ("add_record", "add_records", "flush", "flush_batch", "set_metadata")
+
+
+class CountingWrites:
+    """A store that records the name of every write or commit made through it."""
+
+    def __init__(self, inner: Any, writes: list[str]) -> None:
+        """Wrap ``inner``; every view appends to the same ``writes``."""
+        self._inner = inner
+        self._writes = writes
+
+    def at(self, *path_components: str) -> CountingWrites:
+        """A view recording into the same list."""
+        return CountingWrites(self._inner.at(*path_components), self._writes)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate; record the calls of the write methods."""
+        attr = getattr(self._inner, name)
+        if name not in STORE_WRITES:
+            return attr
+
+        def recorded(*args: Any, **kwargs: Any) -> Any:
+            """Record the write, then make it."""
+            self._writes.append(name)
+            return attr(*args, **kwargs)
+
+        return recorded
+
+
+stuck_release = threading.Event()
+press_interrupt = threading.Event()
+stuck_calls: list[int] = []
+after_calls: list[int] = []
+
+
+@function_pod(output_keys="y")
+def stuck_on_first_row(x: int) -> int:
+    """Row 0 presses the interrupt button twice and does not return until released."""
+    stuck_calls.append(x)
+    if x == 0 and press_interrupt.is_set():
+        _thread.interrupt_main()  # first press: cancels the run, which then waits
+        # Second press, while the run waits for this function to return.
+        threading.Timer(1.0, _thread.interrupt_main).start()
+        _ = stuck_release.wait(timeout=30)
+    return x
+
+
+@function_pod(output_keys="z")
+def after_stuck(y: int) -> int:
+    """Count the rows that reach the next node."""
+    after_calls.append(y)
+    return y + 1
+
+
+def make_stuck_job(store: Any) -> PipelineJob:
+    """Six rows through ``stuck_on_first_row`` and then ``after_stuck``."""
+    rows = [{"k": f"r{i}", "x": i} for i in range(6)]
+    job = PipelineJob(name="stuck_demo", store=store)
+    with job:
+        source = DictSource(data=rows, tag_columns=["k"], source_id="rows")
+        stuck = stuck_on_first_row.pod(source, label="stuck")
+        after_stuck.pod(stuck, label="after")
+    return job
+
+
+def bridge_threads() -> list[threading.Thread]:
+    """The threads still running a job's async run."""
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name == "orcapod-async-run" and t.is_alive()
+    ]
+
+
+@pytest.mark.parametrize("store_kind", list(STORES))
+def test_second_interrupt_returns_and_a_late_function_writes_nothing(
+    store_kind: str, tmp_path: Path
+) -> None:
+    """A second interrupt returns at once; the function returning later stores nothing.
+
+    The first interrupt cancels the run, which then waits for row 0's function, still
+    running on a thread where it cannot be interrupted. The second interrupt returns
+    control with a warning naming the node. When the function returns afterwards, no
+    store write happens and no row reaches the next node, and row 0's result is never
+    stored: a later run computes it.
+    """
+    stuck_release.clear()
+    press_interrupt.set()
+    stuck_calls.clear()
+    after_calls.clear()
+    inner = STORES[store_kind](tmp_path / "store")
+    writes: list[str] = []
+    job = make_stuck_job(CountingWrites(inner, writes))
+
+    async def notebook_cell() -> None:
+        """A notebook cell: the job run inside the kernel's running loop."""
+        job.run(orchestrator=AsyncPipelineOrchestrator())
+
+    # A bare loop, as a kernel has: asyncio.run would install its own SIGINT handler.
+    loop = asyncio.new_event_loop()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(KeyboardInterrupt):
+                loop.run_until_complete(notebook_cell())
+    finally:
+        loop.close()
+
+    messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
+    assert len(messages) == 1, messages
+    assert "but a function in node 'stuck' has not returned yet" in messages[0]
+    assert "Nothing more will be written to the store" in messages[0]
+    assert "restart the kernel" in messages[0]
+    assert bridge_threads(), "control returned before the stuck function did"
+
+    writes_when_returned = list(writes)
+    rows_after_when_returned = list(after_calls)
+    stuck_release.set()
+    deadline = time.monotonic() + 30
+    while bridge_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not bridge_threads()
+
+    assert writes == writes_when_returned
+    assert after_calls == rows_after_when_returned
+
+    # Row 0's result was never stored: a later run on the same store computes it.
+    inner.flush()
+    stuck_calls.clear()
+    press_interrupt.clear()
+    rerun = make_stuck_job(inner)
+    _ = rerun.run()
+    assert 0 in stuck_calls
+
+
+@function_pod(output_keys="y")
+async def async_stuck_on_first_row(x: int) -> int:
+    """Row 0 presses the interrupt button twice and blocks the event loop until released."""
+    if x == 0:
+        _thread.interrupt_main()
+        threading.Timer(1.0, _thread.interrupt_main).start()
+        # A blocking wait inside an async function: the bug that blocks the loop.
+        _ = stuck_release.wait(timeout=30)
+    return x
+
+
+def test_second_interrupt_names_an_async_function_blocking_the_loop() -> None:
+    """For an async function blocking the loop, the warning says rows may still be stored.
+
+    The cancellation cannot run on a loop whose thread the function holds, so rows
+    already in progress may be stored once it returns; the warning says so instead of
+    promising that nothing more is written. The run still stops once it returns.
+    """
+    stuck_release.clear()
+    rows = [{"k": f"r{i}", "x": i} for i in range(6)]
+    job = PipelineJob(name="async_stuck_demo", store=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(data=rows, tag_columns=["k"], source_id="rows")
+        stuck = async_stuck_on_first_row.pod(source, label="stuck")
+        after_stuck.pod(stuck, label="after")
+
+    async def notebook_cell() -> None:
+        """A notebook cell: the job run inside the kernel's running loop."""
+        job.run(orchestrator=AsyncPipelineOrchestrator())
+
+    loop = asyncio.new_event_loop()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(KeyboardInterrupt):
+                loop.run_until_complete(notebook_cell())
+    finally:
+        loop.close()
+
+    messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
+    assert len(messages) == 1, messages
+    assert "an async function in node 'stuck' is blocking the event loop" in messages[0]
+    assert "rows already in progress may still be stored" in messages[0]
+    assert "Nothing more will be written" not in messages[0]
+
+    stuck_release.set()
+    deadline = time.monotonic() + 30
+    while bridge_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not bridge_threads()

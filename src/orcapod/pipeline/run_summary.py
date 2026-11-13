@@ -8,6 +8,7 @@ computed, how many were read from the store, and how many failed with which firs
 from __future__ import annotations
 
 import html
+import json
 import threading
 import traceback
 from dataclasses import dataclass
@@ -119,6 +120,7 @@ class RunSummary:
         print(f"No rows failed{where} in this run.")
 
     def _headline(self) -> str:
+        """The first line: the job and whether any row failed."""
         if self.failed_rows:
             outcome = f"{_rows(self.failed_rows)} failed."
         else:
@@ -126,6 +128,7 @@ class RunSummary:
         return f"Run of job {self.job_name!r}: {outcome}"
 
     def __repr__(self) -> str:
+        """The summary as text: one line per node, and the first error of a failing one."""
         lines = [self._headline()]
         for node in self.nodes.values():
             lines.append(
@@ -176,6 +179,7 @@ class RunSummary:
 
 
 def _rows(n: int) -> str:
+    """``1 row`` or ``n rows``."""
     return f"{n} row" if n == 1 else f"{n} rows"
 
 
@@ -192,7 +196,11 @@ def _error_line(error: BaseException | None) -> str:
 
 
 def _traceback_call(label: str) -> str:
-    return f'job.last_run.print_traceback("{label}")'
+    """The call that prints a node's traceback, with the label as a valid string literal.
+
+    A JSON string is a valid Python string literal, and keeps double quotes.
+    """
+    return f"job.last_run.print_traceback({json.dumps(label)})"
 
 
 class RunCountingObserver:
