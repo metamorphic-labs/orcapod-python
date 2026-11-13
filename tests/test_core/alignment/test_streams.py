@@ -9,6 +9,10 @@ for every tie scenario and input order. Every read must also give every row exac
 
 Known defects are marked ``xfail(strict=True)`` on exactly the cases they break:
 
+* ITL-1065: two interleaved iterations of a function pod stream behind an operator stream
+  (the automatic select) recompute a row the first iteration already yielded (the
+  row-by-row path, interleaved reads).
+
 * ITL-1045: ``FunctionPodStream.as_table`` builds the table and its content hashes in two
   passes; an upstream reset in between attaches the new rows' hashes to the old table.
 """
@@ -44,6 +48,10 @@ from .fixtures import (
 from .gate import GATE, ORDERS, new_gated_scale_pod
 from .jobs import derive_y, stream_function_tokens
 
+ITL_1065 = pytest.mark.xfail(
+    strict=True,
+    reason="ITL-1065: interleaved reads behind an operator stream recompute a row",
+)
 ITL_1045 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1045: as_table attaches a recomputed upstream's hashes to the old table",
@@ -97,14 +105,19 @@ PATTERNS = ("fresh", "partial_then_full", "repeated", "interleaved")
 
 
 def stream_params() -> list[Any]:
-    """Every stream kind, completion order and read pattern."""
+    """Every stream kind, completion order and read pattern, marked where a defect hits."""
     params = []
     for kind in KINDS:
         orders = list(ORDERS) if kind == "pod_concurrent" else [None]
         for order in orders:
             for pattern in PATTERNS:
                 name = "-".join(p for p in (kind, order, pattern) if p)
-                params.append(pytest.param(kind, order, pattern, id=name))
+                marks = (
+                    [ITL_1065]
+                    if kind == "pod_row_by_row" and pattern == "interleaved"
+                    else []
+                )
+                params.append(pytest.param(kind, order, pattern, id=name, marks=marks))
     return params
 
 
