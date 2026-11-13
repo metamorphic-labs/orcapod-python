@@ -125,3 +125,24 @@ def test_concurrent_first_lookups_load_the_type_once() -> None:
         )
     assert all(isinstance(lt, fx.LogicalSlowThing) for lt in found)
     assert len({id(lt) for lt in found}) == 1
+
+
+class _BaseHandler:
+    """A handler registered for the base class ``Thing``."""
+
+    def handle(self, obj: object, hasher: object) -> str:
+        """Return a marker."""
+        return "base"
+
+
+def test_deferred_handler_of_a_subclass_wins_over_a_registered_base_handler() -> None:
+    """Lookup walks the MRO once: the most-derived handler wins, registered or deferred."""
+    registry = PythonTypeHandlerRegistry()
+    base_handler = _BaseHandler()
+    registry.register(fx.Thing, base_handler)  # pyright: ignore[reportArgumentType]  # toy handler implements the protocol structurally
+    registry.register_deferred(f"{_MOD}.SubThing", f"{_MOD}.ThingHandler")
+
+    assert registry.get_handler(fx.Thing("a")) is base_handler
+    assert registry.get_handler_for_type(fx.Thing) is base_handler
+    assert isinstance(registry.get_handler_for_type(fx.SubThing), fx.ThingHandler)
+    assert isinstance(registry.get_handler(fx.SubThing("a")), fx.ThingHandler)

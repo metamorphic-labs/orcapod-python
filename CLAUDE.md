@@ -268,7 +268,11 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
 - The identifier is declared in one place, the extension type returned by
   `get_arrow_extension_type()`, and read through `logical_types/identifier.py`
   (`logical_type_identifier`, `LogicalTypeIdentifier.text`). Never put a logical type's bare
-  name into a hash input: use the identifier text.
+  name into a hash input: use the identifier text. Exception (developer, November 12, 2026):
+  the leading type text inside a library value hash (`numpy.ndarray`, `torch.Tensor`, pandas,
+  polars) is the extension name alone, because the metadata holds the ignore list, which must
+  not enter the value's preimage; the full identifier (name plus metadata) still enters every
+  type, schema and cell hash.
 - Change a type's identifier when, and only when, an existing value would be stored or hashed
   differently. It is not a package version. Built-in types use `version_metadata(N)`
   (`{"version":N}`); a new built-in type must write one, never empty metadata.

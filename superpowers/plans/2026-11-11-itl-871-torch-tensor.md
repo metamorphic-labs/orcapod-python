@@ -1,5 +1,11 @@
 # torch.Tensor value type (ITL-871) Implementation Plan
 
+> **SUPERSEDED (November 12, 2026).** Kept as the record of the first implementation. Do not
+> follow it: the storage, the hash and the extension name changed
+> (`superpowers/plans/2026-11-12-itl-871-native-storage-strict-hash.md`). In particular Task 7
+> below tells you to edit `CHANGELOG.md` and `DESIGN_ISSUES.md`; a pull request never does
+> that. The entries are `changelog.d/ITL-871.md` and `design_issues/ITL-871-TT1.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `torch.Tensor` is an Orcapod value type (`orcapod.torch_tensor`, hash label `torch_tensor_v1`) stored in the shared v0.3 array struct, registered lazily so `import orcapod` never imports torch.

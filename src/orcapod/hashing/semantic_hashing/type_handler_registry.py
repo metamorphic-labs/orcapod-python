@@ -12,7 +12,7 @@ import threading
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from orcapod.utils.deferred_types import load_object, match_deferred
+from orcapod.utils.deferred_types import load_object, qualified_name
 
 if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import (
@@ -133,26 +133,18 @@ class PythonTypeHandlerRegistry:
         Returns:
             The registered ``PythonTypeHandlerProtocol``, or None.
         """
-        obj_type = type(obj)
-        with self._lock:
-            handler = self._handlers.get(obj_type)
-            if handler is not None:
-                return handler
-            for base in obj_type.__mro__[1:]:
-                handler = self._handlers.get(base)
-                if handler is not None:
-                    logger.debug(
-                        "PythonTypeHandlerRegistry: resolved hasher for %s via base %s",
-                        obj_type.__name__,
-                        base.__name__,
-                    )
-                    return handler
-            return self._load_deferred(obj_type)
+        return self.get_handler_for_type(type(obj))
 
     def get_handler_for_type(
         self, target_type: type
     ) -> "PythonTypeHandlerProtocol | None":
         """Look up the handler for a *type object* (rather than an instance).
+
+        Walks ``target_type.__mro__`` once, most-derived class first. For each
+        class a registered handler is taken first, then a deferred handler named
+        for that class (``register_deferred``), which is loaded and registered. So
+        the handler of the most-derived class wins, whether it is registered or
+        deferred. Comparing qualified names imports nothing.
 
         Args:
             target_type: The type to look up.
@@ -161,30 +153,24 @@ class PythonTypeHandlerRegistry:
             The registered ``PythonTypeHandlerProtocol``, or None.
         """
         with self._lock:
-            handler = self._handlers.get(target_type)
-            if handler is not None:
-                return handler
-            for base in target_type.__mro__[1:]:
+            for base in getattr(target_type, "__mro__", (target_type,)):
                 handler = self._handlers.get(base)
                 if handler is not None:
                     return handler
-            return self._load_deferred(target_type)
+                entry = self._deferred.get(qualified_name(base))
+                if entry is not None:
+                    return self._load_deferred(entry)
+            return None
 
-    def _load_deferred(self, target_type: type) -> "PythonTypeHandlerProtocol | None":
-        """Load and register the deferred handler matching *target_type*, if any.
-
-        The match compares qualified class names along the MRO, so no optional
-        library is imported for an unrelated type. Callers hold ``self._lock``.
+    def _load_deferred(self, entry: dict[str, Any]) -> "PythonTypeHandlerProtocol":
+        """Load and register a deferred handler. Callers hold ``self._lock``.
 
         Args:
-            target_type: The type being looked up.
+            entry: The deferred entry (``register_deferred``).
 
         Returns:
-            The newly registered handler, or None when nothing matches.
+            The newly registered handler.
         """
-        entry = match_deferred(target_type, self._deferred)
-        if entry is None:
-            return None
         handler = load_object(entry["handler"])(**entry["config"])
         self.register(load_object(entry["python_type"]), handler)
         del self._deferred[entry["python_type"]]

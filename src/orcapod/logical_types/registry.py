@@ -489,6 +489,14 @@ class LogicalTypeRegistry:
         entry = match_deferred(python_type, self._deferred_by_python_name)
         if entry is not None:
             return self._load_deferred(entry)
+        # Another thread may have loaded the deferred type between the lookups above
+        # and the deferred miss: it registers the type before it removes the entry.
+        for base in getattr(python_type, "__mro__", ()):
+            loaded = self._by_python_type.get(base)
+            if loaded is not None and not getattr(
+                loaded, "exact_python_type_only", False
+            ):
+                return loaded
         return None
 
     def get_by_arrow_extension_name(
@@ -508,7 +516,9 @@ class LogicalTypeRegistry:
             return result
         entry = self._deferred_by_arrow_name.get(arrow_name)
         if entry is None:
-            return None
+            # Another thread may have loaded the deferred type between the two reads:
+            # it registers the type before it removes the deferred entry.
+            return self._by_arrow_name.get(arrow_name)
         if not module_available(entry["requires"]):
             raise MissingOptionalDependencyError(
                 f"Arrow extension type {arrow_name!r} needs the optional dependency "

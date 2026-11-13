@@ -8,7 +8,9 @@
 > `src/orcapod/logical_types/torch_type.py`, `docs/concepts/arrays.md` and
 > `docs/reference/hashing.md` section 8; the plan is
 > `superpowers/plans/2026-11-12-itl-871-native-storage-strict-hash.md`. What still holds
-> from this spec: the dtype list, the conversion warning, packaging and CI.
+> from this spec: the dtype list and the CI setup. Also changed: the extra is `torch>=2.6`
+> (not 2.3), and `ValueConversionWarning` reports only a non-CPU device or autograd history
+> (a `grad_fn`); `requires_grad` alone does not warn, because it is stored.
 
 **Date:** 2026-11-11
 **Issue:** ITL-871 (refs ITL-888 / PR #289, ITL-874, ITL-869, ITL-847 / PR #291)
