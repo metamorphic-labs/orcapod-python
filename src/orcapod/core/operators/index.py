@@ -158,6 +158,13 @@ class Index(UnaryOperator):
                 f"Available data columns: {data_columns}"
             )
 
+        if self.out is not None and self.out in tag_schema:
+            raise InputValidationError(
+                f"Index: out column {self.out!r} is a tag column of the input, "
+                f"and a name cannot be both a tag and a data column. Choose a "
+                f"different name, or rename the tag with map_tags."
+            )
+
         if self.out is not None and self.out in data_columns:
             raise InputValidationError(
                 f"Index: out column {self.out!r} already exists in data schema. "

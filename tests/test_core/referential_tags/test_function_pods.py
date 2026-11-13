@@ -132,7 +132,7 @@ def test_output_named_like_a_tag_raises_when_built(tag_only: object) -> None:
     def clobber(amp: float) -> int:
         return 0
 
-    with pytest.raises(InputValidationError, match="conflicts with existing tag"):
+    with pytest.raises(InputValidationError, match="is also a tag column of the input"):
         clobber.pod(_source(tag_only_columns=tag_only))
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING
 
@@ -6,6 +7,7 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import (
     NonZeroInputOperator,
     require_shared_arrow_type,
+    require_tag_data_roles_agree,
 )
 from orcapod.core.referential_tags import (
     check_namespaces,
@@ -123,6 +125,7 @@ class Join(NonZeroInputOperator):
                 target of a referential tag both of them join on, a merged column's
                 types differ, or a plain tag would share a name with a data column.
         """
+        self._require_tag_data_roles_agree(streams)
         ordered_streams = self.order_input_streams(*streams)
         stream = ordered_streams[0]
         tag_schema, data_schema = stream.output_schema()
@@ -177,6 +180,30 @@ class Join(NonZeroInputOperator):
         """
         keys = set(tags) & set(other_tags)
         return keys & set(references) & set(other_references)
+
+    @staticmethod
+    def _require_tag_data_roles_agree(streams: Sequence[StreamProtocol]) -> None:
+        """Raise if a name is a tag in one input and a data column in another.
+
+        Every pair of inputs is checked, in call order, so the error does not
+        depend on the canonical order.
+
+        Args:
+            streams: The input streams, in call order.
+
+        Raises:
+            InputValidationError: Naming the column, the two inputs (counting
+                from 1 in call order) and the remedy.
+        """
+        keys = [stream.keys() for stream in streams]
+        for i, j in itertools.combinations(range(len(streams)), 2):
+            try:
+                require_tag_data_roles_agree(*keys[i], *keys[j])
+            except InputValidationError as exc:
+                raise InputValidationError(
+                    f"Join of input {i + 1} (the first) and input {j + 1} (the "
+                    + f"second): {exc}"
+                ) from exc
 
     def _predict_system_tag_schema(self, *streams: StreamProtocol) -> Schema:
         """Predict the system tag columns that the join would produce.
@@ -704,6 +731,17 @@ class Join(NonZeroInputOperator):
                         self._check_shared_key_types(
                             tag, buffers[other][0][0], shared_keys
                         )
+                        # The same, for a name that is a tag on one side and a data
+                        # column on the other (the sync path checks the schemas).
+                        try:
+                            require_tag_data_roles_agree(
+                                tag.keys(),
+                                pkt.keys(),
+                                buffers[other][0][0].keys(),
+                                buffers[other][0][1].keys(),
+                            )
+                        except InputValidationError as exc:
+                            raise InputValidationError(f"Join: {exc}") from exc
                         needs_reindex = True
 
                     # One-time re-index of rows buffered before shared_keys
