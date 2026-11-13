@@ -52,7 +52,7 @@ def freeze(value: object) -> object:
     return value
 
 
-def frozen_scalar(scalar: "pa.Scalar[Any]") -> object | None:
+def frozen_scalar(scalar: "pa.Scalar[Any]") -> object | None:  # pyright: ignore[reportExplicitAny]
     """Return an Arrow scalar's match key, as the sync ``Join`` equality has it.
 
     Args:
@@ -63,8 +63,7 @@ def frozen_scalar(scalar: "pa.Scalar[Any]") -> object | None:
         because the sync join also keys on a constant column), otherwise the
         frozen value.
     """
-    if isinstance(scalar, pa.ExtensionScalar):
-        scalar = scalar.value
-    if scalar is None or not scalar.is_valid:
+    storage = scalar.value if isinstance(scalar, pa.ExtensionScalar) else scalar
+    if storage is None or not storage.is_valid:
         return None
-    return freeze(scalar.as_py())
+    return freeze(storage.as_py())
