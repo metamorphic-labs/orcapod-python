@@ -650,7 +650,7 @@ class TestNotebookPreview:
         sorted_head = source.head(columns={"sort_by_tags": True})
 
         assert self._scan_limits() == [10, 10]
-        read: list[int] = unsorted_head.table.column("timestamp").to_pylist()
+        read = cast(list[int], unsorted_head.table.column("timestamp").to_pylist())
         assert read == [10, 20, 30, 40, 50, 1, 2, 3, 4, 5]
         assert sorted_head.table.column("timestamp").to_pylist() == sorted(read)
         assert "10 rows read, sorted by tags" in sorted_head.header()
