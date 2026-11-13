@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import uuid
 from abc import abstractmethod
@@ -41,7 +40,6 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
-    head_column_config,
 )
 from orcapod.core.streams.head import (
     BLUEPRINT_NOTE,
@@ -49,7 +47,7 @@ from orcapod.core.streams.head import (
     StreamHead,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.core.datagrams.tag_data import EmptyData, Tag
+from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
     InputValidationError,
@@ -64,8 +62,10 @@ from orcapod.contexts.stored import (
     keep_rows_of_data_context,
     require_same_data_context,
     account_for_stale_tables,
+    describe_store_table,
     find_stale_tables,
     report_rows_of_other_data_contexts,
+    report_unexpected_row_count,
 )
 from orcapod.utils.store_errors import commit_best_effort, keep_store_error
 from orcapod.protocols.core_protocols import (
@@ -223,12 +223,52 @@ def _bare_digest(hash_string: str) -> str:
 _TAG_NODE_INPUT_REF = "_tag_node_input_ref"
 
 
+def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
+    """Return ``data`` rebuilt with ``datagram_id`` as its datagram id.
+
+    A stored row read back is built by a stream, which gives every row a fresh id.
+    The rebuilt datagram has the same columns, types, source info and data context.
+
+    Args:
+        data: The datagram a stream built from a stored row.
+        datagram_id: The id the row was stored under.
+
+    Returns:
+        A datagram equal to ``data`` whose ``datagram_uuid`` is ``datagram_id``.
+    """
+    return Data(
+        data.as_table(columns={"source": True}),
+        record_uuid=datagram_id,
+        data_context=data.data_context_key,
+    )
+
+
 def _executor_supports_concurrent(
     data_function: DataFunctionProtocol,
 ) -> bool:
     """Return True if the data function's executor supports concurrent execution."""
     executor = data_function.executor
     return executor is not None and executor.supports_concurrent_execution
+
+
+class _CloseDeferredWriter:
+    """A writer that forwards rows to ``output`` and leaves closing it to its owner.
+
+    A node hands it to a pod that closes the writer it is given, when the node must
+    still do something (stamp its modified time) before its downstream nodes see the
+    end. The node closes ``output`` itself afterwards.
+    """
+
+    def __init__(self, output: WritableChannel[tuple[TagProtocol, DataProtocol]]):
+        """Wrap ``output``."""
+        self._output = output
+
+    async def send(self, item: tuple[TagProtocol, DataProtocol]) -> None:
+        """Send ``item`` to the wrapped output."""
+        await self._output.send(item)
+
+    async def close(self) -> None:
+        """Do nothing: the owner closes the wrapped output."""
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +578,12 @@ class FunctionNodeBase(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
+        # A stale cache is cleared before any of it is used: the table and the content
+        # hashes are then built from the same rows, and they are the current ones
+        # (ITL-1045). ``iter_data`` clears a stale cache too, but only after the
+        # cached table would already have been read.
+        if self.is_stale:
+            self.clear_cache()
         if self._cached_output_table is None:
             self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
 
@@ -619,21 +665,15 @@ class FunctionNodeBase(StreamBase):
                 order of ``table``; called only when ``column_config`` asks for them.
         """
         tag_keys = self.keys()[0]
-        output_table = arrow_utils.apply_column_config(
-            table, dataclasses.replace(column_config, sort_by_tags=False), tag_keys
+        # The sort sees the hash column and the system tags (they break ties).
+        return arrow_utils.with_content_hash_column(
+            table,
+            column_config.content_hash,
+            content_hashes,
+            lambda carried: arrow_utils.apply_column_config(
+                carried, column_config, tag_keys
+            ),
         )
-        if column_config.content_hash:
-            hash_column_name = (
-                "_content_hash"
-                if column_config.content_hash is True
-                else column_config.content_hash
-            )
-            output_table = output_table.append_column(
-                hash_column_name, content_hashes()
-            )
-        if column_config.sort_by_tags:
-            output_table = arrow_utils.sort_by_tag_columns(output_table, tag_keys)
-        return output_table
 
     def head(
         self,
@@ -645,7 +685,7 @@ class FunctionNodeBase(StreamBase):
         """Return no rows: a node of this kind holds no data. See ``StreamBase.head``."""
         check_head_size(n)
         return self._head_without_rows(
-            head_column_config(columns, all_info),
+            ColumnConfig.handle_config(columns, all_info=all_info),
             HeadStatus.UNAVAILABLE,
             note=BLUEPRINT_NOTE,
         )
@@ -667,7 +707,11 @@ class FunctionNodeBase(StreamBase):
             (t, d) for t, d in pairs if d is not None and not isinstance(d, EmptyData)
         ]
         missing = sum(1 for _, d in pairs if isinstance(d, EmptyData))
-        shown = rows[:n]
+        # With sorting, every row is shaped and sorted (each keeps its own content
+        # hash), then the first n are taken: the head is ``as_table(config)[:n]``.
+        # At least one row is shaped even for n == 0, so that the empty head has the
+        # columns of the rows' own table (the context column among them).
+        shown = rows if config.sort_by_tags else rows[: max(n, 1)]
         table = self._shape_table(
             self._table_from_pairs(shown),
             config,
@@ -675,7 +719,7 @@ class FunctionNodeBase(StreamBase):
                 [data.content_hash().to_string() for _, data in shown],
                 type=pa.large_string(),
             ),
-        )
+        ).slice(0, n)
         note = None
         if missing:
             note = (
@@ -1015,6 +1059,10 @@ class FunctionJobNode(FunctionNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
+    # The job file's expected row count and whether it was checked (ITL-1043); class
+    # defaults so a node attached before ``from_descriptor`` sets them has them.
+    _expected_row_count: int | None = None
+    _row_count_checked: bool = False
     # Set once stored rows of other generations have been accounted for. A node
     # that delivers side effects unsets it at the start of every run.
     _stale_tables_checked: bool = False
@@ -1064,9 +1112,11 @@ class FunctionJobNode(FunctionNodeBase):
         # .node_config setter or PipelineJob.apply_node_config().
         self._node_config: NodeConfig = NodeConfig()
 
-        # Set by from_descriptor() for a loaded node whose saved run had stored
-        # records; a live node computes its own results.
-        self._expects_stored_records: bool = False
+        # Set by from_descriptor() for a loaded node whose job file records how many
+        # pipeline records its run had in the store (ITL-1043); checked once per
+        # store, with a warning only: the store is the source of truth.
+        self._expected_row_count: int | None = None
+        self._row_count_checked: bool = False
         # Batched commits, set only while PipelineJob.run runs the node (ITL-919).
         self._commit_every_rows: int | None = None
         self._rows_since_commit = 0
@@ -1252,6 +1302,8 @@ class FunctionJobNode(FunctionNodeBase):
         self._current_tables_checked = False
         self._unlisted_store_reported = False
         self._skipped_rows_reported = False
+        # ... and its own rows to compare with the job file's expected count.
+        self._row_count_checked = False
         if pipeline_database is not None:
             if result_database is None:
                 # Default result database is pipeline_database scoped to "_result"
@@ -1301,7 +1353,7 @@ class FunctionJobNode(FunctionNodeBase):
         input_stream: StreamProtocol | None = None,
         databases: dict[str, Any] | None = None,
         job_content_hash: str | None = None,
-        expect_stored_records: bool = False,
+        expected_row_count: int | None = None,
     ) -> "FunctionJobNode":
         """Create a read-only ``FunctionJobNode`` stub from a serialized descriptor.
 
@@ -1328,11 +1380,11 @@ class FunctionJobNode(FunctionNodeBase):
                 column written to the DB at execution time.  Required for
                 ``get_all_records()`` to correctly filter DB rows when
                 ``table_scope="pipeline_hash"`` (the default).
-            expect_stored_records: Whether the store held at least one pipeline
-                record of this node (one with this node's content hash) when the
-                job was saved. When ``True``, reading the node from a store with
-                none of them raises instead of returning zero rows, because the
-                store is not the one the job ran against.
+            expected_row_count: How many pipeline records of this node (with its
+                run's content hash) the store held when the job was saved, from the
+                job file's optional ``run.expected_rows``; ``None`` when not recorded.
+                Advisory: a read always returns what the store holds and only warns
+                (``StoreContentWarning``) when the store holds another number.
 
         Returns:
             A ``FunctionJobNode`` in read-only stub mode
@@ -1431,7 +1483,8 @@ class FunctionJobNode(FunctionNodeBase):
 
         # FunctionJobNode — orchestrator config
         node._node_config = NodeConfig()
-        node._expects_stored_records = expect_stored_records
+        node._expected_row_count = expected_row_count
+        node._row_count_checked = False
         node._commit_every_rows = None
         node._rows_since_commit = 0
         node._commit_failed = False
@@ -1535,17 +1588,17 @@ class FunctionJobNode(FunctionNodeBase):
             "as_table() or iter_data()."
         )
 
-    def _has_stored_records(self) -> bool:
-        """Return whether the attached store holds a pipeline record of this node.
+    def _stored_record_count(self) -> int:
+        """Return how many pipeline records of this node the attached store holds.
 
         A record belongs to this node when its ``_node_content_hash`` is this
         node's content hash: the rows ``iter_data()`` and ``get_all_records()``
         read back. Records of other runs or data contexts do not count.
         """
         if self._pipeline_database is None:
-            return False
+            return 0
         if not self._pipeline_database.table_exists(self._versioned_pipeline_path):
-            return False
+            return 0
         own_records = self._pipeline_database.get_records_with_column_value(
             self._versioned_pipeline_path,
             {
@@ -1553,51 +1606,57 @@ class FunctionJobNode(FunctionNodeBase):
                 constants.DATA_CONTEXT_COL: self._stored_data_context_key,
             },
         )
-        return own_records is not None and own_records.num_rows > 0
+        return 0 if own_records is None else own_records.num_rows
+
+    def _expected_row_count_to_save(self, run_finished: bool) -> int | None:
+        """Return the count ``PipelineJob.save`` records for this node, if certain.
+
+        A loaded node keeps the count its file recorded, or none. A node of a job
+        whose last run finished (its writes committed) records the pipeline records
+        the store holds under its run's key; otherwise nothing is certain.
+
+        Args:
+            run_finished: Whether the job's last run finished and committed.
+        """
+        if self._function_pod is None:
+            return self._expected_row_count
+        if not run_finished or self._pipeline_database is None:
+            return None
+        return self._stored_record_count()
 
     def _require_readable_stub(self) -> None:
         """Raise unless this loaded node can read its stored results.
 
         Raises:
-            RuntimeError: If no store is attached, or the saved run stored records
-                that the attached store does not have.
+            RuntimeError: If no store is attached.
         """
         from orcapod.pipeline.serialization import LoadStatus
 
         if self.load_status == LoadStatus.UNAVAILABLE:
             raise self._no_store_error()
-        self._require_expected_records()
+        self._check_expected_rows()
 
-    def _require_expected_records(self) -> None:
-        """Raise if the saved run stored this node's records but the store has none.
+    def _check_expected_rows(self) -> None:
+        """Warn, once per store, if the store holds another number of rows than recorded.
 
-        A loaded node reads only what its store holds. When the job was saved
-        with records of this node in the store and the attached store has none
-        of them, the store is not the one the job ran against; reading zero rows
-        would make the stored results look lost.
-
-        Raises:
-            RuntimeError: If the saved run stored records for this node and the
-                attached store has none of them.
+        The store is the source of truth: the read goes on and returns what it holds
+        (ITL-1043). Only a job file that records the node's count is checked.
         """
-        if not self._expects_stored_records or self._has_stored_records():
+        if self._expected_row_count is None or self._row_count_checked:
             return
-        assert self._pipeline_database is not None  # attached: status is READ_ONLY
-        store_config = self._pipeline_database.to_config()
-        location = store_config.get("root_uri")
-        store = (
-            f"store at {location!r}"
-            if location
-            else f"{store_config.get('type', 'attached')} store"
-        )
-        table = "/".join(
-            self._pipeline_database.base_path + self._versioned_pipeline_path
-        )
-        raise RuntimeError(
-            f"FunctionJobNode {self.label!r}: the saved run stored results for this "
-            f"node, but the attached {store} has none of them (table {table!r}). Load "
-            "the job with the store it ran against: PipelineJob.load(path, store=...)."
-        )
+        self._row_count_checked = True
+        if self._pipeline_database is None:
+            return
+        found = self._stored_record_count()
+        if found != self._expected_row_count:
+            report_unexpected_row_count(
+                f"FunctionJobNode {self.label!r}",
+                describe_store_table(
+                    self._pipeline_database, self._versioned_pipeline_path
+                ),
+                self._expected_row_count,
+                found,
+            )
 
     def _require_pipeline_database(self) -> ArrowDatabaseProtocol:
         """Return the attached pipeline database, raising if there is none.
@@ -2536,8 +2595,12 @@ class FunctionJobNode(FunctionNodeBase):
 
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and no
-                store is attached, or its saved run stored records that the
-                attached store does not have.
+                store is attached.
+
+        Warns:
+            StoreContentWarning: Once per store, if the node was loaded from a job file
+                that records another number of pipeline records for its run than the
+                store holds. The store is the source of truth.
         """
         if self._function_pod is None:
             self._require_readable_stub()
@@ -2882,7 +2945,7 @@ class FunctionJobNode(FunctionNodeBase):
 
     def _stored_rows_stream(
         self, fetched: _JoinedRecords
-    ) -> tuple[list[bytes], ArrowTableStream] | None:
+    ) -> tuple[list[bytes], ArrowTableStream, list[uuid.UUID]] | None:
         """Return the persistent stored rows of *fetched* as a stream.
 
         The stream is built over the stored Arrow records with the internal
@@ -2891,8 +2954,9 @@ class FunctionJobNode(FunctionNodeBase):
         greatest recomputation index.
 
         Returns:
-            The base entry ID of each row, in stream order, and the stream; or
-            ``None`` when no persistent row is stored.
+            The base entry ID of each row, in stream order, the stream, and the
+            stored ``__data_id`` of each row (the id of the result record, in
+            stream order); or ``None`` when no persistent row is stored.
         """
         joined = fetched.table
         if joined.num_rows == 0:
@@ -2933,13 +2997,17 @@ class FunctionJobNode(FunctionNodeBase):
             if c.startswith(constants.META_PREFIX)
             or c == constants.NODE_CONTENT_HASH_COL
         ]
+        data_ids = [
+            uuid.UUID(bytes=bytes(cast(bytes, record_id)))
+            for record_id in joined.column(constants.DATA_RECORD_ID).to_pylist()
+        ]
         # A fall-through column is the stored tag column in its data role (ITL-1023).
         stream = ArrowTableStream(
             joined.drop(drop_cols),
             tag_columns=self._stored_tag_keys(fetched),
             reference_tags=fall_through_references(self._function_pod),
         )
-        return base_entry_ids, stream
+        return base_entry_ids, stream, data_ids
 
     def _load_cached_entries(
         self,
@@ -2981,9 +3049,13 @@ class FunctionJobNode(FunctionNodeBase):
         # --- Process normal (fully matched) rows ---
         stored = self._stored_rows_stream(fetched)
         if stored is not None:
-            base_entry_ids_col, stream = stored
-            for base_eid, (tag, data) in zip(base_entry_ids_col, stream.iter_data()):
-                loaded[base_eid] = (tag, data)
+            base_entry_ids_col, stream, data_ids = stored
+            for base_eid, data_id, (tag, data) in zip(
+                base_entry_ids_col, data_ids, stream.iter_data(), strict=True
+            ):
+                # A stored result is the datagram its own provenance names: it
+                # carries the stored ``__data_id`` as its datagram id (ITL-1060).
+                loaded[base_eid] = (tag, _with_datagram_id(data, data_id))
 
         # --- Process EmptyData tokens (ephemeral misses) ---
         for base_eid, empty_data in fetched.empty_data_tokens.items():
@@ -3053,16 +3125,18 @@ class FunctionJobNode(FunctionNodeBase):
         After a run (or ``execute``) the rows are the node's results in memory, the
         first of what ``as_table`` returns. Otherwise they are the first of its stored
         rows: the node's whole stored slice is read and nothing is kept on the node.
-        With nothing stored, there are no rows. See ``StreamBase.head``.
+        With nothing stored, there are no rows. The node has all of its rows, so with
+        ``sort_by_tags`` (or ``all_info``) the head is exactly
+        ``as_table(...).slice(0, n)``, whatever order the rows were computed in. See
+        ``StreamBase.head``.
 
-        Raises:
-            RuntimeError: If the node was loaded and the attached store does not hold
-                the records its saved run stored (the wrong store).
+        Warns:
+            StoreContentWarning: As for ``as_table``.
         """
         from orcapod.pipeline.serialization import LoadStatus
 
         check_head_size(n)
-        config = head_column_config(columns, all_info)
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
         status = self.load_status
         if status == LoadStatus.UNAVAILABLE:
             return self._head_without_rows(
@@ -3083,7 +3157,7 @@ class FunctionJobNode(FunctionNodeBase):
         """
         if self._function_pod is None:
             # A loaded node: its table is built from the stored Arrow records.
-            self._require_expected_records()
+            self._check_expected_rows()
             fetched = self._fetch_joined_records()
             stored = None if fetched is None else self._stored_rows_stream(fetched)
             stored_ids = set(stored[0]) if stored is not None else set()
@@ -3130,10 +3204,14 @@ class FunctionJobNode(FunctionNodeBase):
         table has zero rows and the node's columns.
 
         Raises:
-            RuntimeError: If the node was loaded and no store is attached, its
-                saved run stored records the attached store does not have, or
-                some of its results were kept in an ephemeral store, which is
-                not saved with the job.
+            RuntimeError: If the node was loaded and no store is attached, or some of
+                its results were kept in an ephemeral store, which is not saved with
+                the job.
+
+        Warns:
+            StoreContentWarning: Once per store, if the node was loaded from a job file
+                that records another number of pipeline records for its run than the
+                store holds. The read returns what the store holds.
         """
         if self._function_pod is None:
             self._require_readable_stub()
@@ -3194,7 +3272,7 @@ class FunctionJobNode(FunctionNodeBase):
 
         if self._function_pod is None:
             # A loaded node: its rows can come only from the store.
-            self._require_expected_records()
+            self._check_expected_rows()
         if not self._cached_output_datas and self._cached_function_pod is not None:
             # Hot-load from DB on the first call when store is empty.
             loaded = self._load_cached_entries()
@@ -3550,13 +3628,21 @@ class FunctionJobNode(FunctionNodeBase):
                 # Commit the last rows inside a job (ITL-919); a no-op otherwise.
                 self._commit_at_node_end()
             else:
-                # No-DB path: delegate dispatch entirely to the pod.
-                # The pod's async_execute() closes `output` in its own finally.
+                # No-DB path: delegate dispatch entirely to the pod. The pod closes
+                # the writer it is given; that close waits for the finally below, so
+                # the node is stamped before its downstream nodes see the end.
                 await self._function_pod.async_execute(
-                    [input_channel], output, observer=ctx_obs, run_id=run_id
+                    [input_channel],
+                    _CloseDeferredWriter(output),
+                    observer=ctx_obs,
+                    run_id=run_id,
                 )
 
             ctx_obs.on_node_end(node_label, node_hash)
+            # The run is complete: stamp the node as the sync execute() does, before
+            # the finally closes the output, so every downstream node, which stamps
+            # after it has seen that close, is newer than this one (ITL-1042).
+            self._update_modified_time()
         except Exception as run_error:
             self._commit_after_failure(run_error)
             raise
