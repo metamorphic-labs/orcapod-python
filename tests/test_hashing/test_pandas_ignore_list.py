@@ -138,8 +138,8 @@ class TestHandlers:
         # a value, a label, a label's type, a column's dtype, the index
         assert digest(base) != digest(base.assign(a=[1, 3]))
         assert digest(base) != digest(base.rename(columns={"a": "c"}))
-        assert digest(pd.DataFrame({0: [1], "x": [2]})) != digest(
-            pd.DataFrame({"0": [1], "x": [2]})
+        assert digest(pd.DataFrame({0: [1], 1: [2]})) != digest(
+            pd.DataFrame({"0": [1], "1": [2]})
         )
         assert digest(base) != digest(base.astype({"a": "int32"}))
         assert digest(base) != digest(base.set_axis([5, 6], axis="index"))

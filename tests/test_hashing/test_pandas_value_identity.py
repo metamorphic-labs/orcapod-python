@@ -448,6 +448,13 @@ class TestOutsideTheGrammar:
 
         with pytest.raises(ValueError, match="Label"):
             _hash(pd.DataFrame({Label(): [1]}))
+        # Also where storage would write the label or name as text.
+        with pytest.raises(ValueError, match="Label"):
+            _hash(pd.DataFrame({Label(): [1], "b": [2]}))
+        with pytest.raises(ValueError, match="Label"):
+            _hash(pd.DataFrame({"a": [1]}, index=pd.Index([0], name=Label())))
+        with pytest.raises(ValueError, match="Label"):
+            _hash(pd.Series([1], name="s", index=pd.Index([0], name=Label())))
 
     def test_unsupported_dtype_raises_naming_the_column(self) -> None:
         frame = pd.DataFrame({"s": pd.arrays.SparseArray([0, 1])})
@@ -652,7 +659,8 @@ class TestDescriptorGrammar:
             "height": 2,
             "attrs": {},
             "columns": [
-                [{"int": 0}, {"masked": "Int64"}],
+                # Labels of mixed type: storage writes them as text.
+                ["0", {"masked": "Int64"}],
                 [
                     "c",
                     {
