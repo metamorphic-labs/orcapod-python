@@ -9,6 +9,7 @@ Delta Lake store.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 from pathlib import Path
 
 import pyarrow as pa
@@ -22,7 +23,6 @@ from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase
 from orcapod.pipeline import PipelineJob
-from orcapod.system_constants import constants
 from orcapod.types import Schema
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ class _LegacyGroupBy(GroupBy):
         tag_columns, _ = stream.keys()
         non_key = [c for c in tag_columns if c not in self.by]
         input_table = stream.as_table()
-        members: dict[tuple, list[dict]] = {}
+        members: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         for row in input_table.to_pylist():
             members.setdefault(tuple(row[c] for c in self.by), []).append(row)
         keys = [

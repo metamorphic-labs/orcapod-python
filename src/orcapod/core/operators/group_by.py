@@ -25,8 +25,7 @@ def _null_last_key(value: Any) -> tuple[Any, ...]:
 
     The leading integer keeps a null comparable against a real value of any
     type.  A list is keyed element by element, so a list-valued non-key tag
-    that holds a null (a list-typed tag column of a source, or the tags of a
-    ``Batch`` output joined in) still compares.
+    that holds a null (a list-typed tag column of a source) still compares.
 
     Args:
         value: A tag or system-tag value: a scalar, ``None``, or a list of

@@ -1,6 +1,6 @@
 # ITL-1070 — GroupBy drops the tags that are not in `by`
 
-Status: DRAFT, plan sent to coordinator for approval (hash-critical). No code before approval.
+Status: APPROVED by coordinator 2026-11-13 (option A: no identity change; delete changelog.d/ITL-955.md and make ITL-1070.md the net entry; keep _null_last_key recursion; stale-table gap filed as ITL-1072). Implemented.
 
 Branch: `eywalker/itl-1070-groupby-drops-the-tags-that-are-not-in-by` (from origin/main 5c7a058f).
 History: ITL-955 (#316) made non-key tags list-valued tags. Future opt-in mode: ITL-1071 (not ours).
@@ -73,4 +73,4 @@ Prototype diff saved at scratchpad `proto.diff` (10 lines in group_by.py).
 
 ## Notes for successor
 
-Plan sent to coordinator via ask (2026-11-13); waiting on decision about stale v0.3-dev tables.
+Implemented, tests/docs/changelog/design issue done; ITL-1048 note posted. Next: PR, Copilot review, CI on 3.11/3.12/3.13.
