@@ -1,0 +1,13 @@
+=== V1. Top-level keys of a saved job file
+    ['bindings', 'orcapod_pipeline_job_version', 'pipeline', 'run']
+
+=== V2. Every field naming a version or a data context
+    orcapod_pipeline_job_version = "0.1.0"
+    pipeline.orcapod_pipeline_version = "0.1.0"
+    pipeline.nodes.semantic_v1:c472fc04f813764db9cb4d1567c03ce3ee70a48a47cdbcd0a165a01589d74596.data_context_key = "std:v1:default"
+    pipeline.nodes.semantic_v1:a55f98a143f589ff66e8430a3b9eb26d5beb703dc30a2b7c5267f9f89d3bdd29.data_context_key = "std:v1:default"
+    pipeline.nodes.semantic_v1:a55f98a143f589ff66e8430a3b9eb26d5beb703dc30a2b7c5267f9f89d3bdd29.function_config.data_function.config.version = "v0.0"
+
+=== V3. A source config inside the job (bindings.sources)
+    src: keys ['content_hash', 'data_schema', 'pipeline_hash', 'source_id', 'source_type', 'tag_columns', 'tag_schema']
+    src.config keys: []

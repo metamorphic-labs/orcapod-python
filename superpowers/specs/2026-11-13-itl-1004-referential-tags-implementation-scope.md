@@ -15,7 +15,12 @@ spec marks Open or that the code makes impossible or ambiguous.
   stream changes (§3).
 - The change is a change of default behaviour.
 - `Join`'s three cases (§9.1) have equal standing.
-- At a pod boundary a reference whose data column does not survive becomes a plain tag (D1).
+- Pod boundary (D1). With `pod.process(...)`, and `pod(..., strict=True)`, a reference whose
+  data column does not survive becomes a plain tag. With `pod(...)`, an automatic step around
+  the pod gives the input's references back their data role (§11). Full append is deferred
+  (ITL-1025).
+- `GroupBy` follows spec §8 unchanged; `Join` gets no special rule for list-valued tags.
+- Saved jobs carry version information that pins behaviour (§4).
 - Renames (§5.4): `map_tags` moves both roles of a reference, `tag_only=True` and `map_data`
   leave a plain tag.
 
@@ -242,16 +247,31 @@ and raise, unless the function takes all keys. That is decision D2.
 
 **Stored-schema changes, named exactly.**
 - No stored table changes, and the descriptor format is unchanged.
-- Source configs gain `tag_only_columns` (§6.2). **Recommended rule (decision D8):**
-  - v0.4 `to_config` always writes the key, as an empty list when every tag is referential.
-  - A config **without** the key is a v0.3 config, and `from_config` /
-    `resolve_source_from_config` restores it with every declared tag tag-only, its v0.3
-    meaning.
-  - So a saved v0.3 job reloads with the content and pipeline hashes it saved. Otherwise its
-    sources would be rebuilt referentially and silently disagree with the saved descriptors
-    (`pipeline/job.py` `PipelineJob.save` embeds each source's `to_config()` beside the node
-    hashes).
-  - The referential default applies to sources built in code.
+- Source configs gain `tag_only_columns` (§6.2).
+- **Version pinning (developer, November 12, 2026: "saved jobs should clearly come with
+  version info to pin behavior").** Measured (`07`), a saved job today holds:
+  - `orcapod_pipeline_job_version = "0.1.0"` (written `pipeline/job.py:1356`, checked
+    `:1422-1426`);
+  - the embedded pipeline's `orcapod_pipeline_version = "0.1.0"` (`pipeline/graph.py:217`,
+    checked `:258`);
+  - a `data_context_key` per node (`std:v1:default`).
+
+  It holds no Orcapod package version, and the source configs in `bindings.sources` carry
+  none. Both format versions were already `"0.1.0"` at v0.2.0, so they were not bumped
+  across the v0.2-to-v0.3 hash changes. The context key will not change in v0.4 (§3.2), so
+  it cannot tell v0.3 from v0.4.
+- **The rule (decision D8):**
+  - v0.4 bumps both format versions in the change that flips the source default (the last
+    step of ITL-1012).
+  - Loading a `"0.1.0"` file pins v0.3 meaning: every declared tag tag-only. The saved
+    content and pipeline hashes then match.
+  - A standalone source config (a `to_config()` dict outside a job or pipeline file) carries
+    no version, so v0.4 adds a `config_version` to source configs if those must reload
+    across versions.
+  - Sent to the coordinator before the v0.3.0 tag: nothing is strictly required in v0.3.0,
+    but writing `orcapod_version` (the package version) beside both format versions costs
+    about two lines and no hash. It lets v0.4 tell v0.3.0 files from files written by the
+    ITL-1023 integration branch, which uses format `"0.1.0"` with referential tags.
 
 **Legacy data.** A v0.3 table or saved job has disjoint `tag`/`data` sets, so it reads as
 plain tags only (§16.1). Nothing is reinterpreted.
@@ -476,7 +496,9 @@ Functions that read the copy recompute once, because the column name is in the `
   materializes.
 - **Tags pass through** (`function_pod.py:739-747`). The output data is only the function's
   outputs (`:747`), so a reference's target never survives a pod, whether or not it was read.
-  Measured: `uses_x.pod(R)` outputs tags `(session, x)`, data `(z,)`. Decided (D1): the tag becomes plain at the pod boundary; a fall-through / append convenience is a planned follow-up.
+  Measured: `uses_x.pod(R)` outputs tags `(session, x)`, data `(z,)`. Decided (D1): with
+  `process` the tag becomes plain at the boundary; with `pod(...)` an automatic step gives the
+  references back their data role (§11).
 - **An output name that collides with a tag (§6.2, Required).**
   - Today `output_schema` accepts it (`01 R5`:
     `(Schema({'x': int | None}), Schema({'x': float}))`), and reading fails with
@@ -519,7 +541,7 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 | 2c | **ITL-1016** | `Join` three cases, sync and async; field-level provenance per D5; §15.4 tests; `06 J1` pinned | M | 1 | 2a, 2b, 2d, 2e |
 | 2d | **ITL-1017** | `GroupBy` key scalar in data; `Batch` tests; §15.3 tests | S | 1 | others |
 | 2e | **ITL-1014** | tests only for the filters, `SemiJoin` and `DropNulls`; `Index`/`Pick` in-place rejection | S | 1 | others |
-| 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule; automatic join and select with references; §15.2 and §15.6 result-identity tests | M | 1, 2b; 2c for the automatic join | 4 |
+| 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule (plain under `process`); automatic join and select with references; the `ReferenceFallThrough` step on `pod(...)` (§11, after its duplicate-tag test is agreed); §15.2 and §15.6 result-identity tests | M+M | 1, 2b; 2c and 2d for the automatic join and the fall-through | 4 |
 | 4 | **ITL-1019** | nodes, stores and saved jobs pass references; descriptor intersection; reuse across retagging (§15.6) | S | 1 | 3 |
 | 4b | **ITL-1012, part 2 (its last step), with ITL-1011** | **flip the default** to referential; golden fixtures switched to `tag_only_columns`, new entries; upgrade note | S | **1013, 1015, 1016, 1017, 1019** | — |
 | 5 | **ITL-1018** | `MergeJoin` (D4); the decided rename rules (§5.4), unless the ITL-1023 slice lands them | M | 1 | 6 |
@@ -581,28 +603,19 @@ context version. To confirm:
 
 **D1. A reference after a function pod: DECIDED (developer, November 12, 2026).** Required
 §6.1 cannot hold as written, because a pod outputs only its function's outputs
-(`function_pod.py:747`); the §6.1 example is conditional ("assuming the output stream retains
-the input data `x`"), and in Orcapod it never does.
-
-The decision: at a pod boundary, a referential tag whose data column does not survive becomes
-a **plain tag** with the same value and type, visible in the pod's output schema
-(`binding_transitions`). A pod's output data stays the function's outputs. Storage and result
-identity do not change.
-
-The options considered and not taken:
-- passing referenced input columns through to the output data;
-- rejecting a pod over references.
-
-Two parts remain:
-- **The diagnostic at a pod boundary (the coordinator's call).** With referential sources by
-  default, *every* pod would trigger it, so the recommendation is **none** there. The same
-  goes for the automatic select of `pod(...)` (ITL-807), which fires on every call. The
-  `reference_materialization` warning is for a select or drop the user wrote (a rename never warns, §5.4). The
-  transition is still recorded in the schema and the pipeline hash (§7.4: the diagnostic
-  never changes a result).
-- **Planned follow-up, out of scope now.** A separate project issue covers a "fall-through /
-  append" convenience: the pod result joined back to its input stream so the tags stay
-  referential. Not to be built in the slices above.
+(`function_pod.py:747`). The §6.1 example is conditional ("assuming the output stream
+retains the input data `x`"), and in Orcapod it never does. The decision:
+- **`pod.process(stream)` and `pod(stream, strict=True)`:** a reference whose data column
+  does not survive becomes a **plain tag** (same value and type), visible in the output
+  schema. No automation. The `strict` reading is the coordinator's; the developer may
+  correct it.
+- **`pod(stream)`:** an automatic step **around** the pod, of the ITL-807 family and visible
+  in the graph, gives the input's referential keys their data role back. The pod node, what
+  it stores and function-result identity are unchanged. Only referential key columns fall
+  through; full append is deferred (ITL-1025). The mechanism is proposed in §11.
+- **The diagnostic** is the coordinator's call. Recommended none at the pod boundary or in
+  the automatic select: the `reference_materialization` warning is for a select or drop the
+  user wrote (a rename never warns, §5.4).
 
 **D2. `pod.process(...)` and `strict=True` with referenced keys (ITL-807).** Under the default,
 every key is an extra data column for a function that does not read it.
@@ -645,86 +658,81 @@ needs a shape).**
 `tag_only_columns=[...]`, a subset of `tag_columns` (§6.2). Open for the ITL-1012 worker to
 propose: a shorthand for "all declared tags", useful for database sources whose tags default
 to primary keys.
-**D8. How a stored source config without `tag_only_columns` is restored** (a stored-config
-rule, §4).
-- (a) **Recommended.** v0.4 always writes the key; a config without it is v0.3 and restores
-  with every declared tag tag-only. Saved v0.3 jobs reload with their saved hashes.
-- (b) A config without the key gets the new default. Simpler, but a reloaded v0.3 job
-  rebuilds its sources referentially and no longer matches its saved hashes and table paths.
+**D8. Version pinning of saved files (decided in principle by the developer; the mechanism
+needs approval).**
+- (a) **Recommended.** v0.4 bumps `PIPELINE_JOB_FORMAT_VERSION` and `PIPELINE_FORMAT_VERSION`
+  with the default flip, and `"0.1.0"` loads with v0.3 tag meaning. v0.3.0 adds
+  `orcapod_version` before its tag (informational). v0.4 adds `config_version` to standalone
+  source configs.
+- (b) Rely on the format-version bump alone. Files from the ITL-1023 integration branch
+  (format `"0.1.0"`, referential tags) would then be misread as v0.3.
 
 ---
 
-## 11. Rules under reconsideration (November 12)
+## 11. The two rules settled late (developer, November 12)
 
-The developer may change two rules. For each, here is what changes against this document.
+### B. `GroupBy`: no change
 
-### A. A referential tag stays referential through a function pod (instead of D1)
+Spec §8.2 stands: a non-key referential tag becomes the same list in both roles and stays
+referential, and plain tags behave as in v0.3 (§5). `Join` gets no special refusal for a
+shared list-valued tag. `Join` matches same-named tags whatever their type, and streams
+whose same-named tags mean different things must be renamed. What `Join` does today with a
+shared list-valued tag (correct match, wrong match, or a join-engine error, sync and async)
+is for the ITL-1023 worker to measure and report.
 
-The pod's output keeps the data role: output data = function outputs + the input's referenced
-columns. The result store is unchanged, and the node gives the data role back from the stored
-tag column on read.
+### A. Pod boundary: references fall through on `pod(...)` only
 
-**Operator table (§5, §7):**
-- `FunctionPod.output_schema` adds the referenced input columns to the data schema.
-- The automatic select of `pod(...)` must **keep** referenced columns, so they are not made
-  plain before the pod. The pod then passes only its parameters to the function.
-- Output rows must carry `x` (from the input row) beside the outputs, and `_table_from_pairs`
-  must deduplicate it like `_rows_to_table`.
-- The output-collision rule is unchanged.
-- Downstream, a pod's output meets `Join` case 3 with sources.
-- Size: ITL-1013 grows from M to L.
+What the code must do (D1):
+- `process` and `strict`: the tag becomes plain.
+- `pod(...)`: an automatic step after the pod restores the data role of the input's
+  referential keys.
 
-**Hash verdict (§3):**
-- Result identity is at risk. The memo key is the whole input `Data` hash
-  (`result_cache.py:217`, `function_node.py:140`, `:2407-2408`). If referenced keys stay in
-  `Data`, a function that does not read them gets a new key, and v0.3 results would not be
-  reused (spec §12.4).
-- So the pod must hash **its parameter projection** of the input `Data`, never the whole
-  row. For a tag-only stream that projection is the whole `Data` (ITL-807's strict contract),
-  so no golden value moves.
-- Pipeline hashes of pods over references change (new shapes only). No data context
-  version.
+**Correctness constraints for that step:**
+- Pod output rows are one-to-one with input rows, except rows whose function returned
+  nothing, which the pod skips (`function_pod.py:1047-1054`).
+- User tags are not unique per row, so a tag join of the output back onto the input can
+  multiply rows.
+- A literal `Join` of a stream with its own ancestor would extend and duplicate system-tag
+  names.
 
-**Node storage (§4):**
-- `pdb_v2` already holds `x` as a tag, and `rdb_v2` holds only outputs, so neither changes.
-- On read, `FunctionNode` rebuilds the output stream with `reference_tags` = the input's
-  references, and the data `x` *is* the stored tag column (`function_node.py:2891`).
-- The value is still written once.
+**Proposed mechanism: a binary structural step `ReferenceFallThrough(names)(pod_output,
+pod_input)`**, inserted by `_FunctionPodBase.__call__` beside ITL-807's automatic join and
+select:
+- **Row alignment by the full system tag tuple.**
+  - The pod passes each input row's tag through unchanged, system tags included
+    (`function_pod.py:1047-1054`: it yields the input `tag` object).
+  - The tuple of system-tag columns (`source_id`/`record_id` per input position) identifies
+    the input row. Source record ids are `uuid5(source_id::token)` and unique per source row
+    (`stream_builder.py:97-116`). A join pairs them, and `GroupBy`/`Batch` fold them into one
+    digest per group.
+  - The step matches output to input on that tuple. It needs no user tag, so duplicate user
+    tags cannot multiply rows.
+  - An input row the pod skipped has no output row and is dropped, as the pod dropped it.
+- **System tags are name-preserving (rule 1).** Both inputs carry the same system-tag
+  columns, so the output keeps the pod output's columns unchanged. This is not a `Join`:
+  nothing is renamed or extended.
+- **Data comes from data.** Each restored data element and its `_source_x` come from the
+  pod *input's* data column `x`. No data element comes from a tag value (ITL-955), and
+  field-level provenance survives. A unary "re-reference the plain tag column" step was
+  considered and rejected: it would turn a tag column into data (against ITL-955), and it
+  cannot restore `_source_x`, which only the input's `Data` holds.
+- **Identity.** `("ReferenceFallThrough", sorted(names))`, with ordered arguments (output,
+  input). It is a new node in the graph. The pod node, its pipeline table and its results are
+  unchanged. A stream without references inserts no step, so no v0.3 graph or hash changes.
+- **Storage.** As an operator node it writes an `odb_v1` table like any operator. It stores
+  `x` once, as the referential column.
+- **Size: M**, sync plus async (barrier `async_execute` first). It belongs in ITL-1013, after
+  ITL-1016 and ITL-1017.
 
-### B. `GroupBy`: a non-key referential tag becomes a data-only list column
-
-Under B:
-- A non-key referential tag loses its tag role and becomes a data-only list.
-- A non-key plain tag stays a list-valued tag, as in v0.3.
-- `Join` refuses a shared list-valued tag.
-
-**Operator table (§5):**
-- `GroupBy` on a non-key reference: output tags omit `x`, data `x` is `list[T]`, and the
-  output references are the referenced keys only. `unary_output_schema` (`group_by.py:302`)
-  and the rebuild (`:258`) change together.
-- The member sort still reads the input's non-key tags (`:192-215`), so the order is
-  unchanged.
-- `Batch` is not covered by B. Batch has no keys, so B's analogue would make every reference
-  a data-only list; it needs a ruling.
-- `Join` gets a new check: a shared tag that is list-valued in either input is refused when
-  the graph is built, from `output_schema`.
-
-**Hash verdict (§3):**
-- No golden entry moves. Plain non-key tags stay lists in v0.3 form, and the golden cases
-  join only ungrouped streams (`cases.py:1113`).
-- The new `Join` refusal is a behaviour change for v0.3 pipelines that join two grouped
-  streams on a shared list-valued tag. They get an error where they ran before. No hash
-  moves, but it belongs in the upgrade note.
-
-**Node storage (§4):**
-- Unchanged. `odb_v1` stores one flat table, and roles come from the descriptor.
-
-### Reconsideration: where each rule touches the slices
-
-- **A** touches only ITL-1013 and ITL-1019.
-- **B** touches only ITL-1017 and ITL-1016.
-
-Neither changes the representation (§2) or the stores (§4).
+**Test, required before building (duplicate user tags):**
+- A source with rows `(session=s1, x=10, y=1)` and `(session=s1, x=20, y=2)`: user tag
+  `session` duplicated, `x` referential, `y` data.
+- `pod(...)` with a function reading only `y` returns exactly two rows, with data
+  `x = [10, 20]` aligned to `y`.
+- `pod.process(...)` (or `strict=True`) returns two rows with `x` a plain tag.
+- The pod node's stored records equal those of the `process` form.
+- The same holds after a `Join` of two sources (two record ids per row), on the sync and
+  async paths.
 
 ---
 
