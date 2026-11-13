@@ -1,4 +1,4 @@
-"""A ``Data``'s source info follows its data columns in every view (ITL-1040).
+"""A ``Data``'s source info follows its data columns in every view (ITL-1040, ITL-838).
 
 ``Data.drop`` and ``Data.select`` used to remove a data column but keep its source info,
 which ``as_dict`` filtered out and ``as_table`` / ``arrow_schema`` did not. The async paths
@@ -52,6 +52,8 @@ def assert_source_follows(d: Data, expected_columns: list[str]) -> None:
     assert d.keys() == tuple(expected_columns)
     config = {"source": True}
     assert source_columns(d.as_table(columns=config).column_names) == expected
+    assert source_columns(d.as_table(all_info=True).column_names) == expected
+    assert source_columns(d.arrow_schema(all_info=True).names) == expected
     assert source_columns(d.arrow_schema(columns=config).names) == expected
     assert source_columns(list(d.as_dict(columns=config))) == expected
     assert source_columns(list(d.schema(columns=config))) == expected
@@ -72,6 +74,14 @@ def test_select_keeps_only_the_source_info_of_the_selected_columns(
 ) -> None:
     selected = data(backing).select("x", "m")
     assert_source_follows(selected, ["x", "m"])
+
+
+@pytest.mark.parametrize("backing", BACKINGS)
+def test_select_orders_the_source_info_as_the_columns(backing: str) -> None:
+    """Whatever column order ``select`` gives, the source info follows it."""
+    reordered = data(backing).select("m", "x")
+    assert set(reordered.keys()) == {"m", "x"}
+    assert_source_follows(reordered, list(reordered.keys()))
 
 
 @pytest.mark.parametrize("backing", BACKINGS)

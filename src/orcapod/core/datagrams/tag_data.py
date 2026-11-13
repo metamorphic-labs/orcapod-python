@@ -480,10 +480,16 @@ class Data(Datagram):
         return table
 
     def select(self, *column_names: str) -> Self:
-        """Return a copy holding only the given data columns and their source info."""
+        """Return a copy holding only the given data columns and their source info.
+
+        The source info is in the order of the columns the copy holds.
+        """
         new_p = super().select(*column_names)
+        # Datagram.keys: the data columns, also for an EmptyData, whose keys() raises.
         new_p._source_info = {
-            k: v for k, v in self._source_info.items() if k in column_names
+            k: self._source_info[k]
+            for k in Datagram.keys(new_p)
+            if k in self._source_info
         }
         new_p._source_info_table = None
         return new_p
