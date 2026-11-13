@@ -78,8 +78,8 @@ does not make it compute again.
 
 | Operator | Referential tag `x` |
 |---|---|
-| `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. Its source info lists both inputs' tokens. Every other data-name collision is still an error. |
-| `GroupBy` | A group key stays scalar in both roles; a non-key becomes the same list in both roles, in the same member order. |
+| `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). Every other data-name collision is still an error. |
+| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below); a non-key becomes the same list in both roles, in the same member order, with one source-info token per member. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag leaves `x` a data column. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
@@ -96,6 +96,32 @@ units = op.sources.DictSource(
 joined = spikes.join(units)
 print(joined.keys())
 # (('unit', 'time'), ('unit', 'area', 'time', 'amp'))
+```
+
+### Source info of a merged value
+
+A source-info column belongs to its data column and has its shape: a scalar value has one
+token, a list one token per element. When a value is the merge of several equal elements
+that are different entries (the key of a `GroupBy`, or the key a `Join` merges from
+several referential inputs), no single member's token is true for it. Its source info is
+then one **merged token**, `merged:source_fold_v1:<hex>`: the SHA-256 digest of the
+members' tokens, sorted, so it does not depend on row or input order. It is a merged
+token for a group of one member too, and a merged token can itself be a member of a
+later merge. A merged key that is a list (two grouped streams joined on a list-valued
+referential tag) gets one merged token per element. No content hash, pipeline hash, record id or
+function result identity reads source info, so these tokens move no stored result.
+
+```python
+sessions = op.sources.DictSource(
+    [{"subject": "m1", "t": 1, "v": 0.5}, {"subject": "m1", "t": 2, "v": 0.7}],
+    tag_columns=["subject", "t"],
+    source_id="sessions",
+)
+grouped = sessions.group_by(["subject"]).as_table(columns={"source": True})
+print(grouped.column("_source_subject").to_pylist())
+# ['merged:source_fold_v1:...']
+print(grouped.column("_source_v").to_pylist())
+# [['sessions::row_0::v', 'sessions::row_1::v']]
 ```
 
 The materialization warning can be turned off; it never changes a result or a hash:
