@@ -118,8 +118,10 @@ def test_the_default_head_is_not_sorted_and_the_sorted_one_is(kind: str) -> None
     stream = STREAMS[kind]()
     ids = stream.head(ROWS).table.column("id").to_pylist()
     assert ids == ORDER
-    for config in ({"columns": {"sort_by_tags": True}}, {"all_info": True}):
-        assert stream.head(3, **config).table.column("id").to_pylist() == [0, 1, 2]
+    by_columns = stream.head(3, columns={"sort_by_tags": True})
+    by_all_info = stream.head(3, all_info=True)
+    assert by_columns.table.column("id").to_pylist() == [0, 1, 2]
+    assert by_all_info.table.column("id").to_pylist() == [0, 1, 2]
 
 
 def test_asking_for_sorted_rows_does_not_raise() -> None:
