@@ -64,9 +64,11 @@ def make_variant_frame(variant: str) -> pd.DataFrame:
     """``_frame(False)`` with one order changed: ``columns``, ``levels`` or neither."""
     frame = _frame(reverse=False)
     if variant == "columns":
-        return frame[["b", "a"]]
+        return frame.loc[:, ["b", "a"]]
     if variant == "levels":
-        return frame.reorder_levels(["j", "i"])
+        index = frame.index
+        assert isinstance(index, pd.MultiIndex)
+        return frame.set_index(index.swaplevel())
     return frame
 
 
