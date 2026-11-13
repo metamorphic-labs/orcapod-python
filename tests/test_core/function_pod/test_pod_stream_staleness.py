@@ -137,6 +137,22 @@ def _source() -> ArrowTableSource:
     return ArrowTableSource(table, tag_columns=["id"], source_id="src")
 
 
+def _other() -> ArrowTableSource:
+    """A second source with tag ``id`` and data ``q``, in another row order."""
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("q", pa.int64(), nullable=False),
+        ]
+    )
+    ids = sorted(IDS)
+    table = pa.Table.from_arrays(
+        [pa.array(ids, type=pa.int64()), pa.array([7 * i for i in ids], pa.int64())],
+        schema=schema,
+    )
+    return ArrowTableSource(table, tag_columns=["id"], source_id="other")
+
+
 def _pod(
     link: int, executor: str, store: InMemoryArrowDatabase | None
 ) -> FunctionPod | CachedFunctionPod:
@@ -235,8 +251,8 @@ def test_a_chain_first_read_as_a_table_is_not_read_again(executor: str) -> None:
 def test_a_chain_through_an_operator_is_not_read_again(executor: str) -> None:
     """A pod after a join of a pod stream reads its input once."""
     first = _pod(0, executor, None).process(_source())
-    joined = Join()(first, _source())
-    last = _pod(1, executor, None).process(joined)
+    joined = Join()(first, _other())
+    last = _pod(1, executor, None)(joined)
     assert len(list(last.iter_data())) == len(IDS)
     CALLS.clear()
     for how in ("iter_data", "as_table", "head"):
@@ -301,37 +317,75 @@ def stamped(x: int) -> int:
     return 1000 * EPOCH[0] + x
 
 
-@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
-@pytest.mark.parametrize("length", [2, 3])
-def test_an_upstream_reset_during_a_read_leaves_the_reader_stale(
-    length: int, executor: str
-) -> None:
-    """A reset of the first stream in the middle of a read is never reported as current.
-
-    The read is finished after the reset; the last stream is then stale, and its next read
-    gives rows computed from one state of the first stream only.
-    """
-    EPOCH[0] = 0
-    first = function_pod(
+def _stamped_stream(
+    executor: str, store: InMemoryArrowDatabase | None
+) -> StreamProtocol:
+    """The stream of ``stamped`` over the source; cached in ``store`` when given."""
+    pod = function_pod(
         output_keys="y",
         executor=_ConcurrentExecutor() if executor == "concurrent" else None,
-    )(stamped).pod.process(_source())
-    streams: list[StreamProtocol] = [first]
-    for link in range(1, length):
-        streams.append(_pod(link, executor, None).process(streams[-1]))
-    reader = iter(streams[-1].iter_data())
+    )(stamped).pod
+    assert isinstance(pod, FunctionPod)
+    if store is None:
+        return pod.process(_source())
+    return CachedFunctionPod(pod, result_database=store).process(_source())
+
+
+def _reset_during_a_read(first: StreamProtocol, last: StreamProtocol) -> None:
+    """Read two rows of ``last``, reset ``first`` (new epoch), then finish the read."""
+    reader = iter(last.iter_data())
     _ = [next(reader) for _ in range(2)]
     EPOCH[0] = 1
     clear_cache = getattr(first, "clear_cache")
     clear_cache()
     _ = list(reader)
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["plain", "cached"])
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+@pytest.mark.parametrize("length", [2, 3])
+def test_an_upstream_reset_during_a_read_leaves_the_reader_stale(
+    length: int, executor: str, cached: bool
+) -> None:
+    """A reset of the first stream in the middle of a read is never reported as current.
+
+    The read is finished after the reset; the last stream is then stale, and its next read
+    gives rows computed from one state of the first stream only. A cached chain may serve
+    the first stream's stored results again, so there only the derivation is checked.
+    """
+    EPOCH[0] = 0
+    store = InMemoryArrowDatabase() if cached else None
+    first = _stamped_stream(executor, store)
+    streams: list[StreamProtocol] = [first]
+    for link in range(1, length):
+        streams.append(_pod(link, executor, store).process(streams[-1]))
+    _reset_during_a_read(first, streams[-1])
     assert getattr(streams[-1], "is_stale")
     last = _values(streams[-1], "z" if length == 2 else "w")
     ys = _values(first, "y")
     assert sorted(last) == sorted(ys) == sorted(IDS)
-    # Every row of the first stream is of the state after the reset ...
-    assert {y // 1000 for y in ys.values()} == {1}
-    # ... and every row of the last stream was computed from that row.
+    if not cached:
+        # Every row of the first stream is of the state after the reset ...
+        assert {y // 1000 for y in ys.values()} == {1}
+    # ... and every row of the last stream was computed from that stream's row.
     for key, y in ys.items():
         assert last[key] == (2 * y if length == 2 else 2 * y - 3), key
     assert _stale(streams) == [False] * length
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+def test_an_upstream_reset_during_a_read_through_an_operator(executor: str) -> None:
+    """Pod, then a join, then a pod: a reset of the first pod mid-read leaves the last stale."""
+    EPOCH[0] = 0
+    first = _stamped_stream(executor, None)
+    joined = Join()(first, _other())
+    last = _pod(1, executor, None)(joined)
+    _reset_during_a_read(first, last)
+    assert getattr(last, "is_stale")
+    zs = _values(last, "z")
+    ys = _values(first, "y")
+    assert sorted(zs) == sorted(ys) == sorted(IDS)
+    assert {y // 1000 for y in ys.values()} == {1}
+    for key, y in ys.items():
+        assert zs[key] == 2 * y, key
+    assert _stale([first, joined, last]) == [False, False, False]
