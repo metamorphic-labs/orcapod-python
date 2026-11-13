@@ -41,6 +41,10 @@ from orcapod.hashing.semantic_hashing.function_info_extractors import ParameterD
 from orcapod.logical_types.array_format import NDARRAY_EXTENSION_NAME, NDARRAY_OPTIONS
 from orcapod.logical_types.identifier import logical_type_identifier
 from orcapod.logical_types.ignore_list import IgnoreListHandler
+from orcapod.logical_types.pandas_type import (
+    LogicalPandasDataFrame,
+    LogicalPandasSeries,
+)
 from orcapod.logical_types.polars_type import (
     POLARS_DATAFRAME_EXTENSION_NAME,
     POLARS_SERIES_EXTENSION_NAME,
@@ -476,6 +480,7 @@ class PandasDataFrameHandler(IgnoreListHandler):
             the registry were constructed before the arrow hasher).
     """
 
+    EXTENSION_NAME = LogicalPandasDataFrame.EXTENSION_NAME
     OPTIONS = PANDAS_DATAFRAME_OPTIONS
     HASH_LABEL = PANDAS_DATAFRAME_HASH_LABEL
 
@@ -544,6 +549,7 @@ class PandasSeriesHandler(IgnoreListHandler):
             the registry were constructed before the arrow hasher).
     """
 
+    EXTENSION_NAME = LogicalPandasSeries.EXTENSION_NAME
     OPTIONS = PANDAS_SERIES_OPTIONS
     HASH_LABEL = PANDAS_SERIES_HASH_LABEL
 

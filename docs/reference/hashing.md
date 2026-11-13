@@ -1387,6 +1387,8 @@ print(digest.method, digest.digest[:3].hex())
 
 ## 10. pandas Value Hash (`pandas_dataframe_v1`, `pandas_series_v1`)
 
+This hash is provisional in v0.3 (see [section 8](#8-array-value-hash)).
+
 A `pandas.DataFrame` or `pandas.Series` value (a pod input or output, a value in a source
 column, or any object given to the semantic hasher) is hashed by
 `pandas_frame_content_hash` / `pandas_series_content_hash` in
