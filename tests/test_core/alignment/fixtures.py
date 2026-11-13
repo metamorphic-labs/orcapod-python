@@ -15,7 +15,7 @@ value names its origin row. Source ``A`` identifies rows by ``record_id_column="
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pyarrow as pa
@@ -181,6 +181,8 @@ class Sources:
     c: ArrowTableSource
     d: ArrowTableSource
     oracle: Oracle
+    oracle_tables: dict[str, pa.Table] = field(default_factory=dict)
+    expected_source: str | None = None
 
 
 def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
@@ -190,6 +192,7 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
     """
     oracle = Oracle()
     built: dict[str, ArrowTableSource] = {}
+    tables: dict[str, pa.Table] = {}
     for name, table, record_id_column in (
         ("A", table_a(scenario, input_order), "x"),
         ("B", table_b(scenario), "z"),
@@ -205,8 +208,14 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
         oracle.add_source(
             name, table, tag_columns=TAG_COLUMNS, record_id_column=record_id_column
         )
+        tables[name] = table
     return Sources(
-        a=built["A"], b=built["B"], c=built["C"], d=built["D"], oracle=oracle
+        a=built["A"],
+        b=built["B"],
+        c=built["C"],
+        d=built["D"],
+        oracle=oracle,
+        oracle_tables=tables,
     )
 
 

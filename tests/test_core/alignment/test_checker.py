@@ -18,10 +18,12 @@ from orcapod.system_constants import constants
 
 from .checker import (
     Layout,
+    assert_requested_columns,
     assert_all_columns_checked,
     assert_rows_aligned,
     assert_same_rows_by_identity,
 )
+from .expectations import pairs, rows
 from .fixtures import TAG_COLUMNS, make_sources
 from .gate import new_gated_scale_pod
 from .jobs import derive_y, make_run, stream_function_tokens
@@ -195,3 +197,55 @@ def test_stored_records_with_a_swapped_output_id_are_named(tmp_path: Path) -> No
         )
     with pytest.raises(AssertionError, match="column '__data_id'"):
         assert_records_aligned(run.job, run.sources, swapped)
+
+
+def test_a_table_without_the_requested_provenance_fails() -> None:
+    table, layout, *_ = source_table()
+    with pytest.raises(AssertionError, match="no source-info columns"):
+        assert_requested_columns(
+            table.drop_columns(["_source_x"]), {"columns": {"source": True}}, layout
+        )
+    system_tags = [
+        c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    with pytest.raises(AssertionError, match="no system tag"):
+        assert_requested_columns(
+            table.drop_columns(system_tags), {"columns": {"system_tags": True}}, layout
+        )
+
+
+def test_a_table_asked_sorted_but_not_in_tag_order_fails() -> None:
+    table, layout, *_ = source_table()
+    ordered = table.sort_by([("g", "ascending")])
+    assert_requested_columns(ordered, {"columns": {"sort_by_tags": True}}, layout)
+    unsorted = ordered.take(list(reversed(range(ordered.num_rows))))
+    with pytest.raises(AssertionError, match="not in tag order"):
+        assert_requested_columns(unsorted, {"columns": {"sort_by_tags": True}}, layout)
+
+
+def test_a_row_replaced_by_a_copy_of_another_fails_the_expected_rows() -> None:
+    table, layout, oracle, context = source_table()
+    expected = rows(oracle, "A")
+    assert_rows_aligned(table, layout, oracle, context, expected_rows=expected)
+    duplicated = table.take([0, *range(table.num_rows - 1)])
+    with pytest.raises(AssertionError, match="not the expected rows"):
+        assert_rows_aligned(duplicated, layout, oracle, context, expected_rows=expected)
+
+
+def test_an_empty_join_fails_its_expected_rows() -> None:
+    sources = make_sources("unique")
+    joined = Join()(sources.a, sources.b)
+    table = joined.as_table(all_info=True)
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=joined.keys()[1])
+    expected = pairs(sources.oracle, "A", "B")
+    assert_rows_aligned(
+        table, layout, sources.oracle, joined.data_context, expected_rows=expected
+    )
+    with pytest.raises(AssertionError, match="no rows"):
+        assert_rows_aligned(
+            table.slice(0, 0),
+            layout,
+            sources.oracle,
+            joined.data_context,
+            expected_rows=expected,
+        )

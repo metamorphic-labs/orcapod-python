@@ -204,9 +204,24 @@ def layout(job: PipelineJob, view: View, config: dict[str, Any]) -> Layout:
         data_keys=tuple(data_keys),
         members=members,
         content_hash_column=content_hash_column(config),
-        # ITL-1059: a plain DerivedSource has null source info by design (for now).
+        # ITL-1059: a plain DerivedSource has null source info and no system tags by
+        # design (for now).
         null_tokens=view.call == "as_source",
+        no_system_tags=view.call == "as_source",
     )
+
+
+def expected_rows(view: View, oracle: Any) -> list[Any]:
+    """The rows ``view`` must hold, from the fixtures by each node's rule."""
+    from .expectations import groups, pairs, rows
+
+    if view.node == "scaled":
+        return rows(oracle, "A")
+    if view.node == "joined":
+        return pairs(oracle, "A", "B")
+    if view.node == "grouped":
+        return groups(oracle, "A", ["g"])
+    raise ValueError(f"unknown node {view.node!r}")
 
 
 def natural_keys(scenario: str, input_order: str) -> list[int]:

@@ -56,6 +56,8 @@ from .fixtures import (
     content_hash_column,
     make_sources,
 )
+from .checker import RowIdentity
+from .expectations import groups, no_nulls, pairs, rows, semi
 from .oracle import Origin
 
 
@@ -75,6 +77,9 @@ class OpCase:
             order, which the async path does not fix.
         covers: ``(column, source id)`` for a many-to-one operator: the flattened
             member values of ``column`` must be that source's rows, each once.
+        expected: The rows the output must hold, from the fixtures by the operator's
+            rule (``expectations.py``); ``None`` where they depend on arrival order
+            (``Batch``'s boundaries), which ``covers`` checks instead.
     """
 
     name: str
@@ -86,6 +91,7 @@ class OpCase:
     prepare: Callable[[Sources], None] = lambda sources: None
     keyed_by_record_ids: bool = True
     covers: tuple[str, str] | None = None
+    expected: Callable[[Sources], list[RowIdentity]] | None = None
 
 
 def every_column(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
@@ -126,13 +132,20 @@ def derive_from_d(
 
 
 CASES = [
-    OpCase("join", lambda s: Join()(s.a, s.b)),
+    OpCase(
+        "join", lambda s: Join()(s.a, s.b), expected=lambda s: pairs(s.oracle, "A", "B")
+    ),
     OpCase(
         "merge_join",
         lambda s: MergeJoin()(SelectDataColumns(["x"])(s.a), s.c),
         merged=frozenset({"x"}),
+        expected=lambda s: pairs(s.oracle, "A", "C"),
     ),
-    OpCase("semi_join", lambda s: SemiJoin()(s.a, s.b)),
+    OpCase(
+        "semi_join",
+        lambda s: SemiJoin()(s.a, s.b),
+        expected=lambda s: semi(s.oracle, "A", "B"),
+    ),
     OpCase(
         "batch",
         lambda s: Batch(4)(s.a),
@@ -145,22 +158,62 @@ CASES = [
         lambda s: GroupBy(by=["g"])(s.a),
         members=all_but_g,
         covers=("x", "A"),
+        expected=lambda s: groups(s.oracle, "A", ["g"]),
     ),
     OpCase(
         "group_by_all_tags",
         lambda s: GroupBy(by=["g", "n"])(s.a),
         members=data_only,
         covers=("x", "A"),
+        expected=lambda s: groups(s.oracle, "A", ["g", "n"]),
     ),
-    OpCase("select_data", lambda s: SelectDataColumns(["m", "x"])(s.a)),
-    OpCase("drop_data", lambda s: DropDataColumns(["s"])(s.a)),
-    OpCase("select_tags", lambda s: SelectTagColumns(["g"])(s.a)),
-    OpCase("drop_tags", lambda s: DropTagColumns(["n"])(s.a)),
-    OpCase("map_tags", lambda s: MapTags({"g": "gg"})(s.a), prepare=rename("gg", "g")),
-    OpCase("map_data", lambda s: MapData({"s": "t"})(s.a), prepare=rename("t", "s")),
-    OpCase("polars_filter", lambda s: PolarsFilter([pl.col("x") > 1])(s.a)),
-    OpCase("drop_nulls_named", lambda s: DropNulls(["m"])(s.a)),
-    OpCase("drop_nulls_all", lambda s: DropNulls()(s.a)),
+    OpCase(
+        "select_data",
+        lambda s: SelectDataColumns(["m", "x"])(s.a),
+        expected=lambda s: rows(s.oracle, "A"),
+    ),
+    OpCase(
+        "drop_data",
+        lambda s: DropDataColumns(["s"])(s.a),
+        expected=lambda s: rows(s.oracle, "A"),
+    ),
+    OpCase(
+        "select_tags",
+        lambda s: SelectTagColumns(["g"])(s.a),
+        expected=lambda s: rows(s.oracle, "A"),
+    ),
+    OpCase(
+        "drop_tags",
+        lambda s: DropTagColumns(["n"])(s.a),
+        expected=lambda s: rows(s.oracle, "A"),
+    ),
+    OpCase(
+        "map_tags",
+        lambda s: MapTags({"g": "gg"})(s.a),
+        prepare=rename("gg", "g"),
+        expected=lambda s: rows(s.oracle, "A"),
+    ),
+    OpCase(
+        "map_data",
+        lambda s: MapData({"s": "t"})(s.a),
+        prepare=rename("t", "s"),
+        expected=lambda s: rows(s.oracle, "A"),
+    ),
+    OpCase(
+        "polars_filter",
+        lambda s: PolarsFilter([pl.col("x") > 1])(s.a),
+        expected=lambda s: rows(s.oracle, "A", lambda o: o.values["x"] > 1),
+    ),
+    OpCase(
+        "drop_nulls_named",
+        lambda s: DropNulls(["m"])(s.a),
+        expected=lambda s: rows(s.oracle, "A", no_nulls("m")),
+    ),
+    OpCase(
+        "drop_nulls_all",
+        lambda s: DropNulls()(s.a),
+        expected=lambda s: rows(s.oracle, "A", no_nulls("g", "n", "x", "s", "m")),
+    ),
     OpCase(
         "pick",
         lambda s: Pick("d", "p", out="dp")(s.d),
@@ -169,6 +222,7 @@ CASES = [
             lambda o: o.values["d"][0]["value"],
             lambda o: f"D::{o.token}::d['p']",
         ),
+        expected=lambda s: rows(s.oracle, "D"),
     ),
     OpCase(
         "index_new_column",
@@ -176,6 +230,7 @@ CASES = [
         prepare=derive_from_d(
             "second", lambda o: o.values["seq"][1], lambda o: f"D::{o.token}::seq[1]"
         ),
+        expected=lambda s: rows(s.oracle, "D"),
     ),
     OpCase(
         "index_in_place",
@@ -183,6 +238,7 @@ CASES = [
         prepare=derive_from_d(
             "seq", lambda o: o.values["seq"][0], lambda o: f"D::{o.token}::seq[0]"
         ),
+        expected=lambda s: rows(s.oracle, "D"),
     ),
 ]
 CASE_IDS = [c.name for c in CASES]
@@ -229,10 +285,20 @@ def check_tables(
                     f"{table.num_rows} rows, the default configuration gives "
                     f"{expected_rows}"
                 )
-                if table.num_rows == 0:
+                if table.num_rows == 0 and not (
+                    case.expected and case.expected(sources)
+                ):
                     continue
-                assert_requested_columns(table, config, layout.content_hash_column)
-                assert_rows_aligned(table, layout, sources.oracle, stream.data_context)
+                assert_requested_columns(
+                    table, config, layout, require_sorted=call != "head"
+                )
+                assert_rows_aligned(
+                    table,
+                    layout,
+                    sources.oracle,
+                    stream.data_context,
+                    expected_rows=case.expected(sources) if case.expected else None,
+                )
             except AssertionError as exc:
                 failures.append(f"{call} [{name}] {exc}")
     return failures

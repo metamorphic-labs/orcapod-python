@@ -22,7 +22,8 @@ per-row column cannot slip by unchecked.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +34,10 @@ from orcapod.system_constants import constants
 from .oracle import Oracle, Origin, fold_record_ids, fold_values
 
 MAX_REPORTED = 12
+
+# A row's origins: one tuple per member (one member unless aggregated), each the sorted
+# (source id, provenance token) pairs of the origin rows the member came from.
+RowIdentity = tuple[tuple[tuple[str, str], ...], ...]
 DEFAULT_CONTENT_HASH_COLUMN = "_content_hash"
 
 
@@ -51,6 +56,8 @@ class Layout:
         null_tokens: Whether a source-info cell may be null beside a value. Only for a
             plain ``DerivedSource`` (``node.as_source()``), whose source info is null in
             every row by the current design (ITL-1059); every other view fails on it.
+        no_system_tags: Whether the view may have no system tags although they are
+            asked for: the same plain ``DerivedSource`` (ITL-1059), and nothing else.
     """
 
     tag_keys: tuple[str, ...]
@@ -59,6 +66,7 @@ class Layout:
     merged: frozenset[str] = frozenset()
     content_hash_column: str = DEFAULT_CONTENT_HASH_COLUMN
     null_tokens: bool = False
+    no_system_tags: bool = False
 
 
 @dataclass
@@ -303,6 +311,17 @@ class _RowChecker:
 
     # -- values --------------------------------------------------------------
 
+    def identity(self) -> RowIdentity:
+        """The origin rows this row was found to come from: per member, sorted pairs.
+
+        An aggregated row's members are sorted too: their order is the operator's choice.
+        """
+        members = [
+            tuple(sorted((o.source_id, o.token) for o in member.values()))
+            for member in self.state.members
+        ]
+        return tuple(sorted(members)) if self.layout.members else tuple(members)
+
     def check_values(self) -> None:
         """Every tag and data value is its origin row's value."""
         for column in (*self.layout.tag_keys, *self.layout.data_keys):
@@ -351,6 +370,7 @@ def assert_rows_aligned(
     *,
     function_tokens: Mapping[tuple[str, bytes], str] | None = None,
     require_rows: bool = True,
+    expected_rows: Collection[RowIdentity] | None = None,
 ) -> set[str]:
     """Assert that every per-row column of every row of ``table`` belongs to that row.
 
@@ -362,6 +382,10 @@ def assert_rows_aligned(
         function_tokens: The stored source-info token of each function output, keyed by
             ``(column, origin record id)``; without it a function token's form is checked.
         require_rows: Fail on a table with no rows (a check of nothing).
+        expected_rows: The origin rows the table must hold, as a multiset of row
+            identities derived from the fixtures by the operator's documented rule
+            (``expectations.py``), never from the library's output. A row that is
+            missing, extra or repeated fails, even when each row is aligned.
 
     Returns:
         The names of the columns at least one rule compared.
@@ -395,6 +419,7 @@ def assert_rows_aligned(
 
     failures: list[str] = []
     checked: set[str] = set()
+    identities: list[RowIdentity] = []
     rows = table.to_pylist()
     for index, row in enumerate(rows):
         checker = _RowChecker(index, row, layout, oracle, function_tokens)
@@ -416,6 +441,16 @@ def assert_rows_aligned(
             checker.checked.add(constants.CONTEXT_KEY)
         failures.extend(checker.failures)
         checked |= checker.checked
+        identities.append(checker.identity())
+    if expected_rows is not None and not failures:
+        got, want = Counter(identities), Counter(expected_rows)
+        if got != want:
+            missing = list((want - got).elements())[:MAX_REPORTED]
+            extra = list((got - want).elements())[:MAX_REPORTED]
+            failures.append(
+                f"the rows are not the expected rows: missing {missing}, "
+                f"extra or repeated {extra}"
+            )
     if failures:
         shown = "\n  ".join(failures[:MAX_REPORTED])
         raise AssertionError(
@@ -429,7 +464,11 @@ def assert_rows_aligned(
 
 
 def assert_requested_columns(
-    table: pa.Table, config: Mapping[str, Any], hash_column: str
+    table: pa.Table,
+    config: Mapping[str, Any],
+    layout: Layout,
+    *,
+    require_sorted: bool = True,
 ) -> None:
     """Assert ``table`` has the per-row columns ``config`` asks for.
 
@@ -437,18 +476,51 @@ def assert_requested_columns(
     columns than asked: the content hash column and the context key are required
     whenever the configuration (or ``all_info``) asks for them.
 
+    A table asked to be sorted (``sort_by_tags`` or ``all_info``) must be in tag order.
+    Source info (one ``_source_<column>`` per data column) and system tags (at least one
+    source-id / record-id pair) are required too when asked for; a plain
+    ``DerivedSource`` has no system tags by design (``layout.no_system_tags``, ITL-1059).
+
     Args:
         table: The produced table.
         config: The keyword arguments the table was asked with (``columns``,
             ``all_info``).
-        hash_column: The name the content hash column must have.
+        layout: The table's layout: its data columns and content hash column name.
+        require_sorted: Whether a sorted order is required when asked for; ``False``
+            for ``head``, which shows rows in stream order.
     """
     columns = config.get("columns", {})
     all_info = bool(config.get("all_info"))
+    names = table.column_names
     if all_info or columns.get("content_hash"):
-        assert hash_column in table.column_names, f"no {hash_column!r} column"
+        assert layout.content_hash_column in names, (
+            f"no {layout.content_hash_column!r} column"
+        )
     if all_info or columns.get("context"):
-        assert constants.CONTEXT_KEY in table.column_names, "no context key column"
+        assert constants.CONTEXT_KEY in names, "no context key column"
+    if all_info or columns.get("source"):
+        missing = [
+            f"{constants.SOURCE_PREFIX}{c}"
+            for c in layout.data_keys
+            if f"{constants.SOURCE_PREFIX}{c}" not in names
+        ]
+        assert not missing, f"no source-info columns {missing}"
+    if require_sorted and (all_info or columns.get("sort_by_tags")):
+        # Only scalar tags: a list-valued tag (Batch, GroupBy) cannot be sorted by Arrow,
+        # and the table then keeps its order (ArrowTableStream's documented fallback).
+        scalar_tags = [k for k in layout.tag_keys if k not in layout.members]
+        if len(scalar_tags) == len(layout.tag_keys):
+            assert_sorted_by_tags(table, scalar_tags)
+    if (all_info or columns.get("system_tags")) and not layout.no_system_tags:
+        pairs = [
+            c
+            for c in names
+            if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
+            and f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}"
+            f"{c[len(constants.SYSTEM_TAG_SOURCE_ID_PREFIX) :]}"
+            in names
+        ]
+        assert pairs, "no system tag (source id / record id) pair"
 
 
 def assert_all_columns_checked(table: pa.Table, checked: Collection[str]) -> None:
@@ -515,3 +587,30 @@ def rows_table(pairs: Iterable[tuple[Any, Any]]) -> pa.Table:
         for tag, data in pairs
     ]
     return pa.concat_tables(tables, promote_options="permissive")
+
+
+def assert_sorted_by_tags(table: pa.Table, tag_keys: Sequence[str]) -> None:
+    """Assert the rows of ``table`` are in tag order (as ``sort_by_tags`` asks).
+
+    Nulls may come first or last, column by column, as long as one placement explains the
+    whole table; rows with equal tags may come in any order.
+    """
+    tuples = list(zip(*(table.column(k).to_pylist() for k in tag_keys), strict=True))
+    if not tag_keys or len(tuples) < 2:
+        return
+
+    def key(nulls_first: bool) -> Callable[[tuple[Any, ...]], tuple[Any, ...]]:
+        """A sort key placing nulls first or last in every column."""
+
+        def sort_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
+            """The row's tags with each null mapped before or after every value."""
+            return tuple(
+                (0 if nulls_first else 2, 0) if v is None else (1, v) for v in row
+            )
+
+        return sort_key
+
+    assert tuples in (
+        sorted(tuples, key=key(True)),
+        sorted(tuples, key=key(False)),
+    ), f"rows not in tag order: {tuples}"

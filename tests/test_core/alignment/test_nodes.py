@@ -19,8 +19,10 @@ break, so a case passes the day its defect is fixed only by dropping its mark:
 
 * ITL-1060: a row read back from the store gets a fresh datagram id, not the stored
   ``__data_id`` its own token names (the stored-records check of every readback).
-* ITL-1050: the async Join matches null tag keys, the sync one drops them, so the async
-  ``joined`` table of the null scenario has rows the sync one has not.
+* ITL-1050: the async Join matches null tag keys, the sync one drops them, so a
+  ``joined`` view of the null scenario computed on the async path (an async run or
+  rerun, or a load of what an async run stored) holds null-key pairs the documented rule
+  leaves out.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from .checker import (
 from .fixtures import COLUMN_CONFIGS, INPUT_ORDERS, SCENARIOS
 from .gate import ORDERS
 from .jobs import (
+    expected_rows,
     JOB_NAME,
     MODES,
     PER_RUN_COLUMNS,
@@ -131,30 +134,27 @@ def run_keys(marks: Callable[[RunKey], list[Any]] | None = None) -> list[Any]:
     ]
 
 
-def run_view_params(
-    keys: list[RunKey], views: tuple[View, ...] = VIEWS, *, compares_rows: bool = False
-) -> list[Any]:
-    """``(run key, view)`` for each key and view, marked where a filed defect hits.
+def null_join_after_async(key: RunKey, view: View) -> bool:
+    """Whether ``view`` shows a Join the async path computed over null tag keys.
 
-    With ``compares_rows`` (a test that compares the async rows with the sync ones),
-    ITL-1050 on the async ``joined`` views of the null scenario: the async Join keeps
-    the rows whose key is null.
+    ITL-1050: the async Join matches null keys, so it holds the rows of null-key pairs
+    the documented rule (and the sync Join) leave out.
     """
-    params = []
-    for key in keys:
-        for view in views:
-            marks = []
-            if (
-                compares_rows
-                and is_async(key)
-                and key[0] == "null"
-                and (view.node == "joined")
-            ):
-                marks.append(ITL_1050)
-            params.append(
-                pytest.param(key, view, id=f"{'-'.join(key)}-{view.name}", marks=marks)
-            )
-    return params
+    return is_async(key) and key[0] == "null" and view.node == "joined"
+
+
+def run_view_params(keys: list[RunKey], views: tuple[View, ...] = VIEWS) -> list[Any]:
+    """``(run key, view)`` for each key and view; ITL-1050 on async null-key Joins."""
+    return [
+        pytest.param(
+            key,
+            view,
+            id=f"{'-'.join(key)}-{view.name}",
+            marks=[ITL_1050] if null_join_after_async(key, view) else [],
+        )
+        for key in keys
+        for view in views
+    ]
 
 
 # A derived source's table has no system tags, so its rows have no record ids to be
@@ -175,18 +175,25 @@ def check_every_config(
     """
     failures: list[str] = []
     baseline = produce(job, view, {}).num_rows
-    expected_rows = min(baseline, 100) if view.call == "head" else baseline
+    expected_count = min(baseline, 100) if view.call == "head" else baseline
     for name, config in configs_for(view):
         table = produce(job, view, config)
         view_layout: Layout = layout(job, view, config)
         context = job.nodes[view.node].data_context
         try:
-            assert table.num_rows == expected_rows, (
-                f"{table.num_rows} rows, the default configuration gives {expected_rows}"
+            assert table.num_rows == expected_count, (
+                f"{table.num_rows} rows, the default configuration gives {expected_count}"
             )
-            assert_requested_columns(table, config, view_layout.content_hash_column)
+            assert_requested_columns(
+                table, config, view_layout, require_sorted=view.call != "head"
+            )
             assert_rows_aligned(
-                table, view_layout, oracle, context, function_tokens=tokens
+                table,
+                view_layout,
+                oracle,
+                context,
+                function_tokens=tokens,
+                expected_rows=expected_rows(view, oracle),
             )
         except AssertionError as exc:
             failures.append(f"[{name}] {exc}")
@@ -232,9 +239,7 @@ def test_stored_records_are_aligned(key: RunKey, runs: Callable[[RunKey], Run]) 
 
 @pytest.mark.parametrize(
     ("key", "view"),
-    run_view_params(
-        [k for k in all_run_keys() if is_async(k)], KEYED_VIEWS, compares_rows=True
-    ),
+    run_view_params([k for k in all_run_keys() if is_async(k)], KEYED_VIEWS),
 )
 def test_async_equals_sync_row_by_row(
     key: RunKey, view: View, runs: Callable[[RunKey], Run]
@@ -307,7 +312,20 @@ def readbacks(
         if key not in made:
             scenario, input_order, store_kind, write, how = key
             mode, order = write.split("-")
-            run = runs((scenario, input_order, mode, order, store_kind))
+            if how == "load":
+                # A run of its own: the reruns append to the written run's store (an
+                # async rerun writes the joined rows again), which a load would read.
+                keys = natural_keys(scenario, input_order)
+                run = make_run(
+                    scenario,
+                    input_order,
+                    mode,
+                    None if mode == "sync" else ORDERS[order](keys),
+                    store_kind,
+                    tmp_path_factory.mktemp("load"),
+                )
+            else:
+                run = runs((scenario, input_order, mode, order, store_kind))
             job = read_back(
                 run, scenario, input_order, how, tmp_path_factory.mktemp("read")
             )
@@ -333,9 +351,24 @@ def readback_params() -> list[Any]:
                         for view in VIEWS:
                             if how == "load" and view.node == "grouped":
                                 continue
+                            # ITL-1050: an async rerun computes the Join again,
+                            # and a load reads what an async write stored.
+                            async_join = how == "rerun_async" or (
+                                how == "load" and write.startswith("async")
+                            )
+                            marks = (
+                                [ITL_1050]
+                                if scenario == "null"
+                                and view.node == "joined"
+                                and async_join
+                                else []
+                            )
                             params.append(
                                 pytest.param(
-                                    key, view, id=f"{'-'.join(key)}-{view.name}"
+                                    key,
+                                    view,
+                                    id=f"{'-'.join(key)}-{view.name}",
+                                    marks=marks,
                                 )
                             )
     return params
