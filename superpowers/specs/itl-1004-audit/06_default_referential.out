@@ -1,0 +1,36 @@
+=== J1. Today: materialized with materialized Join (must stay byte-identical)
+--- Join()(A, B)
+    keys: tags=('subject',) data=('b', 'a')
+    schema: tags={'subject': str | None} data={'b': float | None, 'a': float | None}
+    as_table columns: ['subject', 'b', 'a']
+    rows: [({'subject': 'm1'}, {'b': 1.0, 'a': 0.1}), ({'subject': 'm2'}, {'b': 2.0, 'a': 0.2})]
+--- Join()(A, B).pipeline_hash()
+    d12c05799eccd043
+--- system tag columns of Join()(A, B)
+    ['_tag_source_id::09145c4fb338d217d713d494648dfa233289617e81a05a5b0cac3b76314ef127::09145c4fb338d217d713d494648dfa233289617e81a05a5b0cac3b76314ef127:0', '_tag_record_id::09145c4fb338d217d713d494648dfa233289617e81a05a5b0cac3b76314ef127::09145c4fb338d217d713d494648dfa233289617e81a05a5b0cac3b76314ef127:0', '_tag_source_id::53834b01c7f038b4464ab8c754790d7bce1d4b3ff783514c34e00d1c8c7e8588::53834b01c7f038b4464ab8c754790d7bce1d4b3ff783514c34e00d1c8c7e8588:1', '_tag_record_id::53834b01c7f038b4464ab8c754790d7bce1d4b3ff783514c34e00d1c8c7e8588::53834b01c7f038b4464ab8c754790d7bce1d4b3ff783514c34e00d1c8c7e8588:1']
+--- sync rows == async rows
+    True
+
+=== H1. Source schema hash (names the system-tag columns) moves under the default
+--- compute_source_schema_hash: x materialized vs x referential
+    ('a7ada39f09464539483466a1e3176e697a755fcfe2d763c100730e525d915d40', '6a4bcb1d6bf4061ec4c4840fd7c7f8cc876265be2f16a1dcc9696570655b2e04')
+
+=== H2. Function-result identity for a function that does not read the keys
+--- Data hash after dropping referenced keys == v0.3 Data hash, per row
+    True
+--- the same, as values
+    ['000002c339da0c5c', '00000278727a2921']
+--- result table path (function uri) is independent of the input stream
+    ('double_y', '872e0cf0d9d842b03280a5017222ea774267c87b7799511c47caefd6d04fd25f', 'v0', 'python.function.v0')
+
+=== H3. A source whose columns are all tags (v0.3)
+--- ArrowTableSource(subject, x; tag_columns=[subject, x])
+    RAISES ValueError: No data columns found in the table. At least one data column is required.
+    (raised at orcapod/core/streams/arrow_table_stream.py:121)
+
+=== H4. ListSource: tags come from a tag function, not from columns
+--- ListSource('weight', [20.5, 22.25])
+    keys: tags=('element_index',) data=('weight',)
+    schema: tags={'element_index': <class 'int'>} data={'weight': <class 'float'>}
+    as_table columns: ['element_index', 'weight']
+    rows: [({'element_index': 0}, {'weight': 20.5}), ({'element_index': 1}, {'weight': 22.25})]

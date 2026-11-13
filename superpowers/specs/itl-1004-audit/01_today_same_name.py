@@ -8,7 +8,7 @@ Output: 01_today_same_name.out
 from __future__ import annotations
 
 import pyarrow as pa
-from _common import async_rows, describe, f64, i64, s, show, src
+from _common import async_rows, describe, f64, i64, s, show, src  # pyright: ignore[reportImplicitRelativeImport]  # run as a file from this folder
 
 from orcapod import function_pod
 from orcapod.core.streams import ArrowTableStream

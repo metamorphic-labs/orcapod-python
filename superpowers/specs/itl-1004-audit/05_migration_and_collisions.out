@@ -1,0 +1,16 @@
+=== M1. Function-result identity follows the data COLUMN NAME (Arrow hash)
+--- Data{spike_time: 10} hash == Data{spike_time_us: 10} hash
+    False
+
+=== M2. Index / Pick: out= equal to an existing TAG name (today)
+--- grouped stream
+    keys: tags=('u', 't') data=('v',)
+    schema: tags={'u': int | None, 't': list[int | None]} data={'v': list[float | None]}
+    as_table columns: ['u', 't', 'v']
+    rows: [({'u': 1, 't': [5, 6]}, {'v': [0.1, 0.2]})]
+--- Index('v', 0, out='t')(g)  (t is a tag)
+    RAISES ValueError: Duplicate column name 't' found in input tables.
+    (raised at orcapod/utils/arrow_utils.py:682)
+--- Pick('d', 't', out='u')(st)  (u is a tag)
+    RAISES InputValidationError: Pick: column 'd' has type orcapod.semantic_types.universal_converter.Struct_t_int | None which is not a supported pick target (not dict[K,V] and no registered logical type).
+    (raised at orcapod/core/operators/pick.py:174)

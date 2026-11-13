@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 import pyarrow as pa
-from _common import async_rows, describe, f64, i64, s, show, src
+from _common import async_rows, describe, f64, i64, s, show, src  # pyright: ignore[reportImplicitRelativeImport]  # run as a file from this folder
 
 from orcapod import function_pod
 from orcapod.operators import (
@@ -63,9 +63,7 @@ def make_ref(source: Any, refs: list[str]) -> Any:
     return source
 
 
-def ref(
-    columns: dict[str, pa.Array], tags: list[str], refs: list[str], sid: str
-) -> Any:
+def ref(columns: dict[str, Any], tags: list[str], refs: list[str], sid: str) -> Any:
     return make_ref(src(columns, tags, sid), refs)
 
 

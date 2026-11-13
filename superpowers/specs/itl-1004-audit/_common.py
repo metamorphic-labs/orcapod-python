@@ -12,20 +12,22 @@ import pyarrow as pa
 from orcapod.sources import ArrowTableSource
 
 
-def src(columns: dict[str, pa.Array], tags: list[str], sid: str) -> ArrowTableSource:
+def src(columns: dict[str, Any], tags: list[str], sid: str) -> ArrowTableSource:
     """Build an ArrowTableSource with explicit Arrow types and a fixed source id."""
-    return ArrowTableSource(pa.table(columns), tag_columns=tags, source_id=sid)
+    return ArrowTableSource(
+        pa.Table.from_pydict(columns), tag_columns=tags, source_id=sid
+    )
 
 
-def i64(*v: Any) -> pa.Array:
+def i64(*v: Any) -> "pa.Array[Any]":
     return pa.array(list(v), type=pa.int64())
 
 
-def f64(*v: Any) -> pa.Array:
+def f64(*v: Any) -> "pa.Array[Any]":
     return pa.array(list(v), type=pa.float64())
 
 
-def s(*v: Any) -> pa.Array:
+def s(*v: Any) -> "pa.Array[Any]":
     return pa.array(list(v), type=pa.large_string())
 
 
@@ -59,14 +61,14 @@ def describe(stream: Any) -> str:
     )
 
 
-def async_rows(op: Any, *streams: Any) -> list[tuple[dict, dict]]:
+def async_rows(op: Any, *streams: Any) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Run an operator's ``async_execute`` over channels and collect the rows.
 
     Same harness as ``tests/test_core/operators/test_async_sync_equivalence.py``.
     """
     from orcapod.channels import Channel
 
-    async def run() -> list[tuple[dict, dict]]:
+    async def run() -> list[tuple[dict[str, Any], dict[str, Any]]]:
         chans = [Channel(buffer_size=64) for _ in streams]
         out = Channel(buffer_size=64)
         for st, ch in zip(streams, chans):

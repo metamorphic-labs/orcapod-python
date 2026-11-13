@@ -55,3 +55,9 @@ document from the evidence.
 
 ## Progress notes
 (updated as work proceeds, for a successor)
+- 2026-11-13: Tasks 1-9 done. Measurements 01-06 in superpowers/specs/itl-1004-audit/ (outputs .out).
+  Coordinator redirects applied (default referential sources; plain-tag mode = v0.3 exactly;
+  three Join cases equal; decisions only for Open/code-impossible points; slices mapped onto
+  ITL-1009..1023). Representation + hash verdict sent to the coordinator (msg_a8cdbe370954).
+  Pod-boundary rule (D1) asked; coordinator: keep (a) recommended, put to developer.
+  Full suite: 11029 passed, 117 skipped, 23 xfailed. Remaining: PR, linear attach, worker_done.

@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from _common import f64, i64, s, show, src
+from _common import f64, i64, s, show, src  # pyright: ignore[reportImplicitRelativeImport]  # run as a file from this folder
 
 from orcapod.contexts import resolve_context
 from orcapod.types import Schema
