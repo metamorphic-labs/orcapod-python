@@ -519,6 +519,36 @@ def pandas_attrs_as_stored(attrs: Any) -> Any:
 def _restored_form(
     dtype: Any, column: pa.ChunkedArray[Any], *, index_level: bool
 ) -> tuple[Any, pa.ChunkedArray[Any]]:
+    """Return the dtype and the Arrow column to digest of a field read back from storage.
+
+    The form is ``_restored_dtype_and_column``, except that a column whose Arrow type is
+    ``null`` is digested as an all-null ``large_string`` column of the same length. Starfix
+    refuses a null column, and storage cannot restore the type a column with no value had (an
+    all-null ``pd.ArrowDtype`` decimal column reads back ``object`` ``[None]``, the same as
+    a plain ``object`` column of ``None``), so every such column takes this one form, a
+    value and its read-back alike. A cast of a null array holds no value, so nothing is
+    inferred. The dtype is not changed, so the descriptor still tells the column from a
+    real ``string`` column.
+
+    Args:
+        dtype: The field's pandas dtype.
+        column: The field's Arrow column in the values table.
+        index_level: Whether the field is an index level.
+
+    Returns:
+        The dtype to describe and the Arrow column to digest.
+    """
+    restored_dtype, restored = _restored_dtype_and_column(
+        dtype, column, index_level=index_level
+    )
+    if pa.types.is_null(restored.type):
+        restored = restored.cast(pa.large_string())
+    return restored_dtype, restored
+
+
+def _restored_dtype_and_column(
+    dtype: Any, column: pa.ChunkedArray[Any], *, index_level: bool
+) -> tuple[Any, pa.ChunkedArray[Any]]:
     """Return the dtype and Arrow column a field has once read back from storage.
 
     A column changes only when it is ``object`` or categorical (the dtype of the

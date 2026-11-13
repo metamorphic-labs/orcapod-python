@@ -207,6 +207,10 @@ COLUMN_VALUES: dict[str, Any] = {
     "uint16": np.array([1, 2], dtype="uint16"),
     "complex128": np.array([1 + 2j, 3 - 1j]),
     "object decimals": pd.Series([decimal.Decimal("1.5"), None], dtype=object),
+    "arrow decimal all null": pd.array(
+        [None, None], dtype=pd.ArrowDtype(pa.decimal128(5, 2))
+    ),
+    "object all null": pd.Series([None, None], dtype=object),
     "object timedeltas": pd.Series([dt.timedelta(days=1), None], dtype=object),
     "object timestamps UTC": pd.Series(
         [pd.Timestamp("2020-01-01", tz="UTC"), None], dtype=object
@@ -348,6 +352,8 @@ COLUMN_VALUE_REPRESENTATIVES = (
     "datetime fixed offset",
     "arrow string",
     "arrow decimal",
+    "arrow decimal all null",
+    "object all null",
     "period",
     "interval",
 )

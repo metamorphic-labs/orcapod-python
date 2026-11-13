@@ -403,6 +403,12 @@ SEMANTIC_VALUES: dict[str, Any] = {
     ),
     "series.named": pd.Series([1.5, 2.5], name="metric"),
     "series.unnamed": pd.Series([1, 2, 3]),
+    # Added by ITL-897 (review round 6): columns whose restored Arrow type is null hash as an
+    # all-null large_string column; a decimal and an object column of None hash equal.
+    "series.null_decimal": pd.Series(
+        pd.array([None, None], dtype=pd.ArrowDtype(pa.decimal128(5, 2)))
+    ),
+    "dataframe.null_object": pd.DataFrame({"c": pd.Series([None, None], dtype=object)}),
 }
 
 

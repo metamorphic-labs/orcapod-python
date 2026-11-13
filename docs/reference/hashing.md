@@ -571,8 +571,8 @@ struct field order does the same for every struct's fields with
 `ordered_struct_fields=False`; ignoring a Series' name writes `""` for `"name"` in the
 descriptor and hashes its values as a column named `""`.
 
-A `pandas.DataFrame` is hashed differently: as the `arrow_v1` hash of its Arrow table, which
-ignores column order. A Polars frame and the equal pandas frame never share a hash.
+A `pandas.DataFrame` is hashed differently: with the `pandas_dataframe_v1` hash (§10), which
+counts column order. A Polars frame and the equal pandas frame never share a hash.
 
 ---
 
@@ -1508,6 +1508,18 @@ More consequences of the same rule:
   `pd.ArrowDtype(pa.string())` column reads back as `string`, so the two hash equal. An
   Arrow decimal column reads back as `object` holding `Decimal` values and is hashed in
   that form. Other `pd.ArrowDtype` columns are restored as they are.
+- **A column that reads back as Arrow `null` is digested as an all-null `large_string`
+  column.** Starfix refuses a `null` column, and storage cannot restore the type of a column
+  with no value: an all-null or empty `pd.ArrowDtype` decimal column reads back as `object`
+  holding `None`, exactly like a plain `object` column of `None`. Every column whose
+  restored Arrow type is `null` is therefore digested as an all-null `large_string` column
+  of the same length (a cast of a null array holds no value, so nothing is inferred), for a
+  value and for its read-back alike. The dtype descriptor of both the all-null or empty
+  decimal column and the all-null or empty `object` column is `{"numpy": "object"}`, so they
+  **hash equal**; the height still counts, and a `string`-dtype column of `None` (descriptor
+  `"string"`) stays different. Other all-null or empty columns (Arrow string, timestamp,
+  integer, list or struct, `Int64`, `string`, categorical) keep their own types and are
+  unchanged.
 - **A timezone is the text storage writes for it** (`"UTC"`, `"Europe/Berlin"`,
   `"+01:00"`), whatever class holds it: `datetime.timezone(timedelta(hours=1))` is read
   back as another class of the same offset, and both hash equal.
