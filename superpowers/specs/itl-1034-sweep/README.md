@@ -14,3 +14,8 @@ results were measured on `main` at 003d2e82 (November 12, 2026).
 | `side_effect_stream_as_table.py` | ITL-1066 | `SideEffectPodStream.as_table` raises with `context` / `all_info` (a duplicate `_context_key`), ignores `content_hash` and `sort_by_tags` |
 | `partial_read_then_head.py` | ITL-1065 | after a partial read of a pod stream fed by the automatic select, the stream is stale and `head(2)` shows no rows (a regression from #355) |
 | `itl1043_loaded_operator_cache.py` | ITL-1043 | a loaded job cannot read a cached operator node: the loaded pipeline hash drops tag nullability, and the loaded content hash uses the stub source's identity |
+
+Status on `main` at 5c7a058f (November 13, 2026): fixed are ITL-1042 and ITL-1052 (#355),
+ITL-1043 (#352), ITL-1045 (#358), ITL-1046 (#353), ITL-1050 (#351), ITL-1060 (#356) and
+ITL-1065 (#360); their scripts now show the fixed behaviour. ITL-1047 and ITL-1066 are not
+fixed there; the suite marks only ITL-1066 (strict xfail).

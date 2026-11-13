@@ -6,10 +6,9 @@ product: operator case x tie scenario x input order x read pattern (a fresh read
 partial ``iter_data`` then a full read; a repeated read) x every ``ColumnConfig``, on the
 stream an operator returns (the sync path). The same cases also run as operator nodes of a
 job on both orchestrators, so each operator's async path is checked, and its table must
-equal the sync one row by row, keyed on record ids.
-
-ITL-1050 (filed): the async Join matches null tag keys and the sync one drops them, so the
-Join job case of the null scenario is marked ``xfail(strict=True)``.
+equal the sync one row by row, keyed on record ids. ``head(n, cfg)`` takes every
+configuration ``as_table`` takes, sorting included, and must equal
+``as_table(cfg).slice(0, n)`` (ITL-1053).
 """
 
 from __future__ import annotations
@@ -257,25 +256,22 @@ def case_layout(case: OpCase, stream: Any, config: dict[str, Any]) -> Layout:
     )
 
 
-def head_accepts(config: dict[str, Any]) -> bool:
-    """``head`` refuses ``sort_by_tags``."""
-    return not config.get("columns", {}).get("sort_by_tags")
-
-
 def check_tables(
     case: OpCase, stream: Any, sources: Sources, *, with_head: bool
 ) -> list[str]:
     """Check ``as_table`` (and ``head``) under every configuration; return the failures.
 
     Every configuration must give the rows the default one gives (``head`` at most 100)
-    and the per-row columns it asks for. An empty default table (a filter that keeps
-    nothing) must stay empty.
+    and the per-row columns it asks for, and ``head(100, cfg)`` must be the first rows of
+    ``as_table(cfg)``. An empty default table (a filter that keeps nothing) must stay
+    empty.
     """
     failures = []
     baseline = stream.as_table().num_rows
     for name, config in COLUMN_CONFIGS.items():
-        tables = [("as_table", stream.as_table(**config), baseline)]
-        if with_head and head_accepts(config):
+        full = stream.as_table(**config)
+        tables = [("as_table", full, baseline)]
+        if with_head:
             tables.append(
                 ("head", stream.head(100, **config).as_table(), min(baseline, 100))
             )
@@ -286,6 +282,10 @@ def check_tables(
                     f"{table.num_rows} rows, the default configuration gives "
                     f"{expected_rows}"
                 )
+                if call == "head":
+                    assert table.equals(full.slice(0, expected_rows)), (
+                        "head(100) is not the first rows of as_table"
+                    )
                 # Every configured table, not only the default one: a configuration
                 # could repeat one whole group and leave out another, or give none.
                 if (covered := member_values(case, sources)) is not None:
@@ -297,9 +297,7 @@ def check_tables(
                     and not case.expected(sources)
                 ):
                     continue
-                assert_requested_columns(
-                    table, config, layout, require_sorted=call != "head"
-                )
+                assert_requested_columns(table, config, layout)
                 assert_rows_aligned(
                     table,
                     layout,
@@ -379,21 +377,14 @@ def run_case(case: OpCase, scenario: str, input_order: str, orchestrator: str) -
     return job.nodes[label], sources
 
 
-ITL_1050 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1050: the async Join matches null tag keys; the sync Join drops them",
-)
-
-
 def job_case_params() -> list[Any]:
-    """Every case, scenario and input order; ITL-1050 on Join with null tags."""
+    """Every case, scenario and input order."""
     return [
         pytest.param(
             case,
             scenario,
             input_order,
             id=f"{case.name}-{scenario}-{input_order}",
-            marks=[ITL_1050] if case.name == "join" and scenario == "null" else [],
         )
         for case in CASES
         for scenario in SCENARIOS

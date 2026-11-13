@@ -151,3 +151,9 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   ITL-1043, ITL-1045, ITL-1046, ITL-1050. PR #346 body holds the matrix, runtime, sweep
   table and defect list. Left: CodeRabbit rounds and CI on #346, then worker_done. When
   an open issue's fix merges, merge main and drop its marks (they XPASS strictly).
+* Nov 13 (later): main at 5c7a058f has #351 (ITL-1050), #354 (ITL-1053), #356 (ITL-1060),
+  #358 (ITL-1045), #360 (ITL-1065) and #361. Merged; with --runxfail only the 60 ITL-1066
+  cases failed, so every other mark is gone. head now takes every configuration and must
+  equal as_table(cfg).slice(0, n); previews check sorted configs among the held rows.
+  6431 pass, 60 strict xfails (ITL-1066 only). #346 merges last; worker_done on the
+  coordinator's word.

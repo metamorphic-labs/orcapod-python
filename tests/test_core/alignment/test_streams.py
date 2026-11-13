@@ -8,19 +8,17 @@ table must also hold exactly the expected rows (``expectations.py``). Each is re
 fresh read; a partial ``iter_data`` then a full read; a repeated read; two interleaved
 iterations) and its ``as_table`` and ``head`` are checked under every column configuration,
 for every tie scenario and input order. Every read must also give every row exactly once.
+``head(n, cfg)`` takes every configuration ``as_table`` takes, sorting included, and
+equals ``as_table(cfg).slice(0, n)``; before a full read it sorts the rows the stream
+holds (ITL-1053).
 
-Known defects are marked ``xfail(strict=True)`` on exactly the cases they break:
+One known defect is marked ``xfail(strict=True)`` on exactly the cases it breaks:
 
 * ITL-1066: ``SideEffectPodStream.as_table`` raises when asked for the context key (and so
   under ``all_info``), and ignores ``content_hash`` and ``sort_by_tags`` (only those
   configurations of the side-effect stream).
-* ITL-1065: a function pod stream behind an operator stream (the automatic select) turns
-  stale during or after a partial read: two interleaved iterations recompute a row the
-  first already yielded (row-by-row path, interleaved reads), and a preview after a
-  partial read shows no rows (the partial-pod preview).
 
-* ITL-1045: ``FunctionPodStream.as_table`` builds the table and its content hashes in two
-  passes; an upstream reset in between attaches the new rows' hashes to the old table.
+The defects fixed since (ITL-1045, ITL-1046, ITL-1065) keep their exact cases below.
 """
 
 from __future__ import annotations
@@ -57,14 +55,10 @@ from .fixtures import (
 )
 from .expectations import member as member_of
 from .expectations import rows
-from .gate import GATE, ORDERS, new_gated_scale_pod
-from .oracle import Oracle
+from .gate import GATE, ORDERS, new_gated_scale_pod, scale
+from .oracle import Oracle, Origin
 from .jobs import derive_y, pairs_function_tokens, stream_function_tokens
 
-ITL_1065 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1065: interleaved reads behind an operator stream recompute a row",
-)
 ITL_1066 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1066: SideEffectPodStream.as_table raises on context, ignores "
@@ -81,10 +75,6 @@ ITL_1066_CONFIGS = {
     "content_hash_sorted",
     "sort_by_tags",
 }
-ITL_1045 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1045: as_table attaches a recomputed upstream's hashes to the old table",
-)
 
 
 class ConcurrentLocalExecutor(LocalPythonFunctionExecutor):
@@ -170,19 +160,14 @@ PATTERNS = ("fresh", "partial_then_full", "repeated", "interleaved")
 
 
 def stream_params() -> list[Any]:
-    """Every stream kind, completion order and read pattern, marked where a defect hits."""
+    """Every stream kind, completion order and read pattern."""
     params = []
     for kind in KINDS:
         orders = list(ORDERS) if kind == "pod_concurrent" else [None]
         for order in orders:
             for pattern in PATTERNS:
                 name = "-".join(p for p in (kind, order, pattern) if p)
-                marks = (
-                    [ITL_1065]
-                    if kind == "pod_row_by_row" and pattern == "interleaved"
-                    else []
-                )
-                params.append(pytest.param(kind, order, pattern, id=name, marks=marks))
+                params.append(pytest.param(kind, order, pattern, id=name))
     return params
 
 
@@ -266,15 +251,16 @@ def test_every_row_of_a_stream_is_aligned(
             data_keys=tuple(data),
             content_hash_column=content_hash_column(config),
         )
-        tables = [("as_table", stream.as_table(**config))]
-        if not config.get("columns", {}).get("sort_by_tags"):
-            tables.append(("head", stream.head(100, **config).as_table()))
+        full = stream.as_table(**config)
+        tables = [("as_table", full), ("head", stream.head(100, **config).as_table())]
         for call, table in tables:
             try:
                 assert table.num_rows == len(keys), f"{table.num_rows} rows"
-                assert_requested_columns(
-                    table, config, layout, require_sorted=call != "head"
-                )
+                if call == "head":
+                    assert table.equals(full.slice(0, len(keys))), (
+                        "head(100) is not the first rows of as_table"
+                    )
+                assert_requested_columns(table, config, layout)
                 assert_rows_aligned(
                     table,
                     layout,
@@ -289,11 +275,10 @@ def test_every_row_of_a_stream_is_aligned(
 
 
 # ---------------------------------------------------------------------------
-# Filed defects, each with its exact case
+# Defects found by the suite, each with its exact case
 # ---------------------------------------------------------------------------
 
 
-@ITL_1045
 def test_as_table_after_an_upstream_reset_keeps_each_hash_with_its_row() -> None:
     """An upstream reset between two ``as_table`` calls must not mix two computations."""
     counter = itertools.count()
@@ -385,25 +370,68 @@ def test_side_effect_stream_tables(
 # Previews before a full read
 # ---------------------------------------------------------------------------
 
-# The configurations a preview is checked under. head() shows rows in stream order and,
-# on main, refuses sort_by_tags and does not sort under all_info; PR #354 (ITL-1053)
-# makes it sort among the rows it has, so the sorted configurations are left out here
-# and EXPECTED_HEAD below is the one place to follow it when it merges.
-HEAD_CONFIGS = {
-    name: config
-    for name, config in COLUMN_CONFIGS.items()
-    if not config.get("all_info") and not config.get("columns", {}).get("sort_by_tags")
-}
 HEAD_SIZES = (0, 2, 4, 100)
 
 
-def expected_head(origin_order: list[Any], available: int, n: int) -> list[Any]:
-    """The rows a head of ``n`` shows: the first ``min(n, available)`` in stream order.
+def sorts(config: dict[str, Any]) -> bool:
+    """Whether ``config`` asks for tag order (``sort_by_tags``, or ``all_info``)."""
+    return bool(config.get("all_info") or config.get("columns", {}).get("sort_by_tags"))
 
-    ``origin_order`` is the stream's rows in input order; ``available`` how many of them
-    the stream holds (a source all of them; a pod those computed so far).
+
+def tag_order(origin: Origin) -> tuple[Any, ...]:
+    """The tag-order key ``as_table`` sorts by: each tag ascending, nulls last."""
+    return tuple(
+        (1, 0) if origin.values[k] is None else (0, origin.values[k])
+        for k in TAG_COLUMNS
+    )
+
+
+def expected_head(
+    origins: list[Origin], available: int, n: int, *, sort: bool
+) -> list[Origin]:
+    """The rows a head of ``n`` shows (ITL-1053).
+
+    ``origins`` is the stream's rows in input order and ``available`` how many of them
+    the stream holds (a source all of them; a pod those computed so far). The head shows
+    the first ``n`` of the rows it holds, in stream order or, when ``sort``, in tag order;
+    rows with equal tags may come in either order.
     """
-    return [(member,) for member in origin_order[: min(n, available)]]
+    held = origins[:available]
+    return (sorted(held, key=tag_order) if sort else held)[:n]
+
+
+def assert_head_rows(
+    table: pa.Table, want: list[Origin], held: list[Origin], *, sort: bool
+) -> None:
+    """Assert ``table`` holds the rows of ``want``, up to the order of tag ties.
+
+    Unsorted, the rows are exactly ``want``. Sorted, the tags must be those of ``want``
+    in order, and each row one of the ``held`` rows, at most once: a tie at the cut may
+    be filled by any of its rows. A unique value names each row: ``x`` in a source's
+    table, ``y = scale(x)`` in a pod's.
+    """
+    column = "x" if "x" in table.column_names else "y"
+
+    def name(origin: Origin) -> int:
+        """The value of ``column`` the row of ``origin`` holds."""
+        x = origin.values["x"]
+        return x if column == "x" else scale(x)
+
+    tags = list(zip(*(table.column(k).to_pylist() for k in TAG_COLUMNS), strict=True))
+    names = table.column(column).to_pylist()
+    if not sort:
+        assert names == [name(o) for o in want], f"rows {column}={names}"
+        return
+    assert tags == [tuple(o.values[k] for k in TAG_COLUMNS) for o in want], (
+        f"tags {tags} are not the first in tag order"
+    )
+    assert len(set(names)) == len(names), f"a row repeated: {column}={names}"
+    by_name = {name(o): o for o in held}
+    for value, row_tags in zip(names, tags, strict=True):
+        assert value in by_name, f"row {column}={value} is not one the stream holds"
+        assert tuple(by_name[value].values[k] for k in TAG_COLUMNS) == row_tags, (
+            f"row {column}={value} has another row's tags"
+        )
 
 
 PREVIEW_STATES = ("fresh_source", "fresh_pod", "partial_pod", "complete_pod")
@@ -415,9 +443,6 @@ PREVIEW_STATES = ("fresh_source", "fresh_pod", "partial_pod", "complete_pod")
         pytest.param(
             state,
             id=state,
-            # ITL-1065: after a partial read of a pod stream fed by an operator stream
-            # (the automatic select), the stream is stale and its head shows no rows.
-            marks=[ITL_1065] if state == "partial_pod" else [],
         )
         for state in PREVIEW_STATES
     ],
@@ -452,10 +477,10 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
     tokens = pairs_function_tokens(prepared) if prepared else None
     computed_before = len(GATE.completed)
 
-    origin_order = [member_of(o) for o in sources.oracle.origins if o.source_id == "A"]
+    origins = [o for o in sources.oracle.origins if o.source_id == "A"]
     tags, data = stream.keys()
     failures = []
-    for name, config in HEAD_CONFIGS.items():
+    for name, config in COLUMN_CONFIGS.items():
         layout = Layout(
             tag_keys=tuple(tags),
             data_keys=tuple(data),
@@ -463,19 +488,26 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
         )
         for n in HEAD_SIZES:
             table = stream.head(n, **config).as_table()
-            want = expected_head(origin_order, available, n)
+            want = expected_head(origins, available, n, sort=sorts(config))
             try:
                 assert table.num_rows == len(want), f"{table.num_rows} rows"
                 if not want:
                     continue
-                assert_requested_columns(table, config, layout, require_sorted=False)
+                if state in ("fresh_source", "complete_pod"):
+                    # Every row is held: as_table computes nothing more.
+                    first = stream.as_table(**config).slice(0, n)
+                    assert table.equals(first), "head is not the first rows of as_table"
+                assert_requested_columns(table, config, layout)
+                assert_head_rows(table, want, origins[:available], sort=sorts(config))
                 assert_rows_aligned(
                     table,
                     layout,
                     sources.oracle,
                     stream.data_context,
                     function_tokens=tokens,
-                    expected_rows=want,
+                    expected_rows=[(member_of(o),) for o in want]
+                    if not sorts(config)
+                    else None,
                 )
             except AssertionError as exc:
                 failures.append(f"head({n}) [{name}] {exc}")

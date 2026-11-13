@@ -9,20 +9,14 @@ Entry points and orders: sync ``run`` (input order); async ``run`` in every forc
 ``ENTRY_POINT_ORDERS`` (they share the async execution path with async ``run`` and differ
 only in how the run is entered). Each run is made once and shared by the tests that read
 it; each test checks every column configuration of one view and names every configuration
-that fails. ``head`` refuses ``sort_by_tags``, so it is checked without it.
+that fails. ``head(100, cfg)`` takes every configuration, sorting included, and must be
+the first rows of ``as_table(cfg)`` (ITL-1053).
 
 Readback: the stored rows read by a second run (rows from the store, not computed) and by
 a job loaded with ``PipelineJob.load``, after writes in input order and in forced orders.
 
-Known defects, each filed, are marked ``xfail(strict=True)`` on exactly the cases they
-break, so a case passes the day its defect is fixed only by dropping its mark:
-
-* ITL-1060: a row read back from the store gets a fresh datagram id, not the stored
-  ``__data_id`` its own token names (the stored-records check of every readback).
-* ITL-1050: the async Join matches null tag keys, the sync one drops them, so a
-  ``joined`` view of the null scenario computed on the async path (an async run or
-  rerun, or a load of what an async run stored) holds null-key pairs the documented rule
-  leaves out.
+No case is marked: the defects these paths showed (ITL-1029, ITL-1043, ITL-1050,
+ITL-1060) are fixed, and each fixed case runs as an ordinary test.
 """
 
 from __future__ import annotations
@@ -66,15 +60,6 @@ from .jobs import (
 )
 
 RunKey = tuple[str, str, str, str, str]
-
-ITL_1060 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1060: a row read back from the store gets a fresh datagram id",
-)
-ITL_1050 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1050: the async Join matches null tag keys; the sync Join drops them",
-)
 
 ENTRY_POINT_ORDERS = ("reversed", "one_slow", "random_0")
 
@@ -134,24 +119,10 @@ def run_keys(marks: Callable[[RunKey], list[Any]] | None = None) -> list[Any]:
     ]
 
 
-def null_join_after_async(key: RunKey, view: View) -> bool:
-    """Whether ``view`` shows a Join the async path computed over null tag keys.
-
-    ITL-1050: the async Join matches null keys, so it holds the rows of null-key pairs
-    the documented rule (and the sync Join) leave out.
-    """
-    return is_async(key) and key[0] == "null" and view.node == "joined"
-
-
 def run_view_params(keys: list[RunKey], views: tuple[View, ...] = VIEWS) -> list[Any]:
-    """``(run key, view)`` for each key and view; ITL-1050 on async null-key Joins."""
+    """``(run key, view)`` for each key and view."""
     return [
-        pytest.param(
-            key,
-            view,
-            id=f"{'-'.join(key)}-{view.name}",
-            marks=[ITL_1050] if null_join_after_async(key, view) else [],
-        )
+        pytest.param(key, view, id=f"{'-'.join(key)}-{view.name}")
         for key in keys
         for view in views
     ]
@@ -171,12 +142,13 @@ def check_every_config(
     """Check ``view`` under every column configuration; name every one that fails.
 
     Every configuration must give the rows the default one gives (``head`` at most 100)
-    and the per-row columns it asks for.
+    and the per-row columns it asks for, and ``head(100, cfg)`` must be the first rows of
+    ``as_table(cfg)``.
     """
     failures: list[str] = []
     baseline = produce(job, view, {}).num_rows
     expected_count = min(baseline, 100) if view.call == "head" else baseline
-    for name, config in configs_for(view):
+    for name, config in COLUMN_CONFIGS.items():
         table = produce(job, view, config)
         view_layout: Layout = layout(job, view, config)
         context = job.nodes[view.node].data_context
@@ -184,9 +156,12 @@ def check_every_config(
             assert table.num_rows == expected_count, (
                 f"{table.num_rows} rows, the default configuration gives {expected_count}"
             )
-            assert_requested_columns(
-                table, config, view_layout, require_sorted=view.call != "head"
-            )
+            if view.call == "head":
+                first = produce(job, View(view.node, "as_table"), config)
+                assert table.equals(first.slice(0, expected_count)), (
+                    "head(100) is not the first rows of as_table"
+                )
+            assert_requested_columns(table, config, view_layout)
             assert_rows_aligned(
                 table,
                 view_layout,
@@ -198,15 +173,6 @@ def check_every_config(
         except AssertionError as exc:
             failures.append(f"[{name}] {exc}")
     assert not failures, f"{view.name}: " + "\n".join(failures)
-
-
-def configs_for(view: View) -> list[tuple[str, dict[str, Any]]]:
-    """The column configurations ``view`` accepts: ``head`` refuses ``sort_by_tags``."""
-    return [
-        (name, config)
-        for name, config in COLUMN_CONFIGS.items()
-        if not (view.call == "head" and config.get("columns", {}).get("sort_by_tags"))
-    ]
 
 
 @pytest.mark.parametrize(("key", "view"), run_view_params(all_run_keys()))
@@ -250,7 +216,7 @@ def test_async_equals_sync_row_by_row(
     run = runs(key)
     failures = []
     compared = 0
-    for name, config in configs_for(view):
+    for name, config in COLUMN_CONFIGS.items():
         expected = produce(sync.job, view, config)
         if not _has_record_ids(expected):
             continue
@@ -336,7 +302,7 @@ def readbacks(
 
 
 def readback_params() -> list[Any]:
-    """Every readback and view, marked where a filed defect breaks it.
+    """Every readback and view.
 
     A loaded job leaves out ``grouped``: its operator stores nothing, so a loaded job has
     nothing to read for it, by design.
@@ -351,24 +317,9 @@ def readback_params() -> list[Any]:
                         for view in VIEWS:
                             if how == "load" and view.node == "grouped":
                                 continue
-                            # ITL-1050: an async rerun computes the Join again,
-                            # and a load reads what an async write stored.
-                            async_join = how == "rerun_async" or (
-                                how == "load" and write.startswith("async")
-                            )
-                            marks = (
-                                [ITL_1050]
-                                if scenario == "null"
-                                and view.node == "joined"
-                                and async_join
-                                else []
-                            )
                             params.append(
                                 pytest.param(
-                                    key,
-                                    view,
-                                    id=f"{'-'.join(key)}-{view.name}",
-                                    marks=marks,
+                                    key, view, id=f"{'-'.join(key)}-{view.name}"
                                 )
                             )
     return params
@@ -458,7 +409,6 @@ def test_a_node_read_in_any_pattern_stays_aligned(
         pytest.param(
             (scenario, input_order, store_kind, write, how),
             id=f"{scenario}-{input_order}-{store_kind}-{write}-{how}",
-            marks=[ITL_1060],
         )
         for scenario in SCENARIOS
         for input_order in INPUT_ORDERS

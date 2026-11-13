@@ -41,8 +41,8 @@ def rows(
 def keys_match(left: Origin, right: Origin, keys: Sequence[str] = KEYS) -> bool:
     """Whether two rows join: every key present, non-null and equal.
 
-    A null key matches nothing, as in an inner join (the rule of the sync path; the
-    async path's null matching is the defect ITL-1050).
+    A null key matches nothing, as in an inner join, on the sync and the async path
+    (the async path matched null keys until ITL-1050 was fixed).
     """
     return all(
         left.values[k] is not None
