@@ -1014,3 +1014,138 @@ def test_join_accepts_layout_only_key_difference(
         expected = sync_rows(Join(), *operands)
         assert len(expected) == 2
         assert_equivalent(expected, async_rows(Join(), *operands))
+
+
+# ── shared tags whose values are lists, structs or null (ITL-1044) ─────────
+
+_NAN = float("nan")
+
+
+def _tag_source(
+    key_type: pa.DataType,
+    keys: list[Any],
+    id_name: str,
+    data_name: str,
+    source_id: str,
+) -> ArrowTableSource:
+    """A source with tags (``<id_name>``, ``k``) and one data column.
+
+    The tag columns are not in alphabetical order and the rows are not sorted
+    by ``k``: an input already in tag order once hid a defect.
+    """
+    ids = list(range(len(keys), 0, -1))
+    table = pa.Table.from_arrays(
+        [
+            pa.array(ids, pa.int64()),
+            pa.array(keys, key_type),
+            pa.array(ids, pa.int16()),
+        ],
+        names=[id_name, "k", data_name],
+    )
+    return ArrowTableSource(table, tag_columns=[id_name, "k"], source_id=source_id)
+
+
+_LIST_INT = pa.large_list(pa.int64())
+_NESTED = pa.large_list(pa.large_list(pa.int64()))
+_STRUCT = pa.struct([("x", pa.int64()), ("y", pa.large_list(pa.int64()))])
+
+KEY_CASES = [
+    pytest.param(
+        _LIST_INT,
+        [[3, 1], [1, 2], [2, 1], [1, 2]],
+        [[1, 2], [2, 1], [9], [1, 2]],
+        id="list_int_many_to_many",
+    ),
+    pytest.param(
+        pa.large_list(pa.large_string()),
+        [["b", "a"], ["a"], ["a", "b"]],
+        [["a", "b"], ["a"], ["b", "a"], ["a"]],
+        id="list_string",
+    ),
+    pytest.param(
+        _NESTED,
+        [[[1], [2, 3]], [[2, 3], [1]], [[]], [[1], None]],
+        [[[1], [2, 3]], [[]], [[1], None], []],
+        id="nested_list",
+    ),
+    pytest.param(
+        _STRUCT,
+        [{"x": 2, "y": [1]}, {"x": 1, "y": None}, {"x": None, "y": None}],
+        [{"x": 1, "y": None}, {"x": 2, "y": [1]}, {"x": None, "y": None}],
+        id="struct",
+    ),
+    pytest.param(
+        _LIST_INT,
+        [[None, 1], [1, None], [None], [1]],
+        [[1, None], [None], [None, 1], [None]],
+        id="null_element",
+    ),
+    pytest.param(
+        _LIST_INT,
+        [None, [1], None, []],
+        [[1], None, [], None],
+        id="null_list_and_empty_list",
+    ),
+    pytest.param(
+        _STRUCT,
+        [None, {"x": None, "y": None}, {"x": 1, "y": []}],
+        [{"x": None, "y": None}, None, {"x": 1, "y": []}],
+        id="null_struct_and_struct_of_nulls",
+    ),
+    pytest.param(
+        pa.large_list(pa.float64()),
+        [[_NAN, 1.0], [0.0], [1.0, _NAN]],
+        [[_NAN, 1.0], [-0.0], [_NAN]],
+        id="nan_in_list",
+    ),
+    pytest.param(pa.float64(), [_NAN, 1.0, 0.0], [_NAN, 2.0, -0.0], id="nan"),
+    pytest.param(pa.int64(), [3, None, 1], [None, 1, 2], id="null_primitive"),
+    pytest.param(
+        pa.large_string(), [None, "a", "b"], [None, "b", "a"], id="null_string"
+    ),
+]
+JOIN_KEYS = pytest.mark.parametrize(("key_type", "left_keys", "right_keys"), KEY_CASES)
+
+
+def _key_sources(
+    key_type: pa.DataType, left_keys: list[Any], right_keys: list[Any]
+) -> tuple[ArrowTableSource, ArrowTableSource]:
+    return (
+        _tag_source(key_type, left_keys, "zl", "a", "left"),
+        _tag_source(key_type, right_keys, "zr", "b", "right"),
+    )
+
+
+@JOIN_KEYS
+def test_async_join_matches_shared_tags_as_the_sync_join_does(
+    key_type: pa.DataType, left_keys: list[Any], right_keys: list[Any]
+) -> None:
+    """Shared tags of any type match on both paths by the same equality (ITL-1044)."""
+    left, right = _key_sources(key_type, left_keys, right_keys)
+    for operands in ((left, right), (right, left)):
+        expected = sync_rows(Join(), *operands)
+        assert_equivalent(expected, async_rows(Join(), *operands))
+
+
+@JOIN_KEYS
+def test_async_semijoin_matches_shared_tags_as_the_sync_semijoin_does(
+    key_type: pa.DataType, left_keys: list[Any], right_keys: list[Any]
+) -> None:
+    """``SemiJoin`` keeps the same left rows on both paths for these keys."""
+    left, right = _key_sources(key_type, left_keys, right_keys)
+    # ``SemiJoin`` is ordered: both operand orders.
+    for operands in ((left, right), (right, left)):
+        expected = sync_rows(SemiJoin(), *operands)
+        assert_equivalent(expected, async_rows(SemiJoin(), *operands))
+
+
+def test_async_join_matches_a_shared_list_tag_across_three_inputs() -> None:
+    """The staggered N-ary join matches list-valued tags like the sync join."""
+    left, right = _key_sources(
+        _LIST_INT, [[3, 1], [1, 2], [2, 1], [1, 2]], [[1, 2], [2, 1], [9], [1, 2]]
+    )
+    third = _tag_source(_LIST_INT, [[2, 1], [1, 2], None], "zt", "c", "third")
+    for operands in ((left, right, third), (third, left, right)):
+        expected = sync_rows(Join(), *operands)
+        assert expected
+        assert_equivalent(expected, async_rows(Join(), *operands))
