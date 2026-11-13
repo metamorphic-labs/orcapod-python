@@ -83,6 +83,21 @@ else:
 # ---------------------------------------------------------------------------
 
 
+class _LoadedCacheUnreadableError(RuntimeError):
+    """A loaded operator node in REPLAY cannot read its run's stored rows.
+
+    ``as_table()`` and ``iter_data()`` raise it; ``head()``, which never raises on a
+    loaded node, shows no rows with ``head_note`` as the reason.
+
+    Attributes:
+        head_note: The short reason a head shows.
+    """
+
+    def __init__(self, message: str, head_note: str) -> None:
+        super().__init__(message)
+        self.head_note = head_note
+
+
 class OperatorNodeBase(StreamBase):
     """Shared base for ``OperatorNode`` and ``OperatorJobNode``.
 
@@ -1154,22 +1169,42 @@ class OperatorJobNode(OperatorNodeBase):
             and records.num_rows == 0
             and stored.num_rows > 0
         ):
-            raise RuntimeError(
+            if self._saved_run_content_hash is None:
+                cause = (
+                    "the job file does not record the content hash of this node's run "
+                    "(a file saved before Orcapod recorded it), and the loaded job "
+                    "cannot reproduce it. Upgrading such files is left to the migration "
+                    "tool after v0.3 (ITL-1048); until then build the job from code and "
+                    "attach the node with CacheMode.REPLAY to read them."
+                )
+                head_cause = (
+                    "the job file does not record its run's content hash "
+                    "(an older file; ITL-1048)"
+                )
+            else:
+                cause = (
+                    "they were stored by other runs: this store does not hold the rows "
+                    "of the saved run. Load with the store the run wrote."
+                )
+                head_cause = "they are other runs' rows (another store)"
+            raise _LoadedCacheUnreadableError(
                 f"OperatorJobNode {self.label!r}: its cache table "
                 f"({'/'.join(self._stored_table_path)}) holds {stored.num_rows} stored "
                 "rows, none of them under this node's content hash "
-                f"({self.content_hash().to_string()}). They were stored by other runs, "
-                "or by this job's run under a content hash the loaded job cannot "
-                "reproduce (an input source whose data was not saved with the job). "
-                "Build the job from code and attach the node with CacheMode.REPLAY to "
-                "read them."
+                f"({self.content_hash().to_string()}): {cause}",
+                head_note=(
+                    f"loaded node: {stored.num_rows} stored rows, none under its run's "
+                    f"content hash; {head_cause}"
+                ),
             )
         if records is None:
             if self._loaded:
-                raise RuntimeError(
+                raise _LoadedCacheUnreadableError(
                     f"OperatorJobNode {self.label!r}: the cache table is absent "
                     f"({'/'.join(self._stored_table_path)}). Load with the store "
-                    "that holds the saved operator results."
+                    "that holds the saved operator results.",
+                    head_note="loaded node whose cache table is absent from the "
+                    "attached store",
                 )
             if self._operator is None:
                 # Read-only (deserialized) node with no operator: cannot derive
@@ -1442,13 +1477,16 @@ class OperatorJobNode(OperatorNodeBase):
         """Return the first ``n`` of this node's stored rows.
 
         Reads the node's whole stored slice (no bounded read exists yet) through the
-        same path as ``as_table`` and keeps nothing on the node.
-
-        Raises:
-            RuntimeError: If the node was loaded and its cache table is absent from
-                the attached store (the wrong store).
+        same path as ``as_table`` and keeps nothing on the node. A loaded node whose
+        run's rows cannot be read (its cache table is absent, or none of its rows is the
+        run's) shows no rows and says why, where ``as_table`` raises.
         """
-        stream = self._load_cached_stream_from_db()
+        try:
+            stream = self._load_cached_stream_from_db()
+        except _LoadedCacheUnreadableError as exc:
+            return self._head_without_rows(
+                config, HeadStatus.UNAVAILABLE, note=exc.head_note
+            )
         if stream is None or stream.as_table().num_rows == 0:
             return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
         return stream.head(n, columns=config).for_stream(self, origin="stored")

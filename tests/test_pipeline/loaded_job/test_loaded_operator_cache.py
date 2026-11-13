@@ -22,6 +22,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import Join
+from orcapod.core.streams import HeadStatus
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import Pipeline
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -238,7 +239,13 @@ def test_without_saved_nullability_the_operator_still_reads_its_runs_table(
     assert _sorted(node.as_table()).equals(_sorted(job.nodes["joined"].as_table()))
 
 
-@pytest.mark.parametrize("read", ["as_table", "iter_data", "head"])
+def _drop_both(data: dict[str, Any]) -> None:
+    """Remove every field this fix adds, as in a file written before them."""
+    _drop_saved_nullability(data)
+    _drop_saved_operator_content_hash(data)
+
+
+@pytest.mark.parametrize("read", ["as_table", "iter_data"])
 @pytest.mark.parametrize("store_kind", STORES)
 @pytest.mark.parametrize("nullability", list(NULLABILITY))
 def test_without_the_run_content_hash_the_loaded_operator_raises(
@@ -247,20 +254,82 @@ def test_without_the_run_content_hash_the_loaded_operator_raises(
     """Stored rows the loaded node cannot identify as its run's never read as none."""
     store = _store(store_kind, tmp_path)
     job = _run(store, nullability)
-
-    def drop_both(data: dict[str, Any]) -> None:
-        """Remove every field this fix adds."""
-        _drop_saved_nullability(data)
-        _drop_saved_operator_content_hash(data)
-
-    node = _load_replaying(_save(job, tmp_path, drop_both), store).nodes["joined"]
+    node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
     with pytest.raises(
         RuntimeError,
-        match=r"'joined': its cache table \(.*\) holds 2 stored rows, none of them",
+        match=r"'joined': its cache table \(.*\) holds 2 stored rows, none of them "
+        r"under this node's content hash .* the job file does not record .*ITL-1048",
     ):
         result = getattr(node, read)()
         if read == "iter_data":
             _ = list(result)
+
+
+@pytest.mark.parametrize("store_kind", STORES)
+def test_without_the_run_content_hash_head_says_why_it_shows_no_rows(
+    store_kind: str, tmp_path: pathlib.Path
+) -> None:
+    """``head()`` never raises on a loaded node: it shows no rows and names the cause."""
+    store = _store(store_kind, tmp_path)
+    job = _run(store, "nullable_tag")
+    node = _load_replaying(_save(job, tmp_path, _drop_both), store).nodes["joined"]
+    head = node.head()
+    assert head.status is HeadStatus.UNAVAILABLE
+    assert head.table.num_rows == 0
+    assert "2 stored rows, none under its run's content hash" in head.header()
+    assert "ITL-1048" in head.header()
+
+
+def test_a_store_holding_only_other_runs_rows_is_named_as_the_cause(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With the run's content hash recorded, rows of other runs only mean another store."""
+    saved_store = InMemoryArrowDatabase()
+    saved = _save(_run(saved_store, "non_null"), tmp_path)
+    # Another store whose table at the same path holds another run's rows.
+    other_store = InMemoryArrowDatabase()
+    other = PipelineJob(name=JOB_NAME, store=other_store)
+    with other:
+        other_a = ArrowTableSource(
+            pa.table(
+                {"id": [0], "a": [9]},
+                schema=pa.schema(
+                    [
+                        pa.field("id", pa.int64(), nullable=False),
+                        pa.field("a", pa.int64(), nullable=False),
+                    ]
+                ),
+            ),
+            tag_columns=["id"],
+            source_id="other_a",
+        )
+        _ = Join()(
+            inc.pod(other_a, label="inc"),
+            _sources("non_null")["src_b"],
+            label="joined",
+        )
+    other.nodes["joined"].attach_databases(
+        pipeline_database=other_store.at(JOB_NAME), cache_mode=CacheMode.LOG
+    )
+    _ = other.run()
+    node = _load_replaying(saved, other_store).nodes["joined"]
+    with pytest.raises(RuntimeError, match=r"stored by other runs.*store"):
+        _ = node.as_table()
+    assert node.head().status is HeadStatus.UNAVAILABLE
+
+
+def test_an_absent_cache_table_shows_no_rows_in_head_and_raises_elsewhere(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A store without the run's table: ``head()`` names it; ``as_table()`` raises."""
+    store = InMemoryArrowDatabase()
+    saved = _save(_run(store, "non_null"), tmp_path)
+    node = _load_replaying(saved, InMemoryArrowDatabase()).nodes["joined"]
+    head = node.head()
+    assert head.status is HeadStatus.UNAVAILABLE
+    assert "cache table is absent" in head.header()
+    with pytest.raises(RuntimeError, match="'joined': the cache table is absent"):
+        _ = node.as_table()
 
 
 def test_an_empty_nullable_list_means_every_column_is_non_null(
