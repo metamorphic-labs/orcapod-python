@@ -25,6 +25,7 @@ from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.streams import HeadStatus
 
 from .test_pod_stream_staleness import _ConcurrentExecutor
 
@@ -317,3 +318,28 @@ def test_a_table_or_head_during_an_open_read_computes_each_row_once(
     assert _same_datagrams(first_rows, third_rows)
     assert stream.as_table().num_rows == len(IDS)
     assert CALLS == _expected_calls(upstream)
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+@pytest.mark.parametrize("upstream", UPSTREAMS)
+def test_the_head_after_an_abandoned_read_shows_its_rows(
+    upstream: str, executor: str
+) -> None:
+    """A read left after three rows is not stale: ``head()`` shows the rows it computed.
+
+    On the sequential path three rows are computed and the head is partial; the concurrent
+    path computes every row on the first one, so its head is complete. No head computes.
+    """
+    stream = _stream(upstream, executor, cached=False)
+    abandoned = iter(stream.iter_data())
+    for _ in range(3):
+        _ = next(abandoned)
+    del abandoned
+    calls = Counter(CALLS)
+    assert not _stale(stream)
+    head = stream.head(2)
+    assert head.status is (
+        HeadStatus.PARTIAL if executor == "sequential" else HeadStatus.ROWS
+    ), head.header()
+    assert head.table.num_rows == 2
+    assert CALLS == calls
