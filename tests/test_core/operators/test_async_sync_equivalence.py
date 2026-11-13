@@ -1268,3 +1268,35 @@ def test_join_paths_reject_a_tag_and_a_data_column_of_one_name(
             isinstance(e, InputValidationError) and re.search(_TAG_DATA_MESSAGE, str(e))
             for e in errors
         ), errors
+
+
+# ── keys that differ below one microsecond (CodeRabbit, PR #351) ────────────
+
+_NS_TYPES = [
+    pytest.param(pa.time64("ns"), id="time64_ns"),
+    pytest.param(pa.timestamp("ns"), id="timestamp_ns"),
+    pytest.param(pa.duration("ns"), id="duration_ns"),
+]
+
+
+@pytest.mark.parametrize("key_type", _NS_TYPES)
+@pytest.mark.parametrize("nested", [False, True], ids=["top_level", "in_list"])
+@pytest.mark.parametrize("operator", [Join, SemiJoin], ids=["join", "semijoin"])
+def test_async_keys_differing_below_a_microsecond_stay_apart(
+    operator: Callable[[], StaticOutputOperatorPod],
+    nested: bool,
+    key_type: pa.DataType,
+) -> None:
+    """Nanosecond keys that ``as_py()`` would merge do not match, as in the sync path."""
+    left_keys: list[Any] = [3, 1, 2]
+    right_keys: list[Any] = [2, 1, 4]
+    arrow_type: pa.DataType = key_type
+    if nested:
+        left_keys = [[k] for k in left_keys]
+        right_keys = [[k] for k in right_keys]
+        arrow_type = pa.large_list(key_type)
+    left, right = _key_sources(arrow_type, left_keys, right_keys)
+    for operands in ((left, right), (right, left)):
+        expected = sync_rows(operator(), *operands)
+        assert_equivalent(expected, async_rows(operator(), *operands))
+        assert len(expected) == 2 or operator is SemiJoin

@@ -14,14 +14,15 @@ the Polars join:
   to another one too).
 
 Values are read from the row's Arrow column (the storage of a logical column),
-never from ``as_dict()``, and never through ``repr`` or ``str``.
+never from ``as_dict()``, and never through ``repr`` or ``str``. Temporal values
+(time, timestamp, duration, date) are frozen from their integer storage value,
+because ``as_py()`` drops nanoseconds.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 import pyarrow as pa
 
@@ -29,26 +30,44 @@ import pyarrow as pa
 _NAN = object()
 
 
-def freeze(value: object) -> object:
-    """Return a Python value of an Arrow column in a hashable form.
+def _freeze_scalar(scalar: Any) -> object:  # pyright: ignore[reportAny, reportExplicitAny]  # pyarrow's scalar stubs lack the nested accessors
+    """Return an Arrow scalar, nested values included, in a hashable form.
 
-    Structs (dicts) become tuples of their items in field order, lists become
-    tuples, and NaN becomes one shared sentinel. Both inputs' key types are
-    checked equal first, so frozen values of different types never meet.
+    Structs become tuples of (field name, value), lists tuples, a map a tuple
+    of (key, value) pairs, NaN one shared sentinel and a null ``None``; a
+    temporal value is its integer storage value.
 
     Args:
-        value: A Python value (from ``as_py``) of an Arrow key column.
+        scalar: A scalar of a key column, or of a list item or struct field.
 
     Returns:
-        The hashable form of ``value``.
+        The hashable form of the scalar.
     """
+    if isinstance(scalar, pa.ExtensionScalar):
+        scalar = scalar.value  # pyright: ignore[reportAny]
+    if not scalar.is_valid:  # pyright: ignore[reportAny]
+        return None
+    arrow_type = scalar.type
+    if pa.types.is_struct(arrow_type):
+        return tuple(
+            (field.name, _freeze_scalar(scalar[field.name])) for field in arrow_type
+        )
+    if pa.types.is_map(arrow_type):
+        return tuple(
+            (_freeze_scalar(item["key"]), _freeze_scalar(item["value"]))
+            for item in scalar.values
+        )
+    if (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        return tuple(_freeze_scalar(item) for item in scalar.values)
+    if pa.types.is_temporal(arrow_type) and not pa.types.is_interval(arrow_type):
+        return scalar.value
+    value = scalar.as_py()
     if isinstance(value, float) and math.isnan(value):
         return _NAN
-    if isinstance(value, dict):
-        items = cast("dict[str, object]", value)
-        return tuple((name, freeze(item)) for name, item in items.items())
-    if isinstance(value, (list, tuple)):
-        return tuple(freeze(item) for item in cast("Sequence[object]", value))
     return value
 
 
@@ -63,7 +82,4 @@ def frozen_scalar(scalar: "pa.Scalar[Any]") -> object | None:  # pyright: ignore
         because the sync join also keys on a constant column), otherwise the
         frozen value.
     """
-    storage = scalar.value if isinstance(scalar, pa.ExtensionScalar) else scalar
-    if storage is None or not storage.is_valid:
-        return None
-    return freeze(storage.as_py())
+    return _freeze_scalar(scalar)

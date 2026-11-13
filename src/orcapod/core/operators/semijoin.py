@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
-from orcapod.core.operators.match_keys import freeze
+from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -297,12 +297,10 @@ class SemiJoin(BinaryOperator):
         values: list[object] = []
         for key in keys:
             scalar = SemiJoin._key_table(tag, data, key).column(key)[0]
-            if isinstance(scalar, pa.ExtensionScalar):
-                scalar = scalar.value
-            value: object = scalar.as_py() if scalar is not None else None
+            value = frozen_scalar(scalar)
             if value is None:
                 return None
-            values.append(freeze(value))
+            values.append(value)
         return tuple(values)
 
     def identity_structure(self) -> Any:
