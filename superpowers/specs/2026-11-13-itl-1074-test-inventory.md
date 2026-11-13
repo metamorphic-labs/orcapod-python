@@ -40,7 +40,7 @@ the same commit, the static marks in the tree, and local runs of the files that 
 |---|---|---|---|---|
 | Live Spiral source: `tests/test_core/sources/test_spiraldb_table_source_live.py` | 8 | "Set ORCAPOD_SPIRAL_LIVE_PROJECT to run" | The variable is set nowhere in `.github/`. The tests need a real Spiral project holding a `spike_event` table of more than 1,000 rows, credentials and network. | Correct to skip in `Run Tests`. Could run in the `spiral-integration` job once that job works and a project with the table exists (needs a developer decision and Spiral data). |
 | Spiral connector integration: `test_spiraldb_connector_integration.py` | 9 | "Set SPIRAL_INTEGRATION_TESTS=1" | Run by the `spiral-integration` job (push to `main` only), which sets the variable. In that job all 9 **fail** (section 3.2). | Correct to skip in `Run Tests`; the job that runs them is broken. |
-| S3 / MinIO: `test_delta_table_database_s3.py` (7), `test_list_table_paths.py::test_s3_lists_tables_and_nested_tables` (1) | 8 | "MinIO container could not be started: 404 ... pull access denied for minio/minio" | See 3.3. The fixture starts MinIO with testcontainers and skips on any exception; in CI the image cannot be pulled, so the S3 path is never tested. | Should run in CI but does not; needs a CI decision (3.3). |
+| S3 / MinIO: `test_delta_table_database_s3.py` (7), `test_list_table_paths.py::test_s3_lists_tables_and_nested_tables` (1) | 8 | "MinIO container could not be started: 404 ... pull access denied for minio/minio" | See 3.3. The fixture starts MinIO with testcontainers and skips on any exception; in CI the image cannot be pulled, so the S3 path is never tested. | Should run in CI but does not; needs a CI decision (3.3, ITL-1079). |
 | Delta tables under special-character roots: `test_delta_native_fs_read.py` (`x#y`, `q?r`, two tests each) | 4 | "deltalake cannot write a table at ..." | `_write_or_skip` skips when `deltalake` itself cannot write a table under a root named `x#y` or `q?r`. The other six special names run and pass. | Correct to skip: a limit of `deltalake`, not of Orcapod. Re-check on each `deltalake` upgrade. |
 | GPU tensors: `test_tensor_round_trip.py` (MPS, CUDA), `test_tensor_conversion_warning.py` (CUDA or MPS) | 3 | "needs MPS / CUDA / a CUDA or MPS device" | GitHub's Ubuntu runners have no GPU and no MPS. | Correct to skip. Running them needs a GPU runner (a paid CI service): not recommended before v0.3.0. |
 
@@ -82,6 +82,10 @@ from the ones `MinioContainer` sets), the `minio` server binary downloaded in th
 fixture already supports that), or a different S3 emulator (`moto`, a new dependency). Recommendation: the binary +
 `MINIO_ENDPOINT` route (no new dependency, about 10 lines of workflow), and make the fixture fail instead of skip when `CI`
 is set, as `test_ci_has_torch.py` does for torch. That needs a decision on where the binary comes from.
+A second, hidden defect: once a container starts, the fixture calls `minio.get_url()`, which `MinioContainer`
+in `testcontainers` 4.14.2 does not have (`AttributeError`; the endpoint must be built from
+`get_container_host_ip()` and `get_exposed_port(9000)`). The skip hid it. The image decision and this
+fixture fix are ITL-1079.
 
 ### 3.4 Wrong or closed issue named by an xfail
 - `test_delta_append_types.py` (4 xfails) cited ITL-916 (now ITL-1076), which is "A Delta table directory whose
