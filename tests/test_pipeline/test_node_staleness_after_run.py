@@ -14,6 +14,7 @@ source ``B``) and ``grouped`` (``GroupBy`` on ``g``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -125,9 +126,11 @@ def _reset() -> Iterator[None]:
 
 def _table(columns: dict[str, list[int]]) -> pa.Table:
     """A table of non-nullable ``int64`` columns."""
-    return pa.table(
-        columns,
-        schema=pa.schema([pa.field(name, pa.int64(), nullable=False) for name in columns]),
+    return pa.Table.from_arrays(
+        [pa.array(values, type=pa.int64()) for values in columns.values()],
+        schema=pa.schema(
+            [pa.field(name, pa.int64(), nullable=False) for name in columns]
+        ),
     )
 
 
@@ -189,8 +192,10 @@ def _computed_nodes(job: PipelineJob) -> dict[str, Any]:
     }
 
 
-def _count_store_reads(store: ArrowDatabaseProtocol) -> tuple[list[str], Any]:
-    """A record of store reads and the patcher that fills it (every view of the store)."""
+def _count_store_reads(
+    store: ArrowDatabaseProtocol,
+) -> tuple[list[str], contextlib.ExitStack]:
+    """Start counting reads of ``store`` (every view of it); closing the stack stops it."""
     reads: list[str] = []
     store_class = type(store)
 
@@ -203,13 +208,16 @@ def _count_store_reads(store: ArrowDatabaseProtocol) -> tuple[list[str], Any]:
 
         return read
 
-    return reads, mock.patch.multiple(
-        store_class, **{name: counting(name) for name in STORE_READS}
-    )
+    patches = contextlib.ExitStack()
+    for name in STORE_READS:
+        patches.enter_context(mock.patch.object(store_class, name, counting(name)))
+    return reads, patches
 
 
 RUNS = [
-    pytest.param(orchestrator, store_kind, gated, id=f"{orchestrator}-{store_kind}{tag}")
+    pytest.param(
+        orchestrator, store_kind, gated, id=f"{orchestrator}-{store_kind}{tag}"
+    )
     for store_kind in ("in_memory", "delta")
     for orchestrator, gated, tag in (
         ("sync", False, ""),
@@ -265,8 +273,8 @@ def test_reads_after_a_run_compute_nothing_and_read_no_store(
     job = _job(store)
     _run(job, orchestrator, gated=gated)
     CALLS.clear()
-    reads, patcher = _count_store_reads(store)
-    with patcher:
+    reads, counting = _count_store_reads(store)
+    with counting:
         for node in _computed_nodes(job).values():
             _ = node.head(100)
             _ = node.as_table(all_info=True)
