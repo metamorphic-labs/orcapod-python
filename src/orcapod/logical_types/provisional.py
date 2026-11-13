@@ -29,7 +29,7 @@ def _outside_orcapod_stacklevel() -> int:
     level = 1
     frame: FrameType | None = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
     while frame is not None:
-        module = frame.f_globals.get("__name__", "")
+        module = str(frame.f_globals.get("__name__", ""))
         if module != "orcapod" and not module.startswith("orcapod."):
             return level
         frame = frame.f_back
