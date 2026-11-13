@@ -269,7 +269,7 @@ class StreamHead:
             parts.append(f"<div><small>{html.escape(tags, quote=False)}</small></div>")
         if self.table.num_columns:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
-            with pl.Config(fmt_str_lengths=_MAX_TEXT):
+            with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=-1):
                 parts.append(self._display_frame()._repr_html_())
         return "\n".join(parts)
 
@@ -279,7 +279,7 @@ class StreamHead:
         if tags:
             lines.append(tags)
         if self.table.num_columns:
-            with pl.Config(fmt_str_lengths=_MAX_TEXT):
+            with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=-1):
                 lines.append(str(self._display_frame()))
         return "\n".join(lines)
 
@@ -374,7 +374,10 @@ def _summarise(column: pa.ChunkedArray[Any]) -> list[str | None] | None:
         starts: list[str | None] = pc.utf8_slice_codeunits(
             column, 0, _TEXT_START
         ).to_pylist()
-        ends: list[str | None] = pc.utf8_slice_codeunits(column, -_TEXT_END).to_pylist()
+        ends = [
+            None if n is None or n <= _MAX_TEXT else _text_end(column[i])
+            for i, n in enumerate(lengths)
+        ]
         return [
             None if n is None else f"{a}…{b}" if n > _MAX_TEXT else short
             for n, short, a, b in zip(lengths, shorts, starts, ends)
@@ -496,6 +499,17 @@ def _shape_text(shape: Any) -> str:
     if len(dims) == 1:
         return f"({dims[0]},)"
     return "(" + ", ".join(str(d) for d in dims) + ")"
+
+
+def _text_end(cell: Any) -> str:
+    """Return the last ``_TEXT_END`` characters of a string cell, reading only its end.
+
+    A character is at most 4 bytes in UTF-8, so the last ``4 * _TEXT_END`` bytes hold
+    them; a character cut at the start of that window is dropped when decoding.
+    """
+    buffer = cell.as_buffer()
+    window = buffer[max(0, buffer.size - 4 * _TEXT_END) :].to_pybytes()
+    return window.decode("utf-8", errors="ignore")[-_TEXT_END:]
 
 
 def _summarise_list(

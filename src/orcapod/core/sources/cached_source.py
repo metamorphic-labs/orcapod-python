@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 
 import logging
 from collections.abc import Iterator
@@ -12,6 +11,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import schema_requires_io
 from orcapod.core.streams.head import (
+    HeadStatus,
     StreamHead,
     head_of,
 )
@@ -426,22 +426,26 @@ class CachedSource(RootSource):
         """Return the first rows without reading or writing the cache.
 
         Once the source has been used, its merged stream is in memory and this is a slice
-        of it. Before that, the rows are the wrapped source's head: the cache table is
-        read and written only on first use (``iter_data``, ``as_table``).
+        of it. Before that its rows are not known: they are the cache's earlier rows
+        merged with the wrapped source's, and reading them writes the cache. The head
+        then has the wrapped source's columns, no rows and ``NOT_COMPUTED`` (or the
+        wrapped source's own reason when it has none to give).
         """
         if self._cached_stream is not None and not self.is_stale:
             return head_of(
                 self._cached_stream.head(n, columns=columns, all_info=all_info), self
             )
         wrapped = head_of(
-            self._source.head(n, columns=columns, all_info=all_info), self
+            self._source.head(0, columns=columns, all_info=all_info), self
         )
-        if wrapped.table.num_rows == 0:
-            # Keep the wrapped source's own explanation of why there are no rows.
+        if wrapped.status is not HeadStatus.ROWS:
             return wrapped
-        return dataclasses.replace(
-            wrapped,
-            note="rows of the wrapped source; the cache is read and written on first use",
+        return StreamHead.without_rows(
+            self,
+            HeadStatus.NOT_COMPUTED,
+            wrapped.table,
+            tag_columns=wrapped.tag_columns,
+            note="not read yet; as_table() or iter_data() reads and updates the cache",
         )
 
     def get_all_records(

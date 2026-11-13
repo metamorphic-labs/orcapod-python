@@ -2985,11 +2985,25 @@ class FunctionJobNode(FunctionNodeBase):
             self._require_expected_records()
             fetched = self._fetch_joined_records()
             stored = None if fetched is None else self._stored_rows_stream(fetched)
+            stored_ids = set(stored[0]) if stored is not None else set()
+            missing = 0
+            if fetched is not None:
+                missing = sum(
+                    1 for k in fetched.empty_data_tokens if k not in stored_ids
+                )
+            note = (
+                f"{missing:,} {'result' if missing == 1 else 'results'} not shown: kept "
+                "in an ephemeral store, which is not saved with the job"
+                if missing
+                else None
+            )
             if stored is not None:
                 return (
-                    stored[1].head(n, columns=config).for_stream(self, origin="stored")
+                    stored[1]
+                    .head(n, columns=config)
+                    .for_stream(self, origin="stored", note=note)
                 )
-            return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
+            return self._head_without_rows(config, HeadStatus.NOTHING_STORED, note=note)
         if self._cached_function_pod is None:
             return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
         entries = list(self._load_cached_entries().values())

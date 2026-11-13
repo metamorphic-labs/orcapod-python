@@ -423,7 +423,14 @@ def test_cached_source_head_writes_nothing() -> None:
     head = source.head(3)
     _ = source._repr_html_()
     assert store.list_table_paths() == []
-    assert head.table.column("x").to_pylist() == [0, 10, 20]
+    # Before first use its rows (earlier cached rows merged with the wrapped source's)
+    # are not known: the columns are shown, with no rows.
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert head.table.column_names == ["id", "x"]
+    table = source.as_table()
+    after = source.head(3)
+    assert after.status is HeadStatus.ROWS
+    assert after.table.equals(table.slice(0, 3))
 
 
 # ---------------------------------------------------------------------------
@@ -633,3 +640,24 @@ def test_head_of_adapts_any_head_the_protocol_allows() -> None:
     head = head_of(_PlainHead(), source)
     assert head.status is HeadStatus.ROWS
     assert head.header() == "ArrowTableSource[readings] — all 2 rows"
+
+
+def test_head_of_n_rows_renders_all_n_rows() -> None:
+    """The preview of ``head(n)`` shows all ``n`` rows, not Polars' default of 10."""
+    text = str(_source().head(25))
+    assert "shape: (25, 2)" in text
+    assert "…" not in text.split("\n", 2)[2]
+
+
+def test_an_empty_computed_result_has_the_requested_columns() -> None:
+    """A computed empty result has the columns ``as_table`` gives, hashes included."""
+    calls: list[int] = []
+    stream = _counting_pod(calls).pod(PolarsFilter(constraints={"x": -1})(_source()))
+    _ = list(stream.iter_data())
+    head = stream.head(columns={"content_hash": True})
+    assert head.status is HeadStatus.ROWS
+    assert len(head) == 0
+    assert (
+        head.table.column_names
+        == stream.as_table(columns={"content_hash": True}).column_names
+    )

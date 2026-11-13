@@ -14,6 +14,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod import function_pod
+from orcapod.core.function_pod import FunctionPodStream
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.operators import SelectDataColumns
@@ -239,3 +240,16 @@ def test_an_operator_node_with_an_empty_result_reads_as_computed(
     assert head.status is HeadStatus.ROWS
     assert len(head) == 0
     assert head.table.column_names == ["id", "x"]
+
+
+def test_an_operator_node_with_changed_inputs_shows_no_stale_rows() -> None:
+    """After an input changed, an operator node's kept rows are not shown."""
+    fn_stream = triple.pod(_source())
+    assert isinstance(fn_stream, FunctionPodStream)
+    node = OperatorJobNode(operator=SelectDataColumns(["y"]), input_streams=[fn_stream])
+    _ = node.execute(fn_stream)
+    assert node.head().status is HeadStatus.ROWS
+    fn_stream.clear_cache()  # the input is modified after the run
+    head = node.head()
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert "inputs changed" in head.header()

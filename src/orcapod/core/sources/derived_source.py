@@ -482,12 +482,17 @@ class DerivedSource(RootSource):
                 # No rows: this source's own columns (tag copies included), with the
                 # origin's status and explanation.
                 empty = self._stream_over(origin_head.table.slice(0, 0))
-                return StreamHead.without_rows(
-                    self,
-                    origin_head.status,
-                    empty.as_table(columns=config),
-                    tag_columns=empty.keys(columns=config)[0],
-                    note=origin_head.note,
+                return dataclasses.replace(
+                    StreamHead.without_rows(
+                        self,
+                        origin_head.status,
+                        empty.as_table(columns=config),
+                        tag_columns=empty.keys(columns=config)[0],
+                        note=origin_head.note,
+                    ),
+                    total_rows=origin_head.total_rows,
+                    total_is_estimate=origin_head.total_is_estimate,
+                    description=origin_head.description,
                 )
             stream = self._stream_over(origin_head.table)
             return dataclasses.replace(

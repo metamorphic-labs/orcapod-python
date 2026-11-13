@@ -402,3 +402,8 @@ renders `SpiralDBTableSource[spike_event] — first 10 rows of about 63,349`.
   `_head_note` (still the one place for its wording) as the header text, through
   `StreamHead.description`. An unlabelled Spiral source is shown by its table name. #333's
   display tests now go through `head()` / `header()`; their scan assertions are unchanged.
+- CodeRabbit rounds 3-4: a `CachedSource` not yet used shows its columns and `NOT_COMPUTED`
+  (its rows merge earlier cached rows with the wrapped source's, unknown until read); an
+  operator node whose input changed shows `NOT_COMPUTED` ("inputs changed") rather than its
+  kept rows; an async operator run with no rows keeps a typed empty result; `head_of` adapts
+  any `StreamHeadProtocol` result; the preview shows all `n` rows (Polars `tbl_rows=-1`).

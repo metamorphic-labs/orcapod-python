@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterator, Sequence
@@ -1187,9 +1186,18 @@ class FunctionPodStream(StreamBase):
         if not shown:
             # Nothing to show (an empty result, inputs that all gave no output so far,
             # or n == 0): the declared columns.
-            empty = self._head_without_rows(config, HeadStatus.ROWS)
-            return dataclasses.replace(
-                empty, status=status, total_rows=total, origin="computed"
+            table = self._shape_table(
+                self._table_from_pairs([]),
+                config,
+                lambda: pa.array([], type=pa.large_string()),
+            )
+            return StreamHead.of_rows(
+                self,
+                table,
+                tag_columns=tag_columns,
+                total_rows=total,
+                status=status,
+                origin="computed",
             )
         return StreamHead.of_rows(
             self,

@@ -33,6 +33,7 @@ from orcapod.core.streams.base import (
     head_column_config,
 )
 from orcapod.core.streams.head import (
+    STALE_NOTE,
     BLUEPRINT_NOTE,
     HeadStatus,
     StreamHead,
@@ -1333,6 +1334,11 @@ class OperatorJobNode(OperatorNodeBase):
         check_head_size(n)
         config = head_column_config(columns, all_info)
         if self._cached_output_stream is not None:
+            if not self._loaded and self.is_stale:
+                # run() would recompute; the kept rows are not the current result.
+                return self._head_without_rows(
+                    config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
+                )
             return head_of(self._cached_output_stream.head(n, columns=config), self)
         if self._cache_mode == CacheMode.REPLAY and self._pipeline_database is not None:
             return self._head_from_store(n, config)
