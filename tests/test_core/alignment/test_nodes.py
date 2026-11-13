@@ -17,11 +17,6 @@ a job loaded with ``PipelineJob.load``, after writes in input order and in force
 Known defects, each filed, are marked ``xfail(strict=True)`` on exactly the cases they
 break, so a case passes the day its defect is fixed only by dropping its mark:
 
-* ITL-1042: after an async run an operator node's ``head()`` says "not computed" and
-  shows no rows (``joined.head`` and ``grouped.head`` after an async run or rerun).
-* ITL-1042 also: a function node is stale right after an async run whose input comes
-  through an operator node, so its rows are reloaded from the store and (ITL-1060) get
-  fresh datagram ids (the stored-records check, async runs).
 * ITL-1060: a row read back from the store gets a fresh datagram id, not the stored
   ``__data_id`` its own token names (the stored-records check of every readback).
 * ITL-1050: the async Join matches null tag keys, the sync one drops them, so the async
@@ -69,17 +64,6 @@ from .jobs import (
 
 RunKey = tuple[str, str, str, str, str]
 
-ITL_1042 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1042: after an async run an operator node's head() shows no rows",
-)
-# After an async run the function node is stale (its input comes through the automatic
-# select, an operator node), so its next read reloads from the store, and a reloaded row
-# gets a fresh datagram id (ITL-1060): its __data_id check fails. Fixed with ITL-1042.
-ITL_1042_STALE = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1042: a function node is stale right after an async run and reloads",
-)
 ITL_1060 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1060: a row read back from the store gets a fresh datagram id",
@@ -139,11 +123,6 @@ def is_async(key: RunKey) -> bool:
     return key[2] != "sync"
 
 
-def operator_head(view: View) -> bool:
-    """Whether ``view`` is an operator node's ``head()`` (ITL-1042)."""
-    return view.call == "head" and view.node != "scaled"
-
-
 def run_keys(marks: Callable[[RunKey], list[Any]] | None = None) -> list[Any]:
     """Every run key as a parameter, with the marks ``marks`` gives it."""
     return [
@@ -157,17 +136,15 @@ def run_view_params(
 ) -> list[Any]:
     """``(run key, view)`` for each key and view, marked where a filed defect hits.
 
-    ITL-1042 on async operator heads. With ``compares_rows`` (a test that compares the
-    async rows with the sync ones), ITL-1050 on the async ``joined`` table of the null
-    scenario: the async Join keeps the rows whose key is null.
+    With ``compares_rows`` (a test that compares the async rows with the sync ones),
+    ITL-1050 on the async ``joined`` views of the null scenario: the async Join keeps
+    the rows whose key is null.
     """
     params = []
     for key in keys:
         for view in views:
             marks = []
-            if is_async(key) and operator_head(view):
-                marks.append(ITL_1042)
-            elif (
+            if (
                 compares_rows
                 and is_async(key)
                 and key[0] == "null"
@@ -244,9 +221,7 @@ def test_the_gate_realised_the_order(
     assert runs(key).completed == expected
 
 
-@pytest.mark.parametrize(
-    "key", run_keys(lambda key: [ITL_1042_STALE] if is_async(key) else [])
-)
+@pytest.mark.parametrize("key", run_keys())
 def test_stored_records_are_aligned(key: RunKey, runs: Callable[[RunKey], Run]) -> None:
     """The function node's stored records: hashes, tokens and ids belong to their rows."""
     from .records import assert_records_aligned
@@ -358,15 +333,9 @@ def readback_params() -> list[Any]:
                         for view in VIEWS:
                             if how == "load" and view.node == "grouped":
                                 continue
-                            marks = []
-                            if how == "rerun_async" and operator_head(view):
-                                marks.append(ITL_1042)
                             params.append(
                                 pytest.param(
-                                    key,
-                                    view,
-                                    id=f"{'-'.join(key)}-{view.name}",
-                                    marks=marks,
+                                    key, view, id=f"{'-'.join(key)}-{view.name}"
                                 )
                             )
     return params
