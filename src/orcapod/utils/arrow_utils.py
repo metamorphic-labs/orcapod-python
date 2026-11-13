@@ -8,7 +8,7 @@ from collections.abc import Mapping, Collection, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, SourceInfoValue
+from orcapod.types import ColumnConfig, ContentHash, SourceInfoValue
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -1399,6 +1399,46 @@ def fold_system_tag_values(column_name: str, values: Sequence[Any]) -> str | byt
         ensure_ascii=False,
     )
     return hashlib.sha256(members.encode("utf-8")).hexdigest()
+
+
+# The kind of a source-info token that stands for a value merged from several equal
+# elements, and the label of the algorithm that folds the members' tokens into it
+# (``fold_source_info_tokens``, the one place that uses the label).
+MERGED_SOURCE_INFO_KIND = "merged"
+SOURCE_FOLD_LABEL = "source_fold_v1"
+
+
+def fold_source_info_tokens(tokens: Sequence[str | None]) -> str:
+    """Fold the source-info tokens of several equal elements into one token.
+
+    When a data value is the merge of several elements that are equal in value but
+    are different entries (the scalar key of a ``GroupBy``, the shared key of a
+    ``Join`` that is referential on several inputs), no member's token is true for
+    it alone; its provenance is this one token (developer decision, November 13,
+    2026, ITL-1017). Nothing here assumes the merged column is a tag.
+
+    Modelled on ``fold_system_tag_values``: the preimage is the canonical JSON array
+    of the member tokens, where a missing token is ``null``, and the digest is
+    SHA-256, so the token is stable across processes. Unlike a system-tag fold the
+    members are sorted first (missing last): the provenance of N equal values is a
+    multiset, so the token does not depend on the order in which an operator met
+    them (a group's member order, a join's input order). A token that is itself a
+    merged token is a member like any other: it enters as it is, an identifier, as a
+    default source id does. Never substitute ``hash()`` or a set.
+
+    The result is always a merged token, for one member too, so its form never
+    depends on the data.
+
+    Args:
+        tokens: The members' source-info tokens, in any order.
+
+    Returns:
+        ``merged:<label>:<64 hex>``.
+    """
+    ordered = sorted(tokens, key=lambda token: (token is None, token or ""))
+    members = json.dumps(ordered, separators=(",", ":"), ensure_ascii=False)
+    digest = ContentHash(SOURCE_FOLD_LABEL, hashlib.sha256(members.encode()).digest())
+    return f"{MERGED_SOURCE_INFO_KIND}:{digest.to_string()}"
 
 
 def aggregated_list_type(

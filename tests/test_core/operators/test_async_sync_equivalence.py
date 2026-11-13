@@ -369,6 +369,29 @@ CASES = [
         ),
     ),
     Case(
+        # Two key-only referential inputs tie on pipeline hash (ITL-1017).
+        "ref_join_3_tied",
+        Join,
+        lambda: (
+            _source(
+                {"k": pa.array([1, 2, 3], pa.int16())}, ("k",), "p", referential=True
+            ),
+            source_b(referential=True),
+            _source(
+                {"k": pa.array([1, 2, 3], pa.int16())}, ("k",), "q", referential=True
+            ),
+        ),
+    ),
+    Case(
+        # The group key's merged token, merged again by the join (ITL-1017).
+        "ref_join_after_group_by",
+        Join,
+        lambda: (
+            GroupBy(["k"])(source_a(referential=True)),
+            source_b(referential=True),
+        ),
+    ),
+    Case(
         "ref_semijoin",
         SemiJoin,
         lambda: (source_a(referential=True), source_b(referential=True)),

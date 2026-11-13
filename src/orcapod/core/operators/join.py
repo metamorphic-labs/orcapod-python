@@ -1,5 +1,7 @@
 import asyncio
+import functools
 import itertools
+import json
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING
 
@@ -11,7 +13,7 @@ from orcapod.core.operators.base import (
 )
 from orcapod.core.referential_tags import (
     check_namespaces,
-    merged_source_tokens,
+    merge_source_info,
     reference_names,
     stream_references,
 )
@@ -39,6 +41,41 @@ else:
 # Temporary name of the right input's source info of a merged referential column
 # during the join (``static_process``); never in an output.
 _MERGED_SOURCE_PREFIX = "__join_merged_source__"
+
+# A column referential on several inputs gets ONE merged token per value, folded once
+# over every input's token (ITL-1017), not pairwise: a pairwise fold would depend on
+# the order of the join chain, which inputs tied on pipeline hash leave to the
+# argument order. Between the pairwise steps of one join, each token position holds
+# the members met so far, as this marker followed by their JSON array; the join folds
+# them when it emits a row (``_fold_pending``). Never in an output.
+_PENDING_MEMBERS = "\x00join-pending-members\x00"
+
+
+def _members(token: str | None) -> list[str | None]:
+    """The member tokens a token position holds so far (itself, if not pending)."""
+    if token is not None and token.startswith(_PENDING_MEMBERS):
+        return json.loads(token.removeprefix(_PENDING_MEMBERS))
+    return [token]
+
+
+def _pending(tokens: Sequence[str | None]) -> str:
+    """Hold the members of ``tokens`` at one token position until the join emits."""
+    members = [member for token in tokens for member in _members(token)]
+    return _PENDING_MEMBERS + json.dumps(members, ensure_ascii=False)
+
+
+def _merge_pending(left: Any, right: Any) -> Any:
+    """Merge two inputs' source info of one merged column, keeping its shape."""
+    return merge_source_info([left, right], combine=_pending)
+
+
+def _fold_pending(value: Any) -> Any:
+    """Replace every pending token position of ``value`` by its merged token."""
+    if isinstance(value, list):
+        return [_fold_pending(item) for item in value]
+    if isinstance(value, str) and value.startswith(_PENDING_MEMBERS):
+        return arrow_utils.fold_source_info_tokens(_members(value))
+    return value
 
 
 class Join(NonZeroInputOperator):
@@ -256,6 +293,8 @@ class Join(NonZeroInputOperator):
 
         tag_keys, _ = [set(k) for k in stream.keys()]
         references = set(stream_references(stream))
+        # Source-info columns of merged referential columns, folded once at the end.
+        merged_source: set[str] = set()
         table = self._without_meta(
             stream.as_table(columns={"source": True, "system_tags": True})
         )
@@ -326,6 +365,7 @@ class Join(NonZeroInputOperator):
             )
             for left_name, right_name in right_source.items():
                 table = self._merge_source_columns(table, left_name, right_name)
+            merged_source |= set(right_source)
 
             tag_keys.update(next_tag_keys)
             references |= next_references
@@ -333,6 +373,8 @@ class Join(NonZeroInputOperator):
         # reorder columns to bring tag columns to the front
         # TODO: come up with a better algorithm
         table = table.drop(COMMON_JOIN_KEY)
+        for name in sorted(merged_source):
+            table = self._fold_source_column(table, name)
 
         # Sort system tag values for same-pipeline-hash streams to ensure commutativity
         table = arrow_utils.sort_system_tag_values(table)
@@ -365,28 +407,46 @@ class Join(NonZeroInputOperator):
 
         Args:
             table: The joined table.
-            left_name: The left side's source-info column; replaced in place.
+            left_name: The left side's source-info column; replaced in place, with its
+                type and field kept (the merge keeps the shape of the data column).
             right_name: The right side's source-info column; removed.
 
         Returns:
-            The table with ``left_name`` holding both sides' tokens
-            (``merged_source_tokens``) as ``large_list<large_string>``.
+            The table with ``left_name`` holding both sides' members, pending until
+            the join folds them (``_fold_source_column``).
         """
+        field = table.schema.field(left_name)
         merged = pa.array(
             [
-                merged_source_tokens(left, right)
+                _merge_pending(left, right)
                 for left, right in zip(
                     table.column(left_name).to_pylist(),
                     table.column(right_name).to_pylist(),
                 )
             ],
-            type=pa.large_list(pa.large_string()),
+            type=field.type,
         )
         index = table.schema.get_field_index(left_name)
-        table = table.set_column(
-            index, pa.field(left_name, merged.type, nullable=True), merged
-        )
+        table = table.set_column(index, field, merged)
         return table.drop_columns([right_name])
+
+    @staticmethod
+    def _fold_source_column(table: "pa.Table", name: str) -> "pa.Table":
+        """Fold the pending members of a merged source-info column into merged tokens.
+
+        Args:
+            table: The joined table.
+            name: The source-info column.
+
+        Returns:
+            The table with one merged token at every token position of ``name``.
+        """
+        field = table.schema.field(name)
+        folded = pa.array(
+            [_fold_pending(value) for value in table.column(name).to_pylist()],
+            type=field.type,
+        )
+        return table.set_column(table.schema.get_field_index(name), field, folded)
 
     @staticmethod
     def _without_meta(table: "pa.Table") -> "pa.Table":
@@ -650,7 +710,7 @@ class Join(NonZeroInputOperator):
                         current_reader,
                         renamed_readers[i],
                         target_writer,
-                        self._merge_pair_passthrough,
+                        functools.partial(self._merge_pair_passthrough, final=is_last),
                     )
                 )
 
@@ -910,6 +970,7 @@ class Join(NonZeroInputOperator):
         left: DataProtocol,
         right_tag: TagProtocol,
         right: DataProtocol,
+        final: bool = True,
     ) -> DataProtocol:
         """Merge two data datagrams as Arrow, left columns first.
 
@@ -917,7 +978,7 @@ class Join(NonZeroInputOperator):
         of both sides is carried over. Neither side's meta columns are, as in
         ``static_process`` (``_without_meta``). A data column that is the target
         of a referential tag on both sides, joined on, is kept once, with the
-        source info of both (``merged_source_tokens``, as ``static_process``).
+        source info of both inputs, merged as ``static_process`` merges it.
 
         Args:
             left_tag: The left row's tag.
@@ -925,6 +986,9 @@ class Join(NonZeroInputOperator):
                 result of the joins so far).
             right_tag: The right row's tag.
             right: The later data.
+            final: Whether this row is emitted by the join (the last step of a
+                staggered chain, or a two-input join): then every merged column's
+                pending members are folded into merged tokens.
 
         Returns:
             The merged data, in the context of ``left``.
@@ -951,9 +1015,13 @@ class Join(NonZeroInputOperator):
         if merged:
             left_info, right_info = left.source_info(), right.source_info()
             for name in merged:
-                source_info[name] = merged_source_tokens(
+                source_info[name] = _merge_pending(
                     left_info.get(name), right_info.get(name)
                 )
+        if final:
+            source_info = {
+                name: _fold_pending(value) for name, value in source_info.items()
+            }
         # Column order as ``static_process`` lays it out: the referential columns
         # first, in the merged tag order, then each side's other data columns.
         tag_order = [*left_tag.keys()]
@@ -1031,12 +1099,14 @@ class Join(NonZeroInputOperator):
         left_pkt: DataProtocol,
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
+        final: bool = True,
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, passing system tags through without renaming.
 
         Used in the staggered chain where system tags have already been
         pre-renamed by ``_rename_sys_tags``. The merged row is built from the
         inputs' Arrow tables, in the left (canonically first) tag's context.
+        ``final`` is true only for the chain's last step (see ``_merge_data``).
         """
         # Combine system tags (already renamed)
         merged_sys: dict[str, DataValue] = {}
@@ -1050,7 +1120,9 @@ class Join(NonZeroInputOperator):
             merged_sys,
             left_tag.data_context_key,
         )
-        return merged_tag, Join._merge_data(left_tag, left_pkt, right_tag, right_pkt)
+        return merged_tag, Join._merge_data(
+            left_tag, left_pkt, right_tag, right_pkt, final=final
+        )
 
     @staticmethod
     def _sort_merged_system_tags(merged_sys: dict) -> dict:

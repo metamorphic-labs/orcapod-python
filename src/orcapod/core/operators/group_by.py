@@ -59,7 +59,9 @@ class GroupBy(UnaryOperator):
       output are the tag columns of the input, in the same order.
     * ``path`` becomes list-valued
     * the ``_source_*`` column of each data column becomes list-valued, one
-      element per member
+      element per member, except that of a referential group key: its value is
+      the merge of the members' equal values, so its source info is one merged
+      token (``arrow_utils.fold_source_info_tokens``, ITL-1017)
     * system-tag columns fold to a scalar digest and gain a
       ``::{pipeline_hash}`` name suffix
 
@@ -188,10 +190,19 @@ class GroupBy(UnaryOperator):
         system_tag_columns = tuple(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
+        # The source info of a referential key: the key's value is the merge of its
+        # members' equal values, so its source info is one merged token (ITL-1017).
+        key_source_columns = tuple(
+            name
+            for name in (f"{constants.SOURCE_PREFIX}{c}" for c in self.by)
+            if name in table.column_names
+        )
         member_columns = tuple(
             c
             for c in table.column_names
-            if c not in self.by and c not in system_tag_columns
+            if c not in self.by
+            and c not in system_tag_columns
+            and c not in key_source_columns
         )
         # Non-key user tags order the members of a group.  The `record_id`
         # columns are appended as a final tiebreaker: tag tuples are supposed
@@ -235,6 +246,10 @@ class GroupBy(UnaryOperator):
                 {
                     **dict(zip(self.by, key)),
                     **{c: [m[c] for m in members] for c in member_columns},
+                    **{
+                        c: arrow_utils.fold_source_info_tokens([m[c] for m in members])
+                        for c in key_source_columns
+                    },
                     **{
                         c: arrow_utils.fold_system_tag_values(
                             c, [m[c] for m in members]

@@ -19,15 +19,17 @@ identities exactly.
 
 from __future__ import annotations
 
+import typing
 import warnings
 import weakref
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
 
 from orcapod.errors import InputValidationError
 from orcapod.types import SourceInfoValue
+from orcapod.utils import arrow_utils
 
 # Diagnostic emitted when a structural operator materializes a reference (section 7.4).
 # ``"warn"`` emits a ``ReferenceMaterializationWarning``; ``"silent"`` emits nothing. The
@@ -219,36 +221,41 @@ def source_reference_tags(
     return tuple(name for name in tags if name not in plain)
 
 
-def merged_source_tokens(
-    left: SourceInfoValue, right: SourceInfoValue
-) -> list[SourceInfoValue]:
-    """Return the source info of a data column merged by a join, keeping both inputs'.
+def merge_source_info(
+    values: Sequence[SourceInfoValue],
+    combine: Callable[
+        [Sequence[str | None]], str
+    ] = arrow_utils.fold_source_info_tokens,
+) -> SourceInfoValue:
+    """Merge the source info of several equal values into the source info of one.
 
-    Section 9.4: a join that merges the data columns of two referential tags keeps the
-    provenance of both. The merged column's source info is the sorted list of both
-    inputs' tokens (``None`` last), as ``MergeJoin`` sorts its merged values, so it does
-    not depend on the order of the inputs. A token that is already a list (an earlier
-    join, or a ``GroupBy`` key, whose source info lists its members) gives its elements,
-    so the result is always a flat list of tokens.
+    The values merged are equal, so their source info has one shape: a token, or a
+    list of them nested as deep as the data column (provenance keeps the shape of its
+    data column; developer decision, November 13, 2026, ITL-1017). The result has
+    that shape, and each of its tokens is ``combine`` of the tokens at that position:
+    by default one merged token (``arrow_utils.fold_source_info_tokens``). This is
+    what a ``Join`` does with the column of a tag that is referential on several of
+    its inputs, and does not assume the column is a tag.
 
     Args:
-        left: The left input's source-info value: a token, ``None`` or a list of them.
-        right: The right input's source-info value, likewise.
+        values: The source info of each merged value, all of one shape.
+        combine: Folds the tokens at one position into one token.
 
     Returns:
-        The flat list of tokens.
+        The merged source info, of the values' shape.
 
     Raises:
-        NotImplementedError: If a value is a list nested more than one level
-            (ITL-1016).
+        ValueError: If the values do not have one shape (a token beside a list, or
+            lists of different lengths).
     """
-    merged: list[SourceInfoValue] = []
-    for value in (left, right):
-        items: list[SourceInfoValue] = value if isinstance(value, list) else [value]
-        for item in items:
-            if isinstance(item, list):
-                raise not_supported_yet(
-                    "Join of nested source info of a referential tag", "ITL-1016"
-                )
-            merged.append(item)
-    return sorted(merged, key=lambda token: (token is None, token or ""))
+    if all(isinstance(value, list) for value in values):
+        lists = typing.cast("list[list[SourceInfoValue]]", list(values))
+        if len({len(value) for value in lists}) > 1:
+            raise ValueError(
+                f"cannot merge source info of lists of different lengths: "
+                f"{[len(value) for value in lists]}"
+            )
+        return [merge_source_info(column, combine) for column in zip(*lists)]
+    if any(isinstance(value, list) for value in values):
+        raise ValueError("cannot merge the source info of a list with that of a scalar")
+    return combine(typing.cast("list[str | None]", list(values)))

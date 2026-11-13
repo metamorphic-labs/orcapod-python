@@ -41,6 +41,7 @@ from orcapod.core.referential_tags import (
     stream_references,
 )
 from orcapod.errors import InputValidationError
+from orcapod.utils import arrow_utils
 
 
 def _ref(rows: Sequence[Mapping[str, Any]], tags: list[str], sid: str, **kw: Any):
@@ -95,9 +96,10 @@ def test_join_referential_with_referential_merges_one_data_column() -> None:
     assert [{k: r[k] for k in ("x", "a", "b")} for r in table.to_pylist()] == [
         {"x": 1, "a": 0.5, "b": 10}
     ]
-    # Section 9.4: both inputs' provenance is kept, as a sorted list.
-    (tokens,) = table.column("_source_x").to_pylist()
-    assert tokens == ["A::row_0::x", "B::row_0::x"]
+    # Both inputs' provenance is kept, folded into one merged token: the merged value
+    # is scalar, so is its source info (developer decision, November 13, 2026, ITL-1017).
+    (token,) = table.column("_source_x").to_pylist()
+    assert token == arrow_utils.fold_source_info_tokens(["A::row_0::x", "B::row_0::x"])
 
 
 def test_join_is_commutative_with_references() -> None:
