@@ -258,6 +258,7 @@ def test_the_preview_of_a_source_shows_rows_in_tag_order_and_says_so() -> None:
 def test_the_preview_of_a_partly_computed_stream_is_the_rows_computed_so_far() -> None:
     """A partial computation previews the computed rows, in tag order; nothing more runs."""
     stream = triple.pod(_source())
+    assert isinstance(stream, FunctionPodStream)
     rows = stream.iter_data()
     for _ in range(4):
         next(rows)
@@ -270,7 +271,9 @@ def test_the_preview_of_a_partly_computed_stream_is_the_rows_computed_so_far() -
 
 def test_the_preview_of_a_stream_with_no_computed_rows_has_no_sorting_caption() -> None:
     """Only shown rows are described as sorted."""
-    html = triple.pod(_source())._repr_html_()
+    stream = triple.pod(_source())
+    assert isinstance(stream, FunctionPodStream)
+    html = stream._repr_html_()
     assert "sorted by tags" not in html
     assert CALLS == []
 
