@@ -67,6 +67,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     operator_node_class = OperatorNode
     side_effect_node_class = SideEffectNode
 
+    # False for a pipeline loaded from a file that does not record which columns may
+    # be null (ITL-1043): its schemas are lossy, so saving it again must not record
+    # their nullability as known.
+    _nullability_recorded: bool = True
+
     def __init__(
         self,
         name: str | tuple[str, ...],
@@ -141,6 +146,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         import json as _json
         from orcapod.pipeline.serialization import (
             PIPELINE_FORMAT_VERSION,
+            serialize_nullability,
+            serialize_output_schema,
             serialize_schema,
         )
         from orcapod.core.nodes import OperatorNode, FunctionNode
@@ -180,10 +187,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 "label": node.label,
                 "content_hash": node.content_hash().to_string(),
                 "pipeline_hash": node.pipeline_hash().to_string(),
-                "output_schema": {
-                    "tag": serialize_schema(tag_schema, type_converter),
-                    "data": serialize_schema(data_schema, type_converter),
-                },
+                "output_schema": serialize_output_schema(
+                    tag_schema, data_schema, type_converter
+                ),
                 "node_uri": list(node.node_uri),
                 "data_context_key": data_context_key,
                 "config": config_val,
@@ -198,6 +204,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         "data_schema": serialize_schema(
                             node.data_schema, type_converter
                         ),
+                        "nullable": serialize_nullability(
+                            node.tag_schema, node.data_schema, type_converter
+                        ),
                     }
                     descriptor["reconstructable"] = True
 
@@ -211,6 +220,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         descriptor["operator_config"] = node._operator.to_config()
                     descriptor["table_scope"] = node._table_scope
 
+            if not self._nullability_recorded:
+                # Loaded from a file without the record: what is known is unknown.
+                del descriptor["output_schema"]["nullable"]
+                descriptor.get("source_config", {}).pop("nullable", None)
             nodes[content_hash_str] = descriptor
 
         output: dict[str, Any] = {
@@ -281,6 +294,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
+        # A file written before nullability was recorded (ITL-1043) restores every
+        # column as non-null: lossy. Saving the loaded pipeline keeps it unrecorded.
+        nullability_recorded = all(
+            "nullable" in (descriptor.get("output_schema") or {})
+            for descriptor in nodes_data.values()
+        )
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -323,30 +342,34 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                     if not node_name:
                         node_name = descriptor.get("label") or "unknown"
+                    # Which columns may be null; None when the file does not say.
+                    saved_nullable: dict[str, list[str]] | None
                     if "tag_schema" in source_config and "data_schema" in source_config:
-                        tag_schema = Schema(
-                            deserialize_schema(
-                                source_config["tag_schema"], context.type_converter
-                            )
-                        )
-                        data_schema = Schema(
-                            deserialize_schema(
-                                source_config["data_schema"], context.type_converter
-                            )
-                        )
+                        saved_tag = source_config["tag_schema"]
+                        saved_data = source_config["data_schema"]
+                        saved_nullable = source_config.get("nullable")
                     else:
-                        tag_schema = Schema(
-                            deserialize_schema(
-                                descriptor["output_schema"]["tag"],
-                                context.type_converter,
-                            )
+                        saved_tag = descriptor["output_schema"]["tag"]
+                        saved_data = descriptor["output_schema"]["data"]
+                        saved_nullable = descriptor["output_schema"].get("nullable")
+                    tag_schema = Schema(
+                        deserialize_schema(
+                            saved_tag,
+                            context.type_converter,
+                            nullable=None
+                            if saved_nullable is None
+                            else saved_nullable["tag"],
                         )
-                        data_schema = Schema(
-                            deserialize_schema(
-                                descriptor["output_schema"]["data"],
-                                context.type_converter,
-                            )
+                    )
+                    data_schema = Schema(
+                        deserialize_schema(
+                            saved_data,
+                            context.type_converter,
+                            nullable=None
+                            if saved_nullable is None
+                            else saved_nullable["data"],
                         )
+                    )
                     node = SourceNodeClass(
                         name=node_name,
                         tag_schema=tag_schema,
@@ -429,6 +452,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
+        pipeline._nullability_recorded = nullability_recorded
         pipeline._persistent_node_map = dict(reconstructed)
 
         nodes_by_label: dict[str, GraphNode] = {}
@@ -512,6 +536,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         clone._node_graph = self._node_graph
         clone._auto_compile = self._auto_compile
         clone._compiled = self._compiled
+        clone._nullability_recorded = self._nullability_recorded
         # Mutable per-execution state — own copy so runs don't interfere
         clone._nodes = dict(self._nodes)
         return clone

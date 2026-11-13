@@ -24,6 +24,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import Join
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import Pipeline
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
 from orcapod.types import CacheMode
@@ -62,7 +63,7 @@ def _source(column: str, tag_nullable: bool, data_nullable: bool) -> ArrowTableS
     return ArrowTableSource(table, tag_columns=["id"], source_id=f"src_{column}")
 
 
-def _sources(nullability: str) -> dict[str, ArrowTableSource]:
+def _sources(nullability: str) -> dict[str, StreamProtocol]:
     """The job's two sources, keyed by source node name."""
     tag_nullable, data_nullable = NULLABILITY[nullability]
     return {
@@ -273,3 +274,65 @@ def test_an_empty_nullable_list_means_every_column_is_non_null(
         d for d in data["pipeline"]["nodes"].values() if d["label"] == "joined"
     )
     assert joined["output_schema"]["nullable"] == {"tag": [], "data": []}
+
+
+# ---------------------------------------------------------------------------
+# Saving a loaded job again: known stays known, unknown stays unknown
+# ---------------------------------------------------------------------------
+
+
+def _recorded_fields(saved: pathlib.Path) -> dict[str, Any]:
+    """The nullability records and operator run hash a saved file holds."""
+    data = json.loads(saved.read_text())
+    records: dict[str, Any] = {}
+    for descriptor in data["pipeline"]["nodes"].values():
+        label = descriptor["label"]
+        records[label] = descriptor["output_schema"].get("nullable")
+        if "source_config" in descriptor:
+            records[f"{label}.source_config"] = descriptor["source_config"].get(
+                "nullable"
+            )
+    records["joined.run_content_hash"] = data["run"]["node_job_content_hashes"].get(
+        "joined"
+    )
+    return records
+
+
+@pytest.mark.parametrize("nullability", ["non_null", "nullable_tag_and_data"])
+def test_saving_a_loaded_job_again_keeps_what_its_file_recorded(
+    nullability: str, tmp_path: pathlib.Path
+) -> None:
+    """A re-saved file records the same nullability and operator run hash."""
+    store = InMemoryArrowDatabase()
+    saved = _save(_run(store, nullability), tmp_path)
+    resaved = tmp_path / "resaved.json"
+    PipelineJob.load(str(saved), store=store).save(resaved)
+    assert _recorded_fields(resaved) == _recorded_fields(saved)
+
+
+def test_saving_a_lossy_loaded_job_again_records_nothing_it_does_not_know(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Unknown nullability and run hash are not written as facts when re-saving."""
+    store = InMemoryArrowDatabase()
+
+    def drop_both(data: dict[str, Any]) -> None:
+        """Remove every field this fix adds."""
+        _drop_saved_nullability(data)
+        _drop_saved_operator_content_hash(data)
+
+    saved = _save(_run(store, "nullable_tag"), tmp_path, drop_both)
+    resaved = tmp_path / "resaved.json"
+    PipelineJob.load(str(saved), store=store).save(resaved)
+    assert all(value is None for value in _recorded_fields(resaved).values())
+
+
+def test_a_source_proxy_keeps_the_nullability_of_the_source_it_stands_for() -> None:
+    """A source rebuilt as a ``SourceProxy`` from its config has the source's schema."""
+    from orcapod.pipeline.serialization import resolve_source_from_config
+
+    source = _source("a", tag_nullable=True, data_nullable=False)
+    config = {**source.to_config(), "source_type": "no_such_source_type"}
+    proxy = resolve_source_from_config(config, fallback_to_proxy=True)
+    assert proxy.output_schema() == source.output_schema()
+    assert proxy.pipeline_hash() == source.pipeline_hash()

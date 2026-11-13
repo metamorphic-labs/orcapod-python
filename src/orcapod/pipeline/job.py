@@ -1330,7 +1330,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         else:
             status = "complete"
 
-        # Collect the live (data-inclusive) content hashes for FunctionJobNodes.
+        # Collect the live (data-inclusive) content hashes of function and operator
+        # job nodes.
         # The pipeline blueprint stores schema-only blueprint hashes; but the DB
         # records are written with the live hash (which includes the upstream data
         # content).  Saving these ensures that PipelineJob.load() can reconstruct
@@ -1351,6 +1352,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 node_has_stored_records[node.label] = (
                     node._expects_stored_records or node._has_stored_records()
                 )
+            elif isinstance(node, OperatorJobNode):
+                # An operator node's stored rows carry its run's content hash too
+                # (ITL-1043). A node loaded from a file without it cannot know it: its
+                # recomputed hash is not the run's, so it is left out, not guessed.
+                run_content_hash = node._run_content_hash()
+                if run_content_hash is not None:
+                    node_job_content_hashes[node.label] = run_content_hash.to_string()
 
         output: dict[str, Any] = {
             "orcapod_pipeline_job_version": PIPELINE_JOB_FORMAT_VERSION,
@@ -1525,7 +1533,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Extract the live (data-inclusive) content hashes saved at run time.
         # These are keyed by node label and used below to override the blueprint
-        # hash stored in each FunctionNode descriptor so that loaded stubs'
+        # hash stored in each function and operator node descriptor so that loaded stubs'
         # content_hash() matches the _node_content_hash column in the DB.
         run_block = data.get("run", {})
         node_job_content_hashes: dict[str, str] = run_block.get(
@@ -1582,11 +1590,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 )
                 # Use the reconstructed operator from the blueprint if available.
                 operator = getattr(bp_node, "_operator", None)
+                # The run's content hash, when the file records it (ITL-1043): the
+                # rows the run stored carry it, and the rebuilt inputs cannot give it.
                 ojn = OperatorJobNode.from_descriptor(
                     descriptor,
                     operator=operator,
                     input_streams=input_streams,
                     databases={},
+                    job_content_hash=node_job_content_hashes.get(bp_node.label),
                 )
                 job._persistent_node_map[node_hash] = ojn
 

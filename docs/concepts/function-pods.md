@@ -687,14 +687,21 @@ as before.
   saved run stored, with the types they were stored with. Rows come in the order the store
   returns them; sort them if order matters.
 - Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
-  A loaded operator without a readable cache raises from `as_table()` and `iter_data()`.
-  So does a loaded operator attached in `CacheMode.REPLAY` whose stored rows it cannot tell
-  apart as its run's, which happens when an input source's data was not saved with the job:
-  it never shows them as zero rows. Read its input nodes instead (an in-memory input source
-  must be bound first, see below), or build the job from your code and attach the operator
-  node in `CacheMode.REPLAY`.
-  Saved descriptors do not yet preserve all runtime identity and cache configuration needed
-  for operator readback without reconstruction (follow-up ITL-977).
+  The saved file does not record an operator's cache mode (follow-up ITL-977), so attach a
+  loaded operator node in `CacheMode.REPLAY` to read the rows its run stored:
+  `loaded.nodes["joined"].attach_databases(pipeline_database=store.at("<job name>"),
+  cache_mode=CacheMode.REPLAY)`. A loaded operator without a readable cache raises from
+  `as_table()` and `iter_data()`; it never shows stored rows as zero rows. Read its input
+  nodes instead (an in-memory input source must be bound first, see below), or build the job
+  from your code and attach the operator node in `CacheMode.REPLAY`.
+- A loaded node has the pipeline hash, content hash, table path and output schema its run
+  had (a source node whose data was not saved gets its run's content hash once its source is
+  bound). The file records which columns may be null (`T | None`), because the Arrow type text
+  of a schema cannot say it, and the content hash of each node's run, which the stored rows
+  carry. A file written before these were recorded (format `0.1.0`) still loads, but lossy:
+  its schemas read every column as non-null, and a loaded operator node cannot tell its run's
+  stored rows apart, so reading them raises. Saving such a loaded job again does not record
+  what its file did not.
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs

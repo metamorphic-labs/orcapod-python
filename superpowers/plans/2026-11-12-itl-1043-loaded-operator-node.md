@@ -17,9 +17,14 @@ Options 2 and 3 (saved operator run content hash; saved top-level nullability, r
 
 ## Status / notes for a successor
 
-- 2026-11-12: investigation done and reported (commit 5b07349d); option 1 approved; options
-  2-3 to be prepared, not pushed until confirmed. ITL-1026 merges first; option 3 then adds
-  fields to the same `0.2.0` format.
+- 2026-11-12: investigation done and reported (commit 5b07349d); option 1 approved and
+  done (c7e3e4d6). Developer then chose option 3 (all three). Tasks 1-5 implemented locally;
+  presence of the `nullable` record / the operator's entry in `node_job_content_hashes`
+  decides lossless vs lossy load (never the version number). Pipeline._nullability_recorded
+  keeps a lossy file lossy on re-save; OperatorJobNode._run_content_hash() is None for a
+  loaded node without a saved run hash, so re-save leaves it out.
+- PUSH RULE (coordinator): do not push the format fields until PR #345 (ITL-1026, format
+  0.2.0) has merged; then merge origin/main and push once, open the PR (Fixes ITL-1043).
 - Pre-existing contradiction, not changed here: `OperatorJobNode.head` says "a loaded node
   never raises", but `_head_from_store` raises when a loaded REPLAY node's table is absent. The
   new 0-of-N case behaves like the absent table (raises from `head` too). Report it.

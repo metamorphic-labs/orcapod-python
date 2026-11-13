@@ -92,6 +92,10 @@ class OperatorNodeBase(StreamBase):
 
     node_type = "operator"
     HASH_COLUMN_NAME = "_record_hash"
+    # The content hash a saved job recorded for this node's run (ITL-1043); set only
+    # on a node rebuilt by ``OperatorJobNode.from_descriptor``. A class default, so
+    # nodes built without ``__init__`` have it too.
+    _saved_run_content_hash: str | None = None
 
     def __init__(
         self,
@@ -184,7 +188,15 @@ class OperatorNodeBase(StreamBase):
     # ------------------------------------------------------------------
 
     def content_hash(self, hasher=None) -> ContentHash:
-        """Return the content hash, using stored value in read-only mode."""
+        """Return the content hash: the run's when a loaded job recorded it.
+
+        A node of a job loaded from a file that records its run's content hash returns
+        that: the rows the run stored carry it, and inputs rebuilt from the file (an
+        in-memory source is not saved) cannot reproduce it (ITL-1043). Otherwise a
+        read-only node returns its descriptor's value, and any other node computes it.
+        """
+        if self._saved_run_content_hash is not None:
+            return ContentHash.from_string(self._saved_run_content_hash)
         if self._operator is None and self._stored_content_hash is not None:
             return ContentHash.from_string(self._stored_content_hash)
         return super().content_hash(hasher)
@@ -750,6 +762,7 @@ class OperatorJobNode(OperatorNodeBase):
         operator: OperatorPodProtocol | None,
         input_streams: tuple[StreamProtocol, ...] | list[StreamProtocol],
         databases: dict[str, Any],
+        job_content_hash: str | None = None,
     ) -> OperatorJobNode:
         """Construct an OperatorJobNode from a serialized descriptor.
 
@@ -767,6 +780,8 @@ class OperatorJobNode(OperatorNodeBase):
                 for read-only mode.
             databases: Mapping of database role names (``"pipeline"``)
                 to database instances.
+            job_content_hash: The content hash of the node in the saved job's run,
+                which its stored rows carry; ``None`` when the file does not record it.
 
         Returns:
             A new ``OperatorJobNode`` instance.
@@ -811,6 +826,7 @@ class OperatorJobNode(OperatorNodeBase):
             # The run's pipeline hash, not one recomputed from the rebuilt inputs: it
             # names the table the run's rows are stored in.
             node._stored_pipeline_hash = descriptor.get("pipeline_hash")
+            node._saved_run_content_hash = job_content_hash
             node._load_status = LoadStatus.FULL
             node._loaded = True
             return node
@@ -862,6 +878,7 @@ class OperatorJobNode(OperatorNodeBase):
         node._descriptor = descriptor
         node._stored_schema = descriptor.get("output_schema", {})
         node._stored_content_hash = descriptor.get("content_hash")
+        node._saved_run_content_hash = job_content_hash
         node._stored_pipeline_hash = descriptor.get("pipeline_hash")
         node._stored_pipeline_path = tuple(descriptor.get("pipeline_path", ()))
         node._stored_node_uri = tuple(descriptor.get("node_uri") or [])
@@ -882,6 +899,19 @@ class OperatorJobNode(OperatorNodeBase):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _run_content_hash(self) -> ContentHash | None:
+        """Return the content hash this node's run stores its rows under, if known.
+
+        A node that runs computes it. A loaded node knows it only when its saved job
+        recorded it (ITL-1043); otherwise ``None``, because the hash it recomputes from
+        inputs rebuilt from the file is not the run's.
+        """
+        if not self._loaded:
+            return self.content_hash()
+        if self._saved_run_content_hash is None:
+            return None
+        return ContentHash.from_string(self._saved_run_content_hash)
 
     def _no_stored_results_error(self) -> RuntimeError:
         """Return the error for reading a loaded operator node with nothing to serve.
