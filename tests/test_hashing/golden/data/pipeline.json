@@ -591,5 +591,7 @@
   "sources.subjects.system_tag_columns": [
     "_tag_source_id::d22029fcc2b0458566a83389c23c1a850dc69499f2456ae83bc6345284f861a5",
     "_tag_record_id::d22029fcc2b0458566a83389c23c1a850dc69499f2456ae83bc6345284f861a5"
-  ]
+  ],
+  "tagless_producerless_stream.as_given": "semantic_v1:8910e1f5088e3a86be550c356c8127e4dcd302c99378942f30bc34a982b1a108",
+  "tagless_producerless_stream.reordered": "semantic_v1:8910e1f5088e3a86be550c356c8127e4dcd302c99378942f30bc34a982b1a108"
 }

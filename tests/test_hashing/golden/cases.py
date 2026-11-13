@@ -1884,3 +1884,31 @@ def torch_datagram() -> dict[str, Any]:
     return stream_summary(
         DictSource(data=rows, tag_columns=["k"], source_id="golden_torch_tensor")
     )
+
+
+@case("pipeline", "tagless_producerless_stream")
+def pipeline_tagless_producerless_stream() -> dict[str, Any]:
+    """Pin the content hash of a stream with no tag column and no producer (ITL-1053).
+
+    Its identity hashes the rows sorted by their system tags, so the hash is the same
+    for rows given in any order.
+
+    Returns:
+        The content hash for two orders of the same rows.
+    """
+    from orcapod.core.streams import ArrowTableStream
+
+    rows = {"record_id": ["b", "c", "a"], "x": [1, 2, 3]}
+    reordered = {"record_id": ["c", "a", "b"], "x": [2, 3, 1]}
+    return {
+        "as_given": ArrowTableStream(
+            pa.table(rows), tag_columns=[], system_tag_columns=["record_id"]
+        )
+        .content_hash()
+        .to_string(),
+        "reordered": ArrowTableStream(
+            pa.table(reordered), tag_columns=[], system_tag_columns=["record_id"]
+        )
+        .content_hash()
+        .to_string(),
+    }
