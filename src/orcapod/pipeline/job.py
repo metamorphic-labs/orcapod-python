@@ -181,6 +181,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # the same class name (e.g. two ArrowTableSource objects).
         self._sources_by_hash: dict[str, cp.StreamProtocol] = {}
         self._has_run: bool = False
+        # True only while the last run started has finished and committed its writes:
+        # what the store then holds for each node is what that run left (ITL-1043).
+        self._last_run_finished: bool = False
         self._run_id: str | None = None
         # The summary of the last run this object completed (ITL-997).
         self._last_run: RunSummary | None = None
@@ -1057,6 +1060,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "is for reading stored results only. To run a new computation, "
                 "create a fresh PipelineJob from the original pipeline definition."
             )
+        # Until this run finishes, what the store holds for a node is not certain.
+        self._last_run_finished = False
 
         table_committing = as_table_committing(self._store)
         if (
@@ -1248,6 +1253,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Mutate self in place.
         self._has_run = True
+        self._last_run_finished = True
         self._run_id = prepared.run_id
         node_summaries: list[NodeRunSummary] = []
         for node in prepared.exec_dag.topological_sort():
@@ -1339,20 +1345,18 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # stubs whose content_hash() matches the _node_content_hash column in the
         # DB — required for _filter_by_content_hash() in get_all_records().
         node_job_content_hashes: dict[str, str] = {}
-        # Whether the store holds at least one pipeline record of each function
-        # node (a record with the node's content hash), so that load() can tell a
-        # store that holds this run's results from one that does not (a
-        # different store passed to load(), or a moved one).
-        node_has_stored_records: dict[str, bool] = {}
+        # Advisory only (ITL-1043): how many rows the store holds under each node's
+        # run key, written only when certain (the last run finished and committed, or
+        # a loaded node's own record). A loaded node compares it with its store and
+        # warns on a difference; the store stays the source of truth.
+        expected_rows: dict[str, int] = {}
         for node in (self._persistent_node_map or {}).values():
+            if isinstance(node, (FunctionJobNode, OperatorJobNode)):
+                count = node._expected_row_count_to_save(self._last_run_finished)
+                if count is not None:
+                    expected_rows[node.label] = count
             if isinstance(node, FunctionJobNode):
                 node_job_content_hashes[node.label] = node.content_hash().to_string()
-                # A loaded node keeps the expectation it was saved with: a store
-                # attached since then that lacks the table does not mean the
-                # original run stored nothing.
-                node_has_stored_records[node.label] = (
-                    node._expects_stored_records or node._has_stored_records()
-                )
             elif isinstance(node, OperatorJobNode):
                 # An operator node's stored rows carry its run's content hash too
                 # (ITL-1043). A node loaded from a file without it cannot know it: its
@@ -1369,7 +1373,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "status": status,
                 "unbound_sources": list(self.unbound_sources),
                 "node_job_content_hashes": node_job_content_hashes,
-                "node_has_stored_records": node_has_stored_records,
+                # A separate, optional section: deleting it changes nothing but the
+                # check (ITL-1043).
+                **({"expected_rows": expected_rows} if expected_rows else {}),
             },
             "pipeline": pipeline_data,
             "bindings": {
@@ -1541,11 +1547,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         node_job_content_hashes: dict[str, str] = run_block.get(
             "node_job_content_hashes", {}
         )
-        # Absent in files saved before ITL-904: such nodes read zero rows from a
-        # store that has none, as before.
-        node_has_stored_records: dict[str, bool] = run_block.get(
-            "node_has_stored_records", {}
-        )
+        # The optional, advisory section (ITL-1043): a node with an entry warns when
+        # its store holds another number of rows. Without it nothing is checked. The
+        # ITL-904 flag (node_has_stored_records) of older files is not used: the store
+        # is the source of truth.
+        expected_rows: dict[str, int] = run_block.get("expected_rows", {})
 
         for node_hash in _nx.topological_sort(job._hash_graph):
             bp_node = pipeline._persistent_node_map.get(node_hash)
@@ -1576,9 +1582,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     descriptor,
                     input_stream=input_stream,
                     job_content_hash=live_content_hash,
-                    expect_stored_records=node_has_stored_records.get(
-                        bp_node.label, False
-                    ),
+                    expected_row_count=expected_rows.get(bp_node.label),
                 )
                 job._persistent_node_map[node_hash] = fjn
 
@@ -1600,6 +1604,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     input_streams=input_streams,
                     databases={},
                     job_content_hash=node_job_content_hashes.get(bp_node.label),
+                    expected_row_count=expected_rows.get(bp_node.label),
                 )
                 job._persistent_node_map[node_hash] = ojn
 

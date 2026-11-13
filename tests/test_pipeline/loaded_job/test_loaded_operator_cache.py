@@ -13,6 +13,7 @@ and raises rather than show the stored rows as none.
 from __future__ import annotations
 
 import json
+import warnings
 import pathlib
 from collections.abc import Callable
 from typing import Any
@@ -24,7 +25,8 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import Join
 from orcapod.core.streams import HeadStatus
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.pipeline import Pipeline
+from orcapod.errors import StoreContentWarning
+from orcapod.pipeline import Pipeline, SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
@@ -361,7 +363,9 @@ def test_a_store_holding_only_other_runs_rows_gives_an_empty_result(
     )
     _ = other.run()
     node = _load_replaying(saved, other_store).nodes["joined"]
-    _assert_reads_as_live_with_no_rows(node, _live_replaying(other_store, job))
+    # The job file records the run's 2 rows: an advisory warning, not an error.
+    with pytest.warns(StoreContentWarning, match="records 2 rows .* holds 0"):
+        _assert_reads_as_live_with_no_rows(node, _live_replaying(other_store, job))
 
 
 @pytest.mark.parametrize("nullability", list(NULLABILITY))
@@ -372,7 +376,9 @@ def test_an_absent_cache_table_gives_an_empty_result(
     job = _run(InMemoryArrowDatabase(), nullability)
     empty_store = InMemoryArrowDatabase()
     node = _load_replaying(_save(job, tmp_path), empty_store).nodes["joined"]
-    _assert_reads_as_live_with_no_rows(node, _live_replaying(empty_store, job))
+    # The job file records the run's 2 rows: an advisory warning, not an error.
+    with pytest.warns(StoreContentWarning, match="records 2 rows .* holds 0"):
+        _assert_reads_as_live_with_no_rows(node, _live_replaying(empty_store, job))
 
 
 def _run_empty_join(store: ArrowDatabaseProtocol) -> PipelineJob:
@@ -624,3 +630,140 @@ def test_saving_again_drops_only_the_records_its_file_lacked(
     assert _recorded_fields(resaved) == _recorded_fields(saved)
     assert _recorded_fields(resaved)["src_a"] is None
     assert _recorded_fields(resaved)["src_b"] == {"tag": ["id"], "data": ["b"]}
+
+
+# ---------------------------------------------------------------------------
+# run.expected_rows: an optional, advisory count; the store stays the truth
+# ---------------------------------------------------------------------------
+
+READ_NODES = ["inc", "joined"]
+
+
+def _read_all(job: PipelineJob, label: str) -> pa.Table:
+    """Read a loaded node three ways and return its table."""
+    node = job.nodes[label]
+    _ = list(node.iter_data())
+    _ = node.head()
+    return node.as_table()
+
+
+def _loaded(saved: pathlib.Path, store: ArrowDatabaseProtocol) -> PipelineJob:
+    """Load the job; its join replays (the file does not record its cache mode)."""
+    return _load_replaying(saved, store)
+
+
+def test_the_job_file_records_the_rows_each_node_has_in_the_store(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``run.expected_rows``: the run's rows under each node's key, in its own section."""
+    data = json.loads(
+        _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path).read_text()
+    )
+    assert data["run"]["expected_rows"] == {"inc": 2, "joined": 2}
+
+
+@pytest.mark.parametrize("label", READ_NODES)
+@pytest.mark.parametrize("store_kind", STORES)
+def test_fewer_rows_than_expected_warn_once_and_read_what_the_store_holds(
+    store_kind: str, label: str, tmp_path: pathlib.Path
+) -> None:
+    """Another store with none of the run's rows: no rows, one warning per node."""
+    saved = _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path)
+    loaded = _loaded(saved, _store(store_kind, tmp_path))
+    with pytest.warns(StoreContentWarning) as record:
+        table = _read_all(loaded, label)
+        _ = _read_all(loaded, label)
+    assert table.num_rows == 0
+    messages = [str(w.message) for w in record if w.category is StoreContentWarning]
+    assert len(messages) == 1
+    assert f"Node {label!r}: the job file records 2 rows for its run" in messages[0]
+    assert "holds 0 under the run's key" in messages[0]
+
+
+@pytest.mark.parametrize("label", READ_NODES)
+@pytest.mark.parametrize("store_kind", STORES)
+def test_more_rows_than_expected_warn_and_read_them_all(
+    store_kind: str, label: str, tmp_path: pathlib.Path
+) -> None:
+    """The store holds more than the file records: all of them, one warning."""
+    store = _store(store_kind, tmp_path)
+    job = _run(store, "non_null")
+
+    def expect_one(data: dict[str, Any]) -> None:
+        """Record one row where the run left two."""
+        data["run"]["expected_rows"][label] = 1
+
+    loaded = _loaded(_save(job, tmp_path, expect_one), store)
+    with pytest.warns(StoreContentWarning, match="records 1 row for its run.*holds 2"):
+        table = _read_all(loaded, label)
+    assert _sorted(table).equals(_sorted(job.nodes[label].as_table()))
+
+
+@pytest.mark.parametrize("store_kind", STORES)
+def test_matching_counts_and_zero_expected_zero_found_do_not_warn(
+    store_kind: str, tmp_path: pathlib.Path
+) -> None:
+    """No warning when the store holds what the file records, zero included."""
+    store = _store(store_kind, tmp_path)
+    job = _run(store, "non_null")
+    empty = _run_empty_join(_store("memory", tmp_path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", StoreContentWarning)
+        loaded = _loaded(_save(job, tmp_path), store)
+        for label in READ_NODES:
+            assert _read_all(loaded, label).num_rows == 2
+        empty_saved = _save(empty, tmp_path / "empty")
+        assert json.loads(empty_saved.read_text())["run"]["expected_rows"] == {
+            "joined": 0
+        }
+        node = _load_replaying(empty_saved, InMemoryArrowDatabase()).nodes["joined"]
+        assert node.as_table().num_rows == 0
+
+
+def test_deleting_the_section_by_hand_loads_identically_without_a_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Without ``run.expected_rows`` every read gives the same rows and no warning."""
+    store = InMemoryArrowDatabase()
+    job = _run(store, "nullable_tag_and_data")
+
+    def delete_section(data: dict[str, Any]) -> None:
+        """Delete the advisory section."""
+        del data["run"]["expected_rows"]
+
+    with_section = _loaded(_save(job, tmp_path), store)
+    without = _loaded(_save(job, tmp_path / "bare", delete_section), store)
+    other = _loaded(
+        _save(job, tmp_path / "bare2", delete_section), InMemoryArrowDatabase()
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", StoreContentWarning)
+        for label in READ_NODES:
+            assert _sorted(_read_all(without, label)).equals(
+                _sorted(_read_all(with_section, label))
+            )
+            assert _read_all(other, label).num_rows == 0
+
+
+def test_a_run_that_did_not_finish_records_no_counts(tmp_path: pathlib.Path) -> None:
+    """Counts are written only when certain: not before a run, nor after a failed one."""
+    store = InMemoryArrowDatabase()
+    sources = _sources("non_null")
+    job = PipelineJob(name=JOB_NAME, store=store)
+    with job:
+        _ = Join()(sources["src_a"], sources["src_b"], label="joined")
+    pending = _save(job, tmp_path / "pending")
+    assert "expected_rows" not in json.loads(pending.read_text())["run"]
+
+    @function_pod(output_keys="a1")
+    def fails(a: int) -> int:
+        """Fail on every row."""
+        raise ValueError(f"no {a}")
+
+    failing = PipelineJob(name=JOB_NAME, store=store)
+    with failing:
+        _ = fails.pod(_sources("non_null")["src_a"], label="fails")
+    with pytest.raises(ValueError, match="no 0|no 1"):
+        _ = failing.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))
+    failed = _save(failing, tmp_path / "failed")
+    assert "expected_rows" not in json.loads(failed.read_text())["run"]

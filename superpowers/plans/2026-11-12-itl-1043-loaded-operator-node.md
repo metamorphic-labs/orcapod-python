@@ -23,6 +23,11 @@ Options 2 and 3 (saved operator run content hash; saved top-level nullability, r
   decides lossless vs lossy load (never the version number). Pipeline._unrecorded_*_nullability (per node)
   keeps a lossy file lossy on re-save; OperatorJobNode._run_content_hash() is None for a
   loaded node without a saved run hash, so re-save leaves it out.
+- Final shape (developer, Nov 12): store is the source of truth. Known key (run content
+  hash in file) -> loaded node reads like live REPLAY (empty, NOTHING_STORED). Unknown key
+  -> raise / head UNAVAILABLE (ITL-1048). No row count as truth; optional advisory
+  run.expected_rows -> StoreContentWarning once per node. node_has_stored_records dropped
+  (function nodes warn instead of raise). Dangling result refs: unchanged (logged, matches live).
 - PUSH RULE (coordinator): do not push the format fields until PR #345 (ITL-1026, format
   0.2.0) has merged; then merge origin/main and push once, open the PR (Fixes ITL-1043).
 - Pre-existing contradiction, not changed here: `OperatorJobNode.head` says "a loaded node

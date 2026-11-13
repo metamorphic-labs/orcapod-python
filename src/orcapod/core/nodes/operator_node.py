@@ -49,8 +49,10 @@ from orcapod.contexts.stored import (
     keep_rows_of_data_context,
     require_same_data_context,
     account_for_stale_tables,
+    describe_store_table,
     find_stale_tables,
     report_rows_of_other_data_contexts,
+    report_unexpected_row_count,
     with_data_context,
 )
 from orcapod.protocols.core_protocols import (
@@ -641,6 +643,10 @@ class OperatorJobNode(OperatorNodeBase):
     _skipped_rows_reported: bool = False
     # Set once a table found at the older layout has been accounted for.
     _stale_tables_checked: bool = False
+    # The job file's expected row count for a loaded node, and whether it was checked
+    # against the attached store (ITL-1043). Advisory: a mismatch only warns.
+    _expected_row_count: int | None = None
+    _row_count_checked: bool = False
 
     @property
     def _stored_table_path(self) -> tuple[str, ...]:
@@ -757,6 +763,7 @@ class OperatorJobNode(OperatorNodeBase):
         # Another store has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._skipped_rows_reported = False
+        self._row_count_checked = False
         self._pipeline_database = pipeline_database
         self._cache_mode = cache_mode
 
@@ -778,6 +785,7 @@ class OperatorJobNode(OperatorNodeBase):
         input_streams: tuple[StreamProtocol, ...] | list[StreamProtocol],
         databases: dict[str, Any],
         job_content_hash: str | None = None,
+        expected_row_count: int | None = None,
     ) -> OperatorJobNode:
         """Construct an OperatorJobNode from a serialized descriptor.
 
@@ -797,6 +805,10 @@ class OperatorJobNode(OperatorNodeBase):
                 to database instances.
             job_content_hash: The content hash of the node in the saved job's run,
                 which its stored rows carry; ``None`` when the file does not record it.
+            expected_row_count: How many rows the store held under the run's key when
+                the job was saved, from the job file's optional ``run.expected_rows``;
+                ``None`` when not recorded. Advisory: a read returns what the store
+                holds and only warns (``StoreContentWarning``) when it differs.
 
         Returns:
             A new ``OperatorJobNode`` instance.
@@ -842,6 +854,7 @@ class OperatorJobNode(OperatorNodeBase):
             # names the table the run's rows are stored in.
             node._stored_pipeline_hash = descriptor.get("pipeline_hash")
             node._saved_run_content_hash = job_content_hash
+            node._expected_row_count = expected_row_count
             node._load_status = LoadStatus.FULL
             node._loaded = True
             return node
@@ -894,6 +907,7 @@ class OperatorJobNode(OperatorNodeBase):
         node._stored_schema = descriptor.get("output_schema", {})
         node._stored_content_hash = descriptor.get("content_hash")
         node._saved_run_content_hash = job_content_hash
+        node._expected_row_count = expected_row_count
         node._stored_pipeline_hash = descriptor.get("pipeline_hash")
         node._stored_pipeline_path = tuple(descriptor.get("pipeline_path", ()))
         node._stored_node_uri = tuple(descriptor.get("node_uri") or [])
@@ -927,6 +941,42 @@ class OperatorJobNode(OperatorNodeBase):
         if self._saved_run_content_hash is None:
             return None
         return ContentHash.from_string(self._saved_run_content_hash)
+
+    def _expected_row_count_to_save(self, run_finished: bool) -> int | None:
+        """Return the count ``PipelineJob.save`` records for this node, if certain.
+
+        A loaded node keeps the count its file recorded, or none. A node of a job whose
+        last run finished (its writes committed) records the rows the store holds under
+        its run's content hash; otherwise nothing is certain.
+
+        Args:
+            run_finished: Whether the job's last run finished and committed.
+        """
+        if self._loaded:
+            return self._expected_row_count
+        if not run_finished or self._pipeline_database is None:
+            return None
+        records = self._read_stored_records()
+        return 0 if records is None else records.num_rows
+
+    def _check_expected_rows(self, found: int) -> None:
+        """Warn, once per store, if a loaded node finds another number of rows than recorded.
+
+        The store is the source of truth: the read returns what it holds (ITL-1043).
+
+        Args:
+            found: The rows the store holds under the node's run key.
+        """
+        if self._expected_row_count is None or self._row_count_checked:
+            return
+        self._row_count_checked = True
+        if found != self._expected_row_count and self._pipeline_database is not None:
+            report_unexpected_row_count(
+                f"OperatorJobNode {self.label!r}",
+                describe_store_table(self._pipeline_database, self._stored_table_path),
+                self._expected_row_count,
+                found,
+            )
 
     def _no_stored_results_error(self) -> RuntimeError:
         """Return the error for reading a loaded operator node with nothing to serve.
@@ -1190,6 +1240,8 @@ class OperatorJobNode(OperatorNodeBase):
                     "(an older file; ITL-1048)"
                 ),
             )
+        if self._loaded:
+            self._check_expected_rows(0 if records is None else records.num_rows)
         if records is None:
             if self._operator is None and not self._loaded:
                 # Read-only (deserialized) node with no operator: cannot derive
