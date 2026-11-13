@@ -7,6 +7,7 @@ from typing import cast
 import pyarrow as pa
 import pytest
 
+import orcapod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes import FunctionNode, OperatorNode
@@ -650,6 +651,38 @@ class TestPipelineJobSerialization:
         job.save(str(path))
         data = json.loads(path.read_text())
         assert data["orcapod_pipeline_job_version"] == "0.1.0"
+
+    def test_save_stamps_orcapod_version(self, store, tmp_path):
+        src_a, src_b = _make_two_sources()
+        job = PipelineJob(store=store)
+        with job:
+            Join()(src_a, src_b)
+        path = tmp_path / "stamped.json"
+        job.save(str(path))
+        data = json.loads(path.read_text())
+        assert data["orcapod_version"] == orcapod.__version__
+        assert data["pipeline"]["orcapod_version"] == orcapod.__version__
+        assert data["orcapod_pipeline_job_version"] == "0.1.0"
+        assert data["pipeline"]["orcapod_pipeline_version"] == "0.1.0"
+
+    @pytest.mark.parametrize("variant", ["absent", "0.0.1", "99.0.0"])
+    def test_load_ignores_orcapod_version(self, store, tmp_path, variant):
+        """The stamp is informational: absent or unfamiliar, the file loads."""
+        src_a, src_b = _make_two_sources()
+        job = PipelineJob(store=store)
+        with job:
+            Join()(src_a, src_b)
+        path = tmp_path / "job_version.json"
+        job.save(str(path))
+        data = json.loads(path.read_text())
+        for obj in (data, data["pipeline"]):
+            if variant == "absent":
+                del obj["orcapod_version"]
+            else:
+                obj["orcapod_version"] = variant
+        path.write_text(json.dumps(data))
+        loaded = PipelineJob.load(str(path))
+        assert set(loaded.pipeline.nodes) == set(job.pipeline.nodes)
 
     def test_save_includes_run_block(self, store, tmp_path):
         """Unsaved template has status=pending and null run fields."""

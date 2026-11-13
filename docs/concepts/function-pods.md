@@ -653,7 +653,12 @@ later.
 
 `job.save(path)` writes the job to a JSON file: the graph, the store's location and how each
 source was configured. `PipelineJob.load(path)` reads it back, for example in a later Python
-session, so that you can read the results the job stored:
+session, so that you can read the results the job stored. The file also records
+`orcapod_version`, the Orcapod release that wrote it (the same text as `orcapod.__version__`;
+a development checkout gives a development version). It is informational: loading never
+depends on it, and a file without it loads as before.
+
+For example:
 
 ```python
 import tempfile

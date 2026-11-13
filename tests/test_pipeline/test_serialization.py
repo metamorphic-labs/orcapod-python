@@ -7,6 +7,7 @@ import json
 import pyarrow as pa
 import pytest
 
+import orcapod
 from orcapod.core.nodes import SourceNode
 from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
@@ -57,6 +58,31 @@ class TestPipelineBlueprintSave:
         pipeline.save(str(path))
         data = json.loads(path.read_text())
         assert data["orcapod_pipeline_version"] == PIPELINE_FORMAT_VERSION
+
+    def test_save_stamps_orcapod_version(self, spec_pipeline):
+        pipeline, tmp_path = spec_pipeline
+        path = tmp_path / "pipeline.json"
+        pipeline.save(str(path))
+        data = json.loads(path.read_text())
+        assert data["orcapod_version"] == orcapod.__version__
+        assert data["orcapod_pipeline_version"] == "0.1.0"
+
+    def test_load_ignores_orcapod_version(self, spec_pipeline):
+        """The stamp is informational: absent or unfamiliar, the file loads."""
+        pipeline, tmp_path = spec_pipeline
+        path = tmp_path / "pipeline.json"
+        pipeline.save(str(path))
+        data = json.loads(path.read_text())
+        for variant in ("absent", "0.0.1", "99.0.0"):
+            edited = dict(data)
+            if variant == "absent":
+                del edited["orcapod_version"]
+            else:
+                edited["orcapod_version"] = variant
+            other = tmp_path / f"pipeline_{variant}.json"
+            other.write_text(json.dumps(edited))
+            loaded = Pipeline.load(str(other))
+            assert set(loaded.nodes) == set(pipeline.nodes)
 
     def test_save_no_databases_block(self, spec_pipeline):
         """Pure blueprint save must not contain a 'databases' block."""
