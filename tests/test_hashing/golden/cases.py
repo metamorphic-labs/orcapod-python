@@ -1898,16 +1898,22 @@ def pipeline_tagless_producerless_stream() -> dict[str, Any]:
     """
     from orcapod.core.streams import ArrowTableStream
 
-    rows = {"record_id": ["b", "c", "a"], "x": [1, 2, 3]}
-    reordered = {"record_id": ["c", "a", "b"], "x": [2, 3, 1]}
+    def table(record_ids: list[str], xs: list[int]) -> pa.Table:
+        return pa.table(
+            [pa.array(record_ids, pa.string()), pa.array(xs, pa.int64())],
+            names=["record_id", "x"],
+        )
+
+    rows = table(["b", "c", "a"], [1, 2, 3])
+    reordered = table(["c", "a", "b"], [2, 3, 1])
     return {
         "as_given": ArrowTableStream(
-            pa.table(rows), tag_columns=[], system_tag_columns=["record_id"]
+            rows, tag_columns=[], system_tag_columns=["record_id"]
         )
         .content_hash()
         .to_string(),
         "reordered": ArrowTableStream(
-            pa.table(reordered), tag_columns=[], system_tag_columns=["record_id"]
+            reordered, tag_columns=[], system_tag_columns=["record_id"]
         )
         .content_hash()
         .to_string(),
