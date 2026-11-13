@@ -25,10 +25,14 @@ logger = logging.getLogger(__name__)
 # Format version
 # ---------------------------------------------------------------------------
 
-# 0.3.0: the first format in which a source's tags may be referential (ITL-1023). A
-# file at an earlier version holds v0.3 sources: their configs carry no
-# ``tag_only_columns`` and read back with every declared tag plain, so their saved
-# hashes match. 0.2.0 is v0.3.0's own format (ITL-1026).
+# The version a pipeline file is written at, and the versions a load accepts.
+# A format change adds the new version here and to the supported set; the loaders
+# only test membership (``Pipeline.load``).
+#   0.1.0: first format (v0.2.0).
+#   0.2.0: adds ``orcapod_version`` (v0.3.0); a 0.1.0 file loads unchanged.
+#   0.3.0: a source's tags may be referential (ITL-1023). A file at 0.1.0 or 0.2.0
+#          holds v0.3 sources: their configs carry no ``tag_only_columns`` and read
+#          back with every declared tag plain, so their saved hashes match.
 PIPELINE_FORMAT_VERSION = "0.3.0"
 SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
 
@@ -1048,6 +1052,7 @@ _BUILTIN_TYPE_MAP: dict[str, type] = {
 # PipelineJob format version
 # ---------------------------------------------------------------------------
 
-# 0.3.0 with referential tags (ITL-1023); see ``PIPELINE_FORMAT_VERSION``.
+# Same scheme as ``PIPELINE_FORMAT_VERSION``: the written version, and the set a
+# load accepts (``PipelineJob.load``).
 PIPELINE_JOB_FORMAT_VERSION = "0.3.0"
 SUPPORTED_JOB_FORMAT_VERSIONS = frozenset({"0.1.0", "0.2.0", "0.3.0"})
