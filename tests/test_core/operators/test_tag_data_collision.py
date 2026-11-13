@@ -8,13 +8,19 @@ result would hold two columns of one name. Each case is rejected when the graph 
 
 from __future__ import annotations
 
+import asyncio
+from typing import TypeAlias
+
 import pyarrow as pa
 import pytest
 
 from orcapod import function_pod
+from orcapod.channels import Channel
+from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import Index, Join, MergeJoin, Pick, SemiJoin
 from orcapod.core.sources import ArrowTableSource
 from orcapod.errors import InputValidationError
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 
 from .test_async_sync_equivalence import async_rows
 
@@ -30,6 +36,7 @@ DICT = pa.list_(
         nullable=False,
     )
 )
+Row: TypeAlias = tuple[TagProtocol, DataProtocol]
 MESSAGE = r"column 'x'.*tag.*data column.*(map_tags|map_data)"
 
 
@@ -125,7 +132,9 @@ def test_semijoin_is_not_affected() -> None:
 
 
 @pytest.mark.parametrize("operator", [Index, Pick])
-def test_index_and_pick_reject_out_equal_to_a_tag(operator: type[Index] | type[Pick]) -> None:
+def test_index_and_pick_reject_out_equal_to_a_tag(
+    operator: type[Index] | type[Pick],
+) -> None:
     if operator is Index:
         source = ArrowTableSource(
             pa.table(
@@ -164,12 +173,12 @@ def test_index_and_pick_reject_out_equal_to_a_tag(operator: type[Index] | type[P
         _ = op(source)
 
 
-def _make_x_pod():
+def _make_x_pod() -> FunctionPod:
     @function_pod(output_keys="x")
     def make_x(b: int | None) -> int:
         return (b or 0) * 2
 
-    return make_x.pod
+    return make_x.pod  # pyright: ignore[reportReturnType]  # the decorator's pod is a FunctionPod
 
 
 def test_function_pod_rejects_an_output_key_equal_to_an_input_tag() -> None:
@@ -202,14 +211,10 @@ def test_function_pod_async_rejects_the_collision_instead_of_skipping_rows() -> 
     )
 
 
-def _run_pod_async(pod, source) -> list:
-    import asyncio
-
-    from orcapod.channels import Channel
-
-    async def run() -> list:
-        inp: Channel = Channel(buffer_size=8)
-        out: Channel = Channel(buffer_size=8)
+def _run_pod_async(pod: FunctionPod, source: ArrowTableSource) -> list[Row]:
+    async def run() -> list[Row]:
+        inp: Channel[Row] = Channel(buffer_size=8)
+        out: Channel[Row] = Channel(buffer_size=8)
         for row in source.iter_data():
             await inp.writer.send(row)
         await inp.writer.close()
@@ -224,4 +229,4 @@ def test_function_node_rejects_the_collision() -> None:
 
     source = _source({"x": [1, 2], "b": [5, 6]}, ["x"], "podnode")
     with pytest.raises(InputValidationError, match=r"output key 'x'.*tag"):
-        _ = FunctionNode(_make_x_pod(), source)
+        _ = FunctionNode(_make_x_pod(), source)  # pyright: ignore[reportArgumentType]  # pod base class vs protocol, baselined elsewhere

@@ -1056,7 +1056,6 @@ def test_join_paths_reject_a_tag_and_a_data_column_of_one_name(
             else (excinfo.value,)
         )
         assert any(
-            isinstance(e, InputValidationError)
-            and re.search(_TAG_DATA_MESSAGE, str(e))
+            isinstance(e, InputValidationError) and re.search(_TAG_DATA_MESSAGE, str(e))
             for e in errors
         ), errors
