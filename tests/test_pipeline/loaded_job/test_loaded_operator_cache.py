@@ -447,9 +447,9 @@ def _store_the_fixture_join(store: ArrowDatabaseProtocol) -> Any:
     job = PipelineJob(name=tuple(name), store=store)
     with job:
         joined = Join()(source("value", [10, 20]), source("score", [100, 200]))
-        pod = FunctionPod(
-            data_function=PythonDataFunction(_add_values, output_keys="total")
-        )  # pyright: ignore[reportArgumentType] -- as in the fixture's generator
+        function = PythonDataFunction(_add_values, output_keys="total")
+        # As in the fixture's generator: a protocol mismatch shared with other tests.
+        pod = FunctionPod(data_function=function)  # pyright: ignore[reportArgumentType]
         _ = pod(joined)
     run_join = job.nodes["Join"]
     # OperatorNode.attach_databases is the public way to turn on LOG / REPLAY mode.
