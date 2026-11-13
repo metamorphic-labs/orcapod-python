@@ -451,6 +451,68 @@ print(job.nodes["bmi"].as_table().num_rows)
 # 3
 ```
 
+### Reading the run summary
+
+`job.run()` (and `await job.run_async()`) returns a `RunSummary`: for each function node, how
+many rows were computed, how many were read from the store, and how many failed. At the end
+of a notebook cell it is shown as a table; `print` shows the same as text. The job keeps it as
+`job.last_run`. The results themselves are read from `job.nodes`, as above.
+
+Running the same job again computes nothing new, and the summary says so:
+
+```python
+job = PipelineJob(name="bmi_demo", store=db)
+with job:
+    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+summary = job.run()
+print(summary)
+# Run of job 'bmi_demo': all rows succeeded.
+#   bmi: 3 rows: 0 computed, 3 from store, 0 failed
+```
+
+When a function raises for a row, the run skips that row and goes on with the others (the
+default `error_policy="continue"`). At the end it issues one `RowFailuresWarning` (from
+`orcapod.errors`) naming each node with failed rows, and the summary shows the first error.
+A run with no failed rows issues no warning:
+
+```python
+@function_pod(output_keys="bmi")
+def careless_bmi(weight: float, height: float) -> float:
+    return weight / heigth ** 2  # a typo: heigth
+
+
+job = PipelineJob(name="bmi_typo", store=InMemoryArrowDatabase())
+with job:
+    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    careless_bmi.pod(source, label="bmi")
+
+summary = job.run()
+# RowFailuresWarning: 3 of 3 rows failed in node 'bmi' (first error: NameError: name 'heigth' is not defined). Full traceback: job.last_run.print_traceback("bmi").
+print(summary)
+# Run of job 'bmi_typo': 3 rows failed.
+#   bmi: 3 rows: 0 computed, 0 from store, 3 failed
+#     first error: NameError: name 'heigth' is not defined
+#     Full traceback: job.last_run.print_traceback("bmi")
+```
+
+`job.last_run.print_traceback("bmi")` prints the full traceback of the node's first failed
+row, ending in the line of your function that raised. Fix the function and run the job
+again: the rows that succeeded before are read from the store, and only the failed ones
+are computed. To stop a run at the first failed row instead, pass
+`SyncPipelineOrchestrator(error_policy="fail_fast")` as the orchestrator.
+
+The counts are also available one by one, for example in a test:
+
+```python
+node = summary.nodes["bmi"]
+print(node.computed, node.reused, node.failed, type(node.first_error).__name__)
+# 0 0 3 NameError
+print(summary.ok, summary.failed_rows)
+# False 3
+```
+
 ### When results are committed
 
 Inside `job.run()`, each function node commits its results and pipeline records to the

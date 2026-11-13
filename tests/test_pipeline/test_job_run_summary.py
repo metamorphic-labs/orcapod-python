@@ -18,31 +18,37 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import RowFailuresWarning
-from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.pipeline import (
+    AsyncPipelineOrchestrator,
+    RunSummary,
+    SyncPipelineOrchestrator,
+)
 from orcapod.sources import DictSource
 
 # --- The public names this feature adds, in one place ---------------------------------
 
 
-def run(job: PipelineJob, orchestrator: Any) -> Any:
+def run(job: PipelineJob, orchestrator: Any) -> RunSummary:
     """Run ``job``; return what the user gets back (the run summary)."""
     return job.run(orchestrator=orchestrator)
 
 
-def node_counts(summary: Any, label: str) -> tuple[int, int, int]:
+def node_counts(summary: RunSummary, label: str) -> tuple[int, int, int]:
     """``(computed, from store, failed)`` rows of node ``label`` in ``summary``."""
     node = summary.nodes[label]
     return node.computed, node.reused, node.failed
 
 
-def first_error(summary: Any, label: str) -> BaseException | None:
+def first_error(summary: RunSummary, label: str) -> BaseException | None:
     """The first error raised in node ``label`` during the run."""
     return summary.nodes[label].first_error
 
 
-def last_run(job: PipelineJob) -> Any:
+def last_run(job: PipelineJob) -> RunSummary:
     """The summary of the job's last completed run."""
-    return job.last_run
+    summary = job.last_run
+    assert summary is not None
+    return summary
 
 
 # --------------------------------------------------------------------------------------
@@ -182,3 +188,38 @@ def test_notebook_representation_names_the_failing_node() -> None:
     assert "evens" in html
     assert "ValueError" in html
     assert "odd x=" in html
+
+
+def test_run_async_returns_the_same_summary(store: Any) -> None:
+    import asyncio
+
+    job = make_job(store, even_only, "evens")
+    with pytest.warns(RowFailuresWarning, match="2 of 4 rows failed in node 'evens'"):
+        summary = asyncio.run(job.run_async())
+
+    assert node_counts(summary, "evens") == (2, 0, 2)
+    assert last_run(job) is summary
+
+
+@function_pod(output_keys="z")
+def plus_one(y: int) -> int:
+    """Return ``y + 1``."""
+    return y + 1
+
+
+def test_node_with_empty_input_counts_zero_rows(store: Any, orchestrator: Any) -> None:
+    """Every row fails upstream, so the next node receives none: it reports zeros."""
+    rows = [{"k": f"r{i}", "x": i} for i in range(4)]
+    job = PipelineJob(name="summary_chain", store=store)
+    with job:
+        source = DictSource(data=rows, tag_columns=["k"], source_id="rows")
+        broken = always_fails.pod(source, label="broken")
+        plus_one.pod(broken, label="after")
+
+    with pytest.warns(RowFailuresWarning, match="4 of 4 rows failed in node 'broken'"):
+        summary = run(job, orchestrator)
+
+    assert list(summary.nodes) == ["broken", "after"]
+    assert node_counts(summary, "broken") == (0, 0, 4)
+    assert node_counts(summary, "after") == (0, 0, 0)
+    assert "after: 0 rows: 0 computed, 0 from store, 0 failed" in repr(summary)
