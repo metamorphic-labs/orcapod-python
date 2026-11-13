@@ -688,7 +688,11 @@ as before.
   returns them; sort them if order matters.
 - Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
   A loaded operator without a readable cache raises from `as_table()` and `iter_data()`.
-  Read its input nodes instead (an in-memory input source must be bound first, see below).
+  So does a loaded operator attached in `CacheMode.REPLAY` whose stored rows it cannot tell
+  apart as its run's, which happens when an input source's data was not saved with the job:
+  it never shows them as zero rows. Read its input nodes instead (an in-memory input source
+  must be bound first, see below), or build the job from your code and attach the operator
+  node in `CacheMode.REPLAY`.
   Saved descriptors do not yet preserve all runtime identity and cache configuration needed
   for operator readback without reconstruction (follow-up ITL-977).
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
