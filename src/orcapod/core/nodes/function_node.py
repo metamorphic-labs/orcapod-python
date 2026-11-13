@@ -486,45 +486,7 @@ class FunctionNodeBase(StreamBase):
         all_info: bool = False,
     ) -> "pa.Table":
         if self._cached_output_table is None:
-            rows = list(self.iter_data())
-            if not rows:
-                # No data was produced (node has not been run yet or produced zero
-                # outputs).  Build a zero-row table whose schema is derived from the
-                # pod's declared output so that callers always receive a well-formed
-                # schema regardless of whether the node has actually executed.
-                tag_python_schema, data_python_schema = self.output_schema(
-                    all_info=True
-                )
-                self._cached_output_table = pa.Table.from_pylist(
-                    [],
-                    schema=self.data_context.type_converter.python_schema_to_arrow_schema(
-                        tag_python_schema + data_python_schema
-                    ),
-                )
-            else:
-                # Built from each row's own Arrow tables, so every column keeps the
-                # type its row has: a tag the type of the input's tag, never a type
-                # inferred from Python values (ITL-928).
-                # A row's meta columns (a computed row's ``__computed`` flag) are its
-                # own bookkeeping, not part of the node's output, as for the pod's
-                # stream outside a job.
-                try:
-                    tag_table = _concat_row_tables(
-                        [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
-                    )
-                    data_table = _concat_row_tables(
-                        [
-                            data.as_table(columns={"source": True, "context": True})
-                            for _, data in rows
-                        ]
-                    )
-                except InputValidationError as exc:
-                    raise InputValidationError(
-                        f"Function node {self.label!r}: {exc}"
-                    ) from exc
-                self._cached_output_table = arrow_utils.hstack_tables(
-                    tag_table, data_table
-                )
+            self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
 
         column_config = ColumnConfig.handle_config(columns, all_info=all_info)
         output_table = arrow_utils.apply_column_config(
@@ -550,6 +512,48 @@ class FunctionNodeBase(StreamBase):
             )
 
         return output_table
+
+    def _table_from_pairs(
+        self, pairs: "list[tuple[TagProtocol, DataProtocol]]"
+    ) -> "pa.Table":
+        """Return the output rows ``pairs`` as one table with every column group.
+
+        Built from each row's own Arrow tables, so every column keeps the type its
+        row has: a tag the type of the input's tag, never a type inferred from
+        Python values (ITL-928). A row's meta columns (a computed row's
+        ``__computed`` flag) are its own bookkeeping, not part of the node's
+        output, as for the pod's stream outside a job. With no rows the table has
+        the declared columns, typed from the declared output schema.
+
+        Raises:
+            InputValidationError: If two rows give one column different Arrow
+                types, naming this node, the column and both types.
+        """
+        if not pairs:
+            # No data was produced (node has not been run yet or produced zero
+            # outputs).  Build a zero-row table whose schema is derived from the
+            # pod's declared output so that callers always receive a well-formed
+            # schema regardless of whether the node has actually executed.
+            tag_python_schema, data_python_schema = self.output_schema(all_info=True)
+            return pa.Table.from_pylist(
+                [],
+                schema=self.data_context.type_converter.python_schema_to_arrow_schema(
+                    tag_python_schema + data_python_schema
+                ),
+            )
+        try:
+            tag_table = _concat_row_tables(
+                [tag.as_table(columns={"system_tags": True}) for tag, _ in pairs]
+            )
+            data_table = _concat_row_tables(
+                [
+                    data.as_table(columns={"source": True, "context": True})
+                    for _, data in pairs
+                ]
+            )
+        except InputValidationError as exc:
+            raise InputValidationError(f"Function node {self.label!r}: {exc}") from exc
+        return arrow_utils.hstack_tables(tag_table, data_table)
 
     def __repr__(self) -> str:
         return (
