@@ -1845,21 +1845,20 @@ def unused_column_name(table: "pa.Table", base: str) -> str:
     return name
 
 
-def sort_by_tag_columns(
-    table: "pa.Table",
-    tag_keys: tuple[str, ...],
-    system_tag_keys: tuple[str, ...] | None = None,
-    order_unsortable: bool = True,
-) -> "pa.Table":
-    """Return ``table`` with its rows in tag order: the one sort every tag sort uses.
+def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
+    """Return ``table`` with its rows in tag order: the sort every presentation uses.
+
+    This is the order of ``as_table(sort_by_tags=True)``, ``head`` and the notebook
+    preview. It is not a hash input: a stream's identity keeps its own ordering
+    (``ArrowTableStream._identity_table``).
 
     The rows are ordered ascending by the tag columns ``tag_keys``, nulls last. Rows with
-    equal tags are then ordered by the system tag columns ``system_tag_keys`` (default:
-    those ``table`` has, in column order; they hold the record ids), and rows still equal
-    keep their input order, so the
+    equal tags are then ordered by the system tag columns ``table`` has (they hold the
+    record ids), in column order, and rows still equal keep their input order, so the
     result does not depend on the order the rows arrived in whenever the table has system
     tags. A table with neither is returned as it is. A caller that must keep the order of
-    a stream with no regular tag column does not call this for it.
+    a stream with no regular tag column does not call this for it. A tag type Arrow cannot
+    order (a list) is ordered with Polars, nulls last.
 
     Whole rows move together: a column added to ``table`` before the sort (a content hash)
     stays with its row. Column types and nullability are those of ``table``. Sort before
@@ -1868,33 +1867,19 @@ def sort_by_tag_columns(
     Args:
         table: The table to sort.
         tag_keys: Names of the regular (non-system) tag columns, in sort priority.
-        system_tag_keys: Names of the system tag columns to break ties with, in priority;
-            names the table does not have are ignored. ``None`` means every system tag
-            column of ``table`` in column order.
-        order_unsortable: What to do with a type Arrow cannot order (a list tag):
-            ``True`` orders it with Polars (nulls last, input order among equals);
-            ``False`` returns ``table`` in its input order.
 
     Returns:
         A new table with the same columns, rows in tag order.
     """
-    if system_tag_keys is None:
-        system_tag_keys = tuple(
-            c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
-        )
-    present = set(table.column_names)
-    keys = list(
-        dict.fromkeys([*tag_keys, *(c for c in system_tag_keys if c in present)])
+    system_tags = (
+        c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
     )
+    keys = list(dict.fromkeys([*tag_keys, *system_tags]))
     if not keys:
         return table
     try:
         return table.sort_by([(key, "ascending") for key in keys])
     except (pa.ArrowNotImplementedError, pa.ArrowTypeError):
-        if not order_unsortable:
-            return table
-        # Arrow cannot order this type (a list tag): order by Polars, nulls last, and
-        # keep the input order of equal rows.
         import polars as pl
 
         sorted_table = (

@@ -150,17 +150,31 @@ class ArrowTableStream(StreamBase):
         # hash label, which must never enter a hash input.
         return (
             self.__class__.__name__,
-            self.as_table(
-                columns=ColumnConfig(
-                    meta=True,
-                    context=True,
-                    source=True,
-                    system_tags=True,
-                    sort_by_tags=True,
-                )
-            ),
+            self._identity_table(),
             self._tag_columns,
         )
+
+    def _identity_table(self) -> "pa.Table":
+        """Return the rows in the order and columns that ``identity_structure`` hashes.
+
+        THIS ORDER IS A HASH INPUT AND MUST NOT CHANGE: it is the ordering that every
+        stream's content hash has been built from since before ITL-1053. It is kept apart
+        from ``as_table``'s sort on purpose; the sort in the body is the code
+        ``as_table(sort_by_tags=True)`` had on origin/main, unchanged: the tags and
+        system tags in this stream's own priority, a type Arrow cannot order leaving the
+        rows in stream order, and a stream with nothing to sort by raising.
+        """
+        table = self._assemble_table(
+            ColumnConfig(meta=True, context=True, source=True, system_tags=True),
+            limit=None,
+        )
+        try:
+            return table.sort_by(
+                [(column, "ascending") for column in self._all_tag_columns]
+            )
+        except pa.ArrowTypeError:
+            # If sorting fails, fall back to unsorted table
+            return table
 
     def pipeline_identity_structure(self) -> Any:
         if self._producer is None or not isinstance(
@@ -300,18 +314,11 @@ class ArrowTableStream(StreamBase):
         if columns_config.sort_by_tags and (
             self._tag_columns or columns_config.system_tags
         ):
+            # The presentation sort (not the identity order, see ``_identity_table``).
             # A stream with no tag column is sorted only when the system tags are asked
-            # for (its identity, ``identity_structure``, depends on that order); the
-            # system tags stay in the table through the sort.
-            # With the system tags still in the table: they break ties between equal tags.
-            # A tag type Arrow cannot order (a list) keeps the stream's order: the
-            # identity of the stream hashes this table and must not move.
-            table = arrow_utils.sort_by_tag_columns(
-                table,
-                tuple(self._tag_columns),
-                self._system_tag_columns,
-                order_unsortable=False,
-            )
+            # for. The system tags stay in the table through the sort: they break ties
+            # between equal tags.
+            table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
         if not columns_config.system_tags:
             table = table.drop_columns(list(self._system_tag_columns))
         return table

@@ -367,27 +367,6 @@ def test_a_custom_hash_column_named_like_a_system_tag_is_kept() -> None:
     assert stream.head(3, columns=config).table.equals(table.slice(0, 3))
 
 
-def test_system_tag_priority_follows_the_streams_own_order() -> None:
-    """Ties between equal tags use the system tags in the stream's own column order.
-
-    ``system_tag_columns`` given as ``["s2", "s1"]`` for a table that stores ``s1`` first:
-    the identity order of a tagless stream sorts by ``s2`` first, as before (ITL-1053).
-    """
-    from orcapod.core.streams import ArrowTableStream
-
-    table = pa.table(
-        [
-            pa.array(["a", "z"], pa.string()),
-            pa.array(["z", "a"], pa.string()),
-            pa.array([1, 2], pa.int64()),
-        ],
-        names=["s1", "s2", "x"],
-    )
-    stream = ArrowTableStream(table, tag_columns=[], system_tag_columns=["s2", "s1"])
-    ordered = stream.as_table(columns={"system_tags": True, "sort_by_tags": True})
-    assert ordered.column("x").to_pylist() == [2, 1]
-
-
 @pytest.mark.parametrize("name", ["_context_key", "_source_y", "_tag_digest"])
 def test_a_hash_column_named_like_another_column_group_is_kept(name: str) -> None:
     """A requested hash name equal to a column the shaping drops or keeps still works."""
@@ -408,10 +387,13 @@ def test_a_hash_column_named_like_another_column_group_is_kept(name: str) -> Non
             assert head.table.equals(table.slice(0, 3))
 
 
-def test_a_stream_with_list_tags_keeps_its_order_and_its_identity() -> None:
-    """Arrow cannot order a list tag: an ``ArrowTableStream`` keeps its rows' order.
+def test_the_presentation_sort_orders_a_list_tag_while_identity_keeps_stream_order() -> (
+    None
+):
+    """``as_table(sort_by_tags)`` orders list tags (Polars); the identity table does not.
 
-    Its identity hashes that table, so ordering it would move the content hash (ITL-1053).
+    The identity of a stream hashes its own table, in the order main always gave it
+    (``ArrowTableStream._identity_table``); only presentations use the new sort.
     """
     from orcapod.core.streams import ArrowTableStream
 
@@ -420,5 +402,9 @@ def test_a_stream_with_list_tags_keeps_its_order_and_its_identity() -> None:
         names=["k", "x"],
     )
     stream = ArrowTableStream(table, tag_columns=["k"])
-    for config in ({"sort_by_tags": True}, {"system_tags": True, "sort_by_tags": True}):
-        assert stream.as_table(columns=config).column("x").to_pylist() == [20, 10]
+    assert stream.as_table(columns={"sort_by_tags": True}).column("x").to_pylist() == [
+        10,
+        20,
+    ]
+    identity = stream.identity_structure()[1]
+    assert identity.column("x").to_pylist() == [20, 10]
