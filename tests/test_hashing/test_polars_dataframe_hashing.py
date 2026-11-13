@@ -677,6 +677,38 @@ class TestHashTimeRejection:
         with pytest.raises(ValueError, match=r"'big'.*Int128"):
             hasher.hash_object(series)
 
+    def test_names_forming_the_same_slash_path_are_rejected_naming_the_path(
+        self,
+    ) -> None:
+        """A column ``"a/b"`` beside a struct column ``a`` with a field ``b`` is refused."""
+        frame = pl.DataFrame(
+            {
+                "a/b": [1],
+                "a": pl.Series([{"b": 2}], dtype=pl.Struct({"b": pl.Int64})),
+            }
+        )
+        hasher = get_default_context().semantic_hasher
+        with pytest.raises(ValueError, match=r"same '/' path 'a/b'"):
+            hasher.hash_object(frame)
+
+    def test_nested_names_forming_the_same_slash_path_are_rejected(self) -> None:
+        """The same clash between a struct's fields, in a frame and in a Series."""
+        dtype = pl.Struct({"x/y": pl.Int64, "x": pl.Struct({"y": pl.Int64})})
+        series = pl.Series("s", [{"x/y": 1, "x": {"y": 2}}], dtype=dtype)
+        hasher = get_default_context().semantic_hasher
+        with pytest.raises(ValueError, match=r"same '/' path 's/x/y'"):
+            hasher.hash_object(series.to_frame())
+        with pytest.raises(ValueError, match=r"same '/' path 's/x/y'"):
+            hasher.hash_object(series)
+
+    def test_a_slash_in_a_name_alone_is_hashed(self) -> None:
+        """A name containing ``/`` is fine while no other name forms the same path."""
+        flat = pl.DataFrame({"a/b": [1]})
+        nested = pl.DataFrame(
+            {"a": pl.Series([{"b": 1}], dtype=pl.Struct({"b": pl.Int64}))}
+        )
+        assert _data_hash(flat) != _data_hash(nested)
+
 
 _CROSS_PROCESS_SCRIPT = textwrap.dedent(
     """

@@ -551,6 +551,12 @@ Supporting a new dtype adds to the grammar without changing any existing hash; o
 that would give an existing value a different digest needs new labels (`polars_dataframe_v2`,
 `polars_series_v2`). A dtype outside the grammar raises `ValueError` naming the column.
 
+One kind of value cannot be hashed: starfix addresses a column or struct field by the path of
+its names joined with `/`, so a value in which two names form the same path (a column `"a/b"`
+beside a struct column `a` with a field `b`, or the same between a struct's fields) raises
+`ValueError` naming the path. A name containing `/` is fine as long as no other name forms
+the same path. The Arrow table hash (§9) has the same limit.
+
 The hash is strict by default. An ignore list, part of the logical type's identifier, can
 leave out `column_order` and `struct_field_order` for a frame, and `series_name` and
 `struct_field_order` for a Series. A data context declares its list once, under `hash_ignore`

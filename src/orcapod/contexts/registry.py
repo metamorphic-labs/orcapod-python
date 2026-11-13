@@ -71,7 +71,7 @@ def _read_json_file(path: Path) -> Any:
         ContextValidationError: If an object in the file repeats a key; the message
             names the file and the key.
     """
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         try:
             return json.load(f, object_pairs_hook=_object_without_duplicate_keys)
         except ValueError as error:
@@ -154,6 +154,9 @@ class JSONDataContextRegistry:
             try:
                 self._schema = _read_json_file(self.schema_file)
                 logger.info(f"Loaded validation schema from {self.schema_file}")
+            except ContextValidationError:
+                # A schema file that repeats a key is refused like any other context file.
+                raise
             except Exception as e:
                 logger.warning(f"Failed to load schema from {self.schema_file}: {e}")
                 self._schema = None

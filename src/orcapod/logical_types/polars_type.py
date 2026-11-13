@@ -84,6 +84,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -110,6 +111,9 @@ POLARS_SERIES_EXTENSION_NAME = "orcapod.polars.series"
 _VERSION = 1
 """Version of the stored layout and value hash of both types. Never stored under another
 version, so there is no older layout to read."""
+
+_AMBIGUOUS_PATH = re.compile(r"Ambiguous node path '(.*)': two schema nodes", re.DOTALL)
+"""starfix's error for two schema nodes with one ``/``-joined path; group 1 is the path."""
 
 _IPC_COMPRESSION = "uncompressed"
 """``compression`` of ``DataFrame.write_ipc``: Polars' default, pinned."""
@@ -365,12 +369,27 @@ def _values_digest(
     Returns:
         ``ArrowDigester.hash_table`` of the projected table, in starfix's ordered or
         unordered mode for columns and for struct fields as asked.
+
+    Raises:
+        ValueError: If two column or struct field names form the same ``/`` path, which
+            starfix cannot tell apart (a column ``"a/b"`` beside a struct column ``a``
+            with a field ``b``). The message names the path.
     """
-    return ArrowDigester.hash_table(
-        _hash_projection(df),
-        ordered_columns=ordered_columns,
-        ordered_struct_fields=ordered_struct_fields,
-    )
+    try:
+        return ArrowDigester.hash_table(
+            _hash_projection(df),
+            ordered_columns=ordered_columns,
+            ordered_struct_fields=ordered_struct_fields,
+        )
+    except ValueError as error:
+        ambiguous = _AMBIGUOUS_PATH.match(str(error))
+        if ambiguous is None:
+            raise
+        raise ValueError(
+            "Polars value cannot be hashed: two of its column or struct field names "
+            f"form the same '/' path {ambiguous.group(1)!r} (a name containing '/' "
+            "stands for the same path as a struct field). Rename one of them."
+        ) from error
 
 
 def _digest(
@@ -511,7 +530,9 @@ def _frame_to_ipc_bytes(df: pl.DataFrame) -> bytes:
 
     Returns:
         The bytes ``df.write_ipc`` writes (Arrow IPC file format) with Polars' default
-        parameters, each pinned here.
+        compression and compatibility level, both pinned here. ``record_batch_size`` is
+        left at its default without being named: the oldest supported Polars (1.36) has
+        no such parameter.
 
     Raises:
         ValueError: If a column's dtype cannot be stored and hashed exactly (see
@@ -523,7 +544,6 @@ def _frame_to_ipc_bytes(df: pl.DataFrame) -> bytes:
         buffer,
         compression=_IPC_COMPRESSION,
         compat_level=_IPC_COMPAT_LEVEL,
-        record_batch_size=None,
     )
     return buffer.getvalue()
 
