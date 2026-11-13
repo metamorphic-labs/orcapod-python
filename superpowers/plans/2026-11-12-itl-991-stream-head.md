@@ -180,3 +180,24 @@ Header wording (exact; #333 depends on the estimate line):
   pushed: F1 fix, StreamHead, sources, operator/function streams, cached pod stream, nodes,
   docs ("Looking at data" in docs/concepts/streams.md), changelog fragment, design issue
   ITL-991-PV1. Next: full suite, merge main, PR, CodeRabbit.
+
+## Merge of origin/main 859106f7 (#335 ITL-928, #328 ITL-981, #336) — November 12, 2026
+
+Resolution agreed in advance by the #334 and #335 workers (coordinator brief):
+
+- [ ] `git merge origin/main` (merge commit, no rebase). Conflict expected in
+      `core/nodes/function_node.py`; check `core/function_pod.py` for a duplicated
+      `_table_from_pairs` left by the auto-merge.
+- [ ] Keep #334's structure: `head`, `_shape_table`, `_computed_prefix`, `as_table` =
+      `_table_from_pairs(list(self.iter_data()))` then `_shape_table`.
+- [ ] Take main's (#335) `_table_from_pairs` bodies as the non-empty build in both classes
+      (per-row `tag.as_table` / `data.as_table` concatenation, `_concat_row_tables`,
+      mixed Arrow types raise `InputValidationError`).
+- [ ] Empty pairs: `FunctionPodStream._table_from_pairs` keeps #334's declared-columns branch
+      (`make_empty_table`); `FunctionNodeBase._table_from_pairs` keeps main's empty branch.
+- [ ] If the resolution is not mechanical, ask the coordinator before pushing.
+- [ ] Tests: #335's (tag types kept on both stores, mixed rows error, join after function
+      node), #334's (no computation on display, prefix invariant in every ROWS state),
+      #328's array tests + ndarray `.npy` preview summary; full suite on 3.12, 3.11, 3.13;
+      ruff, format, basedpyright; golden unchanged.
+- [ ] One push; CodeRabbit reviews the new head; answer every thread; worker_done with sha.

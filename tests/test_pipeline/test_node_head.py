@@ -258,3 +258,42 @@ def test_an_operator_node_with_changed_inputs_shows_no_stale_rows() -> None:
     head = node.head()
     assert head.status is HeadStatus.NOT_COMPUTED
     assert "inputs changed" in head.header()
+
+
+@pytest.mark.parametrize("store_kind", ["in_memory", "delta"])
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_head_keeps_the_tag_arrow_type_of_the_input(
+    orchestrator: str, store_kind: str, tmp_path: Path
+) -> None:
+    """A node's head keeps an ``int8`` tag ``int8`` and is the prefix of ``as_table``.
+
+    ``head`` and ``as_table`` share one table build (ITL-928 typing), in memory after a
+    run and from the store in a new job.
+    """
+    table = pa.table(
+        {"id": pa.array(range(12), pa.int8()), "x": pa.array(range(12), pa.int64())},
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int8(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+
+    def build(store: ArrowDatabaseProtocol) -> PipelineJob:
+        job = PipelineJob(name="itl991_types", store=store)
+        with job:
+            _ = triple.pod(
+                ArrowTableSource(table, tag_columns=["id"], source_id="narrow"),
+                label="triple",
+            )
+        return job
+
+    store = _store(store_kind, tmp_path)
+    job = build(store)
+    _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    for node in (job.nodes["triple"], build(store).nodes["triple"]):
+        head = node.head(5, all_info=True)
+        assert head.status is HeadStatus.ROWS
+        assert head.table.schema.field("id").type == pa.int8()
+        assert head.table.equals(node.as_table(all_info=True).slice(0, 5))
