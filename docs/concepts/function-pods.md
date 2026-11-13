@@ -398,6 +398,59 @@ print("function calls:", len(calls))
     flush tries them again. A flush that fails for any other reason raises `RuntimeError`,
     with the first failure as its cause.
 
+### Running asynchronously, in a script or a notebook
+
+`job.run()` uses the `SyncPipelineOrchestrator`, which runs one node after another. The
+`AsyncPipelineOrchestrator` runs every node at once, passing rows between them as they are
+ready, and runs your function on several rows concurrently. Choose it with the
+`orchestrator` argument. The line is the same in a script and in a Jupyter notebook:
+
+```python
+from orcapod.pipeline import AsyncPipelineOrchestrator
+
+job = PipelineJob(name="bmi_async", store=InMemoryArrowDatabase())
+with job:
+    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+job.run(orchestrator=AsyncPipelineOrchestrator())
+
+print(job.nodes["bmi"].as_table().to_pandas())
+#   subject_id          bmi
+# 0   mouse_01  1756.944444
+# 1   mouse_02  2210.000000
+# 2   mouse_03  2297.520661
+```
+
+Both orchestrators store the same rows, with the same record ids and hashes.
+
+A notebook kernel already runs an event loop. There, `job.run(...)` runs the job on a
+separate thread and waits for it, so the cell blocks until the run ends, as it does with the
+sync orchestrator. The interrupt button stops the run: rows already stored stay stored, and
+the next run computes only the rest.
+
+In async code, await the run instead, so the event loop stays free while it runs:
+`await job.run_async()` (the async orchestrator is its default). This also works at the top
+level of a notebook cell. In a script, start async code with `asyncio.run`:
+
+```python
+import asyncio
+
+job = PipelineJob(name="bmi_awaited", store=InMemoryArrowDatabase())
+with job:
+    source = DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+
+async def main():
+    await job.run_async()
+
+
+asyncio.run(main())
+print(job.nodes["bmi"].as_table().num_rows)
+# 3
+```
+
 ### When results are committed
 
 Inside `job.run()`, each function node commits its results and pipeline records to the

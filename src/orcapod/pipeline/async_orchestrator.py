@@ -8,11 +8,14 @@ Uses TypeGuard dispatch with tightened per-type async_execute signatures.
 from __future__ import annotations
 
 import asyncio
-import uuid
+import contextlib
+import contextvars
 import logging
+import threading
+import uuid
 from collections import defaultdict
-from collections.abc import Coroutine
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from orcapod.channels import BroadcastChannel, Channel
 from orcapod.errors import StoreError, StoreWriteError, TypeIdentityError
@@ -32,6 +35,11 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+# How often a caller waiting for a run on its own thread checks for an interrupt.
+_INTERRUPT_CHECK_SECONDS = 0.1
 
 
 class AsyncPipelineOrchestrator:
@@ -69,6 +77,14 @@ class AsyncPipelineOrchestrator:
     ) -> OrchestratorResult:
         """Synchronous entry point — runs the async pipeline to completion.
 
+        Without a running event loop on the calling thread (a script), the run uses
+        ``asyncio.run``. With one (a Jupyter kernel, or a call from async code), the
+        same coroutine runs to completion on a separate thread with its own event loop
+        while the caller waits, so the call works the same in both places. The caller's
+        loop is blocked until the run ends; async code should await ``run_async``
+        instead. A ``KeyboardInterrupt`` while waiting (the notebook's interrupt button)
+        cancels the run, waits for it to stop, and is re-raised.
+
         Args:
             graph: A ``GraphProtocol`` DAG with GraphNode objects as vertices.
             observer: Optional execution observer forwarded to nodes.
@@ -83,15 +99,26 @@ class AsyncPipelineOrchestrator:
         Returns:
             OrchestratorResult with node outputs.
         """
-        return asyncio.run(
-            self._run_async(
+
+        def make_run() -> Coroutine[Any, Any, OrchestratorResult]:
+            return self._run_async(
                 graph,
                 materialize_results,
                 observer=observer,
                 run_id=run_id,
                 pipeline_uri=pipeline_uri,
             )
-        )
+
+        try:
+            _ = asyncio.get_running_loop()
+        except RuntimeError:
+            loop_running = False
+        else:
+            loop_running = True
+        # Run outside the handler, so the run's own errors carry no context from it.
+        if loop_running:
+            return _run_on_own_thread(make_run)
+        return asyncio.run(make_run())
 
     async def run_async(
         self,
@@ -283,6 +310,76 @@ class AsyncPipelineOrchestrator:
             # A failing on_run_end must not replace a failed store read or write.
             with keep_store_error(store_error, "Observer on_run_end"):
                 effective_observer.on_run_end(run_id)
+
+
+def _run_on_own_thread(make_run: Callable[[], Coroutine[Any, Any, _T]]) -> _T:
+    """Run a coroutine to completion on a new thread with its own event loop.
+
+    For a caller whose thread already runs an event loop, where ``asyncio.run`` is
+    refused. The caller blocks until the run ends and gets its result, or its exception
+    unchanged. The thread runs in a copy of the caller's context variables. A
+    ``KeyboardInterrupt`` raised in the caller while it waits cancels the run, waits for
+    the run to stop (functions already running in the loop's thread pool finish their
+    current row), and is re-raised, so no run keeps writing after the caller stopped.
+
+    Args:
+        make_run: Builds the coroutine; called on the new thread.
+
+    Returns:
+        What the coroutine returned.
+    """
+    loop = asyncio.new_event_loop()
+    tasks: list[asyncio.Task[_T]] = []
+    task_created = threading.Event()
+    finished = threading.Event()
+    results: list[_T] = []
+    errors: list[BaseException] = []
+
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        try:
+            task = loop.create_task(make_run())
+            tasks.append(task)
+            task_created.set()
+            results.append(loop.run_until_complete(task))
+        except BaseException as exc:  # noqa: BLE001  # handed to the waiting caller
+            errors.append(exc)
+        finally:
+            task_created.set()
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+                finished.set()
+
+    context = contextvars.copy_context()
+    thread = threading.Thread(
+        target=context.run, args=(run_loop,), name="orcapod-async-run", daemon=True
+    )
+    thread.start()
+    # Wait on an event, not Thread.join: on Python 3.12 an interrupt inside join marks
+    # a thread that is still running as stopped, and later joins return at once.
+    try:
+        # Wait in short slices: a pending interrupt is raised between them even when
+        # the signal reached another thread and did not wake this one's wait.
+        while not finished.wait(_INTERRUPT_CHECK_SECONDS):
+            pass
+    except KeyboardInterrupt:
+        _ = task_created.wait()
+        if tasks:
+            # The loop may have closed after the run ended on its own.
+            with contextlib.suppress(RuntimeError):
+                _ = loop.call_soon_threadsafe(tasks[0].cancel)
+        # A second interrupt here stops the wait; the cancelled run then winds down
+        # on its own thread.
+        while not finished.wait(_INTERRUPT_CHECK_SECONDS):
+            pass
+        raise
+    if errors:
+        raise errors[0]
+    return results[0]
 
 
 def _start_node(

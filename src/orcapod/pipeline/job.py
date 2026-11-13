@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.nodes import JobNode
@@ -47,6 +48,25 @@ _PENDING_BEFORE_RUN_NOTE = (
     "without a flush, or by a run that failed). The run stopped before computing "
     "anything."
 )
+
+
+@dataclass(frozen=True)
+class _PreparedRun:
+    """What one run of a job needs, built by ``PipelineJob._prepare_run``.
+
+    Attributes:
+        exec_dag: The nodes to run (unbound sources and their dependents left out).
+        run_id: The run's identifier.
+        pipeline_uri: ``<job name>@<snapshot hash>``, passed to the observer.
+        pipeline_db: The job's view of the store.
+        result_db: The job's function-result view of the store.
+    """
+
+    exec_dag: OrcaDAG[Any]
+    run_id: str
+    pipeline_uri: str
+    pipeline_db: "ArrowDatabaseProtocol"
+    result_db: "ArrowDatabaseProtocol"
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -785,6 +805,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         After a successful run, ``job.nodes`` returns the execution-ready
         nodes with populated database caches.
 
+        ``job.run(orchestrator=AsyncPipelineOrchestrator())`` works the same in a
+        script and inside a running event loop, such as a Jupyter kernel: there the
+        run goes on a separate thread while the call waits, and blocks that loop
+        until it ends. From async code, ``await job.run_async()`` instead.
+
         Args:
             orchestrator: Orchestrator to use for execution. Defaults to
                 ``SyncPipelineOrchestrator`` when ``None``.
@@ -840,11 +865,92 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 was needed to write a node's results. Its rows are not recomputed
                 and the table is not overwritten.
         """
-        import hashlib
-        import uuid
-
         from orcapod.pipeline.observer import NoOpObserver
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+
+        prepared = self._prepare_run(commit_every_rows)
+        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+        with self._executing(prepared, commit_every_rows):
+            effective_orchestrator.run(
+                prepared.exec_dag,
+                observer=observer or NoOpObserver(),
+                run_id=prepared.run_id,
+                pipeline_uri=prepared.pipeline_uri,
+                materialize_results=materialize_results,
+            )
+        return self._finish_run(prepared)
+
+    async def run_async(
+        self,
+        orchestrator: "AsyncPipelineOrchestrator | None" = None,
+        observer: "ExecutionObserverProtocol | None" = None,
+        materialize_results: bool = True,
+        commit_every_rows: int = 100,
+    ) -> "PipelineJob":
+        """Execute the job with the async orchestrator, from async code.
+
+        The awaitable form of ``run``: ``await job.run_async()`` runs on the caller's
+        event loop instead of blocking it. ``job.run(orchestrator=AsyncPipelineOrchestrator())``
+        also works inside a running loop (a Jupyter kernel), but blocks that loop until
+        the run ends. Both store the same rows and record ids. Arguments, errors and
+        result are those of ``run``.
+
+        Args:
+            orchestrator: The async orchestrator to run with. Defaults to
+                ``AsyncPipelineOrchestrator()``.
+            observer: Optional execution observer.
+            materialize_results: As for ``run``.
+            commit_every_rows: As for ``run``.
+
+        Returns:
+            ``self``, as ``run`` returns.
+
+        Raises:
+            TypeError: If ``orchestrator`` is not an ``AsyncPipelineOrchestrator``;
+                run a ``SyncPipelineOrchestrator`` with ``job.run``.
+            ValueError: As for ``run``.
+            RuntimeError: As for ``run``.
+            StoreWriteError: As for ``run``.
+            StoreReadError: As for ``run``.
+        """
+        from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+        from orcapod.pipeline.observer import NoOpObserver
+
+        if orchestrator is None:
+            orchestrator = AsyncPipelineOrchestrator()
+        elif not isinstance(orchestrator, AsyncPipelineOrchestrator):
+            raise TypeError(
+                "PipelineJob.run_async() runs an AsyncPipelineOrchestrator, got "
+                f"{type(orchestrator).__name__}. Use job.run(orchestrator=...) to run "
+                "it."
+            )
+        prepared = self._prepare_run(commit_every_rows)
+        with self._executing(prepared, commit_every_rows):
+            await orchestrator.run_async(
+                prepared.exec_dag,
+                observer=observer or NoOpObserver(),
+                run_id=prepared.run_id,
+                pipeline_uri=prepared.pipeline_uri,
+                materialize_results=materialize_results,
+            )
+        return self._finish_run(prepared)
+
+    def _prepare_run(self, commit_every_rows: int) -> "_PreparedRun":
+        """Check the job can run and build what a run needs; shared by both run forms.
+
+        Args:
+            commit_every_rows: As for ``run``.
+
+        Returns:
+            The execution DAG, run id, pipeline URI and the store views of the run.
+
+        Raises:
+            ValueError: As for ``run``.
+            RuntimeError: As for ``run``.
+            StoreError: If writes still pending from before the run cannot be committed.
+        """
+        import hashlib
+        import uuid
 
         if (
             isinstance(commit_every_rows, bool)
@@ -955,8 +1061,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     self._persistent_node_map[v_hash],
                 )
 
-        # --- Execute ---
-        effective_observer = observer or NoOpObserver()
         run_id = uuid.uuid4().hex[:16]
 
         # Snapshot hash: SHA-256 of sink-node content digests for the run URI.
@@ -988,28 +1092,56 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 flush_error.add_note(_PENDING_BEFORE_RUN_NOTE)
                 raise flush_error from exc
 
-        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+        return _PreparedRun(
+            exec_dag=exec_dag,
+            run_id=run_id,
+            pipeline_uri=pipeline_uri,
+            pipeline_db=pipeline_db,
+            result_db=result_db,
+        )
+
+    @contextlib.contextmanager
+    def _executing(
+        self, prepared: "_PreparedRun", commit_every_rows: int
+    ) -> Iterator[None]:
+        """Hold every function node to the run's commit cadence while the orchestrator runs.
+
+        A failure inside commits the writes that succeeded before it, then propagates.
+
+        Args:
+            prepared: The run, from ``_prepare_run``.
+            commit_every_rows: As for ``run``.
+        """
         try:
             with contextlib.ExitStack() as batched:
                 # Function nodes commit every commit_every_rows rows (ITL-919).
-                for node in exec_dag.nodes():
+                for node in prepared.exec_dag.nodes():
                     if isinstance(node, FunctionJobNode):
                         batched.enter_context(
                             node._batched_commits(commit_every_rows)  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' commit cadence
                         )
-                effective_orchestrator.run(
-                    exec_dag,
-                    observer=effective_observer,
-                    run_id=run_id,
-                    pipeline_uri=pipeline_uri,
-                    materialize_results=materialize_results,
-                )
+                yield
         except Exception as run_error:
             # Commit the writes that did succeed before the failure, so their rows
             # do not look dropped, then report the failure itself.
-            flush_best_effort(run_error, pipeline_db, result_db)
+            flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
             raise
 
+    def _finish_run(self, prepared: "_PreparedRun") -> "PipelineJob":
+        """Commit the run's last writes and mark the job as run.
+
+        Args:
+            prepared: The run, from ``_prepare_run``.
+
+        Returns:
+            ``self``.
+
+        Raises:
+            StoreReadError: As for ``run``.
+            StoreWriteError: As for ``run``.
+        """
+        pipeline_db = prepared.pipeline_db
+        result_db = prepared.result_db
         # Flush databases. Every view of the store shares one set of pending
         # batches, so a failed batch can leave the ones after it unwritten.
         pending_note = (
@@ -1031,7 +1163,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Mutate self in place.
         self._has_run = True
-        self._run_id = run_id
+        self._run_id = prepared.run_id
 
         return self
 
