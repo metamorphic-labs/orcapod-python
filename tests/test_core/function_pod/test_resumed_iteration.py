@@ -313,8 +313,8 @@ def test_a_read_that_failed_upstream_loses_no_row(
     assert sorted(CALLS) == list(range(ROWS)), "each upstream row is computed once"
     if upstream_started:
         # Only then: an upstream that opens its input after the downstream did makes
-        # the downstream stale, which recomputes it on the next read (a separate,
-        # reported defect of the staleness check, not a lost row).
+        # the downstream stale, which recomputes it on the next read (ITL-1052, a
+        # defect of the staleness check, not a lost row).
         assert sorted(downstream_calls) == [10 * i for i in range(ROWS)], (
             "each downstream row is computed once"
         )
