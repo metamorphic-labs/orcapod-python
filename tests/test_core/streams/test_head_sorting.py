@@ -232,3 +232,56 @@ def test_an_unbound_source_proxy_head_accepts_a_sorted_configuration() -> None:
     )
     head = proxy.head(3, all_info=True)
     assert head.status is HeadStatus.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# The notebook preview sorts by tags (developer, November 12, 2026)
+# ---------------------------------------------------------------------------
+
+
+def _preview_ids(html: str) -> list[int]:
+    """The ``id`` cells of a preview, in the order they are shown."""
+    import re
+
+    return [int(v) for v in re.findall(r"<td>(\d+)</td>", html)][::2]
+
+
+def test_the_preview_of_a_source_shows_rows_in_tag_order_and_says_so() -> None:
+    """Rows not in tag order are previewed sorted; the default head is still unsorted."""
+    source = _source()
+    html = source._repr_html_()
+    assert "ArrowTableSource[nums] — all 8 rows, sorted by tags" in html
+    assert _preview_ids(html) == sorted(ORDER)
+    assert source.head().table.column("id").to_pylist() == ORDER
+
+
+def test_the_preview_of_a_partly_computed_stream_is_the_rows_computed_so_far() -> None:
+    """A partial computation previews the computed rows, in tag order; nothing more runs."""
+    stream = triple.pod(_source())
+    rows = stream.iter_data()
+    for _ in range(4):
+        next(rows)
+    html = stream._repr_html_()
+    assert CALLS == [5, 2, 7, 0]
+    assert "first 4 of 4 rows computed so far" not in html
+    assert "4 rows computed so far, sorted by tags (computation incomplete)" in html
+    assert _preview_ids(html) == [0, 2, 5, 7]
+
+
+def test_the_preview_of_a_stream_with_no_computed_rows_has_no_sorting_caption() -> None:
+    """Only shown rows are described as sorted."""
+    html = triple.pod(_source())._repr_html_()
+    assert "sorted by tags" not in html
+    assert CALLS == []
+
+
+def test_the_preview_of_a_stream_without_tag_columns_keeps_stream_order() -> None:
+    """With no tag column there is nothing to sort by; the rows keep their order."""
+    source = ArrowTableSource(
+        _table().select(["x"]), tag_columns=[], source_id="untagged", label="untagged"
+    )
+    html = source._repr_html_()
+    assert "sorted by tags" not in html
+    assert source.head(columns={"sort_by_tags": True}).table.column(
+        "x"
+    ).to_pylist() == (ORDER)

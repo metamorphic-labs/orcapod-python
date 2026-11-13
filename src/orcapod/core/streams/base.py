@@ -12,7 +12,7 @@ from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
     default_note,
-    render_error_html,
+    preview_html,
 )
 from orcapod.protocols.core_protocols import (
     DataProtocol,
@@ -496,7 +496,7 @@ class StreamBase(TraceableBase):
         of ``as_table`` with that configuration. A stream that has read or computed only
         part of its rows (a source's bounded read, a partly computed stream) sorts those
         rows: the rows read, in tag order, not the first ``n`` in tag order. The
-        notebook preview of a stream is its default (unsorted) ``head()``.
+        notebook preview of a stream is its ``head()`` asked for ``sort_by_tags``.
 
         This default shows no rows: a stream class that can serve rows without computing
         overrides it. The zero-row table then has the stream's columns, typed from its
@@ -562,9 +562,5 @@ class StreamBase(TraceableBase):
         return any(schema_requires_io(upstream, config) for upstream in self.upstreams)
 
     def _repr_html_(self) -> str:
-        """Render ``head()`` for a notebook; never computes."""
-        try:
-            head = self.head()
-        except Exception as error:  # noqa: BLE001 - a display hook must not raise
-            return render_error_html(self, error)
-        return head._repr_html_()
+        """Render ``head()`` in tag order for a notebook; never computes."""
+        return preview_html(self)

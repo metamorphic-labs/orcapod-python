@@ -181,3 +181,103 @@ def test_an_operator_nodes_head_is_the_prefix_of_as_table(
         assert head.table.equals(each.as_table(**CONFIGS[config]).slice(0, 3))
     sorted_ids = node(CacheMode.REPLAY).head(3, all_info=True).table.column("id")
     assert sorted_ids.to_pylist() == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Equal and null tags: one deterministic sort (ITL-1053)
+# ---------------------------------------------------------------------------
+
+TIE_KEYS: list[int | None] = [2, 1, None, 2, 1, None, 0, 2]
+
+
+def _tie_source() -> ArrowTableSource:
+    """Rows with duplicate and null tags ``k``, each with its own ``x``."""
+    table = pa.table(
+        {"k": pa.array(TIE_KEYS, pa.int64()), "x": pa.array(range(N_ROWS + 2))},
+        schema=pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=True),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    return ArrowTableSource(table, tag_columns=["k"], source_id="ties", label="ties")
+
+
+def _tie_run(kind: str) -> Any:
+    """Run ``_tie_source`` through a function node; ``async`` completes rows in reverse."""
+    gates.clear()
+    job = PipelineJob(name="ties", store=InMemoryArrowDatabase())
+    if kind == "sync":
+        with job:
+            triple.pod(_tie_source(), label="node")
+        job.run(orchestrator=SyncPipelineOrchestrator())
+    else:
+        gates.extend(asyncio.Event() for _ in range(len(TIE_KEYS)))
+        with job:
+            tie_last_row_first.pod(_tie_source(), label="node")
+        job.run(orchestrator=AsyncPipelineOrchestrator())
+    return job.nodes["node"]
+
+
+@function_pod(output_keys="y")
+async def tie_last_row_first(x: int) -> int:
+    """Triple ``x``; row ``i`` finishes after row ``i + 1`` (reverse completion)."""
+    if x + 1 < len(TIE_KEYS):
+        await asyncio.wait_for(gates[x + 1].wait(), timeout=60)
+    gates[x].set()
+    return 3 * x
+
+
+@pytest.mark.parametrize("config", ["sort_by_tags", "all_info", "content_hash_sorted"])
+def test_a_sorted_table_with_equal_and_null_tags_does_not_depend_on_completion_order(
+    config: str,
+) -> None:
+    """Rows with equal tags are ordered by their system tags, nulls last, in any order."""
+    sync_node, async_node = _tie_run("sync"), _tie_run("async")
+    assert _held_order_k(sync_node) != _held_order_k(async_node)
+    tables = {
+        name: node.as_table(**CONFIGS[config])
+        for name, node in (("sync", sync_node), ("async", async_node))
+    }
+
+    def without_source_info(table: pa.Table) -> pa.Table:
+        """The table without ``_source_`` columns: their tokens name each run's rows."""
+        return table.drop_columns(
+            [c for c in table.column_names if c.startswith("_source_")]
+        )
+
+    assert without_source_info(tables["sync"]).equals(
+        without_source_info(tables["async"])
+    )
+    assert tables["sync"].column("k").to_pylist() == [0, 1, 1, 2, 2, 2, None, None]
+    for name, node in (("sync", sync_node), ("async", async_node)):
+        for n in (0, 3, 5, 20):
+            head = node.head(n, **CONFIGS[config])
+            assert head.table.equals(tables[name].slice(0, n))
+
+
+def _held_order_k(node: Any) -> list[int | None]:
+    return node.as_table().column("k").to_pylist()
+
+
+# ---------------------------------------------------------------------------
+# The notebook preview sorts by tags (developer, November 12, 2026)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("store_kind", ["in_memory", "delta"])
+def test_a_nodes_preview_is_the_same_after_any_completion_order(
+    store_kind: str, tmp_path: Path
+) -> None:
+    """The preview of a node shows tag order: reversed completion looks like a sync run."""
+    # A sync run over input in tag order holds its rows in tag order.
+    ascending = _build(triple, _store(store_kind, tmp_path / "a"), list(range(N_ROWS)))
+    ascending.run(orchestrator=SyncPipelineOrchestrator())
+    sync_node = ascending.nodes["node"]
+    async_node = _run("async", _store(store_kind, tmp_path / "b")).nodes["node"]
+    assert _held_order(sync_node) != _held_order(async_node)
+    assert sync_node._repr_html_() == async_node._repr_html_()
+    html = async_node._repr_html_()
+    assert "all 6 rows, sorted by tags" in html
+    assert html.index("<td>0</td>") < html.index("<td>5</td>")

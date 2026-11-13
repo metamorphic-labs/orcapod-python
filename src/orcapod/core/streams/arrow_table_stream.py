@@ -301,17 +301,7 @@ class ArrowTableStream(StreamBase):
         table = arrow_utils.hstack_tables(*table_stack)
 
         if columns_config.sort_by_tags:
-            # TODO: cleanup the sorting tag selection logic
-            try:
-                target_tags = (
-                    self._all_tag_columns
-                    if columns_config.system_tags
-                    else self._tag_columns
-                )
-                return table.sort_by([(column, "ascending") for column in target_tags])
-            except pa.ArrowTypeError:
-                # If sorting fails, fall back to unsorted table
-                return table
+            return arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
 
         return table
 

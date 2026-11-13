@@ -1831,17 +1831,24 @@ def apply_column_config(
             if c.startswith(constants.META_PREFIX)
             and not any(c.startswith(p) for p in normalized_meta_prefixes)
         )
-    output_table = table.drop([c for c in drop_columns if c in table.column_names])
     if column_config.sort_by_tags:
-        output_table = sort_by_tag_columns(output_table, tag_keys)
-    return output_table
+        # Before the system tags are dropped: they break ties between equal tags.
+        table = sort_by_tag_columns(table, tag_keys)
+    return table.drop([c for c in drop_columns if c in table.column_names])
 
 
 def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Table":
-    """Return ``table`` with its rows sorted ascending by the tag columns ``tag_keys``.
+    """Return ``table`` with its rows in tag order: the one sort every tag sort uses.
 
-    Whole rows move together: a column added to ``table`` before the sort stays with
-    its row. Column types and nullability are those of ``table``.
+    The rows are ordered ascending by the tag columns ``tag_keys``, nulls last. Rows with
+    equal tags are then ordered by the system tag columns ``table`` has (they hold the
+    record ids), in column order, and rows still equal keep their input order, so the
+    result does not depend on the order the rows arrived in whenever the table has system
+    tags. A table with no tag column is returned as it is.
+
+    Whole rows move together: a column added to ``table`` before the sort (a content hash)
+    stays with its row. Column types and nullability are those of ``table``. Sort before
+    dropping the system tag columns, or the tiebreak is lost.
 
     Args:
         table: The table to sort.
@@ -1850,12 +1857,25 @@ def sort_by_tag_columns(table: "pa.Table", tag_keys: tuple[str, ...]) -> "pa.Tab
     Returns:
         A new table with the same columns, rows in tag order.
     """
-    import polars as pl
+    system_tags = [
+        c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    keys = [*tag_keys, *(c for c in system_tags if c not in tag_keys)]
+    if not keys:
+        return table
+    try:
+        return table.sort_by([(key, "ascending") for key in keys])
+    except (pa.ArrowNotImplementedError, pa.ArrowTypeError):
+        # Arrow cannot order this type (a list tag): order by Polars, nulls last, and
+        # keep the input order of equal rows.
+        import polars as pl
 
-    sorted_table = (
-        pl.DataFrame(table).sort(by=list(tag_keys), descending=False).to_arrow()
-    )
-    return restore_schema_nullability(sorted_table, table.schema)
+        sorted_table = (
+            pl.DataFrame(table)
+            .sort(by=keys, descending=False, nulls_last=True, maintain_order=True)
+            .to_arrow()
+        )
+        return restore_schema_nullability(sorted_table, table.schema)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import uuid
 from abc import abstractmethod
@@ -601,22 +600,15 @@ class FunctionNodeBase(StreamBase):
             content_hashes: Returns the content hash of each row of ``table``, in the
                 order of ``table``; called only when ``column_config`` asks for them.
         """
-        tag_keys = self.keys()[0]
-        output_table = arrow_utils.apply_column_config(
-            table, dataclasses.replace(column_config, sort_by_tags=False), tag_keys
-        )
         if column_config.content_hash:
             hash_column_name = (
                 "_content_hash"
                 if column_config.content_hash is True
                 else column_config.content_hash
             )
-            output_table = output_table.append_column(
-                hash_column_name, content_hashes()
-            )
-        if column_config.sort_by_tags:
-            output_table = arrow_utils.sort_by_tag_columns(output_table, tag_keys)
-        return output_table
+            table = table.append_column(hash_column_name, content_hashes())
+        # The sort sees every column, the system tags included (they break ties).
+        return arrow_utils.apply_column_config(table, column_config, self.keys()[0])
 
     def head(
         self,

@@ -21,7 +21,7 @@ from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
     head_of,
-    render_error_html,
+    preview_html,
 )
 from orcapod.core.streams.base import (
     check_head_size,
@@ -333,12 +333,8 @@ class SourceNodeBase(TraceableBase, ABC):
         )
 
     def _repr_html_(self) -> str:
-        """Render ``head()`` for a notebook; never computes."""
-        try:
-            head = self.head()
-        except Exception as error:  # noqa: BLE001 - a display hook must not raise
-            return render_error_html(self, error)
-        return head._repr_html_()
+        """Render ``head()`` in tag order for a notebook; never computes."""
+        return preview_html(self)
 
     async def async_iter_data(self):
         """Asynchronous iterator over (tag, data) pairs.

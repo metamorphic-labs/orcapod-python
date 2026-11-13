@@ -614,7 +614,10 @@ class TestNotebookPreview:
         html = source._repr_html_()
 
         assert self._scan_limits() == [10]
-        assert "SpiralDBTableSource[big] — first 10 rows of about 25" in html
+        assert (
+            "SpiralDBTableSource[big] — 10 rows read, sorted by tags, of about 25"
+            in html
+        )
         assert "shape: (10, 3)" in html
         assert "tags: subject_id, timestamp" in html
 
@@ -660,7 +663,7 @@ class TestNotebookPreview:
         html = source._repr_html_()
 
         assert self._scan_limits() == [10]
-        assert "first 10 rows of about 25" in html
+        assert "10 rows read, sorted by tags, of about 25" in html
 
     def test_a_small_table_shows_all_its_rows(self, project):
         """A table of fewer than 10 rows is shown whole, saying so."""
@@ -704,7 +707,7 @@ class TestNotebookPreview:
         html = source._repr_html_()
 
         assert (
-            "first 10 matching rows (where subject_id='&lt;b&gt;'); "
+            "10 matching rows read, sorted by tags (where subject_id='&lt;b&gt;'); "
             "the table has about 25 rows"
         ) in html
         assert "<b>'" not in html

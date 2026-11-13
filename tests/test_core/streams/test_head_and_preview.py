@@ -137,11 +137,18 @@ def test_other_in_memory_sources_serve_their_first_rows(make: Any) -> None:
 
 
 def test_preview_is_the_rendered_head() -> None:
-    """The notebook preview is head() rendered."""
+    """The notebook preview is head() rendered, with the rows in tag order (ITL-1053)."""
     source = _source()
     html = source._repr_html_()
-    assert "ArrowTableSource[readings] — first 10 of 25 rows" in html
-    assert html == source.head()._repr_html_()
+    assert "ArrowTableSource[readings] — first 10 of 25 rows, sorted by tags" in html
+    assert (
+        html.split("</strong>")[1:]
+        == (
+            source.head(columns={"sort_by_tags": True})
+            ._repr_html_()
+            .split("</strong>")[1:]
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1349,48 +1349,28 @@ class FunctionPodStream(StreamBase):
             content_hashes: Returns the content hash of each row of ``table``; called
                 only when ``column_config`` asks for them.
         """
-        drop_columns = []
-        if not column_config.system_tags:
-            # TODO: get system tags more effiicently
-            drop_columns.extend(
-                [
-                    c
-                    for c in table.column_names
-                    if c.startswith(constants.SYSTEM_TAG_PREFIX)
-                ]
-            )
-        if not column_config.source:
-            drop_columns.extend(f"{constants.SOURCE_PREFIX}{c}" for c in self.keys()[1])
-        if not column_config.context:
-            drop_columns.append(constants.CONTEXT_KEY)
-
-        output_table = table.drop([c for c in drop_columns if c in table.column_names])
-
         if column_config.content_hash:
             hash_column_name = (
                 "_content_hash"
                 if column_config.content_hash is True
                 else column_config.content_hash
             )
-            output_table = output_table.append_column(
-                hash_column_name, content_hashes()
-            )
-
+            table = table.append_column(hash_column_name, content_hashes())
         if column_config.sort_by_tags:
-            # TODO: reimplement using polars natively
-            output_table_schema = output_table.schema
-            output_table = (
-                pl.DataFrame(output_table)
-                .sort(by=self.keys()[0], descending=False)
-                .to_arrow()
+            # Before the system tags are dropped: they break ties between equal tags.
+            table = arrow_utils.sort_by_tag_columns(table, self.keys()[0])
+        drop_columns = []
+        if not column_config.system_tags:
+            drop_columns.extend(
+                c
+                for c in table.column_names
+                if c.startswith(constants.SYSTEM_TAG_PREFIX)
             )
-            output_table = arrow_utils.restore_schema_nullability(
-                output_table, output_table_schema
-            )
-            # output_table = output_table.sort_by(
-            #     [(column, "ascending") for column in self.keys()[0]]
-            # )
-        return output_table
+        if not column_config.source:
+            drop_columns.extend(f"{constants.SOURCE_PREFIX}{c}" for c in self.keys()[1])
+        if not column_config.context:
+            drop_columns.append(constants.CONTEXT_KEY)
+        return table.drop([c for c in drop_columns if c in table.column_names])
 
 
 class CallableWithPodProtocol(Protocol):
