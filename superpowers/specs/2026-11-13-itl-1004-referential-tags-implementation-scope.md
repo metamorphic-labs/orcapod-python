@@ -14,6 +14,8 @@ spec marks Open or that the code makes impossible or ambiguous.
 - The change is a change of default behaviour.
 - `Join`'s three cases (§9.1) have equal standing.
 - At a pod boundary a reference whose data column does not survive becomes a plain tag (D1).
+- Renames (§5.4): `map_tags` moves both roles of a reference, `tag_only=True` and `map_data`
+  leave a plain tag.
 
 **Code audited:** `origin/main` at `f51ce67c`.
 **Measurements:** `superpowers/specs/itl-1004-audit/` holds each script (run with `uv run`) and
@@ -267,7 +269,7 @@ that change at every site.
 | `GroupBy`/`Batch` async | `Duplicate column name 'x'` (`02 P4`) | as sync | `_rows_to_table` (ITL-1010) | — |
 | Select/Drop data (`column_selection.py:158`, `:413`) | raise when dropping referenced `x` (`02 P2`) | materialize (§7.2) | §5.3 | S |
 | Select/Drop tag (`:37`, `:286`) | the physical column dropped, so data `x` is lost (`02 P2`) | remove tag, keep data (§10) | §5.3 | S |
-| `MapTags`/`MapData` | renaming a referenced tag raises (`02 P3`) | §10.1 (proposed) | §5.4 | M |
+| `MapTags`/`MapData` | renaming a referenced tag raises (`02 P3`) | decided (§5.4) | §5.4 | M |
 | `Index`/`Pick` | §5.5 | §4.5 | §5.5 | S |
 | `Join` | §5.1 | §9 | §5.1 | M |
 | `MergeJoin` | §5.2 | open (§17) | §5.2 | M |
@@ -341,17 +343,23 @@ because they drop per datagram.
   exposes `binding_transitions(...)` → `{name: kept | materialized | removed}` for pipeline
   views.
 
-### 5.4 Renames (spec §10.1, Proposed: how)
+### 5.4 Renames: DECIDED (developer, November 12, 2026; closes spec §10.1)
 
-`MapTags` and `MapData` rename within their own namespace and refuse a name of the other one
-(`01 R4`; `mappers.py:104`, `:254`). Per §10.1:
-- **Renaming only the tag (or only the data) of a reference materializes it.** The renamed
-  side gets a zero-copy duplicate of the column under the new name, using the idiom
-  `table.append_column(field.with_name(new), table.column(x))` from `derived_source.py:429-434`.
-  The other side keeps the original. The diagnostic fires.
-- **Renaming both together preserves the reference.** No operator does this today. Add one
-  explicit form, for example `MapTags({...}, with_references=True)` or a `MapReferences`
-  operator. The name is the developer's call at ITL-1018.
+Today `MapTags` and `MapData` rename within their own namespace and refuse a name of the
+other one (`01 R4`; `mappers.py:104`, `:254`). With references (prototype `02 P3`), renaming
+either side of a reference raises. The decided rules:
+
+| Call | On a referential tag `x` → `y` | On a plain tag | Diagnostic |
+|---|---|---|---|
+| `map_tags({x: y})` (default) | renames the column in **both** roles; the reference survives as `y` (one physical column: rename the column, then rename it in both role lists) | as today | none (nothing materializes) |
+| `map_tags({x: y}, tag_only=True)` (spelling is the coordinator's; the developer may rename it) | the tag becomes plain `y`, a zero-copy duplicate (`table.append_column(field.with_name(y), table.column(x))`, the `derived_source.py:429-434` idiom); data `x` keeps its name | as today | none (the user asked) |
+| `map_data({x: y})` | always a data-only move: data becomes `y`; tag `x` stays as a plain tag under the old name (zero-copy duplicate) | n/a | none (the user asked) |
+
+A rename that would produce a plain tag and a data column of one name, or collide with an
+existing column, raises as today (`mappers.py:104`, `:254`). `tag_only` enters `MapTags`'s
+identity only when true, so the identity of a plain-tag rename stays v0.3's. The EDI test
+renames `timestamp` to `spike_time` / `gaze_time` with `map_tags`. Size M (ITL-1018, or the
+ITL-1023 slice).
 
 ### 5.5 `Index` and `Pick`
 
@@ -476,8 +484,8 @@ Functions that read the copy recompute once, because the column name is in the `
 | Question | Answer |
 |---|---|
 | Outer and unmatched-row joins (§9.7) | **The code decides:** none exist. `Join` and `MergeJoin` use `how="inner"` (`join.py:219`, `merge_join.py:393`), `SemiJoin` uses `how="semi"` (`semijoin.py:120`). Record the §9.7 policy in the operator contract for future ones |
-| Rename both namespaces | §5.4: preserve, through an explicit both-sides form (name at ITL-1018) |
-| Rename one side materializes? | §5.4: yes, as a zero-copy duplicate; the existing contract renames one namespace (`mappers.py:104`, `:254`) |
+| Rename both namespaces | **Decided:** `map_tags` on a referential tag renames both roles; the reference survives (§5.4) |
+| Rename one side materializes? | **Decided:** `map_tags(..., tag_only=True)` and `map_data` leave a plain tag (zero-copy), with no warning (§5.4) |
 | `Batch` | **The code decides:** every member column becomes a list in input order (`batch.py:60-100`). A reference is one column, so it is preserved (`02 P4`) |
 | `MergeJoin` | §5.2; D4 |
 | Avoiding duplicate stored values | **The code decides:** one physical column, and rows share buffers (`arrow_table_stream.py:352-353`). Option B, which the code already is; D3 asks only whether to add an explicit marker |
@@ -503,7 +511,7 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 | 2e | **ITL-1014** | tests only for the filters, `SemiJoin` and `DropNulls`; `Index`/`Pick` in-place rejection | S | 1 | others |
 | 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule; automatic join and select with references; §15.2 and §15.6 result-identity tests | M | 1, 2b; 2c for the automatic join | 4 |
 | 4 | **ITL-1019** | nodes, stores and saved jobs pass references; descriptor intersection; reuse across retagging (§15.6) | S | 1 | 3 |
-| 5 | **ITL-1018** | `MergeJoin` (D4); rename forms (§5.4) | M | 1 | 6 |
+| 5 | **ITL-1018** | `MergeJoin` (D4); the decided rename rules (§5.4), unless the ITL-1023 slice lands them | M | 1 | 6 |
 | 6 | **ITL-1020** | `tags_as_data` beside references (§6.3): docs and tests; no behaviour change | S | 2a | 5 |
 | 7 | **ITL-1021** | ediop and the notebook, without copies; EDI-shaped integration test (§15.7) | M | 2a, 2c, 2d, 3 | — |
 | 8 | **ITL-1022** | operator table in `docs/`; `streams.md:10-25`, `operators.md:31-33`, `sources.md`, `hashing.md`; CLAUDE.md and `.zed/rules` rule | S | all | — |
@@ -511,7 +519,8 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 **ITL-1023 (workshop slice, go/no-go November 14).** The thinnest path is ITL-1010 (+1009),
 1012 (sources only), 1015, 1013, 1016 and 1017, plus guard errors ("not supported with
 referential tags yet") in:
-- `Batch`, `MergeJoin`, `MapTags`, `MapData`, `Index`, `Pick` when an input has references;
+- `Batch`, `MergeJoin`, `Index`, `Pick` when an input has references (the rename rules of §5.4
+  are in the slice);
 - `OperatorNode` reload and `DerivedSource`;
 - `pod.process`/`strict=True` with references (D2), if D2 is not settled.
 
@@ -572,7 +581,7 @@ Two parts remain:
 - **The diagnostic at a pod boundary (the coordinator's call).** With referential sources by
   default, *every* pod would trigger it, so the recommendation is **none** there. The same
   goes for the automatic select of `pod(...)` (ITL-807), which fires on every call. The
-  `reference_materialization` warning is for a select, drop or rename the user wrote. The
+  `reference_materialization` warning is for a select or drop the user wrote (a rename never warns, §5.4). The
   transition is still recorded in the schema and the pipeline hash (§7.4: the diagnostic
   never changes a result).
 - **Planned follow-up, out of scope now.** A separate project issue covers a "fall-through /
