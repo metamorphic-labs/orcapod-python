@@ -115,12 +115,14 @@ def _expected(name: str) -> pa.DataType:
 
 
 def _new_store(kind: str, tmp_path: pathlib.Path):
+    """A store of the given kind (``memory`` or ``delta``); a Delta store under ``tmp_path``."""
     if kind == "delta":
         return DeltaTableDatabase(tmp_path / "store")
     return InMemoryArrowDatabase()
 
 
 def _run(job: PipelineJob, mode: str) -> None:
+    """Run ``job`` with the orchestrator named by ``mode`` (``sync`` or ``async``)."""
     if mode == "async":
         job.run(orchestrator=AsyncPipelineOrchestrator())
     else:
@@ -148,6 +150,7 @@ def _build(store, table: pa.Table, *, chained: bool = False) -> PipelineJob:
 def test_as_table_after_run_keeps_tag_type(
     name: str, store: str, mode: str, tmp_path: pathlib.Path
 ) -> None:
+    """After a run, the node's ``as_table()`` has the input's tag type."""
     job = _build(_new_store(store, tmp_path), _source_table(name))
     _run(job, mode)
 
@@ -227,6 +230,7 @@ def test_as_table_mixing_stored_and_new_rows_keeps_tag_type() -> None:
 def test_store_read_back_keeps_tag_type(
     name: str, store: str, tmp_path: pathlib.Path
 ) -> None:
+    """Reads from the store (``get_all_records``, a fresh job's reads) keep the tag type."""
     database = _new_store(store, tmp_path)
     table = _source_table(name)
     _build(database, table).run()
@@ -305,3 +309,18 @@ def test_new_rows_over_a_store_written_after_the_fix_keep_the_tag_type(
 
     assert table.num_rows == 3
     assert table.schema.field("k").type == pa.uint32()
+
+
+def test_a_column_first_seen_after_row_one_is_still_checked() -> None:
+    """Two later rows that disagree on a column row one lacks still raise, naming it."""
+    # About the private helper itself: no public input gives row one fewer columns.
+    from orcapod.core.nodes.function_node import _concat_row_tables
+
+    rows = [
+        pa.table({"a": pa.array([1], pa.int64())}),
+        pa.table({"a": pa.array([2], pa.int64()), "k": pa.array([1], pa.int8())}),
+        pa.table({"a": pa.array([3], pa.int64()), "k": pa.array([1], pa.int16())}),
+    ]
+
+    with pytest.raises(InputValidationError, match="'k': int8 and int16"):
+        _concat_row_tables(rows)

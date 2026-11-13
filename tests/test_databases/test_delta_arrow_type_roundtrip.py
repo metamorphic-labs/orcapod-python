@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import json
 import pathlib
+import subprocess
+import sys
 from typing import Any
 
 import pyarrow as pa
@@ -80,6 +83,7 @@ def _written_and_read(tmp_path: pathlib.Path, column: pa.Array[Any]) -> pa.Table
 def test_a_read_returns_the_written_type_and_values(
     name: str, tmp_path: pathlib.Path
 ) -> None:
+    """A read gives back the written type (large-normalized) and values."""
     column = COLUMNS[name]
 
     read = _written_and_read(tmp_path, column)
@@ -101,6 +105,7 @@ def test_a_read_returns_the_written_type_and_values(
 def test_an_unsigned_value_above_the_signed_range_round_trips(
     column: pa.Array[Any], tmp_path: pathlib.Path
 ) -> None:
+    """An unsigned value above the signed maximum is stored and read back exactly."""
     read = _written_and_read(tmp_path, column)
 
     assert read.schema.field("c").type == column.type
@@ -108,6 +113,7 @@ def test_an_unsigned_value_above_the_signed_range_round_trips(
 
 
 def test_nanosecond_timestamps_keep_their_digits(tmp_path: pathlib.Path) -> None:
+    """``timestamp[ns]`` keeps its sub-microsecond digits."""
     column = pa.array(
         [1_700_000_000_123_456_789, 1, 1_700_000_000_000_000_001], pa.timestamp("ns")
     )
@@ -131,6 +137,7 @@ def test_nanosecond_timestamps_keep_their_digits(tmp_path: pathlib.Path) -> None
 def test_types_delta_has_no_equivalent_for_are_stored(
     column: pa.Array[Any], tmp_path: pathlib.Path
 ) -> None:
+    """``date64``, ``time`` and ``duration`` columns are stored and read back."""
     read = _written_and_read(tmp_path, column)
 
     assert read.schema.field("c").type == column.type
@@ -155,6 +162,7 @@ def increment(y: int) -> int:
 
 
 def _source_table(k: pa.Array[Any]) -> pa.Table:
+    """A three-row table with tag ``k`` (the given column) and an ``int64`` column ``x``."""
     schema = pa.schema(
         [
             pa.field("k", k.type, nullable=False),
@@ -174,6 +182,7 @@ TAGS = {
 
 
 def _chained_job(root: pathlib.Path, table: pa.Table) -> PipelineJob:
+    """A job on a Delta store at ``root``: source -> ``double`` -> ``increment``."""
     with PipelineJob(name="j", store=DeltaTableDatabase(root)) as job:
         src = ArrowTableSource(table, tag_columns=["k"], source_id="src")
         increment.pod(double.pod(src, label="double"), label="increment")
@@ -208,6 +217,7 @@ def test_a_rerun_on_the_same_store_writes_no_pipeline_rows(
 
 @pytest.mark.parametrize("name", list(TAGS))
 def test_a_fresh_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
+    """A new job on the same store reads the tag type through every read of a node."""
     table = _source_table(TAGS[name])
     _chained_job(tmp_path, table).run()
 
@@ -221,24 +231,49 @@ def test_a_fresh_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> No
     assert records.schema.field("k").type == TAGS[name].type
 
 
+# Run in a child process by ``test_a_loaded_job_reads_the_tag_type``: load the job
+# saved under ``argv[1]`` and print each function node's tag type as JSON.
+_READ_LOADED_TAG_TYPES = """
+import json, pathlib, sys
+from orcapod import PipelineJob
+from orcapod.databases import DeltaTableDatabase
+root = pathlib.Path(sys.argv[1])
+job = PipelineJob.load(root / "job.json", store=DeltaTableDatabase(root / "store"))
+print(json.dumps({
+    label: str(job.nodes[label].as_table().schema.field("k").type)
+    for label in ("double", "increment")
+}))
+"""
+
+
 @pytest.mark.parametrize("name", list(TAGS))
 def test_a_loaded_job_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
+    """A job saved after its run and loaded in a new process reads the tag type.
+
+    The load runs in a child process, so nothing of the run (pods, sources, store
+    objects) can stand in for what the saved job and the store hold.
+    """
     job = _chained_job(tmp_path / "store", _source_table(TAGS[name]))
     job.run()
     job.save(tmp_path / "job.json")
 
-    loaded = PipelineJob.load(
-        tmp_path / "job.json", store=DeltaTableDatabase(tmp_path / "store")
+    read = subprocess.run(
+        [sys.executable, "-c", _READ_LOADED_TAG_TYPES, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
     )
 
-    for label in ("double", "increment"):
-        assert loaded.nodes[label].as_table().schema.field("k").type == TAGS[name].type
+    assert json.loads(read.stdout.strip().splitlines()[-1]) == {
+        label: str(TAGS[name].type) for label in ("double", "increment")
+    }
 
 
 @pytest.mark.parametrize("name", list(TAGS))
 def test_an_operator_replay_reads_the_tag_type(
     name: str, tmp_path: pathlib.Path
 ) -> None:
+    """An operator node's ``REPLAY`` of its logged output reads the tag type."""
     table = pa.Table.from_arrays(
         [TAGS[name], pa.array([1, 2, 3], pa.int64()), pa.array([4, 5, 6], pa.int64())],
         schema=pa.schema(
@@ -251,6 +286,7 @@ def test_an_operator_replay_reads_the_tag_type(
     )
 
     def build(mode: CacheMode) -> PipelineJob:
+        """A job with operator node ``sel`` in the given cache mode."""
         store = DeltaTableDatabase(tmp_path)
         with PipelineJob(name="o", store=store) as job:
             src = ArrowTableSource(table, tag_columns=["k"], source_id="src")
@@ -270,9 +306,11 @@ def test_an_operator_replay_reads_the_tag_type(
 
 @pytest.mark.parametrize("name", list(TAGS))
 def test_a_cached_source_reads_the_tag_type(name: str, tmp_path: pathlib.Path) -> None:
+    """A ``CachedSource`` served from its Delta cache reads the tag type."""
     table = _source_table(TAGS[name])
 
     def cached() -> CachedSource:
+        """A ``CachedSource`` of the table, cached in a new Delta store object."""
         return CachedSource(
             ArrowTableSource(table, tag_columns=["k"], source_id="src"),
             cache_database=DeltaTableDatabase(tmp_path),

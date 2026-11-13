@@ -149,14 +149,12 @@ def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
         InputValidationError: If two rows give one column different Arrow types,
             naming the column and both types.
     """
-    first_types = dict(zip(tables[0].schema.names, tables[0].schema.types))
-    for table in tables[1:]:
+    # The first type seen for each column, whichever row first has the column.
+    seen: dict[str, pa.DataType] = {}
+    for table in tables:
         for name, row_type in zip(table.schema.names, table.schema.types):
-            expected = first_types.get(name)
-            if (
-                expected is not None
-                and arrow_utils.shared_arrow_type(expected, row_type) is None
-            ):
+            expected = seen.setdefault(name, row_type)
+            if arrow_utils.shared_arrow_type(expected, row_type) is None:
                 message = f"Rows disagree on the Arrow type of column {name!r}: {expected} and {row_type}"
                 raise InputValidationError(message)
     return arrow_utils.concat_tables_by_name(tables)
