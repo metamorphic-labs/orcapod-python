@@ -74,3 +74,8 @@ list ascending after `group_by(all keys but timestamp).drop_tag_columns("timesta
 ## Progress notes
 
 (Successor: read this section first.)
+
+* 2026-11-12: tasks 1 to 5 done (commits 68f8fd10, 0483972f, 82000e17); #333 merged into
+  main, origin/main merged (conflicts in three files resolved to the branch's side: main's
+  copies equal 848d90b2). Full suite green. PR #336 opened, attached to ITL-996, worktree
+  linked. Next: CodeRabbit rounds (read review BODIES too), CI green, worker_done.
