@@ -1,0 +1,184 @@
+"""After a job run, the user is told which rows failed (ITL-997).
+
+With the default ``error_policy="continue"`` a row whose function raises is skipped and the
+run goes on. The user must still see, without configuring anything: the node, how many rows
+failed out of how many, and the first error's type and message, with a pointer to the full
+traceback. A clean run stays quiet.
+"""
+
+from __future__ import annotations
+
+import warnings
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from orcapod import PipelineJob, function_pod
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import RowFailuresWarning
+from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.sources import DictSource
+
+# --- The public names this feature adds, in one place ---------------------------------
+
+
+def run(job: PipelineJob, orchestrator: Any) -> Any:
+    """Run ``job``; return what the user gets back (the run summary)."""
+    return job.run(orchestrator=orchestrator)
+
+
+def node_counts(summary: Any, label: str) -> tuple[int, int, int]:
+    """``(computed, from store, failed)`` rows of node ``label`` in ``summary``."""
+    node = summary.nodes[label]
+    return node.computed, node.reused, node.failed
+
+
+def first_error(summary: Any, label: str) -> BaseException | None:
+    """The first error raised in node ``label`` during the run."""
+    return summary.nodes[label].first_error
+
+
+def last_run(job: PipelineJob) -> Any:
+    """The summary of the job's last completed run."""
+    return job.last_run
+
+
+# --------------------------------------------------------------------------------------
+
+ORCHESTRATORS: dict[str, Callable[[], Any]] = {
+    "sync": SyncPipelineOrchestrator,
+    "async": AsyncPipelineOrchestrator,
+}
+
+STORES: dict[str, Callable[[Path], Any]] = {
+    "in_memory": lambda _: InMemoryArrowDatabase(),
+    "delta": lambda path: DeltaTableDatabase(path),
+}
+
+
+@function_pod(output_keys="y")
+def even_only(x: int) -> int:
+    """Return ``x``; raise for an odd ``x``."""
+    if x % 2:
+        raise ValueError(f"odd x={x}")
+    return x
+
+
+@function_pod(output_keys="y")
+def always_fails(x: int) -> int:
+    """Raise for every row, as a function with a typo does."""
+    return x / undefined_name  # noqa: F821  # pyright: ignore[reportUndefinedVariable]  # the bug under test
+
+
+@function_pod(output_keys="y")
+def double(x: int) -> int:
+    """Return twice ``x``."""
+    return 2 * x
+
+
+def make_job(store: Any, pod: Any, label: str, n_rows: int = 4) -> PipelineJob:
+    """A source of ``n_rows`` rows (x = 0..n-1) feeding ``pod`` under ``label``."""
+    rows = [{"k": f"r{i}", "x": i} for i in range(n_rows)]
+    job = PipelineJob(name="summary_demo", store=store)
+    with job:
+        source = DictSource(data=rows, tag_columns=["k"], source_id="rows")
+        pod.pod(source, label=label)
+    return job
+
+
+@pytest.fixture(params=list(ORCHESTRATORS))
+def orchestrator(request: pytest.FixtureRequest) -> Any:
+    return ORCHESTRATORS[request.param]()
+
+
+@pytest.fixture(params=list(STORES))
+def store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
+    return STORES[request.param](tmp_path / "store")
+
+
+def test_some_rows_fail(store: Any, orchestrator: Any) -> None:
+    job = make_job(store, even_only, "evens")
+    with pytest.warns(RowFailuresWarning) as caught:
+        summary = run(job, orchestrator)
+
+    assert node_counts(summary, "evens") == (2, 0, 2)
+    error = first_error(summary, "evens")
+    assert isinstance(error, ValueError)
+    assert str(error).startswith("odd x=")
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert "2 of 4 rows failed in node 'evens'" in message
+    assert "ValueError: odd x=" in message
+    assert 'job.last_run.print_traceback("evens")' in message
+    assert last_run(job) is summary
+    # The rows that succeeded were computed and stored as before.
+    ys = sorted(job.nodes["evens"].as_table().column("y").to_pylist())
+    assert ys == [0, 2]
+
+
+def test_every_row_fails(store: Any, orchestrator: Any) -> None:
+    job = make_job(store, always_fails, "broken")
+    with pytest.warns(RowFailuresWarning, match="4 of 4 rows failed in node 'broken'"):
+        summary = run(job, orchestrator)
+
+    assert node_counts(summary, "broken") == (0, 0, 4)
+    assert isinstance(first_error(summary, "broken"), NameError)
+    assert summary.failed_rows == 4
+    assert not summary.ok
+    text = repr(summary)
+    assert "broken" in text
+    assert "NameError: name 'undefined_name' is not defined" in text
+    assert 'job.last_run.print_traceback("broken")' in text
+
+
+def test_clean_run_is_quiet(store: Any, orchestrator: Any) -> None:
+    job = make_job(store, double, "doubled")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        summary = run(job, orchestrator)
+
+    assert summary.ok
+    assert summary.failed_rows == 0
+    assert node_counts(summary, "doubled") == (4, 0, 0)
+    assert first_error(summary, "doubled") is None
+
+
+def test_rerun_counts_rows_from_the_store(store: Any, orchestrator: Any) -> None:
+    run(make_job(store, double, "doubled"), orchestrator)
+    summary = run(make_job(store, double, "doubled", n_rows=5), orchestrator)
+
+    assert node_counts(summary, "doubled") == (1, 4, 0)
+
+
+def test_fail_fast_still_raises(store: Any) -> None:
+    job = make_job(store, even_only, "evens")
+    with pytest.raises(ValueError, match="odd x="):
+        job.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))
+
+
+def test_print_traceback_shows_the_function_frame(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job = make_job(InMemoryArrowDatabase(), always_fails, "broken")
+    with pytest.warns(RowFailuresWarning):
+        run(job, SyncPipelineOrchestrator())
+
+    last_run(job).print_traceback("broken")
+
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+    assert "in always_fails" in err
+    assert "NameError: name 'undefined_name' is not defined" in err
+
+
+def test_notebook_representation_names_the_failing_node() -> None:
+    job = make_job(InMemoryArrowDatabase(), even_only, "evens")
+    with pytest.warns(RowFailuresWarning):
+        summary = run(job, SyncPipelineOrchestrator())
+
+    html = summary._repr_html_()  # the notebook display hook is what is under test
+    assert "evens" in html
+    assert "ValueError" in html
+    assert "odd x=" in html
