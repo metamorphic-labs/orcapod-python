@@ -8,6 +8,8 @@ both a tag key and a data key. A source's declared tags are referential by defau
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -20,7 +22,7 @@ from orcapod.errors import InputValidationError
 ROWS = [{"x": 1, "y": 0.5}, {"x": 2, "y": 0.75}]
 
 
-def _source(**kwargs: object) -> op.sources.DictSource:
+def _source(**kwargs: Any) -> op.sources.DictSource:
     return op.sources.DictSource(ROWS, tag_columns=["x"], source_id="s", **kwargs)
 
 

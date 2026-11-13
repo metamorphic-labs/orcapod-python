@@ -16,6 +16,7 @@ from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.referential_tags import (
     materialization_diagnostic_off,
+    not_supported_yet,
     stream_references,
 )
 from orcapod.core.streams.base import (
@@ -715,12 +716,12 @@ class _FunctionPodBase(TraceableBase):
         # Referential tags of the input fall through the pod (developer decision,
         # November 12, 2026, ITL-1023): their columns are kept for that, and the
         # pod is the fall-through variant of this one.
-        # A wrapper pod (a ``CachedFunctionPod`` used directly) keeps its plain
-        # behaviour: its ``process`` is its inner pod's.
+        # Only a plain ``FunctionPod`` has a fall-through variant: a wrapper pod (a
+        # ``CachedFunctionPod`` used directly) keeps its plain behaviour, its
+        # ``process`` being its inner pod's.
+        fall_through_pod = self if isinstance(self, FunctionPod) else None
         references = (
-            ()
-            if isinstance(self, WrappedFunctionPod)
-            else stream_references(input_stream)
+            stream_references(input_stream) if fall_through_pod is not None else ()
         )
         dropped = [
             name
@@ -749,8 +750,8 @@ class _FunctionPodBase(TraceableBase):
             # plain tags are not reported (ITL-1023).
             with materialization_diagnostic_off():
                 input_stream = SelectDataColumns(columns=kept)(input_stream)
-        if references:
-            return ReferenceFallThroughPod(self, references).process(
+        if fall_through_pod is not None and references:
+            return ReferenceFallThroughPod(fall_through_pod, references).process(
                 input_stream, label=label
             )
         return self.process(input_stream, label=label)
@@ -1598,9 +1599,7 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
         references: The referential tags of the pod's input that fall through.
     """
 
-    def __init__(
-        self, function_pod: _FunctionPodBase, references: Collection[str]
-    ) -> None:
+    def __init__(self, function_pod: FunctionPod, references: Collection[str]) -> None:
         super().__init__(function_pod)
         self._plain_pod = function_pod
         self._references = tuple(references)
@@ -1613,9 +1612,26 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
         return self._references
 
     @property
-    def plain_pod(self) -> _FunctionPodBase:
+    def plain_pod(self) -> FunctionPod:
         """The plain pod: its function, result identity and result store are these."""
         return self._plain_pod
+
+    def to_config(self) -> dict[str, Any]:
+        """Raise: a pipeline holding referential tags cannot be saved yet (ITL-1019).
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise not_supported_yet("Saving a fall-through function pod", "ITL-1019")
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "ReferenceFallThroughPod":
+        """Raise: a fall-through pod is never saved, so never loaded (ITL-1019).
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise not_supported_yet("Loading a fall-through function pod", "ITL-1019")
 
     def identity_structure(self) -> Any:
         return (self._plain_pod, ("fall_through_references", self._references))

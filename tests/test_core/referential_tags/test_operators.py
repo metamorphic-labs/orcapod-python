@@ -12,6 +12,8 @@ stream's public methods.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import pytest
 
@@ -41,15 +43,15 @@ from orcapod.core.referential_tags import (
 from orcapod.errors import InputValidationError
 
 
-def _ref(rows: list[dict[str, object]], tags: list[str], sid: str, **kw: object):
+def _ref(rows: Sequence[Mapping[str, Any]], tags: list[str], sid: str, **kw: Any):
     return op.sources.DictSource(rows, tag_columns=tags, source_id=sid, **kw)
 
 
-def _a(**kw: object):
+def _a(**kw: Any):
     return _ref([{"x": 1, "a": 0.5}, {"x": 2, "a": 0.6}], ["x"], "A", **kw)
 
 
-def _b(**kw: object):
+def _b(**kw: Any):
     return _ref([{"x": 1, "b": 10}, {"x": 3, "b": 30}], ["x"], "B", **kw)
 
 

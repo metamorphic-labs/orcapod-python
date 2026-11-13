@@ -13,6 +13,7 @@ tag is an error when the pipeline is built.
 from __future__ import annotations
 
 import warnings
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +30,7 @@ from orcapod.pipeline import PipelineJob
 ROWS = [{"t": 10, "amp": 0.5}, {"t": 20, "amp": 0.25}]
 
 
-def _source(**kwargs: object) -> op.sources.DictSource:
+def _source(**kwargs: Any) -> op.sources.DictSource:
     return op.sources.DictSource(ROWS, tag_columns=["t"], source_id="spikes", **kwargs)
 
 
@@ -65,7 +66,7 @@ def test_the_call_lets_references_fall_through() -> None:
     table = out.as_table(columns={"source": True})
     assert table.column_names.count("t") == 1
     # The column keeps its source info: it is the input row's own.
-    assert sorted(table.column("_source_t").to_pylist()) == [
+    assert sorted(str(t) for t in table.column("_source_t").to_pylist()) == [
         "spikes::row_0::t",
         "spikes::row_1::t",
     ]
@@ -205,7 +206,7 @@ def test_a_side_effect_function_gets_a_referenced_column_only_when_it_names_it()
     None
 ):
     """After a pod call the keys fall through; a sink written for the data still works."""
-    from orcapod.side_effects import side_effect_pod
+    from orcapod.side_effects import SideEffectPod, side_effect_pod
 
     seen: list[dict[str, object]] = []
 
@@ -223,8 +224,8 @@ def test_a_side_effect_function_gets_a_referenced_column_only_when_it_names_it()
 
     out = half.pod(_source())
     assert stream_references(out) == ("t",)
-    list(record(out).iter_data())
-    list(record_with_key(out).iter_data())
+    for sink in (record, record_with_key):
+        list(cast(SideEffectPod, sink)(out).iter_data())
     assert sorted(seen, key=lambda r: (len(r), r["half"])) == [
         {"half": 0.125},
         {"half": 0.25},

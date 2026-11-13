@@ -3419,8 +3419,12 @@ class FunctionJobNode(FunctionNodeBase):
                             raise
                         # The row's referenced columns fall through onto the stored
                         # result, as on the sync path (ITL-1023).
-                        output_data = with_fall_through(
-                            self._function_pod, input_data, output_data
+                        # Not None: the result channel carries only results.
+                        output_data = cast(
+                            DataProtocol,
+                            with_fall_through(
+                                self._function_pod, input_data, output_data
+                            ),
                         )
                         # Update in-memory cache so iter_data() sees the result.
                         clean_tag = output_tag.drop_meta_columns(

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,7 +29,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "saved_job_f51ce67c"
 
 
 @pytest.fixture
-def saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+def saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Copy the fixture into a working directory (its paths are relative) and read it."""
     shutil.copytree(FIXTURE, tmp_path / "job")
     monkeypatch.chdir(tmp_path / "job")
@@ -41,7 +42,7 @@ def test_format_versions() -> None:
     assert {"0.1.0", "0.2.0", "0.3.0"} == SUPPORTED_JOB_FORMAT_VERSIONS
 
 
-def test_a_v03_job_loads_with_unchanged_hashes(saved: dict) -> None:
+def test_a_v03_job_loads_with_unchanged_hashes(saved: dict[str, Any]) -> None:
     assert saved["orcapod_pipeline_job_version"] == "0.1.0"
     job = PipelineJob.load("job.json")
     nodes = saved["pipeline"]["nodes"]
@@ -61,7 +62,7 @@ def test_a_v03_job_loads_with_unchanged_hashes(saved: dict) -> None:
     assert sorted(records.column("older").to_pylist()) == [4, 6]
 
 
-def test_a_v03_source_config_rebuilds_the_v03_source(saved: dict) -> None:
+def test_a_v03_source_config_rebuilds_the_v03_source(saved: dict[str, Any]) -> None:
     config = saved["bindings"]["sources"]["subjects"]
     assert "tag_only_columns" not in config
     source = CSVSource.from_config(config)

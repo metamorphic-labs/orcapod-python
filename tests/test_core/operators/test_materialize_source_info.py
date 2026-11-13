@@ -148,7 +148,7 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def broadcasting(
         rows: Sequence[Row],
-    ) -> tuple[pa.Table, tuple[str, ...]]:
+    ) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
         """Stamp row 0's source info on every row, then build the table."""
         row_zero = rows[0][1].source_info()
         return original(
