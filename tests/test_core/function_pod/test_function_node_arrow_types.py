@@ -324,3 +324,19 @@ def test_a_column_first_seen_after_row_one_is_still_checked() -> None:
 
     with pytest.raises(InputValidationError, match="'k': int8 and int16"):
         _concat_row_tables(rows)
+
+
+def test_rows_in_two_layouts_of_one_type_concatenate() -> None:
+    """``string`` and ``large_string`` rows are one type: they make one large column."""
+    # About the private helper itself: a node's rows rarely differ only in layout.
+    from orcapod.core.nodes.function_node import _concat_row_tables
+
+    rows = [
+        pa.table({"k": pa.array(["a"], pa.string())}),
+        pa.table({"k": pa.array(["b"], pa.large_string())}),
+    ]
+
+    table = _concat_row_tables(rows)
+
+    assert table.schema.field("k").type == pa.large_string()
+    assert table.column("k").to_pylist() == ["a", "b"]

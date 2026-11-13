@@ -446,3 +446,42 @@ def test_unsigned_rows_append_to_a_signed_column_without_a_recorded_type(
     assert read is not None
     assert read.schema.field("c").type == pa.int32()
     assert read.sort_by("id").column("c").to_pylist() == [1, 2]
+
+
+def test_an_unsigned_value_beyond_an_unrecorded_signed_column_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Into a column with no recorded type, only values the stored type holds go.
+
+    Such a column may hold what a build before ITL-928 wrote for ``uint32``, Delta's
+    ``int32``. A value above its maximum would be written as a negative number, so the
+    append is refused and nothing is written.
+    """
+    from deltalake import write_deltalake
+
+    write_deltalake(
+        str(tmp_path / "t"),
+        pa.table(
+            {
+                "__record_id": pa.array([b"a"], pa.large_binary()),
+                "c": pa.array([1], pa.int32()),
+            }
+        ),
+    )
+    store = DeltaTableDatabase(tmp_path)
+    store.add_records(
+        ("t",),
+        pa.table(
+            {
+                "id": pa.array([b"b"], pa.large_binary()),
+                "c": pa.array([3_000_000_000], pa.uint32()),
+            }
+        ),
+        record_id_column="id",
+    )
+
+    with pytest.raises(InputValidationError, match="'c'"):
+        store.flush()
+    read = DeltaTableDatabase(tmp_path).get_all_records(("t",))
+    assert read is not None
+    assert read.column("c").to_pylist() == [1]

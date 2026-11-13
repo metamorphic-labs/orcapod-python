@@ -29,7 +29,7 @@ types; such a store must be rebuilt.
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
 from orcapod.utils import arrow_utils
@@ -202,4 +202,35 @@ def recorded_type(
     for key, value in (metadata or {}).items():
         if (key.encode() if isinstance(key, str) else key) == ARROW_TYPE_KEY:
             return _deserialize(value.encode() if isinstance(value, str) else value)
+    return None
+
+
+def first_column_out_of_stored_range(
+    table: pa.Table, names: "Collection[str]"
+) -> str | None:
+    """Return the first named column with a value its written form cannot hold.
+
+    An unsigned integer is written as the signed integer of the same width, bit for
+    bit; a column that records its type reads it back exactly. A column whose stored
+    type is not recorded (written before types were recorded) would read such a value
+    back as a negative number, so the caller refuses it.
+
+    Args:
+        table: The rows about to be written, with their own types.
+        names: The columns to check: those stored without a recorded type.
+
+    Returns:
+        The first such column's name, or ``None``.
+    """
+    for name in names:
+        index = table.schema.get_field_index(name)
+        if index < 0:
+            continue
+        arrow_type = table.schema.field(index).type
+        if _has_extension_type(arrow_type) or not _is_recorded(arrow_type):
+            continue
+        try:
+            table.column(index).cast(_stored_form(arrow_type), safe=True)
+        except pa.ArrowInvalid:
+            return name
     return None

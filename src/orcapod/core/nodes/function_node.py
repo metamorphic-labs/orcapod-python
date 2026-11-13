@@ -149,6 +149,9 @@ def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
         InputValidationError: If two rows give one column different Arrow types,
             naming the column and both types.
     """
+    # Large and non-large layouts of one type are one type: give every row the
+    # large layout, so they also concatenate.
+    tables = [arrow_utils.normalize_table_to_large_types(t) for t in tables]
     # The first type seen for each column, whichever row first has the column.
     seen: dict[str, pa.DataType] = {}
     for table in tables:

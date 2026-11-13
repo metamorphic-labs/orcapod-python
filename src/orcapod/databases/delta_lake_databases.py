@@ -24,6 +24,7 @@ from orcapod.errors import (
     TypeIdentityError,
 )
 from orcapod.databases.delta_arrow_types import (
+    first_column_out_of_stored_range,
     from_delta_layout,
     recorded_type,
     to_delta_layout,
@@ -1754,6 +1755,24 @@ class DeltaTableDatabase:
                         f"{incoming_type} (input type "
                         f"{original_table.schema.field(column).type}). "
                         "The stored rows are unchanged and nothing was written."
+                    )
+                overflowing = first_column_out_of_stored_range(
+                    original_table,
+                    [
+                        f.name
+                        for f in delta_table.schema().fields
+                        if recorded_type(f.metadata) is None
+                    ],
+                )
+                if overflowing is not None:
+                    raise InputValidationError(
+                        f"Cannot append to the stored table {table_uri!r}: column "
+                        f"{overflowing!r} is stored as a signed integer with no "
+                        "recorded Arrow type (a table written before ITL-928), and "
+                        "the new rows have "
+                        f"{original_table.schema.field(overflowing).type} values it "
+                        "cannot hold. The stored rows are unchanged and nothing was "
+                        "written; rebuild the store."
                     )
                 base = self._snapshot_for_commit(
                     record_key, delta_table, table_uri, abs_path_components
