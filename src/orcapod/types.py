@@ -526,7 +526,7 @@ class ColumnConfig:
                 "Expected ColumnConfig instance or dict."
             )
 
-        if column_config.all_info:
+        if column_config.all_info and column_config != cls.all():
             return cls.all()
         return column_config
 
