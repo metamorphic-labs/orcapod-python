@@ -69,7 +69,7 @@ its output (`.out`). Every example below comes from those outputs.
    emits such rows silently (`01 R2`).
 7. **One Required rule the code makes impossible as written** (spec §6.1 against
    `core/function_pod.py:747`): a pod's output data is only the function's outputs, so a
-   reference's target never survives a pod. This is decision D1, sent to the coordinator.
+   reference's target never survives a pod. Decided (D1): the tag becomes plain at the pod boundary.
 
 ---
 
@@ -124,7 +124,7 @@ The prototype (`02`) verified the rows marked †.
 | `MapTags`/`MapData` (`mappers.py:83`, `:104`, `:226`, `:254`) | a rename moves the column | **Change** (§5.4) |
 | `Index`/`Pick` (`index.py:365`, `pick.py:379`) | data replaced in place | **Reject** in-place on a referenced column (§5.5) |
 | `FunctionPod.output_schema` (`function_pod.py:733-747`) | output data = function outputs | **Change**: reject output names equal to a tag; D1 |
-| `FunctionNode` read (`core/nodes/function_node.py:2820-2835`, `:2891`) | tags = pipeline-table columns | OK under D1(a) |
+| `FunctionNode` read (`core/nodes/function_node.py:2820-2835`, `:2891`) | tags = pipeline-table columns | OK under D1 (tags are plain after a pod) |
 | `OperatorNode` read (`operator_node.py:1116`, `:1228`, `:1317`, `:1581`; loaded stub `:235-238`) | `tag_keys = self.keys()[0]` | **Change**: pass references (from `keys()` or descriptor) |
 | `CachedSource` (`cached_source.py:360-363`), `DerivedSource` plain (`derived_source.py:462`, `:490`, `:543`), `PollingSource` (`polling_source.py:288-301`, `:865`), `SpiralDBTableSource` (`spiraldb_table_source.py:623`) | tags vs rest | **Change** (§6) |
 | `SourceProxy.keys` (`source_proxy.py:177-185`); node descriptor (`pipeline/graph.py:178-199`) | — | OK: two name→type dicts; a name may be in both |
@@ -454,7 +454,7 @@ Functions that read the copy recompute once, because the column name is in the `
   materializes.
 - **Tags pass through** (`function_pod.py:739-747`). The output data is only the function's
   outputs (`:747`), so a reference's target never survives a pod, whether or not it was read.
-  Measured: `uses_x.pod(R)` outputs tags `(session, x)`, data `(z,)`. This is **D1**.
+  Measured: `uses_x.pod(R)` outputs tags `(session, x)`, data `(z,)`. Decided (D1): the tag becomes plain at the pod boundary; a fall-through / append convenience is a planned follow-up.
 - **An output name that collides with a tag (§6.2, Required).**
   - Today `output_schema` accepts it (`01 R5`:
     `(Schema({'x': int | None}), Schema({'x': float}))`), and reading fails with
@@ -497,7 +497,7 @@ The project has ITL-1009 to ITL-1023. Recommended order, with changes to the iss
 | 2c | **ITL-1016** | `Join` three cases, sync and async; field-level provenance per D5; §15.4 tests; `06 J1` pinned | M | 1 | 2a, 2b, 2d, 2e |
 | 2d | **ITL-1017** | `GroupBy` key scalar in data; `Batch` tests; §15.3 tests | S | 1 | others |
 | 2e | **ITL-1014** | tests only for the filters, `SemiJoin` and `DropNulls`; `Index`/`Pick` in-place rejection | S | 1 | others |
-| 3 | **ITL-1013** | pod output collision (shares code with ITL-940); D1; automatic join and select with references; §15.2 and §15.6 result-identity tests | M | 1, 2b; 2c for the automatic join | 4 |
+| 3 | **ITL-1013** | pod output collision (shares code with ITL-940); the D1 pod-boundary rule; automatic join and select with references; §15.2 and §15.6 result-identity tests | M | 1, 2b; 2c for the automatic join | 4 |
 | 4 | **ITL-1019** | nodes, stores and saved jobs pass references; descriptor intersection; reuse across retagging (§15.6) | S | 1 | 3 |
 | 5 | **ITL-1018** | `MergeJoin` (D4); rename forms (§5.4) | M | 1 | 6 |
 | 6 | **ITL-1020** | `tags_as_data` beside references (§6.3): docs and tests; no behaviour change | S | 2a | 5 |
@@ -535,7 +535,7 @@ depends on ITL-1015 (the automatic select). Add ITL-940 to the project as the fi
 ## 10. Decisions for the developer (most consequential first)
 
 D0 is stated first, as asked. It is the consequence of the developer's default, for
-confirmation. D1 is the first open decision.
+confirmation. D1 is decided and recorded here; D2 onward are open.
 
 **D0. The hash consequence of the default (measured, §3.3).** An unchanged v0.3 script gets:
 - new source content and pipeline hashes, system-tag names, function-node record ids, and
@@ -550,23 +550,30 @@ context version. To confirm:
 - (b) Also provide a one-off tool that re-keys v0.3 pipeline records to the new paths. The
   results are reused anyway, so this only saves re-establishing records.
 
-**D1. A reference after a function pod** (Required §6.1 is impossible as written, because a pod
-outputs only its function's outputs, `function_pod.py:747`). The coordinator has put it to the
-developer. The §6.1 example is conditional ("assuming the output stream retains the input data
-`x`"); in Orcapod it never does.
-- (a) **Recommended.** The pod's discarding of input data is the structural projection of
-  §6.5: the tag is materialized at the pod boundary, which the pod's output schema shows
-  (`binding_transitions`). No storage or result-identity change.
-  - **The diagnostic at a pod boundary.** With referential sources by default, *every* pod
-    would trigger it, so recommend **none** there. The same goes for the automatic select of
-    `pod(...)` (ITL-807), which also fires on every call. The `reference_materialization`
-    warning is for a select, drop or rename the user wrote. The materialization is still
-    recorded in the schema and the pipeline hash; §7.4 makes the diagnostic a matter of
-    configuration, never of result.
-- (b) Pass referenced input columns through to the pod's output data (the §6.1 example
-  literally). This changes the `FunctionPod` output contract and the pipeline hashes of pods
-  over references; `FunctionNode` rebuilds data `x` from the stored tag on read.
-- (c) Reject a pod over references until materialized.
+**D1. A reference after a function pod: DECIDED (developer, November 12, 2026).** Required
+§6.1 cannot hold as written, because a pod outputs only its function's outputs
+(`function_pod.py:747`); the §6.1 example is conditional ("assuming the output stream retains
+the input data `x`"), and in Orcapod it never does.
+
+The decision: at a pod boundary, a referential tag whose data column does not survive becomes
+a **plain tag** with the same value and type, visible in the pod's output schema
+(`binding_transitions`). A pod's output data stays the function's outputs. Storage and result
+identity do not change.
+
+The options considered and not taken:
+- passing referenced input columns through to the output data;
+- rejecting a pod over references.
+
+Two parts remain:
+- **The diagnostic at a pod boundary (the coordinator's call).** With referential sources by
+  default, *every* pod would trigger it, so the recommendation is **none** there. The same
+  goes for the automatic select of `pod(...)` (ITL-807), which fires on every call. The
+  `reference_materialization` warning is for a select, drop or rename the user wrote. The
+  transition is still recorded in the schema and the pipeline hash (§7.4: the diagnostic
+  never changes a result).
+- **Planned follow-up, out of scope now.** A separate project issue covers a "fall-through /
+  append" convenience: the pod result joined back to its input stream so the tags stay
+  referential. Not to be built in the slices above.
 
 **D2. `pod.process(...)` and `strict=True` with referenced keys (ITL-807).** Under the default,
 every key is an extra data column for a function that does not read it.
