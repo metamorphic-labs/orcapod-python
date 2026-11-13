@@ -297,6 +297,7 @@ def _reference_tensor_digest(
     import struct
 
     def lp(text: str) -> bytes:
+        """Return ``text`` as UTF-8 behind its length (unsigned 64-bit little-endian)."""
         raw = text.encode("utf-8")
         return struct.pack("<Q", len(raw)) + raw
 

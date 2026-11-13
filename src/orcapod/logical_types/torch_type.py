@@ -157,13 +157,6 @@ def _check_storable(value: Any) -> str:
     """
     if not isinstance(value, torch.Tensor):
         raise TypeError(f"expected a torch.Tensor, got {type(value).__name__}")
-    if type(value) not in _CLASS_NAMES:
-        raise _refuse(
-            f"class {type(value).__module__}.{type(value).__qualname__}",
-            "only torch.Tensor and torch.nn.Parameter can be read back by PyTorch's "
-            "restricted loader (convert with .as_subclass(torch.Tensor), or register "
-            "a logical type for the class)",
-        )
     if value.is_nested:
         raise _refuse(
             "nested (jagged) layout",
@@ -244,7 +237,9 @@ def stored_form(value: Any) -> Any:
 
     The stored form is on the CPU and has no autograd history; ``requires_grad``,
     the class (``torch.Tensor`` or ``torch.nn.Parameter``), dtype, shape and
-    elements are those of ``value``. When ``value`` covers its underlying storage
+    elements are those of ``value``. A tensor made under ``torch.inference_mode()``
+    that requires grad is cloned, because only an ordinary tensor can carry the
+    flag outside that mode. When ``value`` covers its underlying storage
     exactly, its strides and lazy conjugate and negative bits are kept. Otherwise
     the stored form is ``clone(memory_format=torch.preserve_format)``: only the
     elements of ``value``, with PyTorch's strides for that clone and with the lazy
@@ -262,10 +257,21 @@ def stored_form(value: Any) -> Any:
         UnsupportedValueError: For tensors that cannot be stored.
     """
     _check_storable(value)
+    if type(value) not in _CLASS_NAMES:
+        raise _refuse(
+            f"class {type(value).__module__}.{type(value).__qualname__}",
+            "only torch.Tensor and torch.nn.Parameter can be read back by PyTorch's "
+            "restricted loader (convert with .as_subclass(torch.Tensor), or register "
+            "a logical type for the class)",
+        )
     t = value.detach()
     if t.device.type != "cpu":
         t = t.to("cpu")
     if not _covers_storage(t):
+        t = t.clone(memory_format=torch.preserve_format)
+    if value.requires_grad and t.is_inference():
+        # A tensor made under torch.inference_mode() cannot be given requires_grad
+        # outside it; its clone is an ordinary tensor.
         t = t.clone(memory_format=torch.preserve_format)
     if isinstance(value, torch.nn.Parameter):
         return torch.nn.Parameter(t, requires_grad=value.requires_grad)
@@ -329,13 +335,23 @@ def tensor_digest(value: Any, ignore: frozenset[str] = frozenset()) -> bytes:
     Raises:
         ValueError: If ``ignore`` holds a name that is not in ``OPTIONS``.
         TypeError: If ``value`` is not a ``torch.Tensor``.
-        UnsupportedValueError: For tensors that cannot be stored.
+        UnsupportedValueError: For tensors that cannot be stored, and for a
+            subclass other than ``torch.nn.Parameter``: the hash includes the
+            class, so such a class needs a value handler of its own.
     """
     unknown = ignore - OPTIONS
     if unknown:
         raise ValueError(
             f"unknown torch tensor hash options {sorted(unknown)}; "
             f"the options are {sorted(OPTIONS)}"
+        )
+    if isinstance(value, torch.Tensor) and type(value) not in _CLASS_NAMES:
+        raise UnsupportedValueError(
+            f"a {type(value).__module__}.{type(value).__qualname__} cannot be hashed "
+            "as a torch tensor: the tensor value hash includes the class and is "
+            "defined for torch.Tensor and torch.nn.Parameter only. Register a value "
+            "handler for the class (a subclass with its own logical type needs its "
+            "own value handler too), or convert with .as_subclass(torch.Tensor)"
         )
     stored = stored_form(value)
     tag, shape, data = canonical_tensor(stored)
@@ -404,7 +420,11 @@ def tensor_from_bytes(data: bytes) -> Any:
             tensor.
     """
     try:
-        value = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+        # Without autograd: PyTorch rebuilds some dtypes (complex32, the float8
+        # family) in place, which a leaf that requires grad refuses. requires_grad
+        # is restored all the same.
+        with torch.no_grad():
+            value = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
     except Exception as exc:  # noqa: BLE001  # torch.load raises many unrelated types
         # An UnpicklingError's text advises an unrestricted load: it stays on the
         # cause only. Other errors say what is wrong (for example a dtype the

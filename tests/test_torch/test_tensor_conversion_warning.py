@@ -10,6 +10,7 @@ error.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from typing import Any
 
@@ -238,3 +239,39 @@ def test_a_returned_gpu_tensor_warns_naming_the_device() -> None:
     got = out[0]["y"]
     assert got.device.type == "cpu"
     assert torch.equal(got, torch.arange(3.0))
+
+
+def test_an_error_filter_set_after_a_reported_conversion_still_raises() -> None:
+    """Once reported as a warning, the same conversion raises under a later error filter."""
+    with_grad = make_with_grad()
+    with pytest.warns(ValueConversionWarning):
+        run(with_grad, source_of([torch.ones(2)]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ValueConversionWarning)
+        with pytest.raises(ValueConversionWarning, match="'with_grad' output 'y'"):
+            run(with_grad, source_of([torch.ones(2)]))
+    # Without the error filter the conversion is not reported a second time.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(with_grad, source_of([torch.ones(2)]))
+    assert conversion_warnings(caught) == []
+
+
+@dataclasses.dataclass
+class Fit:
+    """A user class with a tensor field."""
+
+    weights: torch.Tensor
+    steps: int
+
+
+def test_a_tensor_inside_a_user_class_field_warns() -> None:
+    """A tensor with autograd history in a dataclass field is reported."""
+
+    @function_pod(output_keys="fit")
+    def fit(x: torch.Tensor) -> Fit:
+        """Return a dataclass holding a tensor with a ``grad_fn``."""
+        return Fit(weights=x.clone().requires_grad_(True) * 2, steps=3)
+
+    with pytest.warns(ValueConversionWarning, match="'fit' output 'fit'.*autograd"):
+        run(fit, source_of([torch.ones(2)]))

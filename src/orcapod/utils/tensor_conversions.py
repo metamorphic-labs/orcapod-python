@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from orcapod.errors import ValueConversionWarning
+from orcapod.logical_types.user_class_identity import class_kind, stored_field_names
 from orcapod.utils.deferred_types import qualified_name
 
 _TENSOR_CLASS = "torch.Tensor"
@@ -40,8 +41,8 @@ def _is_tensor_type(cls: type) -> bool:
 def tensor_conversions(value: Any) -> tuple[str, ...]:
     """Describe what storing ``value`` converts in the torch tensors it holds.
 
-    Looks at ``value`` itself and, recursively, at the items of lists and tuples
-    and the values of dicts.
+    Looks at ``value`` itself and, recursively, at the items of lists and tuples,
+    the values of dicts and the stored fields of dataclass and pydantic instances.
 
     Args:
         value: Any value about to be stored.
@@ -72,11 +73,35 @@ def _collect(value: Any, found: dict[str, None]) -> None:
             found[f"on device '{device}'"] = None
         if value.grad_fn is not None:
             found[_HAS_HISTORY] = None
+    elif type(value).__module__ != "builtins" and class_kind(type(value)) is not None:
+        for name in stored_field_names(type(value)):
+            _collect(getattr(value, name), found)
 
 
 def describe(conversions: Iterable[str]) -> str:
     """Join conversions into one phrase (``"on device 'cuda:0' with autograd ..."``)."""
     return " ".join(conversions)
+
+
+def _error_filter_active(message: str) -> bool:
+    """Whether the active warning filters turn ``ValueConversionWarning`` into an error.
+
+    Reads ``warnings.filters`` as Python does: the first filter that matches the
+    category and the message decides. A filter restricted to a module is skipped,
+    because the module that the warning is attributed to is the caller's.
+
+    Args:
+        message: The warning text.
+
+    Returns:
+        True when that filter's action is ``"error"``.
+    """
+    for action, text, category, module, _lineno in warnings.filters:
+        if module is not None or not issubclass(ValueConversionWarning, category):
+            continue
+        if text is None or text.match(message):
+            return action == "error"
+    return False
 
 
 def warn_once(
@@ -88,7 +113,10 @@ def warn_once(
     """Issue ``ValueConversionWarning`` unless every conversion was already reported.
 
     The record is updated only after ``warnings.warn`` returns, so when the warning
-    is escalated to an error every conversion raises, on every row.
+    is escalated to an error every conversion raises, on every row. A conversion
+    that was already reported still raises once an error filter is in place. The
+    record is needed besides Python's own filters: the warning is reported once
+    per owner also under an ``always`` filter.
 
     Args:
         issued: The ``(scope, conversion)`` pairs already reported; updated in place.
@@ -97,7 +125,9 @@ def warn_once(
         conversions: The conversions of the value (``tensor_conversions``).
         message: The warning text.
     """
-    if all((scope, c) in issued for c in conversions):
+    if all((scope, c) in issued for c in conversions) and not _error_filter_active(
+        message
+    ):
         return
     warnings.warn(message, ValueConversionWarning, stacklevel=3)
     issued.update((scope, c) for c in conversions)

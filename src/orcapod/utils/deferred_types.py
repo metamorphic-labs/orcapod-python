@@ -57,22 +57,3 @@ def module_available(module_name: str) -> bool:
         return importlib.util.find_spec(module_name) is not None
     except (ImportError, ValueError):
         return False
-
-
-def match_deferred(cls: type, entries: dict[str, Any]) -> Any | None:
-    """Return the deferred entry for the first class in ``cls.__mro__`` named in ``entries``.
-
-    Args:
-        cls: The type being looked up.
-        entries: Deferred entries keyed by qualified class name.
-
-    Returns:
-        The matching entry, or ``None``.
-    """
-    if not entries:
-        return None
-    for base in getattr(cls, "__mro__", ()):
-        entry = entries.get(qualified_name(base))
-        if entry is not None:
-            return entry
-    return None

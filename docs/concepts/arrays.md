@@ -375,8 +375,10 @@ avoid it: return or pass `value.detach().cpu()`. A function warns once per outpu
 conversion, however many rows it processes; a source warns once per column, with the number
 of values converted. A CPU tensor without a `grad_fn` never warns, also when it has
 `requires_grad=True` or is an `nn.Parameter`: those are stored. To treat the conversion as an
-error, run with `-W error::orcapod.errors.ValueConversionWarning`; every conversion then
-raises, and in a pipeline that row fails.
+error, call `warnings.simplefilter("error", ValueConversionWarning)` in your program (import
+the class from `orcapod.errors`); every conversion then raises, and in a pipeline that row
+fails. Python's `-W` command-line option and `PYTHONWARNINGS` cannot name this class: they are
+read before installed packages can be imported, and Python ignores the filter.
 
 ```python
 import warnings
@@ -429,7 +431,7 @@ they are written, with an `UnsupportedValueError` that names the column and the 
 | on the `meta` device | it holds no data |
 | named dimensions (PyTorch versions that have them) | `.rename(None)` |
 | sub-byte and packed dtypes (`int1` to `int7`, `uint1` to `uint7`, `float4_e2m1fn_x2`, `bits*`), `bcomplex32` | convert to a supported dtype |
-| a subclass other than `torch.nn.Parameter` | `.as_subclass(torch.Tensor)`, or register a logical type for the class (PyTorch's restricted loader cannot read it back) |
+| a subclass other than `torch.nn.Parameter` | `.as_subclass(torch.Tensor)`, or register a logical type **and** a value handler for the class (PyTorch's restricted loader cannot read it back, and the tensor hash, which includes the class, is defined for `torch.Tensor` and `nn.Parameter` only) |
 
 A function pod that declares `-> torch.Tensor` must return a tensor. An `np.ndarray` or a
 Python number raises `OutputTypeError` that names the function and the output. Return

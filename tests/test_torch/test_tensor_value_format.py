@@ -325,3 +325,22 @@ def test_declared_subclass_with_its_own_logical_type_requires_that_subclass() ->
         list(plain.pod(source).iter_data())
     got = [d.as_dict()["y"] for _, d in labeled.pod(source).iter_data()]
     assert type(got[0]) is LabeledTensor
+
+
+def test_hashing_a_subclass_without_its_own_value_handler_says_what_is_missing() -> (
+    None
+):
+    """A tensor subclass is not hashed as a tensor: the refusal names the value handler.
+
+    The value hash includes the class, so only ``torch.Tensor`` and
+    ``nn.Parameter`` have one. A subclass registered with its own logical type
+    needs its own value handler as well.
+    """
+    value = torch.ones(2).as_subclass(LabeledTensor)
+    with pytest.raises(UnsupportedValueError) as info:
+        semantic_hash(value)
+    message = str(info.value)
+    assert "LabeledTensor" in message
+    assert "cannot be hashed" in message
+    assert "value handler" in message
+    assert "cannot be stored" not in message

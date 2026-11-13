@@ -106,3 +106,17 @@ class LogicalSlowThing(LogicalThing):
 
         time.sleep(0.05)
         super().__init__()
+
+
+SUB_EXTENSION_NAME = "orcapod_test.deferred_sub_thing"
+
+
+class LogicalSubThing(LogicalThing):
+    """Logical type for ``SubThing``, deferred while ``Thing``'s is registered."""
+
+    _arrow_ext_class = make_arrow_extension_type(SUB_EXTENSION_NAME, pa.large_string())
+    _polars_ext_class = make_polars_extension_type(
+        SUB_EXTENSION_NAME, pa.large_string()
+    )
+    logical_type_name: str = SUB_EXTENSION_NAME
+    python_type: type = SubThing

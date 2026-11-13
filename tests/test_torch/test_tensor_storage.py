@@ -335,3 +335,37 @@ def test_garbage_bytes_are_refused(cell: bytes) -> None:
     """Bytes that are not a ``torch.save`` archive raise naming the column."""
     with pytest.raises(RuntimeError, match="column 'x'.*restricted loader"):
         read_cell(cell)
+
+
+# ---------------------------------------------------------------------------
+# Gradient-bearing tensors of every floating dtype, and inference tensors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["float32", "bfloat16", "complex32", "complex64", "float8_e4m3fn"]
+)
+def test_a_tensor_that_requires_grad_reads_back_for_every_dtype(name: str) -> None:
+    """``requires_grad`` reads back for the dtypes PyTorch rebuilds in place, too."""
+    dtype = getattr(torch, name)
+    value = torch.zeros(3, dtype=dtype).requires_grad_(True)
+    got = read_back(value)
+    assert got.dtype == dtype
+    assert got.requires_grad and got.is_leaf
+    assert value_bytes(got) == value_bytes(value)
+    row = next(iter(_source(value).iter_data()))[1]
+    stored = ArrowTableSource(
+        _source(value).as_table().select(["k", "x"]), tag_columns=["k"]
+    )
+    assert next(iter(stored.iter_data()))[1].content_hash() == row.content_hash()
+
+
+def test_an_inference_tensor_that_requires_grad_is_stored() -> None:
+    """A tensor made under ``torch.inference_mode()`` is stored without touching it."""
+    with torch.inference_mode():
+        value = torch.arange(3.0, requires_grad=True)
+    assert value.is_inference() and value.requires_grad
+    got = read_back(value)
+    assert got.requires_grad and not got.is_inference()
+    assert torch.equal(got.detach(), torch.arange(3.0))
+    assert value.is_inference() and value.requires_grad

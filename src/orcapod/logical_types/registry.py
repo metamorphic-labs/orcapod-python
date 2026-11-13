@@ -18,7 +18,7 @@ from orcapod.logical_types.protocols import (
     LogicalTypeProtocol,
     LogicalTypeFactoryProtocol,
 )
-from orcapod.utils.deferred_types import load_object, match_deferred, module_available
+from orcapod.utils.deferred_types import load_object, module_available, qualified_name
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -458,8 +458,9 @@ class LogicalTypeRegistry:
     def get_by_python_type(self, python_type: type) -> LogicalTypeProtocol | None:
         """Return the logical type for *python_type*, or ``None``.
 
-        The most specific registered type wins: *python_type* itself, then each
-        class of its MRO in order, so a subclass registered with its own logical
+        The most specific type wins: *python_type* itself, then each class of its
+        MRO in order, and for each class a registered type before a deferred one
+        (which is loaded), so a subclass registered with its own logical
         type is used for itself and its subclasses whatever the registration
         order (an ``np.ndarray`` subclass without one is an array). A logical type
         with ``exact_python_type_only`` (a dataclass or pydantic model) is never
@@ -467,18 +468,28 @@ class LogicalTypeRegistry:
         subclasses only through ``__subclasshook__``/ABC registration fall back
         to an ``issubclass`` scan, where the first registered match wins.
         """
-        result = self._by_python_type.get(python_type)
-        if result is not None:
-            return result
-        for base in getattr(python_type, "__mro__", ())[1:]:
+        if not isinstance(python_type, type):
+            # An annotation that is not a class (a union, a generic alias) is
+            # found only as itself.
+            result = self._by_python_type.get(python_type)
+            if result is not None:
+                return result
+        for base in getattr(python_type, "__mro__", ()):
             result = self._by_python_type.get(base)
             # A user class matches exactly: its subclass is a different class with
             # its own fields and identity, never stored as the base (ITL-881).
-            if result is not None and not getattr(
-                result, "exact_python_type_only", False
+            if result is not None and (
+                base is python_type
+                or not getattr(result, "exact_python_type_only", False)
             ):
                 return result
-        for registered_type, registered_lt in self._by_python_type.items():
+            # A deferred type named for this class comes before any type of a base
+            # class, registered or deferred.
+            entry = self._deferred_by_python_name.get(qualified_name(base))
+            if entry is not None:
+                return self._load_deferred(entry)
+        # A snapshot: a deferred type loaded by another thread adds an entry.
+        for registered_type, registered_lt in tuple(self._by_python_type.items()):
             if getattr(registered_lt, "exact_python_type_only", False):
                 continue
             try:
@@ -486,11 +497,8 @@ class LogicalTypeRegistry:
                     return registered_lt
             except TypeError:
                 continue
-        entry = match_deferred(python_type, self._deferred_by_python_name)
-        if entry is not None:
-            return self._load_deferred(entry)
-        # Another thread may have loaded the deferred type between the lookups above
-        # and the deferred miss: it registers the type before it removes the entry.
+        # Another thread may have loaded a deferred type between the two reads of the
+        # walk above: it registers the type before it removes the deferred entry.
         for base in getattr(python_type, "__mro__", ()):
             loaded = self._by_python_type.get(base)
             if loaded is not None and not getattr(

@@ -146,3 +146,22 @@ def test_deferred_handler_of_a_subclass_wins_over_a_registered_base_handler() ->
     assert registry.get_handler_for_type(fx.Thing) is base_handler
     assert isinstance(registry.get_handler_for_type(fx.SubThing), fx.ThingHandler)
     assert isinstance(registry.get_handler(fx.SubThing("a")), fx.ThingHandler)
+
+
+def test_deferred_type_of_a_subclass_wins_over_a_registered_base_type() -> None:
+    """The logical type of the most-derived class wins, registered or deferred."""
+    registry = LogicalTypeRegistry(
+        logical_types=[fx.LogicalThing()],
+        deferred_logical_types=[
+            {
+                "python_type": f"{_MOD}.SubThing",
+                "extension_name": fx.SUB_EXTENSION_NAME,
+                "logical_type": f"{_MOD}.LogicalSubThing",
+                "requires": "polars",
+            }
+        ],
+    )
+    assert type(registry.get_by_python_type(fx.Thing)) is fx.LogicalThing
+    assert type(registry.get_by_python_type(fx.SubThing)) is fx.LogicalSubThing
+    # The answer is the same once the deferred type is loaded.
+    assert type(registry.get_by_python_type(fx.SubThing)) is fx.LogicalSubThing
