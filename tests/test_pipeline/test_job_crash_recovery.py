@@ -57,7 +57,7 @@ JOB_SCRIPT = textwrap.dedent(
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.sources import DictSource
 
-    store_path, calls_path, every, orchestrator, crash = sys.argv[1:6]
+    store_path, calls_path, every, orchestrator, crash, late = sys.argv[1:7]
     crash_kind, _, crash_arg = crash.partition(":")
     earlier_batches_committed = threading.Event()
     if crash_kind == "fn":
@@ -82,6 +82,8 @@ JOB_SCRIPT = textwrap.dedent(
             wait_for_earlier_batches()
             if x == int(crash_arg):
                 os._exit(3)
+        if crash_kind == "fn" and late != "none" and x == int(late):
+            wait_for_earlier_batches()
         return 2 * x
 
 
@@ -125,7 +127,12 @@ JOB_SCRIPT = textwrap.dedent(
 
 
 def run_job(
-    tmp_path: Path, store: Path, every: int, orchestrator: str, crash: str = "none"
+    tmp_path: Path,
+    store: Path,
+    every: int,
+    orchestrator: str,
+    crash: str = "none",
+    late: int | None = None,
 ) -> tuple[int, list[int]]:
     """Run the job in a subprocess; return its exit code and the rows it computed."""
     script = tmp_path / "job.py"
@@ -134,7 +141,7 @@ def run_job(
     calls.write_text("")
     done = subprocess.run(
         [sys.executable, str(script), str(store), str(calls), str(every)]
-        + [orchestrator, crash],
+        + [orchestrator, crash, "none" if late is None else str(late)],
         capture_output=True,
         text=True,
         timeout=600,
@@ -205,13 +212,20 @@ def uninterrupted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, list[An
     return stable(tmp / "store")
 
 
-@pytest.mark.parametrize("orchestrator", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("orchestrator", "late"),
+    [("sync", None), ("async", None), ("async", 199)],
+    ids=["sync", "async", "async-late-row"],
+)
 def test_crash_mid_batch_keeps_committed_batches(
-    tmp_path: Path, orchestrator: str, uninterrupted: dict[str, list[Any]]
+    tmp_path: Path,
+    orchestrator: str,
+    late: int | None,
+    uninterrupted: dict[str, list[Any]],
 ) -> None:
     """Killed at row 234 with 100 rows per commit: 200 rows stored, 50 recomputed."""
     store = tmp_path / "store"
-    code, _ = run_job(tmp_path, store, 100, orchestrator, crash="fn:234")
+    code, _ = run_job(tmp_path, store, 100, orchestrator, crash="fn:234", late=late)
     assert code == 3
     results, records = row_count(store, "result"), row_count(store, "pipeline")
     if orchestrator == "sync":
