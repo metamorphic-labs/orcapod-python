@@ -553,3 +553,54 @@ def test_an_unlabelled_source_is_shown_by_its_source_id() -> None:
     )
     assert source.head().header() == "DictSource[spike_event] — all 1 row"
     assert source.label == "DictSource"
+
+
+class _BatchedDynamicSource(_FakeDynamicSource):
+    """Serves three batches of two rows, one per poll that reports new data."""
+
+    async def poll(self, cursor: Cursor[int] | None = None) -> bool:
+        self.polls += 1
+        return (cursor.value if cursor is not None else 0) < 3
+
+    async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], Any]:
+        self.fetches += 1
+        index = cursor.value if cursor is not None else 0
+        return Cursor(value=index + 1), {
+            "id": pa.array([2 * index, 2 * index + 1], type=pa.int64()),
+            "val": pa.array([10 * index, 10 * index + 1], type=pa.int64()),
+        }
+
+
+def test_polling_source_head_over_several_batches_is_the_prefix() -> None:
+    """With several polled batches, head is the prefix of all rows, with the full count."""
+    fake = _BatchedDynamicSource()
+    source = PollingSource(fake, tag_columns="id")
+    for _ in range(3):
+        _ = list(source.iter_data())
+    seen = (fake.polls, fake.fetches)
+    head = source.head(3)
+    assert (fake.polls, fake.fetches) == seen
+    assert head.total_rows == 6
+    assert head.table.equals(source.as_table().slice(0, 3))
+
+
+def test_derived_source_rowless_head_has_its_own_columns() -> None:
+    """Before its origin polls, a derived source shows its columns, tag copies included."""
+    fake = _FakeDynamicSource(declared=Schema({"id": int, "val": int}))
+    origin = PollingSource(fake, tag_columns="id")
+    derived = DerivedSource(origin, tags_as_data={"id": "id_value"})
+    head = derived.head()
+    assert (fake.polls, fake.fetches) == (0, 0)
+    assert head.status is HeadStatus.NOT_COMPUTED
+    assert "id_value" in head.table.column_names
+    assert "nothing polled yet" in head.header()
+
+
+def test_cached_source_keeps_the_wrapped_explanation_when_it_has_no_rows() -> None:
+    """A cached source over an unpolled source says why there are no rows."""
+    source = CachedSource(
+        PollingSource(_FakeDynamicSource(), tag_columns="id"),
+        cache_database=InMemoryArrowDatabase(),
+    )
+    head = source.head()
+    assert "nothing polled yet" in head.header()

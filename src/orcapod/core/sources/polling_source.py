@@ -464,8 +464,21 @@ class PollingSource(RootSource, Generic[T]):
         """
         check_head_size(n)
         config = head_column_config(columns, all_info)
-        if self._batches:
-            return self._get_combined_stream().head(n, columns=config).for_stream(self)
+        batches = list(self._batches)  # snapshot: the list is append-only
+        if batches:
+            # Combine only the batches that hold the first n rows; count the rest.
+            sizes = [batch.head(0).total_rows or 0 for batch in batches]
+            needed, covered = 0, 0
+            while needed < len(batches) and (covered < n or needed == 0):
+                covered += sizes[needed]
+                needed += 1
+            prefix = batches[0]
+            for batch in batches[1:needed]:
+                prefix = self._combine(prefix, batch)
+            return dataclasses.replace(
+                prefix.head(n, columns=config).for_stream(self),
+                total_rows=sum(sizes),
+            )
         if self._tag_schema is not None and self._data_schema is not None:
             # The declared schema answers without a fetch, system tags included; the
             # column groups that need data (source info, context, ...) are left out.

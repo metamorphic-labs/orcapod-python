@@ -476,7 +476,19 @@ class DerivedSource(RootSource):
         if isinstance(self._origin, RootSource):
             origin_head = self._origin.head(n)
             if origin_head.status is not HeadStatus.ROWS:
-                return origin_head.for_stream(self)
+                if origin_head.table.num_columns == 0:
+                    # The origin's columns are not known without polling it.
+                    return origin_head.for_stream(self)
+                # No rows: this source's own columns (tag copies included), with the
+                # origin's status and explanation.
+                empty = self._stream_over(origin_head.table.slice(0, 0))
+                return StreamHead.without_rows(
+                    self,
+                    origin_head.status,
+                    empty.as_table(columns=config),
+                    tag_columns=empty.keys(columns=config)[0],
+                    note=origin_head.note,
+                )
             stream = self._stream_over(origin_head.table)
             return dataclasses.replace(
                 stream.head(n, columns=config).for_stream(self),
@@ -495,10 +507,10 @@ class DerivedSource(RootSource):
                 tag_columns=stream.keys(columns=config)[0],
                 note="nothing stored: its origin has not run",
             )
-        return (
-            self._stream_over(records)
-            .head(n, columns=config)
-            .for_stream(self, origin="stored")
+        # Only the shown rows are enriched; the total is the whole stored count.
+        head = self._stream_over(records.slice(0, n)).head(n, columns=config)
+        return dataclasses.replace(
+            head.for_stream(self, origin="stored"), total_rows=records.num_rows
         )
 
     def _stream_over(self, table: "pa.Table") -> ArrowTableStream:

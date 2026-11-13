@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -431,9 +433,14 @@ class CachedSource(RootSource):
             return head_of(
                 self._cached_stream.head(n, columns=columns, all_info=all_info), self
             )
-        return head_of(
-            self._source.head(n, columns=columns, all_info=all_info),
-            self,
+        wrapped = head_of(
+            self._source.head(n, columns=columns, all_info=all_info), self
+        )
+        if wrapped.table.num_rows == 0:
+            # Keep the wrapped source's own explanation of why there are no rows.
+            return wrapped
+        return dataclasses.replace(
+            wrapped,
             note="rows of the wrapped source; the cache is read and written on first use",
         )
 

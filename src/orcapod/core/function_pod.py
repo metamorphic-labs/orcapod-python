@@ -1237,7 +1237,16 @@ class FunctionPodStream(StreamBase):
     def _table_from_pairs(
         self, pairs: list[tuple[TagProtocol, DataProtocol]]
     ) -> pa.Table:
-        """Return the output rows ``pairs`` as one table with every column group."""
+        """Return the output rows ``pairs`` as one table with every column group.
+
+        With no rows the table has the declared columns (tags, system tags and data),
+        typed from the declared schema, as the rest of a head without rows is.
+        """
+        if not pairs:
+            tag_schema, data_schema = self.output_schema(all_info=True)
+            return arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, self.data_context.type_converter
+            )
         all_tags = []
         all_data = []
         tag_schema, data_schema = None, None
