@@ -2,7 +2,7 @@
 
 Run after ``spiral login``, from the repository root:
 
-    uv run python superpowers/specs/itl-926-live/scan_cost_probe.py edi-sample-v1-855632 \
+    uv run python superpowers/specs/itl-926-live/scan_cost_probe.py <project id> \
         unit unit_location > scan_cost.txt
 
 For each table it prints the number of column groups and fragments (from the manifests, no

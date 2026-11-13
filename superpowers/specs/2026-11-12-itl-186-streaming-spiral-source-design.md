@@ -21,7 +21,7 @@ part of the first PR.
 
 ## What was measured
 
-Live, read-only, pyspiral 0.16.33, project `edi-tutorial-v1-841226` (largest tables:
+Live, read-only, pyspiral 0.16.33, project `<project id>` (largest tables:
 `lfp_timeseries` 86,331 rows, `spike_event` 63,349 rows). Scripts: `.untracked/itl186_probe_*.py`.
 
 | Question | Result on `spike_event` (63,349 rows, 8 columns) |
@@ -41,7 +41,7 @@ Live, read-only, pyspiral 0.16.33, project `edi-tutorial-v1-841226` (largest tab
 | Table id on drop and recreate, same name | new id (`table_8tEglDEJMS5P`) |
 
 The last two rows used one throwaway table, `scratch.itl186_idprobe`, created and dropped in
-`edi-tutorial-v1-841226`. Nothing else was written.
+`<project id>`. Nothing else was written.
 
 Offline, on spike_event-shaped synthetic data (script in the session scratchpad):
 
@@ -82,14 +82,14 @@ same-named table of the same schema share identity. Not changed here; listed for
 Options for where the table id lives:
 
 * **A (recommended): inside the source id.** Default
-  `edi-tutorial-v1-841226/default.spike_event@table_W7C01nkLTmEJ`. Readable and unique
+  `<project id>/default.spike_event@table_W7C01nkLTmEJ`. Readable and unique
   everywhere the source id goes (source-info tokens, record ids, `SourceRegistry`).
   `identity_structure` keeps its form `(class, schema, source_id)`. Cost: a renamed table gets
   a new source id, so its pipeline records are entered again (function results are still
   reused, because they are found by row content).
 * **B: source id is `<project>/<table id>` only**, the readable name shown in `label`, `repr`
   and the saved file. A renamed table keeps its whole identity. Cost: every provenance token
-  in stored data reads `edi-tutorial-v1-841226/table_W7C01nkLTmEJ::...`, which no longer says
+  in stored data reads `<project id>/table_W7C01nkLTmEJ::...`, which no longer says
   `spike_event`.
 * **C: readable source id, table id only in `identity_structure`.** Rejected: the content hash
   is unique, but record ids and tokens of a recreated table collide with the old table's.
@@ -189,7 +189,7 @@ The size guard, options:
   PostgreSQL and SQLite sources are untouched.
 
   ```python
-  SpiralDBTableSource("edi-tutorial-v1-841226", "spike_event",
+  SpiralDBTableSource("<project id>", "spike_event",
                       where={"unit_id": 106}, limit=None, max_rows=100_000)
   ```
   Saved form (`source_type` stays `spiraldb_table`):
@@ -269,7 +269,7 @@ counter:
   nothing, appended row is the only one computed; save and load.
 
 Opt-in live tests (skipped unless `ORCAPOD_SPIRAL_LIVE_PROJECT` is set), read-only on
-`edi-tutorial-v1-841226`: construction of `spike_event` makes no scan and takes under 5 s;
+`<project id>`: construction of `spike_event` makes no scan and takes under 5 s;
 `limit=1000`; one `where`; an async job over `limit=2000`. One write test confined to a
 `scratch.` table of that project: append rows between two runs.
 

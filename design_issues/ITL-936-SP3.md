@@ -5,7 +5,7 @@
 **Severity:** high
 **Issue:** ITL-936
 
-Live, pyspiral 0.16.33, scratch table in `edi-tutorial-v1-841226` (November 11, 2026): a
+Live, pyspiral 0.16.33, scratch table in `<project id>` (November 11, 2026): a
 table written with `k`, `v`, struct `g` and its field `g.x`, and list `l` with its items all
 declared non-null reports `Schema({k=i64?, l=fixed_size_list(f32)[2]?, v=i32?, w=i32?,
 g={x=i32?, y=i32?}?})`: every top-level column and struct field nullable; only list items keep

@@ -4,7 +4,7 @@ Calls only read methods (``list_tables``, ``Table.schema``, ``Table.key_schema``
 ``Table.get_metadata`` and a ``limit``-ed scan), so it is safe on the workshop's EDI sample
 projects. Run after ``spiral login``, from the repository root:
 
-    uv run python superpowers/specs/itl-926-live/inspect_tables.py edi-sample-v1-855632 \
+    uv run python superpowers/specs/itl-926-live/inspect_tables.py <project id> \
         [--tables session,experiment] [--limit 3] > inspect.txt
 
 For every table it prints the key schema, the Arrow schema ``Table.schema().to_arrow()``

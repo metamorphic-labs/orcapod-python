@@ -6,7 +6,7 @@ Run from the repository root after ``spiral login``, with the ``spiraldb`` extra
 **Write mode** (scratch tables only; repeat the project id to allow writes):
 
     uv run python superpowers/specs/itl-936-live/live_nullability.py write \
-        --project edi-tutorial-v1-841226 --allow-writes edi-tutorial-v1-841226 \
+        --project <project id> --allow-writes <project id> \
         [--dataset meta] [--report write.json]   # dataset defaults to meta
 
 Creates tables ``<dataset>.itl936_<run>_*`` and drops every one of them at the end, even on
@@ -35,7 +35,7 @@ may be left behind). Checks:
 **Read mode** (read-only; for the tutorial tables once they carry the record):
 
     uv run python superpowers/specs/itl-936-live/live_nullability.py read \
-        --project edi-tutorial-v1-841226 --tables session,experiment \
+        --project <project id> --tables session,experiment \
         --float-column <a required float column of the second table> [--report read.json]
 
 For each table: the record, the source's ``output_schema``, and that every recorded

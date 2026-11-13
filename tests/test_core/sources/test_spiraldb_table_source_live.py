@@ -1,15 +1,15 @@
 """SpiralDBTableSource against a live SpiralDB project (ITL-186). Opt-in.
 
 Skipped unless ``ORCAPOD_SPIRAL_LIVE_PROJECT`` names a project the saved ``spiral login``
-can read, with a ``default.spike_event`` table of more than 1,000 rows (the workshop
-project is ``edi-tutorial-v1-841226``, 63,349 rows); the tests that need that many skip
+can read, with a ``default.spike_event`` table of more than 1,000 rows (the tutorial
+project has 63,349 rows); the tests that need that many skip
 when the table records fewer. Every test is read-only except
 ``test_rows_appended_between_runs_are_the_only_ones_computed`` and
 ``test_a_source_reads_the_version_it_was_built_at``, which also need
 ``ORCAPOD_SPIRAL_LIVE_WRITE=1`` and write only to a table each creates and drops in the
 project's ``scratch`` dataset.
 
-    ORCAPOD_SPIRAL_LIVE_PROJECT=edi-tutorial-v1-841226 \\
+    ORCAPOD_SPIRAL_LIVE_PROJECT=<project id> \\
         uv run --extra spiraldb pytest tests/test_core/sources/test_spiraldb_table_source_live.py
 """
 

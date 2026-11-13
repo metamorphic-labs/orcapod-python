@@ -37,7 +37,7 @@ main; then merge main and push once.
 Fake: 0 scans at construction; source_id, record ids, `_tag_source_id` values and
 `_source_amplitude` tokens equal with and without; content/pipeline hash differ; tag datagram
 hash equal, data datagram hash differs; system-tag column names differ (schema hash).
-Live `edi-tutorial-v1-841226` `spike_event`, `limit=20000`: 32 units, every `spike_time_us`
+Live `<project id>` `spike_event`, `limit=20000`: 32 units, every `spike_time_us`
 list ascending after `group_by(all keys but timestamp).drop_tag_columns("timestamp")`.
 
 ## Files
@@ -64,7 +64,7 @@ list ascending after `group_by(all keys but timestamp).drop_tag_columns("timesta
   identity, config, docstrings. Run the new file and all `test_spiraldb_table_source*` → PASS.
   Commit.
 - [ ] 3. Opt-in live test (read-only, `limit=20000`): workshop case ascending per unit. Run with
-  `ORCAPOD_SPIRAL_LIVE_PROJECT=edi-tutorial-v1-841226 uv run --extra spiraldb pytest ... -k tags_as_data`.
+  `ORCAPOD_SPIRAL_LIVE_PROJECT=<project id> uv run --extra spiraldb pytest ... -k tags_as_data`.
 - [ ] 4. Docs section in `docs/concepts/sources.md` (convenience methods, caveat (e)); run
   `uv run pytest tests/test_docs`. Changelog fragment + `--check`; design-issue file + `--check`.
 - [ ] 5. ruff check/format, basedpyright (exit code), full `uv run pytest tests/`. Commit.

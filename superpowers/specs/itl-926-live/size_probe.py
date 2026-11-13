@@ -2,7 +2,7 @@
 
 Run after ``spiral login``, from the repository root:
 
-    uv run python superpowers/specs/itl-926-live/size_probe.py edi-sample-v1-855632 \
+    uv run python superpowers/specs/itl-926-live/size_probe.py <project id> \
         [--max-rows 200000] > sizes.txt
 
 Step 1 reads each table's row count and size from Spiral's manifests (no data is scanned).

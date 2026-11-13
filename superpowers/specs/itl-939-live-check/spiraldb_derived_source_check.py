@@ -11,7 +11,7 @@ file.
 Needs ``pyspiral`` (the ``spiraldb`` extra) and ``spiral login`` credentials. Usage::
 
     uv run --extra spiraldb python superpowers/specs/itl-939-live-check/spiraldb_derived_source_check.py \\
-        edi-tutorial-v1-841226 [dataset]
+        <project id> [dataset]
 """
 
 from __future__ import annotations

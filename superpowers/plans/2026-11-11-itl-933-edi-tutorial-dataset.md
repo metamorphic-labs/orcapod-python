@@ -9,7 +9,7 @@ verify; I fix what the live run shows and open the PR (body: `Part of ITL-933`).
 ## Goal
 
 A reproducible tool under `workshop/edi_tutorial_dataset/` that copies a small subset of the
-V1 EDI sample (`edi-sample-v1-855632`, dataset `default`) into a new Spiral project. The copy
+V1 EDI sample (`<project id>`, dataset `default`) into a new Spiral project. The copy
 declares columns non-nullable where the EDI schema specification (v0.3.0) requires them. It is
 tested against a fake of the pyspiral client and documented in a short README.
 
@@ -128,7 +128,7 @@ selection row by row (streamed, both sides key-sorted).
 ## Phase 2 notes (November 11, 2026)
 
 * Developer decisions applied (decisions.json): see the README. Project created by the
-  coordinator: `edi-tutorial-v1-841226` (marker table only so far).
+  coordinator: `<project id>` (marker table only so far).
 * Probe on the server: SpiralDB stores every top-level column nullable (keys included) and
   every struct field nullable; only list items keep a non-null flag. pyspiral's
   `Schema.from_arrow` already makes top-level columns nullable (my local check suggested
@@ -141,4 +141,4 @@ selection row by row (streamed, both sides key-sorted).
   record later without touching data.
 * `copy --tables X --replace` refreshes a table after a source fix (the EDI owner is adding
   the `White Matter` row to `atlas_label`).
-* `copy --dry-run` ran live against `edi-tutorial-v1-841226`: exit 0, 204,947 rows.
+* `copy --dry-run` ran live against `<project id>`: exit 0, 204,947 rows.

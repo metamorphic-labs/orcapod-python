@@ -69,7 +69,7 @@ To find the tables of a project and their key columns:
 ```python
 from orcapod.databases import SpiralDBConnector
 
-with SpiralDBConnector("edi-sample-v1-855632") as spiral:
+with SpiralDBConnector("my-project-123456") as spiral:
     print(spiral.get_table_names())
     print(spiral.get_pk_columns("session"))
 ```
@@ -80,8 +80,8 @@ The table's key columns become the tag columns, and every other column is a data
 ```python
 from orcapod.sources import SpiralDBTableSource
 
-sessions = SpiralDBTableSource("edi-sample-v1-855632", "session")
-experiments = SpiralDBTableSource("edi-sample-v1-855632", "experiment")
+sessions = SpiralDBTableSource("my-project-123456", "session")
+experiments = SpiralDBTableSource("my-project-123456", "experiment")
 print(sessions.output_schema())
 sessions.as_df()  # also as_polars_df(), as_pandas_df(), as_lazy_frame(), as_table()
 ```
@@ -102,7 +102,7 @@ Things to know about Spiral tables:
   storage type).
 - **Source identity.** A Spiral source is identified by where its table is, never by its
   rows. The default `source_id` is `<project id>/<dataset>.<table>@<Spiral table id>`, for
-  example `edi-tutorial-v1-841226/default.session@table_Jo7J0lpkLcOM`. The table id is
+  example `my-project-123456/default.session@table_Jo7J0lpkLcOM`. The table id is
   SpiralDB's own, so tables with the same name in different projects stay apart, and a table
   that is dropped and created again under the same name is a different source: nothing
   recorded for the old table is reused. A renamed table also gets a new `source_id`.
@@ -128,9 +128,9 @@ restrictions before any row is transferred:
 
 <!-- docs-test: skip -->
 ```python
-first = SpiralDBTableSource("edi-tutorial-v1-841226", "spike_event", limit=1000)
+first = SpiralDBTableSource("my-project-123456", "spike_event", limit=1000)
 unit = SpiralDBTableSource(
-    "edi-tutorial-v1-841226", "spike_event", where={"unit_id": 106}
+    "my-project-123456", "spike_event", where={"unit_id": 106}
 )
 print(first.row_count_estimate)  # rows in the whole table, without reading any
 ```
@@ -184,7 +184,7 @@ type, never null:
 <!-- docs-test: skip -->
 ```python
 spikes = SpiralDBTableSource(
-    "edi-tutorial-v1-841226", "spike_event", tags_as_data={"timestamp": "spike_time_us"}
+    "my-project-123456", "spike_event", tags_as_data={"timestamp": "spike_time_us"}
 )
 unit_key = [
     "spike_extraction_hash", "subject_id", "session_start_datetime",
