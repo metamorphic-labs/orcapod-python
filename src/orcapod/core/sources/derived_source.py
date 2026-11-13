@@ -4,6 +4,7 @@ import dataclasses
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from orcapod.core.referential_tags import not_supported_yet, stream_references
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -232,6 +233,8 @@ class DerivedSource(RootSource):
         record_id_column: str | None = None,
         **kwargs: Any,
     ) -> None:
+        if stream_references(origin):
+            raise not_supported_yet("DerivedSource", "ITL-1019")
         if tags_as_data is None:
             if isinstance(origin, RootSource):
                 raise TypeError(

@@ -92,16 +92,24 @@ def _source(
     tags: Sequence[str],
     source_id: str,
     nullable: Sequence[str] = (),
+    referential: bool = False,
 ) -> ArrowTableSource:
-    """Build a source; every column not listed in ``nullable`` is non-nullable."""
+    """Build a source; every column not listed in ``nullable`` is non-nullable.
+
+    Its tags are plain (``tag_only_columns``), as in v0.3, unless ``referential``
+    (ITL-1023): then every tag is also a data column of the same name.
+    """
     table = pa.table(list(columns.values()), names=list(columns))
     schema = pa.schema([f.with_nullable(f.name in nullable) for f in table.schema])
     return ArrowTableSource(
-        table.cast(schema), tag_columns=list(tags), source_id=source_id
+        table.cast(schema),
+        tag_columns=list(tags),
+        source_id=source_id,
+        tag_only_columns=not referential,
     )
 
 
-def source_a() -> ArrowTableSource:
+def source_a(referential: bool = False) -> ArrowTableSource:
     """Tags ``k: int16`` (non-nullable) and ``ta: int8``; many narrow data columns."""
     return _source(
         {
@@ -123,10 +131,11 @@ def source_a() -> ArrowTableSource:
         tags=("k", "ta"),
         source_id="a",
         nullable=("nul", "s"),
+        referential=referential,
     )
 
 
-def source_b(nested: bool = True) -> ArrowTableSource:
+def source_b(nested: bool = True, referential: bool = False) -> ArrowTableSource:
     """Tag ``k: int16``; scalar data columns, plus list columns when ``nested``."""
     columns: dict[str, Column] = {
         "k": pa.array([1, 2, 3], pa.int16()),
@@ -138,10 +147,16 @@ def source_b(nested: bool = True) -> ArrowTableSource:
     if nested:
         columns["ll"] = pa.array([[0.5], [1.5, 2.5], []], pa.large_list(pa.float32()))
         columns["lnn"] = pa.array([[1], [2], [3]], NON_NULL_ITEMS)
-    return _source(columns, tags=("k",), source_id="b", nullable=("f32",))
+    return _source(
+        columns,
+        tags=("k",),
+        source_id="b",
+        nullable=("f32",),
+        referential=referential,
+    )
 
 
-def source_c() -> ArrowTableSource:
+def source_c(referential: bool = False) -> ArrowTableSource:
     """Tags ``k: int16`` and nullable ``tc: uint8``; a third input for the staggered path."""
     return _source(
         {
@@ -153,6 +168,7 @@ def source_c() -> ArrowTableSource:
         tags=("k", "tc"),
         source_id="c",
         nullable=("tc", "c8"),
+        referential=referential,
     )
 
 
@@ -209,10 +225,15 @@ def _row_key(tag: TagProtocol) -> str:
 
 
 def _row_schema(tag: TagProtocol, data: DataProtocol) -> pa.Schema:
-    """The row's Arrow schema: user and system tags, then data."""
-    return arrow_utils.join_arrow_schemas(
-        tag.arrow_schema(columns={"system_tags": True}), data.arrow_schema()
-    )
+    """The row's Arrow schema: user and system tags, then data.
+
+    A referential tag (ITL-1023) is one column, named among the tags and the data:
+    it is listed once, among the tags.
+    """
+    tag_schema = tag.arrow_schema(columns={"system_tags": True})
+    data_schema = data.arrow_schema()
+    data_schema = pa.schema(f for f in data_schema if f.name not in tag_schema.names)
+    return arrow_utils.join_arrow_schemas(tag_schema, data_schema)
 
 
 def _paired(expected: list[Row], actual: list[Row]) -> list[tuple[Row, Row]]:
@@ -322,6 +343,71 @@ CASES = [
     ),
     # No names: every tag and data column, among them struct, logical and list ones.
     Case("drop_nulls_all", lambda: DropNulls(), lambda: (source_a(),)),
+    # Referential tags (ITL-1023): every tag of these sources is also data.
+    Case(
+        "ref_join_2",
+        Join,
+        lambda: (source_a(referential=True), source_b(referential=True)),
+    ),
+    Case(
+        "ref_join_2_plain_left",
+        Join,
+        lambda: (source_a(), source_b(referential=True)),
+    ),
+    Case(
+        "ref_join_2_plain_right",
+        Join,
+        lambda: (source_a(referential=True), source_b()),
+    ),
+    Case(
+        "ref_join_3",
+        Join,
+        lambda: (
+            source_a(referential=True),
+            source_b(referential=True),
+            source_c(referential=True),
+        ),
+    ),
+    Case(
+        "ref_semijoin",
+        SemiJoin,
+        lambda: (source_a(referential=True), source_b(referential=True)),
+    ),
+    Case(
+        "ref_group_by_key",
+        lambda: GroupBy(["ta"]),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_polars_filter",
+        lambda: PolarsFilter(constraints={"ta": 5}),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_select_data_columns",
+        lambda: SelectDataColumns(["i8", "ta"]),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_drop_tag_columns",
+        lambda: DropTagColumns(["ta"]),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_drop_data_columns",
+        lambda: DropDataColumns(["k"]),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_index",
+        lambda: Index("l8", 0, out="first"),
+        lambda: (source_a(referential=True),),
+    ),
+    Case(
+        "ref_drop_nulls_all",
+        lambda: DropNulls(),
+        lambda: (source_a(referential=True),),
+    ),
 ]
 CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 
@@ -652,6 +738,8 @@ _DROPPED_SOURCE_INFO = (
 PROVENANCE_XFAIL = {
     "select_data_columns": _DROPPED_SOURCE_INFO,
     "drop_data_columns": _DROPPED_SOURCE_INFO,
+    "ref_select_data_columns": _DROPPED_SOURCE_INFO,
+    "ref_drop_data_columns": _DROPPED_SOURCE_INFO,
 }
 PROVENANCE_CASES = [
     pytest.param(
@@ -741,8 +829,9 @@ def _with_meta(source: StreamProtocol, meta: dict[str, Column]) -> ArrowTableStr
     table = source.as_table(columns={"source": True, "system_tags": True})
     for name, column in meta.items():
         table = table.append_column(name, column)
-    tags = source.keys()[0]
-    return ArrowTableStream(table, tag_columns=tags)
+    tags, data = source.keys()
+    references = [name for name in tags if name in data]
+    return ArrowTableStream(table, tag_columns=tags, reference_tags=references)
 
 
 def _meta_columns(prefix: str, n_rows: int) -> dict[str, Column]:
@@ -796,6 +885,10 @@ META_XFAIL: dict[str, str] = {
     "select_data_columns": _SYNC_DROPS_META,
     "index": _SYNC_DROPS_META,
     "pick": _SYNC_DROPS_META,
+    "ref_group_by_key": _MATERIALIZE_DROPS_META,
+    "ref_polars_filter": _MATERIALIZE_DROPS_META,
+    "ref_select_data_columns": _SYNC_DROPS_META,
+    "ref_index": _SYNC_DROPS_META,
 }
 META_CASES = [
     pytest.param(
@@ -879,7 +972,10 @@ def _narrow_source(column: str, source_id: str) -> ArrowTableSource:
     table = pa.table(
         {"k": pa.array([1, 2], pa.int16()), column: pa.array([3, 4], pa.int8())}
     )
-    return ArrowTableSource(table, tag_columns=["k"], source_id=source_id)
+    # Its hashes are pinned below: plain tags, as in v0.3 (ITL-1023).
+    return ArrowTableSource(
+        table, tag_columns=["k"], source_id=source_id, tag_only_columns=True
+    )
 
 
 # Recorded from the sync path on main (ab544982) before the ITL-837 fix. The sync

@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import typing
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
+from orcapod.core.referential_tags import stream_references
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -47,6 +48,9 @@ class Index(UnaryOperator):
             instead of skipping.  Excluded from ``identity_structure``.
             See ITL-439.
     """
+
+    # Referential tags (ITL-1023): handled.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
         self,
@@ -133,8 +137,20 @@ class Index(UnaryOperator):
             NotImplementedError: If the column holds an extension type whose
                 ``index_element`` is not yet implemented.
         """
-        _, data_schema = stream.output_schema()
+        tag_schema, data_schema = stream.output_schema()
         data_columns = list(data_schema.keys())
+        # Referential tags (ITL-1023): the output is a new data column, never a tag's
+        # value replaced in place or a name shared with a tag (section 4).
+        if self.out is None and self.column in tag_schema:
+            raise InputValidationError(
+                f"Index: column {self.column!r} is a referential tag; replacing it "
+                "in place would change the tag's value. Give out=<new name>."
+            )
+        if self.out is not None and self.out in tag_schema:
+            raise InputValidationError(
+                f"Index: out column {self.out!r} is the name of a tag; a data "
+                "column cannot share a name with a tag it does not back."
+            )
 
         if self.column not in data_columns:
             raise InputValidationError(
@@ -366,6 +382,7 @@ class Index(UnaryOperator):
                 output_schema.empty_table(),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
+                reference_tags=stream_references(stream),
             )
 
         return self._materialize_to_stream(out_rows)

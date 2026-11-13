@@ -1,8 +1,9 @@
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.referential_tags import not_supported_yet, stream_references
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
@@ -29,6 +30,38 @@ class MapData(UnaryOperator):
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         super().__init__(**kwargs)
+
+    # Referential tags (ITL-1023): handled when the renaming leaves them alone.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def check_reference_support(self, *streams: StreamProtocol) -> None:
+        """Raise if the renaming would touch a referential tag (not supported yet).
+
+        Renaming a referential tag or its data column, or dropping it as unmapped,
+        is a rule the specification leaves open (section 10.1, ITL-1018). A renaming
+        that leaves every referential tag alone is supported.
+
+        Args:
+            *streams: The input stream.
+
+        Raises:
+            NotImplementedError: If a referential tag is renamed, renamed to, or
+                dropped as unmapped.
+        """
+        for stream in streams:
+            references = stream_references(stream)
+            touched = [
+                name
+                for name in references
+                if name in self.name_map
+                or name in self.name_map.values()
+                or self.drop_unmapped
+            ]
+            if touched:
+                raise not_supported_yet(
+                    f"{type(self).__name__} renaming referential tag(s) {touched}",
+                    "ITL-1018",
+                )
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this MapData operator to a config dict.
@@ -80,7 +113,11 @@ class MapData(UnaryOperator):
         if self.drop_unmapped and unmapped_columns:
             renamed_table = renamed_table.drop_columns(list(unmapped_columns))
 
-        return ArrowTableStream(renamed_table, tag_columns=tag_columns)
+        return ArrowTableStream(
+            renamed_table,
+            tag_columns=tag_columns,
+            reference_tags=stream_references(stream),
+        )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
         # verify that renamed value does NOT collide with other columns
@@ -182,6 +219,38 @@ class MapTags(UnaryOperator):
         self.drop_unmapped = drop_unmapped
         super().__init__(**kwargs)
 
+    # Referential tags (ITL-1023): handled when the renaming leaves them alone.
+    REFERENTIAL_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def check_reference_support(self, *streams: StreamProtocol) -> None:
+        """Raise if the renaming would touch a referential tag (not supported yet).
+
+        Renaming a referential tag or its data column, or dropping it as unmapped,
+        is a rule the specification leaves open (section 10.1, ITL-1018). A renaming
+        that leaves every referential tag alone is supported.
+
+        Args:
+            *streams: The input stream.
+
+        Raises:
+            NotImplementedError: If a referential tag is renamed, renamed to, or
+                dropped as unmapped.
+        """
+        for stream in streams:
+            references = stream_references(stream)
+            touched = [
+                name
+                for name in references
+                if name in self.name_map
+                or name in self.name_map.values()
+                or self.drop_unmapped
+            ]
+            if touched:
+                raise not_supported_yet(
+                    f"{type(self).__name__} renaming referential tag(s) {touched}",
+                    "ITL-1018",
+                )
+
     def to_config(self) -> dict[str, Any]:
         """Serialize this MapTags operator to a config dict.
 
@@ -226,6 +295,7 @@ class MapTags(UnaryOperator):
         return ArrowTableStream(
             renamed_table,
             tag_columns=new_tag_columns,
+            reference_tags=stream_references(stream),
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:

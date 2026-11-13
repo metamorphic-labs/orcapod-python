@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
+from orcapod.core.referential_tags import stream_references
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -360,7 +361,10 @@ class CachedSource(RootSource):
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.
         return ArrowTableStream(
-            all_records, tag_columns=tag_keys, data_context=self.data_context
+            all_records,
+            tag_columns=tag_keys,
+            data_context=self.data_context,
+            reference_tags=stream_references(self._source),
         )
 
     def _empty_table(self) -> pa.Table:

@@ -146,8 +146,15 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         from orcapod.core.nodes import OperatorNode, FunctionNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
 
+        from orcapod.core.referential_tags import (
+            not_supported_yet,
+            stream_references,
+        )
+
         nodes: dict[str, Any] = {}
         for content_hash_str, node in self._persistent_node_map.items():
+            if stream_references(node):
+                raise not_supported_yet("Saving a pipeline", "ITL-1019")
             tag_schema, data_schema = node.output_schema()
             try:
                 type_converter = node.data_context.type_converter

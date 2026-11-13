@@ -257,9 +257,6 @@ class Join(NonZeroInputOperator):
                 0, COMMON_JOIN_KEY, pa.array([0] * len(next_table), type=pa.int8())
             )
 
-            # Polars sets every field nullable; capture the schema before the join.
-            next_ref_schema = next_table.schema
-
             common_tag_keys = tag_keys.intersection(next_tag_keys)
             next_references = set(stream_references(next_stream))
             merged = self._merged_references(
@@ -276,6 +273,8 @@ class Join(NonZeroInputOperator):
                 next_table = next_table.rename_columns(
                     [right_source.get(c, c) for c in next_table.column_names]
                 )
+            # Polars sets every field nullable; capture the schema before the join.
+            next_ref_schema = next_table.schema
             # A shared tag key must have one Arrow type in both inputs (up to
             # layout); otherwise Polars would join and keep one side's type.
             for key in sorted(common_tag_keys):
@@ -912,14 +911,48 @@ class Join(NonZeroInputOperator):
             )
         source_info = {**left.source_info(), **right.source_info()}
         if merged:
-            right_table = right_table.drop_columns(sorted(merged))
             left_info, right_info = left.source_info(), right.source_info()
             for name in merged:
                 source_info[name] = merged_source_tokens(
                     left_info.get(name), right_info.get(name)
                 )
+        # Column order as ``static_process`` lays it out: the referential columns
+        # first, in the merged tag order, then each side's other data columns.
+        tag_order = [*left_tag.keys()]
+        tag_order += [name for name in right_tag.keys() if name not in tag_order]
+        referential = [
+            name
+            for name in tag_order
+            if name in left_table.column_names or name in right_table.column_names
+        ]
+        if not referential:
+            return Data(
+                arrow_utils.hstack_tables(left_table, right_table),
+                source_info=source_info,
+                data_context=left.data_context_key,
+            )
+        left_rest = left_table.drop_columns(
+            [c for c in referential if c in left_table.column_names]
+        )
+        right_rest = right_table.drop_columns(
+            [c for c in referential if c in right_table.column_names]
+        )
+        references = pa.table(
+            {
+                name: (
+                    left_table if name in left_table.column_names else right_table
+                ).column(name)
+                for name in referential
+            },
+            schema=pa.schema(
+                (
+                    left_table if name in left_table.column_names else right_table
+                ).schema.field(name)
+                for name in referential
+            ),
+        )
         return Data(
-            arrow_utils.hstack_tables(left_table, right_table),
+            arrow_utils.hstack_tables(references, left_rest, right_rest),
             source_info=source_info,
             data_context=left.data_context_key,
         )
