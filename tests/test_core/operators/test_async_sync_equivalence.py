@@ -1149,3 +1149,94 @@ def test_async_join_matches_a_shared_list_tag_across_three_inputs() -> None:
         expected = sync_rows(Join(), *operands)
         assert expected
         assert_equivalent(expected, async_rows(Join(), *operands))
+
+
+# ── null join keys (ITL-1050) ───────────────────────────────────────────────
+
+NULL_KEY_CASES = [
+    pytest.param(["a", None, "b"], [None, "a", "b"], id="null_on_both_sides"),
+    pytest.param(["a", None, "b"], ["b", "a", "c"], id="null_on_one_side"),
+    pytest.param([None, None, None], [None, None], id="all_null_key_column"),
+    pytest.param([None, None], ["b", "a"], id="all_null_on_one_side"),
+]
+NULL_KEYS = pytest.mark.parametrize(("left_keys", "right_keys"), NULL_KEY_CASES)
+
+
+def _null_key_source(
+    keys: list[str | None], id_name: str, data_name: str, source_id: str
+) -> ArrowTableSource:
+    """Tags (``<id_name>``, nullable ``g``) out of tag order, one data column."""
+    ids = list(range(len(keys), 0, -1))
+    return _tag_source(
+        pa.large_string(), keys, id_name, data_name, source_id
+    ).__class__(
+        pa.Table.from_arrays(
+            [
+                pa.array(ids, pa.int64()),
+                pa.array(keys, pa.large_string()),
+                pa.array(ids, pa.int16()),
+            ],
+            names=[id_name, "g", data_name],
+        ),
+        tag_columns=[id_name, "g"],
+        source_id=source_id,
+    )
+
+
+@NULL_KEYS
+@pytest.mark.parametrize("operator", [Join, SemiJoin], ids=["join", "semijoin"])
+def test_async_null_key_matches_nothing_as_the_sync_path_does(
+    operator: Callable[[], StaticOutputOperatorPod],
+    left_keys: list[str | None],
+    right_keys: list[str | None],
+) -> None:
+    """A null in a shared tag matches nothing, on both paths, in both operand orders."""
+    left = _null_key_source(left_keys, "zl", "a", "left")
+    right = _null_key_source(right_keys, "zr", "b", "right")
+    for operands in ((left, right), (right, left)):
+        expected = sync_rows(operator(), *operands)
+        assert_equivalent(expected, async_rows(operator(), *operands))
+
+
+@NULL_KEYS
+def test_async_null_key_in_a_three_input_join_matches_nothing(
+    left_keys: list[str | None], right_keys: list[str | None]
+) -> None:
+    """The staggered N-ary join also never matches a null key."""
+    left = _null_key_source(left_keys, "zl", "a", "left")
+    right = _null_key_source(right_keys, "zr", "b", "right")
+    third = _null_key_source([None, "a", "b"], "zt", "c", "third")
+    for operands in ((left, right, third), (third, right, left)):
+        assert_equivalent(sync_rows(Join(), *operands), async_rows(Join(), *operands))
+
+
+def _merge_null_key_source(
+    keys: list[str | None], source_id: str, offset: int
+) -> ArrowTableSource:
+    """A ``MergeJoin`` input: nullable tag ``g``, colliding data column ``x``."""
+    ids = list(range(len(keys), 0, -1))
+    return ArrowTableSource(
+        pa.Table.from_arrays(
+            [
+                pa.array(ids, pa.int64()),
+                pa.array(keys, pa.large_string()),
+                pa.array([i + offset for i in ids], pa.int16()),
+            ],
+            names=[f"z{source_id}", "g", "x"],
+        ),
+        tag_columns=[f"z{source_id}", "g"],
+        source_id=source_id,
+    )
+
+
+@NULL_KEYS
+def test_async_merge_join_with_null_tags_equals_sync(
+    left_keys: list[str | None], right_keys: list[str | None]
+) -> None:
+    """``MergeJoin`` agrees on both paths when a tag is null."""
+    left = _merge_null_key_source(left_keys, "l", 0)
+    right = _merge_null_key_source(right_keys, "r", 10)
+    for operands in ((left, right), (right, left)):
+        assert_equivalent(
+            sync_rows(MergeJoin(), *operands), async_rows(MergeJoin(), *operands)
+        )

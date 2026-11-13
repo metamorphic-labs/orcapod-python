@@ -59,7 +59,12 @@ N-ary inner join on shared tag columns. Requires that input streams have non-ove
 data columns (raises `InputValidationError` on collision). Join is **commutative** -- the
 order of input streams does not affect the result. Join drops its inputs' meta
 (`__`-prefixed) columns, such as a cached function pod's `__computed`, so they never collide
-and never appear in its output.
+and never appear in its output. Rows match on equality of every shared tag column, whatever
+its type (lists and structs compare element by element). A row with a null in any shared tag
+column matches nothing, a null list or struct included, and rows with null on both sides do
+not match each other; a null *inside* a list or struct is an ordinary element that equals
+another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
+rows.
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
 `MergeJoin`) list tag and data columns by first appearance across their inputs in canonical
