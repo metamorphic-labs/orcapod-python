@@ -19,7 +19,12 @@ break, so a case passes the day its defect is fixed only by dropping its mark:
 
 * ITL-1042: after an async run an operator node's ``head()`` says "not computed" and
   shows no rows (``joined.head`` and ``grouped.head`` after an async run or rerun).
+* ITL-1042 also: a function node is stale right after an async run whose input comes
+  through an operator node, so its rows are reloaded from the store and (ITL-1060) get
+  fresh datagram ids (the stored-records check, async runs).
 * ITL-1043: a loaded job cannot read a cached operator node (``joined`` in a loaded job).
+* ITL-1060: a row read back from the store gets a fresh datagram id, not the stored
+  ``__data_id`` its own token names (the stored-records check of every readback).
 * ITL-1050: the async Join matches null tag keys, the sync one drops them, so the async
   ``joined`` table of the null scenario has rows the sync one has not.
 """
@@ -68,6 +73,17 @@ RunKey = tuple[str, str, str, str, str]
 ITL_1042 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1042: after an async run an operator node's head() shows no rows",
+)
+# After an async run the function node is stale (its input comes through the automatic
+# select, an operator node), so its next read reloads from the store, and a reloaded row
+# gets a fresh datagram id (ITL-1060): its __data_id check fails. Fixed with ITL-1042.
+ITL_1042_STALE = pytest.mark.xfail(
+    strict=True,
+    reason="ITL-1042: a function node is stale right after an async run and reloads",
+)
+ITL_1060 = pytest.mark.xfail(
+    strict=True,
+    reason="ITL-1060: a row read back from the store gets a fresh datagram id",
 )
 ITL_1050 = pytest.mark.xfail(
     strict=True,
@@ -233,7 +249,9 @@ def test_the_gate_realised_the_order(
     assert runs(key).completed == expected
 
 
-@pytest.mark.parametrize("key", run_keys())
+@pytest.mark.parametrize(
+    "key", run_keys(lambda key: [ITL_1042_STALE] if is_async(key) else [])
+)
 def test_stored_records_are_aligned(key: RunKey, runs: Callable[[RunKey], Run]) -> None:
     """The function node's stored records: hashes, tokens and ids belong to their rows."""
     from .records import assert_records_aligned
@@ -436,3 +454,28 @@ def test_a_node_read_in_any_pattern_stays_aligned(
             function_tokens=tokens,
         )
     check_every_config(run.job, view, run.sources.oracle, tokens)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param(
+            (scenario, input_order, store_kind, write, how),
+            id=f"{scenario}-{input_order}-{store_kind}-{write}-{how}",
+            marks=[ITL_1060],
+        )
+        for scenario in SCENARIOS
+        for input_order in INPUT_ORDERS
+        for store_kind in STORES
+        for write in WRITES
+        for how in READS
+    ],
+)
+def test_stored_records_read_back_are_aligned(
+    key: ReadKey, readbacks: Callable[[ReadKey], tuple[Run, PipelineJob]]
+) -> None:
+    """The stored records, read by a job that read its rows back from the store."""
+    from .records import assert_records_aligned
+
+    run, job = readbacks(key)
+    assert_records_aligned(job, run.sources)

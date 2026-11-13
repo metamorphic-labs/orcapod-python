@@ -26,7 +26,12 @@ from orcapod.core.executors import LocalPythonFunctionExecutor
 from orcapod.core.operators import Batch, GroupBy, Index
 from orcapod.system_constants import constants
 
-from .checker import Layout, assert_rows_aligned
+from .checker import (
+    Layout,
+    assert_requested_columns,
+    assert_rows_aligned,
+    rows_table,
+)
 from .fixtures import (
     COLUMN_CONFIGS,
     INPUT_ORDERS,
@@ -37,7 +42,7 @@ from .fixtures import (
     make_sources,
 )
 from .gate import GATE, ORDERS, new_gated_scale_pod
-from .jobs import derive_y
+from .jobs import derive_y, stream_function_tokens
 
 ITL_1045 = pytest.mark.xfail(
     strict=True,
@@ -103,27 +108,27 @@ def stream_params() -> list[Any]:
     return params
 
 
-def read(stream: Any, pattern: str) -> list[Any]:
-    """Read ``stream`` in ``pattern``; return the rows of the last full read."""
+def read(stream: Any, pattern: str) -> list[list[Any]]:
+    """Read ``stream`` in ``pattern``; return the rows of every full read it made."""
     if pattern == "partial_then_full":
         partial = iter(stream.iter_data())
         next(partial)
         next(partial)
         del partial
-        return list(stream.iter_data())
+        return [list(stream.iter_data())]
     if pattern == "repeated":
-        list(stream.iter_data())
+        first = list(stream.iter_data())
         stream.as_table(all_info=True)
-        return list(stream.iter_data())
+        return [first, list(stream.iter_data())]
     if pattern == "interleaved":
         first = iter(stream.iter_data())
         second = iter(stream.iter_data())
-        seen = [next(first)]
-        list(itertools.islice(second, 3))
-        seen += list(first)
-        list(second)
-        return seen
-    return list(stream.iter_data())
+        seen_first = [next(first)]
+        seen_second = list(itertools.islice(second, 3))
+        seen_first += list(first)
+        seen_second += list(second)
+        return [seen_first, seen_second]
+    return [list(stream.iter_data())]
 
 
 @pytest.mark.parametrize(("kind", "order", "pattern"), stream_params())
@@ -140,17 +145,27 @@ def test_every_row_of_a_stream_is_aligned(
     else:
         GATE.arm(ORDERS[order](keys))
     try:
-        rows = read(stream, pattern)
+        reads = read(stream, pattern)
         realised = list(GATE.completed)
     finally:
         GATE.disarm()
 
-    assert len(rows) == len(keys), "a read lost or repeated rows"
-    assert stream.as_table().num_rows == len(keys)
     if order is not None:
         assert realised == ORDERS[order](keys), "the gate did not realise the order"
-
     tags, data = stream.keys()
+    # A function output's tokens, matched by record id with the run's own rows.
+    tokens = stream_function_tokens(stream) if "y" in data else None
+    for rows in reads:
+        assert len(rows) == len(keys), "a read lost or repeated rows"
+        # The rows the iteration yielded, not only the tables built afterwards.
+        assert_rows_aligned(
+            rows_table(rows),
+            Layout(tag_keys=tuple(tags), data_keys=tuple(data)),
+            sources.oracle,
+            stream.data_context,
+            function_tokens=tokens,
+        )
+
     failures = []
     for name, config in COLUMN_CONFIGS.items():
         layout = Layout(
@@ -163,7 +178,15 @@ def test_every_row_of_a_stream_is_aligned(
             tables.append(("head", stream.head(100, **config).as_table()))
         for call, table in tables:
             try:
-                assert_rows_aligned(table, layout, sources.oracle, stream.data_context)
+                assert table.num_rows == len(keys), f"{table.num_rows} rows"
+                assert_requested_columns(table, config, layout.content_hash_column)
+                assert_rows_aligned(
+                    table,
+                    layout,
+                    sources.oracle,
+                    stream.data_context,
+                    function_tokens=tokens,
+                )
             except AssertionError as exc:
                 failures.append(f"{call} [{name}] {exc}")
     assert not failures, "\n".join(failures)

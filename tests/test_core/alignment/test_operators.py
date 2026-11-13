@@ -42,7 +42,12 @@ from orcapod.core.operators import (
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 
-from .checker import Layout, assert_rows_aligned, assert_same_rows_by_identity
+from .checker import (
+    Layout,
+    assert_requested_columns,
+    assert_rows_aligned,
+    assert_same_rows_by_identity,
+)
 from .fixtures import (
     COLUMN_CONFIGS,
     INPUT_ORDERS,
@@ -68,6 +73,8 @@ class OpCase:
         keyed_by_record_ids: Whether sync and async give the same rows, so the two
             tables can be matched by record ids. ``Batch`` groups rows in arrival
             order, which the async path does not fix.
+        covers: ``(column, source id)`` for a many-to-one operator: the flattened
+            member values of ``column`` must be that source's rows, each once.
     """
 
     name: str
@@ -78,6 +85,7 @@ class OpCase:
     merged: frozenset[str] = frozenset()
     prepare: Callable[[Sources], None] = lambda sources: None
     keyed_by_record_ids: bool = True
+    covers: tuple[str, str] | None = None
 
 
 def every_column(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
@@ -130,10 +138,19 @@ CASES = [
         lambda s: Batch(4)(s.a),
         members=every_column,
         keyed_by_record_ids=False,
+        covers=("x", "A"),
     ),
-    OpCase("group_by_g", lambda s: GroupBy(by=["g"])(s.a), members=all_but_g),
     OpCase(
-        "group_by_all_tags", lambda s: GroupBy(by=["g", "n"])(s.a), members=data_only
+        "group_by_g",
+        lambda s: GroupBy(by=["g"])(s.a),
+        members=all_but_g,
+        covers=("x", "A"),
+    ),
+    OpCase(
+        "group_by_all_tags",
+        lambda s: GroupBy(by=["g", "n"])(s.a),
+        members=data_only,
+        covers=("x", "A"),
     ),
     OpCase("select_data", lambda s: SelectDataColumns(["m", "x"])(s.a)),
     OpCase("drop_data", lambda s: DropDataColumns(["s"])(s.a)),
@@ -188,26 +205,64 @@ def head_accepts(config: dict[str, Any]) -> bool:
     return not config.get("columns", {}).get("sort_by_tags")
 
 
-def check_stream(case: OpCase, stream: Any, sources: Sources) -> None:
-    """Check ``as_table`` and ``head`` of ``stream`` under every column configuration."""
+def check_tables(
+    case: OpCase, stream: Any, sources: Sources, *, with_head: bool
+) -> list[str]:
+    """Check ``as_table`` (and ``head``) under every configuration; return the failures.
+
+    Every configuration must give the rows the default one gives (``head`` at most 100)
+    and the per-row columns it asks for. An empty default table (a filter that keeps
+    nothing) must stay empty.
+    """
     failures = []
+    baseline = stream.as_table().num_rows
     for name, config in COLUMN_CONFIGS.items():
-        tables = [("as_table", stream.as_table(**config))]
-        if head_accepts(config):
-            tables.append(("head", stream.head(100, **config).as_table()))
-        for call, table in tables:
-            if table.num_rows == 0:
-                continue  # an operator may legitimately give no rows (a filter)
+        tables = [("as_table", stream.as_table(**config), baseline)]
+        if with_head and head_accepts(config):
+            tables.append(
+                ("head", stream.head(100, **config).as_table(), min(baseline, 100))
+            )
+        for call, table, expected_rows in tables:
+            layout = case_layout(case, stream, config)
             try:
-                assert_rows_aligned(
-                    table,
-                    case_layout(case, stream, config),
-                    sources.oracle,
-                    stream.data_context,
+                assert table.num_rows == expected_rows, (
+                    f"{table.num_rows} rows, the default configuration gives "
+                    f"{expected_rows}"
                 )
+                if table.num_rows == 0:
+                    continue
+                assert_requested_columns(table, config, layout.content_hash_column)
+                assert_rows_aligned(table, layout, sources.oracle, stream.data_context)
             except AssertionError as exc:
                 failures.append(f"{call} [{name}] {exc}")
+    return failures
+
+
+def check_members_cover_the_input(case: OpCase, stream: Any, sources: Sources) -> None:
+    """A many-to-one operator's members hold every input row exactly once.
+
+    Each row is aligned by itself, so an output that lost or repeated a whole group
+    (a batch) would pass that check; the flattened members of all rows must be the
+    input's rows.
+    """
+    if case.covers is None:
+        return
+    column, source_id = case.covers
+    flattened = [x for xs in stream.as_table().column(column).to_pylist() for x in xs]
+    expected = [
+        o.values[column] for o in sources.oracle.origins if o.source_id == source_id
+    ]
+    assert sorted(flattened) == sorted(expected), (
+        f"{case.name}: the members {sorted(flattened)} are not the input rows "
+        f"{sorted(expected)}"
+    )
+
+
+def check_stream(case: OpCase, stream: Any, sources: Sources) -> None:
+    """Check ``as_table`` and ``head`` of ``stream`` under every column configuration."""
+    failures = check_tables(case, stream, sources, with_head=True)
     assert not failures, f"{case.name}: " + "\n".join(failures)
+    check_members_cover_the_input(case, stream, sources)
 
 
 READ_PATTERNS = ("fresh", "partial_then_full", "repeated")
@@ -292,21 +347,9 @@ def test_operator_nodes_are_aligned_and_async_equals_sync(
     for orchestrator in ORCHESTRATORS:
         node, sources = run_case(case, scenario, input_order, orchestrator)
         nodes[orchestrator] = node
-        failures = []
-        for name, config in COLUMN_CONFIGS.items():
-            table = node.as_table(**config)
-            if table.num_rows == 0:
-                continue
-            try:
-                assert_rows_aligned(
-                    table,
-                    case_layout(case, node, config),
-                    sources.oracle,
-                    node.data_context,
-                )
-            except AssertionError as exc:
-                failures.append(f"{orchestrator} [{name}] {exc}")
-        assert not failures, "\n".join(failures)
+        failures = check_tables(case, node, sources, with_head=False)
+        assert not failures, f"{orchestrator}: " + "\n".join(failures)
+        check_members_cover_the_input(case, node, sources)
     if case.keyed_by_record_ids:
         sync, async_ = nodes["sync"], nodes["async"]
         assert_same_rows_by_identity(
