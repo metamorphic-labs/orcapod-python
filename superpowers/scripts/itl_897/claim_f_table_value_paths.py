@@ -65,3 +65,4 @@ if __name__ == "__main__":
         by_kind[kind] += count
         print(f"{count:8d}  {site}")
     print(f"\npytest exit code: {code}; calls by origin: {dict(by_kind)}")
+    sys.exit(code)

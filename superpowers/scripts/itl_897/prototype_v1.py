@@ -1,5 +1,13 @@
 """Prototype of the proposed pandas hash, for the ITL-897 investigation scripts only.
 
+Historical record (November 12, 2026): this script belongs to the investigation of
+November 11, 2026 and was run against ``main`` as it was then. It is kept as the record of
+that investigation and is not maintained: on this branch the library has the final hash
+(``orcapod/hashing/pandas_value_hash.py``), which
+supersedes this prototype. The prototype puts the algorithm label in its descriptor; the
+final hash does not (its ``kind`` is the logical type's name, and the label never enters
+the computation).
+
 ``install()`` patches ``PandasDataFrameHandler.handle`` / ``PandasSeriesHandler.handle`` in
 the running process (never in the library) so that::
 

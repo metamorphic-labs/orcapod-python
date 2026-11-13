@@ -56,6 +56,28 @@ def counted_leading_names(df: pd.DataFrame) -> str:
     return leading
 
 
+_VARIANT_CALLS: list[str] = []
+
+
+@function_pod(output_keys="df")
+def make_variant_frame(variant: str) -> pd.DataFrame:
+    """``_frame(False)`` with one order changed: ``columns``, ``levels`` or neither."""
+    frame = _frame(reverse=False)
+    if variant == "columns":
+        return frame[["b", "a"]]
+    if variant == "levels":
+        return frame.swaplevel()
+    return frame
+
+
+@function_pod(output_keys="leading")
+def counted_variant_leading_names(df: pd.DataFrame) -> str:
+    """As ``leading_names``, recording every call that actually computes."""
+    leading = f"{df.columns[0]}/{df.index.names[0]}"
+    _VARIANT_CALLS.append(leading)
+    return leading
+
+
 _CONSUMER_CALLS: list[int] = []
 
 
@@ -172,6 +194,39 @@ class TestPandasColumnOrder:
             )
         assert got == {"first": "a/i", "equal": "a/i", "reordered": "b/j"}
         assert _COUNTED_CALLS == ["a/i", "b/j"]
+
+    def test_each_order_alone_is_a_cache_miss(
+        self, store_name: str, orchestrator_name: str, tmp_path: Path
+    ) -> None:
+        """Column order alone, and index level order alone, each compute again."""
+        store = _STORES[store_name](tmp_path)
+        _VARIANT_CALLS.clear()
+        got: dict[str, str] = {}
+        for key, variant in (
+            ("first", "none"),
+            ("equal", "none"),
+            ("columns", "columns"),
+            ("levels", "levels"),
+        ):
+            source = DictSource([{"k": key, "variant": variant}], tag_columns=["k"])
+            job = PipelineJob(name="pandas_order_variants", store=store)
+            with job:
+                frames = make_variant_frame.pod(source, label="make")
+                counted_variant_leading_names.pod(frames, label="leading")
+            job.run(orchestrator=_ORCHESTRATORS[orchestrator_name]())
+            got.update(
+                {
+                    tag["k"]: data["leading"]
+                    for tag, data in job.nodes["leading"].iter_data()
+                }
+            )
+        assert got == {
+            "first": "a/i",
+            "equal": "a/i",
+            "columns": "b/i",
+            "levels": "a/j",
+        }
+        assert _VARIANT_CALLS == ["a/i", "b/i", "a/j"]
 
     def test_frame_read_back_from_the_store_keeps_its_cache_key(
         self, store_name: str, orchestrator_name: str, tmp_path: Path

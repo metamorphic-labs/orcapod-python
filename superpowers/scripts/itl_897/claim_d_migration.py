@@ -1,5 +1,11 @@
 """ITL-897 claim (d): what a v0.2.0 store sees after the pandas hash changes.
 
+Historical record (November 12, 2026): this script belongs to the investigation of
+November 11, 2026 and was run against ``main`` as it was then. It is kept as the record of
+that investigation and is not maintained: on this branch the library has the final hash
+(``orcapod/hashing/pandas_value_hash.py``), so the ``old`` phase no longer
+writes what ``main`` wrote and the script no longer reproduces its results.
+
 Two separate processes share one Delta store:
 
 1. ``old``: the released (v0.2.0 / ``main``) pandas handlers.

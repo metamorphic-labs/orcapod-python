@@ -637,7 +637,13 @@ class TestDescriptorGrammar:
         from orcapod.hashing.pandas_value_hash import pandas_frame_descriptor
 
         frame = pd.DataFrame(
-            {0: pd.array([1, None], dtype="Int64"), "c": pd.Categorical(["x", "y"])},
+            {
+                0: pd.array([1, None], dtype="Int64"),
+                # The category dtype is stated: pandas 3 infers a string dtype here.
+                "c": pd.Categorical(
+                    ["x", "y"], categories=pd.Index(["x", "y"], dtype=object)
+                ),
+            },
             index=pd.Index([5, 6], name="id"),
         )
         frame.columns = frame.columns.rename("features")
@@ -739,7 +745,7 @@ class TestDescriptorGrammar:
         }
         assert pandas_label_descriptor(np.timedelta64("NaT")) == {"nat": "timedelta"}
         assert pandas_label_descriptor(dt.date(2020, 1, 2)) == {"date": "2020-01-02"}
-        assert pandas_label_descriptor(pd.Timedelta(seconds=1)) == {
+        assert pandas_label_descriptor(pd.Timedelta(seconds=1).as_unit("ns")) == {
             "timedelta": [1000000000, "ns"]
         }
         assert pandas_label_descriptor(pd.Period("2020-01", freq="M")) == {

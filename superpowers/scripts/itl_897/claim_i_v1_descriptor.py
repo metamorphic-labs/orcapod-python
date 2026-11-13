@@ -97,6 +97,12 @@ COVERAGE: list[tuple[str, pd.DataFrame, pd.DataFrame]] = [
 ]
 
 
+def _kept_through_storage(value: Any, back: Any) -> bool:
+    """Whether both hashes were computed and are equal (two equal errors do not count)."""
+    before, after = _h(value), _h(back)
+    return not before.startswith("ERROR") and before == after
+
+
 def _coverage() -> None:
     print("\n## Grammar coverage: values that work on v0.2.0\n")
     print("| pair | today hashes | equals | v1 hashes | v1 | v1 kept through storage |")
@@ -108,7 +114,9 @@ def _coverage() -> None:
         v1_ok = not (v1a.startswith("ERROR") or v1b.startswith("ERROR"))
         try:
             kept: object = all(
-                _h(LT_DF.storage_to_python(LT_DF.python_to_storage(v))) == _h(v)
+                _kept_through_storage(
+                    v, LT_DF.storage_to_python(LT_DF.python_to_storage(v))
+                )
                 for v in (a, b)
             )
         except Exception as exc:  # noqa: BLE001 - storage fails on main too
@@ -152,6 +160,7 @@ def main() -> None:
     }
     prototype_v1.install_full_descriptor()
     unstable: list[str] = []
+    unhashable: list[str] = []
     for kind, cases, assert_fn, lt in groups:
         print(f"\n## {kind}\n")
         print("| property | equals | assert | hash today | v1 | v1 follows |")
@@ -178,9 +187,12 @@ def main() -> None:
                     back = lt.storage_to_python(lt.python_to_storage(value))
                 except Exception:  # noqa: BLE001 - not storable on main; see claim (a)
                     continue
-                if _h(back) != _h(value):
+                if _h(value).startswith("ERROR"):
+                    unhashable.append(f"{kind}: {name}")
+                elif not _kept_through_storage(value, back):
                     unstable.append(f"{kind}: {name}")
     print(f"\nv1 hash changes through storage for: {sorted(set(unstable)) or 'none'}")
+    print(f"v1 hash not computed for: {sorted(set(unhashable)) or 'none'}")
 
 
 if __name__ == "__main__":
