@@ -767,3 +767,43 @@ def test_a_run_that_did_not_finish_records_no_counts(tmp_path: pathlib.Path) -> 
         _ = failing.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))
     failed = _save(failing, tmp_path / "failed")
     assert "expected_rows" not in json.loads(failed.read_text())["run"]
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit round 2 (PR #352)
+# ---------------------------------------------------------------------------
+
+
+def test_get_all_records_of_a_loaded_operator_runs_the_advisory_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``get_all_records()`` warns once, like the other reads, and returns no rows."""
+    saved = _save(_run(InMemoryArrowDatabase(), "non_null"), tmp_path)
+    node = _loaded(saved, InMemoryArrowDatabase()).nodes["joined"]
+    with pytest.warns(StoreContentWarning) as record:
+        assert node.get_all_records() is None
+        assert node.get_all_records() is None
+    assert len([w for w in record if w.category is StoreContentWarning]) == 1
+
+
+def test_a_source_node_without_its_own_record_takes_its_output_schemas(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A source config without the record restores nullability from the output schema."""
+    store = InMemoryArrowDatabase()
+    job = _run(store, "nullable_tag_and_data")
+
+    def drop_source_config_records(data: dict[str, Any]) -> None:
+        """Remove only the source configs' records, by hand."""
+        for descriptor in data["pipeline"]["nodes"].values():
+            descriptor.get("source_config", {}).pop("nullable", None)
+
+    saved = _save(job, tmp_path, drop_source_config_records)
+    loaded = PipelineJob.load(str(saved), store=store)
+    for label in ("src_a", "src_b"):
+        assert loaded.nodes[label].output_schema() == job.nodes[label].output_schema()
+    resaved = tmp_path / "resaved.json"
+    loaded.save(resaved)
+    fields = _recorded_fields(resaved)
+    assert fields["src_a"] == {"tag": ["id"], "data": ["a"]}
+    assert fields["src_a.source_config"] is None

@@ -1562,6 +1562,9 @@ class OperatorJobNode(OperatorNodeBase):
             return None
 
         results = self._read_stored_records()
+        if self._loaded:
+            # The advisory check of every read of a loaded node (ITL-1043).
+            self._check_expected_rows(0 if results is None else results.num_rows)
         if results is None:
             return None
 

@@ -359,7 +359,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     if "tag_schema" in source_config and "data_schema" in source_config:
                         saved_tag = source_config["tag_schema"]
                         saved_data = source_config["data_schema"]
-                        saved_nullable = source_config.get("nullable")
+                        # A source node's output schema has the same columns: its
+                        # record stands in when the source config has none.
+                        saved_nullable = source_config.get(
+                            "nullable", descriptor["output_schema"].get("nullable")
+                        )
                     else:
                         saved_tag = descriptor["output_schema"]["tag"]
                         saved_data = descriptor["output_schema"]["data"]
