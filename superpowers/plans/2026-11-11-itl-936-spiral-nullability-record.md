@@ -225,7 +225,7 @@ if read_nullability_record(table.get_metadata()) != read_nullability_record(kv):
 
 - [ ] Full suite (one Python version), ruff, basedpyright, golden hashes unchanged.
 - [ ] Live check script under `superpowers/specs/itl-936-live/` + exact commands for the
-  coordinator on `<project id>`.
+  coordinator on `edi-tutorial-v1-841226`.
 - [ ] Merge origin/main, push, PR (stacked on #305), attach, worker_done.
 
 ## Notes

@@ -228,9 +228,6 @@ Developer decisions, November 12, 2026 (ITL-1007); the full procedure is RELEASI
 - An agent never pushes to nauticalab, adds a remote for it, creates or pushes a tag, runs the
   Release workflow, or touches a setting, secret or environment there. The push happens only on
   the developer's explicit go. The v0.2.0 tag is never pushed.
-- No Spiral project id of the EDI projects (shape edi-<word>-v<digit>-<6 digits>) may appear
-  in any tracked file; use <project id> in prose and my-project-123456 in code samples, and
-  read a real project from an environment variable. tests/test_repo enforces it.
 - Linear, Codecov and SpiralDB jobs run only when
   github.repository == 'metamorphic-labs/orcapod-python'; lint.yml runs only on nauticalab.
 

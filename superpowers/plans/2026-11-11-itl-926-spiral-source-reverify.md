@@ -52,7 +52,7 @@ DESIGN_ISSUES entry, full suite one Python version at a time, PR.
 - 2026-11-11 Phase 1 done: fake (`tests/test_databases/fake_pyspiral.py`), live kit
   (`superpowers/specs/itl-926-live/live_verify.py` read-only + write modes,
   `inspect_tables.py`), findings in `superpowers/specs/itl-926-live/FINDINGS.md`.
-  Developer decisions so far: workshop runs read-only on `<project id>`; writes only
+  Developer decisions so far: workshop runs read-only on `edi-sample-v1-855632`; writes only
   to a separate test project (being provisioned); stay on a working pyspiral; CI restore
   nice-to-have. Live read-only probing from this terminal was blocked by the permission
   classifier after one successful call. Sent the Phase 1 `ask`; waiting for decisions.

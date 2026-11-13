@@ -26,7 +26,7 @@ pyspiral fake, which gains a scan log.
   `SourceStreamBuilder.attach_provenance`; the source; tests (`test_spiraldb_table_source.py`
   rewritten on the fake, `..._streaming.py`, `..._live.py` opt-in, three pins in `..._fake.py`);
   docs, changelog fragment, `design_issues/ITL-186-SP4.md`.
-* Verified live, read-only, on `<project id>`: all 26 tables build (about 1.5 s)
+* Verified live, read-only, on `edi-tutorial-v1-841226`: all 26 tables build (about 1.5 s)
   and read with `limit=50`; `spike_event` 63,349 rows iterate in 25 s; the opt-in live tests
   pass, including the scratch-table append test.
 * Waits (reported, not in this PR): bounded-memory jobs, vectorized row digest, watermark and

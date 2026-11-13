@@ -6,11 +6,11 @@ root, with the ``spiraldb`` extra installed (``uv sync --all-extras``).
 Two modes.
 
 **Read-only (default)** -- for an existing project such as the workshop's EDI sample
-(``<project id>``). Nothing is written to the project: no table creation, no writes,
+(``edi-sample-v1-855632``). Nothing is written to the project: no table creation, no writes,
 no maintenance. Results go to a local Delta store in a temporary directory:
 
     uv run python superpowers/specs/itl-926-live/live_verify.py \
-        --project <project id> --tables session,experiment \
+        --project edi-sample-v1-855632 --tables session,experiment \
         --value-column total_trials [--report ro.json]
 
 It builds ``SpiralDBTableSource`` on each of ``--tables`` (keep them small: the source reads

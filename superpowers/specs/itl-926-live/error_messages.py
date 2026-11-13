@@ -2,7 +2,7 @@
 
 Run after ``spiral login``, from the repository root:
 
-    uv run python superpowers/specs/itl-926-live/error_messages.py <project id>
+    uv run python superpowers/specs/itl-926-live/error_messages.py edi-sample-v1-855632
 
 Each case only lists tables or reads a table's schema; nothing is written. The made-up
 project id is random, so it cannot name a real project (in particular, never a full EDI

@@ -5,7 +5,7 @@
 **Severity:** high
 **Issue:** ITL-926 (follow-ups: ITL-186 streaming source)
 
-Re-verified against the EDI sample project (`<project id>`, read-only) and a
+Re-verified against the EDI sample project (`edi-sample-v1-855632`, read-only) and a
 disk-backed pyspiral fake (`tests/test_databases/fake_pyspiral.py`). The workshop path works:
 a `SpiralDBTableSource` with a composite key, a `Join` of two Spiral sources, a function pod,
 a Delta store, a re-run with no function calls, save and load, and the same hashes in a fresh

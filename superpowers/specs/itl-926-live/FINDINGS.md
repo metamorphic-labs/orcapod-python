@@ -3,7 +3,7 @@
 Audit of `SpiralDBTableSource` / `DBTableSource` / `SpiralDBConnector`, an end-to-end run of
 the workshop path through a disk-backed pyspiral fake (`tests/test_databases/fake_pyspiral.py`),
 a pyspiral 0.14.9 → 0.16.33 API check, and one read-only live call against
-`<project id>`. Repro scripts: `superpowers/specs/itl-926-live/` and the session
+`edi-sample-v1-855632`. Repro scripts: `superpowers/specs/itl-926-live/` and the session
 scratchpad (listed in the plan).
 
 ## Live facts (EDI sample V1, read-only)

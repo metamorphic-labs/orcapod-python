@@ -1,13 +1,13 @@
 # ITL-1007: make the repository ready for public release from nauticalab
 
-Steps follow the coordinator brief (1 ids, 2 workshop, 3 URLs, 4 workflows, 5 lint workflow,
-6 RELEASING.md, 7 guard test first, 8 changelog fragment).
+Scope after the developer's decisions of 2026-11-12: Spiral project ids stay as they are (they
+name only the sample dataset and sit behind credentials), and anything workshop related moves
+to the ediop repository. So: no id scrub, no guard test; the workshop tool, its tests and its
+plan are removed (they stay in git history); URLs, workflow repository guards, `lint.yml`,
+`RELEASING.md` and the agent instructions stay.
 
-Order: guard test (red) -> scrub ids -> remove workshop -> URLs -> workflows -> RELEASING.md
-and agent instructions -> fragment -> full suite -> PR.
+Facts checked: nauticalab main is 61d0f18e, an ancestor of our main; nauticalab has `tests.yml`,
+deleted on our main by 07e5a2ea (#267), so a fast-forward push deletes it.
 
-Facts checked: nauticalab main is 61d0f18e, an ancestor of our main (52 commits behind);
-nauticalab has `tests.yml`, present at 61d0f18e and deleted on our main by 07e5a2ea (#267), so a
-fast-forward push deletes it. First commit of the repo: c5d0963e (2025-04-25); 1866 commits on main.
-
-Notes for a successor: placeholders are `<project id>` (prose) and `my-project-123456` (code).
+Order: undo scrub -> drop guard -> remove workshop plan -> instructions and fragment -> full
+suite on 3.11/3.12/3.13 -> push once -> CodeRabbit.

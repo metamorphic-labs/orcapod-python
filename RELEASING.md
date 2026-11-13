@@ -68,8 +68,7 @@ Per-release checklists live in `superpowers/plans/` (for example
 
 All of these hold before the developer is asked for the go:
 
-1. **The guard test is green**: `uv run pytest tests/test_repo` (no private Spiral project id in
-   any tracked file), and the full `uv run pytest tests/` passes on the commit to be pushed.
+1. **The full suite is green**: `uv run pytest tests/` passes on the commit to be pushed.
 2. **The release pull request is merged** on `metamorphic-labs` (`CHANGELOG.md` folded, section
    dated, `changelog.d/` fragments deleted).
 3. **The data context freeze is done**: every released manifest is pinned in
