@@ -117,6 +117,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from pyarrow.lib import tzinfo_to_string
 
 from orcapod.hashing.labelled_hash import canonical_json, labelled_content_hash
 
@@ -361,7 +362,7 @@ def _timezone_text(tz: dt.tzinfo) -> str:
     class holds it: ``datetime.timezone(timedelta(hours=1))`` is read back from storage
     as another class of the same offset, and both are ``"+01:00"``.
     """
-    return pa.lib.tzinfo_to_string(tz)
+    return tzinfo_to_string(tz)
 
 
 def _count_in_own_unit(moment: pd.Timestamp | pd.Timedelta) -> int:
