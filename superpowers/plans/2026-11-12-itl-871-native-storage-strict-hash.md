@@ -183,3 +183,14 @@ Measured (torch 2.3.0, 2.4.1, 2.5.1, 2.6.0, 2.15.0):
 ## Resume notes
 
 - `5d6a3aa3`: merge of `origin/main` at `25650c42`. Nothing is pushed; remote head `5f98283f`.
+- Tasks 1 to 5 done. ITL-984 was fixed on `main` (#330): the xfail is removed. The extra is
+  `torch>=2.6` (developer).
+- Final merge of `origin/main` at `859106f7` (holds ITL-981, #328): every ITL-981 file is
+  `main`'s; `contexts/logical_types.json` has one `hash_ignore` object with both types (git
+  had merged it into two). Torch golden regenerated with `--group torch`: unchanged, 30
+  entries; against `main` only `torch.json` is added.
+- Verified on that merge: `pytest tests/` on 3.12, 3.11 and 3.13 each 10970 passed, 119
+  skipped, 22 xfailed, 0 failed; ruff check, ruff format --check, basedpyright exit 0;
+  changelog and design-issue checks pass.
+- Later type PRs (Polars #286, pandas) touch `logical_types.json`, `docs/reference/hashing.md`
+  and the golden files: expect one more mechanical merge of `main`.
