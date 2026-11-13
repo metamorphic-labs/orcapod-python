@@ -75,7 +75,7 @@ the merge. Tracked by ITL-1008.
 The full reason in this PR's CI log: `404 Client Error ... images/create?tag=RELEASE.2022-12-02T19-19-22Z&fromImage=minio/minio: pull access denied for minio/minio, repository does not exist`.
 `testcontainers` 4.14.2 defaults to the Docker Hub image `minio/minio:RELEASE.2022-12-02T19-19-22Z`,
 which Docker Hub no longer serves. The fixture turns every start failure into a skip, so no one noticed.
-Tried in this PR: the same tag from `quay.io/minio/minio` (CI run of commit `b9f5e0a`): `unknown: failed to resolve reference`
+Tried in this PR: the same tag from `quay.io/minio/minio` (CI run of commit `90aa0fdf`): `unknown: failed to resolve reference`
 (not served anonymously either); the change was reverted. Options, all outside "a few lines of test code": a MinIO
 image another registry still serves (for example a pinned `bitnamilegacy/minio`, whose entrypoint and env names differ
 from the ones `MinioContainer` sets), the `minio` server binary downloaded in the workflow and `MINIO_ENDPOINT` set (the
