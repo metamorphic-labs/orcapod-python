@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections.abc import Callable, Collection, Iterable
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -136,7 +137,7 @@ def parse_ignore_metadata(metadata: bytes) -> tuple[int, tuple[str, ...]]:
     """
     try:
         parsed = json.loads(metadata.decode("ascii"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise ValueError(
             f"extension metadata {metadata!r} is not ignore-list metadata: not JSON"
         ) from exc
@@ -185,19 +186,27 @@ class _ExtensionFamily:
         self.options = options
         self._arrow_types: dict[tuple[str, ...], pa.ExtensionType] = {}
         self._polars_class: type[pl.BaseExtension] | None = None
+        self._polars_types: dict[tuple[str, ...], pl.BaseExtension] = {}
 
     def arrow_type(self, ignore: tuple[str, ...]) -> "pa.ExtensionType":
         """Return the Arrow extension type of a checked ignore list."""
-        cached = self._arrow_types.get(ignore)
-        if cached is None:
-            cached = self._make_arrow_class(ignore)()
-            self._arrow_types[ignore] = cached
-        return cached
+        with _LOCK:
+            cached = self._arrow_types.get(ignore)
+            if cached is None:
+                cached = self._make_arrow_class(ignore)()
+                self._arrow_types[ignore] = cached
+            return cached
 
     def _deserialize(
-        self, storage_type: "pa.DataType", serialized: bytes, readable: bytes
+        self, storage_type: "pa.DataType", serialized: bytes
     ) -> "pa.ExtensionType":
-        """Return the type of a stored column, or raise if it cannot be one."""
+        """Return the type of a stored column.
+
+        Raises:
+            TypeIdentityError: If ``storage_type`` is not the family's storage.
+            ValueError: If ``serialized`` is not the metadata of a valid ignore
+                list of this family's version.
+        """
         from orcapod.errors import TypeIdentityError
         from orcapod.logical_types.registry import storage_type_matches
 
@@ -206,16 +215,10 @@ class _ExtensionFamily:
                 f"Arrow extension type '{self.extension_name}': expected storage_type "
                 f"{self.storage_type!r} but got {storage_type!r}."
             )
-        try:
-            version, names = parse_ignore_metadata(serialized)
-            if version != self.version:
-                raise ValueError(f"version {version} is not version {self.version}")
-            ignore = checked_ignore(names, self.options)
-        except ValueError as exc:
-            raise LogicalTypeIdentifierError(
-                LogicalTypeIdentifier(self.extension_name, serialized), (readable,)
-            ) from exc
-        return self.arrow_type(ignore)
+        version, names = parse_ignore_metadata(serialized)
+        if version != self.version:
+            raise ValueError(f"version {version} is not version {self.version}")
+        return self.arrow_type(checked_ignore(names, self.options))
 
     def _make_arrow_class(
         self, ignore: tuple[str, ...]
@@ -235,7 +238,18 @@ class _ExtensionFamily:
             storage_type: "pa.DataType",
             serialized: bytes,
         ) -> "pa.ExtensionType":
-            return family._deserialize(storage_type, serialized, metadata)
+            from orcapod.errors import TypeIdentityError
+
+            try:
+                return family._deserialize(storage_type, serialized)
+            except TypeIdentityError:
+                raise
+            except ValueError as exc:
+                # The class knows what it reads; the family only what is valid.
+                raise LogicalTypeIdentifierError(
+                    LogicalTypeIdentifier(family.extension_name, serialized),
+                    (metadata,),
+                ) from exc
 
         extension_class = type(
             f"_ArrowExt_{_sanitize(self.extension_name)}{suffix}",
@@ -253,9 +267,15 @@ class _ExtensionFamily:
 
     def polars_type(self, ignore: tuple[str, ...]) -> "pl.BaseExtension":
         """Return the Polars extension type of a checked ignore list."""
-        if self._polars_class is None:
-            self._polars_class = self._make_polars_class()
-        return self._polars_class(ignore_metadata(self.version, ignore).decode("ascii"))  # pyright: ignore[reportCallIssue]  # the synthesized class takes the metadata text
+        with _LOCK:
+            cached = self._polars_types.get(ignore)
+            if cached is None:
+                if self._polars_class is None:
+                    self._polars_class = self._make_polars_class()
+                metadata = ignore_metadata(self.version, ignore).decode("ascii")
+                cached = self._polars_class(metadata)  # pyright: ignore[reportCallIssue]  # the synthesized class takes the metadata text
+                self._polars_types[ignore] = cached
+            return cached
 
     def _make_polars_class(self) -> type["pl.BaseExtension"]:
         name = self.extension_name
@@ -285,6 +305,13 @@ class _ExtensionFamily:
 
 _FAMILIES: dict[str, _ExtensionFamily] = {}
 
+_LOCK = threading.RLock()
+"""Guards ``_FAMILIES`` and each family's caches.
+
+Arrow compares extension types by class, so one ignore list must never get two
+classes: every cache lookup that may create a class runs under this lock.
+"""
+
 
 def _family(
     extension_name: str,
@@ -298,21 +325,22 @@ def _family(
         ValueError: If the name was already declared with another storage type,
             version or set of options.
     """
-    family = _FAMILIES.get(extension_name)
-    if family is None:
-        family = _ExtensionFamily(extension_name, storage_type, version, options)
-        _FAMILIES[extension_name] = family
-    elif (
-        family.storage_type != storage_type
-        or family.version != version
-        or family.options != options
-    ):
-        raise ValueError(
-            f"extension name {extension_name!r} is already declared with storage "
-            f"type {family.storage_type}, version {family.version} and options "
-            f"{sorted(family.options)}"
-        )
-    return family
+    with _LOCK:
+        family = _FAMILIES.get(extension_name)
+        if family is None:
+            family = _ExtensionFamily(extension_name, storage_type, version, options)
+            _FAMILIES[extension_name] = family
+        elif (
+            family.storage_type != storage_type
+            or family.version != version
+            or family.options != options
+        ):
+            raise ValueError(
+                f"extension name {extension_name!r} is already declared with storage "
+                f"type {family.storage_type}, version {family.version} and options "
+                f"{sorted(family.options)}"
+            )
+        return family
 
 
 class IgnoreListLogicalType(BaseLogicalType):
