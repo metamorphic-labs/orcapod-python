@@ -361,7 +361,6 @@ def test_second_interrupt_returns_and_a_late_function_writes_nothing(
     assert 0 in stuck_calls
 
 
-@function_pod(output_keys="y")
 async def async_stuck_on_first_row(x: int) -> int:
     """Row 0 presses the interrupt button twice and blocks the event loop until released."""
     if x == 0:
@@ -372,19 +371,34 @@ async def async_stuck_on_first_row(x: int) -> int:
     return x
 
 
-def test_second_interrupt_names_an_async_function_blocking_the_loop() -> None:
+POD_FORMS: dict[str, Callable[[], dict[str, Any]]] = {
+    "plain": dict,
+    "result_database": lambda: {"result_database": InMemoryArrowDatabase()},
+    "pod_cache_database": lambda: {"pod_cache_database": InMemoryArrowDatabase()},
+}
+
+
+@pytest.mark.parametrize("pod_form", list(POD_FORMS))
+def test_second_interrupt_names_an_async_function_blocking_the_loop(
+    pod_form: str,
+) -> None:
     """For an async function blocking the loop, the warning says rows may still be stored.
 
     The cancellation cannot run on a loop whose thread the function holds, so rows
     already in progress may be stored once it returns; the warning says so instead of
-    promising that nothing more is written. The run still stops once it returns.
+    promising that nothing more is written. The run still stops once it returns. The
+    function is recognised as async in every form of pod: plain, with a result
+    database (a wrapped data function) and with a pod cache.
     """
     stuck_release.clear()
+    pod = function_pod(output_keys="y", **POD_FORMS[pod_form]())(
+        async_stuck_on_first_row
+    )
     rows = [{"k": f"r{i}", "x": i} for i in range(6)]
     job = PipelineJob(name="async_stuck_demo", store=InMemoryArrowDatabase())
     with job:
         source = DictSource(data=rows, tag_columns=["k"], source_id="rows")
-        stuck = async_stuck_on_first_row.pod(source, label="stuck")
+        stuck = pod.pod(source, label="stuck")
         after_stuck.pod(stuck, label="after")
 
     async def notebook_cell() -> None:
@@ -411,3 +425,36 @@ def test_second_interrupt_names_an_async_function_blocking_the_loop() -> None:
     while bridge_threads() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not bridge_threads()
+
+
+pod_task_cleanup: list[int] = []
+
+
+async def wait_forever_then_clean_up(x: int) -> None:
+    """A background task left pending by a pod; records its cancellation cleanup."""
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pod_task_cleanup.append(x)
+        raise
+
+
+@function_pod(output_keys="y")
+async def leaves_a_task_running(x: int) -> int:
+    """Start a background task and return without awaiting it."""
+    _ = asyncio.get_running_loop().create_task(wait_forever_then_clean_up(x))
+    return x
+
+
+def test_tasks_left_pending_by_a_pod_are_cancelled_and_cleaned_up() -> None:
+    """Inside a running loop, as with ``asyncio.run``, leftover tasks get their cleanup."""
+    pod_task_cleanup.clear()
+    rows = [{"k": f"r{i}", "x": i} for i in range(3)]
+    job = PipelineJob(name="leftover_demo", store=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(data=rows, tag_columns=["k"], source_id="rows")
+        leaves_a_task_running.pod(source, label="leaves")
+
+    run_inside_running_loop(job)
+
+    assert sorted(pod_task_cleanup) == [0, 1, 2]

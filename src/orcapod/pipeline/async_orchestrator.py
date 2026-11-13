@@ -384,6 +384,7 @@ def _run_on_own_thread(
             errors.append(exc)
         finally:
             try:
+                _cancel_leftover_tasks(loop)
                 loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.run_until_complete(loop.shutdown_default_executor())
             finally:
@@ -417,6 +418,23 @@ def _run_on_own_thread(
     if errors:
         raise errors[0]
     return results[0]
+
+
+def _cancel_leftover_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel the tasks still pending on ``loop`` and let them finish, as ``asyncio.run`` does.
+
+    A task a pod started and left running would otherwise lose its cancellation
+    cleanup when the loop closes.
+
+    Args:
+        loop: The bridge thread's loop, no longer running.
+    """
+    leftover = asyncio.all_tasks(loop)
+    if not leftover:
+        return
+    for task in leftover:
+        _ = task.cancel()
+    _ = loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
 
 
 def _wait_until(event: threading.Event) -> None:

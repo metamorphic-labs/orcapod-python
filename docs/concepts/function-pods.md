@@ -418,7 +418,8 @@ with job:
 
 job.run(orchestrator=AsyncPipelineOrchestrator())
 
-print(job.nodes["bmi"].as_table().to_pandas())
+# The async run stores rows as they finish: sort them to print in a fixed order.
+print(job.nodes["bmi"].as_table().sort_by("subject_id").to_pandas())
 #   subject_id          bmi
 # 0   mouse_01  1756.944444
 # 1   mouse_02  2210.000000

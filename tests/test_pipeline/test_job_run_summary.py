@@ -248,3 +248,27 @@ def test_traceback_pointer_is_valid_python_for_any_label() -> None:
     call = ast.parse(pointer, mode="eval").body
     assert isinstance(call, ast.Call)
     assert ast.literal_eval(call.args[0]) == label
+
+
+def test_every_failed_run_warns_also_from_the_same_line() -> None:
+    """Re-running the same failing cell warns again; a user's ignore filter still applies.
+
+    Python's default filter shows a given text from a given line once, and a notebook
+    names a cell's file by its content, so an identical second run would warn nothing.
+    """
+    # One filter setting for both runs, as in a session: changing the filters between
+    # the runs would reset Python's once-per-line record and hide the problem.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        for _ in range(2):
+            job = make_job(InMemoryArrowDatabase(), always_fails, "broken")
+            _ = job.run(orchestrator=SyncPipelineOrchestrator())  # the same line twice
+    assert sum(1 for w in caught if issubclass(w.category, RowFailuresWarning)) == 2
+
+    job = make_job(InMemoryArrowDatabase(), always_fails, "broken")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        warnings.filterwarnings("ignore", category=RowFailuresWarning)
+        summary = job.run(orchestrator=SyncPipelineOrchestrator())
+    assert not [w for w in caught if issubclass(w.category, RowFailuresWarning)]
+    assert summary.failed_rows == 4
