@@ -11,6 +11,7 @@ forced completion order on the async ones, both stores and every tie scenario.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -22,7 +23,7 @@ from .gate import ORDERS, fails
 from .jobs import MODES, STORES, function_tokens, make_run
 
 
-def job_params() -> list[pytest.ParameterSet]:
+def job_params() -> list[Any]:
     """Every entry point, its orders, store and scenario."""
     params = []
     for scenario in SCENARIOS:
@@ -46,7 +47,7 @@ def test_run_summary_and_table_belong_to_the_rows_that_ran(
     scenario: str, store_kind: str, mode: str, order: str, tmp_path: Path
 ) -> None:
     keys = keys_a(scenario, "shuffled")
-    completion = keys if mode == "sync" else ORDERS[order](keys)
+    completion = keys if mode == "sync" else cast(list[int], ORDERS[order](keys))
     with pytest.warns(RowFailuresWarning, match="rows failed in node 'scaled'"):
         run = make_run(
             scenario,

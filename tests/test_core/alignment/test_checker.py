@@ -7,6 +7,8 @@ and the checker must name that column.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -20,6 +22,7 @@ from .checker import (
     assert_same_rows_by_identity,
 )
 from .fixtures import TAG_COLUMNS, make_sources
+from .oracle import Oracle
 
 
 def rotated(table: pa.Table, column: str) -> pa.Table:
@@ -30,7 +33,7 @@ def rotated(table: pa.Table, column: str) -> pa.Table:
     return table.set_column(index, table.field(column), values.take(order))
 
 
-def source_table() -> tuple[pa.Table, Layout, object, object]:
+def source_table() -> tuple[pa.Table, Layout, Oracle, Any]:
     """Source A of the unique scenario with every column group, its layout and oracle."""
     sources = make_sources("unique")
     table = sources.a.as_table(all_info=True)
@@ -40,7 +43,7 @@ def source_table() -> tuple[pa.Table, Layout, object, object]:
 
 def test_an_aligned_source_table_passes_and_every_column_is_compared() -> None:
     table, layout, oracle, context = source_table()
-    checked = assert_rows_aligned(table, layout, oracle, context)  # type: ignore[arg-type]
+    checked = assert_rows_aligned(table, layout, oracle, context)
     assert_all_columns_checked(table, checked)
 
 
@@ -57,7 +60,7 @@ def _misalignable_columns() -> list[str]:
 def test_a_rotated_column_is_named(column: str) -> None:
     table, layout, oracle, context = source_table()
     with pytest.raises(AssertionError, match=rf"column '{column}'"):
-        assert_rows_aligned(rotated(table, column), layout, oracle, context)  # type: ignore[arg-type]
+        assert_rows_aligned(rotated(table, column), layout, oracle, context)
 
 
 def test_a_wrong_context_key_is_named() -> None:
@@ -69,14 +72,14 @@ def test_a_wrong_context_key_is_named() -> None:
         pa.array(["other"] * table.num_rows, type=pa.large_string()),
     )
     with pytest.raises(AssertionError, match=constants.CONTEXT_KEY):
-        assert_rows_aligned(wrong, layout, oracle, context)  # type: ignore[arg-type]
+        assert_rows_aligned(wrong, layout, oracle, context)
 
 
 def test_a_column_no_rule_covers_fails() -> None:
     table, layout, oracle, context = source_table()
     extra = table.append_column("__unexplained", pa.array(range(table.num_rows)))
     with pytest.raises(AssertionError, match="__unexplained"):
-        assert_rows_aligned(extra, layout, oracle, context)  # type: ignore[arg-type]
+        assert_rows_aligned(extra, layout, oracle, context)
 
 
 def test_rotated_join_record_ids_are_named() -> None:

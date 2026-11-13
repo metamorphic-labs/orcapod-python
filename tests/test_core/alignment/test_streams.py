@@ -208,8 +208,8 @@ def test_as_table_after_an_upstream_reset_keeps_each_hash_with_its_row() -> None
         return y + 1
 
     sources = make_sources("unique")
-    upstream = stamp.pod(sources.a.select_data_columns(["x"]))
-    stream = plus_one.pod(upstream)
+    upstream: Any = stamp.pod(sources.a.select_data_columns(["x"]))
+    stream: Any = plus_one.pod(upstream)
     stream.as_table()
     upstream.clear_cache()
     table = stream.as_table(columns={"content_hash": True})
@@ -234,5 +234,5 @@ def test_index_after_aggregation_gives_each_element_its_own_token(
     tokens = members.as_table(columns={"source": True}).column("_source_x").to_pylist()
     first = Index("x", 0, out="first")(members)
     table = first.as_table(columns={"source": True})
-    expected = [member_tokens[0] for member_tokens in tokens]
+    expected = [member_tokens[0] if member_tokens else None for member_tokens in tokens]
     assert table.column(f"{constants.SOURCE_PREFIX}first").to_pylist() == expected
