@@ -289,9 +289,6 @@ class ArrowTableStream(StreamBase):
                 pa.field(hash_column_name, pa.large_string(), nullable=False),
                 pa.array(content_hashes, type=pa.large_string()),
             )
-        if not columns_config.system_tags:
-            # Check in original implementation
-            output_table = output_table.drop_columns(list(self._system_tag_columns))
         table_stack = (output_table,)
         if columns_config.context:
             table_stack += (data_context_table,)
@@ -301,8 +298,10 @@ class ArrowTableStream(StreamBase):
         table = arrow_utils.hstack_tables(*table_stack)
 
         if columns_config.sort_by_tags:
-            return arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
-
+            # With the system tags still in the table: they break ties between equal tags.
+            table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
+        if not columns_config.system_tags:
+            table = table.drop_columns(list(self._system_tag_columns))
         return table
 
     def clear_cache(self) -> None:

@@ -725,7 +725,9 @@ class SpiralDBTableSource(RootSource):
             total_rows=head.total_rows,
             total_is_estimate=head.total_is_estimate,
             origin="read",
-            description=self._head_note(head, config.sort_by_tags),
+            description=self._head_note(
+                head, config.sort_by_tags and bool(self._tag_columns)
+            ),
         )
 
     def _display_name(self) -> str:

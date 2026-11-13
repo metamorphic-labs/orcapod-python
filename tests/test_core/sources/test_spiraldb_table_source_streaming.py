@@ -632,19 +632,28 @@ class TestNotebookPreview:
         assert (head.total_rows, head.total_is_estimate) == (25, True)
         assert len(head) == 10
 
-    def test_a_sorted_head_sorts_only_the_rows_it_read(self, big):
-        """``sort_by_tags`` sorts the one bounded read; it reads no more rows (ITL-1053)."""
-        source = SpiralDBTableSource(_PROJECT, "big", label="big")
-        tags = ["subject_id", "timestamp"]
+    def test_a_sorted_head_sorts_only_the_rows_it_read(self, project):
+        """``sort_by_tags`` reorders the one bounded read and reads no more (ITL-1053).
+
+        The table is read in key order (subject, then timestamp) but tagged by
+        ``timestamp``, so the first ten rows read are not in tag order.
+        """
+        table = project.create_table("default.mixed", key_schema=_KEYS)
+        table.write(_rows([10, 20, 30, 40, 50], subject="m1"))
+        table.write(_rows([1, 2, 3, 4, 5, 6], subject="m2"))
+        fake_pyspiral.scan_log.clear()
+        source = SpiralDBTableSource(
+            _PROJECT, "mixed", tag_columns=["timestamp"], label="mixed"
+        )
 
         unsorted_head = source.head()
         sorted_head = source.head(columns={"sort_by_tags": True})
 
         assert self._scan_limits() == [10, 10]
-        assert len(sorted_head) == 10
-        assert sorted_head.table.equals(
-            unsorted_head.table.sort_by([(name, "ascending") for name in tags])
-        )
+        read = unsorted_head.table.column("timestamp").to_pylist()
+        assert read == [10, 20, 30, 40, 50, 1, 2, 3, 4, 5]
+        assert sorted_head.table.column("timestamp").to_pylist() == sorted(read)
+        assert "10 rows read, sorted by tags" in sorted_head.header()
 
     def test_an_unlabelled_source_is_shown_by_its_table_name(self, big):
         """With no label, the header names the table; the label itself is unchanged."""

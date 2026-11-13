@@ -288,3 +288,28 @@ def test_the_preview_of_a_stream_without_tag_columns_keeps_stream_order() -> Non
     assert source.head(columns={"sort_by_tags": True}).table.column(
         "x"
     ).to_pylist() == (ORDER)
+
+
+def test_a_custom_content_hash_column_is_kept_by_a_nodes_head() -> None:
+    """A custom hash column name that looks like a meta column is still shown."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+
+    job = PipelineJob(name="digest", store=InMemoryArrowDatabase())
+    with job:
+        triple.pod(_source(), label="node")
+    job.run()
+    node = job.nodes["node"]
+    config = {"content_hash": "__digest", "sort_by_tags": True}
+    assert "__digest" in node.as_table(columns=config).column_names
+    head = node.head(3, columns=config)
+    assert head.table.equals(node.as_table(columns=config).slice(0, 3))
+
+
+def test_a_tagless_stream_keeps_its_order_when_sorted_with_system_tags() -> None:
+    """With no regular tag column the rows keep their order, system tags or not."""
+    source = ArrowTableSource(
+        _table().select(["x"]), tag_columns=[], source_id="untagged", label="untagged"
+    )
+    table = source.head(8, all_info=True).table
+    assert table.column("x").to_pylist() == ORDER
