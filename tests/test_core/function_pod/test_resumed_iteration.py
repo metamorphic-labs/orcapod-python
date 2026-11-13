@@ -188,15 +188,15 @@ def test_a_job_node_read_partially_then_in_full_has_every_row(
     assert sorted(CALLS) == list(range(ROWS))
 
 
-def raising_once_pod(failing_x: int) -> Any:
-    """A fresh pod of ``times_ten`` that raises the first time it sees ``failing_x``."""
-    failed: list[int] = []
+def raising_pod(failures: dict[int, int]) -> Any:
+    """A fresh pod of ``times_ten`` that raises ``failures[x]`` times for each ``x``."""
+    remaining = dict(failures)
 
     @function_pod(output_keys="y")
     def times_ten(x: int) -> int:
-        """Return ``10 * x``; raise once for ``failing_x``."""
-        if x == failing_x and not failed:
-            failed.append(x)
+        """Return ``10 * x``; raise while ``x`` has failures left."""
+        if remaining.get(x, 0) > 0:
+            remaining[x] -= 1
             raise RuntimeError(f"transient failure for x={x}")
         CALLS.append(x)
         return 10 * x
@@ -204,9 +204,9 @@ def raising_once_pod(failing_x: int) -> Any:
     return times_ten.pod
 
 
-def raising_once_stream(kind: str, failing_x: int) -> Any:
-    """A stream of ``kind`` whose function raises once, for ``failing_x``."""
-    pod = raising_once_pod(failing_x)
+def raising_stream(kind: str, failures: dict[int, int]) -> Any:
+    """A stream of ``kind`` whose function raises as ``failures`` says."""
+    pod = raising_pod(failures)
     if kind == "plain":
         return pod(source())
     if kind == "concurrent":
@@ -218,16 +218,37 @@ def raising_once_stream(kind: str, failing_x: int) -> Any:
     raise ValueError(kind)
 
 
-@pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("failing_x", [0, 2, ROWS - 1])
-def test_a_row_whose_function_raised_is_computed_again_by_the_next_read(
-    kind: str, failing_x: int
-) -> None:
-    """A failed row is not lost: the next read computes it and yields every row."""
-    rows = raising_once_stream(kind, failing_x)
+def read_until_complete(rows: Any, failing_reads: int) -> None:
+    """Read ``rows`` in full ``failing_reads`` times, each read raising a failure."""
+    for _ in range(failing_reads):
+        with pytest.raises(RuntimeError, match="transient failure"):
+            list(rows.iter_data())
 
-    with pytest.raises(RuntimeError, match="transient failure"):
-        list(rows.iter_data())
+
+# How many times each x raises, and how many full reads raise before one succeeds. The
+# sequential path stops at the first failure of a read; the concurrent path computes every
+# row and raises once per read.
+FAILURE_CASES = {
+    "first_row_once": ({0: 1}, {"sequential": 1, "concurrent": 1}),
+    "middle_row_once": ({2: 1}, {"sequential": 1, "concurrent": 1}),
+    "last_row_once": ({ROWS - 1: 1}, {"sequential": 1, "concurrent": 1}),
+    "same_row_twice": ({2: 2}, {"sequential": 2, "concurrent": 2}),
+    "two_rows_once_each": ({1: 1, 4: 1}, {"sequential": 2, "concurrent": 1}),
+}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("case", list(FAILURE_CASES))
+def test_a_row_whose_function_raised_is_computed_again_by_the_next_read(
+    kind: str, case: str
+) -> None:
+    """A failed row is neither lost nor left as a gap: a later read yields every row."""
+    failures, failing_reads = FAILURE_CASES[case]
+    rows = raising_stream(kind, failures)
+
+    read_until_complete(
+        rows, failing_reads["concurrent" if kind == "concurrent" else "sequential"]
+    )
 
     assert pairs(rows.iter_data()) == EVERY_ROW
     assert pairs(rows.iter_data()) == EVERY_ROW, "a third read replays the cache"
