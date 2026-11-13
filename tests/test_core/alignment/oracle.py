@@ -81,10 +81,14 @@ class Derivation:
     Attributes:
         source_id: The source whose row is the function's input.
         compute: The value the function returns for that row.
+        token: The source-info token the column has for that row, when it can be
+            recomputed from the row (an operator's ``Pick`` or ``Index``); ``None`` for
+            a function's output, whose token names a datagram made at run time.
     """
 
     source_id: str
     compute: Callable[[Origin], Any]
+    token: Callable[[Origin], str] | None = None
 
 
 class Oracle:
@@ -132,10 +136,21 @@ class Oracle:
             self.by_token[(source_id, token)] = origin
 
     def derive(
-        self, column: str, source_id: str, compute: Callable[[Origin], Any]
+        self,
+        column: str,
+        source_id: str,
+        compute: Callable[[Origin], Any],
+        token: Callable[[Origin], str] | None = None,
     ) -> None:
-        """Declare that the output column ``column`` is computed from a ``source_id`` row."""
-        self.derivations[column] = Derivation(source_id, compute)
+        """Declare that the output column ``column`` is computed from a ``source_id`` row.
+
+        Args:
+            column: The output column.
+            source_id: The source whose row the value is computed from.
+            compute: The value for that row.
+            token: The column's source-info token for that row, when recomputable.
+        """
+        self.derivations[column] = Derivation(source_id, compute, token)
 
     def rename(self, new: str, old: str) -> None:
         """Declare that the output column ``new`` is the input column ``old`` renamed."""

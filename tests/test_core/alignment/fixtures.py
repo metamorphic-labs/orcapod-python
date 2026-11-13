@@ -138,13 +138,48 @@ def table_c(scenario: str) -> pa.Table:
     )
 
 
+DICT_TYPE = pa.large_list(
+    pa.struct(
+        [
+            pa.field("key", pa.large_string(), nullable=False),
+            pa.field("value", pa.int64()),
+        ]
+    )
+)
+
+
+def table_d(scenario: str, input_order: str = "shuffled") -> pa.Table:
+    """Source D (for ``Pick`` and ``Index``): A's tags; ``x`` from another range, a list
+    column ``seq`` and a ``dict[str, int]`` column ``d``."""
+    rows = rows_a(scenario, input_order)
+    xs = [300 + x for _, _, x in rows]
+    return pa.table(
+        {
+            "g": [g for g, _, _ in rows],
+            "n": [n for _, n, _ in rows],
+            "x": xs,
+            "seq": [[x, x + 1] for x in xs],
+            "d": pa.array([[{"key": "p", "value": x}] for x in xs], type=DICT_TYPE),
+        },
+        schema=pa.schema(
+            [
+                *TAG_FIELDS,
+                pa.field("x", pa.int64(), nullable=False),
+                pa.field("seq", pa.large_list(pa.int64()), nullable=False),
+                pa.field("d", DICT_TYPE, nullable=False),
+            ]
+        ),
+    )
+
+
 @dataclass
 class Sources:
-    """The three sources of a scenario and the oracle that knows their rows."""
+    """The four sources of a scenario and the oracle that knows their rows."""
 
     a: ArrowTableSource
     b: ArrowTableSource
     c: ArrowTableSource
+    d: ArrowTableSource
     oracle: Oracle
 
 
@@ -159,6 +194,7 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
         ("A", table_a(scenario, input_order), "x"),
         ("B", table_b(scenario), "z"),
         ("C", table_c(scenario), None),
+        ("D", table_d(scenario, input_order), "x"),
     ):
         built[name] = ArrowTableSource(
             table,
@@ -169,7 +205,9 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
         oracle.add_source(
             name, table, tag_columns=TAG_COLUMNS, record_id_column=record_id_column
         )
-    return Sources(a=built["A"], b=built["B"], c=built["C"], oracle=oracle)
+    return Sources(
+        a=built["A"], b=built["B"], c=built["C"], d=built["D"], oracle=oracle
+    )
 
 
 ALL_GROUPS = {

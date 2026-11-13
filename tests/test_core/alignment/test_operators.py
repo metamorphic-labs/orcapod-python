@@ -1,0 +1,314 @@
+"""Every operator's output keeps each derived column with its own row (ITL-1034).
+
+Each case applies one operator (``core/operators``) to the alignment sources, and every
+column configuration of its ``as_table`` and ``head`` is checked by recomputation. The
+product: operator case x tie scenario x input order x read pattern (a fresh read; a
+partial ``iter_data`` then a full read; a repeated read) x every ``ColumnConfig``, on the
+stream an operator returns (the sync path). The same cases also run as operator nodes of a
+job on both orchestrators, so each operator's async path is checked, and its table must
+equal the sync one row by row, keyed on record ids.
+
+ITL-1050 (filed): the async Join matches null tag keys and the sync one drops them, so the
+Join job case of the null scenario is marked ``xfail(strict=True)``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import polars as pl
+import pytest
+
+from orcapod import PipelineJob
+from orcapod.core.operators import (
+    Batch,
+    DropDataColumns,
+    DropNulls,
+    DropTagColumns,
+    GroupBy,
+    Index,
+    Join,
+    MapData,
+    MapTags,
+    MergeJoin,
+    Pick,
+    PolarsFilter,
+    SelectDataColumns,
+    SelectTagColumns,
+    SemiJoin,
+)
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+from .checker import Layout, assert_rows_aligned, assert_same_rows_by_identity
+from .fixtures import (
+    COLUMN_CONFIGS,
+    INPUT_ORDERS,
+    SCENARIOS,
+    Sources,
+    content_hash_column,
+    make_sources,
+)
+from .oracle import Origin
+
+
+@dataclass(frozen=True)
+class OpCase:
+    """One operator applied to the alignment sources.
+
+    Attributes:
+        name: The test id.
+        build: The operator's output stream from the sources (called inside a job for
+            the job variant, so the streams it makes become job nodes).
+        members: Columns that hold one element per member row (``Batch``, ``GroupBy``).
+        merged: Columns that hold one element per input (``MergeJoin``).
+        prepare: Tells the oracle about renamed or derived columns.
+        keyed_by_record_ids: Whether sync and async give the same rows, so the two
+            tables can be matched by record ids. ``Batch`` groups rows in arrival
+            order, which the async path does not fix.
+    """
+
+    name: str
+    build: Callable[[Sources], Any]
+    members: Callable[[tuple[str, ...], tuple[str, ...]], frozenset[str]] = (
+        lambda tags, data: frozenset()
+    )
+    merged: frozenset[str] = frozenset()
+    prepare: Callable[[Sources], None] = lambda sources: None
+    keyed_by_record_ids: bool = True
+
+
+def every_column(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
+    """Every tag and data column holds members (``Batch``)."""
+    return frozenset(tags + data)
+
+
+def all_but_g(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
+    """Every column but the ``g`` key holds members (``GroupBy(by=["g"])``)."""
+    return frozenset(c for c in tags + data if c != "g")
+
+
+def data_only(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
+    """Only data columns hold members (``GroupBy`` on every tag)."""
+    return frozenset(data)
+
+
+def rename(new: str, old: str) -> Callable[[Sources], None]:
+    """Tell the oracle that ``new`` is ``old`` renamed."""
+
+    def prepare(sources: Sources) -> None:
+        """Register the rename."""
+        sources.oracle.rename(new, old)
+
+    return prepare
+
+
+def derive_from_d(
+    column: str, compute: Callable[[Origin], Any], token: Callable[[Origin], str]
+) -> Callable[[Sources], None]:
+    """Tell the oracle that ``column`` is computed from a row of source D."""
+
+    def prepare(sources: Sources) -> None:
+        """Register the derivation."""
+        sources.oracle.derive(column, "D", compute, token)
+
+    return prepare
+
+
+CASES = [
+    OpCase("join", lambda s: Join()(s.a, s.b)),
+    OpCase(
+        "merge_join",
+        lambda s: MergeJoin()(SelectDataColumns(["x"])(s.a), s.c),
+        merged=frozenset({"x"}),
+    ),
+    OpCase("semi_join", lambda s: SemiJoin()(s.a, s.b)),
+    OpCase(
+        "batch",
+        lambda s: Batch(4)(s.a),
+        members=every_column,
+        keyed_by_record_ids=False,
+    ),
+    OpCase("group_by_g", lambda s: GroupBy(by=["g"])(s.a), members=all_but_g),
+    OpCase(
+        "group_by_all_tags", lambda s: GroupBy(by=["g", "n"])(s.a), members=data_only
+    ),
+    OpCase("select_data", lambda s: SelectDataColumns(["m", "x"])(s.a)),
+    OpCase("drop_data", lambda s: DropDataColumns(["s"])(s.a)),
+    OpCase("select_tags", lambda s: SelectTagColumns(["g"])(s.a)),
+    OpCase("drop_tags", lambda s: DropTagColumns(["n"])(s.a)),
+    OpCase("map_tags", lambda s: MapTags({"g": "gg"})(s.a), prepare=rename("gg", "g")),
+    OpCase("map_data", lambda s: MapData({"s": "t"})(s.a), prepare=rename("t", "s")),
+    OpCase("polars_filter", lambda s: PolarsFilter([pl.col("x") > 1])(s.a)),
+    OpCase("drop_nulls_named", lambda s: DropNulls(["m"])(s.a)),
+    OpCase("drop_nulls_all", lambda s: DropNulls()(s.a)),
+    OpCase(
+        "pick",
+        lambda s: Pick("d", "p", out="dp")(s.d),
+        prepare=derive_from_d(
+            "dp",
+            lambda o: o.values["d"][0]["value"],
+            lambda o: f"D::{o.token}::d['p']",
+        ),
+    ),
+    OpCase(
+        "index_new_column",
+        lambda s: Index("seq", 1, out="second")(s.d),
+        prepare=derive_from_d(
+            "second", lambda o: o.values["seq"][1], lambda o: f"D::{o.token}::seq[1]"
+        ),
+    ),
+    OpCase(
+        "index_in_place",
+        lambda s: Index("seq", 0)(s.d),
+        prepare=derive_from_d(
+            "seq", lambda o: o.values["seq"][0], lambda o: f"D::{o.token}::seq[0]"
+        ),
+    ),
+]
+CASE_IDS = [c.name for c in CASES]
+
+
+def case_layout(case: OpCase, stream: Any, config: dict[str, Any]) -> Layout:
+    """How the columns of ``stream``'s table relate to the origin rows."""
+    tags, data = stream.keys()
+    return Layout(
+        tag_keys=tuple(tags),
+        data_keys=tuple(data),
+        members=case.members(tuple(tags), tuple(data)),
+        merged=case.merged,
+        content_hash_column=content_hash_column(config),
+    )
+
+
+def head_accepts(config: dict[str, Any]) -> bool:
+    """``head`` refuses ``sort_by_tags``."""
+    return not config.get("columns", {}).get("sort_by_tags")
+
+
+def check_stream(case: OpCase, stream: Any, sources: Sources) -> None:
+    """Check ``as_table`` and ``head`` of ``stream`` under every column configuration."""
+    failures = []
+    for name, config in COLUMN_CONFIGS.items():
+        tables = [("as_table", stream.as_table(**config))]
+        if head_accepts(config):
+            tables.append(("head", stream.head(100, **config).as_table()))
+        for call, table in tables:
+            if table.num_rows == 0:
+                continue  # an operator may legitimately give no rows (a filter)
+            try:
+                assert_rows_aligned(
+                    table,
+                    case_layout(case, stream, config),
+                    sources.oracle,
+                    stream.data_context,
+                )
+            except AssertionError as exc:
+                failures.append(f"{call} [{name}] {exc}")
+    assert not failures, f"{case.name}: " + "\n".join(failures)
+
+
+READ_PATTERNS = ("fresh", "partial_then_full", "repeated")
+
+
+def read(stream: Any, pattern: str) -> None:
+    """Read ``stream`` in ``pattern`` before its tables are checked."""
+    if pattern == "partial_then_full":
+        partial = iter(stream.iter_data())
+        next(partial, None)
+        del partial
+    elif pattern == "repeated":
+        stream.as_table(all_info=True)
+        list(stream.iter_data())
+
+
+@pytest.mark.parametrize("pattern", READ_PATTERNS)
+@pytest.mark.parametrize("input_order", INPUT_ORDERS)
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+@pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+def test_every_row_of_an_operator_output_is_aligned(
+    case: OpCase, scenario: str, input_order: str, pattern: str
+) -> None:
+    sources = make_sources(scenario, input_order)
+    case.prepare(sources)
+    stream = case.build(sources)
+    read(stream, pattern)
+    total = stream.as_table().num_rows
+    check_stream(case, stream, sources)
+    assert total or case.name.startswith(("polars_filter", "drop_nulls", "join")), (
+        "an unfiltered operator gave no rows: the check checked nothing"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The same operators as job nodes, on both orchestrators
+# ---------------------------------------------------------------------------
+
+ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
+
+
+def run_case(case: OpCase, scenario: str, input_order: str, orchestrator: str) -> Any:
+    """Run ``case`` as the operator node ``op`` of a job; return the node and sources."""
+    sources = make_sources(scenario, input_order)
+    case.prepare(sources)
+    job = PipelineJob(name="ops", store=InMemoryArrowDatabase())
+    with job:
+        output = case.build(sources)
+    label = output.label
+    job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    return job.nodes[label], sources
+
+
+ITL_1050 = pytest.mark.xfail(
+    strict=True,
+    reason="ITL-1050: the async Join matches null tag keys; the sync Join drops them",
+)
+
+
+def job_case_params() -> list[Any]:
+    """Every case, scenario and input order; ITL-1050 on Join with null tags."""
+    return [
+        pytest.param(
+            case,
+            scenario,
+            input_order,
+            id=f"{case.name}-{scenario}-{input_order}",
+            marks=[ITL_1050] if case.name == "join" and scenario == "null" else [],
+        )
+        for case in CASES
+        for scenario in SCENARIOS
+        for input_order in INPUT_ORDERS
+    ]
+
+
+@pytest.mark.parametrize(("case", "scenario", "input_order"), job_case_params())
+def test_operator_nodes_are_aligned_and_async_equals_sync(
+    case: OpCase, scenario: str, input_order: str
+) -> None:
+    """Both orchestrators give aligned rows, and the same rows keyed on record ids."""
+    nodes = {}
+    for orchestrator in ORCHESTRATORS:
+        node, sources = run_case(case, scenario, input_order, orchestrator)
+        nodes[orchestrator] = node
+        failures = []
+        for name, config in COLUMN_CONFIGS.items():
+            table = node.as_table(**config)
+            if table.num_rows == 0:
+                continue
+            try:
+                assert_rows_aligned(
+                    table,
+                    case_layout(case, node, config),
+                    sources.oracle,
+                    node.data_context,
+                )
+            except AssertionError as exc:
+                failures.append(f"{orchestrator} [{name}] {exc}")
+        assert not failures, "\n".join(failures)
+    if case.keyed_by_record_ids:
+        sync, async_ = nodes["sync"], nodes["async"]
+        assert_same_rows_by_identity(
+            sync.as_table(all_info=True), async_.as_table(all_info=True)
+        )

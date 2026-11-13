@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Callable, Hashable, Sequence
+from typing import Any
 
 from orcapod import function_pod
 
@@ -196,3 +197,22 @@ async def gated_fragile(x: int) -> int:
         return scale(x)
     finally:
         GATE.finish(x)
+
+
+def new_gated_scale_pod() -> Any:
+    """A fresh function pod computing ``scale`` behind ``GATE``.
+
+    Setting a stream's executor sets it on its pod's data function, so a test that
+    changes the executor takes its own pod and leaves ``gated_scale`` untouched.
+    """
+
+    @function_pod(output_keys="y")
+    async def gated_scale(x: int) -> int:
+        """Return ``10 * x`` once ``GATE`` lets the row keyed ``x`` complete."""
+        await GATE.wait_turn(x)
+        try:
+            return scale(x)
+        finally:
+            GATE.finish(x)
+
+    return gated_scale.pod

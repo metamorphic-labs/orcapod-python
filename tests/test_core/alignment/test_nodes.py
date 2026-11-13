@@ -22,10 +22,13 @@ break, so a case passes the day its defect is fixed only by dropping its mark:
 * ITL-1042: after an async run an operator node's ``head()`` says "not computed" and
   shows no rows (``joined.head`` and ``grouped.head`` after an async run or rerun).
 * ITL-1043: a loaded job cannot read a cached operator node (``joined`` in a loaded job).
+* ITL-1050: the async Join matches null tag keys, the sync one drops them, so the async
+  ``joined`` table of the null scenario has rows the sync one has not.
 """
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -69,6 +72,10 @@ ITL_1040 = pytest.mark.xfail(
 ITL_1042 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1042: after an async run an operator node's head() shows no rows",
+)
+ITL_1050 = pytest.mark.xfail(
+    strict=True,
+    reason="ITL-1050: the async Join matches null tag keys; the sync Join drops them",
 )
 ITL_1043 = pytest.mark.xfail(
     strict=True,
@@ -138,18 +145,32 @@ def run_keys(marks: Callable[[RunKey], list[Any]] | None = None) -> list[Any]:
     ]
 
 
-def run_view_params(keys: list[RunKey], views: tuple[View, ...] = VIEWS) -> list[Any]:
-    """``(run key, view)`` for each key and view; ITL-1042 on async operator heads."""
-    return [
-        pytest.param(
-            key,
-            view,
-            id=f"{'-'.join(key)}-{view.name}",
-            marks=[ITL_1042] if is_async(key) and operator_head(view) else [],
-        )
-        for key in keys
-        for view in views
-    ]
+def run_view_params(
+    keys: list[RunKey], views: tuple[View, ...] = VIEWS, *, compares_rows: bool = False
+) -> list[Any]:
+    """``(run key, view)`` for each key and view, marked where a filed defect hits.
+
+    ITL-1042 on async operator heads. With ``compares_rows`` (a test that compares the
+    async rows with the sync ones), ITL-1050 on the async ``joined`` table of the null
+    scenario: the async Join keeps the rows whose key is null.
+    """
+    params = []
+    for key in keys:
+        for view in views:
+            marks = []
+            if is_async(key) and operator_head(view):
+                marks.append(ITL_1042)
+            elif (
+                compares_rows
+                and is_async(key)
+                and key[0] == "null"
+                and (view.node == "joined")
+            ):
+                marks.append(ITL_1050)
+            params.append(
+                pytest.param(key, view, id=f"{'-'.join(key)}-{view.name}", marks=marks)
+            )
+    return params
 
 
 # A derived source's table has no system tags, so its rows have no record ids to be
@@ -219,7 +240,9 @@ def test_stored_records_are_aligned(key: RunKey, runs: Callable[[RunKey], Run]) 
 
 @pytest.mark.parametrize(
     ("key", "view"),
-    run_view_params([k for k in all_run_keys() if is_async(k)], KEYED_VIEWS),
+    run_view_params(
+        [k for k in all_run_keys() if is_async(k)], KEYED_VIEWS, compares_rows=True
+    ),
 )
 def test_async_equals_sync_row_by_row(
     key: RunKey, view: View, runs: Callable[[RunKey], Run]
@@ -341,3 +364,60 @@ def test_rows_read_back_from_the_store_are_aligned(
 ) -> None:
     run, job = readbacks(key)
     check_every_config(job, view, run.sources.oracle, function_tokens(run.job))
+
+
+# ---------------------------------------------------------------------------
+# Read patterns
+# ---------------------------------------------------------------------------
+
+READ_PATTERNS = ("partial_then_full", "repeated", "interleaved")
+PATTERN_VIEWS = tuple(v for v in VIEWS if v.call == "as_table")
+
+
+def pattern_keys() -> list[RunKey]:
+    """The runs read in patterns: in memory; sync, and async ``run`` in two orders."""
+    return [
+        key
+        for key in all_run_keys()
+        if key[4] == "in_memory"
+        and (
+            key[2] == "sync"
+            or (key[2] == "async_run" and key[3] in ("reversed", "random_0"))
+        )
+    ]
+
+
+def read_node(node: Any, pattern: str) -> list[Any]:
+    """Read ``node`` in ``pattern``; return the rows of the last full read."""
+    if pattern == "partial_then_full":
+        partial = iter(node.iter_data())
+        next(partial, None)
+        del partial
+        return list(node.iter_data())
+    if pattern == "repeated":
+        list(node.iter_data())
+        node.as_table(all_info=True)
+        node.as_table()
+        return list(node.iter_data())
+    first = iter(node.iter_data())
+    second = iter(node.iter_data())
+    seen = [row for row in itertools.islice(first, 1)]
+    list(itertools.islice(second, 2))
+    seen += list(first)
+    list(second)
+    return seen
+
+
+@pytest.mark.parametrize("pattern", READ_PATTERNS)
+@pytest.mark.parametrize(
+    ("key", "view"), run_view_params(pattern_keys(), PATTERN_VIEWS)
+)
+def test_a_node_read_in_any_pattern_stays_aligned(
+    key: RunKey, view: View, pattern: str, runs: Callable[[RunKey], Run]
+) -> None:
+    """Partial, repeated and interleaved reads give every row once, each aligned."""
+    run = runs(key)
+    node = run.job.nodes[view.node]
+    rows = read_node(node, pattern)
+    assert len(rows) == node.as_table().num_rows, "a read lost or repeated rows"
+    check_every_config(run.job, view, run.sources.oracle, function_tokens(run.job))

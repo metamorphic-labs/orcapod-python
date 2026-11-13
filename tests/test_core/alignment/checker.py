@@ -131,7 +131,11 @@ class _RowChecker:
             self.checked.add(token_name)
             source, row_token, token_column = split_token(token)
             if column in self.oracle.derivations:
-                if token_column != column:
+                # A function output's token names the column itself; an operator's
+                # derived token (``Pick``, ``Index``) is checked whole, by its recipe.
+                if self.oracle.derivations[column].token is None and (
+                    token_column != column
+                ):
                     self.fail(
                         token_name, f"token {token!r} names column {token_column!r}"
                     )
@@ -202,8 +206,14 @@ class _RowChecker:
         self.checked.add(column)
 
     def _check_function_token(self, column: str, origin: Origin, token: str) -> None:
-        """A function output's token must be the one stored for this row's record."""
+        """A derived column's token: recomputed, or the one stored for this row's record."""
         name = f"{constants.SOURCE_PREFIX}{column}"
+        recompute = self.oracle.derivations[column].token
+        if recompute is not None:
+            expected = recompute(origin)
+            if token != expected:
+                self.fail(name, f"token {token!r}, its row's token is {expected!r}")
+            return
         if self.function_tokens is None:
             _, row_token, _ = split_token(token)
             if len(row_token) != 32:
