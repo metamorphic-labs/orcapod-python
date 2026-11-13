@@ -367,10 +367,13 @@ class Data(Datagram):
         if self._source_info_table is None:
             import pyarrow as _pa
 
-            if self._source_info:
+            # Only the source info of the data columns this Data holds: a column it
+            # no longer has has no source info in any view (ITL-1040).
+            data_keys = set(super().keys())
+            current = {k: v for k, v in self._source_info.items() if k in data_keys}
+            if current:
                 prefixed = {
-                    f"{constants.SOURCE_PREFIX}{k}": v
-                    for k, v in self._source_info.items()
+                    f"{constants.SOURCE_PREFIX}{k}": v for k, v in current.items()
                 }
                 schema = _pa.schema(
                     [
@@ -475,6 +478,24 @@ class Data(Datagram):
             if si_table.num_columns > 0 and si_table.num_rows > 0:
                 table = arrow_utils.hstack_tables(table, si_table)
         return table
+
+    def select(self, *column_names: str) -> Self:
+        """Return a copy holding only the given data columns and their source info."""
+        new_p = super().select(*column_names)
+        new_p._source_info = {
+            k: v for k, v in self._source_info.items() if k in column_names
+        }
+        new_p._source_info_table = None
+        return new_p
+
+    def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
+        """Return a copy without the given data columns and their source info."""
+        new_p = super().drop(*column_names, ignore_missing=ignore_missing)
+        new_p._source_info = {
+            k: v for k, v in self._source_info.items() if k not in column_names
+        }
+        new_p._source_info_table = None
+        return new_p
 
     def rename(self, column_mapping: "Mapping[str, str]") -> Self:
         new_p = super().rename(column_mapping)
