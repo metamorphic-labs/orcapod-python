@@ -15,6 +15,19 @@ its list shape) for every merged referential column, once over all inputs' value
 **Status log (successor notes):**
 - 2026-11-13: plan written; baseline measurements taken (`ids_before.json`, `bench_before_*.json` in the
   session scratchpad; numbers copied below once known). Waiting for coordinator approval (STEP 1 ask).
+- 2026-11-13: approved by the coordinator (kind `merged`, sorted members, one flat fold for N-ary joins,
+  per-element fold for list keys; nested token fed as-is accepted for the slice, recorded as an open point).
+  Done: 5e8028e1 (fix + tests), aaff7da8 (docs, changelog, `design_issues/ITL-1017-RT2.md`), 8d7e3c9e
+  (merge of origin/main; new main tests pinned to `tag_only_columns=True`). PR #342 body updated.
+  Hash/id diff before/after (also on the merged head): identical except `_source_<key>` types.
+- Linear comments were refused by the session's permission classifier: the texts below are for the
+  coordinator to post.
+  - ITL-1017: implementation summary + OPEN POINT (nested merged token fed with its label vs bare hex
+    with a structural marker `{"merged": "<hex>"}`; see RT2).
+  - ITL-1019: `OperatorNode._store_output_stream` (`operator_node.py` ~943-990) hashes each stored row
+    with `source=True` into `_record_hash`; once referential streams can be stored, a group membership
+    change (new merged token) moves that row's dedup key. Decide there whether `_record_hash` keeps
+    hashing source info.
 
 ---
 
