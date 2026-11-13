@@ -701,7 +701,7 @@ as before.
   carry. A file written before these were recorded (format `0.1.0`) still loads, but lossy:
   its schemas read every column as non-null, and a loaded operator node cannot tell its run's
   stored rows apart, so reading them raises. Saving such a loaded job again does not record
-  what its file did not.
+  what its file did not. Upgrading such files is left to a migration tool after v0.3.
 - Sources that read files, such as `CSVSource` and `DeltaTableSource`, are rebuilt from their
   paths. In-memory sources (`DictSource`, `ListSource`, `ArrowTableSource`,
   `DataFrameSource`) keep their data only in memory, so they are not saved; loading logs
