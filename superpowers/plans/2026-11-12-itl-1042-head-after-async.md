@@ -143,3 +143,39 @@ stream kinds) on ITL-985 and ITL-1002. Save the measurement script as
 - ITL-1045 is a different defect (two passes in `as_table` with a genuinely stale upstream);
   this one is a false staleness after an async run.
 - Scratchpad scripts: `repro.py`, `cost.py`, `emptyhead.py`, `a346/drive.py`.
+
+---
+
+## ITL-1052 (added Nov 12, 2026 by the coordinator; same PR: Fixes ITL-1042, Fixes ITL-1052)
+
+**Cause.** `FunctionPodStream._ensure_iterator` stamps when the stream OPENS its input. The
+upstream's `iter_data` is a lazy generator, so in `s2 = g.pod(f.pod(src))` the upstream opens
+(and stamps) only after `s2` has stamped: `s2` ends its first full read older than `s1`, and its
+second read clears and recomputes (6 calls, then 9).
+
+**Rule (same as ITL-1042).** A stream or node stamps its modified time when its results are
+complete (its input read to the end), before it signals the end downstream; never at the start
+of a read. `clear_cache()` stamps (a reset is a change). A failed or partial read does not stamp.
+
+**Mid-read reset (coordinator: must not become silent).** A reset of an upstream in the middle
+of a downstream's read must leave the downstream stale. A modified-time snapshot alone cannot
+tell a reset from the upstream's own completion stamp (which lands during the downstream's
+read), so:
+- `FunctionPodStream` keeps `_reset_generation`, bumped by `clear_cache()`.
+- When a read takes its first item from the input (after the upstream's own stale refresh), it
+  snapshots each upstream: the generation for a `FunctionPodStream` upstream, the modified time
+  for any other. Kept across partial reads; cleared by `clear_cache()`.
+- At the end of the input it stamps if the snapshot still holds and no upstream modified time is
+  `None`; otherwise it sets its own modified time to `None` (stale; downstream streams then see a
+  `None` upstream and are stale too, so it propagates).
+- Concurrent path: same, at the end of the materialised compute.
+
+**Tests.** `tests/test_core/function_pod/test_pod_stream_staleness.py` (28 cases; all fail
+before the fix on the staleness assertion): chains of 2 and 3, sequential and concurrent, second
+read by `iter_data` / `as_table` / `head` calls nothing; first read by `as_table`; through a
+`Join`; cached chain reads no store; `clear_cache()` upstream recomputes (read by `iter_data`:
+`as_table` on a stale pod stream is ITL-1045); upstream reset mid-read leaves the reader stale
+and the next read is of one state.
+
+**Waiting for** #348 (rewrites `_iter_data_sequential` / `_iter_data_concurrent`) to merge; then
+merge origin/main and implement.
