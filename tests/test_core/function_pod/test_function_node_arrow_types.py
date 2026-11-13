@@ -188,7 +188,9 @@ def test_as_table_all_info_matches_the_pod_outside_a_job(name: str) -> None:
     assert inside.schema == outside.schema
     # A source-info token names the result record, which each computation makes anew.
     source_info = [c for c in inside.column_names if c.startswith("_source_")]
-    assert source_info == ["_source_y"]
+    # The key ``k`` is a referential tag that falls through the pod call (ITL-1023):
+    # its data column has the source's token.
+    assert source_info == ["_source_k", "_source_y"]
     assert inside.drop(source_info).equals(outside.drop(source_info))
 
 

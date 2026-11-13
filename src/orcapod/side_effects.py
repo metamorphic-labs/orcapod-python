@@ -217,6 +217,36 @@ class SideEffectPodStream(StreamBase):
 # ---------------------------------------------------------------------------
 
 
+def _side_effect_arguments(
+    fn: Callable[..., Any], tag: TagProtocol, data: DataProtocol
+) -> dict[str, Any]:
+    """Return a row's data as keyword arguments for a side-effect function.
+
+    The column of a referential tag (a name that is a tag and a data column,
+    ITL-1023) is passed only to a function that names it or takes ``**kwargs``: it
+    is a tag first, and a function written for the row's data does not expect it.
+    Every other data column is passed as before.
+
+    Args:
+        fn: The side-effect function.
+        tag: The row's tag.
+        data: The row's data.
+
+    Returns:
+        The keyword arguments.
+    """
+    import inspect
+
+    values = data.as_dict()
+    references = set(tag.keys()) & set(values)
+    if not references:
+        return values
+    parameters = inspect.signature(fn).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return values
+    return {k: v for k, v in values.items() if k not in references or k in parameters}
+
+
 def _execute_side_effect_row(
     *,
     fn: Callable,
@@ -300,7 +330,7 @@ def _execute_side_effect_row(
     )
 
     # 5. Call user function.
-    data_dict = data.as_dict()
+    data_dict = _side_effect_arguments(fn, tag, data)
     if ctx_arg_name in data_dict:
         raise ValueError(
             f"ctx_arg_name {ctx_arg_name!r} collides with a data column of the same name. "

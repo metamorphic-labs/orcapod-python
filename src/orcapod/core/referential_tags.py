@@ -225,10 +225,11 @@ def merged_source_tokens(
     """Return the source info of a data column merged by a join, keeping both inputs'.
 
     Section 9.4: a join that merges the data columns of two referential tags keeps the
-    provenance of both. The merged column's source info is the list of both inputs'
-    tokens, left (canonically first) then right. A token that is already a list (an
-    earlier join, or a ``GroupBy`` key, whose source info lists its members) gives its
-    elements, so the result is always a flat list of tokens.
+    provenance of both. The merged column's source info is the sorted list of both
+    inputs' tokens (``None`` last), as ``MergeJoin`` sorts its merged values, so it does
+    not depend on the order of the inputs. A token that is already a list (an earlier
+    join, or a ``GroupBy`` key, whose source info lists its members) gives its elements,
+    so the result is always a flat list of tokens.
 
     Args:
         left: The left input's source-info value: a token, ``None`` or a list of them.
@@ -250,4 +251,4 @@ def merged_source_tokens(
                     "Join of nested source info of a referential tag", "ITL-1016"
                 )
             merged.append(item)
-    return merged
+    return sorted(merged, key=lambda token: (token is None, token or ""))

@@ -93,9 +93,9 @@ def test_join_referential_with_referential_merges_one_data_column() -> None:
     assert [{k: r[k] for k in ("x", "a", "b")} for r in table.to_pylist()] == [
         {"x": 1, "a": 0.5, "b": 10}
     ]
-    # Section 9.4: both inputs' provenance is kept, in canonical input order.
+    # Section 9.4: both inputs' provenance is kept, as a sorted list.
     (tokens,) = table.column("_source_x").to_pylist()
-    assert sorted(tokens) == ["A::row_0::x", "B::row_0::x"]
+    assert tokens == ["A::row_0::x", "B::row_0::x"]
 
 
 def test_join_is_commutative_with_references() -> None:

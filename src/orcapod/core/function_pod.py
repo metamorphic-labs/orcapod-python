@@ -13,6 +13,7 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
+from orcapod.core.datagrams import Data
 from orcapod.core.referential_tags import (
     materialization_diagnostic_off,
     stream_references,
@@ -714,7 +715,13 @@ class _FunctionPodBase(TraceableBase):
         # Referential tags of the input fall through the pod (developer decision,
         # November 12, 2026, ITL-1023): their columns are kept for that, and the
         # pod is the fall-through variant of this one.
-        references = stream_references(input_stream)
+        # A wrapper pod (a ``CachedFunctionPod`` used directly) keeps its plain
+        # behaviour: its ``process`` is its inner pod's.
+        references = (
+            ()
+            if isinstance(self, WrappedFunctionPod)
+            else stream_references(input_stream)
+        )
         dropped = [
             name
             for name in data_schema
@@ -1173,13 +1180,20 @@ class FunctionPodStream(StreamBase):
         tag_tables: list[pa.Table] = []
         all_data = []
         data_schema = None
+        # A referential tag that falls through the pod is one column: it is laid
+        # out from the tags, with its exact Arrow type, never converted from its
+        # Python value (ITL-1023).
+        shared: set[str] = set()
         for tag, data in pairs:
             if data_schema is None:
+                shared = set(tag.keys()) & set(data.keys())
                 data_schema = data.arrow_schema(all_info=True)
+                data_schema = pa.schema(f for f in data_schema if f.name not in shared)
             # Tags are passed through untouched: each row's own Arrow table keeps
             # the input's tag types, a logical type included (ITL-928).
             tag_tables.append(tag.as_table(columns={"system_tags": True}))
-            all_data.append(data.as_dict(all_info=True))
+            row = data.as_dict(all_info=True)
+            all_data.append({k: v for k, v in row.items() if k not in shared})
 
         # TODO: re-verify the implemetation of this conversion
         converter = self.data_context.type_converter
@@ -1198,14 +1212,6 @@ class FunctionPodStream(StreamBase):
         all_data_as_tables: pa.Table = pa.Table.from_pylist(
             struct_data, schema=data_schema
         )
-        # A referential tag is one column: laid out once, among the tags.
-        shared = [
-            c
-            for c in all_data_as_tables.column_names
-            if c in all_tags_as_tables.column_names
-        ]
-        if shared:
-            all_data_as_tables = all_data_as_tables.drop_columns(shared)
         return arrow_utils.hstack_tables(all_tags_as_tables, all_data_as_tables)
 
     def as_table(
@@ -1650,14 +1656,12 @@ class ReferenceFallThroughPod(WrappedFunctionPod):
         """
         if output is None:
             return None
-        fields = input_data.arrow_schema()
-        source_info = input_data.source_info()
-        values = {name: input_data[name] for name in self._references}
-        combined = output.with_columns(
-            column_types={name: fields.field(name) for name in self._references},
-            **values,
-        ).with_source_info(**{name: source_info.get(name) for name in self._references})
-        return combined.select(*self._references, *output.keys())
+        if not isinstance(output, Data):
+            raise TypeError(
+                f"A fall-through pod needs its function's output as Data, got "
+                f"{type(output).__name__}"
+            )
+        return output.with_columns_of(input_data, self._references)
 
     def function_input_schema(self, input_schema: Schema) -> Schema:
         """The part of an input data schema the function takes (see ``function_input``)."""

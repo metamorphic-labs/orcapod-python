@@ -686,8 +686,18 @@ class Datagram(ContentIdentifiableBase):
                 raise ValueError(f"Columns not found: {missing}")
             new_d = self.copy(include_cache=False)
             new_d._data_table = self._data_table.select(list(column_names))
-            new_d._data_dict = None
-            new_d._data_python_schema = None
+            # The Python values held beside the table (a function's own objects)
+            # are kept for the selected columns, never rebuilt from Arrow.
+            new_d._data_dict = (
+                {k: self._data_dict[k] for k in column_names}
+                if self._data_dict is not None
+                else None
+            )
+            new_d._data_python_schema = (
+                Schema({k: self._data_python_schema[k] for k in column_names})
+                if self._data_python_schema is not None and self._data_dict is not None
+                else None
+            )
             new_d._data_arrow_schema = None
             return new_d
         else:
@@ -734,8 +744,22 @@ class Datagram(ContentIdentifiableBase):
             new_d = self.copy(include_cache=False)
             if existing:
                 new_d._data_table = self._data_table.drop_columns(existing)
-            new_d._data_dict = None
-            new_d._data_python_schema = None
+            # The Python values held beside the table are kept for the remaining
+            # columns, never rebuilt from Arrow.
+            if self._data_dict is not None and self._data_python_schema is not None:
+                new_d._data_dict = {
+                    k: v for k, v in self._data_dict.items() if k not in existing
+                }
+                new_d._data_python_schema = Schema(
+                    {
+                        k: v
+                        for k, v in self._data_python_schema.items()
+                        if k not in existing
+                    }
+                )
+            else:
+                new_d._data_dict = None
+                new_d._data_python_schema = None
             new_d._data_arrow_schema = None
             return new_d
         else:

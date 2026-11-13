@@ -199,3 +199,35 @@ def test_function_not_reading_the_reference_keeps_its_result_identity() -> None:
         plain_job.nodes["half"].pipeline_hash()
         != referential_job.nodes["half"].pipeline_hash()
     )
+
+
+def test_a_side_effect_function_gets_a_referenced_column_only_when_it_names_it() -> (
+    None
+):
+    """After a pod call the keys fall through; a sink written for the data still works."""
+    from orcapod.side_effects import side_effect_pod
+
+    seen: list[dict[str, object]] = []
+
+    @op.function_pod(output_keys=["half"])
+    def half(amp: float) -> float:
+        return amp / 2
+
+    @side_effect_pod
+    def record(half: float, ctx: object) -> None:
+        seen.append({"half": half})
+
+    @side_effect_pod
+    def record_with_key(half: float, t: int, ctx: object) -> None:
+        seen.append({"half": half, "t": t})
+
+    out = half.pod(_source())
+    assert stream_references(out) == ("t",)
+    list(record(out).iter_data())
+    list(record_with_key(out).iter_data())
+    assert sorted(seen, key=lambda r: (len(r), r["half"])) == [
+        {"half": 0.125},
+        {"half": 0.25},
+        {"half": 0.125, "t": 20},
+        {"half": 0.25, "t": 10},
+    ]
