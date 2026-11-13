@@ -405,3 +405,79 @@ def test_a_source_proxy_keeps_the_nullability_of_the_source_it_stands_for() -> N
     proxy = resolve_source_from_config(config, fallback_to_proxy=True)
     assert proxy.output_schema() == source.output_schema()
     assert proxy.pipeline_hash() == source.pipeline_hash()
+
+
+# ---------------------------------------------------------------------------
+# A real format 0.1.0 file (tests/test_pipeline/fixtures, written by ITL-1026)
+# ---------------------------------------------------------------------------
+
+FORMAT_0_1_0 = pathlib.Path(__file__).parents[1] / "fixtures" / "job_format_0_1_0.json"
+
+
+def _add_values(value: int, score: int) -> int:
+    """The fixture job's function."""
+    return value + score
+
+
+def _store_the_fixture_join(store: ArrowDatabaseProtocol) -> Any:
+    """Run the fixture's job with today's code, its join stored; the run's join node.
+
+    The fixture was saved before running, with in-memory sources, so no store holds
+    its rows: this run stores them at the path the file's join node names.
+    """
+    from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.function_pod import FunctionPod
+
+    def source(column: str, values: list[int]) -> ArrowTableSource:
+        """One of the fixture's two sources."""
+        table = pa.table(
+            {
+                "key": pa.array(["a", "b"], type=pa.large_string()),
+                column: pa.array(values, type=pa.int64()),
+            }
+        )
+        return ArrowTableSource(
+            table,
+            tag_columns=["key"],
+            infer_nullable=True,
+            source_id=f"fixture_{column}",
+        )
+
+    name = json.loads(FORMAT_0_1_0.read_text())["pipeline"]["pipeline"]["name"]
+    job = PipelineJob(name=tuple(name), store=store)
+    with job:
+        joined = Join()(source("value", [10, 20]), source("score", [100, 200]))
+        pod = FunctionPod(
+            data_function=PythonDataFunction(_add_values, output_keys="total")
+        )  # pyright: ignore[reportArgumentType] -- as in the fixture's generator
+        _ = pod(joined)
+    run_join = job.nodes["Join"]
+    # OperatorNode.attach_databases is the public way to turn on LOG / REPLAY mode.
+    run_join.attach_databases(
+        pipeline_database=store.at(*name), cache_mode=CacheMode.LOG
+    )
+    _ = job.run()
+    return run_join
+
+
+def test_a_format_0_1_0_file_finds_its_join_table_and_never_shows_its_rows_as_none() -> (
+    None
+):
+    """The real 0.1.0 file: the run's path, ``head()`` says why, ``as_table()`` raises."""
+    store = InMemoryArrowDatabase()
+    run_join = _store_the_fixture_join(store)
+    loaded = PipelineJob.load(str(FORMAT_0_1_0), store=store)
+    node = loaded.nodes["Join"]
+    name = json.loads(FORMAT_0_1_0.read_text())["pipeline"]["pipeline"]["name"]
+    node.attach_databases(
+        pipeline_database=store.at(*name), cache_mode=CacheMode.REPLAY
+    )
+    assert node.pipeline_hash() == run_join.pipeline_hash()
+    assert node.node_identity_path == run_join.node_identity_path
+    head = node.head()
+    assert head.status is HeadStatus.UNAVAILABLE
+    assert "ITL-1048" in head.header()
+    with pytest.raises(
+        RuntimeError, match=r"'Join': its cache table .* the job file does not record"
+    ):
+        _ = node.as_table()
