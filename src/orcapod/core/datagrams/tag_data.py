@@ -367,10 +367,13 @@ class Data(Datagram):
         if self._source_info_table is None:
             import pyarrow as _pa
 
-            # Only the source info of the data columns this Data holds: a column it
-            # no longer has has no source info in any view (ITL-1040).
-            data_keys = set(super().keys())
-            current = {k: v for k, v in self._source_info.items() if k in data_keys}
+            # Only the source info of the data columns this Data holds, in the order of
+            # those columns, as every other view gives it (ITL-1040).
+            current = {
+                k: self._source_info[k]
+                for k in super().keys()
+                if k in self._source_info
+            }
             if current:
                 prefixed = {
                     f"{constants.SOURCE_PREFIX}{k}": v for k, v in current.items()

@@ -125,3 +125,20 @@ def test_tag_drop_keeps_the_system_tags_which_belong_to_the_row() -> None:
     table = dropped.as_table(columns={"system_tags": True})
     assert table.column_names == ["a", system_tag]
     assert dropped.system_tags() == {system_tag: "src"}
+
+
+@pytest.mark.parametrize("operation", ["construct", "drop", "select"])
+def test_source_info_given_out_of_column_order_follows_the_columns(
+    operation: str,
+) -> None:
+    """Source info given in another order than the columns is shown in column order."""
+    d = Data(
+        {"x": 1, "s": "p", "m": 2.5},
+        source_info={"m": "src::row_0::m", "s": "src::row_0::s", "x": "src::row_0::x"},
+    )
+    if operation == "drop":
+        d = d.drop("s")
+    elif operation == "select":
+        d = d.select("x", "m")
+    expected = [c for c in ("x", "s", "m") if c in d.keys()]
+    assert_source_follows(d, expected)
