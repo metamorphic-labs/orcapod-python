@@ -172,8 +172,8 @@ rows, can be missing from it even when `columns` or `all_info` asks for them.
 
 A stream or node records that its results are current when it has read its input to the end.
 So after `job.run()` on either orchestrator, sync or async, every node shows the rows of that
-run: `head()`, `as_table()` and `iter_data()` all serve them from memory, without reading the
-store. Likewise, once a chain of streams such as `g.pod(f.pod(source))` has been read to the
+run: `head()`, `as_table()` and `iter_data()` serve them from memory, without reading the
+store (a function node whose run left no rows in memory reads its stored rows). Likewise, once a chain of streams such as `g.pod(f.pod(source))` has been read to the
 end, reading it again computes nothing. A change upstream (`clear_cache()`) makes every stream
 after it out of date, and its next read computes it again.
 

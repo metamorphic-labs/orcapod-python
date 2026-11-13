@@ -389,3 +389,49 @@ def test_an_upstream_reset_during_a_read_through_an_operator(executor: str) -> N
     for key, y in ys.items():
         assert zs[key] == 2 * y, key
     assert _stale([first, joined, last]) == [False, False, False]
+
+
+RESETS: list[Callable[[], None]] = []
+
+
+def double_and_reset(y: int) -> int:
+    """Return ``2 * y``; the first call runs the pending reset, if any."""
+    CALLS["double_and_reset"] += 1
+    if RESETS:
+        RESETS.pop()()
+    return 2 * y
+
+
+@pytest.mark.parametrize("executor", ["sequential", "concurrent"])
+def test_an_upstream_reset_while_computing_leaves_the_reader_stale(
+    executor: str,
+) -> None:
+    """A reset of the input made while the stream computes is never reported as current.
+
+    On the concurrent path every input row is read before any is computed, so the reset
+    comes after the input delivered its rows and before the results are complete.
+    """
+    EPOCH[0] = 0
+    first = _stamped_stream(executor, None)
+    last = function_pod(
+        output_keys="z",
+        executor=_ConcurrentExecutor() if executor == "concurrent" else None,
+    )(double_and_reset).pod.process(first)
+
+    def reset_first() -> None:
+        """Move to a new epoch and reset the first stream."""
+        EPOCH[0] = 1
+        clear_cache = getattr(first, "clear_cache")
+        clear_cache()
+
+    RESETS.append(reset_first)
+    _ = list(last.iter_data())
+    assert RESETS == []
+    assert getattr(last, "is_stale")
+    zs = _values(last, "z")
+    ys = _values(first, "y")
+    assert sorted(zs) == sorted(ys) == sorted(IDS)
+    assert {y // 1000 for y in ys.values()} == {1}
+    for key, y in ys.items():
+        assert zs[key] == 2 * y, key
+    assert _stale([first, last]) == [False, False]

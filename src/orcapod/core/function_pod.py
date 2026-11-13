@@ -1225,6 +1225,9 @@ class FunctionPodStream(StreamBase):
             # and reads them anew (an upstream stream yields its cached rows).
             self._input_raised()
             raise
+        # The input has delivered its rows (after its own refresh, if it had one): note
+        # its state now, before computing, so a reset during the computation is seen.
+        self._note_input_state()
         # Submit uncached data concurrently via async_process_data. Every row that
         # returns is cached; a row whose function raised stays in the input, so the
         # next read computes it again, and the first error is raised after the others
