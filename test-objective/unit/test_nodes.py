@@ -41,7 +41,9 @@ def _make_stream(n: int = 3) -> ArrowTableSource:
             "x": pa.array(list(range(n)), type=pa.int64()),
         }
     )
-    return ArrowTableSource(table, tag_columns=["id"], infer_nullable=True)
+    return ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+    )
 
 
 def _make_joinable_streams() -> tuple[ArrowTableSource, ArrowTableSource]:
@@ -58,8 +60,12 @@ def _make_joinable_streams() -> tuple[ArrowTableSource, ArrowTableSource]:
         }
     )
     return (
-        ArrowTableSource(left, tag_columns=["id"], infer_nullable=True),
-        ArrowTableSource(right, tag_columns=["id"], infer_nullable=True),
+        ArrowTableSource(
+            left, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+        ),
+        ArrowTableSource(
+            right, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
+        ),
     )
 
 
