@@ -185,3 +185,18 @@ def test_the_job_node_table_agrees_for_every_config(kwargs: dict[str, Any]) -> N
     table = job.nodes["node"].as_table(**kwargs)
     expected = _source().as_table(**kwargs)
     assert sorted(table.column_names) == sorted(expected.column_names)
+
+
+def test_the_declared_schema_is_asked_for_only_when_there_are_no_rows() -> None:
+    """Asking a source for its schema can poll it: rows present, it is never asked."""
+    asked: list[bool] = []
+    stream: Any = SideEffectPod(deliver)(_source())
+    original = stream.output_schema
+
+    def counting(**kwargs: Any) -> Any:
+        asked.append(True)
+        return original(**kwargs)
+
+    stream.output_schema = counting  # the spy
+    stream.as_table(all_info=True)
+    assert asked == []

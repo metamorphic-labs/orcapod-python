@@ -199,7 +199,7 @@ class SideEffectPodStream(StreamBase):
             self.iter_data(),
             column_config,
             tag_keys=self.keys()[0],
-            declared_schema=self.output_schema(all_info=True),
+            declared_schema=lambda: self.output_schema(all_info=True),
             type_converter=self._pod.data_context.type_converter,
         )
 
@@ -209,7 +209,7 @@ def _table_of_rows(
     column_config: ColumnConfig,
     *,
     tag_keys: tuple[str, ...],
-    declared_schema: tuple[Schema, Schema],
+    declared_schema: Callable[[], tuple[Schema, Schema]],
     type_converter: Any,
 ) -> pa.Table:
     """Return the delivered rows as one table with the column groups of ``column_config``.
@@ -224,8 +224,8 @@ def _table_of_rows(
         rows: The (tag, data) pairs to tabulate.
         column_config: The column groups to keep, and whether to sort by tags.
         tag_keys: Names of the regular tag columns.
-        declared_schema: The declared (tag, data) schemas with every group, for the table
-            of no rows.
+        declared_schema: Returns the declared (tag, data) schemas with every group. Called
+            only for the table of no rows: asking a source for its schema can poll it.
         type_converter: The data context's type converter, to type the table of no rows.
     """
     tag_tables: list[pa.Table] = []
@@ -243,7 +243,7 @@ def _table_of_rows(
         )
     else:
         # No rows: the declared columns, with the declared field nullability.
-        tag_schema, data_schema = declared_schema
+        tag_schema, data_schema = declared_schema()
         full = arrow_utils.make_empty_table(
             {**tag_schema, **data_schema}, type_converter
         )
@@ -846,7 +846,7 @@ class SideEffectNode(StreamBase):
             self.iter_data(),
             column_config,
             tag_keys=self.keys()[0],
-            declared_schema=self.output_schema(all_info=True),
+            declared_schema=lambda: self.output_schema(all_info=True),
             type_converter=self._pod.data_context.type_converter,
         )
 
