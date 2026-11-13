@@ -375,6 +375,15 @@ class JSONDataContextRegistry:
                 # extension name; its logical type and its value handler both take
                 # it as ``{"_ref": "hash_ignore:<extension name>"}`` (ITL-981).
                 for name, ignore in registration.get("hash_ignore", {}).items():
+                    # A JSON object or string would iterate as names; only a list
+                    # of names is a list of names.
+                    if not isinstance(ignore, list) or not all(
+                        isinstance(item, str) for item in ignore
+                    ):
+                        raise ValueError(
+                            f"hash_ignore[{name!r}] must be a list of property "
+                            f"names, got {ignore!r}"
+                        )
                     ref_lut[f"{self._HASH_IGNORE_REF_PREFIX}{name}"] = list(ignore)
                 ref_lut[self._LOGICAL_TYPE_REGISTRY_REF] = parse_objectspec(
                     registration["logical_type_registry"], ref_lut=ref_lut

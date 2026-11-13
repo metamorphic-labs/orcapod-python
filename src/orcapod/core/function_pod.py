@@ -655,12 +655,65 @@ class _FunctionPodBase(TraceableBase):
         ...
 
     def __call__(
-        self, *streams: StreamProtocol, label: str | None = None
+        self,
+        *streams: StreamProtocol,
+        label: str | None = None,
+        strict: bool = False,
     ) -> StreamProtocol:
-        """Convenience alias for ``process``."""
+        """Apply the pod, dropping the data columns its function does not take.
+
+        This is the convenient form of ``process``. The inputs are joined as
+        ``process`` joins them. When the joined stream carries data columns that
+        are not parameters of the function, one ``SelectDataColumns`` keeping the
+        parameter columns is applied to it, and the result is handed to
+        ``process``. The select is an ordinary operator step: the pipeline is the
+        one in which the caller wrote that select by hand. When nothing would be
+        dropped no step is added, and the call is ``process``. Tag columns are
+        never dropped.
+
+        Args:
+            *streams: Input streams to process.
+            label: Optional label for tracking.
+            strict: If ``True``, an extra data column is an error, as in
+                ``process``. It decides only that; it is part of no identity.
+
+        Returns:
+            The resulting output stream.
+
+        Raises:
+            ValueError: If a parameter without a default has no column, a column's
+                type is incompatible with its parameter, or (``strict=True``) the
+                input carries a data column that is not a parameter.
+        """
         logger.debug(f"Invoking pod {self} on streams through __call__: {streams}")
-        # perform input stream validation
-        return self.process(*streams, label=label)
+        # A function that accepts arbitrary keywords takes every column, so
+        # nothing is unused and no select is added (developer, November 12, 2026,
+        # ITL-807). No data function kind accepts them today.
+        if strict or self.data_function.accepts_arbitrary_keywords:
+            return self.process(*streams, label=label)
+
+        input_stream = self.handle_input_streams(*streams)
+        _, data_schema = input_stream.output_schema()
+        parameters = self.input_data_schema
+        dropped = [name for name in data_schema if name not in parameters]
+        kept = [name for name in data_schema if name in parameters]
+        # With no parameter column left there is nothing to select: a stream has
+        # at least one data column. ``process`` then raises its own error.
+        if dropped and kept:
+            # A missing column or a type mismatch is raised before a step is added.
+            self._validate_input_schema(
+                Schema({name: data_schema[name] for name in kept})
+            )
+            from orcapod.core.operators import SelectDataColumns
+
+            logger.info(
+                "Function pod %r: dropped data columns %s, which are not "
+                "parameters of the function",
+                self.label,
+                dropped,
+            )
+            input_stream = SelectDataColumns(columns=kept)(input_stream)
+        return self.process(input_stream, label=label)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         return self.multi_stream_handler().argument_symmetry(streams)
@@ -781,12 +834,27 @@ class FunctionPod(_FunctionPodBase):
         return output_stream
 
     def __call__(
-        self, *streams: StreamProtocol, label: str | None = None
+        self,
+        *streams: StreamProtocol,
+        label: str | None = None,
+        strict: bool = False,
     ) -> FunctionPodStream:
-        """Convenience alias for ``process``."""
-        logger.debug(f"Invoking pod {self} on streams through __call__: {streams}")
-        # perform input stream validation
-        return self.process(*streams, label=label)
+        """Apply the pod, dropping the data columns its function does not take.
+
+        See ``_FunctionPodBase.__call__``; this override only narrows the return
+        type to the ``FunctionPodStream`` that ``process`` returns.
+
+        Args:
+            *streams: Input streams to process.
+            label: Optional label for tracking.
+            strict: If ``True``, an extra data column is an error, as in ``process``.
+
+        Returns:
+            A ``FunctionPodStream`` wrapping the computation.
+        """
+        return cast(
+            FunctionPodStream, super().__call__(*streams, label=label, strict=strict)
+        )
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this function pod to a JSON-compatible config dict.
@@ -1028,6 +1096,44 @@ class FunctionPodStream(StreamBase):
             if data is not None:
                 yield tag, data
 
+    def _table_from_pairs(
+        self, pairs: list[tuple[TagProtocol, DataProtocol]]
+    ) -> pa.Table:
+        """Return the output rows ``pairs`` as one table with every column group."""
+        tag_tables: list[pa.Table] = []
+        all_data = []
+        data_schema = None
+        for tag, data in pairs:
+            if data_schema is None:
+                data_schema = data.arrow_schema(all_info=True)
+            # Tags are passed through untouched: each row's own Arrow table keeps
+            # the input's tag types, a logical type included (ITL-928).
+            tag_tables.append(tag.as_table(columns={"system_tags": True}))
+            all_data.append(data.as_dict(all_info=True))
+
+        # TODO: re-verify the implemetation of this conversion
+        converter = self.data_context.type_converter
+
+        # The data columns have declared types: convert each value as its column's
+        # type, never as the type the value happens to have. A subclass instance
+        # returned for a base-class column is then refused instead of being stored
+        # as the base without its own fields (ITL-972). Only the remaining columns
+        # (meta, source info) are typed from their values.
+        python_schema = dict(infer_python_schema_from_pylist_data(all_data))
+        python_schema.update(self.output_schema()[1])
+        struct_data = converter.python_dicts_to_struct_dicts(
+            all_data, python_schema=python_schema
+        )
+        if tag_tables:
+            all_tags_as_tables = arrow_utils.concat_tables_by_name(tag_tables)
+        else:
+            # An empty stream has no row to take a tag table from.
+            all_tags_as_tables = pa.Table.from_pylist([])
+        all_data_as_tables: pa.Table = pa.Table.from_pylist(
+            struct_data, schema=data_schema
+        )
+        return arrow_utils.hstack_tables(all_tags_as_tables, all_data_as_tables)
+
     def as_table(
         self,
         *,
@@ -1035,44 +1141,7 @@ class FunctionPodStream(StreamBase):
         all_info: bool = False,
     ) -> pa.Table:
         if self._cached_output_table is None:
-            all_tags = []
-            all_data = []
-            tag_schema, data_schema = None, None
-            for tag, data in self.iter_data():
-                if tag_schema is None:
-                    tag_schema = tag.arrow_schema(all_info=True)
-                if data_schema is None:
-                    data_schema = data.arrow_schema(all_info=True)
-                # TODO: make use of arrow_compat dict
-                all_tags.append(tag.as_dict(all_info=True))
-                all_data.append(data.as_dict(all_info=True))
-
-            # TODO: re-verify the implemetation of this conversion
-            converter = self.data_context.type_converter
-
-            # The data columns have declared types: convert each value as its column's
-            # type, never as the type the value happens to have. A subclass instance
-            # returned for a base-class column is then refused instead of being stored
-            # as the base without its own fields (ITL-972). Only the remaining columns
-            # (meta, source info) are typed from their values.
-            python_schema = dict(infer_python_schema_from_pylist_data(all_data))
-            python_schema.update(self.output_schema()[1])
-            struct_data = converter.python_dicts_to_struct_dicts(
-                all_data, python_schema=python_schema
-            )
-            all_tags_as_tables: pa.Table = pa.Table.from_pylist(
-                all_tags, schema=tag_schema
-            )
-            # drop context key column from tags table (guard: column absent on empty stream)
-            if constants.CONTEXT_KEY in all_tags_as_tables.column_names:
-                all_tags_as_tables = all_tags_as_tables.drop([constants.CONTEXT_KEY])
-            all_data_as_tables: pa.Table = pa.Table.from_pylist(
-                struct_data, schema=data_schema
-            )
-
-            self._cached_output_table = arrow_utils.hstack_tables(
-                all_tags_as_tables, all_data_as_tables
-            )
+            self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
         assert self._cached_output_table is not None, (
             "_cached_output_table should not be None here."
         )

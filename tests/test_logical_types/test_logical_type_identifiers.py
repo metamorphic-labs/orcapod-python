@@ -60,7 +60,11 @@ BUILTINS_WITH_EMPTY_LEGACY: list[tuple[Any, str]] = [
     (op.File, "orcapod.file"),
     (op.Directory, "orcapod.directory"),
 ]
-ALL_BUILTINS = [*BUILTINS_WITH_EMPTY_LEGACY, (np.ndarray, "orcapod.ndarray")]
+ALL_BUILTINS = [*BUILTINS_WITH_EMPTY_LEGACY, (np.ndarray, "orcapod.numpy.ndarray")]
+
+# A library value type writes its ignore list beside the version (ITL-981).
+BUILTIN_METADATA = {"orcapod.numpy.ndarray": b'{"ignore":[],"version":1}'}
+
 # Library value types whose identifier carries an ignore list (ITL-981). pandas values
 # were stored under ``pandas.dataframe`` / ``pandas.series`` before v0.3; the current
 # names never carried empty metadata (ITL-897).
@@ -159,10 +163,10 @@ def _stored_column(
 
 @pytest.mark.parametrize(("python_type", "name"), ALL_BUILTINS)
 def test_builtin_type_writes_version_1(python_type: Any, name: str) -> None:
-    """Each built-in extension type has its expected name and writes ``VERSION_1``."""
+    """Each built-in extension type has its expected name and writes version 1."""
     arrow_type = _extension_type(python_type)
     assert arrow_type.extension_name == name
-    assert arrow_type.__arrow_ext_serialize__() == VERSION_1
+    assert arrow_type.__arrow_ext_serialize__() == BUILTIN_METADATA.get(name, VERSION_1)
 
 
 @pytest.mark.parametrize(("python_type", "name"), ALL_BUILTINS)
@@ -170,12 +174,12 @@ def test_builtin_identifier_is_declared_by_the_extension_type(
     python_type: Any, name: str
 ) -> None:
     """``logical_type_identifier`` of a built-in type is its extension name with
-    ``VERSION_1``.
+    its version-1 metadata.
     """
     logical_type = _converter().get_logical_type(python_type)
     assert logical_type is not None
     assert logical_type_identifier(logical_type) == LogicalTypeIdentifier(
-        name, VERSION_1
+        name, BUILTIN_METADATA.get(name, VERSION_1)
     )
 
 
@@ -477,11 +481,11 @@ def test_builtin_data_without_metadata_is_read_as_version_1(
 
 
 def test_array_without_metadata_is_refused() -> None:
-    """The array format never wrote empty metadata, so it does not read it."""
+    """The array type never wrote empty metadata, so it does not read it."""
     converter = _converter()
     array_type = _extension_type(np.ndarray)
     table = _stored_column(
-        b"orcapod.ndarray", b"", pa.array([], array_type.storage_type)
+        b"orcapod.numpy.ndarray", b"", pa.array([], array_type.storage_type)
     )
     with pytest.raises(LogicalTypeIdentifierError):
         converter.load_logical_types(table)

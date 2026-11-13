@@ -17,6 +17,7 @@ import orcapod.contexts as contexts_package
 from orcapod.contexts.core import ContextValidationError, DataContext
 from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.errors import TypeIdentityError
+from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.ignore_list import (
     checked_ignore,
@@ -35,7 +36,7 @@ STRICT = b'{"ignore":[],"version":1}'
 LENIENT = b'{"ignore":["label"],"version":1}'
 
 
-def _context(tmp_path: Path, ignore: list[str]) -> DataContext:
+def _context(tmp_path: Path, ignore: Any) -> DataContext:
     """Build a data context that registers the toy type with ``ignore``."""
     shipped = Path(contexts_package.__file__).parent / "logical_types.json"
     registration = json.loads(shipped.read_text())
@@ -53,7 +54,8 @@ def _context(tmp_path: Path, ignore: list[str]) -> DataContext:
             },
         ]
     )
-    custom = tmp_path / f"logical_types_{'_'.join(ignore) or 'strict'}.json"
+    name = "_".join(str(item) for item in ignore) if isinstance(ignore, list) else ""
+    custom = tmp_path / f"logical_types_{name or 'other'}.json"
     custom.write_text(json.dumps(registration))
     return JSONDataContextRegistry(logical_types_file=custom).get_context()
 
@@ -119,6 +121,7 @@ def test_parse_returns_what_was_written() -> None:
         b'{"ignore":[],"version":"1"}',
         b'{"ignore":[],"version":0}',
         b"not json",
+        b'{"ignore":' + b"[" * 100000 + b"]" * 100000 + b',"version":1}',
         b"\xff\xfe",
         b"[]",
     ],
@@ -171,6 +174,12 @@ def test_two_lists_are_two_types(tmp_path: Path) -> None:
             [_table(strict, Labelled(1, "a")), _table(lenient, Labelled(1, "a"))]
         )
     # The type hash and the schema hash take the identifier, which holds the list.
+    strict_hasher, lenient_hasher = strict.arrow_hasher, lenient.arrow_hasher
+    assert isinstance(strict_hasher, StarfixArrowHasher)
+    assert isinstance(lenient_hasher, StarfixArrowHasher)
+    assert strict_hasher.hash_schema(
+        pa.schema([("x", strict_type)])
+    ) != lenient_hasher.hash_schema(pa.schema([("x", lenient_type)]))
     assert strict.semantic_hasher.hash_object(
         Labelled
     ) != lenient.semantic_hasher.hash_object(Labelled)
@@ -214,6 +223,13 @@ def test_an_unknown_option_name_fails_the_context_build(tmp_path: Path) -> None:
     """A context that lists a name the type does not have cannot be built."""
     with pytest.raises(ContextValidationError, match="'colour'.*allowed names: label"):
         _context(tmp_path, ["colour"])
+
+
+@pytest.mark.parametrize("value", [{"label": False}, "label", [1], None])
+def test_hash_ignore_must_be_a_list_of_names(tmp_path: Path, value: Any) -> None:
+    """Only a JSON list of names is an ignore list; an object or a string is refused."""
+    with pytest.raises(ContextValidationError, match="list of property names"):
+        _context(tmp_path, value)
 
 
 # --- Arrow and stored columns ----------------------------------------------------------
@@ -293,3 +309,38 @@ def test_a_column_stored_under_another_list_is_refused_naming_both(
         _converter(lenient).apply_logical_types(plain)["x"].type
         == stored.schema.field("x").type
     )
+
+
+def test_concurrent_first_use_gives_one_type_per_list() -> None:
+    """Threads that first ask for a list at the same time all get the same Arrow type."""
+    import sys
+    import threading
+
+    from orcapod.logical_types.ignore_list import IgnoreListLogicalType
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for trial in range(30):
+
+            class Racy(IgnoreListLogicalType):
+                EXTENSION_NAME = f"orcapod.test.racy{trial}"
+                STORAGE_TYPE = pa.large_string()
+                VERSION = 1
+                OPTIONS = frozenset({"a"})
+
+            barrier = threading.Barrier(8)
+            seen: list[pa.ExtensionType] = []
+
+            def ask(logical_type: type[IgnoreListLogicalType] = Racy) -> None:
+                barrier.wait()
+                seen.append(logical_type(["a"]).get_arrow_extension_type())
+
+            threads = [threading.Thread(target=ask) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert len({id(t) for t in seen}) == 1
+    finally:
+        sys.setswitchinterval(interval)
