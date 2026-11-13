@@ -1,6 +1,6 @@
 """Name the callers of the Arrow hasher during one read of a SpiralDBTableSource (ITL-1061).
 
-    uv run python superpowers/specs/itl-1061/spiral_hash_callers.py
+uv run python superpowers/specs/itl-1061/spiral_hash_callers.py
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import rerun_counts  # noqa: E402
+import rerun_counts  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]  # a sibling script, run from this folder's path
 
 from orcapod.hashing import arrow_hashers  # noqa: E402
 from tests.test_databases import fake_pyspiral  # noqa: E402
@@ -25,7 +25,11 @@ original = arrow_hashers.StarfixArrowHasher.hash_table
 
 def counted(self, table):
     frames = traceback.extract_stack(limit=6)[:-1]
-    callers[" <- ".join(f"{Path(f.filename).name}:{f.lineno}:{f.name}" for f in frames[::-1][:3])] += 1
+    callers[
+        " <- ".join(
+            f"{Path(f.filename).name}:{f.lineno}:{f.name}" for f in frames[::-1][:3]
+        )
+    ] += 1
     return original(self, table)
 
 

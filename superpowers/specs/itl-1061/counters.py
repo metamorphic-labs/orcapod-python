@@ -70,9 +70,11 @@ def _wrap(owner: Any, name: str, metric: str | Callable[..., str]) -> None:
     else:
 
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def call_wrapper(*args, **kwargs):
             bump(metric if isinstance(metric, str) else metric(*args, **kwargs))
             return func(*args, **kwargs)
+
+        wrapper = call_wrapper
 
     setattr(owner, name, staticmethod(wrapper) if is_static else wrapper)
 
@@ -148,9 +150,9 @@ def install() -> None:
     _wrap(
         ArrowTableStream,
         "iter_data",
-        lambda self: "ats.iter.cached"
-        if self._cached_elements is not None
-        else "ats.iter.build",
+        lambda self: (
+            "ats.iter.cached" if self._cached_elements is not None else "ats.iter.build"
+        ),
     )
     _wrap(RootSource, "iter_data", "source.iter")
     _wrap(SpiralDBTableSource, "iter_data", "source.iter")
@@ -181,7 +183,9 @@ def install() -> None:
             _wrap(cls, "static_process", "op.static_process")
     _wrap(sop.StaticOutputOperatorPod, "process", "op.process")
     _wrap(sop.StaticOutputOperatorPod, "_rows_to_table", "rows_to_table")
-    _wrap(sop.StaticOutputOperatorPod, "_materialize_to_stream", "materialize_to_stream")
+    _wrap(
+        sop.StaticOutputOperatorPod, "_materialize_to_stream", "materialize_to_stream"
+    )
 
     original_hstack = arrow_utils.hstack_tables
 

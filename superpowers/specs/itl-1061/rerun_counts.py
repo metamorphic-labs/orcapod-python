@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import counters  # noqa: E402
+import counters  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]  # a sibling script, run from this folder's path
 import pyarrow as pa  # noqa: E402
 
 N_SUBJECTS = 200
@@ -95,7 +95,9 @@ def arrow_sources():
 
     sessions, experiments = tables()
     return (
-        ArrowTableSource(sessions, tag_columns=["subject_id", "session"], source_id="sessions"),
+        ArrowTableSource(
+            sessions, tag_columns=["subject_id", "session"], source_id="sessions"
+        ),
         ArrowTableSource(
             experiments,
             tag_columns=["subject_id", "session", "experiment_index"],
@@ -114,11 +116,15 @@ def spiral_sources(root: Path):
     # fragments. 1,024 rows keeps per-batch counts from swamping per-row ones.
     fake_pyspiral.scan_batch_rows = 1024
     project = fake_pyspiral.FakeSpiral().project(PROJECT)
-    s = project.create_table("default.sessions", key_schema=sessions.select(["subject_id", "session"]).schema)
+    s = project.create_table(
+        "default.sessions", key_schema=sessions.select(["subject_id", "session"]).schema
+    )
     s.write(sessions)
     e = project.create_table(
         "default.experiments",
-        key_schema=experiments.select(["subject_id", "session", "experiment_index"]).schema,
+        key_schema=experiments.select(
+            ["subject_id", "session", "experiment_index"]
+        ).schema,
     )
     e.write(experiments)
     return (
@@ -132,7 +138,9 @@ def build(sessions, experiments, pods):
     accuracy, grade = pods
     exp = experiments.drop_nulls(["correct", "total"], label="drop_nulls")
     grouped = exp.group_by(["subject_id", "session"], label="group_by")
-    mapped = grouped.map_tags({"experiment_index": "experiment_indices"}, label="map_tags")
+    mapped = grouped.map_tags(
+        {"experiment_index": "experiment_indices"}, label="map_tags"
+    )
     joined = sessions.join(mapped, label="join")
     acc = accuracy.pod(joined, label="accuracy")
     return grade.pod(acc, label="grade")
@@ -148,13 +156,13 @@ def run_counted(title: str, action) -> None:
 def mode_lazy(sources) -> None:
     """Lazy streams, no job: read the last stream twice (as_table, iter_data, head)."""
     pods = make_pods()
-    out = build(*sources, pods)
+    out = build(sources[0], sources[1], pods)
     run_counted("lazy: first as_table()", lambda: out.as_table())
     run_counted("lazy: second as_table()", lambda: out.as_table())
     run_counted("lazy: list(iter_data())", lambda: list(out.iter_data()))
     run_counted("lazy: head()", lambda: out.head())
     # A second chain built over the same source objects (what a notebook re-run does).
-    out2 = build(*sources, pods)
+    out2 = build(sources[0], sources[1], pods)
     run_counted("lazy: same steps rebuilt, as_table()", lambda: out2.as_table())
 
 
@@ -169,7 +177,7 @@ def mode_job(sources, orchestrator_factory, store=None, runs: int = 2) -> None:
     def new_job():
         job = PipelineJob(name="ws", store=store)
         with job:
-            build(*sources, pods)
+            build(sources[0], sources[1], pods)
         return job
 
     job = new_job()
