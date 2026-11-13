@@ -24,6 +24,9 @@ import pyarrow as pa
 import pytest
 
 from orcapod import function_pod
+from orcapod.channels import Channel
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes import FunctionJobNode
 from orcapod.core.operators import GroupBy, Join
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -297,3 +300,57 @@ def test_a_second_run_leaves_no_node_stale(
     for label, node in _computed_nodes(job).items():
         assert not node.is_stale, label
         assert node.head(100).status is HeadStatus.ROWS, label
+
+
+@pytest.mark.parametrize("with_store", [False, True], ids=["no_store", "store"])
+def test_a_function_node_is_stamped_before_its_output_closes(with_store: bool) -> None:
+    """A reader that sees the node's output close sees the node already stamped.
+
+    A downstream node stamps itself after it has seen that close, so it is then newer than
+    the function node. Without a store the pod closes the writer it is given; the node must
+    still stamp first.
+    """
+    source = ArrowTableSource(
+        _table({"id": A_IDS, "id_": A_IDS, "x": [i + 1 for i in A_IDS]}),
+        tag_columns=["id"],
+        source_id="a",
+        label="A",
+    )
+    store = InMemoryArrowDatabase() if with_store else None
+    pod = scale.pod
+    assert isinstance(pod, FunctionPod)
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=store,
+        result_database=store,
+    )
+    constructed = node.last_modified
+    assert constructed is not None
+    seen_at_close: list[Any] = []
+
+    async def run() -> None:
+        """Feed the source to the node and record its stamp when the output closes."""
+        inputs: Channel[Any] = Channel(buffer_size=16)
+        output: Channel[Any] = Channel(buffer_size=16)
+
+        async def feed() -> None:
+            """Send every source row, then close the input."""
+            for row in source.iter_data():
+                await inputs.writer.send(row)
+            await inputs.writer.close()
+
+        async def read() -> None:
+            """Read the output to its end, then note the node's modified time."""
+            rows = await output.reader.collect()
+            assert len(rows) == len(A_IDS)
+            seen_at_close.append(node.last_modified)
+
+        async with asyncio.TaskGroup() as group:
+            group.create_task(feed())
+            group.create_task(node.async_execute(inputs.reader, output.writer))
+            group.create_task(read())
+
+    asyncio.run(run())
+    (stamp,) = seen_at_close
+    assert stamp is not None and stamp > constructed
