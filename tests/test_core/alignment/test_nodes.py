@@ -22,7 +22,6 @@ break, so a case passes the day its defect is fixed only by dropping its mark:
 * ITL-1042 also: a function node is stale right after an async run whose input comes
   through an operator node, so its rows are reloaded from the store and (ITL-1060) get
   fresh datagram ids (the stored-records check, async runs).
-* ITL-1043: a loaded job cannot read a cached operator node (``joined`` in a loaded job).
 * ITL-1060: a row read back from the store gets a fresh datagram id, not the stored
   ``__data_id`` its own token names (the stored-records check of every readback).
 * ITL-1050: the async Join matches null tag keys, the sync one drops them, so the async
@@ -88,10 +87,6 @@ ITL_1060 = pytest.mark.xfail(
 ITL_1050 = pytest.mark.xfail(
     strict=True,
     reason="ITL-1050: the async Join matches null tag keys; the sync Join drops them",
-)
-ITL_1043 = pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1043: a loaded job cannot read a cached operator node",
 )
 
 ENTRY_POINT_ORDERS = ("reversed", "one_slow", "random_0")
@@ -313,7 +308,8 @@ def read_back(
         run.job.save(saved)
         loaded = PipelineJob.load(str(saved), store=run.store)
         # A loaded operator node reads its stored rows in REPLAY mode, and the saved job
-        # does not keep the cache mode: attach it again, the public way (ITL-1043).
+        # does not keep the cache mode (a loaded node is OFF): attach it again, the
+        # public way. Since ITL-1043 the loaded node then reads what the store holds.
         loaded.nodes["joined"].attach_databases(
             pipeline_database=run.store.at(JOB_NAME), cache_mode=CacheMode.REPLAY
         )
@@ -363,9 +359,7 @@ def readback_params() -> list[Any]:
                             if how == "load" and view.node == "grouped":
                                 continue
                             marks = []
-                            if how == "load" and view.node == "joined":
-                                marks.append(ITL_1043)
-                            elif how == "rerun_async" and operator_head(view):
+                            if how == "rerun_async" and operator_head(view):
                                 marks.append(ITL_1042)
                             params.append(
                                 pytest.param(
