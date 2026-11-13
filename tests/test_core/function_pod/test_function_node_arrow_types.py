@@ -340,3 +340,17 @@ def test_rows_in_two_layouts_of_one_type_concatenate() -> None:
 
     assert table.schema.field("k").type == pa.large_string()
     assert table.column("k").to_pylist() == ["a", "b"]
+
+
+def test_a_null_typed_row_is_compared_as_null() -> None:
+    """Large normalization keeps a ``null`` column ``null``: the error names it so."""
+    # About the private helper itself: Orcapod rows seldom carry a null-typed column.
+    from orcapod.core.nodes.function_node import _concat_row_tables
+
+    rows = [
+        pa.table({"k": pa.array([None], pa.null())}),
+        pa.table({"k": pa.array([1], pa.int64())}),
+    ]
+
+    with pytest.raises(InputValidationError, match="'k': null and int64"):
+        _concat_row_tables(rows)

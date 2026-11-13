@@ -132,6 +132,27 @@ def _build_record_id_preimage(
     )
 
 
+def _large_layout(table: "pa.Table") -> "pa.Table":
+    """Return ``table`` with every column in its large layout, ``null`` kept ``null``.
+
+    Args:
+        table: The table to normalize.
+
+    Returns:
+        The table with large-normalized column types; names, nullability and
+        metadata kept.
+    """
+    schema = pa.schema(
+        [
+            field.with_type(
+                arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            )
+            for field in table.schema
+        ]
+    )
+    return table if schema.equals(table.schema) else table.cast(schema)
+
+
 def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
     """Concatenate one-row tables by column name, refusing a column whose types differ.
 
@@ -150,8 +171,8 @@ def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
             naming the column and both types.
     """
     # Large and non-large layouts of one type are one type: give every row the
-    # large layout, so they also concatenate.
-    tables = [arrow_utils.normalize_table_to_large_types(t) for t in tables]
+    # large layout, so they also concatenate. Layouts only: ``null`` stays ``null``.
+    tables = [_large_layout(t) for t in tables]
     # The first type seen for each column, whichever row first has the column.
     seen: dict[str, pa.DataType] = {}
     for table in tables:
