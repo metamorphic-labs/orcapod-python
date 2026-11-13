@@ -255,3 +255,66 @@ def test_a_row_whose_function_raised_is_computed_again_by_the_next_read(
     table = rows.as_table()
     assert sorted(zip(table["k"].to_pylist(), table["y"].to_pylist())) == EVERY_ROW
     assert sorted(CALLS) == list(range(ROWS)), "each row is computed once"
+
+
+def upstream_raising_stream(
+    kind: str, failing_x: int, upstream_started: bool
+) -> tuple[Any, list[int]]:
+    """``plus_one`` of ``times_ten``, whose upstream raises once for ``failing_x``.
+
+    With ``upstream_started``, the upstream's first row was read before the downstream
+    stream was made (so the upstream has its input open, and nothing it does later makes
+    the downstream stale). Returns the downstream stream of ``kind`` and the list its
+    function's calls go to.
+    """
+    downstream_calls: list[int] = []
+
+    @function_pod(output_keys="z")
+    def plus_one(y: int) -> int:
+        """Return ``y + 1``, recording the call."""
+        downstream_calls.append(y)
+        return y + 1
+
+    upstream = raising_pod({failing_x: 1})(source())
+    if upstream_started:
+        assert failing_x != 0
+        next(iter(upstream.iter_data()))
+    if kind == "plain":
+        return plus_one.pod(upstream), downstream_calls
+    if kind == "concurrent":
+        stream = plus_one.pod(upstream)
+        stream.executor = ConcurrentLocalExecutor()
+        return stream, downstream_calls
+    if kind == "cached":
+        pod = CachedFunctionPod(plus_one.pod, result_database=InMemoryArrowDatabase())
+        return pod(upstream), downstream_calls
+    raise ValueError(kind)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize(
+    ("failing_x", "upstream_started"),
+    [(0, False), (2, False), (ROWS - 1, False), (2, True), (ROWS - 1, True)],
+)
+def test_a_read_that_failed_upstream_loses_no_row(
+    kind: str, failing_x: int, upstream_started: bool
+) -> None:
+    """An upstream stream raising mid-read: the next downstream read yields every row."""
+    rows, downstream_calls = upstream_raising_stream(kind, failing_x, upstream_started)
+
+    with pytest.raises(RuntimeError, match="transient failure"):
+        list(rows.iter_data())
+
+    every_row = [(i, 10 * i + 1) for i in range(ROWS)]
+    got = [(tag.as_dict()["k"], data.as_dict()["z"]) for tag, data in rows.iter_data()]
+    assert got == every_row
+    table = rows.as_table()
+    assert sorted(zip(table["k"].to_pylist(), table["z"].to_pylist())) == every_row
+    assert sorted(CALLS) == list(range(ROWS)), "each upstream row is computed once"
+    if upstream_started:
+        # Only then: an upstream that opens its input after the downstream did makes
+        # the downstream stale, which recomputes it on the next read (a separate,
+        # reported defect of the staleness check, not a lost row).
+        assert sorted(downstream_calls) == [10 * i for i in range(ROWS)], (
+            "each downstream row is computed once"
+        )

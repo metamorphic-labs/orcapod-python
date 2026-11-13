@@ -948,6 +948,9 @@ class FunctionPodStream(StreamBase):
             Iterator[tuple[int, tuple[TagProtocol, DataProtocol]]] | None
         ) = None
         self._needs_iterator = True
+        # The input raised while it was being read: its iterator is closed, so the next
+        # read opens the input again and skips the rows already cached.
+        self._input_interrupted = False
 
         # DataProtocol-level caching (for the output data)
         self._cached_output_datas: dict[
@@ -1004,16 +1007,30 @@ class FunctionPodStream(StreamBase):
         )
 
     def _ensure_iterator(self) -> None:
-        """Lazily acquire the upstream iterator on first use."""
+        """Lazily acquire the upstream iterator on first use, or again after it raised.
+
+        An input opened again after it raised yields its rows from the first, with the
+        same indices; the rows this stream already cached are skipped. Opening it again
+        is not a change of this stream's content, so its modified time stays.
+        """
         if self._needs_iterator:
             self._cached_input_iterator = enumerate(self._input_stream.iter_data())
             self._needs_iterator = False
             self._update_modified_time()
+        elif self._input_interrupted:
+            self._cached_input_iterator = enumerate(self._input_stream.iter_data())
+            self._input_interrupted = False
+
+    def _input_raised(self) -> None:
+        """Record that the input raised while being read: it is opened again next read."""
+        self._cached_input_iterator = None
+        self._input_interrupted = True
 
     def clear_cache(self) -> None:
         """Discard all in-memory cached state."""
         self._cached_input_iterator = None
         self._needs_iterator = True
+        self._input_interrupted = False
         self._cached_output_datas.clear()
         self._cached_output_table = None
         self._cached_content_hash_column = None
@@ -1062,6 +1079,9 @@ class FunctionPodStream(StreamBase):
                     yield tag, data
                 index += 1
                 continue
+            if self._cached_input_iterator is None and self._input_interrupted:
+                # Another iteration saw the input raise: open it again.
+                self._ensure_iterator()
             input_iter = self._cached_input_iterator
             if input_iter is None:
                 # The input was read to its end, by this or another iteration.
@@ -1072,6 +1092,14 @@ class FunctionPodStream(StreamBase):
                 # Mark completion by releasing the iterator
                 self._cached_input_iterator = None
                 return
+            except BaseException:
+                # The input itself raised; its iterator is closed. Open it again on
+                # the next read instead of taking it as exhausted.
+                self._input_raised()
+                raise
+            if input_index in self._cached_output_datas:
+                # An input opened again yields the rows this stream already cached.
+                continue
             try:
                 out_tag, output_data = self._pod_base()._invoke_with_hooks(tag, data)
             except BaseException:
@@ -1096,11 +1124,18 @@ class FunctionPodStream(StreamBase):
 
         # Materialise the rest of the input, each row with its own input index; the rows
         # before it were cached by an earlier iteration.
-        to_compute: list[tuple[int, TagProtocol, DataProtocol]] = [
-            (i, tag, data)
-            for i, (tag, data) in input_iter
-            if i not in self._cached_output_datas
-        ]
+        try:
+            to_compute: list[tuple[int, TagProtocol, DataProtocol]] = [
+                (i, tag, data)
+                for i, (tag, data) in input_iter
+                if i not in self._cached_output_datas
+            ]
+        except BaseException:
+            # The input itself raised; its iterator is closed. The rows read so far are
+            # not computed yet, so nothing is lost: the next read opens the input again
+            # and reads them anew (an upstream stream yields its cached rows).
+            self._input_raised()
+            raise
         # Submit uncached data concurrently via async_process_data. Every row that
         # returns is cached; a row whose function raised stays in the input, so the
         # next read computes it again, and the first error is raised after the others
@@ -1255,7 +1290,11 @@ class FunctionPodStream(StreamBase):
         if has_results and schema_requires_io(self, config):
             # The input gave no rows, so its columns are still known only by polling
             # it: show the result as computed, without columns.
-            finished = not self._needs_iterator and self._cached_input_iterator is None
+            finished = (
+                not self._needs_iterator
+                and not self._input_interrupted
+                and self._cached_input_iterator is None
+            )
             return dataclasses.replace(
                 StreamHead.without_rows(
                     self,
@@ -1287,7 +1326,11 @@ class FunctionPodStream(StreamBase):
                 total_rows=self._cached_output_table.num_rows,
                 origin="computed",
             )
-        finished = not self._needs_iterator and self._cached_input_iterator is None
+        finished = (
+            not self._needs_iterator
+            and not self._input_interrupted
+            and self._cached_input_iterator is None
+        )
         if not finished and not self._cached_output_datas:
             return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
         shown, total = self._computed_prefix(n)
