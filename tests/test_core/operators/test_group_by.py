@@ -160,16 +160,16 @@ class TestGroupByKeepsOnlyKeyTags:
     def test_regroup_on_a_coarser_key(self, session_source):
         """A grouped stream grouped again keeps the coarser key; data nests.
 
-        The first grouping dropped ``date`` and ``probe``, so no tag is left to
-        order the members of the second grouping: they are ordered by their
-        folded ``record_id``, which is stable across runs.
+        The first grouping keeps ``date`` as a key and drops ``probe``; the
+        second drops ``date`` but still orders its members by it (``record_id``
+        is only the tiebreaker), so the ``d1`` group comes first.
         """
         out = GroupBy(by=["subject"])(GroupBy(by=["subject", "date"])(session_source))
         assert out.keys() == (("subject",), ("path",))
         rows = out.as_table().to_pylist()
         assert len(rows) == 1
         assert rows[0]["subject"] == "G"
-        assert sorted(rows[0]["path"]) == [["a", "b"], ["c", "d"]]
+        assert rows[0]["path"] == [["a", "b"], ["c", "d"]]
 
     def test_list_valued_non_key_tag_orders_members(self):
         """A list-typed tag of the input still orders members, nulls last.

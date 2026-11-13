@@ -848,7 +848,7 @@ data. The rules:
   `DerivedSource(tags_as_data=...)`). A list-valued tag of the input (a list-typed source tag)
   can still order members, so the member sort key (`_null_last_key`) is
   recursive and sorts nulls last at every depth. A grouped stream grouped again on a coarser key
-  orders its members by record id alone. An opt-in mode that keeps non-key tags is ITL-1071.
+  orders its members by the first grouping's keys outside the coarser key, then by record id. An opt-in mode that keeps non-key tags is ITL-1071.
 - `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
   Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
   That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to

@@ -85,10 +85,12 @@ class GroupBy(UnaryOperator):
     undefined if the source table itself is permuted.
 
     A grouped stream can be grouped again on a coarser key: its data lists nest
-    one level deeper (``list[list[T]]``), as source info does.  The finer key
-    is gone by then, so the members of the second grouping are ordered by
-    ``record_id`` alone.  A list-valued tag of the input can order members but
-    cannot be a grouping key.
+    one level deeper (``list[list[T]]``), as source info does.  The members of
+    the second grouping are ordered by the first grouping's keys that are not
+    in the coarser key (scalar tags of the grouped stream), then by
+    ``record_id``; a tag the first grouping dropped no longer takes part.  A
+    list-valued tag of the input can order members but cannot be a grouping
+    key.
 
     Contrast with ``Batch``, which partitions by row count for throughput.  It
     has no key, so it keeps every tag column, list-valued: those lists are

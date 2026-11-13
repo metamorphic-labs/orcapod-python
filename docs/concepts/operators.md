@@ -275,8 +275,9 @@ as a final tiebreaker), even though those tags are dropped, and groups are emitt
 order. A reordered input therefore produces a byte-identical output table.
 
 A grouped stream can be grouped again on a coarser key; its data lists then nest one level
-deeper (`list[list[T]]`). The finer key is gone by then, so the members of the second grouping
-are ordered by record id alone.
+deeper (`list[list[T]]`). The members of the second grouping are ordered by the first
+grouping's keys that are not in the coarser key, then by record id; a tag the first grouping
+dropped no longer takes part.
 
 Every name in `by` must be a **scalar tag column** of the input. `GroupBy` raises
 `InputValidationError` for an unknown column, a data column, or a list-valued tag column --
