@@ -66,7 +66,7 @@ def make_variant_frame(variant: str) -> pd.DataFrame:
     if variant == "columns":
         return frame[["b", "a"]]
     if variant == "levels":
-        return frame.swaplevel()
+        return frame.reorder_levels(["j", "i"])
     return frame
 
 
