@@ -192,3 +192,17 @@ layout test; (6) golden (local), docs section 10, changelog, design issue, PR bo
   (keep both test classes), `tests/test_logical_types/test_logical_type_identifiers.py`
   (their `ALL_BUILTINS` / `BUILTIN_METADATA`; add the two pandas names to
   `BUILTIN_METADATA` or keep our `BUILTINS_WITH_IGNORE_LIST` test).
+
+## Final merge of main (November 12, 2026)
+
+- Merged `origin/main` 859106f7 (contains ITL-981 as squash commit 8608ed43, #328) in merge
+  commit 6308943b. The branch history still holds 64c63bfe (the ITL-981 mechanism commit
+  merged locally earlier); its files are identical to main's after this merge.
+- Hand-resolved: `docs/concepts/logical-type-identifiers.md`, `docs/reference/hashing.md`,
+  `src/orcapod/contexts/logical_types.json`, `tests/test_contexts/test_data_context_v1.py`,
+  `tests/test_hashing/test_starfix_arrow_hasher.py`,
+  `tests/test_logical_types/test_logical_type_identifiers.py`. ITL-981's own files
+  (`ignore_list.py`, `registry.py`, its plan, spec and tests) taken from main.
+- `logical_types.json` has one `hash_ignore` object (numpy, pandas dataframe, pandas series)
+  and six references. Regenerating golden after the merge changes nothing; against main:
+  13 values changed, 4 keys renamed, 5 added, all pandas.
