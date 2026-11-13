@@ -1300,3 +1300,27 @@ def test_async_keys_differing_below_a_microsecond_stay_apart(
         expected = sync_rows(operator(), *operands)
         assert_equivalent(expected, async_rows(operator(), *operands))
         assert len(expected) == 2 or operator is SemiJoin
+
+
+# ── null logical keys and custom-named maps (Copilot, CodeRabbit; PR #351) ──
+
+
+def test_async_null_logical_key_matches_nothing_as_the_sync_path_does() -> None:
+    """A nullable ``Path`` tag: null rows match nothing on either path, no crash."""
+    keys: list[Path | None] = [Path("/b"), None, Path("/a")]
+    other: list[Path | None] = [None, Path("/a"), Path("/c")]
+    sources: list[ArrowTableSource] = []
+    for name, values, source_id in (("a", keys, "left"), ("b", other, "right")):
+        column = _logical_column(values, Path | None)
+        table = pa.Table.from_arrays(
+            [pa.array([3, 2, 1], pa.int64()), column, pa.array([3, 2, 1], pa.int16())],
+            names=["z" + name, "k", name],
+        )
+        sources.append(
+            ArrowTableSource(table, tag_columns=["z" + name, "k"], source_id=source_id)
+        )
+    left, right = sources
+    for operator in (Join, SemiJoin):
+        for operands in ((left, right), (right, left)):
+            expected = sync_rows(operator(), *operands)
+            assert_equivalent(expected, async_rows(operator(), *operands))

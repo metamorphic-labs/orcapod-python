@@ -48,10 +48,11 @@ def _freeze_scalar(scalar: Any) -> object:  # pyright: ignore[reportAny, reportE
     Returns:
         The hashable form of the scalar.
     """
-    if isinstance(scalar, pa.ExtensionScalar):
-        scalar = scalar.value  # pyright: ignore[reportAny]
     if not scalar.is_valid:  # pyright: ignore[reportAny]
         return None
+    if isinstance(scalar, pa.ExtensionScalar):
+        # A null extension scalar has no storage scalar, so validity comes first.
+        return _freeze_scalar(scalar.value)  # pyright: ignore[reportAny]
     arrow_type = scalar.type
     if pa.types.is_struct(arrow_type):
         return tuple(
@@ -59,7 +60,8 @@ def _freeze_scalar(scalar: Any) -> object:  # pyright: ignore[reportAny, reportE
         )
     if pa.types.is_map(arrow_type):
         return tuple(
-            (_freeze_scalar(item["key"]), _freeze_scalar(item["value"]))
+            # Entry fields may carry any names: read them by position.
+            (_freeze_scalar(item[0]), _freeze_scalar(item[1]))
             for item in scalar.values
         )
     if (
