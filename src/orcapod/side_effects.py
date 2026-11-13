@@ -198,7 +198,7 @@ class SideEffectPodStream(StreamBase):
         return _table_of_rows(
             self.iter_data(),
             column_config,
-            tag_keys=self.keys()[0],
+            tag_keys=lambda: self.keys()[0],
             declared_schema=lambda: self.output_schema(all_info=True),
             type_converter=self._pod.data_context.type_converter,
         )
@@ -208,22 +208,23 @@ def _table_of_rows(
     rows: Iterator[tuple[TagProtocol, DataProtocol]],
     column_config: ColumnConfig,
     *,
-    tag_keys: tuple[str, ...],
+    tag_keys: Callable[[], tuple[str, ...]],
     declared_schema: Callable[[], tuple[Schema, Schema]],
     type_converter: Any,
 ) -> pa.Table:
     """Return the delivered rows as one table with the column groups of ``column_config``.
 
     The one place the side-effect stream and node build their table (ITL-1066). Every
-    column group is collected once per row (the tag's system tags, the data's source
-    info, meta and context) and the shared shaping helpers then choose the groups, sort
+    requested column group is collected once per row (the tag's system tags, the data's
+    source info, meta and context) and the shared shaping helpers then choose the groups, sort
     and attach the content hash, as the function pod streams do. A row's content hash is
     that of its own data, and it stays with its row when the rows are sorted.
 
     Args:
         rows: The (tag, data) pairs to tabulate.
         column_config: The column groups to keep, and whether to sort by tags.
-        tag_keys: Names of the regular tag columns.
+        tag_keys: Returns the names of the regular tag columns. Called after the rows were
+            read: asking a source for its keys can poll it.
         declared_schema: Returns the declared (tag, data) schemas with every group. Called
             only for the table of no rows: asking a source for its schema can poll it.
         type_converter: The data context's type converter, to type the table of no rows.
@@ -233,8 +234,16 @@ def _table_of_rows(
     hashes: list[str] = []
     for tag, data in rows:
         tag_tables.append(tag.as_table(columns={"system_tags": True}))
+        # Only the requested auxiliary groups, so a group that is not shown cannot
+        # make the rows' tables differ; the hash is that of the data, whatever is shown.
         data_tables.append(
-            data.as_table(columns={"source": True, "meta": True, "context": True})
+            data.as_table(
+                columns={
+                    "source": column_config.source,
+                    "meta": column_config.meta,
+                    "context": column_config.context,
+                }
+            )
         )
         hashes.append(data.content_hash().to_string())
     if tag_tables:
@@ -249,7 +258,7 @@ def _table_of_rows(
         )
 
     def shape(carried: pa.Table) -> pa.Table:
-        return arrow_utils.apply_column_config(carried, column_config, tag_keys)
+        return arrow_utils.apply_column_config(carried, column_config, tag_keys())
 
     return arrow_utils.with_content_hash_column(
         full,
@@ -845,7 +854,7 @@ class SideEffectNode(StreamBase):
         return _table_of_rows(
             self.iter_data(),
             column_config,
-            tag_keys=self.keys()[0],
+            tag_keys=lambda: self.keys()[0],
             declared_schema=lambda: self.output_schema(all_info=True),
             type_converter=self._pod.data_context.type_converter,
         )

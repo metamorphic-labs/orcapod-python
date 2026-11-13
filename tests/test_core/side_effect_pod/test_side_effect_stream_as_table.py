@@ -200,3 +200,35 @@ def test_the_declared_schema_is_asked_for_only_when_there_are_no_rows() -> None:
     stream.output_schema = counting  # the spy
     stream.as_table(all_info=True)
     assert asked == []
+
+
+@pytest.mark.parametrize("kwargs", KWARGS, ids=IDS)
+def test_a_content_hash_does_not_depend_on_the_groups_requested(
+    kwargs: dict[str, Any],
+) -> None:
+    """The hash of a row is that of its data, whichever other groups are shown."""
+    base = _stream().as_table(columns={"content_hash": True, "sort_by_tags": True})
+    columns = {**kwargs.get("columns", {}), "content_hash": True, "sort_by_tags": True}
+    table = _stream().as_table(columns=columns, all_info=kwargs.get("all_info", False))
+    assert table.column("_content_hash").to_pylist() == (
+        base.column("_content_hash").to_pylist()
+    )
+
+
+def test_the_keys_are_asked_for_only_after_the_rows_were_read() -> None:
+    """Asking a source for its keys can poll it: never before the rows are delivered."""
+    events: list[str] = []
+
+    def recording(x: int, ctx: Any) -> None:
+        events.append("row")
+
+    stream: Any = SideEffectPod(recording)(_source())
+    original = stream.keys
+
+    def counting(**kwargs: Any) -> Any:
+        events.append("keys")
+        return original(**kwargs)
+
+    stream.keys = counting  # the spy
+    stream.as_table()
+    assert events.index("keys") > max(i for i, e in enumerate(events) if e == "row")
