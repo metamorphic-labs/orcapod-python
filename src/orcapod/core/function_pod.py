@@ -13,7 +13,10 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
-from orcapod.core.referential_tags import materialization_diagnostic_off
+from orcapod.core.referential_tags import (
+    materialization_diagnostic_off,
+    stream_references,
+)
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
@@ -708,14 +711,24 @@ class _FunctionPodBase(TraceableBase):
         input_stream = self.handle_input_streams(*streams)
         _, data_schema = input_stream.output_schema()
         parameters = self.input_data_schema
-        dropped = [name for name in data_schema if name not in parameters]
-        kept = [name for name in data_schema if name in parameters]
+        # Referential tags of the input fall through the pod (developer decision,
+        # November 12, 2026, ITL-1023): their columns are kept for that, and the
+        # pod is the fall-through variant of this one.
+        references = stream_references(input_stream)
+        dropped = [
+            name
+            for name in data_schema
+            if name not in parameters and name not in references
+        ]
+        kept = [
+            name for name in data_schema if name in parameters or name in references
+        ]
         # With no parameter column left there is nothing to select: a stream has
         # at least one data column. ``process`` then raises its own error.
         if dropped and kept:
             # A missing column or a type mismatch is raised before a step is added.
             self._validate_input_schema(
-                Schema({name: data_schema[name] for name in kept})
+                Schema({name: data_schema[name] for name in kept if name in parameters})
             )
             from orcapod.core.operators import SelectDataColumns
 
@@ -729,6 +742,10 @@ class _FunctionPodBase(TraceableBase):
             # plain tags are not reported (ITL-1023).
             with materialization_diagnostic_off():
                 input_stream = SelectDataColumns(columns=kept)(input_stream)
+        if references:
+            return ReferenceFallThroughPod(self, references).process(
+                input_stream, label=label
+            )
         return self.process(input_stream, label=label)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
@@ -1181,6 +1198,14 @@ class FunctionPodStream(StreamBase):
         all_data_as_tables: pa.Table = pa.Table.from_pylist(
             struct_data, schema=data_schema
         )
+        # A referential tag is one column: laid out once, among the tags.
+        shared = [
+            c
+            for c in all_data_as_tables.column_names
+            if c in all_tags_as_tables.column_names
+        ]
+        if shared:
+            all_data_as_tables = all_data_as_tables.drop_columns(shared)
         return arrow_utils.hstack_tables(all_tags_as_tables, all_data_as_tables)
 
     def as_table(
@@ -1541,6 +1566,227 @@ class WrappedFunctionPod(_FunctionPodBase):
         self, *streams: StreamProtocol, label: str | None = None
     ) -> StreamProtocol:
         return self._function_pod.process(*streams, label=label)
+
+
+class ReferenceFallThroughPod(WrappedFunctionPod):
+    """A function pod whose input's referential tags stay referential (ITL-1023).
+
+    Developer decision, November 12, 2026: ``pod(stream)`` (the call form) on a stream
+    with referential tags lets those tags fall through the pod. Per row, the function is
+    called exactly as the plain pod calls it, on the row's parameter columns (same
+    inputs, same result identity, same result store); the row's tag is emitted
+    unchanged and, as data, the function's outputs plus the row's own referenced
+    columns, so the references survive.
+
+    It abbreviates a legal composition: give each row a unique temporary tag, send one
+    copy through the plain pod, join the pod's output back to the input on that tag,
+    keep the referenced columns and drop the temporary tag. No join runs here, no
+    system tag is renamed, and rows and their order are the pod's. Only the referenced
+    columns fall through; other input data columns do not (a full append is ITL-1025).
+
+    ``pod.process(stream)`` is the plain pod: there a referential tag becomes a plain
+    tag at the pod boundary.
+
+    Args:
+        function_pod: The plain pod.
+        references: The referential tags of the pod's input that fall through.
+    """
+
+    def __init__(
+        self, function_pod: _FunctionPodBase, references: Collection[str]
+    ) -> None:
+        super().__init__(function_pod)
+        self._plain_pod = function_pod
+        self._references = tuple(references)
+        # The plain pod's hooks, the same list: a hook registered on it fires here.
+        self._post_run_hooks = function_pod._post_run_hooks  # pyright: ignore[reportPrivateUsage]  # one pod family
+
+    @property
+    def references(self) -> tuple[str, ...]:
+        """The referential tags that fall through the pod."""
+        return self._references
+
+    @property
+    def plain_pod(self) -> _FunctionPodBase:
+        """The plain pod: its function, result identity and result store are these."""
+        return self._plain_pod
+
+    def identity_structure(self) -> Any:
+        return (self._plain_pod, ("fall_through_references", self._references))
+
+    def pipeline_identity_structure(self) -> Any:
+        return (self._plain_pod, ("fall_through_references", self._references))
+
+    def function_input(self, data: DataProtocol) -> DataProtocol:
+        """Return the columns of ``data`` the function takes: all but fall-through ones.
+
+        Args:
+            data: An input row's data.
+
+        Returns:
+            The data without the referenced columns the function does not take.
+        """
+        parameters = self.input_data_schema
+        passed = [
+            k for k in data.keys() if k not in self._references or k in parameters
+        ]
+        if len(passed) == len(data.keys()):
+            return data
+        return data.select(*passed)
+
+    def with_fall_through(
+        self, input_data: DataProtocol, output: DataProtocol | None
+    ) -> DataProtocol | None:
+        """Return the function's output with the row's referenced columns first.
+
+        The referenced columns keep their values, Arrow fields and source info.
+
+        Args:
+            input_data: The input row's data, referenced columns included.
+            output: The function's output, or ``None`` when it filtered the row.
+
+        Returns:
+            The output with the referenced columns, or ``None``.
+        """
+        if output is None:
+            return None
+        fields = input_data.arrow_schema()
+        source_info = input_data.source_info()
+        values = {name: input_data[name] for name in self._references}
+        combined = output.with_columns(
+            column_types={name: fields.field(name) for name in self._references},
+            **values,
+        ).with_source_info(**{name: source_info.get(name) for name in self._references})
+        return combined.select(*self._references, *output.keys())
+
+    def function_input_schema(self, input_schema: Schema) -> Schema:
+        """The part of an input data schema the function takes (see ``function_input``)."""
+        parameters = self.input_data_schema
+        return Schema(
+            {
+                k: v
+                for k, v in input_schema.items()
+                if k not in self._references or k in parameters
+            },
+            optional_fields=input_schema.optional_fields - set(self._references),
+        )
+
+    def _validate_input_schema(self, input_schema: Schema) -> None:
+        super()._validate_input_schema(self.function_input_schema(input_schema))
+
+    def validate_inputs(self, *streams: StreamProtocol) -> None:
+        input_stream = self.handle_input_streams(*streams)
+        self._validate_input_schema(input_stream.output_schema()[1])
+
+    def output_schema(
+        self,
+        *streams: StreamProtocol,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        tag_schema, incoming = self.multi_stream_handler().output_schema(
+            *streams, columns=columns, all_info=all_info
+        )
+        self._validate_input_schema(incoming)
+        self._check_output_names(tag_schema)
+        return tag_schema, Schema(
+            {
+                **{name: incoming[name] for name in self._references},
+                **self.data_function.output_data_schema,
+            },
+            optional_fields=(incoming.optional_fields & set(self._references))
+            | self.data_function.output_data_schema.optional_fields,
+        )
+
+    def process(
+        self, *streams: StreamProtocol, label: str | None = None
+    ) -> FunctionPodStream:
+        input_stream = self.handle_input_streams(*streams)
+        tag_keys, _ = input_stream.keys()
+        self._validate_input_schema(input_stream.output_schema()[1])
+        self._check_output_names(tag_keys)
+        self.tracker_manager.record_function_pod_invocation(
+            self, input_stream, label=label
+        )
+        return FunctionPodStream(
+            function_pod=self, input_stream=input_stream, label=label
+        )
+
+    def process_data(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        tag, output = self._plain_pod.process_data(
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+    async def async_process_data(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        *,
+        logger: DataExecutionLoggerProtocol | None = None,
+        run_id: str | None = None,
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        tag, output = await self._plain_pod.async_process_data(
+            tag, self.function_input(data), logger=logger, run_id=run_id
+        )
+        return tag, self.with_fall_through(data, output)
+
+
+# One place for the fall-through rule as a function node applies it: a plain pod has
+# no fall-through, and these return what the plain pod does.
+
+
+def fall_through_references(pod: object) -> tuple[str, ...]:
+    """The referential tags that fall through ``pod`` (none for a plain pod)."""
+    return pod.references if isinstance(pod, ReferenceFallThroughPod) else ()
+
+
+def result_pod(pod: FunctionPodProtocol) -> FunctionPodProtocol:
+    """The pod whose results a result store holds for ``pod``: its plain pod."""
+    return pod.plain_pod if isinstance(pod, ReferenceFallThroughPod) else pod
+
+
+def function_input(pod: object, data: DataProtocol) -> DataProtocol:
+    """The part of a row's data that ``pod``'s function takes."""
+    return (
+        pod.function_input(data) if isinstance(pod, ReferenceFallThroughPod) else data
+    )
+
+
+def with_fall_through(
+    pod: object, input_data: DataProtocol, output: DataProtocol | None
+) -> DataProtocol | None:
+    """``output`` with the referenced columns of ``input_data`` that fall through ``pod``."""
+    if isinstance(pod, ReferenceFallThroughPod):
+        return pod.with_fall_through(input_data, output)
+    return output
+
+
+def function_input_schema(pod: object, input_schema: Schema) -> Schema:
+    """The part of an input data schema that ``pod``'s function takes."""
+    if isinstance(pod, ReferenceFallThroughPod):
+        return pod.function_input_schema(input_schema)
+    return input_schema
+
+
+def result_data_schema(pod: FunctionPodProtocol, input_schema: Schema) -> Schema:
+    """The data schema of ``pod``'s output for an input with ``input_schema``."""
+    outputs = pod.data_function.output_data_schema
+    references = fall_through_references(pod)
+    if not references:
+        return outputs
+    return Schema(
+        {**{name: input_schema[name] for name in references}, **outputs},
+        optional_fields=(input_schema.optional_fields & set(references))
+        | outputs.optional_fields,
+    )
 
 
 def side_effect_function_pod(

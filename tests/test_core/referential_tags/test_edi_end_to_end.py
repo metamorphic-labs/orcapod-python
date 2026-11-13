@@ -153,14 +153,18 @@ def test_edi_shaped_pipeline_runs_and_second_run_computes_nothing(
     assert sorted(CALLS) == [1, 2]
     node = job.nodes["align"]
     tag_keys, data_keys = node.keys()
-    # A pod's output data is the function's outputs: at the pod boundary every
-    # referential tag becomes a plain tag with the same value (developer, November 12,
-    # 2026). ``unit`` was read by the function; ``session`` was dropped by the automatic
-    # select (section 7). Both are plain tags of the output.
-    assert set(KEYS) <= set(tag_keys)
-    assert data_keys == ("summary",)
+    # The pod call lets the input's referential tags fall through (developer decision,
+    # November 12, 2026): every key and both timestamp lists stay referential, beside
+    # the function's output. ``condition`` (plain data of the trials table) does not.
+    for name in [*KEYS, "spike_time", "gaze_time"]:
+        assert name in tag_keys and name in data_keys
+    assert "summary" in data_keys and "condition" not in data_keys
     table = node.as_table()
+    # A referential tag is stored and shown once.
     assert table.column_names.count("unit") == 1
+    for tag, data in node.iter_data():
+        assert tag["unit"] == data["unit"]
+        assert tag["spike_time"] == data["spike_time"]
     rows = sorted(table.to_pylist(), key=lambda r: r["unit"])
     assert [r["summary"] for r in rows] == [
         "unit 1: spikes [10, 20, 30] gaze [2, 12]",

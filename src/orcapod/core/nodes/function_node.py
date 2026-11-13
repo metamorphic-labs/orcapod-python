@@ -25,6 +25,14 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
+from orcapod.core.function_pod import (
+    fall_through_references,
+    function_input,
+    function_input_schema,
+    result_data_schema,
+    result_pod,
+    with_fall_through,
+)
 from orcapod.channels import Channel, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.cached_function_pod import CachedFunctionPod
@@ -278,8 +286,10 @@ class FunctionNodeBase(StreamBase):
             # Use the pod's exposed input schema (ctx excluded) rather than the
             # data function's full schema, because ctx is auto-injected per row.
             expected_data_schema = function_pod.input_data_schema
+            # Fall-through columns (ITL-1023) pass by the function.
             reason = schema_utils.schema_incompatibility(
-                incoming_data_types, expected_data_schema
+                function_input_schema(function_pod, incoming_data_types),
+                expected_data_schema,
             )
             if reason is not None:
                 raise ValueError(
@@ -432,7 +442,9 @@ class FunctionNodeBase(StreamBase):
         tag_schema = self._input_stream.output_schema(
             columns=columns, all_info=all_info
         )[0]
-        return tag_schema, self._data_function.output_data_schema
+        return tag_schema, result_data_schema(
+            self._function_pod, self._input_stream.output_schema()[1]
+        )
 
     def keys(
         self,
@@ -577,6 +589,10 @@ class FunctionNodeBase(StreamBase):
             )
         except InputValidationError as exc:
             raise InputValidationError(f"Function node {self.label!r}: {exc}") from exc
+        # A referential tag is one column: laid out once, among the tags.
+        shared = [c for c in data_table.column_names if c in tag_table.column_names]
+        if shared:
+            data_table = data_table.drop_columns(shared)
         return arrow_utils.hstack_tables(tag_table, data_table)
 
     def _shape_table(
@@ -1232,8 +1248,9 @@ class FunctionJobNode(FunctionNodeBase):
 
             if self._function_pod is not None:
                 # Normal path: wrap in CachedFunctionPod for compute + cache.
+                # A fall-through pod's results are its plain pod's (ITL-1023).
                 self._cached_function_pod = CachedFunctionPod(
-                    self._function_pod,
+                    result_pod(self._function_pod),
                     result_database=result_database,
                 )
             else:
@@ -1472,7 +1489,7 @@ class FunctionJobNode(FunctionNodeBase):
         self.ephemeral_result_store = store
         if store is not None and self._function_pod is not None:
             self._ephemeral_cached_pod = CachedFunctionPod(
-                self._function_pod,
+                result_pod(self._function_pod),
                 result_database=store,
             )
         else:
@@ -2011,7 +2028,10 @@ class FunctionJobNode(FunctionNodeBase):
                     "an ArrowDatabaseProtocol before executing this node."
                 )
             tag_out, output_data = self._ephemeral_cached_pod.process_data(
-                tag, data, logger=logger, run_id=run_id
+                tag,
+                function_input(self._function_pod, data),
+                logger=logger,
+                run_id=run_id,
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2031,7 +2051,10 @@ class FunctionJobNode(FunctionNodeBase):
                     )
         elif self._cached_function_pod is not None:
             tag_out, output_data = self._cached_function_pod.process_data(
-                tag, data, logger=logger, run_id=run_id
+                tag,
+                function_input(self._function_pod, data),
+                logger=logger,
+                run_id=run_id,
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2051,6 +2074,11 @@ class FunctionJobNode(FunctionNodeBase):
             tag_out, output_data = self._function_pod.process_data(
                 tag, data, logger=logger, run_id=run_id
             )
+
+        if ephemeral_result or self._cached_function_pod is not None:
+            # The stored result is the function's; the row's referenced columns fall
+            # through onto it, as the pod does (ITL-1023).
+            output_data = with_fall_through(self._function_pod, data, output_data)
 
         # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
         self._cached_output_datas[base_entry_id] = (tag_out, output_data)
@@ -2154,7 +2182,7 @@ class FunctionJobNode(FunctionNodeBase):
                     "an ArrowDatabaseProtocol before executing this node."
                 )
             tag_out, output_data = await self._ephemeral_cached_pod.async_process_data(
-                tag, data, logger=logger
+                tag, function_input(self._function_pod, data), logger=logger
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2174,7 +2202,7 @@ class FunctionJobNode(FunctionNodeBase):
                     )
         elif self._cached_function_pod is not None:
             tag_out, output_data = await self._cached_function_pod.async_process_data(
-                tag, data, logger=logger
+                tag, function_input(self._function_pod, data), logger=logger
             )
             if output_data is not None:
                 result_computed = bool(
@@ -2194,6 +2222,11 @@ class FunctionJobNode(FunctionNodeBase):
             tag_out, output_data = await self._function_pod.async_process_data(
                 tag, data, logger=logger
             )
+
+        if ephemeral_result or self._cached_function_pod is not None:
+            # The stored result is the function's; the row's referenced columns fall
+            # through onto it, as the pod does (ITL-1023).
+            output_data = with_fall_through(self._function_pod, data, output_data)
 
         # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
         self._cached_output_datas[base_entry_id] = (tag_out, output_data)
@@ -2888,8 +2921,11 @@ class FunctionJobNode(FunctionNodeBase):
             if c.startswith(constants.META_PREFIX)
             or c == constants.NODE_CONTENT_HASH_COL
         ]
+        # A fall-through column is the stored tag column in its data role (ITL-1023).
         stream = ArrowTableStream(
-            joined.drop(drop_cols), tag_columns=self._stored_tag_keys(fetched)
+            joined.drop(drop_cols),
+            tag_columns=self._stored_tag_keys(fetched),
+            reference_tags=fall_through_references(self._function_pod),
         )
         return base_entry_ids, stream
 
@@ -3334,7 +3370,14 @@ class FunctionJobNode(FunctionNodeBase):
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
                                 )
-                                await compute_channel.writer.send((stamped_tag, data))
+                                # The function takes the row without its
+                                # fall-through columns (ITL-1023).
+                                await compute_channel.writer.send(
+                                    (
+                                        stamped_tag,
+                                        function_input(self._function_pod, data),
+                                    )
+                                )
                     finally:
                         await compute_channel.writer.close()
 
@@ -3367,6 +3410,11 @@ class FunctionJobNode(FunctionNodeBase):
                                 node_label=node_label, tag=original_tag.as_dict()
                             )
                             raise
+                        # The row's referenced columns fall through onto the stored
+                        # result, as on the sync path (ITL-1023).
+                        output_data = with_fall_through(
+                            self._function_pod, input_data, output_data
+                        )
                         # Update in-memory cache so iter_data() sees the result.
                         clean_tag = output_tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
