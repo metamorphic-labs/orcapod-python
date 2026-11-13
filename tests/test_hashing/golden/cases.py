@@ -1913,5 +1913,10 @@ def torch_datagram() -> dict[str, Any]:
         {"k": "r2", "c": torch.tensor([[0.5, 1.5]], dtype=torch.float64)},
     ]
     return stream_summary(
-        DictSource(data=rows, tag_columns=["k"], source_id="golden_torch_tensor")
+        DictSource(
+            data=rows,
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="golden_torch_tensor",
+        )
     )
