@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterator, Sequence
@@ -16,8 +17,10 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
     head_column_config,
+    schema_requires_io,
 )
 from orcapod.core.streams.head import (
+    SCHEMA_NEEDS_POLL_NOTE,
     STALE_NOTE,
     HeadStatus,
     StreamHead,
@@ -1157,7 +1160,21 @@ class FunctionPodStream(StreamBase):
             return self._head_without_rows(
                 config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        # Rows exist only once the input was read, so the schema is known without I/O.
+        if has_results and schema_requires_io(self):
+            # The input gave no rows, so its columns are still known only by polling
+            # it: show the result as computed, without columns.
+            finished = not self._needs_iterator and self._cached_input_iterator is None
+            return dataclasses.replace(
+                StreamHead.without_rows(
+                    self,
+                    HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
+                    pa.table({}),
+                    tag_columns=(),
+                    note=SCHEMA_NEEDS_POLL_NOTE,
+                ),
+                total_rows=0,
+                origin="computed",
+            )
         tag_columns = self.keys(columns=config)[0] if has_results else ()
         if self._cached_output_table is not None:
             # A complete computation: its table holds the rows; only the shown rows'

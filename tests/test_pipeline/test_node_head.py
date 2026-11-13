@@ -44,10 +44,12 @@ def triple(x: int) -> int:
 
 @pytest.fixture(autouse=True)
 def _reset_calls() -> None:
+    """Clear the record of calls before each test."""
     CALLS.clear()
 
 
 def _source(rows: int = 25) -> ArrowTableSource:
+    """A source of ``rows`` rows with ``id`` and ``x``, both non-nullable ``int64``."""
     table = pa.table(
         {"id": list(range(rows)), "x": list(range(rows))},
         schema=pa.schema(
@@ -61,12 +63,14 @@ def _source(rows: int = 25) -> ArrowTableSource:
 
 
 def _store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
+    """A fresh store of the given kind (``in_memory`` or ``delta``)."""
     if kind == "in_memory":
         return InMemoryArrowDatabase()
     return DeltaTableDatabase(base_path=tmp_path / "store")
 
 
 def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
+    """A job of ``triple`` over the source, then a select of ``y``."""
     job = PipelineJob(name="itl991", store=store)
     with job:
         tripled = triple.pod(_source(), label="triple")
@@ -193,6 +197,7 @@ def test_source_nodes() -> None:
 def _operator_node(
     cache_mode: CacheMode, store: InMemoryArrowDatabase
 ) -> OperatorJobNode:
+    """An operator node selecting ``x`` from the source, on ``store``."""
     return OperatorJobNode(
         operator=SelectDataColumns(["x"]),
         input_streams=[_source()],

@@ -9,7 +9,7 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import schema_requires_io
+from orcapod.core.streams.base import check_head_size, schema_requires_io
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
@@ -431,6 +431,7 @@ class CachedSource(RootSource):
         then has the wrapped source's columns, no rows and ``NOT_COMPUTED`` (or the
         wrapped source's own reason when it has none to give).
         """
+        check_head_size(n)
         if self._cached_stream is not None and not self.is_stale:
             return head_of(
                 self._cached_stream.head(n, columns=columns, all_info=all_info), self

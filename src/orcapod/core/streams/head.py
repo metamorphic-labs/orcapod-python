@@ -198,6 +198,7 @@ class StreamHead:
         return pl.DataFrame(self.table)
 
     def __len__(self) -> int:
+        """Return the number of rows in ``table``."""
         return self.table.num_rows
 
     # ------------------------------------------------------------------
@@ -209,6 +210,7 @@ class StreamHead:
         return f"{self.kind}[{self.label}] — {self.description or self._describe()}"
 
     def _describe(self) -> str:
+        """Return the header text after the name, for this status."""
         shown = self.table.num_rows
         if self.status is HeadStatus.ROWS:
             text = self._describe_rows(shown)
@@ -226,6 +228,7 @@ class StreamHead:
         return text
 
     def _describe_rows(self, shown: int) -> str:
+        """Return the header text for a ``ROWS`` head showing ``shown`` rows."""
         total = self.total_rows
         noun = _ORIGIN_NOUNS.get(self.origin, "rows")
         if shown == 0 and (total is None or total == 0):
@@ -256,11 +259,13 @@ class StreamHead:
         return pl.DataFrame(pa.table(columns, names=table.column_names))
 
     def _tags_line(self) -> str:
+        """Return the line naming the tag columns, or an empty string when there are none."""
         if not self.tag_columns:
             return ""
         return "tags: " + ", ".join(self.tag_columns)
 
     def _repr_html_(self) -> str:
+        """Return the notebook preview: header, tag line and the rows (large cells summarised)."""
         parts = [
             f"<div><strong>{html.escape(self.header(), quote=False)}</strong></div>"
         ]
@@ -274,6 +279,7 @@ class StreamHead:
         return "\n".join(parts)
 
     def __str__(self) -> str:
+        """Return the preview as text: header, tag line and the rows."""
         lines = [self.header()]
         tags = self._tags_line()
         if tags:
@@ -284,6 +290,7 @@ class StreamHead:
         return "\n".join(lines)
 
     def __repr__(self) -> str:
+        """Return a short description: kind, label, status and row count."""
         return (
             f"StreamHead({self.kind}[{self.label}], status={self.status.value}, "
             f"rows={self.table.num_rows})"
@@ -340,6 +347,7 @@ def render_error_html(stream: Any, error: BaseException) -> str:
 
 
 def _rows(count: int) -> str:
+    """Return ``row`` or ``rows`` for ``count``."""
     return "row" if count == 1 else "rows"
 
 
@@ -495,6 +503,7 @@ def _struct_fields(
 
 
 def _shape_text(shape: Any) -> str:
+    """Return an array shape as Python writes a tuple: ``(40,)``, ``(2, 3)``."""
     dims = list(shape or [])
     if len(dims) == 1:
         return f"({dims[0]},)"
@@ -515,6 +524,7 @@ def _text_end(cell: Any) -> str:
 def _summarise_list(
     column: pa.ChunkedArray[Any], value_type: pa.DataType
 ) -> list[str | None] | None:
+    """Return display strings for a list column: short lists of scalars as written, others by length."""
     simple_items = not (
         isinstance(value_type, pa.ExtensionType)
         or pa.types.is_nested(value_type)

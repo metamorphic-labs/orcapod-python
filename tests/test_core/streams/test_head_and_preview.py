@@ -55,6 +55,7 @@ def _table(rows: int, offset: int = 0) -> pa.Table:
 
 
 def _source(rows: int = 25, label: str = "readings") -> ArrowTableSource:
+    """An ``ArrowTableSource`` over ``_table(rows)``, labelled ``label``."""
     return ArrowTableSource(
         _table(rows), tag_columns=["id"], source_id="readings", label=label
     )
@@ -147,8 +148,11 @@ def test_preview_is_the_rendered_head() -> None:
 
 
 def _counting_pod(calls: list[int]) -> Any:
+    """A function pod tripling ``x`` that appends each input to ``calls``."""
+
     @function_pod(output_keys="y")
     def triple(x: int) -> int:
+        """Triple ``x``, recording the call."""
         calls.append(x)
         return 3 * x
 
@@ -215,6 +219,7 @@ def test_function_pod_stream_rows_from_iteration_only() -> None:
 
 
 def _other_source() -> ArrowTableSource:
+    """A source sharing ``id`` with ``_source``, with a ``z`` column for joins."""
     table = pa.table(
         {"id": list(range(25)), "z": [i * i for i in range(25)]},
         schema=pa.schema(
@@ -228,6 +233,7 @@ def _other_source() -> ArrowTableSource:
 
 
 def _grouped_source() -> ArrowTableSource:
+    """A source with an ``id`` and a ``grp`` tag, for grouping."""
     table = pa.table(
         {
             "id": list(range(25)),
@@ -311,6 +317,7 @@ def test_side_effect_stream_preview_never_delivers() -> None:
     delivered: list[int] = []
 
     def deliver(x: int) -> None:
+        """The side effect; recording or refusing a delivery."""
         delivered.append(x)
 
     stream = SideEffectPod(deliver)(_source())
@@ -325,28 +332,35 @@ class _FakeDynamicSource:
     """A ``DynamicSourceProtocol`` double that records every poll and fetch."""
 
     def __init__(self, declared: Schema | None = None) -> None:
+        """Set up the double."""
         self.polls = 0
         self.fetches = 0
         self.declared = declared
 
     def identity(self) -> Any:
+        """Return the double's identity."""
         return "fake"
 
     def to_config(self) -> dict[str, Any] | None:
+        """Return no config: the double is not serializable."""
         return None
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> _FakeDynamicSource:
+        """Refuse: the double is not serializable."""
         raise NotImplementedError
 
     def schema(self) -> Any:
+        """Return the declared schema, if any."""
         return self.declared
 
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
+        """Count the poll and say whether new data is there."""
         self.polls += 1
         return False
 
     async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], Any]:
+        """Count the fetch and return the next batch."""
         self.fetches += 1
         return Cursor(value=1), {
             "id": pa.array([1], type=pa.int64()),
@@ -354,6 +368,7 @@ class _FakeDynamicSource:
         }
 
     async def close(self) -> None:
+        """Release nothing."""
         pass
 
 
@@ -405,6 +420,7 @@ def test_downstream_of_an_unpolled_source_never_polls() -> None:
     source = PollingSource(fake, tag_columns="id")
 
     def deliver(val: int) -> None:
+        """The side effect; recording or refusing a delivery."""
         raise AssertionError("delivered")
 
     stream = SideEffectPod(deliver)(source)
@@ -494,21 +510,25 @@ class _NpyArrayType(pa.ExtensionType):
     """The array logical type stored as one ``.npy`` file per cell (the ITL-981 form)."""
 
     def __init__(self) -> None:
+        """Set up the double."""
         from orcapod.logical_types.numpy_type import NDARRAY_EXTENSION_NAME
 
         super().__init__(pa.large_binary(), NDARRAY_EXTENSION_NAME)
 
     def __arrow_ext_serialize__(self) -> bytes:
+        """Return no extension metadata."""
         return b""
 
     @classmethod
     def __arrow_ext_deserialize__(
         cls, storage_type: pa.DataType, serialized: bytes
     ) -> _NpyArrayType:
+        """Rebuild the type."""
         return cls()
 
 
 def _npy(array: npt.NDArray[Any]) -> bytes:
+    """Return ``array`` as the bytes of a ``.npy`` file (format 3.0)."""
     buffer = io.BytesIO()
     np.lib.format.write_array(buffer, array, version=(3, 0))
     return buffer.getvalue()
@@ -566,10 +586,12 @@ class _BatchedDynamicSource(_FakeDynamicSource):
     """Serves three batches of two rows, one per poll that reports new data."""
 
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
+        """Count the poll and say whether new data is there."""
         self.polls += 1
         return (cursor.value if cursor is not None else 0) < 3
 
     async def fetch(self, cursor: Cursor[int] | None = None) -> tuple[Cursor[int], Any]:
+        """Count the fetch and return the next batch."""
         self.fetches += 1
         index = cursor.value if cursor is not None else 0
         return Cursor(value=index + 1), {
@@ -625,15 +647,19 @@ def test_head_of_adapts_any_head_the_protocol_allows() -> None:
         total_rows = 2
 
         def header(self) -> str:
+            """Return a fixed header."""
             return "plain"
 
         def as_table(self) -> pa.Table:
+            """Return the rows."""
             return self.table
 
         def as_polars_df(self) -> Any:
+            """Return nothing: not used by the test."""
             return None
 
         def _repr_html_(self) -> str:
+            """Return an empty preview."""
             return ""
 
     source = _source()
