@@ -98,3 +98,13 @@ from the library. That is not a few lines, so it is not in this PR.
 - [ ] Run the file on 3.12 and 3.13. Loop: before (origin/main test, late row injected)
   vs after, ≤ 50 iterations, sequential.
 - [ ] ruff format/check, basedpyright, commit, full suite, push, PR (`Refs ITL-1001`), Copilot review.
+
+## Progress (2026-11-13)
+
+- Task 1 done: `async-late-row` failed with the old assertions (`assert False` at the
+  `min(calls) >= 200` line, as on CI); the other three cases passed.
+- Task 2 done: 4/4 pass on 3.12 and 3.13; ruff clean; basedpyright exit 0, no new
+  warnings.
+- Before (origin/main test, row 199 late, scratch repro): old assertion failed 20/20;
+  order-free check held 20/20 (records 200, results 207, rerun min 199).
+- After: 25/25 sequential runs of the two async cases passed.
