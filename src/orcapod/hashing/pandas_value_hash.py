@@ -37,8 +37,17 @@ An ``object`` column (or index level) whose values are not strings does not come
 ``object``: ``[1, 2]`` reads back ``int64`` and ``[1, None]`` reads back ``float64``. Such a
 column is hashed in the form it reads back in: its Arrow column is converted to pandas the
 way storage does, and when the result is no longer ``object``, that dtype is described and
-its Arrow form is digested. An ``object`` column that reads back as ``object`` (strings,
-bytes, dicts, lists, decimals, dates) is hashed as it is.
+its Arrow form is digested. An ``object`` column of lists or dicts stays ``object``, but its
+elements can change (a list ``[1, None]`` reads back ``[1.0, nan]``), so the Arrow form of
+what was read back is digested. Any other ``object`` column that reads back as ``object``
+(strings, bytes, decimals, dates) is hashed as it is.
+
+The same holds for the axes. Storage writes the name of an index level as text, so the names
+``1`` and ``"1"`` are one name once read back and hash equal; the name described is the one
+storage restores. (``columns.names`` and a Series' name are restored with their types, so
+they are described typed.) The dtype of each level of the column axis is restored, so it is
+described: an ``int64`` and an ``object`` column axis with the same labels differ. Both are
+read from the frame storage builds for the value's Arrow schema.
 
 Values table
 ------------
@@ -59,15 +68,20 @@ Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone,
     frame:  {"kind": "orcapod.pandas.dataframe", "height": <rows>, "attrs": <attrs>,
              "columns": [[<label>, <dtype>], ...],      in column order
              "columns_names": [<label>, ...],           columns.names, one per column level
-             "index": [[<label>, <dtype>], ...]}        index levels in order: name, dtype
+             "columns_dtypes": [<dtype>, ...],          column axis, one per column level
+             "index": [[<name>, <dtype>], ...]}         index levels in order: name, dtype
     series: {"kind": "orcapod.pandas.series", "height": <rows>, "attrs": <attrs>,
              "name": <label>, "dtype": <dtype>,
-             "index": [[<label>, <dtype>], ...]}
+             "index": [[<name>, <dtype>], ...]}
 
+    <name>  := <str> | null                             an index level name as storage
+                                                        restores it: its text
     <label> := <str> | null | {"bool": b} | {"int": n} | {"float": <float.hex()>}
              | {"tuple": [<label>, ...]}
-             | {"timestamp": [<epoch value>, <unit>, <tz or null>]} | {"date": <iso date>}
-             | {"timedelta": [<value>, <unit>]} | {"period": [<ordinal>, <period alias>]}
+             | {"timestamp": [<count since the epoch, in unit>, <unit>, <tz or null>]}
+             | {"date": <iso date>}
+             | {"timedelta": [<count, in unit>, <unit>]}
+             | {"period": [<ordinal>, <period alias>]}
              | {"nat": "datetime" | "timedelta"}
     <dtype> := {"numpy": <numpy dtype name>}
              | {"masked": "Int8" | ... | "UInt64" | "Float32" | "Float64" | "boolean"}
@@ -108,6 +122,13 @@ PANDAS_DATAFRAME_HASH_LABEL = "pandas_dataframe_v1"
 
 PANDAS_SERIES_HASH_LABEL = "pandas_series_v1"
 """``ContentHash.method`` of a ``pd.Series`` value hash: the single definition."""
+
+PANDAS_UNNAMED_SERIES_COLUMN = "__pandas_series_unnamed__"
+"""The column name storage gives a Series without a name: the single definition.
+
+Storage writes a Series as a one-column frame whose column is the Series' name. The hash
+builds the same frame to learn what storage restores of the index names.
+"""
 
 
 @dataclass(frozen=True)
@@ -157,7 +178,17 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
     ),
     PandasIdentityProperty("index_values", True, "digest", "the index values"),
     PandasIdentityProperty(
-        "index_names", True, "descriptor", "the name of each index level, typed"
+        "index_names",
+        True,
+        "descriptor",
+        "the name of each index level, as the text storage writes it",
+    ),
+    PandasIdentityProperty(
+        "columns_dtype",
+        True,
+        "descriptor",
+        "the dtype of each level of the column axis (an int64 vs an object Index of "
+        "the same labels)",
     ),
     PandasIdentityProperty(
         "index_dtype", True, "digest and descriptor", "the dtype of each index level"
@@ -212,6 +243,12 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
     ),
     PandasIdentityProperty(
         "flags", False, "", "flags.allows_duplicate_labels: storage does not restore it"
+    ),
+    PandasIdentityProperty(
+        "index_name_type",
+        False,
+        "",
+        "the type of an index level name (1 vs '1'): storage writes the name as text",
     ),
     PandasIdentityProperty(
         "index_kind",
@@ -297,6 +334,15 @@ _MASKED_DTYPE_NAMES = frozenset(
 )
 
 
+def _count_in_own_unit(moment: pd.Timestamp | pd.Timedelta) -> int:
+    """Return the integer count of a timestamp or duration in its own unit.
+
+    Not ``.value``, which converts to nanoseconds and overflows for a value that only a
+    coarser unit can hold (``pd.Timestamp("2500-01-01")`` in seconds).
+    """
+    return int(moment.asm8.astype(np.int64))
+
+
 def pandas_label_descriptor(label: Any) -> Any:
     """Describe a pandas label (column label, index or Series name, category) in the grammar.
 
@@ -313,6 +359,12 @@ def pandas_label_descriptor(label: Any) -> Any:
         return label
     if isinstance(label, (bool, np.bool_)):
         return {"bool": bool(label)}
+    if isinstance(label, (pd.Timedelta, dt.timedelta, np.timedelta64)):
+        # Before the integer test: ``np.timedelta64`` is a NumPy signed integer.
+        delta = pd.Timedelta(label)
+        if not isinstance(delta, pd.Timedelta):  # NaT
+            return {"nat": "timedelta"}
+        return {"timedelta": [_count_in_own_unit(delta), delta.unit]}
     if isinstance(label, (int, np.integer)):
         return {"int": int(label)}
     if isinstance(label, (float, np.floating)):
@@ -324,14 +376,9 @@ def pandas_label_descriptor(label: Any) -> Any:
         if not isinstance(timestamp, pd.Timestamp):  # NaT
             return {"nat": "datetime"}
         tz = None if timestamp.tz is None else str(timestamp.tz)
-        return {"timestamp": [timestamp.value, timestamp.unit, tz]}
+        return {"timestamp": [_count_in_own_unit(timestamp), timestamp.unit, tz]}
     if isinstance(label, dt.date):
         return {"date": label.isoformat()}
-    if isinstance(label, (pd.Timedelta, dt.timedelta, np.timedelta64)):
-        delta = pd.Timedelta(label)
-        if not isinstance(delta, pd.Timedelta):  # NaT
-            return {"nat": "timedelta"}
-        return {"timedelta": [delta.value, delta.unit]}
     if isinstance(label, pd.Period):
         return {"period": [label.ordinal, label.freqstr]}
     raise ValueError(
@@ -412,8 +459,10 @@ def _restored_form(
     """Return the dtype and Arrow column a field has once read back from storage.
 
     Only an ``object`` field can change: its Arrow column is converted to pandas the way
-    storage does, and when the result has another dtype (``[1, None]`` reads back
-    ``float64``), that dtype and its Arrow form are returned.
+    storage does. When the result has another dtype (``[1, None]`` reads back ``float64``),
+    that dtype and its Arrow form are returned. When it stays ``object`` but holds lists or
+    dicts, whose elements can change (a list ``[1, None]`` reads back ``[1.0, nan]``), the
+    Arrow form of what was read back is returned.
 
     Args:
         dtype: The field's pandas dtype.
@@ -425,20 +474,61 @@ def _restored_form(
     if dtype != np.dtype(object):
         return dtype, column
     restored = column.to_pandas()
-    if restored.dtype == np.dtype(object):
-        return dtype, column
-    return restored.dtype, pa.chunked_array([pa.Array.from_pandas(restored)])
+    if restored.dtype != np.dtype(object):
+        return restored.dtype, pa.chunked_array([pa.Array.from_pandas(restored)])
+    if pa.types.is_nested(column.type):
+        # A list or dict cell can change inside: ``[1, None]`` reads back ``[1.0, nan]``.
+        return dtype, pa.chunked_array([pa.Array.from_pandas(restored)])
+    return dtype, column
 
 
-def _values_table(df: pd.DataFrame) -> tuple[pa.Table, list[Any], list[Any]]:
-    """Return the frame's values as an Arrow table, with the dtypes storage restores.
+@dataclass(frozen=True)
+class _StoredForm:
+    """What storage restores of a frame, beside its values.
+
+    Attributes:
+        column_dtypes: The dtype of each column, in column order.
+        index_dtypes: The dtype of each index level, in level order.
+        index_names: The name of each index level. Storage writes a name as text, so
+            ``1`` and ``"1"`` are both ``"1"`` here.
+        column_axis_dtypes: The dtype of each level of the column axis.
+    """
+
+    column_dtypes: list[Any]
+    index_dtypes: list[Any]
+    index_names: list[Any]
+    column_axis_dtypes: list[Any]
+
+
+def _level_dtypes(axis: pd.Index) -> list[Any]:
+    if isinstance(axis, pd.MultiIndex):
+        return [level.dtype for level in axis.levels]
+    return [axis.dtype]
+
+
+def _restored_axes(table: pa.Table, df: pd.DataFrame) -> tuple[list[Any], list[Any]]:
+    """Return the index level names and the column-axis level dtypes storage restores.
+
+    They are read from the frame storage builds for the table's schema (no rows are
+    converted), so the rule is storage's own. A frame storage cannot read back at all is
+    described by its own axes.
+    """
+    try:
+        restored = table.schema.empty_table().to_pandas()
+    except (TypeError, ValueError, NotImplementedError, pa.ArrowException):
+        restored = df
+    return list(restored.index.names), _level_dtypes(restored.columns)
+
+
+def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
+    """Return the frame's values as an Arrow table, with the form storage restores.
 
     The table has positional field names: ``c0 ..`` for the columns in order, then
     ``i0 ..`` for the index levels in order.
 
     Returns:
-        The values table, the dtype of each column and the dtype of each index level, each
-        field in the form it reads back from storage in.
+        The values table, and the dtypes and names the frame has once read back from
+        storage.
 
     Raises:
         ValueError: If a column's dtype is outside the grammar (the error names the column)
@@ -470,21 +560,24 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, list[Any], list[Any]]:
     ]
     values = pa.table([column for _, column in restored], names=names)
     restored_dtypes = [dtype for dtype, _ in restored]
-    return values, restored_dtypes[:width], restored_dtypes[width:]
+    index_names, column_axis_dtypes = _restored_axes(table, df)
+    return values, _StoredForm(
+        column_dtypes=restored_dtypes[:width],
+        index_dtypes=restored_dtypes[width:],
+        index_names=index_names,
+        column_axis_dtypes=column_axis_dtypes,
+    )
 
 
-def _index_descriptor(index: pd.Index, dtypes: list[Any]) -> list[Any]:
+def _index_descriptor(stored: _StoredForm) -> list[Any]:
     return [
         [pandas_label_descriptor(name), pandas_dtype_descriptor(dtype)]
-        for name, dtype in zip(index.names, dtypes)
+        for name, dtype in zip(stored.index_names, stored.index_dtypes)
     ]
 
 
 def _frame_descriptor(
-    df: pd.DataFrame,
-    column_dtypes: list[Any],
-    index_dtypes: list[Any],
-    ignore: frozenset[str],
+    df: pd.DataFrame, stored: _StoredForm, ignore: frozenset[str]
 ) -> dict[str, Any]:
     return {
         "kind": "orcapod.pandas.dataframe",
@@ -492,15 +585,18 @@ def _frame_descriptor(
         "attrs": {} if "attrs" in ignore else _attrs_term(df.attrs),
         "columns": [
             _column_descriptor(label, dtype)
-            for label, dtype in zip(df.columns, column_dtypes)
+            for label, dtype in zip(df.columns, stored.column_dtypes)
         ],
         "columns_names": [pandas_label_descriptor(name) for name in df.columns.names],
-        "index": _index_descriptor(df.index, index_dtypes),
+        "columns_dtypes": [
+            pandas_dtype_descriptor(dtype) for dtype in stored.column_axis_dtypes
+        ],
+        "index": _index_descriptor(stored),
     }
 
 
 def _series_descriptor(
-    series: pd.Series, dtype: Any, index_dtypes: list[Any], ignore: frozenset[str]
+    series: pd.Series, stored: _StoredForm, ignore: frozenset[str]
 ) -> dict[str, Any]:
     return {
         "kind": "orcapod.pandas.series",
@@ -509,9 +605,15 @@ def _series_descriptor(
         "name": (
             None if "series_name" in ignore else pandas_label_descriptor(series.name)
         ),
-        "dtype": pandas_dtype_descriptor(dtype),
-        "index": _index_descriptor(series.index, index_dtypes),
+        "dtype": pandas_dtype_descriptor(stored.column_dtypes[0]),
+        "index": _index_descriptor(stored),
     }
+
+
+def _series_as_stored_frame(series: pd.Series) -> pd.DataFrame:
+    """Return the one-column frame storage writes for a Series."""
+    name = PANDAS_UNNAMED_SERIES_COLUMN if series.name is None else series.name
+    return series.to_frame(name=name)
 
 
 def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
@@ -544,8 +646,8 @@ def pandas_frame_descriptor(
     """
     if "column_order" in ignore:
         df = _in_canonical_column_order(df)
-    _, column_dtypes, index_dtypes = _values_table(df)
-    return _frame_descriptor(df, column_dtypes, index_dtypes, ignore)
+    _, stored = _values_table(df)
+    return _frame_descriptor(df, stored, ignore)
 
 
 def pandas_series_descriptor(
@@ -565,8 +667,8 @@ def pandas_series_descriptor(
         ValueError: If a label or the dtype is outside the grammar, or the values cannot be
             converted to Arrow.
     """
-    _, (dtype,), index_dtypes = _values_table(series.to_frame(name="c0"))
-    return _series_descriptor(series, dtype, index_dtypes, ignore)
+    _, stored = _values_table(_series_as_stored_frame(series))
+    return _series_descriptor(series, stored, ignore)
 
 
 def pandas_frame_content_hash(
@@ -593,8 +695,8 @@ def pandas_frame_content_hash(
     """
     if "column_order" in ignore:
         df = _in_canonical_column_order(df)
-    values, column_dtypes, index_dtypes = _values_table(df)
-    descriptor = _frame_descriptor(df, column_dtypes, index_dtypes, ignore)
+    values, stored = _values_table(df)
+    descriptor = _frame_descriptor(df, stored, ignore)
     digest = arrow_hasher.hash_table_ordered(
         values, struct_field_order="struct_field_order" not in ignore
     ).digest
@@ -623,8 +725,8 @@ def pandas_series_content_hash(
         ValueError: If a label or the dtype is outside the grammar, or the values cannot be
             converted to Arrow.
     """
-    values, (dtype,), index_dtypes = _values_table(series.to_frame(name="c0"))
-    descriptor = _series_descriptor(series, dtype, index_dtypes, ignore)
+    values, stored = _values_table(_series_as_stored_frame(series))
+    descriptor = _series_descriptor(series, stored, ignore)
     digest = arrow_hasher.hash_table_ordered(
         values, struct_field_order="struct_field_order" not in ignore
     ).digest

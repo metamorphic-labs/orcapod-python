@@ -74,6 +74,51 @@ class TestLogicalPandasDataFrameStorage:
             LogicalPandasDataFrame().python_to_storage(df)
 
 
+class TestNamesThatCollideAsText:
+    """Storage writes column labels and index names as text; a collision is refused.
+
+    Arrow would write two fields of one name, and the frame read back would have lost its
+    index (the levels come back as columns). So the write raises.
+    """
+
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            pd.DataFrame(
+                {"a": [5]},
+                index=pd.MultiIndex.from_tuples([(0, 9)], names=[1, 2]),
+            ),
+            pd.DataFrame(
+                {"a": [5]},
+                index=pd.MultiIndex.from_tuples([(0, 9)], names=[1, "1"]),
+            ),
+            pd.DataFrame({"1": [5]}, index=pd.Index([0], name=1)),
+        ],
+        ids=["integer level names", "level names 1 and '1'", "column '1', index 1"],
+    )
+    def test_frame_is_refused(self, frame: pd.DataFrame):
+        from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+        with pytest.raises(ValueError, match="'1'"):
+            LogicalPandasDataFrame().python_to_storage(frame)
+
+    def test_series_is_refused(self):
+        from orcapod.logical_types.pandas_type import LogicalPandasSeries
+
+        series = pd.Series([5], name="1", index=pd.Index([0], name=1))
+        with pytest.raises(ValueError, match="'1'"):
+            LogicalPandasSeries().python_to_storage(series)
+
+    def test_index_named_like_a_column_is_stored(self):
+        """Not a collision: Arrow gives the index its own field name."""
+        from orcapod.logical_types.pandas_type import LogicalPandasDataFrame
+
+        logical = LogicalPandasDataFrame()
+        frame = pd.DataFrame({"a": [5]}, index=pd.Index([0], name="a"))
+        back = logical.storage_to_python(logical.python_to_storage(frame))
+        pd.testing.assert_frame_equal(back, frame)
+
+
 class TestLogicalPandasDataFrameRoundTrip:
     def _rt(self, df: pd.DataFrame) -> pd.DataFrame:
         from orcapod.logical_types.pandas_type import LogicalPandasDataFrame

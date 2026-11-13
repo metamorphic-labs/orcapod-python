@@ -129,10 +129,10 @@
   "dataframe.pipeline_hash": "semantic_v1:bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39",
   "dataframe.row[{\"k\":\"r1\"}]._tag_record_id::bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39": "3b7c66de1eb65a05a236c53ce3a3e292",
   "dataframe.row[{\"k\":\"r1\"}]._tag_source_id::bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39": "golden_dataframe",
-  "dataframe.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:00000219ad98657c0b29f77022349c915d2cc0623df0937c682e98a3f572a57ed8ea95",
+  "dataframe.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:000002ff12b51dca50ede4e9645cb9ae60a7fbf8bb923edb636ea3b2dc5b7463dc33b7",
   "dataframe.row[{\"k\":\"r2\"}]._tag_record_id::bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39": "a075d0a40203532b92170507912ff6e6",
   "dataframe.row[{\"k\":\"r2\"}]._tag_source_id::bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39": "golden_dataframe",
-  "dataframe.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:00000227f05e594e881787c2474db8b897c77b1bf0485d37d924dbbc0e23cd40da12f1",
+  "dataframe.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:00000280b3b0d8fc8e73022a59ef6d137be0d9474bb2e934ca0d1185c573ba8b9fe66c",
   "dataframe.system_tag_columns": [
     "_tag_source_id::bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39",
     "_tag_record_id::bcc5445dca15db8b8ce959b58a40de6e1306338fad06556f97685bb163543e39"

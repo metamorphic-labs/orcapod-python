@@ -102,6 +102,32 @@ DISTINCT: dict[str, tuple[Any, Any]] = {
         pd.DataFrame([[1, 2]], columns=pd.Index(["('a', 'x')", "('a', 'y')"])),
     ),
     "columns.name": (_frame(), _with_columns_name(_frame(), "features")),
+    "column axis dtype int64 vs object": (
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, 2], dtype="int64")),
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, 2], dtype=object)),
+    ),
+    "column axis dtype int64 vs int32": (
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, 2], dtype="int64")),
+        pd.DataFrame([[1, 2]], columns=pd.Index([1, 2], dtype="int32")),
+    ),
+    "column axis dtype object vs string": (
+        pd.DataFrame([[1, 2]], columns=pd.Index(["a", "b"], dtype=object)),
+        pd.DataFrame([[1, 2]], columns=pd.Index(["a", "b"], dtype="string")),
+    ),
+    "column axis level dtype int64 vs int32": (
+        pd.DataFrame(
+            [[1, 2]],
+            columns=pd.MultiIndex.from_arrays(
+                [pd.Index([1, 2], dtype="int64"), pd.Index(["x", "y"], dtype=object)]
+            ),
+        ),
+        pd.DataFrame(
+            [[1, 2]],
+            columns=pd.MultiIndex.from_arrays(
+                [pd.Index([1, 2], dtype="int32"), pd.Index(["x", "y"], dtype=object)]
+            ),
+        ),
+    ),
     "index name": (_frame(), _frame().rename_axis("id")),
     "MultiIndex level names": (
         _frame().set_index(pd.MultiIndex.from_tuples([(0, "p"), (1, "q")])),
@@ -247,6 +273,15 @@ EXCEPTIONS: dict[str, tuple[tuple[Any, Any], bool]] = {
         ),
         True,
     ),
+    # Storage writes an index name as text, so 1 and "1" are one name once read back.
+    "index name 1 vs '1'": (
+        (_frame().rename_axis(1), _frame().rename_axis("1")),
+        True,
+    ),
+    "Series index name 1 vs '1'": (
+        (pd.Series([1, 2]).rename_axis(1), pd.Series([1, 2]).rename_axis("1")),
+        True,
+    ),
     # The hash is strict where pandas calls the pair equal.
     "-0.0 vs 0.0": ((pd.DataFrame({"a": [0.0]}), pd.DataFrame({"a": [-0.0]})), False),
     "attrs": ((_frame(), _with_attrs(_frame())), False),
@@ -261,6 +296,12 @@ PROPERTY_OF_PAIR: dict[str, str] = {
     "column label type 0 vs '0'": "label_type",
     "MultiIndex columns vs flat labels": "label_type",
     "columns.name": "columns_names",
+    "column axis dtype int64 vs object": "columns_dtype",
+    "column axis dtype int64 vs int32": "columns_dtype",
+    "column axis dtype object vs string": "columns_dtype",
+    "column axis level dtype int64 vs int32": "columns_dtype",
+    "index name 1 vs '1'": "index_name_type",
+    "Series index name 1 vs '1'": "index_name_type",
     "index name": "index_names",
     "MultiIndex level names": "index_names",
     "index dtype int64 vs float64": "index_dtype",
@@ -475,6 +516,19 @@ CHANGED_BY_STORAGE: dict[str, Any] = {
     "object int index": pd.DataFrame(
         {"a": [1, 2]}, index=pd.Index([5, 6], dtype=object)
     ),
+    "index name int": _frame().rename_axis(1),
+    "index name tuple": _frame().rename_axis([("a", 1)]),
+    "MultiIndex level name float": _frame().set_index(
+        pd.MultiIndex.from_tuples([(0, "p"), (1, "q")], names=[1.5, "j"])
+    ),
+    "RangeIndex with an int name": pd.DataFrame(
+        {"a": [1, 2]}, index=pd.RangeIndex(2, name=7)
+    ),
+    "list of ints with None": pd.DataFrame({"a": _object([[1, None], [2]])}),
+    "list of lists of ints with None": pd.DataFrame({"a": _object([[[1, None]]])}),
+    "dict holding a list of ints with None": pd.DataFrame(
+        {"a": _object([{"x": [1, None]}])}
+    ),
     "RangeIndex with a step": pd.DataFrame({"a": [1, 2]}, index=pd.RangeIndex(5, 9, 2)),
     "index freq": _daily(True),
     "flags": _frame().set_flags(allows_duplicate_labels=False),
@@ -486,6 +540,9 @@ CHANGED_BY_STORAGE: dict[str, Any] = {
     ),
     "Series object ints with None": pd.Series([1, None], dtype=object, name="s"),
     "Series attrs read back as JSON": _with_attrs(pd.Series([1, 2]), {1: "x"}),
+    "Series index name int": pd.Series([1, 2], name="s").rename_axis(1),
+    "unnamed Series, index name int": pd.Series([1, 2]).rename_axis(0),
+    "Series list of ints with None": pd.Series([[1, None]], dtype=object, name="s"),
 }
 
 # ``object`` columns that read back as ``object``: hashed as they are.
@@ -538,6 +595,30 @@ class TestHashOfWhatStorageRestores:
         assert back["a"].dtype == object
         assert _hash(back) == _hash(value)
 
+    @pytest.mark.parametrize(
+        "columns",
+        [
+            pd.Index([1, 2], dtype="int64"),
+            pd.Index([1, 2], dtype="int32"),
+            pd.Index([1, 2], dtype=object),
+            pd.Index([1.5, 2.5], dtype="float32"),
+            pd.Index(["a", "b"], dtype=object),
+            pd.Index(["a", "b"], dtype="string"),
+            pd.DatetimeIndex(["2020-01-01", "2020-01-02"]).as_unit("s"),
+            pd.DatetimeIndex(["2020-01-01", "2020-01-02"], tz="UTC"),
+            pd.MultiIndex.from_arrays([pd.Index([1, 2], dtype="int32"), ["x", "y"]]),
+            pd.Index([], dtype=object),
+            pd.Index([], dtype="int64"),
+        ],
+        ids=lambda columns: f"{type(columns).__name__}[{columns.dtype}]x{len(columns)}",
+    )
+    def test_column_axis_dtype_survives_storage(self, columns: pd.Index) -> None:
+        """The column-axis dtype in the hash is the one storage restores."""
+        value = pd.DataFrame([[1] * len(columns)], columns=columns)
+        back = _stored_and_read(value)
+        assert _hash(back) == _hash(value)
+        assert _hash(_stored_and_read(back)) == _hash(back)
+
     def test_object_strings_still_differ_from_string_dtype(self) -> None:
         """Both read back as they are, so the dtype stays part of the hash."""
         assert _hash(pd.DataFrame({"a": ["x"]})) != _hash(
@@ -577,8 +658,32 @@ class TestDescriptorGrammar:
                 ],
             ],
             "columns_names": ["features"],
+            "columns_dtypes": [{"numpy": "object"}],
             "index": [["id", {"numpy": "int64"}]],
         }
+
+    def test_frame_descriptor_of_a_column_multiindex(self) -> None:
+        from orcapod.hashing.pandas_value_hash import pandas_frame_descriptor
+
+        columns = pd.MultiIndex.from_arrays(
+            [pd.Index([1, 2], dtype="int32"), pd.Index(["x", "y"], dtype=object)]
+        )
+        descriptor = pandas_frame_descriptor(pd.DataFrame([[1, 2]], columns=columns))
+        assert descriptor["columns_dtypes"] == [{"numpy": "int32"}, {"numpy": "object"}]
+
+    def test_index_names_are_described_as_storage_restores_them(self) -> None:
+        from orcapod.hashing.pandas_value_hash import (
+            pandas_frame_descriptor,
+            pandas_series_descriptor,
+        )
+
+        frame = _frame().rename_axis(1)
+        assert pandas_frame_descriptor(frame)["index"] == [["1", {"numpy": "int64"}]]
+        series = pd.Series([1, 2], name=2).rename_axis(1)
+        descriptor = pandas_series_descriptor(series)
+        assert descriptor["index"] == [["1", {"numpy": "int64"}]]
+        # A Series name is restored typed, so it stays typed.
+        assert descriptor["name"] == {"int": 2}
 
     def test_series_descriptor(self) -> None:
         from orcapod.hashing.pandas_value_hash import pandas_series_descriptor
@@ -608,9 +713,31 @@ class TestDescriptorGrammar:
         assert pandas_label_descriptor(True) == {"bool": True}
         assert pandas_label_descriptor(np.int8(3)) == {"int": 3}
         assert pandas_label_descriptor(0.5) == {"float": "0x1.0000000000000p-1"}
-        assert pandas_label_descriptor(pd.Timestamp("2020-01-01", tz="UTC")) == {
-            "timestamp": [1577836800000000000, "s", "UTC"]
+        # A timestamp or duration is the integer count in its own unit, with the unit.
+        second = pd.Timestamp("2020-01-01", tz="UTC").as_unit("s")
+        assert pandas_label_descriptor(second) == {
+            "timestamp": [1577836800, "s", "UTC"]
         }
+        assert pandas_label_descriptor(second.as_unit("ns")) == {
+            "timestamp": [1577836800000000000, "ns", "UTC"]
+        }
+        # Outside the nanosecond range: still a label.
+        assert pandas_label_descriptor(pd.Timestamp("2500-01-01").as_unit("s")) == {
+            "timestamp": [16725225600, "s", None]
+        }
+        assert pandas_label_descriptor(dt.datetime(2020, 1, 1)) == {
+            "timestamp": [1577836800000000, "us", None]
+        }
+        assert pandas_label_descriptor(np.datetime64("2020-01-01", "s")) == {
+            "timestamp": [1577836800, "s", None]
+        }
+        assert pandas_label_descriptor(np.timedelta64(5, "s")) == {
+            "timedelta": [5, "s"]
+        }
+        assert pandas_label_descriptor(dt.timedelta(seconds=5)) == {
+            "timedelta": [5000000, "us"]
+        }
+        assert pandas_label_descriptor(np.timedelta64("NaT")) == {"nat": "timedelta"}
         assert pandas_label_descriptor(dt.date(2020, 1, 2)) == {"date": "2020-01-02"}
         assert pandas_label_descriptor(pd.Timedelta(seconds=1)) == {
             "timedelta": [1000000000, "ns"]

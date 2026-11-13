@@ -23,6 +23,7 @@ import pyarrow.ipc
 from orcapod.hashing.pandas_value_hash import (
     PANDAS_DATAFRAME_OPTIONS,
     PANDAS_SERIES_OPTIONS,
+    PANDAS_UNNAMED_SERIES_COLUMN,
 )
 from orcapod.logical_types.ignore_list import IgnoreListLogicalType
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
-_SERIES_UNNAMED_SENTINEL = "__pandas_series_unnamed__"
+_SERIES_UNNAMED_SENTINEL = PANDAS_UNNAMED_SERIES_COLUMN
 
 
 _LAYOUT_VERSION = 1
@@ -43,6 +44,26 @@ Before v0.3 these types were stored under the names ``pandas.dataframe`` and
 ``pandas.series`` (with empty metadata). Those names are not registered any more, so a
 column stored under them is refused on read, never read as the current types.
 """
+
+
+def _require_distinct_field_names(table: pa.Table) -> None:
+    """Raise if two fields of the Arrow form of a pandas value have one name.
+
+    Arrow writes column labels and index level names as text, so the index name ``1``
+    collides with the column ``"1"``, and integer level names collide with each other. The
+    value read back from such a table has lost its index: the levels come back as columns.
+
+    Raises:
+        ValueError: If a field name occurs twice; the message lists the names.
+    """
+    names = table.schema.names
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"column labels and index names collide once written as text: {repeated}. "
+            "Storage could not restore the index. Rename the index levels (integer "
+            "level names are a common cause) or the columns."
+        )
 
 
 def _table_to_ipc_bytes(table: pa.Table) -> bytes:
@@ -117,7 +138,8 @@ class LogicalPandasDataFrame(IgnoreListLogicalType):
             schema, index, and data.
 
         Raises:
-            ValueError: If any column cannot be converted to an Arrow type.
+            ValueError: If any column cannot be converted to an Arrow type, or column
+                labels and index names collide once written as text.
         """
         try:
             table = pa.Table.from_pandas(value, preserve_index=True)
@@ -127,6 +149,7 @@ class LogicalPandasDataFrame(IgnoreListLogicalType):
                 f"Check for columns with mixed or non-Arrow-serialisable types. "
                 f"Original error: {exc}"
             ) from exc
+        _require_distinct_field_names(table)
         return _table_to_ipc_bytes(table)
 
     def storage_to_python(
@@ -188,8 +211,9 @@ class LogicalPandasSeries(IgnoreListLogicalType):
             Raw bytes in Arrow IPC stream format.
 
         Raises:
-            ValueError: If ``value.name`` equals the reserved sentinel, or if
-                the Series values cannot be converted to an Arrow type.
+            ValueError: If ``value.name`` equals the reserved sentinel, the Series
+                values cannot be converted to an Arrow type, or the name and the index
+                names collide once written as text.
         """
         if value.name == _SERIES_UNNAMED_SENTINEL:
             raise ValueError(
@@ -207,6 +231,7 @@ class LogicalPandasSeries(IgnoreListLogicalType):
                 f"Check for non-Arrow-serialisable values. "
                 f"Original error: {exc}"
             ) from exc
+        _require_distinct_field_names(table)
         return _table_to_ipc_bytes(table)
 
     def storage_to_python(
