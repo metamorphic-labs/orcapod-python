@@ -351,3 +351,43 @@ def test_loaded_csv_now_narrower_is_bound_as_declared(tmp_path: pathlib.Path) ->
     assert dict(slot.output_schema()[1]) == {"x": int | None}
     assert slot.as_table().schema.field("x").nullable
     assert slot.as_table().column("x").to_pylist() == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# System-tag values are the source's own
+# ---------------------------------------------------------------------------
+
+
+def test_system_tag_values_and_source_info_are_the_sources_own(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Names follow the slot; source id, record ids and source-info tokens the source.
+
+    The source is given no source id, so its default hash-based id is computed from its
+    true table (``x: int``) and is carried unchanged.
+    """
+    schema = pa.schema(
+        [pa.field("id", pa.int64(), False), pa.field("x", pa.int64(), False)]
+    )
+    source = ArrowTableSource(
+        pa.table({"id": [0, 1], "x": [1, 2]}, schema=schema), tag_columns=["id"]
+    )
+    direct = source.as_table(all_info=True)
+    slot = _bound_slot(tmp_path, source)
+    bound = slot.as_table(all_info=True)
+
+    def system_tag(table: pa.Table, prefix: str) -> list[Any]:
+        """Return the values of the one column of *table* whose name starts with *prefix*."""
+        (name,) = [c for c in table.column_names if c.startswith(prefix)]
+        return table.column(name).to_pylist()
+
+    for prefix in ("_tag_source_id::", "_tag_record_id::"):
+        assert system_tag(bound, prefix) == system_tag(direct, prefix)
+    assert system_tag(bound, "_tag_source_id::") == [source.source_id] * 2
+    assert (
+        bound.column("_source_x").to_pylist() == direct.column("_source_x").to_pylist()
+    )
+    # The names are the slot's, not the source's.
+    names = [c for c in bound.column_names if c.startswith("_tag_")]
+    assert names == list(slot.keys(columns={"system_tags": True})[0][1:])
+    assert not set(names) & set(direct.column_names)

@@ -813,6 +813,17 @@ data. The rules:
 ### Important implementation details
 
 - `ArrowTableSource.__init__` raises `ValueError` if any `tag_columns` are not in the table.
+- The pipeline determines every node's schema; a bound source never changes it (developer,
+  November 14, 2026, ITL-1112). No accepted bind changes any node's stored path or the
+  schema of any node's or stored table (column names with system tags, types, nullable
+  flags, order); only values differ. `SourceNodeBase.validate` is the one check, used by
+  `PipelineJob.bind`, the `bound_source` setter (and `SourceJobNode.__init__`) and
+  `PipelineJob.load`: per column the declared Python type, or `T` where the slot declares
+  `T | None`; anything else raises `SourceSpecMismatchError` before anything is bound. A
+  narrower source is given as the declared schema at one place, `_DeclaredForm` (nullable
+  fields over the same arrays; the system-tag column NAMES of the declared schema hash, the
+  VALUES the source's own). Limit: the check compares Python types, so a difference in Arrow
+  width only (`int32` against `int64`) is not yet refused (ITL-949).
 - A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
   built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
   `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label

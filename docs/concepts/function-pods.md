@@ -835,8 +835,10 @@ rows under that key is an empty result, not an error.
   node itself, bind a source to it: `loaded.bind(sources={"mice": source})`. The source must
   have the slot's tag and data columns with the same Python types, except that a column the
   slot declares `T | None` may be `T` (the slot then reads it as `T | None`); `bind` refuses
-  any other (`SourceSpecMismatchError`, an `InputValidationError`), so binding a source
-  never changes a stored path.
+  any other (`SourceSpecMismatchError`, an `InputValidationError`). The pipeline determines
+  every node's schema: binding a source never changes a node's stored path or the schema of
+  any node's or stored table, only the values. The check compares Python types, so a
+  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949).
 - The results are read from the store recorded in the file. Pass
   `PipelineJob.load(path, database=...)` if the store has moved.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each
