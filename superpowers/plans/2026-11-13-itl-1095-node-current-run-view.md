@@ -1,6 +1,6 @@
 # ITL-1095: a job node shows the current run; load-only run
 
-Status: DIAGNOSIS + PROPOSAL sent to the coordinator (ask), waiting for decisions. No code changed.
+Status: decisions received (see section 2). Implementing in four stages, one commit (or more) each, pushed to the draft PR.
 Base: PR #378 branch head `2e9972e0` (ITL-1093). Branch: `eywalker/itl-1095-design-what-a-job-node-shows-the-current`.
 
 Rule (developer, November 13, 2026): a job node itself (`as_table`, `iter_data`, dataframe
@@ -57,9 +57,33 @@ involved in `job.run()`. Only `node.run()` reads its upstream node.
 Experiment (reverted): making every un-run read empty fails 400 of 4,464 job-related tests in
 21 files (list in section 5).
 
-## 2. Proposal
+## 2. Decisions (coordinator, November 13, 2026; proposal in 2026-11-13-itl-1095-proposal.md)
 
-See the ask message (copied in section 6 once answered).
+- D1 REPLAY: R1 for the tag (after a run: union of every logged run; only the before-run read
+  becomes empty). ASKED of the developer.
+- D2 (a): load-only uses only the node's own pipeline records; result-store-only hits are not stored.
+- D3 (a)+(i): operators run on the rows that reach them (LOG writes nothing); summary and node
+  status mark every node below a skipped input "inputs incomplete".
+- D4: orchestrator passes side-effect node rows through uncalled in load-only; node reads empty.
+- D5: NodeRunSummary.not_stored, .inputs_incomplete; RunSummary.load_only; loaded rows in reused;
+  repr "rowwise: 6 rows: 3 loaded, 3 not stored (skipped)", "summed: 2 rows: 2 loaded (inputs incomplete: rowwise)".
+- D6: amend ITL-1081 rule: run() takes no positional arguments; a job node's run() (and
+  job.run/run_async) takes keyword-only load_only; non-job streams' run() stays argument-less.
+- D7 + developer: state-driven run. A node (itself or ancestor) that holds a completed run and is
+  not stale does not run again: run() returns its held view. Staleness = the existing
+  modified-time mechanism; a freshly built or loaded job has every node stale. Load-only-filled
+  is its own status (ViewStatus e.g. LOADED_ONLY, caption "N loaded, M inputs without a stored
+  result"), never complete: a full run re-runs it in full. A load-only run that finds everything
+  stays loaded-only by default (ASKED). Cascade = ancestor sub-DAG on the sync orchestrator, one
+  mechanism shared with job.run. Summary on node.last_run. Commits per row + flush at end.
+  job.run() behaviour NOT changed (give options). Side-effect re-delivery with
+  track_completion=False: clear_cache() then run(). Table-backed/polling sources changing without
+  modified time: known limit, documented.
+- D8 loaded jobs as recommended. D9 as recommended. D10 remove NOTHING_STORED. D11 as recommended.
+
+Order: 1) empty before a run for every node kind + test updates; 2) load_only on job.run/run_async
++ summary; 3) node.run cascade + state rule + status; 4) loaded jobs. Each stage its own commit,
+report counts after each. Async tests also on 3.11. Golden unchanged.
 
 ## 3. Implementation sketch (after approval)
 

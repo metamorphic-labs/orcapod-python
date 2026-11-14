@@ -1203,6 +1203,50 @@ class OperatorJobNode(OperatorNodeBase):
             self.data_context.type_converter,
         )
 
+    def _read_run_records(self) -> "pa.Table | None":
+        """Read the stored rows of this node's run: its content hash, current context.
+
+        A loaded node names its run by the content hash its job file records. A file
+        saved before Orcapod recorded it leaves the node only the hash the loaded job
+        computes; when the store holds no rows under that hash, an empty answer would
+        make stored results look dropped, so this raises instead (ITL-1043).
+
+        Returns:
+            The run's stored rows (``_read_stored_records``), or ``None`` when the table
+            does not exist.
+
+        Raises:
+            RuntimeError: If a loaded node's job file does not record its run's
+                content hash and the store holds no rows under the hash the loaded
+                job computes.
+        """
+        stored = self._read_current_context_records()
+        records = None if stored is None else self._filter_by_content_hash(stored)
+        if (
+            self._loaded
+            and self._saved_run_content_hash is None
+            and (records is None or records.num_rows == 0)
+        ):
+            found = (
+                "is absent from the attached store"
+                if stored is None
+                else f"holds {stored.num_rows} stored rows, none of them under the "
+                f"content hash the loaded job computes ({self.content_hash().to_string()})"
+            )
+            raise _LoadedCacheUnreadableError(
+                f"OperatorJobNode {self.label!r}: the job file does not record the "
+                "content hash of this node's run (a file saved before Orcapod recorded "
+                "it), so the loaded job cannot name the run's rows, and its cache table "
+                f"({'/'.join(self._stored_table_path)}) {found}. Upgrading such files is "
+                "left to the migration tool after v0.3 (ITL-1048); until then build the "
+                "job from code and attach the node with CacheMode.REPLAY to read them.",
+                head_note=(
+                    "loaded node: the job file does not record its run's content hash "
+                    "(an older file; ITL-1048)"
+                ),
+            )
+        return records
+
     def _load_cached_stream_from_db(self) -> "ArrowTableStream | None":
         """Read from DB in CacheMode.REPLAY only, without modifying node state.
 
@@ -1234,31 +1278,7 @@ class OperatorJobNode(OperatorNodeBase):
             return None
         if self._cache_mode != CacheMode.REPLAY:
             return None
-        stored = self._read_current_context_records()
-        records = None if stored is None else self._filter_by_content_hash(stored)
-        if (
-            self._loaded
-            and self._saved_run_content_hash is None
-            and (records is None or records.num_rows == 0)
-        ):
-            found = (
-                "is absent from the attached store"
-                if stored is None
-                else f"holds {stored.num_rows} stored rows, none of them under the "
-                f"content hash the loaded job computes ({self.content_hash().to_string()})"
-            )
-            raise _LoadedCacheUnreadableError(
-                f"OperatorJobNode {self.label!r}: the job file does not record the "
-                "content hash of this node's run (a file saved before Orcapod recorded "
-                "it), so the loaded job cannot name the run's rows, and its cache table "
-                f"({'/'.join(self._stored_table_path)}) {found}. Upgrading such files is "
-                "left to the migration tool after v0.3 (ITL-1048); until then build the "
-                "job from code and attach the node with CacheMode.REPLAY to read them.",
-                head_note=(
-                    "loaded node: the job file does not record its run's content hash "
-                    "(an older file; ITL-1048)"
-                ),
-            )
+        records = self._read_run_records()
         if self._loaded:
             self._check_expected_rows(0 if records is None else records.num_rows)
         if records is None:
@@ -1568,7 +1588,9 @@ class OperatorJobNode(OperatorNodeBase):
         if self._pipeline_database is None:
             return None
 
-        results = self._read_stored_records()
+        # A loaded node that cannot name its run's rows raises rather than show the
+        # stored rows as none (ITL-1043): this is the read behind node.as_source().
+        results = self._read_run_records()
         if self._loaded:
             # The advisory check of every read of a loaded node (ITL-1043).
             self._check_expected_rows(0 if results is None else results.num_rows)
@@ -1707,6 +1729,9 @@ class OperatorJobNode(OperatorNodeBase):
                     for tag, data in self._cached_output_stream.iter_data():
                         await output.send((tag, data))
                     _ = await asyncio.gather(*discards)
+                    # The inputs are closed, so every upstream node has stamped itself:
+                    # stamp after them, or the replayed rows would read as stale.
+                    self._update_modified_time()
                 finally:
                     for discard in discards:
                         _ = discard.cancel()

@@ -764,9 +764,15 @@ class TestRowsOfAnotherDataContext:
     def test_function_node_reads_current_rows_only(
         self, new_store: Callable[[], Store]
     ):
-        """Every read method of a function node returns only the rows of ``CURRENT``."""
+        """Every read method of a function node returns only the rows of ``CURRENT``.
+
+        A node shows rows only after a run (ITL-1095); the run reads them from the store.
+        """
         store = both_contexts_store(new_store)
-        node = build_job(store).nodes["dbl"]
+        job = build_job(store)
+        _ = job.run()
+        assert calls == []
+        node = job.nodes["dbl"]
         assert rows_of(node.as_table()) == [2, 4]
         assert rows_of(node.get_all_records()) == [2, 4]
         assert sorted(d.as_dict()["double"] for _, d in node.iter_data()) == [2, 4]
@@ -980,7 +986,9 @@ class TestSideEffects:
             _ = build_job(store, with_sink=True).run()
 
         assert delivered == []
-        assert rows_of(build_job(store).nodes["dbl"].as_table()) == [2, 4]
+        # The function node's stored rows are readable (the stored view: a node shows
+        # rows only after a run, ITL-1095).
+        assert rows_of(build_job(store).nodes["dbl"].as_source().as_table()) == [2, 4]
 
     def test_completions_logged_by_this_version_are_not_delivered_again(
         self, store: Store, orchestrator: Orchestrator
