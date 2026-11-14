@@ -33,9 +33,7 @@ def left_source(nullable: tuple[str, ...]) -> ArrowTableSource:
     return _source(
         {
             "a": pa.array([1, 1, 2, 2, 3], pa.int64()),
-            "b": pa.array(
-                [1, None if "b" in nullable else 5, 1, 2, 2], pa.int64()
-            ),
+            "b": pa.array([1, None if "b" in nullable else 5, 1, 2, 2], pa.int64()),
             "x": pa.array([10, 20, 30, 40, 50], pa.int64()),
         },
         tags=("a", "b"),
@@ -113,7 +111,7 @@ def test_left_nullable_key_narrows_to_t() -> None:
     tag_schema, _ = result.output_schema()
     assert tag_schema["b"] is int
     assert not result.as_table().schema.field("b").nullable
-    assert sorted(result.as_table().column("x").to_pylist()) == [10, 40]
+    assert result.as_table().column("x").to_pylist() == [10, 40]
 
 
 def test_right_nullable_key_keeps_left_schema() -> None:
@@ -122,7 +120,7 @@ def test_right_nullable_key_keeps_left_schema() -> None:
     result = SemiJoin()(left, right_source(("b",)))
     assert result.output_schema() == left.output_schema()
     assert result.as_table().schema == left.as_table().schema
-    assert sorted(result.as_table().column("x").to_pylist()) == [10, 40]
+    assert result.as_table().column("x").to_pylist() == [10, 40]
 
 
 def test_key_nullable_on_both_sides_is_not_narrowed() -> None:
@@ -133,7 +131,7 @@ def test_key_nullable_on_both_sides_is_not_narrowed() -> None:
     assert tag_schema["b"] == int | None
     assert result.as_table().schema.field("b").nullable
     assert result.output_schema() == left.output_schema()
-    assert sorted(result.as_table().column("x").to_pylist()) == [10, 40]
+    assert result.as_table().column("x").to_pylist() == [10, 40]
 
 
 @pytest.mark.parametrize(("left_null", "right_null", "left_drop", "right_drop"), MIXED)
@@ -184,4 +182,3 @@ def test_other_type_mismatch_still_raises() -> None:
     )
     with pytest.raises(InputValidationError, match="'a'"):
         _ = SemiJoin()(left, right)
-

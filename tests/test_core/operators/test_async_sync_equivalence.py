@@ -156,6 +156,20 @@ def source_c() -> ArrowTableSource:
     )
 
 
+def source_nullable_k() -> ArrowTableSource:
+    """Tag ``k: int16``, nullable with a null; for ``SemiJoin`` against a non-null ``k``."""
+    return _source(
+        {
+            "k": pa.array([1, None, 3, 4], pa.int16()),
+            "kn": pa.array([1, 2, 3, 4], pa.int8()),
+            "ks": pa.array(["a", "b", "c", "d"], pa.string()),
+        },
+        tags=("k",),
+        source_id="kn",
+        nullable=("k",),
+    )
+
+
 def merge_source(source_id: str, offset: int) -> ArrowTableSource:
     """A ``MergeJoin`` input; two of them collide on every data column but one."""
     only = f"only_{source_id}"
@@ -285,6 +299,17 @@ CASES = [
     ),
     Case("semijoin", SemiJoin, lambda: (source_c(), source_b(nested=False))),
     Case("semijoin_nested", SemiJoin, lambda: (source_a(), source_b())),
+    # A shared tag key nullable on one side only is narrowed there (ITL-829).
+    Case(
+        "semijoin_left_nullable_key",
+        SemiJoin,
+        lambda: (source_nullable_k(), source_b(nested=False)),
+    ),
+    Case(
+        "semijoin_right_nullable_key",
+        SemiJoin,
+        lambda: (source_c(), source_nullable_k()),
+    ),
     Case("batch_2", lambda: Batch(batch_size=2), lambda: (source_a(),)),
     Case("batch_all", Batch, lambda: (source_a(),)),
     Case("group_by", lambda: GroupBy(["ta"]), lambda: (source_a(),)),
