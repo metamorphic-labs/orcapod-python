@@ -129,3 +129,13 @@ A read-only side-effect node, built from its descriptor, as the function and ope
 3. Docs: `docs/concepts/function-pods.md` "Saving and loading a job"; changelog fragment
    `changelog.d/ITL-1094.md` (Fixed); `design_issues/ITL-1094-<id>.md`.
 4. Targeted tests (loaded_job, side_effect_pod, serialization, golden), ruff, basedpyright.
+
+## Content hash of a loaded side-effect job node (coordinator probe, November 14, 2026)
+
+A loaded `LoadedSideEffectJobNode` returned the descriptor's (blueprint, unbound) content hash,
+while a loaded function node has the saved job's (bound) hash from `run.node_job_content_hashes`.
+Approved fix: `PipelineJob.save` records each `SideEffectJobNode`'s `content_hash()` in that map;
+`PipelineJob.load` passes it as `job_content_hash`, with the descriptor hash as the fallback for
+files saved before. `Pipeline.load`'s blueprint node keeps the descriptor hash. The only consumer
+is the run's `pipeline_uri` (hash of the end nodes), now equal to the live job's. Tests: identity
+before bind, after bind and a load-only run, after save and load; the fallback; `pipeline_uri`.

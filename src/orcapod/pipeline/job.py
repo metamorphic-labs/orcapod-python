@@ -1427,8 +1427,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         else:
             status = "complete"
 
-        # Collect the live (data-inclusive) content hashes of function and operator
-        # job nodes.
+        # Collect the live (data-inclusive) content hashes of function, operator and
+        # side-effect job nodes.
         # The pipeline blueprint stores schema-only blueprint hashes; but the DB
         # records are written with the live hash (which includes the upstream data
         # content).  Saving these ensures that PipelineJob.load() can reconstruct
@@ -1454,6 +1454,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 run_content_hash = node._run_content_hash()
                 if run_content_hash is not None:
                     node_job_content_hashes[node.label] = run_content_hash.to_string()
+            elif isinstance(node, SideEffectJobNode):
+                # Its descriptor holds the blueprint's hash; a loaded side-effect node
+                # takes the job's from here, as a function node does (ITL-1094).
+                node_job_content_hashes[node.label] = node.content_hash().to_string()
 
         output: dict[str, Any] = {
             "orcapod_pipeline_job_version": PIPELINE_JOB_FORMAT_VERSION,
@@ -1726,6 +1730,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 job._persistent_node_map[node_hash] = LoadedSideEffectJobNode(  # pyright: ignore[reportArgumentType]
                     getattr(bp_node, "_descriptor", None) or {},
                     input_stream=job._persistent_node_map[preds[0]],
+                    job_content_hash=node_job_content_hashes.get(bp_node.label),
                 )
 
         # Update _nodes to point to job nodes (FunctionJobNode/OperatorJobNode stubs)

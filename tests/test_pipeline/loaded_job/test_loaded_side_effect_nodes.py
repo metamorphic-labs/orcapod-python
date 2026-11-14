@@ -22,6 +22,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.pipeline import Pipeline
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
 from orcapod.sources import DictSource
 from orcapod.streams import ViewStatus
@@ -122,13 +123,14 @@ def test_a_loaded_job_lists_its_side_effect_nodes(
 def test_a_restored_side_effect_node_has_its_saved_identity_and_position(
     saved: tuple[PipelineJob, list[int], pathlib.Path],
 ) -> None:
-    """Saved content hash and pipeline hash; upstream is the restored node above it."""
+    """The job's content hash and pipeline hash; upstream is the restored node above it."""
     job, _, path = saved
-    descriptors = _descriptors(path)
     loaded = PipelineJob.load(path)
     for label in SIDE_EFFECT_NODES:
         node = loaded.nodes[label]
-        assert node.content_hash().to_string() == descriptors[label]["content_hash"]
+        # The saved job's (bound) hash, as a loaded function node has; not the
+        # blueprint's hash in the node's descriptor.
+        assert node.content_hash() == job.nodes[label].content_hash()
         # The pipeline hash names the invocation log: the run's, unchanged.
         assert node.pipeline_hash() == job.nodes[label].pipeline_hash()
         assert node.output_schema() == job.nodes[label].output_schema()
@@ -287,6 +289,73 @@ def test_a_load_only_node_run_of_a_loaded_side_effect_node(
     assert view.as_table().num_rows == ROWS
     assert loaded.nodes["delivered"].as_table().num_rows == ROWS
     assert loaded.nodes["down"].as_table().num_rows == ROWS
+    assert sent == delivered_before
+
+
+def test_a_loaded_side_effect_node_keeps_the_content_hash_of_the_job_it_was_saved_from(
+    saved: tuple[PipelineJob, list[int], pathlib.Path], tmp_path: pathlib.Path
+) -> None:
+    """Before bind, after bind and a load-only run, and after saving and loading again."""
+    job, _, path = saved
+    live = {label: job.nodes[label].content_hash() for label in SIDE_EFFECT_NODES}
+    loaded = PipelineJob.load(path)
+    assert {label: loaded.nodes[label].content_hash() for label in live} == live
+    loaded.bind(sources={"s": _source()})
+    _ = loaded.run(load_only=True)
+    assert {label: loaded.nodes[label].content_hash() for label in live} == live
+    again = tmp_path / "again.json"
+    loaded.save(again)
+    reloaded = PipelineJob.load(again)
+    assert {label: reloaded.nodes[label].content_hash() for label in live} == live
+
+
+def test_a_job_file_without_the_recorded_hash_restores_the_descriptor_hash(
+    saved: tuple[PipelineJob, list[int], pathlib.Path], tmp_path: pathlib.Path
+) -> None:
+    """A file saved before side-effect nodes' hashes were recorded still loads.
+
+    Such a node then has the hash its descriptor records, the blueprint's, as a
+    loaded function node without a recorded hash has.
+    """
+    _, _, path = saved
+    data = json.loads(path.read_text())
+    for label in SIDE_EFFECT_NODES:
+        del data["run"]["node_job_content_hashes"][label]
+    older = tmp_path / "older.json"
+    older.write_text(json.dumps(data))
+    descriptors = _descriptors(older)
+    loaded = PipelineJob.load(older)
+    for label in SIDE_EFFECT_NODES:
+        node = loaded.nodes[label]
+        assert node.content_hash().to_string() == descriptors[label]["content_hash"]
+
+
+class _RunUris(NoOpObserver):
+    """Records the ``pipeline_uri`` of every run it observes."""
+
+    def __init__(self) -> None:
+        self.uris: list[str] = []
+
+    def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
+        """Record ``pipeline_uri``."""
+        self.uris.append(pipeline_uri)
+
+
+def test_a_load_only_run_of_a_loaded_job_records_the_live_jobs_pipeline_uri(
+    saved: tuple[PipelineJob, list[int], pathlib.Path],
+) -> None:
+    """The run's ``pipeline_uri`` hashes its end nodes: here the side-effect node ``tail``."""
+    job, sent, path = saved
+    delivered_before = list(sent)
+    loaded = PipelineJob.load(path)
+    loaded.bind(sources={"s": _source()})
+    for label in SIDE_EFFECT_NODES:
+        job.nodes[label].clear_cache()
+    live_uris, loaded_uris = _RunUris(), _RunUris()
+    _ = job.run(load_only=True, observer=live_uris)
+    _ = loaded.run(load_only=True, observer=loaded_uris)
+    assert len(live_uris.uris) == len(loaded_uris.uris) == 1
+    assert loaded_uris.uris == live_uris.uris
     assert sent == delivered_before
 
 

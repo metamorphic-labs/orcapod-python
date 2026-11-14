@@ -218,14 +218,22 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
     Args:
         descriptor: The node's entry in the saved file.
         input_stream: The restored job node upstream of it.
+        job_content_hash: The content hash the saved job's node had (the file's
+            ``run.node_job_content_hashes``), as a loaded function node takes it. A
+            file that does not record it leaves the descriptor's (blueprint) hash.
 
     Raises:
         ValueError: As for ``SavedSideEffectNode``.
     """
 
     def __init__(
-        self, descriptor: dict[str, Any], input_stream: StreamProtocol
+        self,
+        descriptor: dict[str, Any],
+        input_stream: StreamProtocol,
+        job_content_hash: str | None = None,
     ) -> None:
+        from orcapod.types import ContentHash
+
         saved = SavedSideEffectNode(descriptor)
         super().__init__(
             # A loaded node has no pod: every method that would use it is overridden.
@@ -234,6 +242,11 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
             label=saved.label,
         )
         self._saved: SavedSideEffectNode = saved
+        self._content_hash: ContentHash = (
+            ContentHash.from_string(job_content_hash)
+            if job_content_hash is not None
+            else saved.content_hash
+        )
         self._descriptor: dict[str, Any] = descriptor
         self._data_context = saved.data_context
         self._orcapod_config = saved.orcapod_config
@@ -246,8 +259,8 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
 
     @override
     def identity_structure(self) -> Any:
-        """The saved content hash."""
-        return self._saved.content_hash
+        """The saved job's content hash."""
+        return self._content_hash
 
     @override
     def pipeline_identity_structure(self) -> Any:
@@ -256,8 +269,8 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
 
     @override
     def content_hash(self, hasher: Any = None) -> ContentHash:
-        """The saved content hash."""
-        return self._saved.content_hash
+        """The saved job's content hash (``job_content_hash``, else the descriptor's)."""
+        return self._content_hash
 
     @override
     def pipeline_hash(self, hasher: Any = None) -> ContentHash:
