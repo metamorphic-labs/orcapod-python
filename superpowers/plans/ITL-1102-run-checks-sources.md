@@ -188,3 +188,12 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
 - `DerivedSource` holding no rows moves when its origin's time moves.
 - ITL-1095 fragment: "reads no source rows to process them".
 - Declined: run_async checks off the event loop (follow-up), `run_sources` deque, test docstrings.
+
+## CodeRabbit round 3 (incremental review of ae8323fc; plan approved by the coordinator)
+
+- `CachedSource` compares with the record hashes it presents (recorded when it builds its
+  merged rows), so a wrapper sharing a cache with another still moves.
+- CSV and SQLite sources keep an absolute access path (`:memory:` and `file:` URIs as given).
+- Docs: Delta's check cost stated exactly; a `PollingSource` a run reads is polled again,
+  and a failing poll raises (follow-up ITL-1139).
+- Declined: a summary for the direct side-effect run path (none exists on that path).

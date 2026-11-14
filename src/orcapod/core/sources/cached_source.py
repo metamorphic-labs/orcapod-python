@@ -108,6 +108,10 @@ class CachedSource(RootSource):
         # last found it had them all (ITL-1102): a check compares it with the wrapped
         # source's time, not with what the wrapped source's own check returned.
         self._source_seen: datetime | None = self._source_modified_time()
+        # The record hashes of the rows the merged stream presents, recorded when it is
+        # built; ``None`` before a build. A cache shared with another source can hold
+        # rows this source has not presented yet (ITL-1102).
+        self._presented_hashes: set[bytes] | None = None
 
     # -------------------------------------------------------------------------
     # Serialization
@@ -355,16 +359,18 @@ class CachedSource(RootSource):
 
         The wrapped source is checked first. When its modified time moved since the
         cache last took in its rows (by this check, or by a check made through another
-        source that wraps it), its rows are hashed and compared with the rows already
-        cached (a read of the cache; nothing is written): the cache keeps every row it
-        ever held, so rows that were removed from the wrapped source change nothing.
-        When it would gain rows, the merged rows held in memory are dropped (the next
-        read writes the new rows to the cache and merges them) and the modified time
-        moves. A comparison that raises leaves everything as it was, so the next check
-        compares again.
+        source that wraps it), its rows are hashed and compared with the rows this
+        source presents (recorded when it built its merged rows; before a build, the
+        rows already cached: a read of the cache; nothing is written). The cache keeps
+        every row it ever held, so rows that were removed from the wrapped source change
+        nothing. When this source would present rows it has not (another source sharing
+        the cache may already have written them), the merged rows held in memory are
+        dropped (the next read writes the new rows to the cache and merges them) and the
+        modified time moves. A comparison that raises leaves everything as it was, so
+        the next check compares again.
 
         Returns:
-            ``True`` if the cache will gain rows at the next read.
+            ``True`` if this source will present new rows at the next read.
         """
         if not isinstance(self._source, RootSource):
             return False
@@ -373,7 +379,12 @@ class CachedSource(RootSource):
         if seen == self._source_seen:
             return False
         live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
-        gains = not {h for h in live if h is not None} <= self._cached_record_hashes()
+        presented = (
+            self._presented_hashes
+            if self._presented_hashes is not None
+            else self._cached_record_hashes()
+        )
+        gains = not {h for h in live if h is not None} <= presented
         self._source_seen = seen
         if not gains:
             return False
@@ -384,13 +395,25 @@ class CachedSource(RootSource):
     def _read_cached_records(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context.
 
+        Returns:
+            The cached rows without the record hash and ``__data_context`` columns,
+            or ``None`` when the cache table does not exist.
+        """
+        records = self._read_cached_records_with_hashes()
+        if records is None:
+            return None
+        return records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
+
+    def _read_cached_records_with_hashes(self) -> "pa.Table | None":
+        """Read the cached rows written under the current data context, as stored.
+
         Every read of the whole cache table goes through here. Rows of another data
         context stay in the table untouched, and a cache at the older layout is not
         read (ITL-944).
 
         Returns:
-            The cached rows without the record hash and ``__data_context`` columns,
-            or ``None`` when the cache table does not exist.
+            The cached rows with their record hash and ``__data_context`` columns, or
+            ``None`` when the cache table does not exist.
         """
         self._account_for_stale_tables()
         records = self._cache_database.get_all_records(
@@ -406,7 +429,7 @@ class CachedSource(RootSource):
                 self._cache_database.base_path + self.cache_path,
                 stored_rows - records.num_rows,
             )
-        return records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
+        return records
 
     def _build_merged_stream(self) -> ArrowTableStream:
         """Ingest live data (if available), then return all cached records.
@@ -424,9 +447,19 @@ class CachedSource(RootSource):
                 self._source.source_id,
             )
 
-        all_records = self._read_cached_records()
-        if all_records is None:
+        stored = self._read_cached_records_with_hashes()
+        if stored is None:
+            self._presented_hashes = set()
             all_records = self._empty_table()
+        else:
+            self._presented_hashes = {
+                h
+                for h in stored.column(self.HASH_COLUMN_NAME).to_pylist()
+                if h is not None
+            }
+            all_records = stored.drop(
+                [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
+            )
 
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.

@@ -57,11 +57,14 @@ class CSVSource(RootSource):
         super().__init__(source_id=source_id, **kwargs)
 
         self._file_path = file_path
+        # Every later read (a check, ITL-1102) opens the file found now, whatever the
+        # working directory is then.
+        self._access_path = os.path.abspath(file_path)
         self._schema = schema
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
         self._record_id_column = record_id_column
-        self._file_state = _file_state(file_path)
+        self._file_state = _file_state(self._access_path)
         table = self._read_table()
         # The rows as read, columns and types included: a check compares a new read
         # with them, and refuses a table whose columns changed.
@@ -77,7 +80,7 @@ class CSVSource(RootSource):
         """Read the file into an Arrow table, typed as at construction."""
         import pyarrow.csv as pa_csv
 
-        table: pa.Table = pa_csv.read_csv(self._file_path)
+        table: pa.Table = pa_csv.read_csv(self._access_path)
         if self._schema is not None:
             return table.cast(self._schema)
         return table.cast(arrow_utils.infer_schema_nullable(table))
@@ -110,7 +113,7 @@ class CSVSource(RootSource):
             ValueError: If the file's columns or their types changed: the source's
                 schema is part of its identity; build a new source to read it.
         """
-        state = _file_state(self._file_path)
+        state = _file_state(self._access_path)
         if state == self._file_state:
             return False
         table = self._read_table()

@@ -186,7 +186,9 @@ class RootSource(StreamBase):
         ``ListSource``, ``DataFrameSource``) cannot change: this default returns
         ``False``. A source that raises here does not fail the run: the run issues a
         ``SourceCheckFailedWarning`` and proceeds with the data the source holds, so a
-        source must leave its data and modified time as they were when it raises.
+        source must leave its data and modified time as they were when it raises. A
+        source whose reads refresh it (``PollingSource``: a read polls) is refreshed
+        again by a run that reads it, and a refresh that fails then raises (ITL-1139).
 
         Returns:
             ``True`` if the source found new data and took it in.

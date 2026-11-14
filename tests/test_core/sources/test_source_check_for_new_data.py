@@ -679,7 +679,7 @@ def test_a_cached_source_retries_a_comparison_that_raised(delta_path: Path) -> N
     before = source.last_modified
     deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
     with patch.object(
-        CachedSource, "_cached_record_hashes", side_effect=OSError("cache unreachable")
+        CachedSource, "_live_records", side_effect=OSError("cache unreachable")
     ):
         with pytest.raises(OSError, match="cache unreachable"):
             source.check_for_new_data()
@@ -762,3 +762,53 @@ def test_a_derived_source_that_held_no_rows_moves_when_its_origin_runs(
     _run(downstream, "sync")
     zs = sorted(r["z"] for r in downstream.nodes["doubled"].as_table().to_pylist())
     assert zs == [2, 22, 42]
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 (ITL-1102): a shared cache, relative paths
+# ---------------------------------------------------------------------------
+
+
+def test_two_cached_sources_sharing_one_cache_both_move(delta_path: Path) -> None:
+    """The second wrapper's rows change though the first already wrote the new row."""
+    origin = _delta(delta_path)
+    database = InMemoryArrowDatabase()
+    first = CachedSource(origin, cache_database=database)
+    second = CachedSource(origin, cache_database=database)
+    assert _keys(first) == _keys(second) == [0, 1, 2]
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert first.check_for_new_data() is True
+    assert _keys(first) == [0, 1, 2, 3]  # this read writes the row to the shared cache
+    before = second.last_modified
+    assert second.check_for_new_data() is True
+    assert second.last_modified != before
+    assert _keys(second) == [0, 1, 2, 3]
+
+
+def test_csv_a_relative_path_is_checked_where_it_was_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    _write_csv(tmp_path / "a" / "rows.csv", [0, 1, 2])
+    _write_csv(tmp_path / "b" / "rows.csv", [5, 6, 7, 8])
+    monkeypatch.chdir(tmp_path / "a")
+    source = CSVSource("rows.csv", tag_columns="k", record_id_column="k")
+    monkeypatch.chdir(tmp_path / "b")
+    assert source.check_for_new_data() is False
+    _write_csv(tmp_path / "a" / "rows.csv", [0, 1, 2, 3])
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
+
+
+def test_sqlite_a_relative_path_is_checked_where_it_was_read(
+    sqlite_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(sqlite_path.parent)
+    source = SQLiteTableSource(sqlite_path.name, "t", record_id_column="k")
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    _insert(sqlite_path, 3)
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
+    assert not (tmp_path / "elsewhere" / sqlite_path.name).exists()

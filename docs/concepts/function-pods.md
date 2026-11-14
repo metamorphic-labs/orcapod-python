@@ -619,7 +619,8 @@ moves nothing, and a current job stays current. What each kind of source checks 
 run: a `SourceCheckFailedWarning` names the source and the error, the run proceeds with the
 data the source already holds, and the summary lists the source in `unchecked_sources` (a
 node's `run()` that runs nothing makes no summary and keeps its `last_run`: the warning is
-the report). `head()` and the preview never check.
+the report; a run that has to read a `PollingSource` whose check failed polls it again, and
+a failing poll raises, ITL-1139). `head()` and the preview never check.
 
 A source that cannot see its data change (an in-memory source: a `DictSource` copies the
 list it is given) is not re-read: build a new source object and bind it

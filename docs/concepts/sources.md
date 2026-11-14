@@ -449,7 +449,7 @@ and neither does a source's own `run()` outside a job (`source.run()` does what
 | `SpiralDBTableSource` | holds no rows (every read scans the pinned version); reads the table's current version (metadata only: no row, and `max_rows` does not apply) and pins it when it is newer, so the next read returns the new rows; an `asof` you gave never moves; record ids are the hash of the key, so only new or changed rows are new entries (a version that moves without a change, if SpiralDB moves it on compaction, re-runs the nodes below and reuses every stored result) |
 | `CSVSource` | reads the file's modification time and size; when either changed, reads the file again and holds the new rows if they changed (in any order) |
 | `SQLiteTableSource`, `PostgreSQLTableSource`, `DBTableSource` | reads the whole table again and holds the new rows if they changed (in any order, so an unordered `SELECT` is not a change) |
-| `CachedSource` | checks the source it wraps; when that source's modified time moved since the cache last took in its rows (also when another source over it made the check), compares the rows' record hashes with the cache (a read; nothing is written) and moves only when the cache will gain rows (a row removed from the wrapped source stays cached) |
+| `CachedSource` | checks the source it wraps; when that source's modified time moved since the cache last took in its rows (also when another source over it made the check), compares the rows' record hashes with the rows it presents (before its first read, with the cache: a read; nothing is written) and moves only when it will present new rows, also when another `CachedSource` sharing the cache already wrote them (a row removed from the wrapped source stays cached) |
 | `DerivedSource` | over a source, checks it; reads the origin's rows again when the origin's modified time moved since this source read them (a source that took in new data, a job node that ran again); holds the new rows if they changed; one that holds no rows (over a job node that had not run) moves when its origin's time moves |
 | `SourceProxy` | checks the source bound to it; its modified time follows that source's, and binding or unbinding moves it |
 
@@ -461,7 +461,9 @@ check. A check that raises part way changes nothing, so the next run checks agai
 A database table has no cheap and exact sign of a change, so each check of a SQLite or
 PostgreSQL source reads the whole table, one full read per run, as building the source did.
 For a large table, build the source over a narrower table or view, or keep the data in a
-store that records versions (Delta, SpiralDB), whose check reads only the version.
+store that records versions: a Delta check whose version did not move reads only the Delta
+log (one whose version moved reads the table again, as above), and a SpiralDB check reads
+only the table's metadata.
 
 A table or file whose columns changed (a CSV file's types are inferred again on each read,
 so a null in a column that had none is a change of type), a table that is gone or empty, or a
@@ -477,7 +479,10 @@ run proceeds with the data the source already holds, and its `RunSummary` lists 
 in `unchecked_sources` ("sources not checked for new data (see the warning): ..."). A job
 node's `run()` that then runs nothing (the node holds a current run) makes no summary and
 keeps its `last_run`: the warning is the report. A later failure to read the source raises
-as it always has.
+as it always has. A `PollingSource` reads by polling: a run that has to read it (a node
+below it runs) polls it again, and a poll that fails again raises, as it did before the
+check existed; a run whose nodes are all current proceeds. Reading a polling source's held
+rows after a failed check is ITL-1139.
 
 A source that takes in new data keeps its record id rule. Without `record_id_column`, a
 row's record id comes from its position, so a row that moves (rows read in another order

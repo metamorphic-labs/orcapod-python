@@ -129,7 +129,8 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     stale. A check that raises does not stop the run (developer, November 14, 2026:
     "For check that fails, issues a warning"): one ``SourceCheckFailedWarning`` names
     the source and the error, at the user's line that started the run and at every run,
-    and the run proceeds with the data the source holds.
+    and the run proceeds with the data the source holds (a ``PollingSource`` that a run
+    reads is polled again by that read, and a poll that fails then raises: ITL-1139).
 
     Args:
         streams: The nodes of the run, or the node whose ``run()`` it is.

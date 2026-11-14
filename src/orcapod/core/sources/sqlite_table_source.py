@@ -37,6 +37,17 @@ if TYPE_CHECKING:
     from orcapod.config import OrcapodConfig
 
 
+def _access_path(db_path: str | os.PathLike[str]) -> str | os.PathLike[str]:
+    """The path a later read opens: a file path made absolute, a special name as given.
+
+    ``":memory:"`` and ``file:`` URIs are not file system paths.
+    """
+    text = os.fspath(db_path)
+    if text == ":memory:" or text.startswith("file:"):
+        return db_path
+    return os.path.abspath(text)
+
+
 class SQLiteTableSource(DBTableSource):
     """A read-only Source backed by a table in a SQLite database.
 
@@ -88,6 +99,9 @@ class SQLiteTableSource(DBTableSource):
         config: "OrcapodConfig | None" = None,
     ) -> None:
         self._db_path = db_path
+        # A check (ITL-1102) reopens the database found now, whatever the working
+        # directory is then; an in-memory database or a URI is kept as given.
+        self._access_path: str | os.PathLike[str] = _access_path(db_path)
         connector = SQLiteConnector(db_path)
 
         try:
@@ -134,7 +148,7 @@ class SQLiteTableSource(DBTableSource):
 
         The connector the source was built with was closed once the table was read.
         """
-        connector = SQLiteConnector(self._db_path)
+        connector = SQLiteConnector(self._access_path)
         try:
             yield connector
         finally:
