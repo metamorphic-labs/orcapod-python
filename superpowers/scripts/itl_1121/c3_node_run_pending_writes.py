@@ -23,7 +23,7 @@ def double(x: int) -> int:
     return 2 * x
 
 
-def col(table: deltalake.DeltaTable, name: str) -> set:
+def col(table: deltalake.DeltaTable, name: str) -> set[object]:
     return set(
         delta_to_pyarrow_dataset(table).to_table(columns=[name])[name].to_pylist()
     )

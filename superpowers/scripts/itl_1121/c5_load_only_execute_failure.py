@@ -37,7 +37,8 @@ def build() -> PipelineJob:
             ),
             label="rowwise",
         )
-        tapped: Any = tap_pod(deliver).process(rows, label="tap")
+        tap: Any = tap_pod(deliver)
+        tapped: Any = tap.process(rows, label="tap")
         tapped.select_data_columns(["y"], label="down")
     return job
 

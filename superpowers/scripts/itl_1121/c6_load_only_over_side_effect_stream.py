@@ -49,21 +49,25 @@ base = ArrowTableStream(
     pa.table({"k": [1, 2, 3], "x": [1, 2, 3]}, schema=schema), tag_columns=["k"]
 )
 
-upstream: Any = tap_pod(deliver_up).process(
-    base
-)  # a SideEffectPodStream, outside a job
+tap_up: Any = tap_pod(deliver_up)
+upstream: Any = tap_up.process(base)  # a SideEffectPodStream, outside a job
 print("input type:", type(upstream).__name__)
-node = SideEffectJobNode(tap_pod(deliver_own), upstream)
-view = node.run(load_only=True)
-print(
-    f"side-effect node, run(load_only=True): upstream delivered {len(UP)}, own delivered {len(OWN)}, rows {view.as_table().num_rows}"
-)
-node.clear_cache()
-node.run(load_only=True)
-print(f"  again after clear_cache(): upstream delivered {len(UP)} in total")
+tap_own: Any = tap_pod(deliver_own)
+node = SideEffectJobNode(tap_own, upstream)
+# Before ITL-1121 this delivered every row of the upstream stream (3, then 6 after
+# clear_cache()); since then the load-only run refuses the input before reading it.
+try:
+    view = node.run(load_only=True)
+    print(f"side-effect node, run(load_only=True): rows {view.as_table().num_rows}")
+except ValueError as exc:
+    print(f"side-effect node, run(load_only=True) refused: {exc}")
+print(f"  upstream delivered {len(UP)}, own delivered {len(OWN)}")
 
+# Unchanged (reported to the coordinator): an outside FunctionPodStream is read, so a
+# load-only run computes its function.
 fn_upstream: Any = inc.pod(base)  # a FunctionPodStream, outside a job
-fnode = FunctionJobNode(dbl.pod, fn_upstream, pipeline_database=InMemoryArrowDatabase())
+dbl_pod: Any = dbl.pod
+fnode = FunctionJobNode(dbl_pod, fn_upstream, pipeline_database=InMemoryArrowDatabase())
 fview = fnode.run(load_only=True)
 print(
     f"function node over a pod stream, run(load_only=True): upstream function called {len(CALLS)} times; status {fview.status}"

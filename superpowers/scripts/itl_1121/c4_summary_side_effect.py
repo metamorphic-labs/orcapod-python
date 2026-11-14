@@ -36,7 +36,8 @@ for name, orch in [
                 ),
                 label="rowwise",
             )
-            tap_pod(deliver).process(rows, label="tap")
+            tap: Any = tap_pod(deliver)
+            tap.process(rows, label="tap")
         job.run(orchestrator=orch())
         first = len(DELIVERED)
         job.nodes["tap"].clear_cache()
@@ -66,7 +67,8 @@ for name, orch in [
             ),
             label="rowwise",
         )
-        rows.select_data_columns(["y"], label="op")
+        rows_any: Any = rows
+        rows_any.select_data_columns(["y"], label="op")
     job.run(orchestrator=orch())
     job.nodes["op"].clear_cache()
     summary = job.run(orchestrator=orch())

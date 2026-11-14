@@ -16,6 +16,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
+from orcapod.side_effects import SideEffectPod, tap_pod
 from orcapod.sources import DictSource
 
 ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
@@ -25,6 +26,13 @@ ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchest
 def inc(x: int) -> int:
     """Return ``x + 1``."""
     return x + 1
+
+
+def _tap(fn: Any) -> SideEffectPod:
+    """A tap side-effect pod over ``fn``."""
+    pod = tap_pod(fn)
+    assert isinstance(pod, SideEffectPod)
+    return pod
 
 
 def _source() -> DictSource:
@@ -160,13 +168,11 @@ def _deliver(y: int, ctx: Any) -> None:
 
 def _job_below_rowwise(below: str) -> PipelineJob:
     """``rowwise`` (``inc``) with a side-effect node or an operator node ``below`` it."""
-    from orcapod.side_effects import tap_pod
-
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
-        rows = inc.pod(_source(), label="rowwise")
+        rows: Any = inc.pod(_source(), label="rowwise")
         if below == "side_effect":
-            tap_pod(_deliver).process(rows, label="below")
+            _tap(_deliver).process(rows, label="below")
         else:
             rows.select_data_columns(["y"], label="below")
     return job
@@ -279,12 +285,10 @@ def test_an_execute_whose_input_raises_leaves_the_side_effect_node_stale(
     import asyncio
 
     from orcapod.channels import Channel
-    from orcapod.side_effects import tap_pod
-
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         rows = inc.pod(_source(), label="rowwise")
-        tapped: Any = tap_pod(_deliver).process(rows, label="tap")
+        tapped: Any = _tap(_deliver).process(rows, label="tap")
         tapped.select_data_columns(["y"], label="down")
     job.run()
     tap, down = job.nodes["tap"], job.nodes["down"]
@@ -326,11 +330,13 @@ def _twice(x: int) -> int:
     return 2 * x
 
 
+# The decorated function's pod, typed for a node's constructor.
+_twice_pod: Any = _twice.pod
+
+
 def _delivering_stream() -> Any:
     """A side-effect pod's stream outside a job: reading it delivers each row."""
-    from orcapod.side_effects import tap_pod
-
-    return tap_pod(_deliver_upstream).process(_base_stream())
+    return _tap(_deliver_upstream).process(_base_stream())
 
 
 def _node_over(kind: str, stream: Any) -> Any:
@@ -338,14 +344,14 @@ def _node_over(kind: str, stream: Any) -> Any:
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
     from orcapod.core.operators import MapData
-    from orcapod.side_effects import SideEffectJobNode, tap_pod
+    from orcapod.side_effects import SideEffectJobNode
     from orcapod.types import CacheMode
 
     if kind == "side_effect":
-        return SideEffectJobNode(tap_pod(_deliver_own), stream)
+        return SideEffectJobNode(_tap(_deliver_own), stream)
     if kind == "function":
         return FunctionJobNode(
-            _twice.pod, stream, pipeline_database=InMemoryArrowDatabase()
+            _twice_pod, stream, pipeline_database=InMemoryArrowDatabase()
         )
     return OperatorJobNode(
         operator=MapData({"x": "renamed"}),
