@@ -2120,11 +2120,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if self._function_pod is None:
             raise self._cannot_compute_error()
 
-        self._begin_run()
-        # A whole-input condition, not a row failure: the error policy does not apply.
-        require_same_data_context(
-            input_stream.data_context_key, self._stored_data_context_key
-        )
+        try:
+            self._begin_run()
+            # A whole-input condition, not a row failure: the error policy does not
+            # apply.
+            require_same_data_context(
+                input_stream.data_context_key, self._stored_data_context_key
+            )
+        except BaseException:
+            # A run that raised defines no rows, also when it was refused at once.
+            self.clear_cache()
+            raise
         node_label = self.label
         node_hash = self.content_hash().to_string()
 
@@ -2221,6 +2227,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self._commit_or_end_node(
                 self._commit_at_node_end, ctx_obs, node_label, node_hash
             )
+            # The node's rows are those of this run's inputs, whatever else it caches.
+            self._set_run_rows(emitted_entry_ids)
+            ctx_obs.on_node_end(node_label, node_hash)
         except Exception as run_error:
             self._commit_after_failure(run_error)
             # A run that raised defines no rows: the node reads as one with no run.
@@ -2230,9 +2239,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
 
-        # The node's rows are those of this run's inputs, whatever else it caches.
-        self._set_run_rows(emitted_entry_ids)
-        ctx_obs.on_node_end(node_label, node_hash)
         # Mark this node as freshly computed so subsequent iter_data() calls
         # skip the is_stale check and serve results directly from the in-memory cache.
         self._update_modified_time()
@@ -3603,7 +3609,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             self._begin_run()
         except StoreError:
-            # Nothing was delivered; downstream must not wait for rows.
+            # Nothing was delivered; downstream must not wait for rows. A run that
+            # raised defines no rows.
+            self.clear_cache()
             await output.close()
             raise
         status = self.load_status
@@ -3628,6 +3636,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     self._input_stream.data_context_key, self._stored_data_context_key
                 )
             except InputValidationError:
+                # A run that raised defines no rows, also when it was refused at once.
+                self.clear_cache()
                 await output.close()
                 raise
         node_label = self.label
