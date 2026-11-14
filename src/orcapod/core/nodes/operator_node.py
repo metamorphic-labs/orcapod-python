@@ -1225,7 +1225,36 @@ class OperatorJobNode(OperatorNodeBase):
                 self._pipeline_database.base_path + self._stored_table_path,
                 stored_rows - records.num_rows,
             )
-        return records.drop([constants.DATA_CONTEXT_COL])
+        return self._in_row_order_on_read(records.drop([constants.DATA_CONTEXT_COL]))
+
+    def _in_row_order_on_read(self, records: "pa.Table") -> "pa.Table":
+        """Put a stored table's user columns in row order; bookkeeping stays in place.
+
+        A node run on its own stored its rows in its operator's column order before
+        ITL-1133 (a join lists its data before its system tags); every writer now
+        stores the row order (``StaticOutputOperatorPod._in_row_order``). Read in row
+        order, such a table gives the columns of every other path, and a table in row
+        order is returned unchanged. Only the order changes: no column is added,
+        dropped, renamed or retyped, and the bookkeeping columns (``__``, and
+        ``HASH_COLUMN_NAME``) keep their positions.
+        """
+        names = records.column_names
+
+        def bookkeeping(name: str) -> bool:
+            return (
+                name.startswith(constants.META_PREFIX) or name == self.HASH_COLUMN_NAME
+            )
+
+        user = [n for n in names if not bookkeeping(n)]
+        ordered = iter(
+            StaticOutputOperatorPod._in_row_order(
+                records.select(user), self.keys()[0]
+            ).column_names
+        )
+        order = [n if bookkeeping(n) else next(ordered) for n in names]
+        if order == names:
+            return records
+        return records.select(order)
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """This node's zero-row table: its operator applied to zero-row inputs.
