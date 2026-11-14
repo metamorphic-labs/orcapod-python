@@ -174,3 +174,12 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   its first hash is that source's schema hash, so two sources of one schema cannot be
   told apart. Three new self-tests. Column order was declined: it is covered by
   `tests/test_core/operators/test_join_tag_order.py`. 6494 pass, no marks.
+* Nov 14 (later): answered 8 older review threads that had no reply. The checker now:
+  - looks a null data value up like any value;
+  - names a wrong folded record id under its own column;
+  - requires a system-tag pair for every source a row's data came from;
+  - checks #354's presentation order: nulls last, then ties by the system tags. List
+    tags follow Polars, where a null element inside a list comes first; GroupBy's member
+    sort puts nulls last at every depth. This was reported to the coordinator.
+  New: a job-backed `SideEffectPod` node test (`SideEffectNode.as_table` has its own
+  concatenation) on both orchestrators. 6503 pass, no marks.

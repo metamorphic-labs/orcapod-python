@@ -7,6 +7,7 @@ and the checker must name that column.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from .checker import (
     assert_all_columns_checked,
     assert_rows_aligned,
     assert_same_rows_by_identity,
+    assert_sorted_by_tags,
 )
 from .expectations import pairs, rows
 from .fixtures import TAG_COLUMNS, make_sources
@@ -166,7 +168,10 @@ def test_a_rotated_folded_record_id_is_named() -> None:
         for c in table.column_names
         if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
     ]
-    with pytest.raises(AssertionError, match="folded record id"):
+    # Named under the record-id column, not the source-id column beside it.
+    with pytest.raises(
+        AssertionError, match=re.escape(f"column '{record_id}': folded record id")
+    ):
         assert_rows_aligned(
             rotated(table, record_id), layout, sources.oracle, batched.data_context
         )
@@ -301,6 +306,85 @@ def test_a_table_asked_sorted_but_not_in_tag_order_fails() -> None:
     unsorted = ordered.take(list(reversed(range(ordered.num_rows))))
     with pytest.raises(AssertionError, match="not in tag order"):
         assert_requested_columns(unsorted, {"columns": {"sort_by_tags": True}}, layout)
+
+
+def test_a_sorted_table_with_nulls_first_or_a_wrong_tiebreak_fails() -> None:
+    """The presentation order of #354: nulls last, then ties by the system tags."""
+    sources = make_sources("null")
+    # all_info sorts by tags, nulls last, and breaks ties by the system tag columns.
+    table = sources.a.as_table(all_info=True)
+    assert_sorted_by_tags(table, TAG_COLUMNS)
+    g = table.column("g").to_pylist()
+    nulls = [i for i, v in enumerate(g) if v is None]
+    values = [i for i, v in enumerate(g) if v is not None]
+    with pytest.raises(AssertionError, match="not in tag order"):
+        assert_sorted_by_tags(table.take(nulls + values), TAG_COLUMNS)
+    tags = list(zip(g, table.column("n").to_pylist(), strict=True))
+    (tie,) = [i for i in range(1, len(tags)) if tags[i] == tags[i - 1]]
+    order = list(range(table.num_rows))
+    order[tie - 1], order[tie] = order[tie], order[tie - 1]
+    with pytest.raises(AssertionError, match="not in tag order"):
+        assert_sorted_by_tags(table.take(order), TAG_COLUMNS)
+
+
+def test_a_null_data_value_no_origin_has_is_named() -> None:
+    """A value nulled where no origin row has a null fails, though it leaves no origin."""
+    table, _, oracle, context = source_table()
+    # Only x: no other column could give the row its origin.
+    bare = table.select([*TAG_COLUMNS, "x"])
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("x",))
+    assert_rows_aligned(bare, layout, oracle, context)
+    values = bare.column("x").to_pylist()
+    values[0] = None
+    nulled = bare.set_column(
+        bare.column_names.index("x"),
+        pa.field("x", bare.field("x").type),
+        pa.array(values, type=bare.field("x").type),
+    )
+    with pytest.raises(
+        AssertionError, match="column 'x': value None is the value of no"
+    ):
+        assert_rows_aligned(nulled, layout, oracle, context)
+
+
+def test_a_row_without_a_pair_for_a_source_of_its_data_fails() -> None:
+    """A joined row whose B pair is gone, or is A's pair copied over B's, fails."""
+    sources = make_sources("unique")
+    joined = Join()(sources.a, sources.b)
+    table = joined.as_table(all_info=True)
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=joined.keys()[1])
+    assert_rows_aligned(table, layout, sources.oracle, joined.data_context)
+    sep = constants.BLOCK_SEPARATOR
+
+    def pair_of(source: str) -> list[str]:
+        """The source-id and record-id columns holding ``source``'s rows."""
+        lineage = f"{sep}{sources.oracle.schema_hashes[source]}{sep}"
+        return [
+            c
+            for prefix in (
+                constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+                constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+            )
+            for c in table.column_names
+            if c.startswith(f"{prefix}{lineage}")
+        ]
+
+    a_pair, b_pair = pair_of("A"), pair_of("B")
+    assert len(a_pair) == len(b_pair) == 2
+    missing = re.escape("no system tag pair for the sources ['B']")
+    with pytest.raises(AssertionError, match=missing):
+        assert_rows_aligned(
+            table.drop_columns(b_pair), layout, sources.oracle, joined.data_context
+        )
+    copied = table
+    for a_column, b_column in zip(a_pair, b_pair, strict=True):
+        copied = copied.set_column(
+            copied.column_names.index(b_column),
+            copied.field(b_column),
+            table.column(a_column),
+        )
+    with pytest.raises(AssertionError, match=missing):
+        assert_rows_aligned(copied, layout, sources.oracle, joined.data_context)
 
 
 def test_a_row_replaced_by_a_copy_of_another_fails_the_expected_rows() -> None:

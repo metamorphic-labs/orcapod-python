@@ -6,6 +6,10 @@ first error must be the error of the first row to fail in the order the rows com
 The node's table must hold exactly the rows that succeeded, each aligned. Every entry
 point (sync ``run``, async ``run``, ``run_async``, ``run`` inside a running loop), every
 forced completion order on the async ones, both stores and every tie scenario.
+
+A job's ``SideEffectPod`` node builds its tables with its own tag/data concatenation
+(``SideEffectNode.as_table``), not a stream's: its iterated rows and its tables under every
+configuration must hold every input row once, each aligned, and its preview no row.
 """
 
 from __future__ import annotations
@@ -15,12 +19,25 @@ from typing import Any, cast
 
 import pytest
 
+from orcapod import PipelineJob
+from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RowFailuresWarning
+from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.side_effects import SideEffectPod
 
-from .checker import Layout, assert_rows_aligned
-from .fixtures import SCENARIOS, keys_a
+from .checker import Layout, assert_requested_columns, assert_rows_aligned, rows_table
+from .expectations import rows
+from .fixtures import (
+    COLUMN_CONFIGS,
+    SCENARIOS,
+    content_hash_column,
+    keys_a,
+    make_sources,
+)
 from .gate import ORDERS, fails
 from .jobs import MODES, STORES, function_tokens, make_run
+
+ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
 
 
 def job_params() -> list[Any]:
@@ -81,3 +98,59 @@ def test_run_summary_and_table_belong_to_the_rows_that_ran(
     )
     computed_ys = sorted(table.column("y").to_pylist())
     assert computed_ys == sorted(10 * x for x in succeeding)
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_a_side_effect_node_gives_every_row_once_aligned(
+    scenario: str, orchestrator: str
+) -> None:
+    """A job's side-effect node: rows and every configured table aligned; no preview.
+
+    The run delivers each input row once. The node's own iteration and its tables under
+    every configuration hold every row of A exactly once, each aligned; its preview has
+    no row under any configuration, by design (showing it must never deliver).
+    """
+    sources = make_sources(scenario)
+    delivered: list[int] = []
+
+    def deliver(x: int, s: str, m: int | None, ctx: Any) -> None:
+        """Record the delivered row's ``x``."""
+        delivered.append(x)
+
+    job = PipelineJob(name="side_effects", store=InMemoryArrowDatabase())
+    with job:
+        SideEffectPod(deliver)(sources.a, label="delivered")
+    job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert sorted(delivered) == sorted(keys_a(scenario, "shuffled")), (
+        "the run did not deliver every row once"
+    )
+
+    node = job.nodes["delivered"]
+    tags, data = node.keys()
+    expected = rows(sources.oracle, "A")
+    assert_rows_aligned(
+        rows_table(list(node.iter_data())),
+        Layout(tag_keys=tuple(tags), data_keys=tuple(data)),
+        sources.oracle,
+        node.data_context,
+        expected_rows=expected,
+    )
+    failures = []
+    for name, config in COLUMN_CONFIGS.items():
+        layout = Layout(
+            tag_keys=tuple(tags),
+            data_keys=tuple(data),
+            content_hash_column=content_hash_column(config),
+        )
+        try:
+            table = node.as_table(**config)
+            assert_requested_columns(table, config, layout)
+            assert_rows_aligned(
+                table, layout, sources.oracle, node.data_context, expected_rows=expected
+            )
+            preview = node.head(100, **config).as_table()
+            assert preview.num_rows == 0, f"the preview has {preview.num_rows} rows"
+        except AssertionError as exc:
+            failures.append(f"[{name}] {exc}")
+    assert not failures, "\n".join(failures)

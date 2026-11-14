@@ -27,7 +27,7 @@ per-row column cannot slip by unchecked.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -173,8 +173,8 @@ class _RowChecker:
                     f"is {expected!r}",
                 )
             return from_token
-        if value is None:
-            return None
+        # A null is looked up like any value: a null no origin row has there is wrong,
+        # though it leaves the row without an origin to compare the rest with.
         candidates = self.oracle.origins_for_value(column, value)
         if not candidates:
             self.fail(column, f"value {value!r} is the value of no origin row")
@@ -263,6 +263,9 @@ class _RowChecker:
         source_prefix = constants.SYSTEM_TAG_SOURCE_ID_PREFIX
         record_prefix = constants.SYSTEM_TAG_RECORD_ID_PREFIX
         folded = bool(self.layout.members)
+        # The sources the row's data came from, before the pairs add their own.
+        data_sources = {s for member in self.state.members for s in member}
+        paired: set[str] = set()
         for name in self.row:
             if not name.startswith(source_prefix):
                 continue
@@ -280,9 +283,22 @@ class _RowChecker:
                 constants.BLOCK_SEPARATOR
             )[0]
             if folded:
-                self._check_folded(name, source_value, record_value, lineage)
+                source = self._check_folded(
+                    name, record_name, source_value, record_value, lineage
+                )
             else:
-                self._check_scalar(record_name, source_value, record_value, lineage)
+                source = self._check_scalar(
+                    record_name, source_value, record_value, lineage
+                )
+            if source is not None:
+                paired.add(source)
+        # A row with system tags has a pair for every source its data came from: a pair
+        # copied over another input's pair (two inputs of one schema) leaves one out.
+        if paired and (missing := sorted(data_sources - paired)):
+            self.fail(
+                "system tags",
+                f"no system tag pair for the sources {missing} the row's data came from",
+            )
 
     def _check_lineage(self, name: str, source: str, lineage: str) -> bool:
         """The column holding a pair of ``source`` must descend from that source's column.
@@ -305,46 +321,69 @@ class _RowChecker:
 
     def _check_scalar(
         self, name: str, source_value: Any, record_value: Any, lineage: str
-    ) -> None:
-        """A scalar record id is the record id of this row's origin row of its source."""
+    ) -> str | None:
+        """A scalar record id is the record id of this row's origin row of its source.
+
+        Returns:
+            The pair's source when the pair is valid, else ``None``.
+        """
         origin = self.oracle.by_record_id.get(record_value)
         if origin is None:
             self.fail(name, f"record id {record_value!r} is no source row's")
-            return
+            return None
         if origin.source_id != source_value:
             self.fail(
                 name,
                 f"record id of a row of {origin.source_id!r} beside source id "
                 f"{source_value!r}",
             )
-            return
+            return None
         if not self._check_lineage(name, origin.source_id, lineage):
-            return
+            return None
         self._assign(0, name, origin)
+        return origin.source_id
 
     def _check_folded(
-        self, name: str, source_value: Any, record_value: Any, lineage: str
-    ) -> None:
-        """A folded pair is the documented fold of this row's members of one source."""
+        self,
+        name: str,
+        record_name: str,
+        source_value: Any,
+        record_value: Any,
+        lineage: str,
+    ) -> str | None:
+        """A folded pair is the documented fold of this row's members of one source.
+
+        Args:
+            name: The folded source-id column.
+            record_name: The folded record-id column beside it.
+            source_value: The row's folded source id.
+            record_value: The row's folded record id.
+            lineage: The first hash of the columns' names.
+
+        Returns:
+            The pair's source when the pair is valid, else ``None``.
+        """
         sources = {s for member in self.state.members for s in member}
         for source in sorted(sources):
             origins = [member.get(source) for member in self.state.members]
             if fold_values([source] * len(origins)) != source_value:
                 continue
             if not self._check_lineage(name, source, lineage):
-                return
+                return None
             if any(o is None for o in origins):
                 self.fail(name, f"members of {source!r} not all known; cannot fold")
-                return
+                return None
             expected = fold_record_ids([o.record_id for o in origins if o is not None])
             if expected != record_value:
                 self.fail(
-                    name,
+                    record_name,
                     "folded record id is not the fold of the row's own members "
                     f"{[o.token for o in origins if o is not None]!r}",
                 )
-            return
+                return None
+            return source
         self.fail(name, f"folded source id {source_value!r} folds no member list")
+        return None
 
     # -- values --------------------------------------------------------------
 
@@ -543,11 +582,8 @@ def assert_requested_columns(
         ]
         assert not missing, f"no source-info columns {missing}"
     if require_sorted and (all_info or columns.get("sort_by_tags")):
-        # Only scalar tags: a list-valued tag (Batch) cannot be sorted by Arrow,
-        # and the table then keeps its order (ArrowTableStream's documented fallback).
-        scalar_tags = [k for k in layout.tag_keys if k not in layout.members]
-        if len(scalar_tags) == len(layout.tag_keys):
-            assert_sorted_by_tags(table, scalar_tags)
+        # List-valued tags (Batch) too: they are sorted with Polars, nulls last.
+        assert_sorted_by_tags(table, layout.tag_keys)
     if (all_info or columns.get("system_tags")) and not layout.no_system_tags:
         pairs = [
             c
@@ -626,31 +662,48 @@ def rows_table(pairs: Iterable[tuple[Any, Any]]) -> pa.Table:
     return pa.concat_tables(tables, promote_options="permissive")
 
 
-def assert_sorted_by_tags(table: pa.Table, tag_keys: Sequence[str]) -> None:
-    """Assert the rows of ``table`` are in tag order (as ``sort_by_tags`` asks).
+def _null_last(value: Any) -> tuple[Any, ...]:
+    """A sort key: ascending, a null cell after every value.
 
-    Nulls may come first or last, column by column, as long as one placement explains the
-    whole table; rows with equal tags may come in any order.
+    A list cell (``Batch``'s tags, sorted with Polars) is ordered element by element, a
+    shorter prefix first; inside a list a null element comes before every value, as
+    Polars orders it (only the null cell itself goes last).
     """
-    tuples = list(zip(*(table.column(k).to_pylist() for k in tag_keys), strict=True))
-    if not tag_keys or len(tuples) < 2:
+    if value is None:
+        return (1,)
+    return (0, _in_list(value) if isinstance(value, list) else value)
+
+
+def _in_list(value: list[Any]) -> tuple[Any, ...]:
+    """The Polars order of a list's elements: a null element before every value."""
+    return tuple(
+        (0,) if v is None else (1, _in_list(v) if isinstance(v, list) else v)
+        for v in value
+    )
+
+
+def assert_sorted_by_tags(table: pa.Table, tag_keys: Sequence[str]) -> None:
+    """Assert the rows of ``table`` are in the presentation order ``sort_by_tags`` asks.
+
+    The order of ``as_table(sort_by_tags=True)`` and ``head`` (#354,
+    ``arrow_utils.sort_by_tag_columns``): ascending by ``tag_keys``, a null cell last (a
+    list-valued tag is ordered with Polars: element by element, a null element first),
+    then by the system tag columns the table has, in column order. Rows equal on all of these keep their
+    input order, which the table does not show, so they may come in any order.
+    """
+    system_tags = [
+        c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    keys = list(dict.fromkeys([*tag_keys, *system_tags]))
+    if not keys or table.num_rows < 2:
         return
-
-    def key(nulls_first: bool) -> Callable[[tuple[Any, ...]], tuple[Any, ...]]:
-        """A sort key placing nulls first or last in every column."""
-
-        def sort_key(row: tuple[Any, ...]) -> tuple[Any, ...]:
-            """The row's tags with each null mapped before or after every value."""
-            return tuple(
-                (0 if nulls_first else 2, 0) if v is None else (1, v) for v in row
-            )
-
-        return sort_key
-
-    assert tuples in (
-        sorted(tuples, key=key(True)),
-        sorted(tuples, key=key(False)),
-    ), f"rows not in tag order: {tuples}"
+    rows = list(zip(*(table.column(k).to_pylist() for k in keys), strict=True))
+    order = [tuple(_null_last(v) for v in row) for row in rows]
+    out_of_order = [i for i in range(1, len(order)) if order[i - 1] > order[i]]
+    assert not out_of_order, (
+        f"rows not in tag order (by {keys}, nulls last): row {out_of_order[0]} "
+        f"{rows[out_of_order[0]]} comes after {rows[out_of_order[0] - 1]}"
+    )
 
 
 def assert_members_cover(
