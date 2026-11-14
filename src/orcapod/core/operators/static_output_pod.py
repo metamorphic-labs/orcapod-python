@@ -17,10 +17,10 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     STALE_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
     head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
@@ -559,7 +559,9 @@ class DynamicPodStream(StreamBase):
             self._cached_stream = None
             self._cached_time = max_upstream_time
 
-    def run(self, *args: Any, **kwargs: Any) -> None:
+    def _refresh(self) -> None:
+        """Run the operator unless its kept result is current: the one computation
+        path of ``as_table``, ``iter_data`` and so ``run``."""
         self._update_cache_status()
 
         # recompute if cache is invalid
@@ -575,7 +577,7 @@ class DynamicPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        self.run()
+        self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
@@ -584,7 +586,7 @@ class DynamicPodStream(StreamBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        self.run()
+        self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
@@ -596,7 +598,7 @@ class DynamicPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first rows of the operator's kept result; never runs the operator.
 
         The head of an operator is not the operator over the heads of its inputs (a
@@ -613,7 +615,7 @@ class DynamicPodStream(StreamBase):
             )
         return self._head_without_rows(
             config,
-            HeadStatus.NOT_COMPUTED,
+            ViewStatus.NOT_COMPUTED,
             note=STALE_NOTE if had_result else None,
         )
 
