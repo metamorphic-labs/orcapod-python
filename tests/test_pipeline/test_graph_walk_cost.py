@@ -72,8 +72,12 @@ class _CallCounter:
         self.budget = budget
         self.per_object: collections.Counter[int] = collections.Counter()
         self.total = 0
+        # Every counted object is kept alive while counting, so that the id of a
+        # short-lived stream (a run makes many) is never reused by another one.
+        self._counted: dict[int, object] = {}
 
     def record(self, obj: object) -> None:
+        self._counted[id(obj)] = obj
         self.per_object[id(obj)] += 1
         self.total += 1
         if self.total > self.budget:
