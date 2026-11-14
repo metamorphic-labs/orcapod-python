@@ -24,8 +24,10 @@ import orcapod
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import MapData
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase
 from orcapod.sources import ArrowTableSource, CSVSource, DictSource
+from orcapod.system_constants import constants
 from orcapod.types import Schema
 
 
@@ -52,6 +54,22 @@ def _csv(tmp_path: pathlib.Path, name: str, text: str) -> CSVSource:
     path = tmp_path / name
     _ = path.write_text(text)
     return CSVSource(str(path), tag_columns=["id"], source_id=name)
+
+
+def _record_id_first(source: ArrowTableSource) -> ArrowTableStream:
+    """Return a stream of *source*'s rows with its system-tag pair record-id first.
+
+    The pair swaps places; every other column keeps its position.
+    """
+    table = source.as_table(
+        columns={"system_tags": True, "source": True, "context": True}
+    )
+    names = table.column_names
+    pair = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+    assert len(pair) == 2 and constants.SYSTEM_TAG_SOURCE_ID_PREFIX in pair[0]
+    swap = {pair[0]: pair[1], pair[1]: pair[0]}
+    reordered = table.select([swap.get(name, name) for name in names])
+    return ArrowTableStream(reordered, tag_columns=["id"])
 
 
 NODES = ("src", "renamed", "inc")
@@ -121,6 +139,16 @@ def test_no_accepted_bind_changes_a_path_or_a_table_schema(
             MapData({"q": "x"})(
                 DictSource([{"id": 10, "q": 10}], tag_columns=["id"], source_id="m")
             ),
+        ),
+        (
+            "system-tag pair record-id first",
+            _assign,
+            _record_id_first(_arrow([11, 12], [11, None], x_nullable=True)),
+        ),
+        (
+            "narrower, system-tag pair record-id first",
+            _bind,
+            _record_id_first(_arrow([13], [13], x_nullable=False)),
         ),
         ("narrower csv", _bind, _csv(tmp_path, "b.csv", "id,x\n9,9\n")),
     ]
@@ -201,3 +229,89 @@ def test_a_structural_class_of_the_same_identity_changes_no_path_or_schema(
         snapshots.append(_snapshot(job, ("src", "renamed")))
     assert snapshots[1] == snapshots[0]
     assert snapshots[2] == snapshots[0]
+
+
+def test_a_record_id_first_pair_is_given_in_the_declared_order() -> None:
+    """A source whose system-tag pair comes record-id first is given source-id first.
+
+    The order every node predicts (``output_schema``) and a source of the declared order
+    has; in the schema, the table, the head and the zero-row table, for a slot of the
+    source's own types (rows passed as they are otherwise) and for a ``T | None`` slot
+    the source is narrower than.
+    """
+    for x_type, x_nullable in ((int, False), (int | None, True)):
+        slot = SourceNode(
+            name="src",
+            tag_schema=Schema({"id": int}),
+            data_schema=Schema({"x": x_type}),
+        )
+        job = PipelineJob(name="j")
+        with job:
+            _ = MapData({"x": "y"})(slot, label="renamed")
+        node = job.nodes["src"]
+        declared = list(node.output_schema(all_info=True)[0])
+        reference = _arrow([0], [0], x_nullable=x_nullable)
+        job.bind(sources={"src": reference})
+        order = node.as_table(all_info=True).column_names
+        zero_row_order = node.head(0, all_info=True).table.column_names
+
+        for rows in ([1, 2], []):
+            # A non-null ``x``: the slot's own type, or narrower than ``int | None``.
+            xs: list[int | None] = list(rows)
+            source = _record_id_first(_arrow(rows, xs, x_nullable=False))
+            job.bind(sources={"src": source})
+            assert list(node.output_schema(all_info=True)[0]) == declared, x_type
+            assert node.as_table(all_info=True).column_names == order, x_type
+            assert node.head(all_info=True).table.column_names == (
+                order if rows else zero_row_order
+            ), x_type
+
+
+@function_pod(output_keys="x")
+def passes_on(w: int | None) -> int | None:
+    """Return ``w`` unchanged."""
+    return w
+
+
+def test_a_bound_function_stream_moves_no_stored_or_downstream_schema(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A function pod's stream (one system-tag pair) moves no path, stored or downstream schema.
+
+    Known limit: the source node's own table keeps the bound stream's column layout (a
+    function pod's stream gives its system tags before its data) and the nullable flags
+    of its ``_content_hash`` and source-info columns. That table is not stored and no
+    downstream node sees it; its columns, and its user and system-tag fields, are the
+    same.
+    """
+    slot = SourceNode(
+        name="src",
+        tag_schema=Schema({"id": int}),
+        data_schema=Schema({"x": int | None}),
+    )
+    job = PipelineJob(name="j", database=DeltaTableDatabase(str(tmp_path / "store")))
+    with job:
+        _ = inc.pod(MapData({"x": "y"})(slot, label="renamed"), label="inc")
+    _bind(job, _arrow([0, 1], [1, None], x_nullable=True))
+    assert job.run().ok
+    first = _snapshot(job)
+
+    upstream = MapData({"x": "w"})(_arrow([5, 6], [5, None], x_nullable=True))
+    _bind(job, passes_on.pod(upstream))
+    assert job.run().ok
+    second = _snapshot(job)
+    assert second["paths"] == first["paths"]
+    assert second["stored"] == first["stored"]
+    for name in ("renamed", "inc"):
+        assert second["nodes"][name] == first["nodes"][name], name
+    src_first, src_second = first["nodes"]["src"], second["nodes"]["src"]
+    assert sorted(src_second.names) == sorted(src_first.names)
+    compared = [
+        name
+        for name in src_first.names
+        if name in ("id", "x", constants.CONTEXT_KEY)
+        or name.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    assert len(compared) == 5
+    for name in compared:
+        assert src_second.field(name) == src_first.field(name), name

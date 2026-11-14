@@ -53,7 +53,7 @@ async files also 3.11), one process. Ruff, basedpyright. One push; CI on the mer
 ## Status notes
 
 - [x] merge
-- [ ] part 1 tests
-- [ ] plan for A/C sent to coordinator
-- [ ] A fix (after approval)
+- [x] part 1 tests (e5155e34)
+- [x] plan for A/C sent to coordinator: A approved, C decline approved; layout-by-kind: option 1 (known limit in PR body + changelog; coordinator files the issue)
+- [x] A fix + tests
 - [ ] push, CI, CodeRabbit, replies on #392 threads

@@ -869,8 +869,8 @@ data. The rules:
   else raises `SourceSpecMismatchError` before anything is bound. The
   source's rows are given as the declared schema at one place, `_DeclaredForm` (nullable
   fields over the same arrays; the declared column order; the system-tag column NAMES of the
-  declared schema hash, taken from the source's own pair by prefix, the VALUES the source's
-  own). Limits: the check compares Python types, so a difference in Arrow width only
+  declared schema hash, taken from the source's own pair by prefix, in the declared order
+  (source id, then record id), the VALUES the source's own). Limits: the check compares Python types, so a difference in Arrow width only
   (`int32` against `int64`) is not yet refused (ITL-949). A source whose system-tag columns
   are not exactly one source-id and one record-id column (a joined or merged stream, a raw
   stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);

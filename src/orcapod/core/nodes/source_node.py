@@ -79,8 +79,9 @@ class _DeclaredForm:
     The pipeline determines every node's schema (ITL-1112). A slot declaring
     ``x: int | None`` accepts a source of ``x: int`` and gives its rows as rows of
     ``x: int | None``: the same arrays under nullable fields. The source's system-tag
-    columns take the slot's names (their values stay the source's own), and its tag and
-    data columns, with their source-info columns, the declared order. Nothing else
+    columns take the slot's names and order, source id then record id (their values stay
+    the source's own), and its tag and data columns, with their source-info columns, the
+    declared order. Nothing else
     differs: values, types, source-info tokens and meta columns pass unchanged, so the
     rows equal those of a source of the declared schema with the same source id.
 
@@ -89,12 +90,14 @@ class _DeclaredForm:
         renames: The source's system-tag column names, mapped to the declared ones.
         tag_order: The declared tag columns, in declared order.
         data_order: The declared data columns, in declared order.
+        system_tag_order: The declared system-tag columns, source id then record id.
     """
 
     nullable: frozenset[str]
     renames: Mapping[str, str]
     tag_order: tuple[str, ...]
     data_order: tuple[str, ...]
+    system_tag_order: tuple[str, str]
 
     def apply(self, table: pa.Table) -> pa.Table:
         """Return *table*'s arrays under the declared fields and system-tag names.
@@ -107,8 +110,9 @@ class _DeclaredForm:
 
         Returns:
             The same arrays, with the columns in ``nullable`` flagged nullable, the
-            columns in ``renames`` renamed, and the tag, data and source-info columns in
-            declared order within the positions each group holds.
+            columns in ``renames`` renamed, and the tag, system-tag, data and
+            source-info columns in declared order within the positions each group
+            holds.
         """
         schema = table.schema
         for position, field in enumerate(table.schema):
@@ -124,14 +128,15 @@ class _DeclaredForm:
     def _declared_positions(self, names: list[str]) -> list[int]:
         """Return the column positions of *names* with each group in declared order.
 
-        The tag columns, the data columns and the data columns' source-info columns each
-        fill the positions their group holds, in declared order; every other column
-        keeps its position.
+        The tag columns, the system-tag pair, the data columns and the data columns'
+        source-info columns each fill the positions their group holds, in declared
+        order; every other column keeps its position.
         """
         position = {name: index for index, name in enumerate(names)}
         order = list(range(len(names)))
         source_info = tuple(f"{constants.SOURCE_PREFIX}{n}" for n in self.data_order)
-        for group in (self.tag_order, self.data_order, source_info):
+        groups = (self.tag_order, self.system_tag_order, self.data_order, source_info)
+        for group in groups:
             present = [name for name in group if name in position]
             for slot, name in zip(
                 sorted(position[n] for n in present), present, strict=True
@@ -879,7 +884,8 @@ class SourceJobNode(SourceNodeBase):
 
         Returns:
             ``None`` when the source's rows already are rows of the declared schema
-            (same types, column order and system-tag names), so they pass unchanged;
+            (same types, column order and system-tag names and order), so they pass
+            unchanged;
             otherwise the ``_DeclaredForm`` that makes them so.
 
         Raises:
@@ -901,11 +907,17 @@ class SourceJobNode(SourceNodeBase):
         }
         tag_order = tuple(self._tag_schema.keys())
         data_order = tuple(self._data_schema.keys())
+        source_system_tags = [
+            name
+            for name in source.keys(columns={"system_tags": True})[0]
+            if name not in source_tag
+        ]
         if (
             not narrower
             and not renames
             and tuple(source_tag.keys()) == tag_order
             and tuple(source_data.keys()) == data_order
+            and source_system_tags == [declared_source_id, declared_record_id]
         ):
             return None
         return _DeclaredForm(
@@ -913,6 +925,7 @@ class SourceJobNode(SourceNodeBase):
             renames=renames,
             tag_order=tag_order,
             data_order=data_order,
+            system_tag_order=(declared_source_id, declared_record_id),
         )
 
     def _declared_rows(
