@@ -20,7 +20,6 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
-from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -87,8 +86,10 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
     # A row passed downstream carries no meta column (``_rows_to_table`` reads a row's
     # data with source info only), so neither does its zero-row table: a cached
     # function pod's ``__computed`` stays in that stream's own table.
-    meta = [n for n in table.column_names if n.startswith(constants.META_PREFIX)]
-    return table.drop(meta) if meta else table
+    from orcapod.core.operators.meta_columns import without_meta_columns
+
+    tag_columns = cast(StreamProtocol, stream).keys()[0]
+    return without_meta_columns(table, tag_columns)
 
 
 def check_head_size(n: int) -> None:

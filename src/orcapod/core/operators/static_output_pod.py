@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
@@ -277,11 +278,11 @@ class StaticOutputOperatorPod(TraceableBase):
     def _zero_row_input(upstream: StreamProtocol) -> StreamProtocol | None:
         """Return ``upstream`` as an operator input with no rows, typed as its rows are.
 
-        The zero-row form of what ``_materialize_input_stream`` and the sync
-        orchestrator build from an upstream's rows: the upstream's zero-row table
-        (``typed_zero_row_table``: user tags, system tags, data and source info, with
-        the Arrow types its rows have) in the column order and with the source-info
-        flags ``_rows_to_table`` gives, and the upstream's producer and upstreams, so the stream's identity,
+        The zero-row form of what ``_materialize_upstream`` builds from an upstream's
+        rows: the upstream's zero-row table (``typed_zero_row_table``: user tags,
+        system tags, data and source info, with the Arrow types its rows have) in the
+        column order and with the source-info flags ``_rows_to_table`` gives, as the
+        upstream's stream (``_as_upstream_stream``), so the stream's identity,
         pipeline hash and system-tag column names are the upstream's (ITL-912).
 
         Args:
@@ -304,12 +305,10 @@ class StaticOutputOperatorPod(TraceableBase):
         system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
         source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
         table = table.select([*tag_keys, *system_tags, *data_keys, *source_info])
-        return ArrowTableStream(
+        return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._flag_source_info_nullability(table),
-            tag_columns=tag_keys,
-            producer=upstream.producer,
-            upstreams=upstream.upstreams,
-            data_context=upstream.data_context,
+            tag_keys,
+            upstream,
         )
 
     @staticmethod
@@ -338,6 +337,105 @@ class StaticOutputOperatorPod(TraceableBase):
         # No ``source_info`` argument: the table's own ``_source_*`` columns
         # pass through, one value per row.
         return ArrowTableStream(table, tag_columns=tag_keys)
+
+    @staticmethod
+    def _materialize_upstream(
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+        upstream: StreamProtocol,
+        *,
+        zero_rows: bool = False,
+    ) -> StreamProtocol:
+        """Rebuild the rows an upstream node delivered as that node's stream.
+
+        This is how an operator node's input is built in a job: the sync
+        orchestrator rebuilds every upstream's buffered rows with it, and an
+        async operator node rebuilds its inputs with it when its run produced
+        no row (``zero_rows``). The stream takes the upstream's producer and
+        upstreams, so its identity and pipeline hash are the upstream's and
+        system-tag column names come out as they would on the upstream itself.
+
+        With rows, the table is ``_rows_to_table(rows)``: every row keeps its
+        own system tags and source info. Without rows, it is the upstream's
+        zero-row table (``_zero_row_input``), with the Arrow types its rows have
+        (ITL-912). Only an upstream that cannot say its Arrow types without rows
+        (see ``typed_zero_row_table``) is built from its Python output schema
+        (with system tags and source info), a known limitation (ITL-1089).
+
+        Args:
+            rows: The rows the upstream delivered; may be empty.
+            upstream: The upstream node or stream the rows came from.
+            zero_rows: Keep the table's columns and types but none of its rows.
+
+        Returns:
+            A stream over the rows (none when ``zero_rows``), in order.
+        """
+        from orcapod.utils import arrow_utils
+
+        if rows:
+            table, tag_keys = StaticOutputOperatorPod._rows_to_table(rows)
+            if zero_rows:
+                table = table.slice(0, 0)
+            return StaticOutputOperatorPod._as_upstream_stream(
+                table, tag_keys, upstream
+            )
+        typed = StaticOutputOperatorPod._zero_row_input(upstream)
+        if typed is not None:
+            return typed
+        # Build an empty table preserving declared field nullability.
+        tag_schema, data_schema = upstream.output_schema(
+            columns={"system_tags": True, "source": True}
+        )
+        table = arrow_utils.make_empty_table(
+            {**tag_schema, **data_schema},
+            StaticOutputOperatorPod._upstream_context(upstream).type_converter,
+        )
+        return StaticOutputOperatorPod._as_upstream_stream(
+            table, upstream.keys()[0], upstream
+        )
+
+    @staticmethod
+    def _upstream_context(upstream: StreamProtocol) -> DataContext:
+        """The data context of ``upstream``, which its rebuilt stream is in."""
+        from orcapod.core.base import DataContextMixin
+
+        if isinstance(upstream, DataContextMixin):
+            return upstream.data_context
+        return contexts.resolve_context(upstream.data_context_key)
+
+    @staticmethod
+    def _as_upstream_stream(
+        table: pa.Table, tag_keys: Sequence[str], upstream: StreamProtocol
+    ) -> StreamProtocol:
+        """Wrap a table of ``upstream``'s rows (or none) as ``upstream``'s stream.
+
+        Args:
+            table: User tags, system tags, data and source info, without the
+                context column.
+            tag_keys: The user tag columns.
+            upstream: The node or stream the table stands for.
+
+        Returns:
+            A stream with ``upstream``'s producer, upstreams and data context.
+        """
+        from orcapod.system_constants import constants
+
+        # The rebuilt stream is in the upstream's data context, as its rows are.
+        context = StaticOutputOperatorPod._upstream_context(upstream)
+        # The context column names the upstream's context on every row; without
+        # it, the stream would fill in the default context's key.
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.array([context.context_key] * table.num_rows, pa.large_string()),
+        )
+        # No ``source_info`` argument: the table's own ``_source_*`` columns
+        # pass through, one value per row.
+        return ArrowTableStream(
+            table,
+            tag_columns=tag_keys,
+            producer=upstream.producer,
+            upstreams=upstream.upstreams,
+            data_context=context,
+        )
 
     @staticmethod
     def _materialize_input_stream(
@@ -526,7 +624,7 @@ class DynamicPodStream(StreamBase):
                     tag_columns=upstream.keys()[0],
                     producer=upstream.producer,
                     upstreams=upstream.upstreams,
-                    data_context=upstream.data_context,
+                    data_context=StaticOutputOperatorPod._upstream_context(upstream),
                 )
             )
         return self._pod.static_process(*inputs).as_table(
