@@ -1437,6 +1437,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         import tempfile
         from pathlib import Path as _Path
 
+        from orcapod.core.nodes.source_node import SourceNodeBase
         from orcapod.pipeline.graph import Pipeline
         from orcapod.pipeline.serialization import (
             SUPPORTED_JOB_FORMAT_VERSIONS,
@@ -1464,6 +1465,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             os.unlink(tmp_path)
 
         # Reconstruct sources (best-effort)
+        slots = {
+            node.name: node
+            for node in pipeline._persistent_node_map.values()
+            if isinstance(node, SourceNodeBase)
+        }
         sources: dict[str, cp.StreamProtocol] = {}
         for spec_name, src_config in (
             data.get("bindings", {}).get("sources", {}).items()
@@ -1472,6 +1478,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             try:
                 source = resolve_source_from_config(src_config)
                 if source is not None:
+                    # A rebuilt source its slot refuses (a file whose column types
+                    # changed) is one that could not be rebuilt (ITL-1112).
+                    if spec_name in slots:
+                        slots[spec_name].validate(source)
                     sources[spec_name] = source
             except NotImplementedError:
                 # In-memory sources (DictSource, ListSource, ArrowTableSource,
