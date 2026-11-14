@@ -357,11 +357,15 @@ _RUN_SCRIPT = textwrap.dedent(
         )
         MapData({"r": "reading"})(slot, label="rename")
         double.pod(slot, label="double")
-    job = PipelineJob.from_pipeline(pipeline, database=DeltaTableDatabase(store + "/job"))
+    database = DeltaTableDatabase(store)
+    job = PipelineJob.from_pipeline(pipeline, database=database.at("job"))
     job.nodes["rename"].attach_databases(
-        pipeline_database=DeltaTableDatabase(store + "/operators"),
+        pipeline_database=database.at("operators"),
         cache_mode=CacheMode.LOG,
     )
+    # Look at the job before any source exists, as a user printing its nodes would.
+    for node in job.nodes.values():
+        node.pipeline_hash()
     if order != "source_first":
         bound = source()
     job.bind(sources={"slot": bound})
