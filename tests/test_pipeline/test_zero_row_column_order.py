@@ -11,6 +11,12 @@ table has the populated table's columns in the populated table's order. It compa
   same job node after a run with rows by the same orchestrator.
 
 Inputs carry one or two system-tag pairs (a source, or a join of two sources).
+
+An operator node also has one populated order on every path (ITL-1133): the row order of a job
+run (user tags, system tags, data, source info). A node run on its own (``node.run()`` over
+streams outside a job, without a store, in ``LOG`` and read back in ``REPLAY``) keeps and
+stores that order, so a store written by a job run and by a node run on its own holds one
+order and accepts both.
 """
 
 from __future__ import annotations
@@ -42,11 +48,13 @@ from orcapod.core.operators import (
     SemiJoin,
 )
 from orcapod.core.sources import ArrowTableSource
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.core.nodes import OperatorJobNode
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.types import CacheMode
 
 ORCHESTRATORS = {
     "sync": SyncPipelineOrchestrator,
@@ -227,3 +235,106 @@ class TestJobNode:
         job = _job(step, pairs, NO_ROWS)
         _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
         _assert_same_schema(job.nodes["op"].as_table(all_info=True), expected)
+
+
+OPERATOR_STEPS = [step for step in STEPS if step != "function_pod"]
+
+
+def _node(
+    step: str, pairs: int, groups: tuple[str, ...], **kwargs: Any
+) -> OperatorJobNode:
+    """An operator node of ``step`` over the plain streams the step reads, outside a job."""
+    stream = _stream(step, pairs, groups)
+    return OperatorJobNode(stream.producer, stream.upstreams, **kwargs)
+
+
+@pytest.mark.parametrize("pairs", PAIRS)
+@pytest.mark.parametrize("step", OPERATOR_STEPS)
+class TestNodeRunOnItsOwn:
+    """A node run on its own has the schema a job run gives it, on every path (ITL-1133)."""
+
+    def _expected(self, step: str, pairs: int) -> pa.Schema:
+        job = _job(step, pairs, WITH_ROWS)
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        return _populated(job.nodes["op"].as_table(all_info=True))
+
+    def test_run_without_a_store(self, step: str, pairs: int) -> None:
+        node = _node(step, pairs, WITH_ROWS)
+        _ = node.run()
+        table = node.as_table(all_info=True)
+        assert table.num_rows > 0
+        assert table.schema.equals(self._expected(step, pairs))
+
+    def test_before_a_run(self, step: str, pairs: int) -> None:
+        node = _node(step, pairs, WITH_ROWS)
+        _assert_same_schema(node.as_table(all_info=True), self._expected(step, pairs))
+
+    def test_run_whose_input_had_no_rows(self, step: str, pairs: int) -> None:
+        node = _node(step, pairs, NO_ROWS)
+        _ = node.run()
+        _assert_same_schema(node.as_table(all_info=True), self._expected(step, pairs))
+
+    def test_log_run_and_replay(self, step: str, pairs: int) -> None:
+        expected = self._expected(step, pairs)
+        store = InMemoryArrowDatabase()
+        node = _node(
+            step, pairs, WITH_ROWS, pipeline_database=store, cache_mode=CacheMode.LOG
+        )
+        _ = node.run()
+        assert node.as_table(all_info=True).schema.equals(expected)
+        replay = _node(
+            step, pairs, WITH_ROWS, pipeline_database=store, cache_mode=CacheMode.REPLAY
+        )
+        table = replay.as_table(all_info=True)
+        assert table.num_rows > 0
+        assert table.schema.equals(expected)
+
+
+def _join_job(ids: list[int]) -> PipelineJob:
+    """A job joining two sources whose rows have ``ids``; same source ids every time."""
+
+    def source(name: str, column: str) -> ArrowTableSource:
+        table = pa.table(
+            {"id": pa.array(ids, pa.int64()), column: pa.array(ids, pa.int64())}
+        )
+        return ArrowTableSource(table, tag_columns=["id"], source_id=name)
+
+    job = PipelineJob(name="itl1133", database=InMemoryArrowDatabase())
+    with job:
+        _ = Join()(source("a", "x"), source("b", "z"), label="joined")
+    return job
+
+
+STORES = ["in_memory", "delta", "delta_flushed"]
+
+
+@pytest.mark.parametrize("store_kind", STORES)
+@pytest.mark.parametrize("order", [("job", "node"), ("node", "job")])
+def test_a_job_run_and_a_node_run_share_one_stored_table(
+    store_kind: str, order: tuple[str, str], tmp_path: Any
+) -> None:
+    """A job run and a node run on its own store one column order in one table (ITL-1133).
+
+    Each run has new rows under the same source ids, so both write the same node table.
+    """
+    store = (
+        InMemoryArrowDatabase()
+        if store_kind == "in_memory"
+        else DeltaTableDatabase(tmp_path)
+    )
+    schemas = []
+    for how, ids in zip(order, ([1, 2], [3, 4]), strict=True):
+        job = _join_job(ids)
+        node = job.nodes["joined"]
+        node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+        if how == "job":
+            _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        else:
+            _ = node.run()
+        schemas.append(node.as_table(all_info=True).schema)
+        if store_kind == "delta_flushed":
+            store.flush()
+    assert schemas[0].equals(schemas[1])
+    stored = node.get_all_records(all_info=True)
+    assert stored is not None
+    assert stored.num_rows == 4
