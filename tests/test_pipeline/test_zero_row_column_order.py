@@ -307,6 +307,12 @@ class TestNodeRunOnItsOwn:
         replay = _node(
             step, pairs, WITH_ROWS, pipeline_database=store, cache_mode=CacheMode.REPLAY
         )
+        # A REPLAY run over lazy inputs that it does not compute reads as stale once
+        # they compute (seen on main e4b4319c, reported); computed first, they do not.
+        for upstream in replay.upstreams:
+            _ = upstream.as_table()
+        # A node shows its current run (ITL-1095): a REPLAY run loads the stored rows.
+        _ = replay.run()
         table = replay.as_table(all_info=True)
         assert table.num_rows > 0
         assert table.schema.equals(expected)
@@ -416,8 +422,10 @@ class TestOperatorCacheWrittenInOperatorOrder:
         return old
 
     def _replay(self, store: DeltaTableDatabase, ids: list[int]) -> OperatorJobNode:
+        """A REPLAY node over ``store`` after its run, which loads the stored rows."""
         node = _join_job(ids).nodes["joined"]
         node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
+        _ = node.run()  # a node shows its current run (ITL-1095)
         return node
 
     def test_reads_in_row_order(self, tmp_path: Any) -> None:
