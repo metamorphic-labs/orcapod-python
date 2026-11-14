@@ -307,7 +307,7 @@ class TestPipelineJob:
 # ---------------------------------------------------------------------------
 
 
-def _one_row_source(value: object) -> DictSource:
+def _one_row_source(value: int | float | str) -> DictSource:
     return DictSource([{"id": 1, "x": value}], tag_columns=["id"], source_id="src")
 
 
