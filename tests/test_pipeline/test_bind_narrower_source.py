@@ -24,6 +24,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import Join, MapData
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, typed_zero_row_table
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -562,3 +563,86 @@ def test_a_narrower_stream_without_system_tags_is_refused(
     with pytest.raises(SourceSpecMismatchError, match="system-tag"):
         bind(job, stream)
     assert job.nodes["src"].bound_source is None  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode
+
+
+# ---------------------------------------------------------------------------
+# Zero-row tables (ITL-912): the declared form, as the populated table has it
+# ---------------------------------------------------------------------------
+
+
+def _declared_bind() -> PipelineJob:
+    """Return the ``x: int`` job bound to a source of exactly the declared form."""
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(int), label="renamed")
+    job.bind(sources={"src": _arrow_source([1, 2], x_nullable=False)})
+    return job
+
+
+def _narrower_bind() -> PipelineJob:
+    """Return the ``x: int | None`` job bound to a source of ``x: int``."""
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(int | None), label="renamed")
+    job.bind(sources={"src": _arrow_source([1, 2], x_nullable=False)})
+    return job
+
+
+def _reordered_bind() -> PipelineJob:
+    """Return the ``a, b, c`` job bound to a source whose data come as ``c, b, a``."""
+    job = _abc_job(int)
+    source = DictSource([{"id": 0, "c": 1.5, "b": "s", "a": 1}], tag_columns=["id"])
+    job.bind(sources={"src": source})
+    return job
+
+
+def _transformed_bind() -> PipelineJob:
+    """Return the ``x: int`` job bound to a stream whose system tags have other names."""
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(int), label="renamed")
+    job.bind(sources={"src": _mapped_stream()})
+    return job
+
+
+DECLARED_FORM_BINDS: dict[str, Callable[[], PipelineJob]] = {
+    "declared": _declared_bind,
+    "narrower": _narrower_bind,
+    "reordered": _reordered_bind,
+    "transformed": _transformed_bind,
+}
+
+
+@pytest.mark.parametrize(
+    "make_job", DECLARED_FORM_BINDS.values(), ids=DECLARED_FORM_BINDS.keys()
+)
+def test_the_zero_row_table_of_a_slot_is_its_populated_declared_form(
+    make_job: Callable[[], PipelineJob],
+) -> None:
+    """A slot's zero-row table has exactly the schema of its populated table."""
+    job = make_job()
+    node = job.nodes["src"]
+    populated = node.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    assert populated.num_rows > 0
+    table = typed_zero_row_table(node)
+    assert table is not None
+    assert table.num_rows == 0
+    assert table.schema == populated.schema
+
+
+@pytest.mark.parametrize(
+    "make_job", DECLARED_FORM_BINDS.values(), ids=DECLARED_FORM_BINDS.keys()
+)
+def test_a_downstream_node_before_a_run_has_the_types_of_its_rows(
+    make_job: Callable[[], PipelineJob],
+) -> None:
+    """The node after the slot reads, before a run, with the schema it has after one."""
+    job = make_job()
+    before = job.nodes["renamed"].as_table(all_info=True)
+    head = job.nodes["renamed"].head(all_info=True).table
+    assert before.num_rows == 0
+    _ = job.run()
+    after = job.nodes["renamed"].as_table(all_info=True)
+    assert after.num_rows > 0
+    assert before.schema == after.schema
+    assert head.schema == after.schema

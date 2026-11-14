@@ -912,11 +912,17 @@ class SourceJobNode(SourceNodeBase):
         return self._declared_rows(self._bound_source.iter_data(), self._declared_form)
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
-        """The bound source's zero-row table; ``None`` when unbound or unknown.
+        """The bound source's zero-row table in the declared form; ``None`` if unknown.
 
-        See ``typed_zero_row_table``.
+        A source given in the declared form (``_DeclaredForm``) has its zero-row table
+        given in that form too, so it has exactly the schema of the node's populated
+        table (ITL-1112, ITL-912). ``None`` when unbound or when the source cannot type
+        its rows without rows. See ``typed_zero_row_table``.
         """
-        return typed_zero_row_table(self._bound_source)
+        table = typed_zero_row_table(self._bound_source)
+        if table is None or self._declared_form is None:
+            return table
+        return self._declared_form.apply(table)
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""
