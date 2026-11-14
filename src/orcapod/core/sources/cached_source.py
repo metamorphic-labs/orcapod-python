@@ -9,7 +9,11 @@ from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import check_head_size, schema_requires_io
+from orcapod.core.streams.base import (
+    check_head_size,
+    schema_requires_io,
+    typed_zero_row_table,
+)
 from orcapod.core.streams.head import (
     HeadStatus,
     StreamHead,
@@ -411,6 +415,13 @@ class CachedSource(RootSource):
         self._ensure_stream()
         assert self._cached_stream is not None
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
+
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """The wrapped source's zero-row table: the cache stores that source's rows.
+
+        See ``typed_zero_row_table``; neither the cache nor the source is read.
+        """
+        return typed_zero_row_table(self._source)
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the wrapped source."""

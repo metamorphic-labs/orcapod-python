@@ -26,6 +26,7 @@ from orcapod.core.streams.head import (
 )
 from orcapod.core.streams.base import (
     check_head_size,
+    typed_zero_row_table,
 )
 from orcapod.errors import (
     CursorInvalidatedError,
@@ -442,6 +443,17 @@ class PollingSource(RootSource, Generic[T]):
             return self._batches[0].keys(columns=columns, all_info=all_info)
         self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """The zero-row table of the rows polled so far; ``None`` before a poll.
+
+        See ``typed_zero_row_table``. Never polls. Before the first poll the source
+        knows only the Python schema ``impl.schema()`` declares, which cannot say an
+        Arrow type such as ``int8`` (a known limitation, ITL-912).
+        """
+        if not self._batches:
+            return None
+        return typed_zero_row_table(self._get_combined_stream())
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll.

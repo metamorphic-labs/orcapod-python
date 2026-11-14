@@ -279,8 +279,8 @@ class StaticOutputOperatorPod(TraceableBase):
         The zero-row form of what ``_materialize_input_stream`` and the sync
         orchestrator build from an upstream's rows: the upstream's zero-row table
         (``typed_zero_row_table``: user tags, system tags, data and source info, with
-        the Arrow types its rows have), source-info flags as ``_rows_to_table`` sets
-        them, and the upstream's producer and upstreams, so the stream's identity,
+        the Arrow types its rows have) in the column order and with the source-info
+        flags ``_rows_to_table`` gives, and the upstream's producer and upstreams, so the stream's identity,
         pipeline hash and system-tag column names are the upstream's (ITL-912).
 
         Args:
@@ -291,12 +291,21 @@ class StaticOutputOperatorPod(TraceableBase):
             types without rows; the caller then builds its input from the Python
             output schema.
         """
+        from orcapod.system_constants import constants
+
         table = typed_zero_row_table(upstream)
         if table is None:
             return None
+        # The column order of a row-built table (``_rows_to_table``): user tags,
+        # system tags, data, source info.
+        tag_keys, data_keys = upstream.keys()
+        names = table.column_names
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+        table = table.select([*tag_keys, *system_tags, *data_keys, *source_info])
         return ArrowTableStream(
             StaticOutputOperatorPod._flag_source_info_nullability(table),
-            tag_columns=upstream.keys()[0],
+            tag_columns=tag_keys,
             producer=upstream.producer,
             upstreams=upstream.upstreams,
         )
@@ -490,15 +499,25 @@ class DynamicPodStream(StreamBase):
     def _typed_zero_row_table(self) -> pa.Table | None:
         """The pod's result over its upstreams' zero-row tables (ITL-912).
 
-        The rule an operator node follows (``OperatorJobNode._typed_zero_row_table``):
-        no row is computed or read, and nothing this stream holds is consulted.
+        The rule an operator node follows (``OperatorJobNode._typed_zero_row_table``),
+        with each upstream given as the stream it is, as ``static_process`` reads
+        it: no row is computed or read, and nothing this stream holds is consulted.
         """
         inputs: list[StreamProtocol] = []
         for upstream in self._upstreams:
-            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
-            if zero_rows is None:
+            # The upstream itself with no row: the pod reads the upstream stream,
+            # not rows rebuilt from it, so its columns stay in their own order.
+            table = typed_zero_row_table(upstream)
+            if table is None:
                 return None
-            inputs.append(zero_rows)
+            inputs.append(
+                ArrowTableStream(
+                    table,
+                    tag_columns=upstream.keys()[0],
+                    producer=upstream.producer,
+                    upstreams=upstream.upstreams,
+                )
+            )
         return self._pod.static_process(*inputs).as_table(
             columns=ZERO_ROW_INPUT_COLUMNS
         )

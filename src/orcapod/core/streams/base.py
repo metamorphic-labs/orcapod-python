@@ -4,7 +4,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.head import (
@@ -20,7 +20,6 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
-from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -63,8 +62,8 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
     """Return ``stream``'s table with no rows and the Arrow types its rows would have.
 
     The table has the user tags, system tags, data and source-info columns
-    (``ZERO_ROW_INPUT_COLUMNS``), with the Arrow types, nullability and logical types
-    the stream's rows have (ITL-912). Getting it never computes, reads or polls a row:
+    (``ZERO_ROW_INPUT_COLUMNS``) in the order the stream's own table has them, with
+    the Arrow types, nullability and logical types the stream's rows have (ITL-912). Getting it never computes, reads or polls a row:
     an in-memory table is sliced, a source answers from the table or schema it already
     holds, and an operator node applies its operator to its inputs' zero-row tables, as
     the sync path applies it to zero-row inputs.
@@ -81,17 +80,7 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
         that reads, polls or derives its rows later, a pod stream not yet computed.
     """
     method = getattr(stream, "_typed_zero_row_table", None)
-    table = method() if callable(method) else None
-    if table is None:
-        return None
-    # The column order of a row-built table (``_rows_to_table``): user tags, system
-    # tags, data, source info.
-    tag_keys, data_keys = cast(StreamProtocol, stream).keys()
-    names = table.column_names
-    system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
-    source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
-    ordered = [*tag_keys, *system_tags, *data_keys, *source_info]
-    return table.select(ordered + [n for n in names if n not in ordered])
+    return method() if callable(method) else None
 
 
 def check_head_size(n: int) -> None:

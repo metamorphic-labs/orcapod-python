@@ -21,7 +21,8 @@ from orcapod import contexts, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.operators import Batch, PolarsFilter, SelectDataColumns
-from orcapod.core.sources import ArrowTableSource
+from orcapod.core.sources import ArrowTableSource, DeltaTableSource
+from orcapod.core.sources.cached_source import CachedSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
@@ -276,3 +277,63 @@ def test_function_node_zero_row_tables_have_the_computed_types(
     assert fn_table.schema == expected_fn
     assert op_table.schema == expected_op
     assert CALLS == []
+
+
+def _int8_table() -> pa.Table:
+    """A small table of non-nullable ``int8`` tag and data columns."""
+    return pa.table(
+        [pa.array([1, 2], pa.int8()), pa.array([10, 20], pa.int8())],
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int8(), nullable=False),
+                pa.field("x", pa.int8(), nullable=False),
+            ]
+        ),
+    )
+
+
+def _arrow_table_source(tmp_path: Path) -> StreamProtocol:
+    """An in-memory source."""
+    return ArrowTableSource(_int8_table(), tag_columns=["id"], source_id="kinds")
+
+
+def _cached_source(tmp_path: Path) -> StreamProtocol:
+    """A cached source over an in-memory source; its cache is never read here."""
+    return CachedSource(
+        _arrow_table_source(tmp_path), cache_database=InMemoryArrowDatabase()
+    )
+
+
+def _delta_source(tmp_path: Path) -> StreamProtocol:
+    """A Delta table source; its table is read when it is built."""
+    from deltalake import write_deltalake
+
+    write_deltalake(tmp_path / "delta", _int8_table(), mode="overwrite")
+    return DeltaTableSource(tmp_path / "delta", tag_columns=["id"], source_id="kinds")
+
+
+@pytest.mark.parametrize(
+    "make_source",
+    [_arrow_table_source, _cached_source, _delta_source],
+    ids=["arrow_table", "cached", "delta"],
+)
+def test_operator_node_over_each_source_kind_types_its_zero_row_table(
+    make_source: Callable[[Path], StreamProtocol], tmp_path: Path
+) -> None:
+    """Before a run, the node's zero-row table has the types of the run's rows."""
+
+    def job() -> PipelineJob:
+        """A job selecting ``x`` from a fresh source of this kind."""
+        new = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
+        with new:
+            _ = SelectDataColumns(["x"])(make_source(tmp_path), label="op")
+        return new
+
+    table = _op(job()).as_table(all_info=True)
+    ran = job()
+    _ = ran.run(orchestrator=SyncPipelineOrchestrator())
+    expected = _op(ran).as_table(all_info=True)
+
+    assert expected.num_rows == 2
+    assert table.num_rows == 0
+    assert table.schema == expected.schema
