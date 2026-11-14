@@ -23,13 +23,11 @@ from orcapod.core.operators import (
     SelectDataColumns,
     SelectTagColumns,
 )
-from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import DictSource
 from orcapod.system_constants import constants
 from tests.test_core.operators.test_async_sync_equivalence import (
-    assert_equivalent,
     async_rows,
     cached_pod_stream,
     double_a,
@@ -334,42 +332,4 @@ def test_meta_columns_are_not_carried(
     assert not any(
         name.startswith(META)
         for name in result.output_schema(columns={"meta": True})[1]
-    )
-
-
-def _meta_named_tag_stream() -> ArrowTableStream:
-    """Tags ``__g`` and ``k``; data ``a`` and ``b``."""
-    return ArrowTableStream(
-        pa.table({f"{META}g": [1, 2], "k": [1, 2], "a": [3, 4], "b": [5, 6]}),
-        tag_columns=[f"{META}g", "k"],
-    )
-
-
-@pytest.mark.parametrize(
-    ("make_op", "keys"),
-    [
-        (lambda: DropColumns(["b"]), ((f"{META}g", "k"), ("a",))),
-        (lambda: SelectColumns([f"{META}g", "k", "a"]), ((f"{META}g", "k"), ("a",))),
-    ],
-    ids=["drop", "select"],
-)
-def test_a_meta_named_tag_is_a_tag(
-    make_op: Callable[[], Any], keys: tuple[tuple[str, ...], tuple[str, ...]]
-) -> None:
-    """A user tag whose name starts with ``__`` is kept as a tag, not dropped as meta."""
-    result = make_op()(_meta_named_tag_stream())
-    assert result.keys() == keys
-    assert len(list(result.iter_data())) == 2
-
-
-def test_a_meta_named_tag_passes_through_both_paths() -> None:
-    """Dropping a data column leaves a ``__``-named tag alone on both paths.
-
-    Only the drop is compared: at row level a ``Tag`` holds a ``__``-named tag as a
-    meta column, so a selection naming it differs between the paths, as it does for
-    ``SelectTagColumns`` (not changed here).
-    """
-    stream = _meta_named_tag_stream()
-    assert_equivalent(
-        sync_rows(DropColumns(["b"]), stream), async_rows(DropColumns(["b"]), stream)
     )

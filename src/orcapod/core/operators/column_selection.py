@@ -577,9 +577,8 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     column of the other group. System tags pass through, the source-info column of
     a removed data column goes with it, and the stream's column order is kept.
     Unlike those operators, no data meta (``__``) column of the input is carried,
-    on either path, as ``Join`` does (a ``__``-named tag is a tag and is kept); and a
-    result without a data column is refused when the operator is called, on both
-    paths.
+    on either path, as ``Join`` does; and a result without a data column is refused
+    when the operator is called, on both paths.
     """
 
     _verb: ClassVar[str] = ""
@@ -688,7 +687,7 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
                 [
                     c
                     for c in table.column_names
-                    # A ``__``-named tag is a user tag, not meta: only data meta goes.
+                    # Only data meta goes; a tag column is never stripped as meta.
                     if c in removed or (_is_meta(c) and c not in tag_columns)
                 ]
             ),
