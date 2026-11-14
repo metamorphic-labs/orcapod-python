@@ -89,7 +89,7 @@ def double(x: int) -> int:
 
 
 rule_store = InMemoryArrowDatabase()
-rule_job = PipelineJob(name="my_pipeline", store=rule_store)
+rule_job = PipelineJob(name="my_pipeline", database=rule_store)
 with rule_job:
     numbers = DictSource(
         data=[{"k": "a", "x": 1}], tag_columns=["k"], source_id="numbers"
@@ -330,7 +330,7 @@ The table below shows what each class returns from `identity_structure()`.
 | `DerivedSource` with `tags_as_data` | `(class_name, output_schema, source_id, ("tags_as_data", sorted items))`; the default `source_id` is `tags_as_data:<label>:<hex>` of the hash of `(("DerivedSource", sorted tags_as_data items), (origin,))`, the origin entering through its `content_hash`; a `record_id_column`, when set, is appended to the parameters as `("record_id_column", name)` | The rule of every root source plus the mapping, which enters the `content_hash` directly (two mappings can give one schema) and so also with an explicit `source_id`; the origin enters through the default `source_id` only, which is the content hash an operator node doing the derivation would have |
 | Operators (unary) | `(operator_class_name, upstream_stream)` | Stream reference resolved via `content_resolver` |
 | Operators (binary/N-ary) | `(operator_class_name, argument_symmetry(streams))` | `frozenset` for commutative (Join, MergeJoin); `tuple` for ordered (SemiJoin) |
-| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
+| `SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`, `DropDataColumns`, `SelectColumns`, `DropColumns` | `(operator_class_name, sorted unique column names as a list, strict)` | The operators act on a set of names: a list, a tuple, a set, a single string, a repeated or a reordered name list give one hash (ITL-942) |
 
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
 covers the structure of the pipeline, not only its schemas. `MergeJoin()(m1, m1)`, a stream
@@ -1363,7 +1363,7 @@ def double_for_contexts(x: int) -> int:
 
 
 context_store = InMemoryArrowDatabase()
-context_job = PipelineJob(name="contexts_demo", store=context_store)
+context_job = PipelineJob(name="contexts_demo", database=context_store)
 with context_job:
     rows = DictSource(data=[{"k": "a", "x": 1}, {"k": "b", "x": 2}], tag_columns=["k"])
     _ = double_for_contexts.pod(rows, label="dbl")
