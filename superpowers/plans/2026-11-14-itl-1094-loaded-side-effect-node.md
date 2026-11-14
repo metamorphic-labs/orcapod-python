@@ -13,7 +13,18 @@ in `side_effects.py`: importing `serialization` from `side_effects.py` is an imp
 basedpyright, and a separate module keeps `side_effects.py` (edited by #380 and #375) almost
 untouched: only `_rows_data_context()` and the `producer` annotation.
 
-## Merge of #380 (to do)
+## Merge of #380 (done: #380 head f02d72ae merged locally, at the coordinator's request)
+
+- #380 f02d72ae: async load-only branch moved above the pod-config read, side-effect node
+  shows `loaded_only` after a load-only run. The stub delegates execute/async_execute with
+  load_only to the live path; `run(load_only=True)` calls `run_job_node` and wraps the view
+  with `_with_run_status`, as the live node.
+- #380's lost-input guard in `PipelineJob._prepare_run` stays (Pipeline.load still skips a
+  node of an unknown `node_type`), reworded without ITL-1094; its two tests: the function
+  case now drives the guard with an unknown node type, the Join case now checks that a
+  load-only run reaches the operator and delivers nothing.
+
+### Planned before the merge
 
 - `LoadedSideEffectJobNode.execute` / `async_execute`: take `load_only`; with it, pass rows
   on and hold them as load-only exactly as the live node (call super's load-only path, which

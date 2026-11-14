@@ -232,3 +232,58 @@ def test_a_file_without_recorded_nullability_restores_side_effect_nodes(
     loaded.save(again)
     for descriptor in _descriptors(again).values():
         assert "nullable" not in descriptor["output_schema"]
+
+
+@pytest.mark.parametrize("orchestrator", ["sync", "async"])
+def test_a_load_only_run_passes_rows_through_and_delivers_nothing(
+    saved: tuple[PipelineJob, list[int], pathlib.Path], orchestrator: str
+) -> None:
+    """``loaded.run(load_only=True)``: the rows pass through, nothing is delivered.
+
+    The function node below a side-effect node loads its stored results, and each
+    side-effect node holds the rows it passed on as loaded only.
+    """
+    job, sent, path = saved
+    delivered_before = list(sent)
+    loaded = PipelineJob.load(path)
+    loaded.bind(sources={"s": _source()})
+    # The same job built from code, run load-only, is what the loaded job must match.
+    for label in SIDE_EFFECT_NODES:
+        job.nodes[label].clear_cache()
+    for each in (job, loaded):
+        if orchestrator == "sync":
+            _ = each.run(load_only=True)
+        else:
+            _ = each.run(orchestrator=AsyncPipelineOrchestrator(), load_only=True)
+    assert sent == delivered_before
+    assert sorted(loaded.nodes["down"].as_table()["y"].to_pylist()) == [
+        100 + i for i in range(ROWS)
+    ]
+    for label in SIDE_EFFECT_NODES:
+        node = loaded.nodes[label]
+        assert node.as_table().equals(job.nodes[label].as_table())
+        assert node.head(100).status is job.nodes[label].head(100).status
+        assert node.head(100).status is ViewStatus.LOADED_ONLY
+    # A run that is not load-only still raises, and still delivers nothing.
+    with pytest.raises(RuntimeError):
+        _ = loaded.run()
+    for label in SIDE_EFFECT_NODES:
+        with pytest.raises(RuntimeError, match="cannot deliver"):
+            _ = loaded.nodes[label].run()
+    assert sent == delivered_before
+
+
+def test_a_load_only_node_run_of_a_loaded_side_effect_node(
+    saved: tuple[PipelineJob, list[int], pathlib.Path],
+) -> None:
+    """``node.run(load_only=True)`` loads the nodes above it and delivers nothing."""
+    _, sent, path = saved
+    delivered_before = list(sent)
+    loaded = PipelineJob.load(path)
+    loaded.bind(sources={"s": _source()})
+    view = loaded.nodes["tail"].run(load_only=True)
+    assert view.status is ViewStatus.LOADED_ONLY
+    assert view.as_table().num_rows == ROWS
+    assert loaded.nodes["delivered"].as_table().num_rows == ROWS
+    assert loaded.nodes["down"].as_table().num_rows == ROWS
+    assert sent == delivered_before

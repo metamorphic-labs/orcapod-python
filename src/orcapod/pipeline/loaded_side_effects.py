@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
+from orcapod.core.nodes.function_node import run_job_node
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 
 if TYPE_CHECKING:
@@ -208,9 +209,11 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
 
     Built by ``PipelineJob.load``. Its identity, schema and node uri are the saved
     ones; the pipeline hash names the saved run's invocation log, which the node never
-    reads or writes. Its reads are those of every ``SideEffectJobNode``: the rows its
-    last run in this process passed on, so none. ``execute``, ``async_execute`` and
-    ``run()`` raise before anything is read, delivered or logged.
+    reads or writes. A load-only run (``loaded.run(load_only=True)``,
+    ``node.run(load_only=True)``) passes its input rows on, and the node holds them as
+    loaded only, as every ``SideEffectJobNode`` does in such a run; its reads return
+    those rows, and none before such a run. Any other run raises before anything is
+    read, delivered or logged.
 
     Args:
         descriptor: The node's entry in the saved file.
@@ -302,9 +305,28 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
         *,
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]:
-        """Raise: the node has no side-effect function."""
-        raise cannot_deliver_error(self.label)
+        """Pass every row on in a load-only run, as every side-effect job node does.
+
+        Args:
+            input_stream: Stream of ``(tag, data)`` pairs.
+            observer: As for ``SideEffectJobNode.execute``.
+            run_id: As for ``SideEffectJobNode.execute``.
+            load_only: Must be true: the node can only pass rows on.
+
+        Returns:
+            The rows of ``input_stream``, which the node then holds as loaded only.
+
+        Raises:
+            RuntimeError: If ``load_only`` is false; nothing is read then.
+        """
+        if not load_only:
+            raise cannot_deliver_error(self.label)
+        # The live load-only path: it uses no pod, delivers nothing and logs nothing.
+        return super().execute(
+            input_stream, observer=observer, run_id=run_id, load_only=True
+        )
 
     @override
     async def async_execute(
@@ -314,14 +336,57 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
         *,
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None:
-        """Close ``output`` and raise: the node has no side-effect function."""
-        try:
-            raise cannot_deliver_error(self.label)
-        finally:
-            await output.close()
+        """Pass every row on in a load-only run, as every side-effect job node does.
+
+        Closes ``output`` in every case.
+
+        Args:
+            inputs: Single-element sequence containing the input channel.
+            output: Writable channel for the rows passed on.
+            observer: As for ``SideEffectJobNode.async_execute``.
+            run_id: As for ``SideEffectJobNode.async_execute``.
+            load_only: Must be true: the node can only pass rows on.
+
+        Raises:
+            RuntimeError: If ``load_only`` is false; nothing is read then.
+            ValueError: If ``inputs`` does not contain exactly one channel.
+        """
+        if not load_only:
+            try:
+                raise cannot_deliver_error(self.label)
+            finally:
+                await output.close()
+        # The live load-only path: it uses no pod, delivers nothing and logs nothing.
+        await super().async_execute(
+            inputs, output, observer=observer, run_id=run_id, load_only=True
+        )
 
     @override
-    def run(self) -> StreamView:
-        """Raise: the node has no side-effect function."""
-        raise cannot_deliver_error(self.label)
+    def run(self, *, load_only: bool = False) -> StreamView:
+        """Run the node load-only, as ``loaded.run(load_only=True)`` runs it.
+
+        The job nodes it depends on that hold no current run run first, load-only; the
+        node then passes its input rows on and holds them. Nothing is delivered.
+
+        Args:
+            load_only: Must be true: the node can only pass rows on.
+
+        Returns:
+            A ``StreamView`` of the rows the node holds.
+
+        Raises:
+            RuntimeError: If ``load_only`` is false; nothing runs then.
+        """
+        import sys
+
+        if not load_only:
+            raise cannot_deliver_error(self.label)
+        run_job_node(
+            self,
+            load_only=True,
+            run_alone=lambda: self._run_alone(load_only=True),
+            caller=sys._getframe(1),  # pyright: ignore[reportPrivateUsage]  # the caller's line is where a failure warning is shown
+        )
+        return self._with_run_status(self._view_of_rows(self.as_table(), "held"))

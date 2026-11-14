@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -22,7 +21,6 @@ from orcapod.contexts.stored import (
     unclaimed_tables_written_before_v03,
 )
 from orcapod.errors import (
-    RowFailuresWarning,
     StoreError,
     StoreReadError,
     StoreWriteError,
@@ -30,14 +28,12 @@ from orcapod.errors import (
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
+from orcapod.pipeline.node_run import RunPlan, clear_run_rows, plan_run
 from orcapod.pipeline.run_summary import (
-    NodeRunSummary,
     RunCountingObserver,
     RunSummary,
-)
-from orcapod.protocols.node_protocols import (
-    is_function_node,
-    is_side_effect_function_node,
+    run_node_summaries,
+    warn_row_failures,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -46,7 +42,6 @@ from orcapod.utils.store_errors import flush_best_effort
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from types import FrameType
 
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
@@ -74,6 +69,7 @@ class _PreparedRun:
         pipeline_uri: ``<job name>@<snapshot hash>``, passed to the observer.
         pipeline_db: The job's view of the store.
         result_db: The job's function-result view of the store.
+        plan: What the run runs and holds (``plan_run``, ITL-1095).
     """
 
     exec_dag: OrcaDAG[Any]
@@ -81,6 +77,7 @@ class _PreparedRun:
     pipeline_uri: str
     pipeline_db: "ArrowDatabaseProtocol"
     result_db: "ArrowDatabaseProtocol"
+    plan: "RunPlan"
 
 
 def _with_counter(
@@ -100,29 +97,6 @@ def _with_counter(
     from orcapod.pipeline.composite_observer import CompositeObserver
 
     return CompositeObserver(observer, counter)  # pyright: ignore[reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
-
-
-def _warn_row_failures(summary: RunSummary, caller: FrameType) -> None:
-    """Issue the run's ``RowFailuresWarning``, shown after every run with failed rows.
-
-    Python's default filter shows a warning once per text and line, so a second identical
-    failing run from the same line (re-running a notebook cell) would show nothing. A
-    fresh registry for each run keeps every run's warning, while the user's filters
-    (``ignore``, ``error``) still apply.
-
-    Args:
-        summary: The run's summary, with failed rows.
-        caller: The frame that called ``run``; the warning is shown at its line.
-    """
-    warnings.warn_explicit(
-        summary.failures_message(),
-        RowFailuresWarning,
-        caller.f_code.co_filename,
-        caller.f_lineno,
-        module=caller.f_globals.get("__name__"),
-        registry=None,
-        module_globals=caller.f_globals,
-    )
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -866,6 +840,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         observer: "ExecutionObserverProtocol | None" = None,
         materialize_results: bool = True,
         commit_every_rows: int = 100,
+        *,
+        load_only: bool = False,
     ) -> RunSummary:
         """Execute the resolvable subgraph of this job in place.
 
@@ -876,6 +852,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         After a successful run, ``job.nodes`` returns the execution-ready
         nodes with populated database caches.
+
+        State-driven, as every job node's ``run()`` (developer, November 14, 2026;
+        ITL-1095): a node that holds a current run (completed in this process, not
+        stale, and for a full run not filled by a load-only run) is held, not run; its
+        rows feed the nodes after it, and nothing is computed, read, written or
+        delivered for it. A source is read only for the nodes that run. So a second run
+        of an unchanged job does nothing. To run a node again, call ``clear_cache()`` on
+        it (every node below it runs too), or bind a new source object.
 
         ``job.run(orchestrator=AsyncPipelineOrchestrator())`` works the same in a
         script and inside a running event loop, such as a Jupyter kernel: there the
@@ -914,6 +898,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 default 1000): the store commits every pending table by itself
                 once one table's pending rows reach that size, which would
                 break the node's results-before-records commit order.
+            load_only: Fill the nodes from what is already stored and compute
+                nothing (ITL-1095). Sources are read and operators run on the rows
+                that reach them; each function node takes the results stored for
+                this run's inputs (its own records under its content hash) and skips
+                the inputs without one, which the summary counts (``not_stored``);
+                a function node forwards only the rows it loaded. No user function
+                is called, no side effect is delivered (a side-effect node passes its
+                rows on) and nothing is written to the store, a ``LOG`` operator's
+                cache included. Afterwards each node shows the rows it loaded.
 
         Rows whose function raised (with the default ``error_policy="continue"``) are
         skipped, and the run goes on. At the end, if any row failed, a single
@@ -946,20 +939,24 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
-        prepared = self._prepare_run(commit_every_rows)
+        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+        # The state rule (ITL-1095): a node that holds a current run is not run again.
+        plan = prepared.plan
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        with self._executing(prepared, commit_every_rows):
+        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = effective_orchestrator.run(
-                prepared.exec_dag,
+                plan.dag,
                 observer=_with_counter(observer, counter),
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
+                load_only=load_only,
+                held_rows=plan.held_rows,
             )
-        summary = self._finish_run(prepared, counter)
+        summary = self._finish_run(prepared, counter, plan, load_only=load_only)
         if not summary.ok:
-            _warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
 
     async def run_async(
@@ -968,6 +965,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         observer: "ExecutionObserverProtocol | None" = None,
         materialize_results: bool = True,
         commit_every_rows: int = 100,
+        *,
+        load_only: bool = False,
     ) -> RunSummary:
         """Execute the job with the async orchestrator, from async code.
 
@@ -983,6 +982,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             observer: Optional execution observer.
             materialize_results: As for ``run``.
             commit_every_rows: As for ``run``.
+            load_only: As for ``run``.
 
         Returns:
             The run's ``RunSummary``, as ``run`` returns.
@@ -1005,26 +1005,33 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{type(orchestrator).__name__}. Use job.run(orchestrator=...) to run "
                 "it."
             )
-        prepared = self._prepare_run(commit_every_rows)
+        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+        # The state rule (ITL-1095): a node that holds a current run is not run again.
+        plan = prepared.plan
         counter = RunCountingObserver()
-        with self._executing(prepared, commit_every_rows):
+        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = await orchestrator.run_async(
-                prepared.exec_dag,
+                plan.dag,
                 observer=_with_counter(observer, counter),
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
+                load_only=load_only,
+                held_rows=plan.held_rows,
             )
-        summary = self._finish_run(prepared, counter)
+        summary = self._finish_run(prepared, counter, plan, load_only=load_only)
         if not summary.ok:
-            _warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
 
-    def _prepare_run(self, commit_every_rows: int) -> "_PreparedRun":
+    def _prepare_run(
+        self, commit_every_rows: int, *, load_only: bool = False
+    ) -> "_PreparedRun":
         """Check the job can run and build what a run needs; shared by both run forms.
 
         Args:
             commit_every_rows: As for ``run``.
+            load_only: As for ``run``: a loaded job can run only this way.
 
         Returns:
             The execution DAG, run id, pipeline URI and the store views of the run.
@@ -1051,14 +1058,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "PipelineJob has no compiled pipeline. "
                 "Record invocations inside a 'with job:' block first."
             )
-        # A loaded job reads the results its saved run stored and never runs:
-        # function pods are not saved with it, and even an operator-only loaded
-        # job, whose operators are rebuilt, stays read-only.
-        if self._loaded:
+        # A loaded job never computes: function pods are not saved with it, and even
+        # an operator-only loaded job, whose operators are rebuilt, stays read-only.
+        # A load-only run fills it from the store (ITL-1095).
+        if self._loaded and not load_only:
             raise RuntimeError(
-                "PipelineJob.run() cannot execute a loaded job: PipelineJob.load() "
-                "is for reading stored results only. To run a new computation, "
-                "create a fresh PipelineJob from the original pipeline definition."
+                "PipelineJob.run() cannot execute a loaded job: its function pods are "
+                "not saved with it, so it cannot compute. Fill its nodes from the "
+                "store with run(load_only=True) (bind in-memory sources first), or "
+                "read a node's stored results with node.as_source(). To run a new "
+                "computation, create a fresh PipelineJob from the original pipeline "
+                "definition."
             )
         # Until this run finishes, what the store holds for a node is not certain.
         self._last_run_finished = False
@@ -1099,7 +1109,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 isinstance(node, (FunctionJobNode, OperatorJobNode))
                 and node.load_status == LoadStatus.UNAVAILABLE
             )
-            or (isinstance(node, FunctionJobNode) and node.producer is None)
+            or (
+                not load_only
+                and isinstance(node, FunctionJobNode)
+                and node.producer is None
+            )
         ]
         if unavailable_labels:
             raise RuntimeError(
@@ -1109,6 +1123,29 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "To run a new computation, create a fresh PipelineJob from the "
                 "original pipeline definition."
             )
+
+        # A loaded job whose graph lost a node (the file records a node of a kind
+        # PipelineJob.load does not restore) cannot feed the nodes below it: every
+        # saved input of a node must be a restored node.
+        if self._loaded:
+            for node_hash, node in self._persistent_node_map.items():
+                if not isinstance(node, (FunctionJobNode, OperatorJobNode)):
+                    continue
+                if node_hash not in self._hash_graph:
+                    continue
+                missing = [
+                    upstream
+                    for upstream in self._hash_graph.predecessors(node_hash)
+                    if upstream not in self._persistent_node_map
+                ]
+                if missing:
+                    raise RuntimeError(
+                        f"Node {node.label!r} of the loaded job has lost "
+                        f"{len(missing)} of its input nodes: the saved file records a "
+                        "node of a kind PipelineJob.load does not restore, so the nodes "
+                        "below it cannot run, not even load-only. Read their stored "
+                        "results with node.as_source()."
+                    )
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         hash_dag: OrcaDAG[str] = OrcaDAG()
@@ -1168,7 +1205,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # this run writes. Those rows would otherwise count towards a table's
         # batch_size, which could then be reached mid-run and commit this run's pipeline
         # records ahead of their results (ITL-919).
-        if table_committing is not None:
+        # The state rule (ITL-1095): a node that holds a current run is not run again.
+        plan = plan_run(exec_dag, load_only=load_only)
+        # A load-only run writes nothing, and a run that runs no node touches no store,
+        # so neither commits anything, not even pending writes of earlier operations.
+        if table_committing is not None and not load_only and plan.to_run:
             try:
                 pipeline_db.flush()
             except StoreError as exc:
@@ -1185,43 +1226,66 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             pipeline_uri=pipeline_uri,
             pipeline_db=pipeline_db,
             result_db=result_db,
+            plan=plan,
         )
 
     @contextlib.contextmanager
     def _executing(
-        self, prepared: "_PreparedRun", commit_every_rows: int
+        self,
+        prepared: "_PreparedRun",
+        plan: RunPlan,
+        commit_every_rows: int,
+        *,
+        load_only: bool = False,
     ) -> Iterator[None]:
         """Hold every function node to the run's commit cadence while the orchestrator runs.
 
-        A failure inside commits the writes that succeeded before it, then propagates.
+        A failure inside commits the writes that succeeded before it (not in a load-only
+        run, which writes nothing), clears every node the run ran (whether their writes
+        were committed is unknown), then propagates.
 
         Args:
             prepared: The run, from ``_prepare_run``.
+            plan: The nodes the run runs (``plan_run``).
             commit_every_rows: As for ``run``.
+            load_only: As for ``run``.
         """
         try:
             with contextlib.ExitStack() as batched:
                 # Function nodes commit every commit_every_rows rows (ITL-919).
-                for node in prepared.exec_dag.nodes():
+                for node in plan.to_run:
                     if isinstance(node, FunctionJobNode):
                         batched.enter_context(
                             node._batched_commits(commit_every_rows)  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' commit cadence
                         )
                 yield
-        except Exception as run_error:
+        except BaseException as run_error:
             # Commit the writes that did succeed before the failure, so their rows
-            # do not look dropped, then report the failure itself.
-            flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
+            # do not look dropped, then report the failure itself. A cancelled or
+            # interrupted run commits nothing more, but clears its nodes too.
+            if isinstance(run_error, Exception) and not load_only:
+                flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
+            clear_run_rows(plan.to_run)
             raise
 
     def _finish_run(
-        self, prepared: "_PreparedRun", counter: RunCountingObserver
+        self,
+        prepared: "_PreparedRun",
+        counter: RunCountingObserver,
+        plan: RunPlan,
+        *,
+        load_only: bool = False,
     ) -> RunSummary:
         """Commit the run's last writes, mark the job as run and keep its summary.
+
+        A failed commit clears the nodes the run ran (they hold no completed run);
+        the nodes it held keep the rows of their earlier run.
 
         Args:
             prepared: The run, from ``_prepare_run``.
             counter: The observer that counted the run's rows.
+            plan: The nodes the run ran and held (``plan_run``).
+            load_only: Whether the run loaded stored results only.
 
         Returns:
             The run's summary, also kept as ``last_run``.
@@ -1240,27 +1304,32 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             + "have been stored."
         )
         try:
-            pipeline_db.flush()
-            result_db.flush()
+            if not load_only and plan.to_run:
+                # A load-only run writes nothing and commits nothing, and a run that
+                # ran no node touches no store (ITL-1095).
+                pipeline_db.flush()
+                result_db.flush()
         except StoreReadError as exc:
             # A stored table could not be read: report the read failure itself.
             exc.add_note(pending_note)
+            # A run whose commit failed did not complete: no node holds its rows.
+            clear_run_rows(plan.to_run)
             raise
         except Exception as exc:
             flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
             flush_error.add_note(pending_note)
+            clear_run_rows(plan.to_run)
             raise flush_error from exc
 
         # Mutate self in place.
         self._has_run = True
         self._last_run_finished = True
         self._run_id = prepared.run_id
-        node_summaries: list[NodeRunSummary] = []
-        for node in prepared.exec_dag.topological_sort():
-            label: str = node.label
-            if is_function_node(node) or is_side_effect_function_node(node):
-                node_summaries.append(counter.node_summary(label))
-        self._last_run = RunSummary("/".join(self._name), node_summaries)
+        self._last_run = RunSummary(
+            "/".join(self._name),
+            run_node_summaries(prepared.exec_dag, counter, held=plan.held_counts),
+            load_only=load_only,
+        )
         return self._last_run
 
     def __repr__(self) -> str:
@@ -1396,10 +1465,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """Deserialize a ``PipelineJob`` from a JSON file to read its stored results.
 
         A loaded job is for reading the results its saved run stored; it cannot be
-        run again, because function pods are not saved with the job. Read a
-        function node with ``job.nodes[label].as_table()``, ``iter_data()`` or
-        ``get_all_records()``. Operators can store outputs when caching is enabled;
-        reading a loaded operator without a readable cache raises ``RuntimeError``.
+        run again, because function pods are not saved with the job. Its nodes have
+        not run in this process, so they are empty (ITL-1095): read a node's stored
+        results through its stored view, ``job.nodes[label].as_source()``, or with
+        ``get_all_records()``. Operators store outputs only when caching is enabled;
+        the stored view of a loaded operator whose run's rows cannot be named raises
+        ``RuntimeError``.
 
         The embedded ``Pipeline`` blueprint is always restored. Sources whose data
         lives in files (CSV, Delta) are rebuilt from the saved config. In-memory
@@ -1415,7 +1486,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 over any database configuration in the file.
 
         Returns:
-            A read-only ``PipelineJob`` whose nodes serve their stored results.
+            A read-only ``PipelineJob`` whose nodes' stored views serve their stored
+            results.
 
         Raises:
             ValueError: If the file's format version is unsupported, or if it was
