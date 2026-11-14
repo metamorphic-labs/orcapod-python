@@ -3694,4 +3694,9 @@ class FunctionJobNode(FunctionNodeBase):
             self.clear_cache()
             raise
         finally:
-            await output.close()
+            try:
+                await output.close()
+            except BaseException:
+                # A close that raises or is cancelled fails the run: no rows.
+                self.clear_cache()
+                raise
