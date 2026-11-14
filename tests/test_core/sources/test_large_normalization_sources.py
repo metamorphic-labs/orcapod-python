@@ -226,3 +226,16 @@ class TestCachedSource:
         table = second.as_table(columns=ALL_COLUMNS)
         assert table.num_rows == 2
         assert _non_large(table) == {}
+
+    @pytest.mark.parametrize("n_rows", [2, 0])
+    def test_head_before_the_read_has_the_types_of_the_read(
+        self, store_kind: str, n_rows: int, tmp_path: Path
+    ) -> None:
+        """The columns ``head()`` shows before the cache is read are large too."""
+        cached = CachedSource(
+            _small_source(n_rows), cache_database=_store(store_kind, tmp_path)
+        )
+        unread = cached.head(columns=ALL_COLUMNS).table
+        assert _non_large(unread) == {}
+        read = cached.as_table(columns=ALL_COLUMNS)
+        assert unread.schema.equals(read.schema, check_metadata=False)

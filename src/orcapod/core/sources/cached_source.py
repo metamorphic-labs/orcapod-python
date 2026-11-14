@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 
+import dataclasses
 import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -361,17 +362,23 @@ class CachedSource(RootSource):
         all_records = self._read_cached_records()
         if all_records is None:
             all_records = self._empty_table()
-        # The rows read back are a table Orcapod creates: large variants, whatever
-        # the cache store keeps and whether it has rows (ITL-1122).
-        all_records = arrow_utils.normalize_table_to_large_types(
-            all_records, keep_null=True
-        )
+        all_records = self._presented(all_records)
 
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.
         return ArrowTableStream(
             all_records, tag_columns=tag_keys, data_context=self.data_context
         )
+
+    @staticmethod
+    def _presented(table: pa.Table) -> pa.Table:
+        """The table as this source presents it: in its large variants (ITL-1122).
+
+        The rows read back from the cache are a table Orcapod creates, so they take
+        the large variants whatever the cache store keeps; the columns ``head()``
+        shows before the cache is read take the same types.
+        """
+        return arrow_utils.normalize_table_to_large_types(table, keep_null=True)
 
     def _empty_table(self) -> pa.Table:
         """Build an empty Arrow table matching the source's output schema.
@@ -464,6 +471,8 @@ class CachedSource(RootSource):
         wrapped = head_of(
             self._source.head(0, columns=columns, all_info=all_info), self
         )
+        # The wrapped source's columns in the types the read gives them (ITL-1122).
+        wrapped = dataclasses.replace(wrapped, table=self._presented(wrapped.table))
         if wrapped.status is not ViewStatus.ROWS:
             return wrapped
         return StreamView.without_rows(
