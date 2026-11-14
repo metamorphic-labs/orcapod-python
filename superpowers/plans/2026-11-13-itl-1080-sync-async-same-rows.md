@@ -95,3 +95,12 @@ input meta in every operator on both paths.
   unvalidated; mutation-checked).
 - Equivalence test: main's new CASES kept; main's `META_XFAIL` (incl. its new
   `merge_join_nullable_key`) dropped, since the meta rule fixes every case.
+
+## Merge of origin/main 5537291f (#367, ITL-1075)
+
+- `operator_node.py`: main's `_discard` and this PR's `_InputTap` both kept. REPLAY branch is
+  main's (drains the raw inputs in tasks); the computing branch taps (`_InputTap`). Taps work
+  under SemiJoin's new concurrent left receive (`receive`, `__aiter__`, `collect`).
+- `semijoin.py`: main's imports and `_collect_right_reading_left` / `_LeftRows` structure kept
+  exactly; `WithoutMetaWriter(output)` is the first statement of the `try` (the `finally`
+  closes the wrapped writer).
