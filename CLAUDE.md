@@ -826,7 +826,8 @@ data. The rules:
   memory (`SideEffectJobNode._held_rows`), and delivers nothing; with none (no run, a run that
   raised, or stale by `is_stale`) a read returns zero rows. Never route a job node's read to
   the standalone delivery path. The standalone `SideEffectPodStream` still delivers on every
-  read.
+  consuming read (`iter_data`, `as_table`, dataframes, `flow`, `run`); its `head()` and
+  preview deliver nothing.
 - `DerivedSource` over a job node before `run()` → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.

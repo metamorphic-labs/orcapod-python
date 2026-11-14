@@ -690,8 +690,10 @@ print(len(sent))
 - Before any run in this process (a new job over a store that already records deliveries),
   after a run that raised, or once a node upstream has changed since the run, a read returns
   no rows and `head()` says that `run()` delivers. Run the job to get the rows.
-- Outside a job, the stream a side-effect pod returns keeps nothing, so every read of it
-  delivers every side effect again; see [Streams](streams.md#computing-a-stream-outside-a-job-run).
+- Outside a job, the stream a side-effect pod returns keeps nothing, so every consuming read
+  of it (`iter_data()`, `as_table()`, the dataframe methods, `flow()`, `run()`) delivers every
+  side effect again; its `head()` and notebook preview deliver nothing and show no rows. See
+  [Streams](streams.md#computing-a-stream-outside-a-job-run).
 
 ### Saving and loading a job
 

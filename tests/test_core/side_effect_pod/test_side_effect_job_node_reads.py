@@ -13,19 +13,24 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Collection
+from pathlib import Path
 from typing import Any, Literal
 
 import pyarrow as pa
 import pytest
+from typing_extensions import override
 
 from orcapod import function_pod
 from orcapod.core.sources import DictSource
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.core.streams import ArrowTableStream
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.side_effects import SideEffectJobNode, SideEffectPod, SideEffectPodConfig
 from orcapod.streams import ViewStatus
+from orcapod.types import ColumnConfig, Schema
 
 ROWS = 6
 SORTED = {"sort_by_tags": True}
@@ -48,7 +53,7 @@ def _job(
     failing: Collection[int] = (),
     upstream: bool = False,
     downstream: bool = False,
-    database: InMemoryArrowDatabase | None = None,
+    database: ArrowDatabaseProtocol | None = None,
 ) -> tuple[PipelineJob, list[int]]:
     """A job with a side-effect node ``delivered``, and the list of its deliveries.
 
@@ -319,3 +324,66 @@ def test_rows_held_from_a_run_are_dropped_when_an_upstream_changes(
         assert len(sent) == ROWS, f"{name} delivered again"
     assert len(node.as_table()) == 0
     assert node.head().status is ViewStatus.NOT_COMPUTED
+
+
+# ---------------------------------------------------------------------------
+# node.run() commits the invocation log; head() after an empty run never polls
+# ---------------------------------------------------------------------------
+
+
+def test_node_run_commits_the_invocation_log(tmp_path: Path) -> None:
+    """The deliveries ``node.run()`` logged are found by a new job over the same store."""
+    job, sent = _job(database=DeltaTableDatabase(tmp_path / "store"))
+    _ = job.nodes["delivered"].run()
+    assert len(sent) == ROWS
+    # A new database object reads only what was committed to the store.
+    again, again_sent = _job(database=DeltaTableDatabase(tmp_path / "store"))
+    _ = again.run()
+    assert again_sent == []
+
+
+class _SchemaOnlyByPolling(ArrowTableStream):
+    """A stream of no rows whose schema, once ``armed``, could be read only by polling."""
+
+    armed: bool = False
+
+    def _schema_requires_io(self, config: ColumnConfig) -> bool:
+        """Say that reading the schema would poll, once armed."""
+        return self.armed
+
+    @override
+    def output_schema(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        """Refuse once armed: reading the schema would poll."""
+        if self.armed:
+            raise AssertionError("the schema was read: a poll")
+        return super().output_schema(columns=columns, all_info=all_info)
+
+
+def test_head_after_a_run_that_passed_on_no_rows_never_polls() -> None:
+    """With no rows held and columns known only by polling, ``head()`` reads no schema."""
+    empty = pa.table(
+        {"k": pa.array([], type=pa.int64()), "x": pa.array([], type=pa.int64())}
+    )
+    upstream = _SchemaOnlyByPolling(empty, tag_columns=["k"])
+    sent: list[int] = []
+
+    def deliver(ctx: Any, x: int) -> None:
+        """The side effect: record ``x``."""
+        sent.append(x)
+
+    node = SideEffectJobNode(
+        side_effect_pod=SideEffectPod(deliver), input_stream=upstream
+    )
+    assert len(node.run()) == 0
+    upstream.armed = True
+    head = node.head(all_info=True)
+    _ = node._repr_html_()  # the notebook preview: the public display hook
+    assert head.status is ViewStatus.ROWS
+    assert len(head) == 0
+    assert "its last run passed on no rows" in head.header()
+    assert sent == []

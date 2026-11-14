@@ -22,6 +22,7 @@ from orcapod.core.nodes.function_node import _build_record_id_preimage
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
+    schema_requires_io,
 )
 from orcapod.core.streams.view import (
     SIDE_EFFECTS_NOTE,
@@ -51,6 +52,7 @@ from orcapod.system_constants import (
 )
 from orcapod.types import ColumnConfig
 from orcapod.utils import arrow_utils
+from orcapod.utils.store_errors import flush_best_effort
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -1121,7 +1123,9 @@ class SideEffectJobNode(SideEffectNode):
         """Return the first rows the last run passed on; never delivers.
 
         After a run, the first ``n`` of ``as_table`` with the same column configuration.
-        Without rows from a run, no rows, with a note that ``run()`` delivers. See
+        Without rows from a run, no rows, with a note that ``run()`` delivers. After a
+        run that passed on no rows, when the columns asked for are known only by
+        polling a source, no columns either: ``head`` never polls. See
         ``StreamBase.head``.
         """
         check_head_size(n)
@@ -1130,6 +1134,12 @@ class SideEffectJobNode(SideEffectNode):
         if rows is None:
             return self._head_without_rows(
                 config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+            )
+        if not rows and schema_requires_io(self, config):
+            # The table of no rows takes its columns from the schema, which here only a
+            # poll of the source could give: show the empty content with no columns.
+            return self._head_without_rows(
+                config, ViewStatus.ROWS, note="its last run passed on no rows"
             )
         return StreamView.of_rows(
             self,
@@ -1148,15 +1158,34 @@ class SideEffectJobNode(SideEffectNode):
         delivered; without it every row is delivered again, as a second ``job.run()``
         delivers it. With no database attached nothing is logged and every row is
         delivered. The node then holds the rows it passed on, which ``as_table()`` and
-        every other read return without delivering.
+        every other read return without delivering. The invocation log is committed
+        before ``run()`` returns, as at the end of a job run; after a failed delivery
+        the log rows of the deliveries that succeeded are committed too, and the
+        delivery's error is raised.
 
         Returns:
             A ``StreamView`` of the rows this run passed on.
 
         Raises:
             SideEffectLogDataContextError: As for ``execute``.
+            StoreWriteError: If committing the invocation log fails.
         """
-        _ = self.execute(self._input_stream)
+        database = self._pipeline_database
+        try:
+            _ = self.execute(self._input_stream)
+        except Exception as run_error:
+            if database is not None:
+                flush_best_effort(run_error, database)
+            raise
+        if database is not None:
+            # Committed as at the end of a job run (PipelineJob._finish_run).
+            try:
+                database.flush()
+            except StoreReadError:
+                # A stored table could not be read: report the read failure itself.
+                raise
+            except Exception as exc:
+                raise StoreWriteError(database.base_path, flush=True) from exc
         return self._view_of_rows(self.as_table(), "held")
 
     # ------------------------------------------------------------------
@@ -1181,6 +1210,10 @@ class SideEffectJobNode(SideEffectNode):
         Emits non-``None`` results to ``output``. Always closes ``output``
         in a ``finally`` block.
 
+        The node then holds exactly this run's rows, in the order they were sent
+        downstream, which every later read returns without delivering (ITL-1091). A run
+        that raises leaves the node with no rows.
+
         Args:
             inputs: Single-element sequence containing the input channel.
             output: Writable channel for pass-through ``(tag, data)`` pairs.
@@ -1203,6 +1236,10 @@ class SideEffectJobNode(SideEffectNode):
         self._held_rows = None
         # This run's rows, in the order they were sent downstream.
         passed_on: list[tuple[TagProtocol, DataProtocol]] = []
+        # Makes recording a row and sending it one step: a send blocked by a full channel
+        # can be overtaken by a later one, so without it the held order could differ from
+        # the order downstream received. Never held across the delivery itself.
+        send_lock = asyncio.Lock()
         try:
             self._refuse_log_of_another_data_context()
 
@@ -1223,9 +1260,9 @@ class SideEffectJobNode(SideEffectNode):
                         table_path=self._table_path,
                     )
                     if result is not None:
-                        # Recorded as it enters the channel, so in the order sent.
-                        passed_on.append(result)
-                        await output.send(result)
+                        async with send_lock:
+                            passed_on.append(result)
+                            await output.send(result)
                 finally:
                     if sem is not None:
                         sem.release()
