@@ -155,7 +155,13 @@ provides the set of matching tags.
 The match keys are exactly the columns that are tag columns of both streams. A name the two
 streams share as a data column, or a tag in one and a data column in the other, is not a key
 and is ignored: the right stream's data columns are never read. If the streams share no tag
-column, every left row is returned.
+column, every left row is returned. Because such names were match keys before v0.3, SemiJoin
+names them in a `SemiJoinIgnoredColumnWarning` (from `orcapod.errors`). This behaviour is
+provisional in v0.3 and may become an error. To silence the warning, rename or drop the
+column on the right stream before the semi join (`map_data`, `select_data_columns`,
+`drop_data_columns`, or `map_tags` for a tag). A right stream must keep at least one data
+column, so a filtered copy of the left stream (which shares every data name) can be reduced
+to one renamed column, e.g. `subset.select_data_columns(["age"]).map_data({"age": "_age"})`.
 
 ```python
 from orcapod.sources import DictSource

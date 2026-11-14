@@ -843,8 +843,10 @@ data. The rules:
 - `SemiJoin`'s match keys are exactly the names that are tag columns of both inputs
   (developer, November 13, 2026, ITL-1088), from one helper, `SemiJoin._match_keys`, used by
   validation, the sync path and the async path. A shared data column name, or a name that is a
-  tag on one side and data on the other, is ignored (never an error); the right input's data
-  columns are never read. No shared tag column: every left row is returned.
+  tag on one side and data on the other, is ignored (by name only); the right input's data
+  columns are never read. No shared tag column: every left row is returned. Ignored names
+  raise `SemiJoinIgnoredColumnWarning` once per operator and set of names (provisional in
+  v0.3: may become an error); the async path warns only when no validation ran.
 - `Join`, `MergeJoin` and `SemiJoin` accept a shared TAG key whose types differ only in
   nullability (`T` against `T | None`), because a null key matches nothing (developer,
   November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it
