@@ -226,7 +226,7 @@ def test_job_warns_once(run_async: bool) -> None:
     """A semi join in a job warns once, at the call, not again when the job runs."""
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
-        job = PipelineJob(name="semijoin_warns_once", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="semijoin_warns_once", database=InMemoryArrowDatabase())
         with job:
             _ = SemiJoin(label="sj")(left_source(), right_same_tag_other_y())
         if run_async:
