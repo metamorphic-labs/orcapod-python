@@ -488,14 +488,6 @@ def test_operator_node_with_no_rows_reads_back_empty_after_async_run(
     assert list(async_node.iter_data()) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-858/ITL-912: no row reaches the async node, so it reads back the table "
-        "built from the Python output schema: int8 becomes int64, and the system-tag "
-        "and source-info columns are missing"
-    ),
-)
 def test_operator_node_with_no_rows_keeps_columns_and_types_after_async_run(
     tmp_path: Path,
 ) -> None:
@@ -576,13 +568,6 @@ def test_clear_cache_returns_operator_node_to_not_yet_run(tmp_path: Path) -> Non
     assert async_cleared.schema == sync_cleared.schema
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-912: the zero-row table built from the Python output schema widens "
-        "int8 to int64 and changes nullability"
-    ),
-)
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
 def test_clear_cache_keeps_operator_node_arrow_types(
     orchestrator: str, tmp_path: Path
