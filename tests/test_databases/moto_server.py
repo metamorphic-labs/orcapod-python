@@ -31,6 +31,28 @@ def free_localhost_port() -> int:
         return sock.getsockname()[1]
 
 
+def stop_process(
+    proc: subprocess.Popen[bytes], terminate_timeout: float = 10.0
+) -> None:
+    """Stop a child process and reap it.
+
+    Sends SIGTERM and waits ``terminate_timeout`` seconds, then SIGKILL; either way the
+    child has been waited for when this returns.
+
+    Args:
+        proc: The child process.
+        terminate_timeout: Seconds to wait after SIGTERM before killing.
+    """
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=terminate_timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 @contextlib.contextmanager
 def moto_server() -> Iterator[str]:
     """Run a moto S3 server in a subprocess and yield its endpoint URL.
@@ -74,9 +96,4 @@ def moto_server() -> Iterator[str]:
                 f"The moto S3 server did not start on {endpoint}:\n{output}"
             )
         finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            stop_process(proc)

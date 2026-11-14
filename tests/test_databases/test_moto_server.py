@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import socket
+import subprocess
+import sys
 
 import pytest
 
-from tests.test_databases.moto_server import moto_server
+from tests.test_databases.moto_server import moto_server, stop_process
 
 
 def _refuses_connections(endpoint: str) -> bool:
@@ -31,3 +33,18 @@ def test_server_is_stopped_when_the_body_raises():
             raise ZeroDivisionError
     assert endpoint
     assert _refuses_connections(endpoint)
+
+
+def test_stop_process_reaps_a_child_that_ignores_sigterm():
+    code = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE)
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == b"ready"  # SIGTERM is now ignored
+    stop_process(proc, terminate_timeout=0.5)
+    proc.stdout.close()
+    assert proc.returncode is not None
