@@ -467,6 +467,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 reconstructed[node_hash] = node
 
             elif node_type == "side_effect":
+                from orcapod.pipeline.loaded_side_effects import LoadedSideEffectNode
+
                 # Restored read-only: the file holds no side-effect function (ITL-1094).
                 up_hashes = upstream_map.get(node_hash, [])
                 upstream_node = reconstructed.get(up_hashes[0]) if up_hashes else None
@@ -475,7 +477,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         f"The saved side-effect node {descriptor.get('label')!r} has "
                         "no upstream node in the file."
                     )
-                reconstructed[node_hash] = SideEffectNode.from_descriptor(
+                # GraphNode predates side-effect nodes; compile() stores them in the
+                # same maps through the untyped side_effect_node_class.
+                reconstructed[node_hash] = LoadedSideEffectNode(  # pyright: ignore[reportArgumentType]
                     descriptor, input_stream=upstream_node
                 )
 

@@ -1551,6 +1551,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.core.nodes.function_node import FunctionNode as _FunctionNode
         from orcapod.core.nodes.operator_node import OperatorNode as _OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as _SourceNode
+        from orcapod.pipeline.loaded_side_effects import LoadedSideEffectJobNode
 
         job._sources = dict(sources)
 
@@ -1627,7 +1628,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 # Read-only: it never delivers (ITL-1094). Its upstream is the restored
                 # job node, so the nodes below it keep their position in the graph.
                 preds = list(job._hash_graph.predecessors(node_hash))
-                job._persistent_node_map[node_hash] = SideEffectJobNode.from_descriptor(
+                # JobNode predates side-effect nodes; compile() stores them in this map
+                # too, through the untyped side_effect_node_class.
+                job._persistent_node_map[node_hash] = LoadedSideEffectJobNode(  # pyright: ignore[reportArgumentType]
                     getattr(bp_node, "_descriptor", None) or {},
                     input_stream=job._persistent_node_map[preds[0]],
                 )
