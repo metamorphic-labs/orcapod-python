@@ -767,7 +767,10 @@ data. The rules:
   the Python schema, and never by computing, reading or polling a row or calling a function.
   An operator's is its result over its inputs' zero-row tables; a function pod's is the
   input's tags plus the declared outputs (`function_zero_row_table`); a source's is the table
-  or schema it holds. A new stream kind implements `_typed_zero_row_table`.
+  or schema it holds. A new stream kind implements `_typed_zero_row_table`. A head with no
+  rows is built in one place, `StreamBase._head_without_rows`, from the stream's
+  `_zero_row_table(config)`, which equals `as_table(columns=config)` with no rows; a kind
+  whose `as_table` shapes its table its own way overrides `_zero_row_table` with that shaping.
 - **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on

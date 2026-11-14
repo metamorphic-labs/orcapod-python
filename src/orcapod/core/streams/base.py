@@ -716,10 +716,15 @@ class StreamBase(TraceableBase):
         status: ViewStatus,
         note: str | None = None,
     ) -> StreamView:
-        """Return a head with no rows: the stream's columns from its declared schema.
+        """Return a head with no rows: the stream's columns, typed as its rows are.
 
-        When reading the schema would poll a source (``schema_requires_io``), the head
-        has no columns either, and the note says so.
+        The one place a head's table of no rows is built (ITL-912): the stream's
+        ``_zero_row_table(config)``, which has the columns and Arrow types
+        ``as_table(columns=config)`` gives the stream with no rows; getting it
+        computes, reads, polls and delivers nothing. Only a stream that cannot say its
+        Arrow types without rows (see ``typed_zero_row_table``; ITL-1089) gets a table
+        built from its declared Python schema. When reading the schema would poll a source
+        (``schema_requires_io``), the head has no columns either, and the note says so.
         """
         if schema_requires_io(self, config):
             return StreamView.without_rows(
@@ -730,9 +735,11 @@ class StreamBase(TraceableBase):
                 note=f"{note or default_note(status)}; {SCHEMA_NEEDS_POLL_NOTE}",
             )
         tag_schema, data_schema = self.output_schema(columns=config)
-        table = arrow_utils.make_empty_table(
-            {**tag_schema, **data_schema}, self.data_context.type_converter
-        )
+        table = self._zero_row_table(config)
+        if table is None:
+            table = arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, self.data_context.type_converter
+            )
         return StreamView.without_rows(
             self, status, table, tag_columns=tuple(tag_schema.keys()), note=note
         )
@@ -749,6 +756,26 @@ class StreamBase(TraceableBase):
         ``config`` asks for a column group known only from rows.
         """
         return any(schema_requires_io(upstream, config) for upstream in self.upstreams)
+
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """This stream's table with no rows and the column groups of ``config``.
+
+        What ``as_table(columns=config)`` gives this stream when it has no rows: its
+        zero-row table (``typed_zero_row_table``) shaped as an ``ArrowTableStream``
+        shapes its table. A kind whose ``as_table`` shapes its table another way
+        overrides this with that shaping. Never computes, reads, polls or delivers.
+
+        Returns:
+            The table, or ``None`` when the stream cannot type it without rows.
+        """
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+        typed = typed_zero_row_table(self)
+        if typed is None:
+            return None
+        return ArrowTableStream(
+            typed, tag_columns=self.keys()[0], data_context=self.data_context_key
+        ).as_table(columns=config)
 
     def _typed_zero_row_table(self) -> pa.Table | None:
         """This stream's zero-row table; ``None``: unknown without rows.

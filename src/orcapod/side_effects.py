@@ -226,6 +226,20 @@ class SideEffectPodStream(StreamBase):
             type_converter=self._pod.data_context.type_converter,
         )
 
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """``as_table(columns=config)`` with no rows; nothing is delivered (ITL-912)."""
+        typed = self._typed_zero_row_table()
+        if typed is None:
+            return None
+        return _table_of_rows(
+            iter(()),
+            config,
+            tag_keys=lambda: self.keys()[0],
+            zero_rows=lambda: typed,
+            declared_schema=lambda: self.output_schema(all_info=True),
+            type_converter=self._pod.data_context.type_converter,
+        )
+
     def _typed_zero_row_table(self) -> pa.Table | None:
         """The input's zero-row table: the pod passes its input's rows through.
 
@@ -941,6 +955,20 @@ class SideEffectNode(StreamBase):
             column_config,
             tag_keys=lambda: self.keys()[0],
             zero_rows=self._typed_zero_row_table,
+            declared_schema=lambda: self.output_schema(all_info=True),
+            type_converter=self._pod.data_context.type_converter,
+        )
+
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """``as_table(columns=config)`` with no rows; nothing is delivered (ITL-912)."""
+        typed = self._typed_zero_row_table()
+        if typed is None:
+            return None
+        return _table_of_rows(
+            iter(()),
+            config,
+            tag_keys=lambda: self.keys()[0],
+            zero_rows=lambda: typed,
             declared_schema=lambda: self.output_schema(all_info=True),
             type_converter=self._pod.data_context.type_converter,
         )

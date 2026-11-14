@@ -1373,10 +1373,14 @@ class FunctionPodStream(StreamBase):
 
     def _typed_zero_row_table(self) -> pa.Table | None:
         """This stream's zero-row table, without calling the function (ITL-912)."""
+        return self._zero_row_table(ZERO_ROW_INPUT_COLUMNS)
+
+    def _zero_row_table(self, config: ColumnConfig) -> pa.Table | None:
+        """``as_table(columns=config)`` with no rows, shaped as ``as_table`` shapes it."""
         table = self._zero_row_output_table()
         if table is None:
             return None
-        return self._shape_table(table, ZERO_ROW_INPUT_COLUMNS, _no_content_hashes)
+        return self._shape_table(table, config, _no_content_hashes)
 
     def _table_from_pairs(
         self, pairs: list[tuple[TagProtocol, DataProtocol]]

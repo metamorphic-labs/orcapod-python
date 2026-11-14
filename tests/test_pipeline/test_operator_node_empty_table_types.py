@@ -442,3 +442,74 @@ def test_a_side_effect_node_not_run_reads_as_zero_rows_typed_as_its_rows(
     assert not_run.num_rows == 0
     assert not_run.schema == after_run.schema
     assert sent == []
+
+
+@function_pod(output_keys=("y", "q"))
+def must_not_run(x: int, p: Path) -> tuple[int, Path]:
+    """A function that must not be called: calling it raises."""
+    raise AssertionError("the function was called")
+
+
+def must_not_deliver(ctx: Any, x: int, p: Path) -> None:
+    """A side effect that must not be delivered: delivering it raises."""
+    raise AssertionError("the side effect was delivered")
+
+
+def _every_kind_job(source: ArrowTableSource) -> PipelineJob:
+    """A job not run: source ``a``, operator ``op``, function ``fn``, side effect ``se``."""
+    job = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
+    with job:
+        selected = SelectDataColumns(["x", "p"])(_g1(source), label="op")
+        _ = must_not_run.pod(selected, label="fn")
+        _ = SideEffectPod(must_not_deliver)(selected, label="se")
+    return job
+
+
+HEAD_CONFIGS: dict[str, dict[str, Any] | None] = {
+    "default": {},
+    "system_tags": {"system_tags": True},
+    "source": {"source": True},
+    "context": {"context": True},
+    "meta": {"meta": True},
+    "content_hash": {"content_hash": True},
+    "sort_by_tags": {"sort_by_tags": True},
+    "all_info": None,
+}
+
+
+@pytest.mark.parametrize("config", list(HEAD_CONFIGS))
+@pytest.mark.parametrize("node", ["op", "fn", "se"])
+def test_head_of_a_node_not_run_has_the_types_of_its_table(
+    node: str, config: str
+) -> None:
+    """A head with no rows has the columns and Arrow types ``as_table`` gives.
+
+    Under every column configuration, for an operator, function and side-effect job
+    node (a source node shows the source's rows): neither read calls the function or
+    delivers the side effect.
+    """
+    columns = HEAD_CONFIGS[config]
+    options: dict[str, Any] = (
+        {"all_info": True} if columns is None else {"columns": columns}
+    )
+    stream = _every_kind_job(_source(NO_MATCH)).nodes[node]
+
+    head = stream.head(**options).table
+    table = stream.as_table(**options)
+
+    assert head.num_rows == 0
+    assert head.schema == table.schema
+
+
+@pytest.mark.parametrize("node", ["op", "fn", "se"])
+def test_head_of_a_node_not_run_reads_no_source_row(node: str) -> None:
+    """A head with no rows takes its types from the source's schema, not its rows."""
+    source = _RowsMustNotBeRead(
+        _table(WITH_ROWS), tag_columns=["id", "grp"], source_id="a"
+    )
+
+    head = _every_kind_job(source).nodes[node].head(all_info=True).table
+
+    assert head.num_rows == 0
+    assert head.schema.field("id").type == pa.int8()
+    assert any(name.startswith("_tag_") for name in head.column_names)
