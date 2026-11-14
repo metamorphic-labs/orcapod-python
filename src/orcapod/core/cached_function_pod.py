@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import FunctionPodStream, WrappedFunctionPod
 from orcapod.core.streams.view import StreamView
@@ -110,6 +112,22 @@ class CachedFunctionPod(WrappedFunctionPod):
         lookup.
         """
         self._cache.stale_tables_accounted_for()
+
+    @override
+    def _in_flight_key(self, data: DataProtocol) -> bytes:
+        """Return the input data hash, the key results are stored and looked up by.
+
+        In ``async_execute`` a row whose input is being computed waits for that
+        computation and then finds its stored result, as the sync path finds the result
+        an earlier row stored (ITL-1062). The data context is the pod's for every row.
+
+        Args:
+            data: The row's input data.
+
+        Returns:
+            The input data's content hash, with its algorithm prefix.
+        """
+        return data.content_hash().to_prefixed_digest()
 
     def lookup_cached_data(self, data: DataProtocol) -> DataProtocol | None:
         """Look up a cached result for ``data`` without triggering computation.

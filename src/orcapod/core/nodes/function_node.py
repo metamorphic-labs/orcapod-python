@@ -3478,30 +3478,43 @@ class FunctionJobNode(FunctionNodeBase):
                 # Base entry ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
+                # The result of the first row of this run to give one, by base entry
+                # id. A later row with that base entry id (an exact duplicate: same
+                # tag, record id and data) reuses it, as on the sync path (ITL-1062).
+                given_in_run: dict[bytes, tuple[TagProtocol, DataProtocol | None]] = {}
+                # Correlation keys of computed rows that are such duplicates: they
+                # are forwarded with the earlier row's result and write no record.
+                repeated_rows: set[bytes] = set()
+
+                def run_hit(
+                    base_entry_id: bytes,
+                ) -> tuple[TagProtocol, DataProtocol | None] | None:
+                    """Return the result a row reuses without computing, if any."""
+                    if base_entry_id in given_in_run:
+                        return given_in_run[base_entry_id]
+                    hit = cached_by_base_entry_id.get(base_entry_id)
+                    # A cached EmptyData is a result that is gone (an ephemeral
+                    # result from an earlier run): compute the row again, as the
+                    # sync path does (ITL-923).
+                    if hit is None or isinstance(hit[1], EmptyData):
+                        return None
+                    return hit
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
                     try:
                         async for tag, data in input_channel:
                             base_entry_id = self.compute_base_entry_id(tag, data)
-                            # A cached EmptyData is a result that is gone (an
-                            # ephemeral result from an earlier run): compute the row
-                            # again, as the sync path does (ITL-923).
-                            if base_entry_id in cached_by_base_entry_id and not (
-                                isinstance(
-                                    cached_by_base_entry_id[base_entry_id][1],
-                                    EmptyData,
-                                )
-                            ):
-                                cached_tag, cached_data = cached_by_base_entry_id[
-                                    base_entry_id
-                                ]
+                            hit = run_hit(base_entry_id)
+                            if hit is not None:
+                                cached_tag, cached_data = hit
                                 ctx_obs.on_data_start(node_label, tag, data)
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
                                 run_entry_ids.append(base_entry_id)
-                                await output.send((cached_tag, cached_data))
+                                if cached_data is not None:
+                                    await output.send((cached_tag, cached_data))
                             else:
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
@@ -3523,6 +3536,16 @@ class FunctionJobNode(FunctionNodeBase):
                         original_tag, input_data, base_entry_id = input_store.pop(
                             cast(bytes, correlation_key)
                         )
+                        if correlation_key in repeated_rows:
+                            # An exact duplicate of an earlier row of this run: the
+                            # sync path serves it that row's result and records
+                            # nothing (ITL-1062).
+                            repeated_rows.discard(cast(bytes, correlation_key))
+                            earlier_tag, earlier_data = given_in_run[base_entry_id]
+                            run_entry_ids.append(base_entry_id)
+                            if earlier_data is not None:
+                                await output.send((earlier_tag, earlier_data))
+                            continue
                         result_computed = bool(
                             output_data.get_meta_value(
                                 execution_pod.RESULT_COMPUTED_FLAG, False
@@ -3598,7 +3621,34 @@ class FunctionJobNode(FunctionNodeBase):
                         clean = tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
                         )
-                        ctx_obs.on_data_end(node_label, clean, inp, out, cached=cached)
+                        correlation_key = tag.get_meta_value(_TAG_NODE_INPUT_REF, None)
+                        original = (
+                            input_store.get(correlation_key)
+                            if correlation_key is not None
+                            else None
+                        )
+                        earlier = None
+                        if original is not None:
+                            # This runs before the row's result is sent on, and a row
+                            # waiting for an equal input starts only after that send, so
+                            # the row that computed gets here before its duplicates. Two
+                            # duplicates that both find a stored result may end in
+                            # either order; they are the same row, so either is first.
+                            earlier = given_in_run.get(original[2])
+                            if earlier is None:
+                                given_in_run[original[2]] = (clean, out)
+                            elif out is not None:
+                                repeated_rows.add(cast(bytes, correlation_key))
+                        if earlier is not None:
+                            # Reported as the sync path reports a row it serves from
+                            # its own results of this run.
+                            ctx_obs.on_data_end(
+                                node_label, clean, inp, earlier[1], cached=True
+                            )
+                        else:
+                            ctx_obs.on_data_end(
+                                node_label, clean, inp, out, cached=cached
+                            )
                         if out is None:
                             # The function filtered this item (returned None).
                             # The pod does not emit to result_channel, so

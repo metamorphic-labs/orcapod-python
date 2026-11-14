@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import itertools
 import dataclasses
 import logging
@@ -585,6 +586,22 @@ class _FunctionPodBase(TraceableBase):
             return joined_stream
         return streams[0]
 
+    def _in_flight_key(self, data: DataProtocol) -> bytes | None:
+        """Return the key under which rows of equal input share one computation.
+
+        Used by ``async_execute``: a row whose key is being computed waits for that
+        computation instead of starting its own. ``None``, the default, computes every
+        row on its own, as the sync path of a pod without a result store does. A pod
+        that stores results returns the key its store looks results up by.
+
+        Args:
+            data: The row's input data.
+
+        Returns:
+            The key, or ``None`` for no sharing.
+        """
+        return None
+
     async def async_execute(
         self,
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
@@ -600,6 +617,13 @@ class _FunctionPodBase(TraceableBase):
         A semaphore limits how many tasks are in-flight concurrently.
         Observer hooks fire per item: ``on_data_start`` before processing,
         ``on_data_end(cached=False)`` on success, ``on_data_crash`` on error.
+
+        A row whose input is being computed by an earlier row of this call (the same
+        ``_in_flight_key``) waits for that computation without holding a slot, and then
+        runs: it finds the stored result, or, when the earlier row gave no result, the
+        first waiting row computes the input. So equal inputs are computed as often as
+        on the sync path, where the first row stores its result before the next looks
+        it up (ITL-1062).
 
         Args:
             inputs: Single-element sequence containing the input channel.
@@ -621,8 +645,15 @@ class _FunctionPodBase(TraceableBase):
                 if max_concurrency is not None
                 else None
             )
+            loop = asyncio.get_running_loop()
+            # Inputs being computed, by in-flight key: the rows waiting for each, in
+            # arrival order. A waiting row holds no concurrency slot.
+            computing: dict[bytes, collections.deque[asyncio.Future[bool]]] = {}
+            # Inputs whose computation gave a result in this call.
+            computed: set[bytes] = set()
 
-            async def process_one(tag: TagProtocol, data: DataProtocol) -> None:
+            async def process_one(tag: TagProtocol, data: DataProtocol) -> bool:
+                """Process one row; return whether it gave a result."""
                 obs.on_data_start(pod_label, tag, data)
                 pkt_logger = obs.create_data_logger(tag, data)
                 try:
@@ -647,13 +678,60 @@ class _FunctionPodBase(TraceableBase):
                         "Data processing failed, skipping: %s", exc, exc_info=True
                     )
                     obs.on_data_crash(pod_label, tag, data, exc)
-                else:
-                    obs.on_data_end(pod_label, tag, data, result_data, cached=False)
-                    if result_data is not None:
-                        await output.send((out_tag, result_data))
+                    return False
+                obs.on_data_end(pod_label, tag, data, result_data, cached=False)
+                if result_data is None:
+                    return False
+                await output.send((out_tag, result_data))
+                return True
+
+            async def run_row(
+                tag: TagProtocol,
+                data: DataProtocol,
+                key: bytes | None,
+                *,
+                computes: bool,
+                holds_slot: bool,
+            ) -> None:
+                """Process one row in a concurrency slot.
+
+                ``computes``: the row is the one computing its input ``key``. When it
+                ends, however it ends (a result, no result, an error, a cancellation),
+                the rows waiting for it go on: after a result each finds it stored;
+                otherwise the first of them computes the input, as the next row with
+                that input does on the sync path.
+                """
+                gave_result = False
+                acquired = holds_slot
+                try:
+                    if sem is not None and not acquired:
+                        _ = await sem.acquire()
+                        acquired = True
+                    gave_result = await process_one(tag, data)
                 finally:
-                    if sem is not None:
+                    if sem is not None and acquired:
                         sem.release()
+                    if computes and key is not None:
+                        waiting = computing[key]
+                        if gave_result:
+                            computed.add(key)
+                            del computing[key]
+                            for waiter in waiting:
+                                waiter.set_result(False)
+                        elif waiting:
+                            waiting.popleft().set_result(True)
+                        else:
+                            del computing[key]
+
+            async def wait_then_run(
+                tag: TagProtocol,
+                data: DataProtocol,
+                key: bytes,
+                turn: asyncio.Future[bool],
+            ) -> None:
+                """Wait, without a slot, for the row computing ``key``; then run."""
+                computes = await turn
+                await run_row(tag, data, key, computes=computes, holds_slot=False)
 
             async with asyncio.TaskGroup() as tg:
                 first_row = True
@@ -664,9 +742,22 @@ class _FunctionPodBase(TraceableBase):
                         # handler would skip the row silently.
                         first_row = False
                         self._validate_output_keys(tag.keys())
+                    key = self._in_flight_key(data)
+                    if key is not None and key in computing:
+                        turn: asyncio.Future[bool] = loop.create_future()
+                        computing[key].append(turn)
+                        _ = tg.create_task(wait_then_run(tag, data, key, turn))
+                        continue
                     if sem is not None:
-                        await sem.acquire()
-                    tg.create_task(process_one(tag, data))
+                        _ = await sem.acquire()
+                    # Only this loop starts a computation, so none started for ``key``
+                    # while it waited for the slot.
+                    computes = key is not None and key not in computed
+                    if computes:
+                        computing[cast(bytes, key)] = collections.deque()
+                    _ = tg.create_task(
+                        run_row(tag, data, key, computes=computes, holds_slot=True)
+                    )
         finally:
             await output.close()
 

@@ -25,11 +25,12 @@ import pytest
 
 from orcapod import PipelineJob
 from orcapod.channels import Channel
-from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.pipeline.run_summary import RunSummary
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import ArrowTableSource, DictSource
 from orcapod.types import NodeConfig, PodConfig
 
@@ -62,7 +63,7 @@ class Gate:
         if len(self.calls) >= self._threshold:
             self._opened.set()
         async with asyncio.timeout(GUARD_SECONDS):
-            await self._opened.wait()
+            _ = await self._opened.wait()
 
 
 def gated_pod(gate: Gate, max_concurrency: int | None) -> FunctionPod:
@@ -72,9 +73,8 @@ def gated_pod(gate: Gate, max_concurrency: int | None) -> FunctionPod:
         await gate.enter(x)
         return x + 1
 
-    return FunctionPod(
-        PythonDataFunction(inc, output_keys="y"),
-        pod_config=PodConfig(max_concurrency=max_concurrency),
+    return FunctionPod.from_fn(
+        inc, "y", pod_config=PodConfig(max_concurrency=max_concurrency)
     )
 
 
@@ -111,7 +111,7 @@ CASES = {
 }
 
 
-def orchestrator(kind: str) -> Any:
+def orchestrator(kind: str) -> SyncPipelineOrchestrator | AsyncPipelineOrchestrator:
     """Return the ``sync`` or ``async`` orchestrator."""
     if kind == "sync":
         return SyncPipelineOrchestrator()
@@ -125,7 +125,9 @@ def threshold(kind: str, max_concurrency: int | None, distinct: int) -> int:
     return min(max_concurrency or math.inf, distinct)  # pyright: ignore[reportReturnType]
 
 
-def build(pod: FunctionPod, source: Any, db: Any) -> PipelineJob:
+def build(
+    pod: FunctionPod, source: StreamProtocol, db: InMemoryArrowDatabase
+) -> PipelineJob:
     """A job over ``db``: node ``f`` applies ``pod`` to ``source``."""
     job = PipelineJob(name="itl1062", database=db)
     with job:
@@ -181,7 +183,7 @@ def stored(db: InMemoryArrowDatabase) -> dict[str, list[Any]]:
 
 def run_case(
     kind: str, case: str, max_concurrency: int | None
-) -> tuple[Gate, Any, PipelineJob, InMemoryArrowDatabase]:
+) -> tuple[Gate, RunSummary, PipelineJob, InMemoryArrowDatabase]:
     """Run ``case`` once on ``kind``; return the gate, summary, job and store."""
     make_source, distinct = CASES[case]
     gate = Gate(threshold(kind, max_concurrency, distinct))
@@ -191,7 +193,7 @@ def run_case(
     return gate, summary, job, db
 
 
-def counts(summary: Any) -> tuple[int, int, int]:
+def counts(summary: RunSummary) -> tuple[int, int, int]:
     """The node's ``(computed, reused, failed)`` row counts."""
     node = summary.nodes["f"]
     return node.computed, node.reused, node.failed
@@ -282,12 +284,12 @@ class LeaderOutcome:
                 self._other_started.set()
             elif self._concurrent:
                 async with asyncio.timeout(GUARD_SECONDS):
-                    await self._other_started.wait()
+                    _ = await self._other_started.wait()
             if x == 0 and self.calls[0] == 1:
                 raise self._error
             return x + 1
 
-        return FunctionPod(PythonDataFunction(inc, output_keys="y"))
+        return FunctionPod.from_fn(inc, "y")
 
 
 def test_a_failed_leader_lets_the_next_copy_compute() -> None:
@@ -344,12 +346,12 @@ async def test_input_ends_while_the_leader_is_computing() -> None:
         calls[x] += 1
         leader_started.set()
         async with asyncio.timeout(GUARD_SECONDS):
-            await release.wait()
+            _ = await release.wait()
         return x + 1
 
     source = same_data_other_tags([0, 0, 0])
     node = FunctionJobNode(
-        FunctionPod(PythonDataFunction(inc, output_keys="y")),
+        FunctionPod.from_fn(inc, "y"),
         source,
         pipeline_database=InMemoryArrowDatabase(),
     )
@@ -361,7 +363,7 @@ async def test_input_ends_while_the_leader_is_computing() -> None:
         run = asyncio.create_task(
             node.async_execute(input_channel.reader, output_channel.writer)
         )
-        await leader_started.wait()
+        _ = await leader_started.wait()
         await input_channel.writer.close()
         release.set()
         await run

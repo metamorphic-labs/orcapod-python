@@ -1,7 +1,10 @@
 # ITL-1062: async function node calls the function more than sync for duplicate inputs
 
 Branch `eywalker/itl-1062-async-function-node-calls-the-function`, from `origin/main` `a9b50350`.
-Status: cause established, proposal sent to the coordinator (waiting before code).
+Status: approved (coordinator, Nov 14); placement moved into `_FunctionPodBase.async_execute`
+(confirmed: a leader whose function raises CancelledError calls no observer, so a node-level
+registry would hang); implemented; tests pass on 3.11 and 3.12; draft PR, no review request
+until the coordinator says (not on the v0.3.0 critical path). Merge main after #379 and #380.
 
 ## Reproduction (public interface, `InMemoryArrowDatabase`, `PipelineJob.run`)
 
@@ -71,3 +74,11 @@ keyed by the input data hash (the result store's key; data context fixed per nod
 2. Fix in `function_node.py` async DB path.
 3. Changelog fragment, design_issues entry, targeted tests on 3.11 and 3.12.
 4. PR (draft), CI, CodeRabbit.
+
+## Result after the fix
+
+Every row of the table above: async = sync (calls, rdb_v2, pdb_v2, RunSummary, node rows,
+as_source rows). ctx_arg, null-value and raising functions equal too. Remaining difference,
+not changed: a function raising `CancelledError` fails a sync run; on async that row is dropped
+silently (pre-existing; error-policy territory, ITL-879 / #379); the waiting copies go on.
+Not changed (report only): the no-database job node path dedups exact duplicates on sync only.
