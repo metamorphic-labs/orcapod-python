@@ -582,7 +582,8 @@ A pod's stream built outside the job (a function pod's, which computes when it i
 side-effect pod's, which delivers) is refused with a `ValueError` before anything is read,
 whether a node of the job reads it, a source slot is bound to it or an operator's stream
 outside the job reads it. Build the pod inside the job, so its node loads its stored results,
-or run without `load_only`.
+or run without `load_only`. (Refusing is the consistent choice for now; ITL-1130 re-evaluates
+it.)
 
 ### Running again: what a run runs
 
