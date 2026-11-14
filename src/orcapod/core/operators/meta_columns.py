@@ -112,7 +112,7 @@ def without_input_meta(
     return ArrowTableStream(
         without_meta_columns(table),
         tag_columns=stream.keys()[0],
-        data_context=stream.data_context,
+        data_context=stream.data_context_key,
     )
 
 

@@ -582,6 +582,12 @@ predicate on values, and `DropNulls` reads only whether a value is present (its 
 never the value. A filter decides which rows exist and never synthesizes a value; no other
 operator reads data content.
 
+No operator carries its inputs' `Data` meta (`__`) columns (developer, November 13, 2026,
+ITL-1080): on the sync and the async path, in rows and in the predicted output schema, for a
+raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or function node's rows
+carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
+operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
+
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,
 the step is not an operator: it is a derived source. So a tag's value is offered as data only

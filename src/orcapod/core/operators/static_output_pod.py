@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
@@ -318,8 +319,11 @@ class StaticOutputOperatorPod(TraceableBase):
             tag_schema, data_schema = upstream.output_schema(
                 columns={"system_tags": True, "source": True}
             )
+            converter = contexts.resolve_context(
+                upstream.data_context_key
+            ).type_converter
             table = arrow_utils.make_empty_table(
-                {**tag_schema, **data_schema}, upstream.data_context.type_converter
+                {**tag_schema, **data_schema}, converter
             )
             tag_keys = upstream.keys()[0]
         # No ``source_info`` argument: the table's own ``_source_*`` columns

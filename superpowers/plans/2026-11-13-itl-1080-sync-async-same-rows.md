@@ -23,8 +23,8 @@ input meta in every operator on both paths.
 - Diagnosis sent to coordinator 2026-11-13 (scratch notes in the worker transcript):
   - All 8 meta xfails: Data/Tag content hashes identical on both paths; only meta columns differ.
   - Main's Join DROPS meta (ITL-854/857), not keeps. Rule B (no operator carries input meta)
-    recommended; coordinator agrees, **developer decision pending: do not change operator meta
-    handling until answered.**
+    recommended; **developer decided B (Nov 13): no operator carries input meta; carry-forward
+    is ITL-867.** Implemented in `core/operators/meta_columns.py`.
   - Q2 (zero-row node) approved: implement now, test first, nothing stored for zero rows.
 - Step-4 matrix (scratchpad `matrix.py`): source → fn pod → 17 operators → fn pod, sync vs async
   job, in-memory store: no difference. MergeJoin over a dict column raises TypeError on BOTH
@@ -52,7 +52,7 @@ input meta in every operator on both paths.
   zero_rows=True) ...])`.
 - [ ] Run targeted tests: readback, equivalence, sync orchestrator, golden. Commit.
 
-## Task 2: Meta rule B (BLOCKED on developer decision)
+## Task 2: Meta rule B (approved, done)
 
 - [ ] Prepare failing tests over both meta origins (raw `ArrowTableStream` with `__` columns;
   `CachedFunctionPod` stream rows with `__computed`) for every operator, sync and async:
@@ -73,3 +73,11 @@ input meta in every operator on both paths.
 
 - [ ] `changelog.d/ITL-1080.md`, `design_issues/ITL-1080-SA1.md`.
 - [ ] Merge origin/main, push, PR "Fixes ITL-1080", CodeRabbit, CI on 3.11/3.12/3.13.
+
+## Progress (2026-11-13)
+
+- Task 1 done (dcf5c69e). Task 2 done. Targeted suites (core, pipeline, hashing, docs): 9356
+  passed, golden unchanged. Step-4 matrix variants plain/log/cached/cached+log/none+log: no
+  sync/async difference; with an upstream that delivered no row, Join now raises on async as on
+  sync (ITL-912), pinned by a test.
+- Next: PR, CodeRabbit, CI.

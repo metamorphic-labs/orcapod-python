@@ -39,6 +39,7 @@ from orcapod.channels import Channel
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -694,3 +695,29 @@ def test_operator_node_reads_back_only_the_latest_run(
     assert sorted(repr(tag.as_dict()["id"]) for tag, _ in node.iter_data()) == [
         repr(i) for i in expected_ids
     ]
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_join_with_an_input_that_delivered_no_row_fails_alike_on_both_paths(
+    orchestrator: str, tmp_path: Path
+) -> None:
+    """An input with no row is rebuilt from its Python output schema on both paths.
+
+    So an ``int8`` key comes back ``int64`` (ITL-912) and ``Join`` with a non-empty
+    ``int8`` input refuses the disagreement, on the async path as on the sync path
+    (ITL-1080); before, the async node finished with a mistyped zero-row result.
+    When ITL-912 keeps the Arrow types of an empty input, both paths complete.
+    """
+    case = Case(
+        "join_after_no_rows",
+        lambda a, b, c: Join()(_no_match(a), b, label="op"),
+        0,
+    )
+    with pytest.raises((InputValidationError, ExceptionGroup)) as info:
+        _ = _run_job(case, orchestrator, "in_memory", tmp_path)
+    error = info.value
+    while isinstance(error, ExceptionGroup):
+        assert len(error.exceptions) == 1
+        error = error.exceptions[0]
+    assert isinstance(error, InputValidationError)
+    assert "'id'" in str(error)
