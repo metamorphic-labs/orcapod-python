@@ -154,3 +154,17 @@ Reproduction scripts: `superpowers/scripts/itl_1121/c1..c6_*.py` (committed).
   computing outside stream (d06ffcf7, node_run.refuse_unloadable_inputs). main merged (#382, #383).
   LEFT: name the coordinator's follow-up issue in the reply to finding G (thread 4574191943);
   CI and a CodeRabbit review of the head; worker_done.
+
+## Merge of main after #380 merged (task_f017ca8a173c)
+
+#380 merged as e4b4319c (it had merged #375 ITL-912 typed zero-row tables and #387 ITL-1111
+schema memo). Steps:
+- [ ] `git merge origin/main` (no rebase); resolve function_node.py, operator_node.py,
+  side_effects.py, node_run.py, job.py, CLAUDE.md, .zed/rules keeping every #388 fix and main's
+  #375 / #387 behaviour.
+- [ ] Doc fix: CLAUDE.md / .zed/rules "A failed end-of-run commit clears every node of the run"
+  -> only the nodes that ran (`run_with_dependencies` -> `commit_run(stores, plan.to_run)`).
+- [ ] Re-run every script in superpowers/scripts/itl_1121/: each shows the fixed behaviour.
+- [ ] Tests: tests/test_pipeline, tests/test_core/{nodes,operators,function_pod,side_effect_pod},
+  golden (3.12; async files also 3.11; one process).
+- [ ] One push; CI green; one signed `@coderabbitai review`; plan to coordinator before code.
