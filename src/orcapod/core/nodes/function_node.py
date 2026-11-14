@@ -3261,7 +3261,9 @@ class FunctionJobNode(FunctionNodeBase):
         rows.
 
         Returns:
-            A ``StreamView`` of every row ``as_table()`` then returns.
+            A ``StreamView`` of every row ``as_table()`` then returns. It says "rows",
+            as ``head()`` then does: the node holds them in memory, whether it computed
+            them or read them from its store.
 
         Raises:
             RuntimeError: If the node was loaded without a function pod, or
@@ -3278,13 +3280,15 @@ class FunctionJobNode(FunctionNodeBase):
             # CACHE_ONLY: upstream unavailable; computation requires a live input stream.
             # READ_ONLY: function pod is a proxy placeholder — cannot compute.
             # The view serves the existing DB results, as iter_data() does.
-            return self._view_of_rows(self.as_table(), "stored")
+            return self._view_of_rows(self.as_table(), "held")
         if self.is_stale:
             # Discard any stale in-memory entries before a fresh computation run
             # so that rerunning does not mix old cached entries with new results.
             self.clear_cache()
         self.execute(self._input_stream)
-        return self._view_of_rows(self.as_table(), "computed")
+        # The rows are the ones held in memory, as head() names them afterwards: some
+        # may have been read from the result store rather than computed.
+        return self._view_of_rows(self.as_table(), "held")
 
     # ------------------------------------------------------------------
     # Async channel execution

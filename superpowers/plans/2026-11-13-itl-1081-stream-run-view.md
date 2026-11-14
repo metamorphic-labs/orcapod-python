@@ -49,7 +49,7 @@ approval of the method proposal), each returning a new view with an honest capti
 | CachedSource | base: reads + updates cache |
 | DerivedSource, SourceProxy | base (delegate's as_table) |
 | FunctionPodStream, cached FunctionPodStream | base: computes, cached |
-| DynamicPodStream | base: as_table -> _refresh (recomputes if stale) |
+| DynamicPodStream | base: `as_table` -> `_refresh` (recomputes if stale) |
 | FunctionNode / OperatorNode (blueprints) | raise PipelineJobRequiredError |
 | FunctionJobNode / OperatorJobNode | today's run body, then view of as_table() |
 | SideEffectPodStream / SideEffectNode / SideEffectJobNode | deliver (as as_table), view of those rows |
@@ -140,3 +140,6 @@ approval of the method proposal), each returning a new view with an honest capti
 | d | nitpick: docstrings on 12 test helpers | valid | add |
 | - | LanguageTool "again" x2 streams.md:165; markdownlint MD037 plan line 52 | trivial | reword; backtick |
 | - | pre-merge "out of scope" (tag marks, tail, sort_by_tags) | declined: approved by developer/coordinator on ITL-1081 (progress notes) | say so in top-level comment |
+- 2026-11-14: round 1 approved as planned (coordinator): (b) also a second strict xfail
+  (job node run() over a pass-through chain; same cause, different failing path: the job
+  node's stale-clear in as_table; XPASSes with f652d737). Fixes committed; replies next.

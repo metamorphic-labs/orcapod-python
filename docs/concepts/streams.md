@@ -161,8 +161,8 @@ print(months.head(3).header())
 Every stream, source and node has `run()`, with no arguments: it is the one way to compute
 any of them outside a job (developer, November 13, 2026). It does exactly the work
 `as_table()` does, through the same cache, and returns a `StreamView` of every row with the
-default columns. A stream already computed is not computed again; one whose input changed is
-computed again. In a notebook, `stream.run()` at the end of a cell computes and displays.
+default columns. A stream already computed is not computed a second time; one whose input
+changed is recomputed. In a notebook, `stream.run()` at the end of a cell computes and displays.
 
 The view's own methods choose what is shown. Each returns a new view and never reads or
 computes anything; the header says which rows are shown:
@@ -188,10 +188,13 @@ such as the one `run()` returns, shows its first and last five rows when it has 
 ten, and its header gives the count.
 
 A view holds the default column groups only. For system tags, source info, the data context
-or content hashes, ask the stream after `run()`: `as_table(columns=...)` and
-`head(columns=...)` read the computed rows and compute nothing. A view never asks its stream
-for them, because for some streams asking again is not a read: a side-effect stream would
-deliver again, a polling source would poll again.
+or content hashes, ask the stream after `run()`. A function pod's or operator's output stream,
+a job node, an in-memory source and a `CachedSource` keep the rows `run()` gave: their
+`as_table(columns=...)` and `head(columns=...)` read those rows and compute nothing. Other
+streams do their `as_table()` work again: a side-effect stream delivers its side effects again
+(its `head()` shows no rows), a polling source polls again and a `SpiralDBTableSource` reads
+its whole table again. A view never asks its stream for more columns, because for those
+streams asking again is not a read.
 
 What `run()` does on each kind of object:
 

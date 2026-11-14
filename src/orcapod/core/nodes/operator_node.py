@@ -1402,7 +1402,8 @@ class OperatorJobNode(OperatorNodeBase):
             - **REPLAY**: skip computation, load from DB.
 
         Returns:
-            A ``StreamView`` of every row ``as_table()`` then returns.
+            A ``StreamView`` of every row ``as_table()`` then returns, naming its rows
+            as ``head()`` then names them.
         """
         if self._loaded:
             raise self._cannot_compute_error()
@@ -1420,7 +1421,12 @@ class OperatorJobNode(OperatorNodeBase):
                     *self._input_streams,
                 )
                 self._update_modified_time()
-        return self._view_of_rows(self.as_table(), "computed")
+        table = self.as_table()
+        # The view names its rows as head() names them afterwards: computed by a live
+        # computation, plain rows when replayed from the store or kept by execute().
+        kept = self._cached_output_stream
+        origin = "computed" if kept is None else head_of(kept.head(1), self).origin
+        return self._view_of_rows(table, origin)
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Return an iterator over (tag, data) pairs.

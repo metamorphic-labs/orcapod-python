@@ -40,6 +40,10 @@ class ArrowTableStream(StreamBase):
     The types of the tag and data columns are inferred from the PyArrow Table schema.
     """
 
+    # The table's rows are held, not computed: a run() view says "all N rows", as
+    # head() does.
+    _RUN_ORIGIN: str = "held"
+
     def __init__(
         self,
         table: "pa.Table",

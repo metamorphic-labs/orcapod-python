@@ -490,7 +490,10 @@ class StreamBase(TraceableBase):
         computed again. The view holds every row with the default column configuration;
         its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. For other
         column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
-        ``run()``: they read the computed rows.
+        ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
+        a job node, an in-memory source) they read the rows ``run()`` gave; a stream that
+        keeps none does its ``as_table()`` work again (a side-effect stream delivers
+        again, a polling source polls again).
 
         Returns:
             A ``StreamView`` of all the rows ``as_table()`` returns, with status

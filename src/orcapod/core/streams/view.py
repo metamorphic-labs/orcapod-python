@@ -150,7 +150,10 @@ class StreamView:
     are; they never read, compute or change the stream. A view holds the columns it was
     made with: for other column groups (system tags, source info, context, content
     hashes) ask the stream, ``stream.as_table(columns=...)`` or
-    ``stream.head(columns=...)``, which after ``run()`` read the computed rows.
+    ``stream.head(columns=...)``. After ``run()`` they read the rows a stream kept (a
+    pod's or operator's output stream, a job node, an in-memory source); a stream that
+    keeps none does its ``as_table()`` work again (a side-effect stream delivers again, a
+    polling source polls again).
 
     Attributes:
         table: The rows, with the exact Arrow types the stream gives them. When the

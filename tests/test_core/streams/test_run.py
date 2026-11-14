@@ -23,9 +23,10 @@ import pytest
 import orcapod
 from orcapod import function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
-from orcapod.core.function_pod import FunctionPodStream
-from orcapod.core.nodes.function_node import FunctionNode
-from orcapod.core.nodes.operator_node import OperatorNode
+from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.function_pod import FunctionPod, FunctionPodStream
+from orcapod.core.nodes.function_node import FunctionJobNode, FunctionNode
+from orcapod.core.nodes.operator_node import OperatorJobNode, OperatorNode
 from orcapod.core.nodes.source_node import SourceJobNode, SourceNode, SourceNodeBase
 from orcapod.core.operators import Join, MapData, SelectDataColumns
 from orcapod.core.sources import (
@@ -44,7 +45,7 @@ from orcapod.pipeline.job import PipelineJob
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode, SideEffectPod
 from orcapod.streams import StreamView, ViewStatus
-from orcapod.types import Schema
+from orcapod.types import CacheMode, Schema
 from tests.test_core.streams.test_head_and_preview import _FakeDynamicSource
 
 ROWS = 25
@@ -129,10 +130,12 @@ def test_the_stream_protocol_declares_run() -> None:
 
 
 def _function_pod_stream() -> Any:
+    """A function pod stream tripling ``x`` of ``_source()``, labelled ``triple``."""
     return _counting_pod([]).pod(_source(), label="triple")
 
 
 def _cached_function_pod_stream() -> Any:
+    """The stream of a ``CachedFunctionPod`` (in-memory result store) over ``_source()``."""
     pod = CachedFunctionPod(
         _counting_pod([]).pod, result_database=InMemoryArrowDatabase()
     )
@@ -140,11 +143,13 @@ def _cached_function_pod_stream() -> Any:
 
 
 def _operator_stream() -> Any:
+    """A ``MapData`` stream renaming ``y`` of ``_function_pod_stream()`` to ``z``."""
     # An operator that computes a new table (a rename), not one that hands its input on.
     return MapData({"y": "z"})(_function_pod_stream(), label="rename")
 
 
 def _join_stream() -> Any:
+    """A ``Join`` stream of ``_source()`` with a ``DictSource`` of ``z`` on ``id``."""
     other = DictSource(
         [{"id": i, "z": i + 1} for i in range(ROWS)], tag_columns=["id"], label="z"
     )
@@ -152,18 +157,22 @@ def _join_stream() -> Any:
 
 
 def _polling_source() -> Any:
+    """A ``PollingSource`` over a fake dynamic source of one row."""
     return PollingSource(_FakeDynamicSource(), tag_columns="id")
 
 
 def _cached_source() -> Any:
+    """A ``CachedSource`` over ``_source()`` with an in-memory cache database."""
     return CachedSource(_source(), cache_database=InMemoryArrowDatabase())
 
 
 def _derived_source() -> Any:
+    """A ``DerivedSource`` of ``_source()`` offering tag ``id`` as data ``id_value``."""
     return DerivedSource(_source(), tags_as_data={"id": "id_value"})
 
 
 def _bound_source_proxy() -> Any:
+    """A ``SourceProxy`` for ``_source()``, bound to a live ``_source()``."""
     live = _source()
     proxy = SourceProxy(
         source_id="readings",
@@ -178,10 +187,12 @@ def _bound_source_proxy() -> Any:
 
 
 def _source_job_node() -> Any:
+    """A ``SourceJobNode`` over ``_source()``."""
     return SourceJobNode.from_stream(_source(), name="readings")
 
 
 def _function_job_node() -> Any:
+    """The ``triple`` function job node of a ``PipelineJob`` over ``_source()``, not run."""
     job = PipelineJob(name="itl1081", store=InMemoryArrowDatabase())
     with job:
         _ = _counting_pod([]).pod(_source(), label="triple")
@@ -189,6 +200,7 @@ def _function_job_node() -> Any:
 
 
 def _operator_job_node() -> Any:
+    """The ``rename`` operator job node of a ``PipelineJob``, its upstream ``triple`` run."""
     job = PipelineJob(name="itl1081", store=InMemoryArrowDatabase())
     with job:
         tripled = _counting_pod([]).pod(_source(), label="triple")
@@ -262,6 +274,51 @@ def test_run_view_captions() -> None:
     )
     assert stream.run().header() == "FunctionPodStream[triple] — all 25 computed rows"
     assert _source().run().header() == "ArrowTableSource[readings] — all 25 rows"
+    held = ArrowTableStream(_table(), tag_columns=["id"])
+    assert held.run().header() == "ArrowTableStream[ArrowTableStream] — all 25 rows"
+
+
+def _operator_job_node_replaying() -> Any:
+    """An operator job node in ``CacheMode.REPLAY`` over rows an earlier node stored."""
+    store = InMemoryArrowDatabase()
+    _ = OperatorJobNode(
+        MapData({"x": "z"}),
+        (_source(),),
+        pipeline_database=store,
+        cache_mode=CacheMode.LOG,
+    ).run()
+    return OperatorJobNode(
+        MapData({"x": "z"}),
+        (_source(),),
+        pipeline_database=store,
+        cache_mode=CacheMode.REPLAY,
+    )
+
+
+def _job_node_after_job_run(name: str) -> Any:
+    """Node ``name`` (``triple`` or ``rename``) of a ``PipelineJob`` that has run."""
+    job = PipelineJob(name="itl1081", store=InMemoryArrowDatabase())
+    with job:
+        tripled = _counting_pod([]).pod(_source(), label="triple")
+        _ = MapData({"y": "z"})(tripled, label="rename")
+    job.run()
+    return job.nodes[name]
+
+
+CAPTION_KINDS: dict[str, Callable[[], Any]] = {
+    **KINDS,
+    "operator_job_node_replaying": _operator_job_node_replaying,
+    "function_job_node_after_job_run": lambda: _job_node_after_job_run("triple"),
+    "operator_job_node_after_job_run": lambda: _job_node_after_job_run("rename"),
+}
+
+
+@pytest.mark.parametrize("kind", list(CAPTION_KINDS))
+def test_run_view_and_head_name_the_same_rows_alike(kind: str) -> None:
+    """A ``run()`` view says what ``head()`` says of the same rows afterwards."""
+    stream = CAPTION_KINDS[kind]()
+    view = stream.run()
+    assert view.head(3).header() == stream.head(3).header()
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +397,36 @@ def test_head_after_run_of_a_pass_through_operator_shows_the_rows() -> None:
     assert out.head(3).table.equals(view.head(3).table)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ITL-1083: a pass-through operator stream judged stale leaves the pod stream "
+        "reading it without a modified time, so the job node over it is stale after its "
+        "run and drops the rows it computed"
+    ),
+)
+def test_job_node_run_over_a_pass_through_chain_returns_its_rows() -> None:
+    """A job node without a database returns the rows its ``run()`` computed."""
+
+    @function_pod(output_keys="w")
+    def plus(y: int) -> int:
+        """Add one to ``y``."""
+        return y + 1
+
+    def same(w: int) -> int:
+        """Return ``w``."""
+        return w
+
+    passed_on = SelectDataColumns(["y"])(_counting_pod([]).pod(_source()))
+    # PythonDataFunction conforms to DataFunctionProtocol at runtime; basedpyright
+    # rejects it (the same false positive is in the baseline for other node tests).
+    same_pod = FunctionPod(
+        PythonDataFunction(same, output_keys="v")  # pyright: ignore[reportArgumentType]
+    )
+    node = FunctionJobNode(same_pod, plus.pod(passed_on))
+    assert len(node.run()) == ROWS
+
+
 # ---------------------------------------------------------------------------
 # Sources: run() does the as_table() work
 # ---------------------------------------------------------------------------
@@ -373,6 +460,7 @@ def test_cached_source_run_reads_and_updates_its_cache() -> None:
 
 
 def _deliveries() -> tuple[list[int], Callable[..., None]]:
+    """A delivery list and a side-effect function that appends each ``x`` it delivers."""
     delivered: list[int] = []
 
     def deliver(x: int, ctx: Any) -> None:
@@ -434,7 +522,7 @@ def test_function_job_node_run_computes_and_returns_the_view() -> None:
     node = job.nodes["triple"]
     view = node.run()
     assert len(calls) == ROWS
-    assert view.header() == "FunctionJobNode[triple] — all 25 computed rows"
+    assert view.header() == "FunctionJobNode[triple] — all 25 rows"
     assert view.as_table().equals(node.as_table())
     _ = node.run()
     assert len(calls) == ROWS
