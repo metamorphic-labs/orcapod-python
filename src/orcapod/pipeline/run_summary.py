@@ -37,6 +37,11 @@ class NodeRunSummary:
         failed: Rows whose function raised; the run skipped them.
         first_error: The exception of the first failed row, with its traceback, or
             ``None`` when no row failed.
+        not_stored: Inputs a load-only run skipped because no result is stored for
+            them (``job.run(load_only=True)``; always 0 in a full run).
+        inputs_incomplete: The labels of the function nodes upstream of this one that
+            skipped inputs in a load-only run, in run order: this node's inputs lack
+            the rows those results would have given (a group may be partial).
     """
 
     label: str
@@ -44,11 +49,13 @@ class NodeRunSummary:
     reused: int
     failed: int
     first_error: BaseException | None
+    not_stored: int = 0
+    inputs_incomplete: tuple[str, ...] = ()
 
     @property
     def rows(self) -> int:
-        """All rows the node received: computed, reused and failed."""
-        return self.computed + self.reused + self.failed
+        """All rows the node received: computed, reused, failed and not stored."""
+        return self.computed + self.reused + self.failed + self.not_stored
 
 
 class RunSummary:
@@ -61,17 +68,27 @@ class RunSummary:
     Attributes:
         job_name: The job's name.
         nodes: Per function node, in run order, keyed by label.
+        load_only: Whether the run was a load-only run (``job.run(load_only=True)``):
+            it computed nothing; ``reused`` counts the rows it loaded.
     """
 
-    def __init__(self, job_name: str, nodes: Sequence[NodeRunSummary]) -> None:
+    def __init__(
+        self,
+        job_name: str,
+        nodes: Sequence[NodeRunSummary],
+        *,
+        load_only: bool = False,
+    ) -> None:
         """Build the summary.
 
         Args:
             job_name: The job's name.
             nodes: One entry per function node of the run, in run order.
+            load_only: Whether the run loaded stored results only.
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
+        self.load_only: bool = load_only
 
     @property
     def failed_rows(self) -> int:
@@ -121,6 +138,14 @@ class RunSummary:
 
     def _headline(self) -> str:
         """The first line: the job and whether any row failed."""
+        if self.load_only:
+            skipped = sum(node.not_stored for node in self.nodes.values())
+            outcome = (
+                f"{_rows(skipped)} without a stored result skipped."
+                if skipped
+                else "every input had a stored result."
+            )
+            return f"Load-only run of job {self.job_name!r}: {outcome}"
         if self.failed_rows:
             outcome = f"{_rows(self.failed_rows)} failed."
         else:
@@ -132,8 +157,7 @@ class RunSummary:
         lines = [self._headline()]
         for node in self.nodes.values():
             lines.append(
-                f"  {node.label}: {_rows(node.rows)}: {node.computed} computed, "
-                f"{node.reused} from store, {node.failed} failed"
+                f"  {node.label}: {_rows(node.rows)}: {_counts(node, self.load_only)}"
             )
             if node.failed:
                 lines.append(f"    first error: {_error_line(node.first_error)}")
@@ -142,6 +166,8 @@ class RunSummary:
 
     def _repr_html_(self) -> str:
         """The notebook display: the same content as ``repr``, as a table."""
+        if self.load_only:
+            return self._load_only_html()
         header = "".join(
             f"<th style='text-align:left'>{name}</th>"
             for name in (
@@ -176,6 +202,40 @@ class RunSummary:
             f"<table><thead><tr>{header}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table>"
         )
+
+    def _load_only_html(self) -> str:
+        """The notebook display of a load-only run: rows loaded and skipped per node."""
+        header = "".join(
+            f"<th style='text-align:left'>{name}</th>"
+            for name in ("node", "rows", "loaded", "not stored", "inputs incomplete")
+        )
+        body = [
+            "<tr>"
+            f"<td><code>{html.escape(node.label)}</code></td>"
+            f"<td>{node.rows}</td><td>{node.reused}</td><td>{node.not_stored}</td>"
+            f"<td>{html.escape(', '.join(node.inputs_incomplete))}</td>"
+            "</tr>"
+            for node in self.nodes.values()
+        ]
+        return (
+            f"<p>{html.escape(self._headline())}</p>"
+            f"<table><thead><tr>{header}</tr></thead>"
+            f"<tbody>{''.join(body)}</tbody></table>"
+        )
+
+
+def _counts(node: NodeRunSummary, load_only: bool) -> str:
+    """A node's counts as text: what a full run did, or what a load-only run loaded."""
+    if not load_only:
+        return (
+            f"{node.computed} computed, {node.reused} from store, {node.failed} failed"
+        )
+    text = f"{node.reused} loaded"
+    if node.not_stored:
+        text += f", {node.not_stored} not stored (skipped)"
+    if node.inputs_incomplete:
+        text += f" (inputs incomplete: {', '.join(node.inputs_incomplete)})"
+    return text
 
 
 def _rows(n: int) -> str:
@@ -289,3 +349,51 @@ class RunCountingObserver:
     def create_data_logger(self, tag: TagProtocol, data: DataProtocol) -> Any:
         """No logging of its own."""
         return _NOOP_LOGGER
+
+
+def run_node_summaries(dag: Any, counter: RunCountingObserver) -> list[NodeRunSummary]:
+    """One summary per function node of a finished run, in run order.
+
+    The counts come from ``counter``; a load-only run's skipped inputs come from each
+    node (``last_run_not_stored``), and every node below a function node that skipped
+    inputs names it in ``inputs_incomplete`` (ITL-1095).
+
+    Args:
+        dag: The run's node graph (``topological_sort``, ``predecessors``).
+        counter: The observer that counted the run's rows.
+
+    Returns:
+        The summaries of the run's function nodes, in run order.
+    """
+    from dataclasses import replace
+
+    from orcapod.protocols.node_protocols import (
+        is_function_node,
+        is_side_effect_function_node,
+    )
+
+    order = list(dag.topological_sort())
+    position = {id(node): index for index, node in enumerate(order)}
+    skipping_above: dict[int, set[int]] = {}
+    summaries: list[NodeRunSummary] = []
+    for node in order:
+        above: set[int] = set()
+        for upstream in dag.predecessors(node):
+            above |= skipping_above.get(id(upstream), set())
+            if getattr(upstream, "last_run_not_stored", 0):
+                above.add(id(upstream))
+        skipping_above[id(node)] = above
+        if not (is_function_node(node) or is_side_effect_function_node(node)):
+            continue
+        labels = tuple(
+            order[index].label for index in sorted(position[key] for key in above)
+        )
+        label: str = getattr(node, "label")  # every graph node is labelled
+        summaries.append(
+            replace(
+                counter.node_summary(label),
+                not_stored=getattr(node, "last_run_not_stored", 0),
+                inputs_incomplete=labels,
+            )
+        )
+    return summaries

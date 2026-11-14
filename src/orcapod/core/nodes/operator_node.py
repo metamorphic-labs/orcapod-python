@@ -1322,12 +1322,17 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         self,
         *input_streams: StreamProtocol,
         observer: ExecutionObserverProtocol | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]:
         """Execute input streams: compute, persist, and cache.
 
         Args:
             *input_streams: Input streams to execute.
             observer: Optional execution observer for hooks.
+            load_only: A load-only run (ITL-1095): the operator still runs on the rows
+                that reach it (it is not a stored computation), but nothing is
+                written: a ``LOG`` node does not store its output. ``REPLAY`` replays
+                as in any run.
 
         Returns:
             Materialized list of (tag, data) pairs.
@@ -1368,9 +1373,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         self._update_modified_time()
 
-        # Persist to DB only in LOG mode
+        # Persist to DB only in LOG mode, and never in a load-only run.
         if (
-            self._pipeline_database is not None
+            not load_only
+            and self._pipeline_database is not None
             and self._cache_mode == CacheMode.LOG
             and self._cached_output_stream is not None
         ):
@@ -1667,6 +1673,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: "ExecutionObserverProtocol | None" = None,
+        load_only: bool = False,
     ) -> None:
         """Async execution with cache mode handling when DB is attached.
 
@@ -1688,6 +1695,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             inputs: Sequence of readable channels from upstream nodes.
             output: Writable channel for output (tag, data) pairs.
             observer: Optional execution observer for hooks.
+            load_only: As for ``execute``: a ``LOG`` node stores nothing (ITL-1095).
         """
         from orcapod.pipeline.observer import NoOpObserver
 
@@ -1733,7 +1741,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # Delegate to the operator, forward its rows downstream and keep them.
             intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
             should_store = (
-                self._pipeline_database is not None
+                not load_only
+                and self._pipeline_database is not None
                 and self._cache_mode == CacheMode.LOG
             )
             if should_store:

@@ -31,6 +31,7 @@ from orcapod.protocols.node_protocols import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.channels import WritableChannel
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -75,6 +76,7 @@ class AsyncPipelineOrchestrator:
         materialize_results: bool = True,
         run_id: str | None = None,
         pipeline_uri: str = "",
+        load_only: bool = False,
     ) -> OrchestratorResult:
         """Synchronous entry point — runs the async pipeline to completion.
 
@@ -118,6 +120,7 @@ class AsyncPipelineOrchestrator:
                     observer=observer,
                     run_id=run_id,
                     pipeline_uri=pipeline_uri,
+                    load_only=load_only,
                 )
             )
 
@@ -138,6 +141,7 @@ class AsyncPipelineOrchestrator:
                 observer=watched,
                 run_id=run_id,
                 pipeline_uri=pipeline_uri,
+                load_only=load_only,
             )
 
         return _run_on_own_thread(make_run, rows_in_flight)
@@ -150,6 +154,7 @@ class AsyncPipelineOrchestrator:
         materialize_results: bool = True,
         run_id: str | None = None,
         pipeline_uri: str = "",
+        load_only: bool = False,
     ) -> OrchestratorResult:
         """Async entry point for callers already inside an event loop.
 
@@ -171,6 +176,7 @@ class AsyncPipelineOrchestrator:
             observer=observer,
             run_id=run_id,
             pipeline_uri=pipeline_uri,
+            load_only=load_only,
         )
 
     async def _run_async(
@@ -181,6 +187,7 @@ class AsyncPipelineOrchestrator:
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
         pipeline_uri: str = "",
+        load_only: bool = False,
     ) -> OrchestratorResult:
         """Core async logic: wire channels, launch tasks, collect results."""
         from orcapod.pipeline.observer import NoOpObserver
@@ -261,6 +268,7 @@ class AsyncPipelineOrchestrator:
                                 writer,
                                 observer=effective_observer,
                                 run_id=run_id,
+                                load_only=load_only,
                             ),
                         )
                     elif is_operator_node(node):
@@ -280,7 +288,10 @@ class AsyncPipelineOrchestrator:
                             tg,
                             node,
                             node.async_execute(
-                                input_readers, writer, observer=effective_observer
+                                input_readers,
+                                writer,
+                                observer=effective_observer,
+                                load_only=load_only,
                             ),
                         )
                     elif is_side_effect_node(node):
@@ -290,16 +301,20 @@ class AsyncPipelineOrchestrator:
                                 "SideEffectNode expects exactly 1 upstream, got 0"
                             )
                         input_reader = edge_readers[(predecessors[0], node)]
-                        _start_node(
-                            tg,
-                            node,
-                            node.async_execute(
-                                [input_reader],
-                                writer,
-                                observer=effective_observer,
-                                run_id=run_id,
-                            ),
-                        )
+                        if load_only:
+                            # Nothing is delivered in a load-only run: rows pass on.
+                            _start_node(tg, node, _pass_through(input_reader, writer))
+                        else:
+                            _start_node(
+                                tg,
+                                node,
+                                node.async_execute(
+                                    [input_reader],
+                                    writer,
+                                    observer=effective_observer,
+                                    run_id=run_id,
+                                ),
+                            )
                     else:
                         raise TypeError(
                             f"Unknown node type: {getattr(node, 'node_type', None)!r}"
@@ -593,6 +608,17 @@ class _RowsInFlight:
         from orcapod.pipeline.observer import NoOpLogger
 
         return NoOpLogger()
+
+
+async def _pass_through(
+    reader: Any, writer: WritableChannel[tuple[TagProtocol, DataProtocol]]
+) -> None:
+    """Forward every row of ``reader`` to ``writer``, then close ``writer``."""
+    try:
+        async for item in reader:
+            await writer.send(item)
+    finally:
+        await writer.close()
 
 
 def _start_node(

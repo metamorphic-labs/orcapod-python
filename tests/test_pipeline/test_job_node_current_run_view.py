@@ -59,7 +59,7 @@ def _build(
     src = DictSource(data, tag_columns=["g", "k"], source_id="s")
     job = PipelineJob(name="j", database=db)
     with job:
-        rowwise = inc.pod(src, label="rowwise")
+        rowwise: Any = inc.pod(src, label="rowwise")
         grouped = rowwise.group_by("g", label="grouped")
         total.pod(grouped, label="summed")
     if cache_mode is not None:

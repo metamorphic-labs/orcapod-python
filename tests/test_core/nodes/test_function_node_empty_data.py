@@ -13,6 +13,7 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import NodeConfig
 from orcapod.errors import EphemeralResultMissingError
@@ -174,7 +175,7 @@ class TestLoadCachedEntriesEmptyData:
             assert isinstance(data, Data)
 
 
-def _entries(node: FunctionJobNode) -> list:
+def _entries(node: FunctionJobNode) -> list[tuple[TagProtocol, DataProtocol]]:
     """The node's entries for its input rows, as its cache façade returns them.
 
     These tests drive ``execute_data`` (one row, not a run), so the node shows no rows

@@ -55,6 +55,7 @@ class SyncPipelineOrchestrator:
         materialize_results: bool = True,
         run_id: str | None = None,
         pipeline_uri: str = "",
+        load_only: bool = False,
     ) -> OrchestratorResult:
         """Execute the node graph synchronously.
 
@@ -69,6 +70,10 @@ class SyncPipelineOrchestrator:
             pipeline_uri: Opaque URI string identifying this pipeline run
                 (e.g. ``"my_pipeline@a1b2c3d4e5f6a1b2"``).  Forwarded
                 verbatim to ``observer.on_run_start``.
+            load_only: Fill the nodes from what is stored and compute nothing
+                (ITL-1095): function nodes load their inputs' stored results and skip
+                the others, operators run without storing, and a side-effect node
+                passes its rows on without being called (nothing is delivered).
 
         Returns:
             OrchestratorResult with node outputs.
@@ -101,6 +106,7 @@ class SyncPipelineOrchestrator:
                         observer=effective_observer,
                         error_policy=self._error_policy,
                         run_id=run_id,
+                        load_only=load_only,
                     )
                 elif is_operator_node(node):
                     upstream_buffers = self._gather_upstream_multi(node, graph, buffers)
@@ -109,19 +115,23 @@ class SyncPipelineOrchestrator:
                         for buf, upstream_node in upstream_buffers
                     ]
                     buffers[node] = node.execute(
-                        *input_streams, observer=effective_observer
+                        *input_streams, observer=effective_observer, load_only=load_only
                     )
                 elif is_side_effect_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)
-                    upstream_node = list(graph.predecessors(node))[0]
-                    input_stream = self._materialize_as_stream(
-                        upstream_buf, upstream_node
-                    )
-                    buffers[node] = node.execute(
-                        input_stream,
-                        observer=effective_observer,
-                        run_id=run_id,
-                    )
+                    if load_only:
+                        # Nothing is delivered in a load-only run: the rows pass on.
+                        buffers[node] = list(upstream_buf)
+                    else:
+                        upstream_node = list(graph.predecessors(node))[0]
+                        input_stream = self._materialize_as_stream(
+                            upstream_buf, upstream_node
+                        )
+                        buffers[node] = node.execute(
+                            input_stream,
+                            observer=effective_observer,
+                            run_id=run_id,
+                        )
                 else:
                     raise TypeError(
                         f"Unknown node type: {getattr(node, 'node_type', None)!r}"

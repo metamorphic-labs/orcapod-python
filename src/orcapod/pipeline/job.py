@@ -31,13 +31,9 @@ from orcapod.errors import (
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.run_summary import (
-    NodeRunSummary,
     RunCountingObserver,
     RunSummary,
-)
-from orcapod.protocols.node_protocols import (
-    is_function_node,
-    is_side_effect_function_node,
+    run_node_summaries,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -866,6 +862,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         observer: "ExecutionObserverProtocol | None" = None,
         materialize_results: bool = True,
         commit_every_rows: int = 100,
+        *,
+        load_only: bool = False,
     ) -> RunSummary:
         """Execute the resolvable subgraph of this job in place.
 
@@ -914,6 +912,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 default 1000): the store commits every pending table by itself
                 once one table's pending rows reach that size, which would
                 break the node's results-before-records commit order.
+            load_only: Fill the nodes from what is already stored and compute
+                nothing (ITL-1095). Sources are read and operators run on the rows
+                that reach them; each function node takes the results stored for
+                this run's inputs (its own records under its content hash) and skips
+                the inputs without one, which the summary counts (``not_stored``);
+                a function node forwards only the rows it loaded. No user function
+                is called, no side effect is delivered (a side-effect node passes its
+                rows on) and nothing is written to the store, a ``LOG`` operator's
+                cache included. Afterwards each node shows the rows it loaded.
 
         Rows whose function raised (with the default ``error_policy="continue"``) are
         skipped, and the run goes on. At the end, if any row failed, a single
@@ -956,8 +963,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
+                load_only=load_only,
             )
-        summary = self._finish_run(prepared, counter)
+        summary = self._finish_run(prepared, counter, load_only=load_only)
         if not summary.ok:
             _warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -968,6 +976,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         observer: "ExecutionObserverProtocol | None" = None,
         materialize_results: bool = True,
         commit_every_rows: int = 100,
+        *,
+        load_only: bool = False,
     ) -> RunSummary:
         """Execute the job with the async orchestrator, from async code.
 
@@ -983,6 +993,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             observer: Optional execution observer.
             materialize_results: As for ``run``.
             commit_every_rows: As for ``run``.
+            load_only: As for ``run``.
 
         Returns:
             The run's ``RunSummary``, as ``run`` returns.
@@ -1014,8 +1025,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
+                load_only=load_only,
             )
-        summary = self._finish_run(prepared, counter)
+        summary = self._finish_run(prepared, counter, load_only=load_only)
         if not summary.ok:
             _warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1215,13 +1227,18 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             raise
 
     def _finish_run(
-        self, prepared: "_PreparedRun", counter: RunCountingObserver
+        self,
+        prepared: "_PreparedRun",
+        counter: RunCountingObserver,
+        *,
+        load_only: bool = False,
     ) -> RunSummary:
         """Commit the run's last writes, mark the job as run and keep its summary.
 
         Args:
             prepared: The run, from ``_prepare_run``.
             counter: The observer that counted the run's rows.
+            load_only: Whether the run loaded stored results only.
 
         Returns:
             The run's summary, also kept as ``last_run``.
@@ -1255,12 +1272,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self._has_run = True
         self._last_run_finished = True
         self._run_id = prepared.run_id
-        node_summaries: list[NodeRunSummary] = []
-        for node in prepared.exec_dag.topological_sort():
-            label: str = node.label
-            if is_function_node(node) or is_side_effect_function_node(node):
-                node_summaries.append(counter.node_summary(label))
-        self._last_run = RunSummary("/".join(self._name), node_summaries)
+        self._last_run = RunSummary(
+            "/".join(self._name),
+            run_node_summaries(prepared.exec_dag, counter),
+            load_only=load_only,
+        )
         return self._last_run
 
     def __repr__(self) -> str:

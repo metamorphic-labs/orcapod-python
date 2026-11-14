@@ -1062,6 +1062,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
     _run_entry_counts: Counter[bytes] | None = None
+    # Whether the last completed run was load-only, and how many of its inputs had no
+    # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
+    _run_load_only: bool = False
+    _run_not_stored: int = 0
 
     def __init__(
         self,
@@ -1526,6 +1530,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._cached_output_table = None
         self._cached_content_hash_column = None
         self._run_entry_counts = None
+        self._run_load_only = False
+        self._run_not_stored = 0
         # No content established: the node, and every node downstream, is stale.
         self._set_modified_time(None)
 
@@ -1552,11 +1558,161 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             if data is not None:
                 yield tag, data
 
-    def _set_run_rows(self, entry_ids: list[bytes]) -> None:
-        """Make the inputs of a completed run, by base entry id, the rows this node holds."""
+    def _set_run_rows(
+        self, entry_ids: list[bytes], *, load_only: bool = False, not_stored: int = 0
+    ) -> None:
+        """Make the inputs of a completed run, by base entry id, the rows this node holds.
+
+        Args:
+            entry_ids: The base entry ids of the run's inputs whose rows the node holds.
+            load_only: Whether the run was load-only (ITL-1095).
+            not_stored: How many inputs of a load-only run had no stored result.
+        """
         self._run_entry_counts = Counter(entry_ids)
+        self._run_load_only = load_only
+        self._run_not_stored = not_stored
         self._cached_output_table = None
         self._cached_content_hash_column = None
+
+    @property
+    def last_run_not_stored(self) -> int:
+        """Inputs the node's last completed run skipped because nothing was stored.
+
+        Non-zero only after a load-only run (``run(load_only=True)``); 0 before a run.
+        """
+        return self._run_not_stored
+
+    def _stored_entry(
+        self, entry_id: bytes
+    ) -> tuple[TagProtocol, DataProtocol | None] | None:
+        """The result held for ``entry_id`` after a lookup, or ``None`` if none is stored.
+
+        A placeholder for a result kept in an ephemeral store that is gone is not a
+        stored result.
+        """
+        entry = self._cached_output_datas.get(entry_id)
+        if entry is None or isinstance(entry[1], EmptyData):
+            return None
+        return entry
+
+    def _execute_load_only(
+        self,
+        input_stream: StreamProtocol,
+        observer: ExecutionObserverProtocol | None,
+    ) -> list[tuple[TagProtocol, DataProtocol]]:
+        """Fill the node with the stored results of ``input_stream``'s rows; compute nothing.
+
+        The load-only form of ``execute`` (ITL-1095): each input's entry is looked up
+        among the node's own stored entries (its pipeline records under its content
+        hash, the lookup a run makes before computing). An input with a stored result
+        is a loaded row (``on_data_start`` and ``on_data_end(cached=True)``); one
+        without is skipped and counted (``last_run_not_stored``), with no observer
+        call. No function is called and nothing is written.
+
+        Returns:
+            The loaded (tag, output data) rows, excluding ``None`` outputs.
+
+        Raises:
+            RuntimeError: If no store is attached (``UNAVAILABLE``).
+            InputValidationError: If the input stream is of another data context.
+        """
+        from orcapod.pipeline.observer import NoOpObserver
+        from orcapod.pipeline.serialization import LoadStatus
+
+        if self.load_status == LoadStatus.UNAVAILABLE:
+            raise self._no_store_error()
+        require_same_data_context(
+            input_stream.data_context_key, self._stored_data_context_key
+        )
+        node_label = self.label
+        node_hash = self.content_hash().to_string()
+        obs = observer if observer is not None else NoOpObserver()
+        ctx_obs = obs.contextualize(*self.node_identity_path)
+        tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
+        ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
+        output: list[tuple[TagProtocol, DataProtocol]] = []
+        loaded_ids: list[bytes] = []
+        not_stored = 0
+        try:
+            inputs = [
+                (tag, data, self.compute_base_entry_id(tag, data))
+                for tag, data in input_stream.iter_data()
+            ]
+            _ = self.get_cached_results(base_entry_ids=[eid for _, _, eid in inputs])
+            for tag, data, entry_id in inputs:
+                entry = self._stored_entry(entry_id)
+                if entry is None:
+                    not_stored += 1
+                    continue
+                ctx_obs.on_data_start(node_label, tag, data)
+                ctx_obs.on_data_end(node_label, tag, data, entry[1], cached=True)
+                loaded_ids.append(entry_id)
+                if entry[1] is not None:
+                    output.append((entry[0], entry[1]))
+        except BaseException:
+            # A run that raised defines no rows.
+            self.clear_cache()
+            raise
+        self._set_run_rows(loaded_ids, load_only=True, not_stored=not_stored)
+        ctx_obs.on_node_end(node_label, node_hash)
+        self._update_modified_time()
+        return output
+
+    async def _async_execute_load_only(
+        self,
+        input_channel: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+        output: WritableChannel[tuple[TagProtocol, DataProtocol]],
+        observer: ExecutionObserverProtocol | None,
+    ) -> None:
+        """The async form of ``_execute_load_only``: same rows, counts and observer calls.
+
+        The node reads its whole input before it looks the entries up, then sends the
+        loaded rows; it stamps itself before its output closes (ITL-1042), and closes
+        the output whatever happens.
+        """
+        from orcapod.pipeline.observer import NoOpObserver
+        from orcapod.pipeline.serialization import LoadStatus
+
+        try:
+            if self.load_status == LoadStatus.UNAVAILABLE:
+                raise self._no_store_error()
+            require_same_data_context(
+                self._input_stream.data_context_key, self._stored_data_context_key
+            )
+            node_label = self.label
+            node_hash = self.content_hash().to_string()
+            obs = observer if observer is not None else NoOpObserver()
+            ctx_obs = obs.contextualize(*self.node_identity_path)
+            tag_schema = self._input_stream.output_schema(
+                columns={"system_tags": True}
+            )[0]
+            ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
+            inputs = [
+                (tag, data, self.compute_base_entry_id(tag, data))
+                async for tag, data in input_channel
+            ]
+            _ = self.get_cached_results(base_entry_ids=[eid for _, _, eid in inputs])
+            loaded_ids: list[bytes] = []
+            not_stored = 0
+            for tag, data, entry_id in inputs:
+                entry = self._stored_entry(entry_id)
+                if entry is None:
+                    not_stored += 1
+                    continue
+                ctx_obs.on_data_start(node_label, tag, data)
+                ctx_obs.on_data_end(node_label, tag, data, entry[1], cached=True)
+                loaded_ids.append(entry_id)
+                if entry[1] is not None:
+                    await output.send((entry[0], entry[1]))
+            self._set_run_rows(loaded_ids, load_only=True, not_stored=not_stored)
+            ctx_obs.on_node_end(node_label, node_hash)
+            self._update_modified_time()
+        except BaseException:
+            # A run that raised or was cancelled defines no rows.
+            self.clear_cache()
+            raise
+        finally:
+            await output.close()
 
     def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
         """Assign or remove the ephemeral result store.
@@ -1912,6 +2068,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         observer: ExecutionObserverProtocol | None = None,
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> list[tuple[TagProtocol, DataProtocol]]:
         """Execute all data from a stream: compute, persist, and cache.
 
@@ -1931,6 +2088,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ``"fail_fast"`` re-raises on the first failure.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
+            load_only: Fill the node with the results already stored for the
+                stream's rows and compute nothing (ITL-1095): no function call, no
+                write; inputs without a stored result are skipped and counted
+                (``last_run_not_stored``). A loaded node (no function pod) can run
+                this way.
 
         Returns:
             Materialized list of (tag, output_data) pairs, excluding
@@ -1945,6 +2107,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from orcapod.pipeline.observer import NoOpObserver
 
+        if load_only:
+            return self._execute_load_only(input_stream, observer)
         if self._function_pod is None:
             raise self._cannot_compute_error()
 
@@ -3274,6 +3438,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         *,
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None:
         """Streaming async execution for FunctionJobNode.
 
@@ -3296,6 +3461,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             observer: Optional execution observer for hooks.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
+            load_only: As for ``execute``: fill the node with the stored results of
+                its input rows and compute nothing (ITL-1095).
 
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load``: without a
@@ -3304,6 +3471,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        if load_only:
+            await self._async_execute_load_only(input_channel, output, observer)
+            return
         try:
             self._begin_run()
         except StoreError:
