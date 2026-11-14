@@ -113,7 +113,8 @@ code (a function, a predicate, a side effect) and never write to a database. `ru
 With no rows to show, a head still has the columns and Arrow types the rows would have. To
 learn them it applies each operator to empty (zero-row) tables, which processes no data: a
 chain of N operators applies up to N operators to empty tables (about 60 ms for 20). A filter
-is not applied at all, since its columns are its input's. Two consequences: a pipeline whose
+is not applied at all, since its columns are its input's. A user-defined operator's
+`static_process` is applied to zero-row tables and must not have effects. Two consequences: a pipeline whose
 inputs disagree on a column's Arrow type (say `int8` against `int64`) raises from `head()`
 the same `InputValidationError` its run raises (the notebook preview shows it as "could not
 read"), and a filter whose predicate does not fit its columns shows a table in `head()` and

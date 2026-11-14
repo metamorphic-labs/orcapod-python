@@ -746,7 +746,8 @@ class StreamBase(TraceableBase):
         applied to zero-row inputs, which processes no data, so a chain of ``N``
         operators applies up to ``N`` operators to empty tables (about 60 ms for 20); an
         operator whose output schema is its input's (``OUTPUT_SCHEMA_IS_INPUT_SCHEMA``,
-        such as ``PolarsFilter``) is not applied at all. So a pipeline whose inputs
+        such as ``PolarsFilter``) is not applied at all. A user-defined operator's
+        ``static_process`` is applied to zero-row tables and must not have effects. So a pipeline whose inputs
         disagree on a column's Arrow type raises from ``head`` the
         ``InputValidationError`` its run raises, and a filter with an ill-typed
         predicate shows its input's columns: the error appears at the run. ``head`` takes the column configuration of ``as_table``,

@@ -238,7 +238,9 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         polls or delivers a row (it reads only what is held or stored, or makes a bounded
         read), never calls user code (a function, a predicate,
         a side effect) and never writes. With no rows to show, it may apply operators
-        to zero-row tables to learn the column types, which processes no data (ITL-912).
+        to zero-row tables to learn the column types, which processes no data (ITL-912). A
+        user-defined operator's ``static_process`` is applied to zero-row tables and must
+        not have effects.
 
         Returns:
             StreamView: The rows, and a status that tells an empty result from one
