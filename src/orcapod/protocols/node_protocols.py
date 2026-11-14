@@ -160,6 +160,7 @@ class SideEffectNodeProtocol(Protocol):
         *,
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> "list[tuple[TagProtocol, DataProtocol]]": ...
 
     async def async_execute(
@@ -169,6 +170,7 @@ class SideEffectNodeProtocol(Protocol):
         *,
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
+        load_only: bool = False,
     ) -> None: ...
 
     def attach_databases(

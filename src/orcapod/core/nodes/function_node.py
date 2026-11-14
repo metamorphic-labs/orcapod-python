@@ -274,6 +274,44 @@ class _CloseDeferredWriter:
 # ---------------------------------------------------------------------------
 
 
+def run_job_node(
+    node: Any,
+    *,
+    load_only: bool,
+    run_alone: Callable[[], Any],
+    caller: Any,
+) -> None:
+    """Run a job node as its ``run()`` does (developer, November 13, 2026; ITL-1095).
+
+    Nothing runs when the node holds a current run (``holds_current_run``). Otherwise
+    a node that depends on job nodes runs with them (``run_with_dependencies``) and one
+    built over streams outside a job runs alone (``run_alone``). The run's summary, if
+    it gives one, is kept as the node's ``last_run``, and failed rows warn at the
+    caller's line, as ``job.run()`` warns.
+
+    Args:
+        node: The job node (a ``RunHoldingNode``).
+        load_only: Whether to load stored results only.
+        run_alone: Runs the node over its input when no job node feeds it; returns its
+            ``RunSummary`` or ``None``.
+        caller: The frame of the ``run()`` caller.
+    """
+    from orcapod.pipeline.node_run import depends_on_job_nodes, run_with_dependencies
+    from orcapod.pipeline.run_summary import warn_row_failures
+
+    if node.holds_current_run(load_only=load_only):
+        return
+    if depends_on_job_nodes(node):
+        summary = run_with_dependencies(node, load_only=load_only)
+    else:
+        summary = run_alone()
+    if summary is None:
+        return
+    node._last_run = summary
+    if not summary.ok:
+        warn_row_failures(summary, caller)
+
+
 class FunctionNodeBase(StreamBase):
     """Shared base for ``FunctionNode`` and ``FunctionJobNode``.
 
@@ -3447,11 +3485,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ``load_only`` is false; or if its input is unavailable
                 (``CACHE_ONLY``): read its stored rows with ``as_source()``.
         """
-        from orcapod.pipeline.node_run import (
-            depends_on_job_nodes,
-            run_with_dependencies,
-        )
-        from orcapod.pipeline.run_summary import warn_row_failures
         from orcapod.pipeline.serialization import LoadStatus
 
         status = self._load_status
@@ -3466,14 +3499,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self._function_pod is None or status == LoadStatus.READ_ONLY
         ):
             raise self._cannot_compute_error()
-        if not self.holds_current_run(load_only=load_only):
-            if depends_on_job_nodes(self):
-                summary = run_with_dependencies(self, load_only=load_only)
-            else:
-                summary = self._run_alone(load_only=load_only)
-            self._last_run = summary
-            if not summary.ok:
-                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+        run_job_node(
+            self,
+            load_only=load_only,
+            run_alone=lambda: self._run_alone(load_only=load_only),
+            caller=sys._getframe(1),  # pyright: ignore[reportPrivateUsage]  # the caller's line is where a failure warning is shown
+        )
         return self._run_view()
 
     def _run_alone(self, *, load_only: bool) -> Any:

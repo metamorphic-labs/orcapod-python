@@ -15,9 +15,8 @@ from typing import Any
 class RunHoldingNode:
     """Mixin of the job nodes that hold the rows of their current run.
 
-    ``FunctionJobNode`` and ``OperatorJobNode`` mix it in ahead of their stream base, so
-    their ``is_stale`` covers their whole ancestry. Side-effect job nodes do not yet:
-    their own ``is_stale`` is redefined by ITL-1091.
+    ``FunctionJobNode``, ``OperatorJobNode`` and ``SideEffectJobNode`` mix it in ahead of
+    their stream base, so their ``is_stale`` covers their whole ancestry.
     """
 
     # The summary of the node's last ``run()`` (with the nodes it ran first); a class

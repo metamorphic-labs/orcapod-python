@@ -75,7 +75,7 @@ class SyncPipelineOrchestrator:
             load_only: Fill the nodes from what is stored and compute nothing
                 (ITL-1095): function nodes load their inputs' stored results and skip
                 the others, operators run without storing, and a side-effect node
-                passes its rows on without being called (nothing is delivered).
+                passes its rows on and delivers nothing.
             held_rows: Nodes of ``graph`` that are not run: each one's rows (the rows
                 of its current run, or of a stream outside the job) feed its
                 successors as if it had just run. Used by ``node.run()``, which runs
@@ -128,19 +128,17 @@ class SyncPipelineOrchestrator:
                     )
                 elif is_side_effect_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)
-                    if load_only:
-                        # Nothing is delivered in a load-only run: the rows pass on.
-                        buffers[node] = list(upstream_buf)
-                    else:
-                        upstream_node = list(graph.predecessors(node))[0]
-                        input_stream = self._materialize_as_stream(
-                            upstream_buf, upstream_node
-                        )
-                        buffers[node] = node.execute(
-                            input_stream,
-                            observer=effective_observer,
-                            run_id=run_id,
-                        )
+                    upstream_node = list(graph.predecessors(node))[0]
+                    input_stream = self._materialize_as_stream(
+                        upstream_buf, upstream_node
+                    )
+                    # In a load-only run the node passes its rows on and delivers nothing.
+                    buffers[node] = node.execute(
+                        input_stream,
+                        observer=effective_observer,
+                        run_id=run_id,
+                        load_only=load_only,
+                    )
                 else:
                     raise TypeError(
                         f"Unknown node type: {getattr(node, 'node_type', None)!r}"

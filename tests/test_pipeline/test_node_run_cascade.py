@@ -288,6 +288,34 @@ class TestLoadOnly:
 
 
 class TestSideEffects:
+    def test_a_side_effect_node_follows_the_state_rule(self) -> None:
+        """Stale before a run; while it holds a current run nothing re-delivers it."""
+        job = _build(ROWS, InMemoryArrowDatabase(), with_tap=True)
+        tap = job.nodes["tap"]
+        assert tap.is_stale
+        _ = job.nodes["summed"].run()
+        assert len(DELIVERED) == 6
+        assert tap.holds_current_run()
+        _ = job.nodes["summed"].run()
+        _ = tap.run()
+        assert len(DELIVERED) == 6
+        tap.clear_cache()
+        assert job.nodes["summed"].is_stale
+        _ = job.nodes["summed"].run()
+        assert len(DELIVERED) == 12
+
+    def test_a_load_only_run_of_a_side_effect_node_holds_its_rows(self) -> None:
+        db = InMemoryArrowDatabase()
+        _build(ROWS, db, with_tap=True).run()
+        DELIVERED.clear()
+        job = _build(ROWS, db, with_tap=True)
+        _ = job.nodes["summed"].run(load_only=True)
+        tap = job.nodes["tap"]
+        assert DELIVERED == []
+        assert tap.as_table().num_rows == 6
+        assert tap.holds_current_run(load_only=True)
+        assert not tap.holds_current_run()
+
     def test_a_full_cascade_delivers_a_load_only_cascade_does_not(self) -> None:
         db = InMemoryArrowDatabase()
         job = _build(ROWS, db, with_tap=True)

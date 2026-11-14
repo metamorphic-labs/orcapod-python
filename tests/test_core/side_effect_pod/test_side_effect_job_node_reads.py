@@ -184,12 +184,18 @@ def test_node_run_delivers_what_the_log_does_not_record(
 
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
-def test_node_run_without_track_completion_delivers_every_row_as_a_job_run_does(
+def test_node_run_without_track_completion_delivers_again_only_after_clear_cache(
     orchestrator: Orchestrator,
 ) -> None:
-    """Without ``track_completion``, ``node.run()`` delivers every row again, as ``job.run()`` does."""
+    """Without ``track_completion``, a node that holds a current run delivers nothing on
+    ``node.run()`` (ITL-1095); after ``clear_cache()`` it delivers every row again, as
+    ``job.run()`` does."""
     job, sent = _job(track_completion=False)
     _run(job, orchestrator)
+    view = job.nodes["delivered"].run()
+    assert len(sent) == ROWS
+    assert len(view) == ROWS
+    job.nodes["delivered"].clear_cache()
     view = job.nodes["delivered"].run()
     assert len(sent) == 2 * ROWS
     assert len(view) == ROWS
@@ -319,6 +325,9 @@ def test_rows_held_from_a_run_are_dropped_when_an_upstream_changes(
     _run(job, orchestrator)
     node = job.nodes["delivered"]
     assert len(node.as_table()) == ROWS
+    # The upstream runs again: a node that holds a current run runs nothing (ITL-1095),
+    # so it is cleared first.
+    job.nodes["up"].clear_cache()
     _ = job.nodes["up"].run()
     for name, read in _reads(node).items():
         _ = read()

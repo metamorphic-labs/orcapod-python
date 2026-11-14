@@ -117,7 +117,12 @@ def test_every_stream_class_has_run_without_positional_arguments(cls: type) -> N
     assert callable(run), f"{cls.__qualname__} has no run()"
     parameters = inspect.signature(run).parameters
     names = list(parameters)
-    if cls.__name__ in ("FunctionJobNode", "OperatorJobNode", "SourceJobNode"):
+    if cls.__name__ in (
+        "FunctionJobNode",
+        "OperatorJobNode",
+        "SideEffectJobNode",
+        "SourceJobNode",
+    ):
         assert names == ["self", "load_only"], f"{cls.__qualname__}.run{names}"
         load_only = parameters["load_only"]
         assert load_only.kind is inspect.Parameter.KEYWORD_ONLY

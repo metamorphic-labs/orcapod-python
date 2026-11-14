@@ -31,7 +31,6 @@ from orcapod.protocols.node_protocols import (
 )
 
 if TYPE_CHECKING:
-    from orcapod.channels import WritableChannel
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -301,20 +300,19 @@ class AsyncPipelineOrchestrator:
                                 "SideEffectNode expects exactly 1 upstream, got 0"
                             )
                         input_reader = edge_readers[(predecessors[0], node)]
-                        if load_only:
-                            # Nothing is delivered in a load-only run: rows pass on.
-                            _start_node(tg, node, _pass_through(input_reader, writer))
-                        else:
-                            _start_node(
-                                tg,
-                                node,
-                                node.async_execute(
-                                    [input_reader],
-                                    writer,
-                                    observer=effective_observer,
-                                    run_id=run_id,
-                                ),
-                            )
+                        # In a load-only run the node passes its rows on and delivers
+                        # nothing.
+                        _start_node(
+                            tg,
+                            node,
+                            node.async_execute(
+                                [input_reader],
+                                writer,
+                                observer=effective_observer,
+                                run_id=run_id,
+                                load_only=load_only,
+                            ),
+                        )
                     else:
                         raise TypeError(
                             f"Unknown node type: {getattr(node, 'node_type', None)!r}"
@@ -608,17 +606,6 @@ class _RowsInFlight:
         from orcapod.pipeline.observer import NoOpLogger
 
         return NoOpLogger()
-
-
-async def _pass_through(
-    reader: Any, writer: WritableChannel[tuple[TagProtocol, DataProtocol]]
-) -> None:
-    """Forward every row of ``reader`` to ``writer``, then close ``writer``."""
-    try:
-        async for item in reader:
-            await writer.send(item)
-    finally:
-        await writer.close()
 
 
 def _start_node(
