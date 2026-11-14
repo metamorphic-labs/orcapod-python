@@ -70,3 +70,32 @@ into the int-declared paths (`schema:f289a35f.../pdb_v2`, `_result/.../rdb_v2`).
 
 - Conflicts: PR #384 (ITL-1102) edits the `bound_source` setter (adds `_update_modified_time()`);
   ITL-1111 adds a memo clear inside `bind`. Whoever merges second resolves.
+
+## Decisions, round 2 (coordinator/developer, 2026-11-14)
+
+- Nullability: a slot accepts a STRICTER source. Declared `T | None` accepts a source with `T`;
+  declared `T` refuses `T | None`. Nothing else is compatible (no other union, subclass, width).
+- The node presents the DECLARED schema: `output_schema()`/`keys()` and its rows. Rows are cast
+  to the declared form at one helper: same arrays re-wrapped under nullable fields (no cast) and
+  the two system-tag columns renamed from the source's schema-hash suffix to the declared one
+  (N1; names from `system_tag_column_names` on both hashes). Row hashes, record ids, stored
+  schema are those of a `T | None` source (the flag reaches the row hash today: measured).
+- `content_hash` and `source_id` stay the source's own.
+- A narrower source whose system-tag columns are not exactly the two of its schema hash is
+  refused at bind (never mid-run).
+- Entry points: `iter_data`, `async_iter_data` (per row: Tag/Data rebuilt with the row's data
+  context), `as_table` and `head` (an `ArrowTableStream` over the cast table, so content-hash
+  column, sort and column selection are computed on the cast rows), `output_schema`.
+- L1: `SourceJobNode.__init__` binds through the setter; `PipelineJob.load` handles a rebuilt
+  source the slot refuses like one that could not be rebuilt (warning, slot unbound).
+- PR as draft; CodeRabbit reviews by itself (do not request).
+
+## Tasks, round 2
+
+- [ ] 6. Tests `tests/test_pipeline/test_bind_narrower_source.py`: accepted narrower bind (bind,
+  setter; fresh, loaded), reverse refused, downstream schema and pipeline hashes unchanged,
+  rows table-equal to a nullable-flag source (names, flags, row hashes, record ids), sync and
+  async, same-path append (narrower run then nullable run with a null), zero rows, head.
+  Loaded job: CSV changed type (warning, unbound, run fails as unbound, rebind works); CSV now
+  narrower (bound, cast).
+- [ ] 7. Implement `_DeclaredForm` + entry points + `__init__` through setter + load handling.
