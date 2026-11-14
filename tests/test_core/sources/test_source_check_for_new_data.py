@@ -812,3 +812,77 @@ def test_sqlite_a_relative_path_is_checked_where_it_was_read(
     assert source.check_for_new_data() is True
     assert _keys(source) == [0, 1, 2, 3]
     assert not (tmp_path / "elsewhere" / sqlite_path.name).exists()
+
+
+# ---------------------------------------------------------------------------
+# Review round 4 (ITL-1102): two wrappers sharing one cache, every order
+# ---------------------------------------------------------------------------
+#
+# The invariant a CachedSource's check keeps: its modified time moves exactly when
+# its next read would present a different set of rows. A shared cache keeps every row
+# any wrapper wrote, so a wrapper's next read presents the cache's rows and the live
+# rows together.
+
+
+def _shared_wrappers(delta_path: Path) -> tuple[CachedSource, CachedSource]:
+    """Two CachedSources over one Delta source, sharing one cache, both read once."""
+    origin = _delta(delta_path)
+    database = InMemoryArrowDatabase()
+    pair = (
+        CachedSource(origin, cache_database=database),
+        CachedSource(origin, cache_database=database),
+    )
+    for wrapper in pair:
+        _ = wrapper.as_table()
+    return pair
+
+
+def _moved(wrapper: CachedSource) -> bool:
+    """Check ``wrapper``; return whether the check said so AND its time really moved."""
+    before = wrapper.last_modified
+    found = wrapper.check_for_new_data()
+    assert found is (wrapper.last_modified != before)
+    return found
+
+
+@pytest.mark.parametrize("leader", [0, 1])
+def test_shared_cache_added_rows_move_both_wrappers(
+    delta_path: Path, leader: int
+) -> None:
+    wrappers = _shared_wrappers(delta_path)
+    first, second = wrappers[leader], wrappers[1 - leader]
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert _moved(first) is True
+    assert _keys(first) == [0, 1, 2, 3]  # writes the row to the shared cache
+    assert _moved(second) is True
+    assert _keys(second) == [0, 1, 2, 3]
+    assert _moved(first) is False
+    assert _moved(second) is False
+
+
+@pytest.mark.parametrize("leader", [0, 1])
+def test_shared_cache_rows_added_then_deleted_still_move_the_other_wrapper(
+    delta_path: Path, leader: int
+) -> None:
+    wrappers = _shared_wrappers(delta_path)
+    first, second = wrappers[leader], wrappers[1 - leader]
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert _moved(first) is True
+    assert _keys(first) == [0, 1, 2, 3]  # the shared cache now holds key 3
+    deltalake.DeltaTable(str(delta_path)).delete("k = 3")
+    assert _moved(second) is True  # its next read presents the cached key 3
+    assert _keys(second) == [0, 1, 2, 3]
+    assert _moved(first) is False  # it already presents key 3, which stays cached
+    assert _keys(first) == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("leader", [0, 1])
+def test_shared_cache_deleted_rows_move_neither_wrapper(
+    delta_path: Path, leader: int
+) -> None:
+    wrappers = _shared_wrappers(delta_path)
+    first, second = wrappers[leader], wrappers[1 - leader]
+    deltalake.DeltaTable(str(delta_path)).delete("k = 2")
+    assert _moved(first) is False  # the cache keeps every row it held
+    assert _moved(second) is False
+    assert _keys(first) == _keys(second) == [0, 1, 2]

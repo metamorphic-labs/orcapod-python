@@ -197,3 +197,10 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
 - Docs: Delta's check cost stated exactly; a `PollingSource` a run reads is polled again,
   and a failing poll raises (follow-up ITL-1139).
 - Declined: a summary for the direct side-effect run path (none exists on that path).
+
+## CodeRabbit round 4 (incremental review of 48ce9c05; approved by the coordinator)
+
+- `CachedSource` compares (live hashes | cached hashes) with the hashes it presents:
+  invariant "the modified time moves exactly when the next read would present a different
+  set of rows". Mirror tests: shared cache with add, add-then-delete, delete-only, from both
+  wrappers in both orders.

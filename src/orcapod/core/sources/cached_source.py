@@ -355,7 +355,7 @@ class CachedSource(RootSource):
 
     @override
     def check_for_new_data(self) -> bool:
-        """Check the wrapped source; move only if the cache would gain rows (ITL-1102).
+        """Check the wrapped source; move only if the next read shows new rows (ITL-1102).
 
         The wrapped source is checked first. When its modified time moved since the
         cache last took in its rows (by this check, or by a check made through another
@@ -369,6 +369,13 @@ class CachedSource(RootSource):
         modified time moves. A comparison that raises leaves everything as it was, so
         the next check compares again.
 
+        The invariant this keeps: the modified time moves exactly when the next read
+        would present a different set of rows. That read presents the rows cached
+        (every row any source sharing the cache wrote, including rows since deleted from
+        the wrapped source) and the live rows, so a row another source wrote to a shared
+        cache moves this source too, and a row deleted from the wrapped source moves
+        nothing.
+
         Returns:
             ``True`` if this source will present new rows at the next read.
         """
@@ -379,12 +386,13 @@ class CachedSource(RootSource):
         if seen == self._source_seen:
             return False
         live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
+        # The next read presents the cache's rows and the live rows together (the
+        # cache keeps every row any source sharing it wrote).
+        cached = self._cached_record_hashes()
         presented = (
-            self._presented_hashes
-            if self._presented_hashes is not None
-            else self._cached_record_hashes()
+            self._presented_hashes if self._presented_hashes is not None else cached
         )
-        gains = not {h for h in live if h is not None} <= presented
+        gains = not ({h for h in live if h is not None} | cached) <= presented
         self._source_seen = seen
         if not gains:
             return False
