@@ -33,6 +33,7 @@ from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
 from orcapod.databases.storage_utils import delta_to_pyarrow_dataset
 from orcapod.errors import StoreWriteError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.databases.utils import as_table_committing
 from orcapod.sources import DictSource
@@ -332,6 +333,52 @@ def test_a_node_cancelled_by_a_failure_commits_its_ephemeral_results(
     records = delta_rows_named(tmp_path / "store", "plus_one")
     assert records > 0, "the downstream node recorded nothing; the test proves nothing"
     assert delta_rows_named(tmp_path / "ephemeral", "plus_one") >= records
+
+
+class RaisingNodeEnd(NoOpObserver):
+    """An observer whose ``on_node_end`` raises for node ``dbl``."""
+
+    def on_node_end(self, node_label: str, node_hash: str) -> None:
+        """Raise for ``dbl``."""
+        if node_label == "dbl":
+            raise RuntimeError("observer failed")
+
+
+def test_a_failing_observer_does_not_skip_the_failed_nodes_commit(
+    tmp_path: Path,
+) -> None:
+    """An observer raising in ``on_node_end`` as a node fails still lets the node commit.
+
+    The node's failure under ``fail_fast`` ends it for the observer and then commits
+    its ephemeral results; the observer's own exception must not skip that commit, as
+    on the sync path, where it propagates to the handler that commits.
+    """
+    job = PipelineJob(name="batched", database=DeltaTableDatabase(tmp_path / "store"))
+    with job:
+        source = DictSource(
+            data=[{"k": i, "x": i} for i in range(CANCEL_ROWS)],
+            tag_columns=["k"],
+            source_id="src",
+        )
+        pod = FunctionPod.from_fn(
+            double_until_last,
+            output_keys="y",
+            pod_config=PodConfig(max_concurrency=1),
+        )
+        pod(source, label="dbl")
+    job.set_ephemeral_store(DeltaTableDatabase(tmp_path / "ephemeral"))
+    job.apply_node_config(NodeConfig(is_result_ephemeral=True))
+
+    with pytest.raises(RuntimeError, match="observer failed"):
+        job.run(
+            orchestrator=AsyncPipelineOrchestrator(error_policy="fail_fast"),
+            observer=RaisingNodeEnd(),
+            commit_every_rows=100,
+        )
+
+    records = delta_rows_named(tmp_path / "store", "double_until_last")
+    assert records == CANCEL_ROWS - 1
+    assert delta_rows_named(tmp_path / "ephemeral", "double_until_last") >= records
 
 
 class FailPipelineRecords:

@@ -3629,14 +3629,17 @@ class FunctionJobNode(FunctionNodeBase):
             self._commit_after_failure(cancelled)
             raise
         except Exception as run_error:
-            if node_started:
-                # The node ends for the observer before it raises, as in execute; a
-                # failing observer must not replace a store error on its way out.
-                with keep_store_error(
-                    store_error_of(run_error), "Observer on_node_end"
-                ):
-                    ctx_obs.on_node_end(node_label, node_hash)
-            self._commit_after_failure(run_error)
+            try:
+                if node_started:
+                    # The node ends for the observer before it raises, as in execute;
+                    # a failing observer must not replace a store error on its way out.
+                    with keep_store_error(
+                        store_error_of(run_error), "Observer on_node_end"
+                    ):
+                        ctx_obs.on_node_end(node_label, node_hash)
+            finally:
+                # Also when the observer raised instead, as execute commits then.
+                self._commit_after_failure(run_error)
             raise
         finally:
             await output.close()
