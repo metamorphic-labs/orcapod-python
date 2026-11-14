@@ -307,12 +307,13 @@ def normalize_table_to_large_types(
         name: large_string
         age: int64
     """
-    normalized_schema = normalize_schema_to_large_types(
-        table.schema, keep_null=keep_null
-    )
+    # ``table.schema`` makes a new Schema object on every access: read it once,
+    # so the identity check below can find an unchanged schema.
+    schema = table.schema
+    normalized_schema = normalize_schema_to_large_types(schema, keep_null=keep_null)
 
     # If schema didn't change, return original table
-    if normalized_schema is table.schema:
+    if normalized_schema is schema:
         return table
 
     # Use cast() for safety - should be zero-copy for large variant conversions

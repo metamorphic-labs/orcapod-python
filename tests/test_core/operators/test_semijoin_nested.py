@@ -8,8 +8,9 @@ on one side and ``large_string`` on the other ("Incompatible data types for
 corresponding join field keys"), e.g. a user's ``string`` table against a ``DictSource``.
 
 The result is the left input's rows that match a right row, in left order, with
-the left input's Arrow schema exactly (types, top-level and nested nullability,
-logical types). The sync and async paths yield the same rows.
+the left input's Arrow schema in its large variants (ITL-1122: ``string`` is
+``large_string``, ``list`` is ``large_list``; top-level and nested nullability and
+logical types exactly as they were). The sync and async paths yield the same rows.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.utils import arrow_utils
 from tests.test_core.operators.test_async_sync_equivalence import (
     STRUCT,
     Column,
@@ -146,7 +148,9 @@ def expected_rows(
 def assert_semijoin_result(
     left: StreamProtocol, right: StreamProtocol, expected: pa.Table
 ) -> None:
-    """The sync result equals ``expected`` exactly, and async yields the same rows."""
+    """The sync result equals ``expected`` in its large variants (ITL-1122), and async
+    yields the same rows."""
+    expected = arrow_utils.normalize_table_to_large_types(expected, keep_null=True)
     result = SemiJoin()(left, right)
     table = result.as_table(columns=ALL_COLUMNS)
     assert table.schema == expected.schema
@@ -258,8 +262,11 @@ def test_nested_non_nullable_fields_keep_their_flag() -> None:
         nullable=("s",),
     )
     result = SemiJoin()(left, scalar_right()).as_table(columns=ALL_COLUMNS)
-    assert result.schema.field("l").type == items
-    assert result.schema.field("s").type == pa.string()
+    # The large variants (ITL-1122); the item keeps its non-null flag.
+    assert result.schema.field("l").type == pa.large_list(
+        pa.field("item", pa.int8(), nullable=False)
+    )
+    assert result.schema.field("s").type == pa.large_string()
     assert result.schema.field("st").type == strict_struct
     assert result.column("k").to_pylist() == [2]
 

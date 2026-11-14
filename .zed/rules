@@ -769,6 +769,9 @@ data. The rules:
   operator that round-trips through Polars casts its columns back
   to the normalized input types (arrow_utils.restore_column_types, or
   restore_schema_nullability when nullability is restored too).
+  This holds for every operator, also one that passes its rows through unchanged (select,
+  map, a no-op filter, Join, SemiJoin), on a plain stream as inside a job (ITL-1122): one
+  place, core/operators/large_types.with_large_types, applied beside without_input_meta.
 - List columns built by Batch, GroupBy and MergeJoin are typed by
   arrow_utils.aggregated_list_type (directly or through build_aggregated_table):
   large_list<normalized T>, or for a logical T the logical list type from the type converter
@@ -864,7 +867,7 @@ data. The rules:
   nullability (`T` against `T | None`), because a null key matches nothing (developer,
   November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it
   `T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output is the left
-  input's schema as it is. The rule is `core/operators/key_nullability.py`
+  input's schema as it is (its nullability; types in their large variants, ITL-1122). The rule is `core/operators/key_nullability.py`
   (`reconcile_key_nullability` on tag schemas before they are combined, `key_nullable` for the
   Arrow field flag, set by re-wrapping arrays, never by a cast). Equal nullability takes the
   unchanged path; any other type difference, and every data column, behaves as before.

@@ -5,6 +5,7 @@ from abc import abstractmethod
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.large_types import with_large_types
 from orcapod.core.operators.meta_columns import (
     without_input_meta,
     without_meta_fields,
@@ -140,8 +141,11 @@ class UnaryOperator(StaticOutputOperatorPod):
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``unary_static_process`` with the single input stream."""
         stream = streams[0]
-        # No operator carries its input's Data meta columns (ITL-1080).
-        return without_input_meta(self.unary_static_process(stream), streams)
+        # No operator carries its input's Data meta columns (ITL-1080), and every
+        # output column takes its large variant (ITL-1122).
+        return with_large_types(
+            without_input_meta(self.unary_static_process(stream), streams)
+        )
 
     def output_schema(
         self,
@@ -240,9 +244,12 @@ class BinaryOperator(StaticOutputOperatorPod):
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Forward to ``binary_static_process`` with two input streams."""
         left_stream, right_stream = streams
-        # No operator carries its inputs' Data meta columns (ITL-1080).
-        return without_input_meta(
-            self.binary_static_process(left_stream, right_stream), streams
+        # No operator carries its inputs' Data meta columns (ITL-1080), and every
+        # output column takes its large variant (ITL-1122).
+        return with_large_types(
+            without_input_meta(
+                self.binary_static_process(left_stream, right_stream), streams
+            )
         )
 
     def output_schema(

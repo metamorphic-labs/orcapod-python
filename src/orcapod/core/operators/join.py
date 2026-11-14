@@ -3,6 +3,7 @@ import itertools
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.large_types import with_large_types
 from orcapod.core.operators.meta_columns import (
     WithoutMetaWriter,
     without_input_meta,
@@ -197,7 +198,8 @@ class Join(NonZeroInputOperator):
                 shared tag key has different Arrow types in two inputs.
         """
         if len(streams) == 1:
-            return without_input_meta(streams[0], streams)
+            # Every output column takes its large variant (ITL-1122).
+            return with_large_types(without_input_meta(streams[0], streams))
 
         # Canonically order streams by pipeline_hash for deterministic
         # system tag column names regardless of input order (Join is commutative)
@@ -294,9 +296,14 @@ class Join(NonZeroInputOperator):
             + data_order
             + [col for col in table.column_names if col not in listed]
         )
-        return ArrowTableStream(
-            result_table,
-            tag_columns=tuple(tag_order),
+        # Every output column takes its large variant (ITL-1122): a column of an
+        # input with a non-large type, and a shared key whose inputs differ only in
+        # layout, never keep the type of whichever input came first.
+        return with_large_types(
+            ArrowTableStream(
+                result_table,
+                tag_columns=tuple(tag_order),
+            )
         )
 
     @staticmethod
