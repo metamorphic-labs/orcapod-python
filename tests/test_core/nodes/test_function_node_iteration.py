@@ -59,14 +59,17 @@ class TestIterDatasReadOnly:
             list(node.iter_data())
             mock_proc.assert_not_called()
 
-    def test_iter_after_db_populated_hot_loads_without_compute(self):
-        """iter_data() on a node with DB records hot-loads without _process_data_internal."""
+    def test_iter_after_db_populated_yields_nothing_until_a_run_loads(self):
+        """A node over a populated DB yields nothing before a run (ITL-1095); its run
+        loads every result from the DB without _process_data_internal."""
         db = InMemoryArrowDatabase()
         node1 = _make_node(n=3, db=db)
         node1.run()  # populate DB
 
         node2 = _make_node(n=3, db=db)
+        assert list(node2.iter_data()) == []
         with patch.object(node2, "_process_data_internal") as mock_proc:
+            node2.run()
             results = list(node2.iter_data())
             mock_proc.assert_not_called()
         assert len(results) == 3

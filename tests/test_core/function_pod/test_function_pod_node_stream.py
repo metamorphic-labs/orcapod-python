@@ -169,7 +169,8 @@ class TestFunctionNodeInactive:
     ):
         """
         Cache filled by node1 (active) is shared with node2 (inactive).
-        node2.as_table() must return full results from Phase 1 (DB).
+        node2's run serves the full results from Phase 1 (DB); a node shows its rows
+        only after a run (ITL-1095).
         """
         n = 3
         db = InMemoryArrowDatabase()
@@ -181,6 +182,7 @@ class TestFunctionNodeInactive:
         double_pf.set_active(False)
 
         node2 = _make_node(double_pf, n=n, db=db)
+        node2.run()
         table2 = node2.as_table()
 
         assert isinstance(table2, pa.Table)
@@ -201,6 +203,7 @@ class TestFunctionNodeInactive:
 
         double_pf.set_active(False)
         node2 = _make_node(double_pf, n=n, db=db)
+        node2.run()  # a node shows its rows only after a run (ITL-1095)
         data = list(node2.iter_data())
         assert len(data) == n
 
@@ -266,7 +269,9 @@ class TestIterDatasDbPhase:
         n = 5
         db = InMemoryArrowDatabase()
         _fill_node(_make_node(double_pf, n=n, db=db))
-        data = list(_make_node(double_pf, n=n, db=db).iter_data())
+        node2 = _make_node(double_pf, n=n, db=db)
+        node2.run()  # a node shows its rows only after a run (ITL-1095)
+        data = list(node2.iter_data())
         assert len(data) == n
 
     def test_fresh_db_always_computes(self, double_pf):
@@ -373,9 +378,11 @@ class TestIterDatasMissingEntriesOnly:
 class TestFunctionNodeStaleness:
     # --- is_stale ---
 
-    def test_is_stale_false_immediately_after_creation(self, double_pf):
-        """A freshly created FunctionNode whose upstream has not changed is not stale."""
+    def test_is_stale_immediately_after_creation(self, double_pf):
+        """A freshly created job node holds no run, so it is stale (ITL-1095)."""
         node = _make_node(double_pf, n=3)
+        assert node.is_stale
+        node.run()
         assert not node.is_stale
 
     def test_is_stale_true_after_upstream_modified(self, double_pf):
@@ -395,7 +402,7 @@ class TestFunctionNodeStaleness:
 
         assert node.is_stale
 
-    def test_is_stale_false_after_clear_cache(self, double_pf):
+    def test_is_stale_after_clear_cache_until_it_runs(self, double_pf):
         import time
 
         db = InMemoryArrowDatabase()
@@ -405,13 +412,16 @@ class TestFunctionNodeStaleness:
             input_stream=input_stream,
             pipeline_database=db,
         )
-        list(node.iter_data())
+        node.run()
 
         time.sleep(0.01)
         input_stream._update_modified_time()
         assert node.is_stale
 
+        # A cleared node holds no run: it stays stale until it runs (ITL-1095).
         node.clear_cache()
+        assert node.is_stale
+        node.run()
         assert not node.is_stale
 
     # --- clear_cache ---
@@ -431,6 +441,9 @@ class TestFunctionNodeStaleness:
         table_before = node.as_table()
 
         node.clear_cache()
+        # A cleared node reads empty until it runs again (ITL-1095).
+        assert node.as_table().num_rows == 0
+        node.run()
         table_after = node.as_table()
 
         assert sorted(table_before.column("result").to_pylist()) == sorted(
@@ -449,12 +462,17 @@ class TestFunctionNodeStaleness:
             input_stream=input_stream,
             pipeline_database=db,
         )
+        node.run()
         first = list(node.iter_data())
+        assert len(first) == 3
 
         time.sleep(0.01)
         input_stream._update_modified_time()
         assert node.is_stale
 
+        # A stale node reads empty (ITL-1095); its run reads the stored results again.
+        assert list(node.iter_data()) == []
+        node.run()
         second = list(node.iter_data())
         assert len(second) == len(first)
         assert [p["result"] for _, p in second] == [p["result"] for _, p in first]
@@ -476,6 +494,9 @@ class TestFunctionNodeStaleness:
         time.sleep(0.01)
         input_stream._update_modified_time()
 
+        # A stale node reads empty (ITL-1095); its run reads the stored results again.
+        assert node.as_table().num_rows == 0
+        node.run()
         table_after = node.as_table()
         assert len(table_after) == 3
         assert sorted(table_after.column("result").to_pylist()) == sorted(
