@@ -65,6 +65,12 @@ def double(y: int) -> int:
     return 2 * y
 
 
+@function_pod(output_keys="w")
+def triple(y: int) -> int:
+    """Return three times ``y``."""
+    return 3 * y
+
+
 @side_effect_function_pod(output_keys="y")
 def check_with_ctx(x: int, ctx: InvocationContext) -> int:
     """Return ``x``; raise for a negative ``x`` (a pod that takes the invocation context)."""
@@ -355,7 +361,7 @@ def test_nothing_left_running_after_fail_fast(
     with job:
         out = checked.pod(source_of(xs_failing_at(2)), label="f")
         double.pod(out, label="down")
-        double.pod(out, label="down2")  # fan-out: a broadcast channel
+        triple.pod(out, label="down2")  # fan-out: a broadcast channel
 
     async def main() -> set[asyncio.Task[Any]]:
         async with asyncio.timeout(RUN_TIMEOUT_SECONDS):
@@ -379,7 +385,9 @@ def test_nothing_left_running_after_fail_fast(
 
 
 @pytest.mark.parametrize("policy", ["continue", "fail_fast"])
-def test_side_effect_raise_is_the_delivery_error(orchestrator: str, policy: str) -> None:
+def test_side_effect_raise_is_the_delivery_error(
+    orchestrator: str, policy: str
+) -> None:
     """``on_error="raise"``: the run raises the delivery's own error, never a group."""
     job = side_effect_job(InMemoryArrowDatabase(), xs_failing_at(2), "raise")
 
@@ -428,7 +436,9 @@ def test_single_failure_takes_the_earliest_node_and_notes_the_others() -> None:
         up_error = ValueError("up failed")
         down_error = KeyError("down failed")
         failed_nodes = {id(up_error): "up", id(down_error): "down"}
-        leaves = [up_error, down_error] if order == "up_first" else [down_error, up_error]
+        leaves = (
+            [up_error, down_error] if order == "up_first" else [down_error, up_error]
+        )
         group = ExceptionGroup("run", [ExceptionGroup("node", leaves)])
 
         chosen = _single_failure(group, topo_order, failed_nodes)
