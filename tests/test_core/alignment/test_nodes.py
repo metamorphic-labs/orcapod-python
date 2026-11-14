@@ -13,7 +13,9 @@ that fails. ``head(100, cfg)`` takes every configuration, sorting included, and 
 the first rows of ``as_table(cfg)`` (ITL-1053).
 
 Readback: the stored rows read by a second run (rows from the store, not computed) and by
-a job loaded with ``PipelineJob.load``, after writes in input order and in forced orders.
+a job loaded with ``PipelineJob.load`` (sources bound, then ``run(load_only=True)``, which
+fills its nodes from the store: ITL-1095), after writes in input order and in forced
+orders.
 
 No case is marked: the defects these paths showed (ITL-1029, ITL-1043, ITL-1050,
 ITL-1060) are fixed, and each fixed case runs as an ordinary test.
@@ -268,6 +270,11 @@ def read_back(
         loaded.nodes["joined"].attach_databases(
             pipeline_database=run.store.at(JOB_NAME), cache_mode=CacheMode.REPLAY
         )
+        # A loaded job is empty until a load-only run fills its nodes from the store
+        # (ITL-1095); the in-memory sources are not saved, so they are bound first.
+        loaded.bind(sources={"A": run.sources.a, "B": run.sources.b})
+        summary = loaded.run(load_only=True)
+        assert summary.nodes["scaled"].not_stored == 0, "a stored row was not loaded"
         return loaded
     job, _ = build_job(scenario, input_order, run.store)
     summary = run_job(job, "sync" if how == "rerun_sync" else "async_run")
@@ -313,8 +320,8 @@ def readbacks(
 def readback_params() -> list[Any]:
     """Every readback and view.
 
-    A loaded job leaves out ``grouped``: its operator stores nothing, so a loaded job has
-    nothing to read for it, by design.
+    A loaded job's ``grouped`` has rows too: a load-only run runs the rebuilt ``GroupBy``
+    over the rows ``scaled`` loaded (ITL-1095).
     """
     params = []
     for scenario in SCENARIOS:
@@ -324,8 +331,6 @@ def readback_params() -> list[Any]:
                     for how in READS:
                         key = (scenario, input_order, store_kind, write, how)
                         for view in VIEWS:
-                            if how == "load" and view.node == "grouped":
-                                continue
                             params.append(
                                 pytest.param(
                                     key, view, id=f"{'-'.join(key)}-{view.name}"
