@@ -80,19 +80,26 @@ _SCRIPT = textwrap.dedent(
         return s1, s2
 
 
+    def rows(table):
+        # The table's rows as sorted JSON text, so row order does not matter.
+        return sorted(json.dumps(row, sort_keys=True, default=str) for row in table.to_pylist())
+
+
     def describe(job):
         out = {}
         for label, node in sorted(job.nodes.items()):
-            table = node.as_table(all_info=True)
+            # The schema with every column group: the system-tag names are compared.
+            schema = node.as_table(all_info=True).schema
             # A source node stores nothing; a function or operator node has a stored view.
             stored_view = getattr(node, "as_source", None)
-            stored = None if stored_view is None else stored_view().as_table(all_info=True)
             out[label] = {
                 "pipeline_hash": node.pipeline_hash().to_string(),
                 "content_hash": node.content_hash().to_string(),
-                "schema": [f"{field.name}: {field.type}" for field in table.schema],
-                "rows": table.num_rows,
-                "stored_rows": None if stored is None else stored.num_rows,
+                "schema": [f"{field.name}: {field.type}" for field in schema],
+                # Values of the user columns: a load-only run's status and execution
+                # columns differ from the saving run's by design.
+                "rows": rows(node.as_table()),
+                "stored_rows": None if stored_view is None else rows(stored_view().as_table()),
             }
         return out
 
@@ -136,6 +143,14 @@ _SCRIPT = textwrap.dedent(
                 json.dump(data, f)
         # Nothing registers the class before the load.
         job = PipelineJob.load(work + "/job.json")
+        # The source slots' hashes while unbound, before the class is imported.
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        unbound_slots = {
+            label: [node.pipeline_hash().to_string(), node.content_hash().to_string()]
+            for label, node in job.nodes.items()
+            if isinstance(node, SourceJobNode)
+        }
         import classes
 
         bound_class = sys.argv[5] if len(sys.argv) > 5 else class_name
@@ -148,6 +163,7 @@ _SCRIPT = textwrap.dedent(
         job.run(load_only=True)
         out = describe(job)
         out["_reused"] = {label: n.reused for label, n in job.last_run.nodes.items()}
+        out["_unbound_slots"] = unbound_slots
         print(json.dumps(out))
     """
 )
@@ -185,6 +201,19 @@ def test_a_job_loaded_before_its_class_is_registered_reads_like_the_saved_job(
     loaded = _run(tmp_path, "load", str(tmp_path / "work"), class_name)
     assert "bind_error" not in loaded, loaded.get("bind_error")
     assert loaded.pop("_reused") == {"add": 2, "read_u": 2}
+    # Each source slot has its saved hashes as soon as it is loaded, before any bind:
+    # the saving run's pipeline hash, and the content hash the job file records for
+    # the slot (a bound slot's content hash is its source's, compared below).
+    job_file = json.loads((tmp_path / "work" / "job.json").read_text())
+    file_content_hashes = {
+        descriptor["label"]: descriptor["content_hash"]
+        for descriptor in job_file["pipeline"]["nodes"].values()
+        if descriptor["node_type"] == "source"
+    }
+    assert loaded.pop("_unbound_slots") == {
+        label: [saved[label]["pipeline_hash"], file_content_hashes[label]]
+        for label in ("s1", "s2")
+    }
     assert loaded == saved
 
 
@@ -209,4 +238,5 @@ def test_a_file_without_the_slots_saved_hashes_loads_and_binds(
     loaded = _run(tmp_path, "load_old_file", str(tmp_path / "work"), "Exact")
     assert "bind_error" not in loaded, loaded.get("bind_error")
     assert loaded.pop("_reused") == {"add": 2, "read_u": 2}
+    _ = loaded.pop("_unbound_slots")  # no saved hashes: recomputed once bound
     assert loaded == saved
