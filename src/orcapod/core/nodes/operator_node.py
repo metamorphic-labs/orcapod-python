@@ -79,6 +79,16 @@ else:
     pc = LazyModule("pyarrow.compute")
 
 
+async def _discard(channel: ReadableChannel[Any]) -> None:
+    """Read ``channel`` to its end, keeping nothing.
+
+    Args:
+        channel: The channel to drain.
+    """
+    async for _ in channel:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # OperatorNodeBase — shared base (no DB)
 # ---------------------------------------------------------------------------
@@ -1659,7 +1669,8 @@ class OperatorJobNode(OperatorNodeBase):
         Without a database, or with one in OFF mode, nothing is stored.
 
         With a database:
-            - REPLAY: emit from DB, close output.
+            - REPLAY: emit from DB while reading and discarding every input, so
+              the upstream nodes run as with the sync orchestrator; close output.
             - OFF: delegate to operator, forward and keep results.
             - LOG: delegate to operator, forward and keep results, then store
               them in the DB.
@@ -1687,10 +1698,20 @@ class OperatorJobNode(OperatorNodeBase):
                 self._pipeline_database is not None
                 and self._cache_mode == CacheMode.REPLAY
             ):
-                self._replay_from_cache()
-                assert self._cached_output_stream is not None
-                for tag, data in self._cached_output_stream.iter_data():
-                    await output.send((tag, data))
+                # Read and discard every input while the stored rows are sent: the
+                # upstream nodes run over every row, as with the sync orchestrator,
+                # and an input no one reads blocks its producer, and the run, once
+                # its channel is full (ITL-1075).
+                discards = [asyncio.create_task(_discard(ch)) for ch in inputs]
+                try:
+                    self._replay_from_cache()
+                    assert self._cached_output_stream is not None
+                    for tag, data in self._cached_output_stream.iter_data():
+                        await output.send((tag, data))
+                    await asyncio.gather(*discards)
+                finally:
+                    for discard in discards:
+                        discard.cancel()
                 ctx_obs.on_node_end(node_label, node_hash)
                 return  # finally block closes output
 

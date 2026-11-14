@@ -1,7 +1,10 @@
-from collections.abc import Sequence
+import asyncio
+import contextlib
+from collections import deque
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.streams import ArrowTableStream
@@ -174,9 +177,16 @@ class SemiJoin(BinaryOperator):
         """Build-probe: collect right input, then stream left through a hash lookup.
 
         Phase 1 — Build: collect all rows from the right (filter) channel and
-        index them by the common-key values.
-        Phase 2 — Probe: stream left rows one at a time; for each row whose
-        common-key values appear in the right-side index, emit immediately.
+        index them by the common-key values. The left channel is read at the
+        same time (ITL-1075): the left rows that arrive before the right input
+        ends are kept, at most the whole left input, as the sync path and
+        ``MergeJoin``'s barrier path hold their inputs. Reading the left input
+        only after the right one ended deadlocked a run in which one node fed
+        both inputs.
+        Phase 2 — Probe: the kept left rows, then the rest of the left input
+        one at a time with backpressure; for each row whose common-key values
+        appear in the right-side index, emit immediately. Left rows keep their
+        arrival order.
 
         Falls back to barrier mode when the right input is empty (schema
         cannot be inferred from data) or when there are no common keys.
@@ -194,10 +204,10 @@ class SemiJoin(BinaryOperator):
                 input's pipeline hash.
         """
         try:
-            left_ch, right_ch = inputs[0], inputs[1]
-
-            # Phase 1: Build right-side lookup
-            right_rows = await right_ch.collect()
+            # Phase 1: Build right-side lookup, reading the left input meanwhile
+            right_rows, left_rows = await _collect_right_reading_left(
+                inputs[0], inputs[1]
+            )
 
             if not right_rows:
                 # Empty right: determine common keys from the validated
@@ -206,10 +216,11 @@ class SemiJoin(BinaryOperator):
                 common = self._common_keys_from_schema()
                 if common:
                     # Drain left channel (discard) — result is empty
-                    await left_ch.collect()
+                    async for _ in left_rows:
+                        pass
                     return
                 # No common keys — pass all left rows through unchanged
-                async for tag, data in left_ch:
+                async for tag, data in left_rows:
                     await output.send((tag, data))
                 return
 
@@ -222,7 +233,7 @@ class SemiJoin(BinaryOperator):
             common_keys: tuple[str, ...] | None = None
             right_lookup: set[tuple[object, ...]] = set()
 
-            async for tag, data in left_ch:
+            async for tag, data in left_rows:
                 if common_keys is None:
                     # First left row — determine common keys and build index
                     left_tag_keys = set(tag.keys())
@@ -233,7 +244,7 @@ class SemiJoin(BinaryOperator):
                     if not common_keys:
                         # No common keys — pass all left rows through
                         await output.send((tag, data))
-                        async for t, p in left_ch:
+                        async for t, p in left_rows:
                             await output.send((t, p))
                         return
 
@@ -305,3 +316,54 @@ class SemiJoin(BinaryOperator):
 
     def identity_structure(self) -> Any:
         return self.__class__.__name__
+
+
+async def _collect_right_reading_left(
+    left: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+    right: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+) -> tuple[
+    list[tuple[TagProtocol, DataProtocol]],
+    AsyncIterator[tuple[TagProtocol, DataProtocol]],
+]:
+    """Collect ``right`` while reading ``left``, so neither input stops being read.
+
+    A task collects ``right``; meanwhile the rows of ``left`` are read and kept, until
+    ``right`` ends or ``left`` does. A semi-join that waited for its right input before
+    reading its left one blocked a node feeding both inputs: the channel into the left
+    input filled, that node could not finish its right-side rows, and the run waited
+    forever (ITL-1075).
+
+    Args:
+        left: The left input channel.
+        right: The right input channel.
+
+    Returns:
+        The rows of ``right``, and an iterator over every row of ``left`` in arrival
+        order: the rows kept while ``right`` was collected, then the rest of ``left``
+        as it arrives.
+    """
+    right_task = asyncio.create_task(right.collect())
+    kept: deque[tuple[TagProtocol, DataProtocol]] = deque()
+    left_ended = False
+    try:
+        while not right_task.done():
+            try:
+                kept.append(await left.receive())
+            except ChannelClosed:
+                left_ended = True
+                break
+        right_rows = await right_task
+    finally:
+        if not right_task.done():
+            right_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await right_task
+
+    async def left_rows() -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
+        while kept:
+            yield kept.popleft()
+        if not left_ended:
+            async for row in left:
+                yield row
+
+    return right_rows, left_rows()
