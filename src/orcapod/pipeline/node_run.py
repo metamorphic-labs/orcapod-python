@@ -270,4 +270,5 @@ def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
         run_node_summaries(graph, counter, held=plan.held_counts),
         load_only=load_only,
         target=target.label,
+        ran_nothing=not plan.to_run,
     )

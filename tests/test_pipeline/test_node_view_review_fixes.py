@@ -143,3 +143,84 @@ def test_an_operator_run_whose_lazy_output_raises_holds_no_run(
     assert node.as_table().num_rows == 0
     _FAIL["on"] = False
     assert node.run().as_table().num_rows == 2
+
+
+# ---------------------------------------------------------------------------
+# Comment 4: the summary says "nothing to do" only when the run ran nothing
+# ---------------------------------------------------------------------------
+
+_DELIVERED: list[int] = []
+_NOTHING_TO_DO = "nothing to do; every node holds a current run"
+
+
+def _deliver(y: int, ctx: Any) -> None:
+    """A side effect: record the delivered value."""
+    _DELIVERED.append(y)
+
+
+def _job_below_rowwise(below: str) -> PipelineJob:
+    """``rowwise`` (``inc``) with a side-effect node or an operator node ``below`` it."""
+    from orcapod.side_effects import tap_pod
+
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        rows = inc.pod(_source(), label="rowwise")
+        if below == "side_effect":
+            tap_pod(_deliver).process(rows, label="below")
+        else:
+            rows.select_data_columns(["y"], label="below")
+    return job
+
+
+def _run_job_or_node(job: PipelineJob, how: str) -> Any:
+    """Run ``job`` on an orchestrator, or run its node ``below``; return the summary."""
+    if how == "node.run":
+        job.nodes["below"].run()
+        return job.nodes["below"].last_run
+    return job.run(orchestrator=ORCHESTRATORS[how]())
+
+
+@pytest.mark.parametrize("how", ["sync", "async", "node.run"])
+@pytest.mark.parametrize("below", ["side_effect", "operator"])
+def test_a_run_that_ran_a_cleared_node_is_not_nothing_to_do(
+    below: str, how: str
+) -> None:
+    """A node cleared below a held function node runs again (a side effect delivers);
+    the summary says what ran, not that there was nothing to do."""
+    _DELIVERED.clear()
+    job = _job_below_rowwise(below)
+    _run_job_or_node(job, how)
+    job.nodes["below"].clear_cache()
+    _DELIVERED.clear()
+    summary = _run_job_or_node(job, how)
+    if below == "side_effect":
+        assert len(_DELIVERED) == 3
+    assert job.nodes["below"].holds_current_run(load_only=False)
+    assert summary.nodes["rowwise"].held == 3
+    assert _NOTHING_TO_DO not in repr(summary)
+    assert repr(summary).splitlines()[0].endswith("all rows succeeded.")
+
+
+# A node.run() of a node that holds a current run returns at once and makes no summary
+# (node.last_run stays the previous one), so "nothing ran" is a job run's case.
+@pytest.mark.parametrize("how", ["sync", "async"])
+@pytest.mark.parametrize("below", ["side_effect", "operator"])
+def test_a_run_that_ran_nothing_is_nothing_to_do(below: str, how: str) -> None:
+    """A second run of an unchanged job runs nothing and says so."""
+    job = _job_below_rowwise(below)
+    _run_job_or_node(job, how)
+    summary = _run_job_or_node(job, how)
+    assert _NOTHING_TO_DO in repr(summary).splitlines()[0]
+
+
+@pytest.mark.parametrize("how", ["sync", "async", "node.run"])
+def test_a_job_with_no_function_node_says_what_ran(how: str) -> None:
+    """Only an operator: the first run succeeds; a second job run has nothing to do."""
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _source().select_data_columns(["x"], label="below")
+    first = _run_job_or_node(job, how)
+    assert repr(first).splitlines()[0].endswith("all rows succeeded.")
+    if how != "node.run":  # a held node.run() makes no summary (see above)
+        second = _run_job_or_node(job, how)
+        assert _NOTHING_TO_DO in repr(second).splitlines()[0]
