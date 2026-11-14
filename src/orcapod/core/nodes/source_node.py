@@ -591,6 +591,20 @@ class SourceJobNode(SourceNodeBase):
     # bound_source property — explicit binding with cache invalidation
     # ------------------------------------------------------------------
 
+    def run(self, *, load_only: bool = False) -> StreamView:
+        """Read the bound source's rows and return a ``StreamView`` of all of them.
+
+        A source is read, never computed, so ``load_only`` changes nothing; a job
+        node's ``run()`` takes it (ITL-1095).
+
+        Args:
+            load_only: Accepted for every job node; a source reads its rows either way.
+
+        Raises:
+            UnboundSourceError: When no concrete source is bound.
+        """
+        return super().run()
+
     @property
     def bound_source(self) -> StreamProtocol | None:
         """The concrete stream currently bound to this slot, or ``None``."""

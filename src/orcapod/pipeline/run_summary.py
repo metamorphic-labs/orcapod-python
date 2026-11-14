@@ -18,7 +18,8 @@ from orcapod.core.result_cache import ResultCache
 from orcapod.pipeline.observer import NoOpLogger
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
+    from types import FrameType
 
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.types import SchemaLike
@@ -70,6 +71,8 @@ class RunSummary:
         nodes: Per function node, in run order, keyed by label.
         load_only: Whether the run was a load-only run (``job.run(load_only=True)``):
             it computed nothing; ``reused`` counts the rows it loaded.
+        target: For the run of one node and the nodes it depends on
+            (``node.run()``), that node's label; ``None`` for a job run.
     """
 
     def __init__(
@@ -78,6 +81,7 @@ class RunSummary:
         nodes: Sequence[NodeRunSummary],
         *,
         load_only: bool = False,
+        target: str | None = None,
     ) -> None:
         """Build the summary.
 
@@ -85,10 +89,12 @@ class RunSummary:
             job_name: The job's name.
             nodes: One entry per function node of the run, in run order.
             load_only: Whether the run loaded stored results only.
+            target: The label of the node whose ``run()`` this was, if any.
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
         self.load_only: bool = load_only
+        self.target: str | None = target
 
     @property
     def failed_rows(self) -> int:
@@ -109,7 +115,7 @@ class RunSummary:
         return " ".join(
             f"{node.failed} of {_rows(node.rows)} failed in node {node.label!r} "
             f"(first error: {_error_line(node.first_error)}). "
-            f"Full traceback: {_traceback_call(node.label)}."
+            f"Full traceback: {_traceback_call(node.label, self.target)}."
             for node in self.nodes.values()
             if node.failed
         )
@@ -137,7 +143,12 @@ class RunSummary:
         print(f"No rows failed{where} in this run.")
 
     def _headline(self) -> str:
-        """The first line: the job and whether any row failed."""
+        """The first line: the job (or node) and whether any row failed."""
+        subject = (
+            f"job {self.job_name!r}"
+            if self.target is None
+            else f"node {self.target!r} and the nodes it depends on"
+        )
         if self.load_only:
             skipped = sum(node.not_stored for node in self.nodes.values())
             outcome = (
@@ -145,12 +156,12 @@ class RunSummary:
                 if skipped
                 else "every input had a stored result."
             )
-            return f"Load-only run of job {self.job_name!r}: {outcome}"
+            return f"Load-only run of {subject}: {outcome}"
         if self.failed_rows:
             outcome = f"{_rows(self.failed_rows)} failed."
         else:
             outcome = "all rows succeeded."
-        return f"Run of job {self.job_name!r}: {outcome}"
+        return f"Run of {subject}: {outcome}"
 
     def __repr__(self) -> str:
         """The summary as text: one line per node, and the first error of a failing one."""
@@ -161,7 +172,9 @@ class RunSummary:
             )
             if node.failed:
                 lines.append(f"    first error: {_error_line(node.first_error)}")
-                lines.append(f"    Full traceback: {_traceback_call(node.label)}")
+                lines.append(
+                    f"    Full traceback: {_traceback_call(node.label, self.target)}"
+                )
         return "\n".join(lines)
 
     def _repr_html_(self) -> str:
@@ -188,7 +201,7 @@ class RunSummary:
             if node.failed:
                 error = (
                     f"{html.escape(_error_line(node.first_error))}<br>"
-                    f"<code>{html.escape(_traceback_call(node.label))}</code>"
+                    f"<code>{html.escape(_traceback_call(node.label, self.target))}</code>"
                 )
             body.append(
                 "<tr>"
@@ -255,12 +268,41 @@ def _error_line(error: BaseException | None) -> str:
     return f"{type(error).__name__}: {first}" if first else type(error).__name__
 
 
-def _traceback_call(label: str) -> str:
+def _traceback_call(label: str, target: str | None = None) -> str:
     """The call that prints a node's traceback, with the label as a valid string literal.
 
-    A JSON string is a valid Python string literal, and keeps double quotes.
+    A JSON string is a valid Python string literal, and keeps double quotes. A node
+    run's summary is kept on its node (``target``), a job run's on the job.
     """
-    return f"job.last_run.print_traceback({json.dumps(label)})"
+    owner = "job" if target is None else f"job.nodes[{json.dumps(target)}]"
+    return f"{owner}.last_run.print_traceback({json.dumps(label)})"
+
+
+def warn_row_failures(summary: RunSummary, caller: FrameType) -> None:
+    """Issue the run's ``RowFailuresWarning``, shown after every run with failed rows.
+
+    Python's default filter shows a warning once per text and line, so a second identical
+    failing run from the same line (re-running a notebook cell) would show nothing. A
+    fresh registry for each run keeps every run's warning, while the user's filters
+    (``ignore``, ``error``) still apply.
+
+    Args:
+        summary: The run's summary, with failed rows.
+        caller: The frame that called ``run``; the warning is shown at its line.
+    """
+    import warnings
+
+    from orcapod.errors import RowFailuresWarning
+
+    warnings.warn_explicit(
+        summary.failures_message(),
+        RowFailuresWarning,
+        caller.f_code.co_filename,
+        caller.f_lineno,
+        module=caller.f_globals.get("__name__"),
+        registry=None,
+        module_globals=caller.f_globals,
+    )
 
 
 class RunCountingObserver:
@@ -351,7 +393,9 @@ class RunCountingObserver:
         return _NOOP_LOGGER
 
 
-def run_node_summaries(dag: Any, counter: RunCountingObserver) -> list[NodeRunSummary]:
+def run_node_summaries(
+    dag: Any, counter: RunCountingObserver, skip: Collection[Any] = ()
+) -> list[NodeRunSummary]:
     """One summary per function node of a finished run, in run order.
 
     The counts come from ``counter``; a load-only run's skipped inputs come from each
@@ -361,6 +405,9 @@ def run_node_summaries(dag: Any, counter: RunCountingObserver) -> list[NodeRunSu
     Args:
         dag: The run's node graph (``topological_sort``, ``predecessors``).
         counter: The observer that counted the run's rows.
+        skip: Nodes of ``dag`` the run did not run (their rows were held): they get no
+            summary, but inputs they skipped in an earlier load-only run still make the
+            nodes below them incomplete.
 
     Returns:
         The summaries of the run's function nodes, in run order.
@@ -383,6 +430,8 @@ def run_node_summaries(dag: Any, counter: RunCountingObserver) -> list[NodeRunSu
             if getattr(upstream, "last_run_not_stored", 0):
                 above.add(id(upstream))
         skipping_above[id(node)] = above
+        if any(node is skipped for skipped in skip):
+            continue
         if not (is_function_node(node) or is_side_effect_function_node(node)):
             continue
         labels = tuple(

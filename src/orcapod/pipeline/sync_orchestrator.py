@@ -23,6 +23,8 @@ from orcapod.protocols.node_protocols import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -56,6 +58,7 @@ class SyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Execute the node graph synchronously.
 
@@ -74,6 +77,10 @@ class SyncPipelineOrchestrator:
                 (ITL-1095): function nodes load their inputs' stored results and skip
                 the others, operators run without storing, and a side-effect node
                 passes its rows on without being called (nothing is delivered).
+            held_rows: Nodes of ``graph`` that are not run: each one's rows (the rows
+                of its current run, or of a stream outside the job) feed its
+                successors as if it had just run. Used by ``node.run()``, which runs
+                only the nodes it depends on that hold no current run (ITL-1095).
 
         Returns:
             OrchestratorResult with node outputs.
@@ -91,9 +98,12 @@ class SyncPipelineOrchestrator:
             buffers: dict[Any, list[tuple[TagProtocol, DataProtocol]]] = {}
             processed: set[Any] = set()
 
+            held = held_rows if held_rows is not None else {}
             for node in topo_order:
                 current = node
-                if is_source_node(node):
+                if node in held:
+                    buffers[node] = list(held[node])
+                elif is_source_node(node):
                     buffers[node] = node.execute(observer=effective_observer)
                 elif is_function_node(node) or is_side_effect_function_node(node):
                     upstream_buf = self._gather_upstream(node, graph, buffers)

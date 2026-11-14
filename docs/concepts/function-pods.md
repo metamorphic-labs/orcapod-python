@@ -345,7 +345,8 @@ result is read from the store and nothing is computed. A run that raised defines
 and so does `clear_cache()`; a node whose input changed since its run (an upstream node ran
 again, or a source was bound again) is stale and empty until it runs again. The stored view,
 `node.as_source()`, reads every record stored under the node's key, whether or not the node
-has run.
+has run: the node's stored history, which keeps an entry's earlier result next to its
+recomputed one, where a run loads only the latest.
 
 `InMemoryArrowDatabase` lasts only as long as the Python process. Use
 `DeltaTableDatabase("some/directory")` from `orcapod.databases` to keep results on disk

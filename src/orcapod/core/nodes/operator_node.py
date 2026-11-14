@@ -17,6 +17,7 @@ directly from ``OperatorNodeBase``, neither from the other.
 from __future__ import annotations
 
 import asyncio
+import sys
 import logging
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
@@ -761,6 +762,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         super().clear_cache()  # clears _node_identity_path_cache + _update_modified_time
         self._cached_output_stream = None
         self._cached_output_table = None
+        self._run_load_only = False
         # No content established: the node, and every node downstream, is stale.
         self._set_modified_time(None)
 
@@ -1350,6 +1352,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         ctx_obs.on_node_start(node_label, node_hash)
 
+        self._run_load_only = load_only
         # Check REPLAY cache first
         cached_output = self.get_cached_output()
         if cached_output is not None:
@@ -1385,13 +1388,17 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         ctx_obs.on_node_end(node_label, node_hash)
         return output
 
-    def _compute_and_store(self) -> None:
-        """Compute operator output, optionally store in DB."""
+    def _compute_and_store(self, *, store: bool = True) -> None:
+        """Compute operator output, optionally store in DB.
+
+        Args:
+            store: Whether a ``LOG`` node stores the output (not in a load-only run).
+        """
         self._cached_output_stream = self._operator.process(
             *self._input_streams,
         )
 
-        if self._cache_mode == CacheMode.OFF:
+        if self._cache_mode == CacheMode.OFF or not store:
             self._update_modified_time()
             return
 
@@ -1432,12 +1439,15 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         )
         self._update_modified_time()
 
-    def run(self) -> StreamView:
-        """Execute the operator according to the current cache mode, and return a
-        ``StreamView`` of the node's rows.
+    def run(self, *, load_only: bool = False) -> StreamView:
+        """Run the node as a job run would, and return a ``StreamView`` of its rows.
 
-        Computes as a job run computes this node, unlike ``as_table()``, which only
-        reads.
+        State-driven (developer, November 13, 2026; ITL-1095): a node that holds the
+        output of a completed run and is not stale is not run again; the view shows it.
+        Otherwise the node runs, after every job node it depends on that holds no
+        current run (each once, in dependency order, as ``job.run()`` would run them;
+        ``last_run`` reports the counts), and the run's writes are committed. A node
+        built over streams outside a job runs its operator on them directly.
 
         Without a database:
             Always compute via the operator's ``process()`` method.
@@ -1447,10 +1457,35 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             - **LOG**: always compute, write results to DB.
             - **REPLAY**: skip computation, load from DB.
 
+        Args:
+            load_only: As ``job.run(load_only=True)``: the operator runs on the rows
+                that reach it, a ``LOG`` node writes nothing, and the nodes run first
+                load their stored results only.
+
         Returns:
             A ``StreamView`` of every row ``as_table()`` then returns, naming its rows
             as ``head()`` then names them.
+
+        Raises:
+            RuntimeError: If the node was loaded by ``PipelineJob.load`` and
+                ``load_only`` is false.
         """
+        from orcapod.pipeline.node_run import (
+            depends_on_job_nodes,
+            run_with_dependencies,
+        )
+        from orcapod.pipeline.run_summary import warn_row_failures
+
+        if self._loaded and not load_only:
+            raise self._cannot_compute_error()
+        if self.holds_current_run(load_only=load_only):
+            return self._run_view(computed=False)
+        if depends_on_job_nodes(self):
+            summary = run_with_dependencies(self, load_only=load_only)
+            self._last_run = summary
+            if not summary.ok:
+                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            return self._run_view(computed=False)
         if self._loaded:
             raise self._cannot_compute_error()
         if self.is_stale:
@@ -1462,14 +1497,23 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 if self._cache_mode == CacheMode.REPLAY:
                     self._replay_from_cache()
                 else:
-                    self._compute_and_store()
+                    self._compute_and_store(store=not load_only)
                     computed = True
+                self._run_load_only = load_only
             else:
                 self._cached_output_stream = self._operator.process(
                     *self._input_streams,
                 )
                 self._update_modified_time()
                 computed = True
+        return self._run_view(computed=computed)
+
+    def _run_view(self, *, computed: bool) -> StreamView:
+        """The ``run()`` view of the node's output.
+
+        Args:
+            computed: Whether this ``run()`` computed the output lazily just now.
+        """
         # Read the kept output itself: a lazy input that finishes computing during this
         # read stamps itself after the node, which would make as_table() judge it stale.
         assert self._cached_output_stream is not None
@@ -1485,6 +1529,16 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         kept = self._cached_output_stream
         origin = "computed" if kept is None else head_of(kept.head(1), self).origin
         return self._view_of_rows(table, origin)
+
+    # Whether the output the node holds came from a load-only run (ITL-1095): its
+    # input may lack rows, so a full run does not take it as complete.
+    _run_load_only: bool = False
+
+    def _holds_run(self, *, load_only: bool) -> bool:
+        """Whether the node holds a run's output; a load-only run's only for ``load_only``."""
+        return self._cached_output_stream is not None and (
+            load_only or not self._run_load_only
+        )
 
     def _current_output(self) -> StreamProtocol | None:
         """The output of the node's current run, or ``None`` when it holds none.
@@ -1710,6 +1764,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
 
         try:
             ctx_obs.on_node_start(node_label, node_hash)
+            self._run_load_only = load_only
 
             if (
                 self._pipeline_database is not None

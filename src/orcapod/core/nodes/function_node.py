@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
+import sys
 import uuid
 from abc import abstractmethod
 from collections import Counter
@@ -1573,6 +1575,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._run_not_stored = not_stored
         self._cached_output_table = None
         self._cached_content_hash_column = None
+
+    def _holds_run(self, *, load_only: bool) -> bool:
+        """Whether the node holds a completed run; a load-only one only for ``load_only``."""
+        return self._run_entry_counts is not None and (
+            load_only or not self._run_load_only
+        )
 
     @property
     def last_run_not_stored(self) -> int:
@@ -3340,7 +3348,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             return self._head_without_rows(
                 config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        return self._head_of_pairs(list(self._held_pairs()), n, config, origin="held")
+        head = self._head_of_pairs(list(self._held_pairs()), n, config, origin="held")
+        if not self._run_load_only:
+            return head
+        # A load-only run's rows have their own status: they may lack the inputs it
+        # skipped (ITL-1095).
+        note = self._load_only_note()
+        if head.note:
+            note += f"; {head.note}"
+        return dataclasses.replace(head, status=ViewStatus.LOADED_ONLY, note=note)
 
     # ------------------------------------------------------------------
     # Iteration
@@ -3393,44 +3409,149 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
         yield from self._held_pairs()
 
-    def run(self) -> StreamView:
-        """Eagerly compute all input data, filling pipeline and result databases, and
-        return a ``StreamView`` of the node's rows.
+    def run(self, *, load_only: bool = False) -> StreamView:
+        """Run the node as a job run would, and return a ``StreamView`` of its rows.
 
-        Computes as a job run computes this node, unlike ``as_table()``, which only
-        reads. A node whose upstream is unavailable (``CACHE_ONLY``) or whose function
-        pod is a placeholder (``READ_ONLY``) computes nothing and holds no rows; its
-        stored rows are read with ``as_source()``.
+        State-driven (developer, November 13, 2026; ITL-1095): a node that holds the rows
+        of a completed run and is not stale is not run again; the view shows what it
+        holds, and nothing is computed, read or written. Otherwise the node runs, after
+        every job node it depends on that holds no current run (each once, in
+        dependency order, as ``job.run()`` would run them; ``last_run`` reports the
+        counts), and the run's writes are committed. A node built over streams outside a
+        job reads its input as it is.
+
+        Args:
+            load_only: Fill the node, and the nodes it runs first, with what is already
+                stored and compute nothing (as ``job.run(load_only=True)``). A node
+                filled this way shows status ``loaded_only`` and is not current for a
+                later full ``run()``, which computes what it skipped.
 
         Returns:
-            A ``StreamView`` of every row ``as_table()`` then returns. It says "rows",
-            as ``head()`` then does: the node holds them in memory, whether it computed
-            them or read them from its store.
+            A ``StreamView`` of every row ``as_table()`` then returns: status ``rows``,
+            or ``loaded_only`` after a load-only run.
 
         Raises:
-            RuntimeError: If the node was loaded without a function pod, or
-                ``load_status`` is UNAVAILABLE (no pod, no DB).
+            RuntimeError: If no store is attached (``UNAVAILABLE``); if the node cannot
+                compute (loaded without a function pod, or a placeholder pod) and
+                ``load_only`` is false; or if its input is unavailable
+                (``CACHE_ONLY``): read its stored rows with ``as_source()``.
         """
+        from orcapod.pipeline.node_run import (
+            depends_on_job_nodes,
+            run_with_dependencies,
+        )
+        from orcapod.pipeline.run_summary import warn_row_failures
         from orcapod.pipeline.serialization import LoadStatus
 
-        if self._function_pod is None:
-            raise self._cannot_compute_error()
-        self._begin_run()
-        if self._load_status == LoadStatus.UNAVAILABLE:
+        status = self._load_status
+        if status == LoadStatus.UNAVAILABLE:
             raise self._no_store_error()
-        if self._load_status in (LoadStatus.CACHE_ONLY, LoadStatus.READ_ONLY):
-            # CACHE_ONLY: upstream unavailable; computation requires a live input stream.
-            # READ_ONLY: function pod is a proxy placeholder — cannot compute.
-            # Neither runs, so the view holds no rows (ITL-1095).
-            return self._view_of_rows(self.as_table(), "held")
+        if status == LoadStatus.CACHE_ONLY:
+            raise RuntimeError(
+                f"FunctionJobNode {self.label!r}: its input is unavailable, so it has "
+                "no inputs to run or look up; read its stored results with as_source()."
+            )
+        if not load_only and (
+            self._function_pod is None or status == LoadStatus.READ_ONLY
+        ):
+            raise self._cannot_compute_error()
+        if not self.holds_current_run(load_only=load_only):
+            if depends_on_job_nodes(self):
+                summary = run_with_dependencies(self, load_only=load_only)
+            else:
+                summary = self._run_alone(load_only=load_only)
+            self._last_run = summary
+            if not summary.ok:
+                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+        return self._run_view()
+
+    def _run_alone(self, *, load_only: bool) -> Any:
+        """Run this node over its input stream, which is not a job node; commit.
+
+        Returns:
+            The run's ``RunSummary``.
+        """
+        from dataclasses import replace
+
+        from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
+        from orcapod.utils.store_errors import flush_best_effort
+
         if self.is_stale:
             # Discard any stale in-memory entries before a fresh computation run
             # so that rerunning does not mix old cached entries with new results.
             self.clear_cache()
-        self.execute(self._input_stream)
-        # The rows are the ones held in memory, as head() names them afterwards: some
-        # may have been read from the result store rather than computed.
-        return self._view_of_rows(self.as_table(), "held")
+        counter = RunCountingObserver()
+        stores = [
+            store
+            for store in (
+                self._pipeline_database,
+                getattr(self._cached_function_pod, "result_database", None),
+            )
+            if store is not None
+        ]
+        try:
+            _ = self.execute(self._input_stream, observer=counter, load_only=load_only)
+        except Exception as run_error:
+            flush_best_effort(run_error, *stores)
+            raise
+        for store in stores:
+            store.flush()
+        node_summary = replace(
+            counter.node_summary(self.label), not_stored=self.last_run_not_stored
+        )
+        base_path = getattr(self._pipeline_database, "base_path", ())
+        return RunSummary(
+            "/".join(base_path), [node_summary], load_only=load_only, target=self.label
+        )
+
+    def _incomplete_inputs(self) -> list[str]:
+        """Labels of the function nodes above this one whose load-only run skipped inputs."""
+        labels: list[str] = []
+        seen: list[Any] = []
+        pending: list[Any] = list(self.upstreams)
+        while pending:
+            node = pending.pop()
+            if any(node is other for other in seen):
+                continue
+            seen.append(node)
+            if isinstance(node, FunctionJobNode) and node._run_load_only:
+                if node._run_not_stored:
+                    labels.append(node.label)
+            pending.extend(getattr(node, "upstreams", ()))
+        return sorted(labels)
+
+    def _load_only_note(self) -> str:
+        """The caption of a node filled by a load-only run (ITL-1095)."""
+        note = (
+            f"loaded only: {self._run_loaded_count():,} loaded, "
+            f"{self._run_not_stored:,} inputs without a stored result"
+        )
+        incomplete = self._incomplete_inputs()
+        if incomplete:
+            note += f"; inputs incomplete: {', '.join(incomplete)}"
+        return note
+
+    def _run_loaded_count(self) -> int:
+        """How many inputs of the last run had a stored result (loaded)."""
+        counts = self._run_entry_counts
+        return 0 if counts is None else sum(counts.values())
+
+    def _run_view(self) -> StreamView:
+        """The ``run()`` view of the node's rows, with the status of its last run."""
+        table = self.as_table()
+        if not self._run_load_only:
+            # The rows are the ones held in memory, as head() names them afterwards:
+            # some may have been read from the result store rather than computed.
+            return self._view_of_rows(table, "held")
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys()[0],
+            total_rows=table.num_rows,
+            status=ViewStatus.LOADED_ONLY,
+            note=self._load_only_note(),
+            display_all_rows=False,
+        )
 
     # ------------------------------------------------------------------
     # Async channel execution

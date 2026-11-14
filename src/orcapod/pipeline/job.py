@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -22,7 +21,6 @@ from orcapod.contexts.stored import (
     unclaimed_tables_written_before_v03,
 )
 from orcapod.errors import (
-    RowFailuresWarning,
     StoreError,
     StoreReadError,
     StoreWriteError,
@@ -34,6 +32,7 @@ from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
     run_node_summaries,
+    warn_row_failures,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -42,7 +41,6 @@ from orcapod.utils.store_errors import flush_best_effort
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from types import FrameType
 
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
@@ -96,29 +94,6 @@ def _with_counter(
     from orcapod.pipeline.composite_observer import CompositeObserver
 
     return CompositeObserver(observer, counter)  # pyright: ignore[reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
-
-
-def _warn_row_failures(summary: RunSummary, caller: FrameType) -> None:
-    """Issue the run's ``RowFailuresWarning``, shown after every run with failed rows.
-
-    Python's default filter shows a warning once per text and line, so a second identical
-    failing run from the same line (re-running a notebook cell) would show nothing. A
-    fresh registry for each run keeps every run's warning, while the user's filters
-    (``ignore``, ``error``) still apply.
-
-    Args:
-        summary: The run's summary, with failed rows.
-        caller: The frame that called ``run``; the warning is shown at its line.
-    """
-    warnings.warn_explicit(
-        summary.failures_message(),
-        RowFailuresWarning,
-        caller.f_code.co_filename,
-        caller.f_lineno,
-        module=caller.f_globals.get("__name__"),
-        registry=None,
-        module_globals=caller.f_globals,
-    )
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -967,7 +942,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
         summary = self._finish_run(prepared, counter, load_only=load_only)
         if not summary.ok:
-            _warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
 
     async def run_async(
@@ -1029,7 +1004,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
         summary = self._finish_run(prepared, counter, load_only=load_only)
         if not summary.ok:
-            _warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
 
     def _prepare_run(self, commit_every_rows: int) -> "_PreparedRun":
