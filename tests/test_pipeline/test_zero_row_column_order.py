@@ -16,6 +16,7 @@ Inputs carry one or two system-tag pairs (a source, or a join of two sources).
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -58,7 +59,7 @@ NO_ROWS = ("g2", "g2", "g3")
 """Groups of the sources' rows: the filter on ``g1`` keeps none."""
 
 
-def _dict_column() -> pa.Array:
+def _dict_column() -> "pa.Array[Any]":
     """A ``dict[str, int]`` column in the type the data context stores it with."""
     converter = contexts.resolve_context(None).type_converter
     table = converter.python_dicts_to_arrow_table(
@@ -67,7 +68,7 @@ def _dict_column() -> pa.Array:
     return table.column("m").combine_chunks()
 
 
-def _table(groups: tuple[str, ...], data: dict[str, pa.Array]) -> pa.Table:
+def _table(groups: tuple[str, ...], data: dict[str, "pa.Array[Any]"]) -> pa.Table:
     """Tags ``g`` and ``id`` and ``data``; every column non-nullable except ``n``."""
     table = pa.table(
         {
@@ -84,7 +85,7 @@ def _table(groups: tuple[str, ...], data: dict[str, pa.Array]) -> pa.Table:
 
 
 def _source(
-    name: str, groups: tuple[str, ...], data: dict[str, pa.Array]
+    name: str, groups: tuple[str, ...], data: dict[str, "pa.Array[Any]"]
 ) -> StreamProtocol:
     """A source of ``data`` behind a filter keeping group ``g1``."""
     source = ArrowTableSource(

@@ -286,6 +286,26 @@ class StaticOutputOperatorPod(TraceableBase):
         return table.select([*tag_keys, *system_tags, *data, *source_info])
 
     @staticmethod
+    def _as_row_built_table(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
+        """Return ``table`` as ``_rows_to_table`` would build it from the same rows.
+
+        Its columns in row order (``_in_row_order``) and each source-info field flagged
+        nullable only when some row's token is ``None``
+        (``_flag_source_info_nullability``). For a table with no rows: what a result
+        built from rows has, with no row (ITL-1131).
+
+        Args:
+            table: A table of user tags, system tags, data and source info.
+            tag_keys: The user tag columns, in order.
+
+        Returns:
+            The same arrays, reordered, under the new source-info field flags.
+        """
+        return StaticOutputOperatorPod._flag_source_info_nullability(
+            StaticOutputOperatorPod._in_row_order(table, tag_keys)
+        )
+
+    @staticmethod
     def _zero_rows_in_row_order(result: StreamProtocol) -> StreamProtocol:
         """Return an operator's result with no rows as a run with rows would keep it.
 
@@ -357,9 +377,8 @@ class StaticOutputOperatorPod(TraceableBase):
         if table is None:
             return None
         tag_keys = upstream.keys()[0]
-        table = StaticOutputOperatorPod._in_row_order(table, tag_keys)
         return StaticOutputOperatorPod._as_upstream_stream(
-            StaticOutputOperatorPod._flag_source_info_nullability(table),
+            StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
             tag_keys,
             upstream,
         )
