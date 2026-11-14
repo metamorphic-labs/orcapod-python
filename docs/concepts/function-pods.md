@@ -605,14 +605,23 @@ A node is stale, and runs, when:
 - `clear_cache()` was called on it, or on any job node above it;
 - a job node above it ran again;
 - its source was bound again (`job.bind(sources=...)`), or the bound source's own modified
-  time moved (a `CachedSource` that read new rows, a `PollingSource` that polled).
+  time moved (a `CachedSource` that read new rows, a `PollingSource` that found new rows).
 
-Staleness comes from modified times only. A source whose rows change while its object stays
-the same (a CSV or Delta file rewritten in place, a database table that grew, a list a
-`DictSource` was built from and that was changed afterwards) is not seen: a run holds the
-nodes below it. To read it again, build a new source object and bind it
-(`job.bind(sources=...)`), or call `clear_cache()` on the first node below it. To deliver a
-side effect again (with `track_completion=False`), call `clear_cache()` on its node first.
+Staleness comes from modified times only, so every run first asks each source feeding it,
+once, whether its data changed (`check_for_new_data()`, ITL-1102): `job.run()`,
+`run_async()` and a job node's `run()`, a load-only run too. A source that finds new data
+takes it in and moves its modified time, and the nodes below it run; one that finds nothing
+moves nothing, and a current job stays current. What each kind of source checks is in
+[Sources](sources.md#what-a-source-does-at-a-run). A check that raises does not fail the
+run: a `SourceCheckFailedWarning` names the source and the error, the run proceeds with the
+data the source already holds, and the summary lists the source in `unchecked_sources`.
+`head()` and the preview never check.
+
+A source that cannot see its data change (an in-memory source, such as a list a
+`DictSource` was built from and that was changed afterwards) is not re-read: build a new
+source object and bind it (`job.bind(sources=...)`), or call `clear_cache()` on the first
+node below it. To deliver a side effect again (with `track_completion=False`), call
+`clear_cache()` on its node first.
 
 `node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,
 and a run's writes are committed when it ends; when everything is held there is nothing to

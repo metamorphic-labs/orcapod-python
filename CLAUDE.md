@@ -849,6 +849,14 @@ data. The rules:
   are read only for nodes that run, a failed end-of-run commit clears only the nodes that ran,
   and the summary reports held nodes (`NodeRunSummary.held`). REPLAY replays every logged run
   of its key (ITL-1098).
+- A run checks its sources first (developer, November 14, 2026, ITL-1102). `job.run()`,
+  `run_async()` and a job node's `run()` (load-only too) call `check_for_new_data()` once on
+  each source feeding them (`node_run.check_sources`) before the state rule judges any node;
+  `head()` and the preview never do. A source that finds new data takes it in and moves its
+  modified time to NOW (never to a time the data reports, such as a cursor's `modified_at`);
+  one that finds nothing moves nothing. A check that raises warns once
+  (`SourceCheckFailedWarning`), keeps the source's data and modified time, lists the source
+  in `RunSummary.unchecked_sources`, and the run proceeds.
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers

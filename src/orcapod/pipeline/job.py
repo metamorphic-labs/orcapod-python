@@ -28,7 +28,12 @@ from orcapod.errors import (
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
-from orcapod.pipeline.node_run import RunPlan, clear_run_rows, plan_run
+from orcapod.pipeline.node_run import (
+    RunPlan,
+    check_sources,
+    clear_run_rows,
+    plan_run,
+)
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -938,6 +943,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
         prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+        # Every source first takes in any new data, moving its modified time (ITL-1102).
+        unchecked = check_sources(prepared.exec_dag.nodes())
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(prepared.exec_dag, load_only=load_only)
         counter = RunCountingObserver()
@@ -952,7 +959,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 load_only=load_only,
                 held_rows=plan.held_rows,
             )
-        summary = self._finish_run(prepared, counter, plan, load_only=load_only)
+        summary = self._finish_run(
+            prepared, counter, plan, load_only=load_only, unchecked_sources=unchecked
+        )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1004,6 +1013,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "it."
             )
         prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+        # Every source first takes in any new data, moving its modified time (ITL-1102).
+        unchecked = check_sources(prepared.exec_dag.nodes())
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(prepared.exec_dag, load_only=load_only)
         counter = RunCountingObserver()
@@ -1017,7 +1028,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 load_only=load_only,
                 held_rows=plan.held_rows,
             )
-        summary = self._finish_run(prepared, counter, plan, load_only=load_only)
+        summary = self._finish_run(
+            prepared, counter, plan, load_only=load_only, unchecked_sources=unchecked
+        )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1234,6 +1247,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         plan: RunPlan,
         *,
         load_only: bool = False,
+        unchecked_sources: tuple[str, ...] = (),
     ) -> RunSummary:
         """Commit the run's last writes, mark the job as run and keep its summary.
 
@@ -1245,6 +1259,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             counter: The observer that counted the run's rows.
             plan: The nodes the run ran and held (``plan_run``).
             load_only: Whether the run loaded stored results only.
+            unchecked_sources: The sources the start-of-run check could not check.
 
         Returns:
             The run's summary, also kept as ``last_run``.
@@ -1285,6 +1300,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             "/".join(self._name),
             run_node_summaries(prepared.exec_dag, counter, held=plan.held_counts),
             load_only=load_only,
+            unchecked_sources=unchecked_sources,
         )
         return self._last_run
 

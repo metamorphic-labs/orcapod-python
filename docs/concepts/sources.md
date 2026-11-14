@@ -416,6 +416,36 @@ Only a source can do this. An operator rearranges rows and columns, and every da
 emits was already a data value of its input; turning a tag value into a data value creates
 new data, which is what a source is for.
 
+## What a source does at a run
+
+A job node that has run holds its rows until it is stale, and staleness comes from modified
+times only (see [Running one node](function-pods.md)). So every run (`job.run()`,
+`run_async()`, a job node's `run()`, a load-only run too) first asks each source feeding it,
+once, whether its data changed: `source.check_for_new_data()` (developer, November 14, 2026,
+ITL-1102). A source that finds new data takes it in and moves its modified time to that
+moment, so every node below it runs; a source that finds nothing changes nothing, so a job
+whose sources are unchanged computes nothing. `head()` and the notebook preview never check.
+
+| Source | What the check does |
+|---|---|
+| `ArrowTableSource`, `DictSource`, `ListSource`, `DataFrameSource` | nothing: data held in memory cannot change; build a new source and bind it to run on new data |
+| `PollingSource` | polls once (and fetches when the poll reports new data); its modified time moves only when the fetch returned rows, to the moment it found them (a cursor's `modified_at` is informational) |
+| Every other source | nothing yet: build a new source object and bind it (`job.bind(sources=...)`) to read changed data |
+
+A check that raises does not fail the run. The run issues one `SourceCheckFailedWarning` per
+source, naming the source and the error; the source keeps its data and modified time; the
+run proceeds with the data the source already holds, and its `RunSummary` lists the source
+in `unchecked_sources` ("sources not checked for new data (see the warning): ..."). A later
+failure to read the source raises as it always has.
+
+A source that takes in new data keeps its record id rule. Without `record_id_column`, a
+row's record id comes from its position, so a row that moves (rows read in another order
+after new ones arrived, or a polling source's batches, each numbered from `row_0`) gets
+another id and is recorded as a new entry; its function result is still reused, because
+results are stored by the hash of the row's data. Give a source that will take in new data
+a `record_id_column` that is unique per row (ITL-1104). Further revisions of what each kind
+checks are collected in ITL-1103.
+
 ## How sources add provenance columns
 
 When you create a source, Orcapod automatically adds two kinds of hidden columns to track
