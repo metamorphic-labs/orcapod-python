@@ -329,9 +329,10 @@ class SourceNodeBase(TraceableBase, ABC):
 
         When ``columns.system_tags`` is ``True`` (or ``all_info=True``), the
         returned tag schema is extended with the two system-tag entries for this
-        node's schema (both typed as ``str``). Their names are deterministic from
-        the declared schemas and match what a concrete source with the same schema
-        would produce.
+        node's schema: the source id as ``str`` and the record id as ``bytes``, the
+        types every source's rows have (Arrow ``large_string`` and ``large_binary``).
+        Their names are deterministic from the declared schemas and match what a
+        concrete source with the same schema would produce.
 
         Other ``ColumnConfig`` flags (``meta``, ``context``, ``source``,
         ``content_hash``, ``sort_by_tags``) are no-ops at the node level —
@@ -352,7 +353,7 @@ class SourceNodeBase(TraceableBase, ABC):
                 self._schema_hash_str
             )
             tag_schema = Schema(
-                {**dict(tag_schema), source_id_col: str, record_id_col: str}
+                {**dict(tag_schema), source_id_col: str, record_id_col: bytes}
             )
         return tag_schema, self._data_schema
 

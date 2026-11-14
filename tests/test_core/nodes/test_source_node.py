@@ -340,10 +340,13 @@ class TestSourceNodeColumnConfig:
         via_all_info = node.keys(all_info=True)
         assert via_system_tags == via_all_info
 
-    def test_unbound_output_schema_system_tags_adds_str_entries(
+    def test_unbound_output_schema_system_tags_adds_typed_entries(
         self, tag_schema, data_schema
     ):
-        """output_schema(system_tags=True) tag schema includes two str-typed system-tag entries."""
+        """output_schema(system_tags=True) adds the source id (str) and record id (bytes).
+
+        The types a source's rows have (ITL-1112): ``large_string`` and ``large_binary``.
+        """
         from orcapod.core.nodes.source_node import SourceNode
         from orcapod.system_constants import constants
         from orcapod.types import ColumnConfig
@@ -361,7 +364,14 @@ class TestSourceNodeColumnConfig:
             if k.startswith(constants.SYSTEM_TAG_PREFIX)
         }
         assert len(system_tag_entries) == 2
-        assert all(v is str for v in system_tag_entries.values())
+        types = {
+            k.split(constants.BLOCK_SEPARATOR)[0]: v
+            for k, v in system_tag_entries.items()
+        }
+        assert types == {
+            constants.SYSTEM_TAG_SOURCE_ID_PREFIX: str,
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX: bytes,
+        }
 
     def test_unbound_output_schema_default_unchanged(self, tag_schema, data_schema):
         """Regression: output_schema() with no args still returns plain schemas."""

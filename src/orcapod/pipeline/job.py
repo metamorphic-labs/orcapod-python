@@ -474,8 +474,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     schema_hash = job_node.as_node().content_hash().to_string()
                     self._sources_by_hash[schema_hash] = sources[job_node.name]
             self._sources.update(sources)
-            # ``validate`` checks column names only, so a rebound source may give a
-            # column another type: every node predicts its schema again (ITL-1111).
+            # Every node predicts its schema again (ITL-1111). Since ITL-1112 a bind
+            # should never change a prediction: ``validate`` refuses a source of other
+            # column names or types, and the slot gives the declared schema, so this
+            # clear is expected to find nothing to change. It is kept so that a bind
+            # can never leave a stale prediction if a bound source's schema ever
+            # differs in a way the check does not see.
             for job_node in (self._persistent_node_map or {}).values():
                 if isinstance(job_node, StreamBase):
                     job_node._forget_output_schema()  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' bindings

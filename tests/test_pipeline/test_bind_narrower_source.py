@@ -722,3 +722,93 @@ def test_a_raw_streams_table_wrapped_as_the_error_advises_runs() -> None:
     table = job.nodes["renamed"].as_table()
     assert table.column("y").to_pylist() == [1]
     assert table.column("w").to_pylist() == ["p"]
+
+
+# ---------------------------------------------------------------------------
+# The slot's predicted schema says what its rows are, bound or unbound
+# ---------------------------------------------------------------------------
+
+
+def _x_job() -> PipelineJob:
+    """Return an unbound job: slot ``src`` (``id: int``, ``x: int | None``) -> rename."""
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(int | None), label="renamed")
+    return job
+
+
+def _abc_unbound() -> PipelineJob:
+    """Return the unbound ``a, b, c`` job."""
+    return _abc_job(int)
+
+
+def _abc_bound(order: str) -> Callable[[], PipelineJob]:
+    """Return a maker of the ``a, b, c`` job bound to a source with data in *order*."""
+
+    def make() -> PipelineJob:
+        job = _abc_job(int)
+        values = {"a": 1, "b": "s", "c": 1.5}
+        row = {"id": 0, **{name: values[name] for name in order}}
+        job.bind(sources={"src": DictSource([row], tag_columns=["id"])})
+        return job
+
+    return make
+
+
+def _x_bound(source: Callable[[], Any]) -> Callable[[], PipelineJob]:
+    """Return a maker of the ``x: int | None`` job bound to ``source()``."""
+
+    def make() -> PipelineJob:
+        job = _x_job()
+        job.bind(sources={"src": source()})
+        return job
+
+    return make
+
+
+PREDICTION_CASES: dict[str, tuple[Callable[[], PipelineJob], ...]] = {
+    "x": (
+        _x_job,
+        _x_bound(lambda: _arrow_source([1, None], x_nullable=True)),
+        _x_bound(lambda: _arrow_source([1, 2], x_nullable=False)),
+        _x_bound(_mapped_stream),
+    ),
+    "abc": (_abc_unbound, _abc_bound("abc"), _abc_bound("cba")),
+}
+
+
+@pytest.mark.parametrize("config", [{"system_tags": True}, "all_info"])
+@pytest.mark.parametrize(
+    "makers", PREDICTION_CASES.values(), ids=PREDICTION_CASES.keys()
+)
+def test_the_predicted_schema_is_that_of_the_rows_bound_or_unbound(
+    makers: tuple[Callable[[], PipelineJob], ...], config: Any
+) -> None:
+    """Unbound, declared, narrower, reordered and transformed binds predict alike.
+
+    The prediction (system tags included: the record id is ``bytes``) equals the
+    Python schema of the populated rows, for the slot and the node after it.
+    """
+    predictions = []
+    for make in makers:
+        job = make()
+        predictions.append(
+            {
+                label: (
+                    job.nodes[label].output_schema(all_info=True)
+                    if config == "all_info"
+                    else job.nodes[label].output_schema(columns=config)
+                )
+                for label in ("src", "renamed")
+            }
+        )
+        if job.nodes["src"].bound_source is None:  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode
+            continue
+        for label, (tag, data) in predictions[-1].items():
+            node = job.nodes[label]
+            table = node.as_table(columns={"system_tags": True})
+            rows = node.data_context.type_converter.arrow_schema_to_python_schema(
+                table.schema
+            )
+            assert {**tag, **data} == dict(rows), label
+    assert all(p == predictions[0] for p in predictions), predictions
