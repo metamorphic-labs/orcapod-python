@@ -586,6 +586,15 @@ predicate on values, and `DropNulls` reads only whether a value is present (its 
 never the value. A filter decides which rows exist and never synthesizes a value; no other
 operator reads data content.
 
+No operator carries its inputs' `Data` meta (`__`) columns (developer, November 13, 2026,
+ITL-1080): on the sync and the async path, in rows and in the predicted output schema, for a
+raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or function node's rows
+carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
+operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
+The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
+with it, and `MapTags` / `MapData` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
+(`schema_utils.require_names_not_meta`, at construction).
+
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,
 the step is not an operator: it is a derived source. So a tag's value is offered as data only
@@ -814,10 +823,22 @@ data. The rules:
   by the user is never changed. `SourceStreamBuilder.build` has no bare-hash default: it
   needs a `source_id` or a `source_kind`.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
-- `FunctionNode.iter_data()` Phase 1 returns ALL records in the shared `pipeline_path`
-  DB table (not filtered to current inputs). Phase 2 skips inputs whose hash is already
-  in the DB.
+- After a run, a `FunctionJobNode` returns exactly the rows of that run's inputs, sync or
+  async (ITL-1093; a run that raised defines no rows). Read without a completed run in this
+  process (a fresh or loaded job), it returns every record stored under its content hash for
+  the current data context, not only its current inputs. A run skips inputs whose entry is
+  already stored.
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
+- A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
+  `job.run()`, `node.run()` (the job run's work for that node: with `track_completion` only
+  what the invocation log does not record, without it every row again), `execute`,
+  `async_execute`. Every read (`iter_data`, `as_table`, dataframes, `flow`, `head`, preview, a
+  downstream node's read) returns the rows its last run in this process passed on, held in
+  memory (`SideEffectJobNode._held_rows`), and delivers nothing; with none (no run, a run that
+  raised, or stale by `is_stale`) a read returns zero rows. Never route a job node's read to
+  the standalone delivery path. The standalone `SideEffectPodStream` still delivers on every
+  consuming read (`iter_data`, `as_table`, dataframes, `flow`, `run`); its `head()` and
+  preview deliver nothing.
 - `DerivedSource` over a job node before `run()` → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
