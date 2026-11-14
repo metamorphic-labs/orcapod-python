@@ -65,7 +65,7 @@ class AsyncPipelineOrchestrator:
         error_policy: Literal["continue", "fail_fast"] = "continue",
     ) -> None:
         self._buffer_size = buffer_size
-        self._error_policy = error_policy
+        self._error_policy: Literal["continue", "fail_fast"] = error_policy
 
     def run(
         self,

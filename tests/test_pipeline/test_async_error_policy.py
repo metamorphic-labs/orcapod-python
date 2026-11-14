@@ -16,19 +16,18 @@ import asyncio
 import logging
 import warnings
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 from orcapod import PipelineJob, function_pod
-from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.function_pod import FunctionPod, side_effect_function_pod
+from orcapod.core.function_pod import FunctionPod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RowFailuresWarning
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline import async_orchestrator as async_orchestrator_module
 from orcapod.pipeline.observer import NoOpObserver
-from orcapod.side_effects import InvocationContext, SideEffectPodConfig, side_effect_pod
+from orcapod.side_effects import InvocationContext, SideEffectPod, SideEffectPodConfig
 from orcapod.sources import DictSource
 from orcapod.types import PodConfig
 
@@ -71,12 +70,16 @@ def triple(y: int) -> int:
     return 3 * y
 
 
-@side_effect_function_pod(output_keys="y")
 def check_with_ctx(x: int, ctx: InvocationContext) -> int:
     """Return ``x``; raise for a negative ``x`` (a pod that takes the invocation context)."""
     if x < 0:
         raise ValueError(f"bad x={x}")
     return x
+
+
+checked_with_ctx = FunctionPod.from_fn(
+    check_with_ctx, output_keys="y", ctx_arg_name="ctx"
+)
 
 
 def deliver(x: int, ctx: InvocationContext) -> None:
@@ -110,8 +113,9 @@ def function_job(
         if max_concurrency is None:
             out = checked.pod(source_of(xs), label="f")
         else:
-            pod = FunctionPod(
-                PythonDataFunction(check, output_keys="y"),
+            pod = FunctionPod.from_fn(
+                check,
+                output_keys="y",
                 pod_config=PodConfig(max_concurrency=max_concurrency),
             )
             out = pod(source_of(xs), label="f")
@@ -123,14 +127,16 @@ def ctx_function_job(store: Any, xs: list[int]) -> PipelineJob:
     """Source -> ``f`` (a side-effect function pod failing on a negative x) -> ``down``."""
     job = PipelineJob(name="itl879", database=store)
     with job:
-        out = check_with_ctx(source_of(xs), label="f")
+        out = checked_with_ctx(source_of(xs), label="f")
         double.pod(out, label="down")
     return job
 
 
-def side_effect_job(store: Any, xs: list[int], on_error: str) -> PipelineJob:
+def side_effect_job(
+    store: Any, xs: list[int], on_error: Literal["raise", "log"]
+) -> PipelineJob:
     """Source -> side-effect node ``se`` whose delivery fails on a negative x."""
-    pod = side_effect_pod(
+    pod = SideEffectPod(
         deliver, config=SideEffectPodConfig(on_error=on_error), name="deliver"
     )
     job = PipelineJob(name="itl879", database=store)
@@ -162,11 +168,11 @@ class Recorder(NoOpObserver):
 
     def on_data_end(self, node_label, tag, input_data, output_data, cached) -> None:
         """Record a row end."""
-        self.events.append(("data_end", node_label, tag.as_dict()["k"]))
+        self.events.append(("data_end", node_label, str(tag.as_dict()["k"])))
 
     def on_data_crash(self, node_label, tag, data, error) -> None:
         """Record a row crash."""
-        self.events.append(("data_crash", node_label, tag.as_dict()["k"]))
+        self.events.append(("data_crash", node_label, str(tag.as_dict()["k"])))
 
     def of(self, event: str, label: str) -> list[str | None]:
         """The row keys (or ``None``) of ``event`` calls for ``label``."""
@@ -343,12 +349,12 @@ def test_nothing_left_running_after_fail_fast(
     created: list[Any] = []
 
     # The orchestrator's channels are internal; record them through its module's names.
-    class RecordingChannel(async_orchestrator_module.Channel):
+    class RecordingChannel(async_orchestrator_module.Channel[Any]):
         def __post_init__(self) -> None:
             super().__post_init__()
             created.append(self)
 
-    class RecordingBroadcastChannel(async_orchestrator_module.BroadcastChannel):
+    class RecordingBroadcastChannel(async_orchestrator_module.BroadcastChannel[Any]):
         def __init__(self, buffer_size: int = 64) -> None:
             super().__init__(buffer_size)
             created.append(self)
