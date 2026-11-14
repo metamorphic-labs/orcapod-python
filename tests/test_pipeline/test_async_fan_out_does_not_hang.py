@@ -18,6 +18,7 @@ Each run here is awaited under ``asyncio.wait_for``: a deadlock fails the test w
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -91,13 +92,19 @@ def operator_job(last: str) -> PipelineJob:
     return job
 
 
+@functools.cache
+def sync_operator_rows(last: str) -> list[dict[str, Any]]:
+    """The rows of ``operator_job(last)`` run once with the sync orchestrator."""
+    job = operator_job(last)
+    job.run(orchestrator=SyncPipelineOrchestrator())
+    return output_rows(job)
+
+
 @pytest.mark.parametrize("buffer_size", BUFFER_SIZES)
 @pytest.mark.parametrize("last", list(LAST_OPERATORS))
 def test_operator_fan_out_completes_on_both_runs(last: str, buffer_size: int) -> None:
     """Runs 1 and 2 finish and give the rows of a sync run."""
-    expected_job = operator_job(last)
-    expected_job.run(orchestrator=SyncPipelineOrchestrator())
-    expected = output_rows(expected_job)
+    expected = sync_operator_rows(last)
     assert expected  # the comparison is not vacuous
 
     job = operator_job(last)
