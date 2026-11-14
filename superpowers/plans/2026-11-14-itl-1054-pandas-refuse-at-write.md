@@ -16,8 +16,16 @@ changes.
 
 **Tech stack:** pandas 2.2.3 (locked; `<3`), pyarrow `>=22.0.0` (locked 23.0.1).
 
-**Status:** step 1 (reproduce, search) done; WAITING for the coordinator's reply to the list and
-plan below (sent with `orca orchestration ask`).
+**Status:** coordinator approved (Q1-Q5, all recommendations; then option B: remove the
+`struct_field_order` ignore option). Implemented; draft PR next.
+
+Decisions (coordinator, November 14, 2026): Q1 refuse case 1 and every case-2 shape; the
+documented lossy read-backs stay accepted (#339). Q2 matrix: only first write may refuse; read
+and second round trip never raise; hash stable; per-position check of columns and index
+levels. Q3 the hash refuses everything storage refuses (one shared check). Q4 `pd.ArrowDtype`
+decimal left as is; report exactly what is preserved (values exact incl. scale; dtype and
+declared precision lost). Q5 write-time conversion errors wrapped into ValueError naming the
+part. struct_field_order: removed from both OPTIONS sets and the identity list (B).
 
 ---
 
@@ -118,12 +126,12 @@ raise; hash stable; plus a hash-independent positional check (see the ask).
 
 ## Tasks (after the coordinator's reply)
 
-- [ ] Task 1: failing tests: `tests/test_hashing/test_pandas_refused_at_write.py` (each shape,
+- [x] Task 1: failing tests: `tests/test_hashing/test_pandas_refused_at_write.py` (each shape,
   frame and Series, hash and `python_to_storage`, message names column/level), pipeline test
   (in-memory and Delta: the pod's row fails at write, nothing unreadable is stored), tightened
   matrix. Run, show failures.
-- [ ] Task 2: `require_restorable` + callers; run targeted tests.
-- [ ] Task 3: golden suite unchanged; identifier tests unchanged.
-- [ ] Task 4: docs (`docs/reference/hashing.md` section 10 "What is refused", executed sample),
+- [x] Task 2: `require_restorable` + callers; run targeted tests.
+- [x] Task 3: golden suite unchanged; identifier tests unchanged.
+- [x] Task 4: docs (`docs/reference/hashing.md` section 10 "What is refused", executed sample),
   `changelog.d/ITL-1054.md`, `design_issues/ITL-1054-<id>.md`.
 - [ ] Task 5: ruff, basedpyright, targeted pytest (one process, 3.12); push; draft PR.

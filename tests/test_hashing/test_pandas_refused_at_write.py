@@ -25,17 +25,19 @@ from typing import Any
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.logical_types.pandas_type import LogicalPandasDataFrame, LogicalPandasSeries
+from orcapod.logical_types.pandas_type import (
+    LogicalPandasDataFrame,
+    LogicalPandasSeries,
+)
 from orcapod.sources import DictSource
 
 
-def _arrow_values(array: pa.Array) -> pd.Series:
+def _arrow_values(array: pa.Array[Any]) -> pd.Series:
     """A Series named ``"s"`` of ``pd.ArrowDtype`` over ``array``."""
     return pd.Series(pd.arrays.ArrowExtensionArray(pa.chunked_array([array])), name="s")
 
@@ -46,7 +48,7 @@ def _multi(names: list[Any]) -> pd.MultiIndex:
 
 
 # pd.ArrowDtype values storage writes but cannot read back (as a column and as an index level).
-UNREADABLE_ARROW: dict[str, pa.Array] = {
+UNREADABLE_ARROW: dict[str, pa.Array[Any]] = {
     "list": pa.array([[1, 2], None], pa.list_(pa.int64())),
     "large_list": pa.array([[1, 2], None], pa.large_list(pa.int64())),
     "fixed_size_list": pa.array([[1, 2], None], pa.list_(pa.int64(), 2)),
@@ -57,9 +59,11 @@ UNREADABLE_ARROW: dict[str, pa.Array] = {
 }
 # Readable as an index level? No for these either; readable as a column but refused at write
 # by Arrow already for an index level.
-UNREADABLE_ARROW_COLUMN_ONLY: dict[str, pa.Array] = {
+UNREADABLE_ARROW_COLUMN_ONLY: dict[str, pa.Array[Any]] = {
     "list_view": pa.array([[1, 2], None], pa.list_view(pa.int64())),
-    "run_end_encoded": pc.run_end_encode(pa.array([1, 1])),
+    "run_end_encoded": pa.RunEndEncodedArray.from_arrays(
+        pa.array([2], pa.int32()), pa.array([1])
+    ),
     "dense_union": pa.UnionArray.from_dense(
         pa.array([0, 1], pa.int8()),
         pa.array([0, 0], pa.int32()),
@@ -123,11 +127,11 @@ def _refused() -> dict[str, tuple[pd.DataFrame | pd.Series, str]]:
         values = _arrow_values(array)
         cases[f"frame, arrow {kind} column"] = (
             values.to_frame(name="col"),
-            r"column 'col'.*cannot (be read back|be converted)",
+            r"column 'col'.*(cannot be read back|cannot convert)",
         )
         cases[f"series, arrow {kind} values"] = (
             values,
-            r"column 's'.*cannot (be read back|be converted)",
+            r"column 's'.*(cannot be read back|cannot convert)",
         )
     for kind, array in UNREADABLE_ARROW.items():
         cases[f"frame, arrow {kind} index level"] = (
@@ -163,23 +167,32 @@ ACCEPTED: dict[str, pd.DataFrame | pd.Series] = {
         [[1, 2]], columns=pd.MultiIndex.from_tuples([("a", 1), ("b", 2)], names=[1, 0])
     ),
     "arrow string column": _arrow_values(pa.array(["x", None])).to_frame(),
-    "arrow large_binary values": _arrow_values(pa.array([b"x", None], pa.large_binary())),
+    "arrow large_binary values": _arrow_values(
+        pa.array([b"x", None], pa.large_binary())
+    ),
     "arrow timestamp tz index": pd.DataFrame(
         {"a": [1, 2]},
         index=pd.Index(
             _arrow_values(
-                pa.array([dt.datetime(2020, 1, 1), None], pa.timestamp("s", tz="UTC"))
+                pa.array(
+                    [dt.datetime(2020, 1, 1), dt.datetime(2020, 1, 2)],
+                    pa.timestamp("s", tz="UTC"),
+                )
             ).array
         ),
     ),
-    "Int64 column axis": pd.DataFrame([[1, 2]], columns=pd.Index([0, 1], dtype="Int64")),
+    "Int64 column axis": pd.DataFrame(
+        [[1, 2]], columns=pd.Index([0, 1], dtype="Int64")
+    ),
     "datetime column axis": pd.DataFrame(
         [[1, 2]], columns=pd.DatetimeIndex(["2020-01-01", "2020-01-02"], tz="UTC")
     ),
 }
 
 
-def _logical(value: pd.DataFrame | pd.Series) -> LogicalPandasDataFrame | LogicalPandasSeries:
+def _logical(
+    value: pd.DataFrame | pd.Series,
+) -> LogicalPandasDataFrame | LogicalPandasSeries:
     """The logical type that stores ``value``."""
     if isinstance(value, pd.Series):
         return LogicalPandasSeries()

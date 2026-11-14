@@ -27,9 +27,10 @@ A data context can configure the hash of each type to ignore some properties
 (``PANDAS_DATAFRAME_OPTIONS``, ``PANDAS_SERIES_OPTIONS``; the list is saved in the logical
 type's extension metadata, ``orcapod.logical_types.ignore_list``). The preimage keeps its
 shape: an ignored property is hashed with a fixed value. ``attrs`` becomes ``{}``,
-``series_name`` becomes ``null``, ``column_order`` hashes the columns sorted by the canonical
-JSON of their labels, and ``struct_field_order`` turns off starfix's struct field order
-option. Nothing is ignored by default.
+``series_name`` becomes ``null``, and ``column_order`` hashes the columns sorted by the
+canonical JSON of their labels. Nothing is ignored by default. (``struct_field_order`` is not
+an option: it acted only on a ``pd.ArrowDtype`` struct column, which storage cannot read back
+and so is refused, ITL-1054.)
 
 Hashing what storage restores
 -----------------------------
@@ -98,9 +99,6 @@ Canonical JSON, in a grammar Orcapod owns (never ``repr``, ``str(dtype)`` alone,
              | {"arrow": <Arrow type text>}             pd.ArrowDtype of a non-nested Arrow
                                                         type: str(type), e.g. "large_binary",
                                                         "decimal128(10, 2)", "null"
-             | "arrow"                                  pd.ArrowDtype of a nested, dictionary
-                                                        or run-end type: the type is in the
-                                                        digest only (ITL-1054)
 
 ``<attrs>`` is ``attrs`` as the JSON object it is stored as: ``{1: "x"}`` is
 ``{"1": "x"}`` and a tuple is a list. ``attrs`` with an entry JSON cannot write (a ``set``,
@@ -110,12 +108,25 @@ value's logical type.
 
 A period alias is pandas' own period frequency string (``"M"``, ``"Q-DEC"``, as in
 ``Period.freqstr``). A label or dtype outside the grammar raises ``ValueError``.
+
+What is refused
+---------------
+A value storage would write but not restore is refused with ``ValueError`` by the hash and by
+storage alike, through one check, ``require_restorable`` (ITL-1054): MultiIndex levels that
+would be written in another order (level names that are also level positions,
+``names=[1, 0]``), and values storage cannot read back (a nested, dictionary or fixed-size
+``pd.ArrowDtype`` column or index level; a categorical, period, timedelta, interval, date or
+``pd.ArrowDtype`` column axis), besides labels and names that collide once written as text.
+A value Arrow cannot convert is refused by ``pandas_frame_to_arrow``. Both messages name the
+column, index level or column-axis level.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+from collections import Counter
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -173,13 +184,6 @@ PANDAS_IDENTITY_PROPERTIES: tuple[PandasIdentityProperty, ...] = (
     ),
     PandasIdentityProperty(
         "index_level_order", True, "digest", "order of the levels of a MultiIndex"
-    ),
-    PandasIdentityProperty(
-        "struct_field_order",
-        True,
-        "digest",
-        "order of the fields of a pd.ArrowDtype struct column, at every depth",
-        option=True,
     ),
     PandasIdentityProperty(
         "values", True, "digest", "the values, their row order and the row count"
@@ -331,14 +335,10 @@ of values. Changing an entry's ``identity`` changes existing hashes: it needs ne
 a new logical type identifier.
 """
 
-PANDAS_DATAFRAME_OPTIONS: frozenset[str] = frozenset(
-    {"attrs", "column_order", "struct_field_order"}
-)
+PANDAS_DATAFRAME_OPTIONS: frozenset[str] = frozenset({"attrs", "column_order"})
 """The properties a data context can configure a ``pd.DataFrame`` hash to ignore."""
 
-PANDAS_SERIES_OPTIONS: frozenset[str] = frozenset(
-    {"attrs", "series_name", "struct_field_order"}
-)
+PANDAS_SERIES_OPTIONS: frozenset[str] = frozenset({"attrs", "series_name"})
 """The properties a data context can configure a ``pd.Series`` hash to ignore."""
 
 _NOTHING_IGNORED: frozenset[str] = frozenset()
@@ -447,18 +447,12 @@ def pandas_dtype_descriptor(dtype: Any) -> Any:
             }
         }
     if isinstance(dtype, pd.ArrowDtype):
-        arrow_type = dtype.pyarrow_dtype
-        if (
-            pa.types.is_nested(arrow_type)
-            or pa.types.is_dictionary(arrow_type)
-            or pa.types.is_run_end_encoded(arrow_type)
-        ):
-            # No nested Arrow dtype reads back today; ITL-1054 decides what identifies one.
-            return "arrow"
         # Storage restores the exact Arrow type, but the values digest unifies large and
         # non-large variants, so the type text is the term (``null`` included: the digest sees an all-null ``large_string`` there, see
         # ``_restored_form``, and the term keeps it apart from a ``large_string`` column).
-        return {"arrow": str(arrow_type)}
+        # A nested, dictionary or run-end Arrow type never reaches a hash: storage cannot
+        # read such a column back, so ``require_restorable`` refuses the value (ITL-1054).
+        return {"arrow": str(dtype.pyarrow_dtype)}
     if isinstance(dtype, pd.StringDtype):
         # The storage (python / pyarrow) is not kept by the stored form, so it is not
         # part of the term.
@@ -662,31 +656,234 @@ def _axes_of(frame: pd.DataFrame) -> _StoredAxes:
     )
 
 
+def _level_by_position(axis: pd.Index, position: int) -> pd.Index:
+    """Return level ``position`` of ``axis``, found by position only (``axis`` for a flat Index).
+
+    ``MultiIndex.get_level_values`` resolves an integer as a level name first, so the levels are
+    looked up with every name cleared. The level keeps its own name.
+    """
+    if not isinstance(axis, pd.MultiIndex):
+        return axis
+    unnamed = axis.set_names([None] * axis.nlevels)
+    return unnamed.get_level_values(position).rename(axis.names[position])
+
+
+def _parts(frame: pd.DataFrame, rows: int | None) -> Iterator[tuple[str, pd.DataFrame]]:
+    """Yield each part of ``frame`` storage writes, alone in a frame, with its description.
+
+    The parts are the levels of the column axis, the columns, and the index levels, each by
+    position. A part's frame holds the first ``rows`` rows of it (all rows when ``None``); a
+    column-axis level is a zero-row frame with that level as its column labels.
+    """
+    subset = frame if rows is None else frame.iloc[:rows]
+    columns = frame.columns
+    for position in range(columns.nlevels):
+        level = _level_by_position(columns, position)
+        where = (
+            "column axis" if columns.nlevels == 1 else f"column axis level {position}"
+        )
+        yield (
+            f"{where} (dtype {level.dtype})",
+            pd.DataFrame(index=pd.RangeIndex(0), columns=level.unique()),
+        )
+    for position in range(subset.shape[1]):
+        column = subset.iloc[:, [position]]
+        yield (
+            f"column {columns[position]!r} (dtype {column.dtypes.iloc[0]})",
+            column.set_axis(pd.RangeIndex(1), axis=1).reset_index(drop=True),
+        )
+    index = subset.index
+    for position in range(index.nlevels):
+        level = _level_by_position(index, position)
+        yield (
+            f"index level {position} (name {index.names[position]!r}, dtype {level.dtype})",
+            pd.DataFrame(index=level),
+        )
+
+
+def _failing_part(
+    frame: pd.DataFrame, rows: int | None, attempt: Callable[[pd.DataFrame], object]
+) -> str | None:
+    """Return the description of the first part of ``frame`` on which ``attempt`` raises.
+
+    Args:
+        frame: The frame.
+        rows: How many rows of each part to try (all when ``None``); see ``_parts``.
+        attempt: The step that failed on the whole frame.
+
+    Returns:
+        The description of the part, or ``None`` when every part alone succeeds.
+    """
+    for description, part in _parts(frame, rows):
+        try:
+            attempt(part)
+        except Exception:  # noqa: BLE001 - any failure of the step locates the part
+            return description
+    return None
+
+
+def _converted(frame: pd.DataFrame) -> pa.Table:
+    """``pa.Table.from_pandas(frame, preserve_index=True)``: the table storage writes."""
+    return pa.Table.from_pandas(frame, preserve_index=True)
+
+
+def _read_back_empty(frame: pd.DataFrame) -> pd.DataFrame:
+    """The zero-row frame storage restores for ``frame``'s Arrow schema."""
+    return _converted(frame).schema.empty_table().to_pandas()
+
+
+def _with_part(part: str | None, message: str) -> str:
+    """``message`` prefixed by the part it is about, when the part is known."""
+    return message if part is None else f"{part}: {message}"
+
+
+def pandas_frame_to_arrow(frame: pd.DataFrame) -> pa.Table:
+    """Return the Arrow table storage writes for ``frame``, refusing a frame Arrow cannot hold.
+
+    Storage and the value hash convert a frame with this one function, so they refuse the same
+    frames with the same message.
+
+    Args:
+        frame: The frame (a Series is converted as its one-column frame).
+
+    Returns:
+        ``pa.Table.from_pandas(frame, preserve_index=True)``.
+
+    Raises:
+        ValueError: If Arrow cannot convert the frame (mixed or non-Arrow values, a dtype or an
+            index kind Arrow does not support). The message names the column, index level or
+            column-axis level when converting it alone fails too.
+    """
+    try:
+        return _converted(frame)
+    except (pa.ArrowException, NotImplementedError, TypeError, ValueError) as exc:
+        part = _failing_part(frame, None, _converted)
+        raise ValueError(
+            _with_part(
+                part,
+                "cannot convert to Arrow; check for columns with mixed or "
+                f"non-Arrow-serialisable values. Original error: {exc}",
+            )
+        ) from exc
+
+
+def _require_levels_in_place(index: pd.Index) -> None:
+    """Raise if storage would write the levels of ``index`` in another order.
+
+    pyarrow fetches index level ``i`` with ``index.get_level_values(i)``, and pandas resolves an
+    integer there as a level *name* first: with the names ``[1, 0]``, level 0 is fetched as the
+    level named 0 (position 1). The value would be written, and read back, with its levels in
+    another order, and nothing would raise.
+
+    Raises:
+        ValueError: If a level would be written in another level's place; the message names it.
+    """
+    if not isinstance(index, pd.MultiIndex):
+        return
+    names = list(index.names)
+    for position in range(index.nlevels):
+        # pandas' own rule for an integer level argument: a matching name wins (by ==, so 1.0
+        # and True match 1), else the position.
+        fetched = names.index(position) if position in names else position
+        if fetched != position:
+            raise ValueError(
+                f"index level {position} (name {names[position]!r}): storage would write "
+                f"level {fetched} (name {names[fetched]!r}) in its place, because pyarrow "
+                f"fetches level {position} by index.get_level_values({position}), which "
+                f"pandas resolves as the level named {position}; the value would be read "
+                "back with its levels in another order. Rename the index levels (integer "
+                "level names that are also level positions are the cause)."
+            )
+
+
+def require_restorable(schema: pa.Schema, frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the zero-row frame storage restores for ``frame``, refusing what it would not.
+
+    The one check, shared by storage (``python_to_storage``) and the value hash, of a value
+    storage would write but not restore. Such a value is refused, before anything is written:
+
+    - Two fields get one name (the index name ``1`` beside the column ``"1"``; integer names of
+      MultiIndex levels): the frame read back would have lost its index.
+    - The levels of a MultiIndex would be written in another order (level names that are also
+      level positions, ``names=[1, 0]``): the frame read back would differ, silently.
+    - The frame read back cannot be built: a nested, dictionary or fixed-size ``pd.ArrowDtype``
+      column or index level; a categorical, period, timedelta, interval, date or
+      ``pd.ArrowDtype`` column axis.
+    - The frame read back would have another number of columns or index levels, or distinct
+      column labels that read back equal (``True`` and ``False`` are written as text).
+
+    No rows are converted: what storage restores is read from the frame it builds for
+    ``schema`` alone.
+
+    Args:
+        schema: The schema of ``pandas_frame_to_arrow(frame)``.
+        frame: The frame about to be stored or hashed.
+
+    Returns:
+        The zero-row frame storage restores for ``schema``: its axes, labels, names and the
+        dtypes the schema decides.
+
+    Raises:
+        ValueError: If storage would not restore the frame; the message names the column,
+            index level or column-axis level and the reason.
+    """
+    counts = Counter(schema.names)
+    repeated = sorted(name for name, count in counts.items() if count > 1)
+    if repeated:
+        raise ValueError(
+            f"column labels and index names collide once written as text: {repeated}. "
+            "Storage could not restore the index. Rename the index levels (integer "
+            "level names are a common cause) or the columns."
+        )
+    _require_levels_in_place(frame.index)
+    try:
+        restored = schema.empty_table().to_pandas()
+    except Exception as exc:  # noqa: BLE001 - pandas and pyarrow raise many kinds here
+        part = _failing_part(frame, 0, _read_back_empty)
+        raise ValueError(
+            _with_part(
+                part,
+                "storage would write this value but it cannot be read back "
+                f"({type(exc).__name__}: {exc}).",
+            )
+        ) from exc
+    if (
+        restored.shape[1] != frame.shape[1]
+        or restored.index.nlevels != frame.index.nlevels
+    ):
+        raise ValueError(
+            "the value read back from storage would have "
+            f"{restored.shape[1]} column(s) and {restored.index.nlevels} index "
+            f"level(s), not {frame.shape[1]} and {frame.index.nlevels}. Rename the "
+            "columns or the index levels."
+        )
+    if frame.columns.is_unique and not restored.columns.is_unique:
+        labels = sorted({repr(label) for label in restored.columns})
+        raise ValueError(
+            "distinct column labels would read back from storage as duplicates: "
+            f"{labels}. Rename the columns (labels of mixed or bool type are written "
+            "as text)."
+        )
+    return restored
+
+
 def _restored_axes(schema: pa.Schema, df: pd.DataFrame) -> _StoredAxes:
     """Return the axes storage restores for a frame whose Arrow schema is ``schema``.
 
     They are read from the frame storage builds for the schema (no rows are converted), so
-    the rule is storage's own. A frame storage cannot read back with its columns and index
-    levels (storage refuses to write such a frame) is described by its own axes.
+    the rule is storage's own.
 
     Args:
-        schema: The schema of ``pa.Table.from_pandas(df, preserve_index=True)``.
+        schema: The schema of ``pandas_frame_to_arrow(df)``.
         df: The frame.
 
     Returns:
         The axes of the frame once read back from storage.
+
+    Raises:
+        ValueError: If storage would not restore the frame (``require_restorable``).
     """
-    try:
-        restored = schema.empty_table().to_pandas()
-    except (TypeError, ValueError, NotImplementedError, pa.ArrowException):
-        return _axes_of(df)
-    if (
-        restored.shape[1] != df.shape[1]
-        or restored.index.nlevels != df.index.nlevels
-        or (df.columns.is_unique and not restored.columns.is_unique)
-    ):
-        return _axes_of(df)
-    return _axes_of(restored)
+    return _axes_of(require_restorable(schema, df))
 
 
 def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
@@ -700,14 +897,10 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
         from storage.
 
     Raises:
-        ValueError: If a column's dtype is outside the grammar (the error names the column)
-            or a column cannot be converted to Arrow.
+        ValueError: If a column's dtype is outside the grammar (the error names the column),
+            the frame cannot be converted to Arrow, storage would not restore it
+            (``require_restorable``), or a label or name is outside the grammar.
     """
-    # The frame's own labels and names must be in the grammar, although the descriptor
-    # holds them in the form storage restores: storage writes some as text, and the text of
-    # an arbitrary object (its ``repr``, with a memory address) must never reach a hash.
-    for label in (*df.columns, *df.columns.names, *df.index.names):
-        pandas_label_descriptor(label)
     for label, dtype in zip(df.columns, df.dtypes):
         if dtype != np.dtype(object):
             # A dtype outside the grammar is reported by name, before Arrow refuses it.
@@ -715,13 +908,14 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
                 pandas_dtype_descriptor(dtype)
             except ValueError as exc:
                 raise ValueError(f"column {label!r}: {exc}") from exc
-    try:
-        table = pa.Table.from_pandas(df, preserve_index=True)
-    except pa.ArrowInvalid as exc:
-        raise ValueError(
-            "cannot convert to Arrow; check for columns with mixed or "
-            f"non-Arrow-serialisable values. Original error: {exc}"
-        ) from exc
+    table = pandas_frame_to_arrow(df)
+    # Refuses what storage would not restore, with storage's own message (ITL-1054).
+    axes = _restored_axes(table.schema, df)
+    # The frame's own labels and names must be in the grammar, although the descriptor
+    # holds them in the form storage restores: storage writes some as text, and the text of
+    # an arbitrary object (its ``repr``, with a memory address) must never reach a hash.
+    for label in (*df.columns, *df.columns.names, *df.index.names):
+        pandas_label_descriptor(label)
     width = df.shape[1]
     index = df.index
     dtypes = [
@@ -731,7 +925,6 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
     names = [f"c{position}" for position in range(width)] + [
         f"i{position}" for position in range(index.nlevels)
     ]
-    axes = _restored_axes(table.schema, df)
     for position, schema_dtype in enumerate(axes.schema_dtypes):
         own = dtypes[position]
         if own != np.dtype(object) and not isinstance(own, pd.CategoricalDtype):
@@ -851,11 +1044,7 @@ def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
     The sort is on the terms of the labels as storage restores them, so a frame and the
     frame read back from storage are sorted alike.
     """
-    try:
-        schema = pa.Table.from_pandas(df.iloc[:0], preserve_index=True).schema
-    except pa.ArrowInvalid as exc:
-        raise ValueError(f"cannot convert to Arrow. Original error: {exc}") from exc
-    labels = _restored_axes(schema, df).column_labels
+    labels = _restored_axes(pandas_frame_to_arrow(df).schema, df).column_labels
     keys = [canonical_json(pandas_label_descriptor(label)) for label in labels]
     order = sorted(range(len(keys)), key=keys.__getitem__)
     return df.iloc[:, order]
@@ -933,9 +1122,7 @@ def pandas_frame_content_hash(
         bare = _in_canonical_column_order(bare)
     values, stored = _values_table(bare)
     descriptor = _frame_descriptor(df, stored, ignore)
-    digest = arrow_hasher.hash_table_ordered(
-        values, struct_field_order="struct_field_order" not in ignore
-    ).digest
+    digest = arrow_hasher.hash_table_ordered(values).digest
     return labelled_content_hash(PANDAS_DATAFRAME_HASH_LABEL, descriptor, digest)
 
 
@@ -963,7 +1150,5 @@ def pandas_series_content_hash(
     """
     values, stored = _values_table(_series_as_stored_frame(series))
     descriptor = _series_descriptor(series, stored, ignore)
-    digest = arrow_hasher.hash_table_ordered(
-        values, struct_field_order="struct_field_order" not in ignore
-    ).digest
+    digest = arrow_hasher.hash_table_ordered(values).digest
     return labelled_content_hash(PANDAS_SERIES_HASH_LABEL, descriptor, digest)
