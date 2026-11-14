@@ -598,6 +598,10 @@ nothing, also on the asynchronous orchestrator, and the summary says so per node
 run's rows are never held by a full run, nor are the rows of any node below them. A source
 is read only when a node that runs reads it.
 
+A node whose last run left failed rows (with the default `error_policy="continue"`) is not
+held either: the next run computes only the failed rows and reads the rest from the store,
+so running the job again after fixing a transient failure retries exactly those rows.
+
 A node is stale, and runs, when:
 
 - it has not run in this process, its last run raised, or the commit at the end of its run
@@ -611,8 +615,8 @@ Staleness comes from modified times only. A source whose rows change while its o
 the same (a CSV or Delta file rewritten in place, a database table that grew, a list a
 `DictSource` was built from and that was changed afterwards, a polling source with new
 rows) is not seen: a run holds the nodes below it. To read it again, build a new source
-object and bind it (`job.bind(sources=...)`), or call `clear_cache()` on the first node
-below it. (A start-of-run check for new data is planned, ITL-1102.) To deliver a
+object and bind it (`job.bind(sources=...)`), which makes every node that reads it stale,
+or call `clear_cache()` on each node that reads it directly (one per branch). (A start-of-run check for new data is planned, ITL-1102.) To deliver a
 side effect again (with `track_completion=False`), call `clear_cache()` on its node first.
 
 `node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,

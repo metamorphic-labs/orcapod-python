@@ -488,3 +488,162 @@ def test_a_loaded_job_without_its_side_effect_node_names_it(tmp_path: Path) -> N
     loaded.bind(sources={"s": _source()})
     with pytest.raises(RuntimeError, match=r"'down'.*ITL-1094"):
         loaded.run(load_only=True)
+
+
+# ---------------------------------------------------------------------------
+# Second review round
+# ---------------------------------------------------------------------------
+
+FLAKY = {"fail": True}
+
+
+@function_pod(output_keys="y")
+def flaky(x: int) -> int:
+    """Return ``x + 1``; raise for ``x == 20`` while ``FLAKY['fail']`` is set."""
+    CALLS.append("flaky")
+    if x == 20 and FLAKY["fail"]:
+        raise ValueError("transient failure")
+    return x + 1
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_run_with_failed_rows_is_retried_by_the_next_run(orchestrator: str) -> None:
+    """A run that left failed rows is never current: the next run computes exactly
+    the failed rows and reads the rest; a third, unchanged run runs nothing."""
+    FLAKY["fail"] = True
+    job = PipelineJob(name="r", database=InMemoryArrowDatabase())
+    with job:
+        flaky.pod(_source(), label="node")
+    with pytest.warns(Warning):
+        job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert job.nodes["node"].as_table().num_rows == 5
+    CALLS.clear()
+    FLAKY["fail"] = False
+    summary = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert CALLS == ["flaky"]
+    assert (summary.nodes["node"].computed, summary.nodes["node"].reused) == (1, 5)
+    assert job.nodes["node"].as_table().num_rows == 6
+    CALLS.clear()
+    summary = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert CALLS == []
+    assert summary.nodes["node"].held == 6
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_an_unchanged_rerun_touches_no_store(orchestrator: str) -> None:
+    db = InMemoryArrowDatabase()
+    job = _grouped_job(ROWS, db)
+    job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    _add_pending_write(db)
+    before = _pending(db)
+    with mock.patch.object(
+        InMemoryArrowDatabase, "flush", side_effect=AssertionError("flushed")
+    ):
+        job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert _pending(db) == before
+
+
+def test_a_held_load_only_node_keeps_its_missing_inputs_in_the_summary() -> None:
+    db = InMemoryArrowDatabase()
+    _grouped_job(ROWS[:3], db).run()
+    job = _grouped_job(ROWS, db)
+    job.run(load_only=True)
+    summary = job.run(load_only=True)
+    rowwise = summary.nodes["rowwise"]
+    assert (rowwise.held, rowwise.not_stored) == (3, 3)
+    assert "held from the previous run (3 inputs without a stored result)" in repr(
+        summary
+    )
+
+
+class _Stop(BaseException):
+    """An interruption that is not an ``Exception``, as a cancellation is."""
+
+
+class StopsAtNodeEnd(NoOpObserver):
+    """An observer that interrupts the run at the end of one node."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def on_node_end(self, node_label: str, node_hash: str) -> None:
+        """Interrupt at the node's end."""
+        if node_label == self.label:
+            raise _Stop()
+
+    def contextualize(self, *identity_path: str) -> StopsAtNodeEnd:
+        """Keep this observer for every node."""
+        return self
+
+
+def test_an_interrupted_run_clears_the_nodes_it_ran() -> None:
+    job = _grouped_job(ROWS, InMemoryArrowDatabase())
+    with pytest.raises(_Stop):
+        job.run(observer=StopsAtNodeEnd("summed"))
+    assert job.nodes["rowwise"].as_table().num_rows == 0
+    assert job.nodes["rowwise"].is_stale
+
+
+def test_a_loaded_operator_that_lost_an_input_names_it(tmp_path: Path) -> None:
+    tap = side_effect_pod(_deliver_x)
+    assert isinstance(tap, SideEffectPod)
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="m2", database=db)
+    with job:
+        tapped: Any = tap.process(_source(), label="delivered")
+        Join()(
+            tapped,
+            DictSource(
+                [{"g": r["g"], "k": r["k"], "w": r["x"]} for r in ROWS],
+                tag_columns=["g", "k"],
+                source_id="w",
+            ),
+            label="joined",
+        )
+    job.run()
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(tmp_path / "job.json", database=db)
+    loaded.bind(sources={"s": _source()})
+    with pytest.raises(RuntimeError, match=r"'joined'.*ITL-1094"):
+        loaded.run(load_only=True)
+
+
+def test_an_async_cache_only_node_holds_the_rows_it_sent() -> None:
+    from orcapod.channels import Channel
+    from orcapod.core.nodes import FunctionJobNode
+    from orcapod.pipeline.serialization import LoadStatus
+
+    table = pa.table(
+        {"k": [0, 1], "x": [1, 2]},
+        schema=pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    db = InMemoryArrowDatabase()
+
+    def node() -> Any:
+        return FunctionJobNode(
+            inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+            ArrowTableStream(table, tag_columns=["k"]),
+            pipeline_database=db,
+        )
+
+    node().run()
+    cached = node()
+    # A node whose input is unavailable (as from_descriptor makes it) is the case here.
+    cached._load_status = LoadStatus.CACHE_ONLY  # pyright: ignore[reportPrivateUsage]  # the load status is what this test is about
+
+    async def run() -> list[Any]:
+        inputs: Channel[Any] = Channel(buffer_size=4)
+        output: Channel[Any] = Channel(buffer_size=4)
+        await inputs.writer.close()
+        # The channel entry point is what this test is about.
+        await cached.async_execute(inputs.reader, output.writer)
+        return await output.reader.collect()
+
+    sent = asyncio.run(run())
+    assert len(sent) == 2
+    assert cached.as_table().num_rows == 2

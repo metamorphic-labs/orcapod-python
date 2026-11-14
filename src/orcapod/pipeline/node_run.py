@@ -132,14 +132,18 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
     order = list(graph.topological_sort())
 
     def is_outside(node: Any) -> bool:
+        """Whether ``node`` is one of the ``outside`` streams: by identity, not by
+        equality (two equal streams are still two inputs)."""
         return any(node is other for other in outside)
 
     def is_current(node: Any) -> bool:
+        """Whether ``node`` holds a run this run need not redo (it is held)."""
         return isinstance(node, RunHoldingNode) and node.holds_current_run(
             load_only=load_only
         )
 
     def is_source(node: Any) -> bool:
+        """Whether ``node`` is a source slot: read when a node that runs reads it."""
         return isinstance(node, SourceJobNode)
 
     current = [node for node in order if is_current(node)]
@@ -246,8 +250,8 @@ def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
         _ = SyncPipelineOrchestrator().run(
             plan.dag, observer=counter, load_only=load_only, held_rows=plan.held_rows
         )
-    except Exception as run_error:
-        if not load_only:
+    except BaseException as run_error:
+        if isinstance(run_error, Exception) and not load_only:
             # Commit the writes that succeeded before the failure, as job.run() does;
             # a load-only run writes nothing, so it commits nothing (ITL-1095).
             flush_best_effort(run_error, *stores)
