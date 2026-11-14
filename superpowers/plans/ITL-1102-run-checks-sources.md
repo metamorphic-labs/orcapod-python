@@ -160,3 +160,9 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
 
 - Stage 1: committed 42826d93, pushed, draft PR #384.
 - Stage 2: Delta + SpiralDB implemented (reload.same_rows helper), tests in tests/test_core/sources/test_source_check_for_new_data.py.
+- Stage 2: committed cb988d7c. Merged #380 head 3cd6bef5 (9ad0b8e7; function-pods.md conflict: kept ours).
+- Stage 3: CSV (stat + order-insensitive re-read), DBTableSource/SQLite/PG (re-read every run,
+  _open_connector per class), CachedSource (inner check + record-hash compare, no write),
+  DerivedSource (origin check / job node re-read after it ran), SourceProxy (forward
+  last_modified, stamp bind/unbind, delegate check). Targeted suites: 10319 passed.
+- Next: CI, wait for #380 to merge, then CodeRabbit per the brief.

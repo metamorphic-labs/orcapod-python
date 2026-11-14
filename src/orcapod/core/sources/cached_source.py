@@ -5,6 +5,8 @@ import logging
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
@@ -268,11 +270,10 @@ class CachedSource(RootSource):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         return self._source.keys(columns=columns, all_info=all_info)
 
-    def _ingest_live_data(self) -> None:
-        """Fetch live data from the source and store new rows in the cache.
+    def _live_records(self) -> pa.Table:
+        """Read the wrapped source's rows, each with its record hash in front.
 
-        Raises if the source cannot provide data (e.g. an unbound
-        ``SourceProxy``).
+        Raises if the source cannot provide data (e.g. an unbound ``SourceProxy``).
         """
         require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
@@ -293,12 +294,20 @@ class CachedSource(RootSource):
                     arrow_hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
                 )
 
-        # Store in DB with hash as record ID (skip_duplicates deduplicates)
-        live_with_hash = live_table.add_column(
+        return live_table.add_column(
             0,
             self.HASH_COLUMN_NAME,
             pa.array(record_hashes, type=pa.large_binary()),
         )
+
+    def _ingest_live_data(self) -> None:
+        """Fetch live data from the source and store new rows in the cache.
+
+        Raises if the source cannot provide data (e.g. an unbound
+        ``SourceProxy``).
+        """
+        live_with_hash = self._live_records()
+        # Store in DB with hash as record ID (skip_duplicates deduplicates).
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
         self._account_for_stale_tables()
@@ -309,6 +318,46 @@ class CachedSource(RootSource):
             skip_duplicates=True,
         )
         self._cache_database.flush()
+
+    def _cached_record_hashes(self) -> set[bytes]:
+        """The record hashes of the rows cached under the current data context."""
+        self._account_for_stale_tables()
+        records = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if records is None:
+            return set()
+        records = keep_rows_of_data_context(records, self.data_context_key)
+        return {
+            h
+            for h in records.column(self.HASH_COLUMN_NAME).to_pylist()
+            if h is not None
+        }
+
+    @override
+    def check_for_new_data(self) -> bool:
+        """Check the wrapped source; move only if the cache would gain rows (ITL-1102).
+
+        The wrapped source is checked first. When it took in new data, its rows are
+        hashed and compared with the rows already cached (a read of the cache; nothing
+        is written): the cache keeps every row it ever held, so rows that were removed
+        from the wrapped source change nothing. When it would gain rows, the merged
+        rows held in memory are dropped (the next read writes the new rows to the cache
+        and merges them) and the modified time moves.
+
+        Returns:
+            ``True`` if the cache will gain rows at the next read.
+        """
+        if not isinstance(self._source, RootSource):
+            return False
+        if not self._source.check_for_new_data():
+            return False
+        live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
+        if {h for h in live if h is not None} <= self._cached_record_hashes():
+            return False
+        self._cached_stream = None
+        self._update_modified_time()
+        return True
 
     def _read_cached_records(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context.

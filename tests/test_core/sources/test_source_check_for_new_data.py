@@ -8,8 +8,12 @@ orchestrators.
 
 from __future__ import annotations
 
+import os
+import sqlite3
+import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import deltalake
 import pyarrow as pa
@@ -18,9 +22,21 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.databases.spiraldb_nullability import write_nullability_record
+from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.errors import SourceCheckFailedWarning
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
-from orcapod.sources import DeltaTableSource, SpiralDBTableSource
+from orcapod.sources import (
+    CachedSource,
+    CSVSource,
+    DBTableSource,
+    DeltaTableSource,
+    DerivedSource,
+    PostgreSQLTableSource,
+    SourceProxy,
+    SpiralDBTableSource,
+    SQLiteTableSource,
+)
+from orcapod.types import ColumnInfo
 from tests.test_databases import fake_pyspiral
 
 CALLS: list[int] = []
@@ -65,8 +81,14 @@ def _run(job: PipelineJob, orchestrator: str) -> Any:
     return job.run(orchestrator=ORCHESTRATORS[orchestrator]())
 
 
+def _values(source: Any, column: str) -> list[int]:
+    return sorted(
+        v for v in source.as_table().column(column).to_pylist() if v is not None
+    )
+
+
 def _keys(source: Any) -> list[int]:
-    return sorted(k for k in source.as_table().column("k").to_pylist() if k is not None)
+    return _values(source, "k")
 
 
 def _ys(job: PipelineJob) -> list[int]:
@@ -263,3 +285,251 @@ def test_spiral_job_runs_only_the_new_rows(spiral: Any, orchestrator: str) -> No
     assert CALLS == [30]  # keyed record ids: the other rows' entries are stored
     assert summary.nodes["rowwise"].computed == 1
     assert _ys(job) == [1, 11, 21, 31]
+
+
+# ---------------------------------------------------------------------------
+# CSVSource
+# ---------------------------------------------------------------------------
+
+
+def _write_csv(path: Path, keys: list[int]) -> None:
+    lines = ["k,x", *(f"{k},{10 * k}" for k in keys)]
+    path.write_text("\n".join(lines) + "\n")
+
+
+@pytest.fixture()
+def csv_path(tmp_path: Path) -> Path:
+    path = tmp_path / "rows.csv"
+    _write_csv(path, [0, 1, 2])
+    return path
+
+
+def _csv(path: Path) -> CSVSource:
+    return CSVSource(str(path), tag_columns="k", record_id_column="k")
+
+
+def test_csv_unchanged_finds_nothing(csv_path: Path) -> None:
+    source = _csv(csv_path)
+    before = source.last_modified
+    assert source.check_for_new_data() is False
+    assert source.last_modified == before
+
+
+def test_csv_touched_or_reordered_with_the_same_rows_changes_nothing(
+    csv_path: Path,
+) -> None:
+    source = _csv(csv_path)
+    before = source.last_modified
+    os.utime(csv_path, ns=(time.time_ns(), time.time_ns() + 10**9))
+    assert source.check_for_new_data() is False
+    _write_csv(csv_path, [2, 0, 1])  # the same rows in another order
+    assert source.check_for_new_data() is False
+    assert source.last_modified == before
+
+
+def test_csv_appended_rows_are_taken_in(csv_path: Path) -> None:
+    source = _csv(csv_path)
+    _write_csv(csv_path, [0, 1, 2, 3])
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
+    assert source.check_for_new_data() is False
+
+
+def test_csv_changed_columns_fail_the_check(csv_path: Path) -> None:
+    source = _csv(csv_path)
+    csv_path.write_text("k,x,z\n0,0,1\n")
+    with pytest.raises(ValueError, match="changed its columns"):
+        source.check_for_new_data()
+    assert _keys(source) == [0, 1, 2]
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_csv_job_runs_only_the_new_rows(csv_path: Path, orchestrator: str) -> None:
+    job = _job(_csv(csv_path))
+    _run(job, orchestrator)
+    CALLS.clear()
+    assert _run(job, orchestrator).nodes["rowwise"].held == 3
+    _write_csv(csv_path, [0, 1, 2, 3])
+    _run(job, orchestrator)
+    assert CALLS == [30]
+    assert _ys(job) == [1, 11, 21, 31]
+
+
+# ---------------------------------------------------------------------------
+# SQLiteTableSource and DBTableSource
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def sqlite_path(tmp_path: Path) -> Path:
+    path = tmp_path / "data.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE t (k INTEGER PRIMARY KEY NOT NULL, x INTEGER NOT NULL)"
+        )
+        conn.executemany("INSERT INTO t VALUES (?, ?)", [(k, 10 * k) for k in range(3)])
+    return path
+
+
+def _insert(path: Path, k: int) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO t VALUES (?, ?)", (k, 10 * k))
+
+
+def test_sqlite_unchanged_finds_nothing(sqlite_path: Path) -> None:
+    source = SQLiteTableSource(sqlite_path, "t", record_id_column="k")
+    before = source.last_modified
+    assert source.check_for_new_data() is False
+    assert source.last_modified == before
+
+
+def test_sqlite_new_rows_are_taken_in(sqlite_path: Path) -> None:
+    source = SQLiteTableSource(sqlite_path, "t", record_id_column="k")
+    _insert(sqlite_path, 3)
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
+
+
+def test_sqlite_dropped_table_fails_the_check(sqlite_path: Path) -> None:
+    source = SQLiteTableSource(sqlite_path, "t", record_id_column="k")
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute("DROP TABLE t")
+    with pytest.raises(ValueError, match="not found"):
+        source.check_for_new_data()
+    assert _keys(source) == [0, 1, 2]
+
+
+def test_db_table_source_reads_again_through_its_connector() -> None:
+    connector = SQLiteConnector(":memory:")
+    connector.create_table_if_not_exists(
+        "t",
+        [ColumnInfo("k", pa.int64(), False), ColumnInfo("x", pa.int64(), False)],
+        pk_column="k",
+    )
+    connector.upsert_records("t", _rows([0, 1, 2]), id_column="k")
+    source = DBTableSource(connector, "t", record_id_column="k")
+    connector.upsert_records("t", _rows([3]), id_column="k")
+    # A DBTableSource reads through the connector it was given, which is still open.
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_sqlite_job_runs_only_the_new_rows(
+    sqlite_path: Path, orchestrator: str
+) -> None:
+    job = _job(SQLiteTableSource(sqlite_path, "t", record_id_column="k"))
+    _run(job, orchestrator)
+    CALLS.clear()
+    assert _run(job, orchestrator).nodes["rowwise"].held == 3
+    _insert(sqlite_path, 3)
+    _run(job, orchestrator)
+    assert CALLS == [30]
+    assert _ys(job) == [1, 11, 21, 31]
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQLTableSource (connector mocked; no server)
+# ---------------------------------------------------------------------------
+
+_PG_PATCH = "orcapod.core.sources.postgresql_table_source.PostgreSQLConnector"
+
+
+def _pg_connector(keys: list[int]) -> MagicMock:
+    connector = MagicMock()
+    connector.get_table_names.return_value = ["t"]
+    connector.get_pk_columns.return_value = ["k"]
+    connector.get_column_info.return_value = [
+        ColumnInfo("k", pa.int64(), False),
+        ColumnInfo("x", pa.int64(), False),
+    ]
+    connector.iter_batches.return_value = iter(_rows(keys).to_batches())
+    return connector
+
+
+def test_postgresql_reads_again_and_compares_in_any_order() -> None:
+    with patch(_PG_PATCH) as connector_class:
+        connector_class.return_value = _pg_connector([0, 1, 2])
+        source = PostgreSQLTableSource("dsn", "t", record_id_column="k")
+        before = source.last_modified
+        connector_class.return_value = _pg_connector([2, 0, 1])
+        assert source.check_for_new_data() is False
+        assert source.last_modified == before
+        connector_class.return_value = _pg_connector([0, 1, 2, 3])
+        assert source.check_for_new_data() is True
+        connector_class.return_value.close.assert_called_once()
+    assert _keys(source) == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# CachedSource, DerivedSource, SourceProxy
+# ---------------------------------------------------------------------------
+
+
+def test_cached_source_moves_only_when_the_cache_gains_rows(delta_path: Path) -> None:
+    source = CachedSource(_delta(delta_path), cache_database=InMemoryArrowDatabase())
+    assert _keys(source) == [0, 1, 2]
+    before = source.last_modified
+    assert source.check_for_new_data() is False
+    deltalake.DeltaTable(str(delta_path)).delete("k = 2")
+    assert source.check_for_new_data() is False  # the cache keeps every row it had
+    assert source.last_modified == before
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_cached_source_job_runs_only_the_new_rows(
+    delta_path: Path, orchestrator: str
+) -> None:
+    job = _job(CachedSource(_delta(delta_path), cache_database=InMemoryArrowDatabase()))
+    _run(job, orchestrator)
+    CALLS.clear()
+    assert _run(job, orchestrator).nodes["rowwise"].held == 3
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    _run(job, orchestrator)
+    assert CALLS == [30]
+
+
+def test_derived_source_follows_its_source_origin(delta_path: Path) -> None:
+    source = DerivedSource(_delta(delta_path), tags_as_data={"k": "k_value"})
+    assert _values(source, "k_value") == [0, 1, 2]
+    assert source.check_for_new_data() is False
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert source.check_for_new_data() is True
+    assert _values(source, "k_value") == [0, 1, 2, 3]
+
+
+def test_derived_source_follows_its_job_node(csv_path: Path) -> None:
+    job = _job(_csv(csv_path))
+    stored = job.nodes["rowwise"].as_source()
+    assert stored.as_table().num_rows == 0  # nothing stored before the first run
+    before = stored.last_modified
+    _run(job, "sync")
+    assert stored.check_for_new_data() is True
+    assert _values(stored, "y") == [1, 11, 21]
+    assert stored.last_modified is not None and before is not None
+    assert stored.last_modified > before
+    assert stored.check_for_new_data() is False
+
+
+def test_source_proxy_follows_its_delegate(delta_path: Path) -> None:
+    live = _delta(delta_path)
+    proxy = SourceProxy(
+        source_id=live.source_id,
+        expected_class_name="DeltaTableSource",
+        tag_schema=live.output_schema()[0],
+        data_schema=live.output_schema()[1],
+        content_hash_str=live.content_hash().to_string(),
+        pipeline_hash_str=live.pipeline_hash().to_string(),
+    )
+    built = proxy.last_modified
+    proxy.bind(live)
+    bound = proxy.last_modified
+    assert bound is not None and built is not None and bound > built
+    assert proxy.check_for_new_data() is False
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert proxy.check_for_new_data() is True
+    assert proxy.last_modified == live.last_modified
+    assert _keys(proxy) == [0, 1, 2, 3]

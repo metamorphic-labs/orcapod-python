@@ -12,11 +12,18 @@ Example::
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.stream_builder import SourceStreamBuilder
+from orcapod.core.sources.reload import same_rows
+from orcapod.core.sources.stream_builder import (
+    SourceStreamBuilder,
+    SourceStreamResult,
+)
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -108,14 +115,36 @@ class DBTableSource(RootSource):
         # Step 3: Fetch the full table as Arrow.
         # _query allows subclasses (e.g. SQLiteTableSource) to inject a custom
         # SELECT (e.g. SELECT rowid, * FROM "t") without duplicating the rest of init.
-        query = _query if _query is not None else f'SELECT * FROM "{table_name}"'
-        batches = list(connector.iter_batches(query))
+        self._query = _query if _query is not None else f'SELECT * FROM "{table_name}"'
+        table = self._read_table(connector)
+        # The columns the source was built with: a check refuses a table that changed them.
+        self._table_schema: pa.Schema = table.schema
+
+        # Step 4: Enrich via SourceStreamBuilder (same pipeline as all other RootSources)
+        self._tag_columns: Collection[str] = resolved_tag_columns
+        self._system_tag_columns: Collection[str] = system_tag_columns
+        result = self._build(table)
+        self._stream = result.stream
+        self._tag_columns = result.tag_columns
+        self._system_tag_columns = result.system_tag_columns
+        if self._source_id is None:
+            self._source_id = result.source_id
+
+    def _read_table(self, connector: DBConnectorProtocol) -> pa.Table:
+        """Read every row of the table through ``connector``, with its nullability.
+
+        Raises:
+            ValueError: If the table is not found or is empty.
+        """
+        if self._table_name not in connector.get_table_names():
+            raise ValueError(f"Table {self._table_name!r} not found in database.")
+        batches = list(connector.iter_batches(self._query))
         if not batches:
-            raise ValueError(f"Table {table_name!r} is empty.")
+            raise ValueError(f"Table {self._table_name!r} is empty.")
         table: pa.Table = pa.Table.from_batches(batches)
         # Apply database-defined nullability: the connector's get_column_info
         # returns the authoritative nullable flag per column from the DB schema.
-        col_infos = connector.get_column_info(table_name)
+        col_infos = connector.get_column_info(self._table_name)
         if col_infos:
             db_nullable = {ci.name: ci.nullable for ci in col_infos}
             db_schema = pa.schema(
@@ -124,31 +153,65 @@ class DBTableSource(RootSource):
                     for f in table.schema
                 ]
             )
-            table = pa.Table.from_arrays(
+            return pa.Table.from_arrays(
                 [table.column(i) for i in range(table.num_columns)],
                 schema=db_schema,
             )
-        else:
-            # No column info available — fall back to inferring nullable flags
-            # from actual data so columns without nulls are not spuriously marked
-            # nullable=True (Arrow's default).
-            table = table.cast(arrow_utils.infer_schema_nullable(table))
+        # No column info available — fall back to inferring nullable flags
+        # from actual data so columns without nulls are not spuriously marked
+        # nullable=True (Arrow's default).
+        return table.cast(arrow_utils.infer_schema_nullable(table))
 
-        # Step 4: Enrich via SourceStreamBuilder (same pipeline as all other RootSources)
+    def _build(self, table: pa.Table) -> SourceStreamResult:
+        """Enrich ``table`` as this source's stream (source info, system tags)."""
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
-        result = builder.build(
+        return builder.build(
             table,
-            tag_columns=resolved_tag_columns,
+            tag_columns=self._tag_columns,
             source_id=self._source_id,
-            record_id_column=record_id_column,
-            system_tag_columns=system_tag_columns,
+            record_id_column=self._record_id_column,
+            system_tag_columns=self._system_tag_columns,
         )
 
-        self._stream = result.stream
-        self._tag_columns = result.tag_columns
-        self._system_tag_columns = result.system_tag_columns
-        if self._source_id is None:
-            self._source_id = result.source_id
+    @contextmanager
+    def _open_connector(self) -> Iterator[DBConnectorProtocol]:
+        """Give the connector a check reads through: the one the source was given.
+
+        A subclass that closed its connector after construction opens a new one.
+        """
+        yield self._connector
+
+    @override
+    def check_for_new_data(self) -> bool:
+        """Read the table again and take in its rows if they changed (ITL-1102).
+
+        A database table has no cheap exact sign of a change, so every check reads the
+        whole table, as building the source did, and compares it with the rows held,
+        in any order: a table that returns the same rows in another order (an
+        unordered ``SELECT``) is unchanged.
+
+        Returns:
+            ``True`` if the source now holds new rows.
+
+        Raises:
+            ValueError: If the table is gone or empty, or its columns or their types
+                changed: the source's schema is part of its identity; build a new
+                source to read it.
+        """
+        with self._open_connector() as connector:
+            table = self._read_table(connector)
+        if not table.schema.equals(self._table_schema, check_metadata=True):
+            raise ValueError(
+                f"Table {self._table_name!r} changed its columns: the source was "
+                f"built with {self._table_schema}, the table now has {table.schema}. "
+                "Build a new source to read it"
+            )
+        stream = self._build(table).stream
+        if same_rows(self._stream.as_table(), stream.as_table()):
+            return False
+        self._stream = stream
+        self._update_modified_time()
+        return True
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize source configuration to a JSON-compatible dict."""

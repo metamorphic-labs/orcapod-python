@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from typing_extensions import override
+
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -265,6 +269,9 @@ class DerivedSource(RootSource):
         self._record_id_column = record_id_column
         self._cached_table: pa.Table | None = None
         self._cached_stream: ArrowTableStream | None = None
+        # The origin job node's modified time when its rows were cached: a check reads
+        # its stored rows again only after it ran again (ITL-1102).
+        self._origin_seen: datetime | None = None
 
     # -------------------------------------------------------------------------
     # Identity
@@ -444,6 +451,7 @@ class DerivedSource(RootSource):
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream
+            self._origin_seen = self._origin.last_modified
             stream, has_rows = self._build_derived_stream(self._tags_as_data)
             if has_rows:
                 # An origin node that has not run yet is not cached, so the rows
@@ -452,6 +460,7 @@ class DerivedSource(RootSource):
             return stream
 
         if self._cached_table is None:
+            self._origin_seen = self._origin.last_modified
             records = self._origin_records()
             if records is None:
                 self._cached_table = self._empty_origin_table()
@@ -459,6 +468,51 @@ class DerivedSource(RootSource):
                 self._cached_table = records
         tag_keys = self._origin.keys()[0]
         return ArrowTableStream(self._cached_table, tag_columns=tag_keys)
+
+    def _held_rows(self) -> "pa.Table | None":
+        """The rows this source holds from its origin, or ``None`` before a read."""
+        if self._tags_as_data is not None:
+            return (
+                None if self._cached_stream is None else self._cached_stream.as_table()
+            )
+        return self._cached_table
+
+    @override
+    def check_for_new_data(self) -> bool:
+        """Take in the origin's rows if they changed since this source read them.
+
+        Developer, November 14, 2026 (ITL-1102). Over a source, the origin is checked
+        first (``check_for_new_data``); over a job node, its stored rows are read again
+        only after the node ran again (its modified time moved). The rows read are
+        compared with the rows held, in any order; when they differ the source holds
+        the new ones and moves its modified time. A source that has not read its origin
+        yet holds nothing: its next read reads the origin as it is.
+
+        Returns:
+            ``True`` if the source now holds new rows.
+        """
+        if isinstance(self._origin, RootSource):
+            if not self._origin.check_for_new_data():
+                return False
+        elif self._origin.last_modified == self._origin_seen:
+            return False
+        held = self._held_rows()
+        if held is None:
+            return False
+        self._origin_seen = self._origin.last_modified
+        if self._tags_as_data is not None:
+            stream, has_rows = self._build_derived_stream(self._tags_as_data)
+            if same_rows(held, stream.as_table()):
+                return False
+            self._cached_stream = stream if has_rows else None
+        else:
+            records = self._origin_records()
+            read = self._empty_origin_table() if records is None else records
+            if same_rows(held, read):
+                return False
+            self._cached_table = read
+        self._update_modified_time()
+        return True
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the origin."""

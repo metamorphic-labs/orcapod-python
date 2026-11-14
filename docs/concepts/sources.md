@@ -432,10 +432,21 @@ whose sources are unchanged computes nothing. `head()` and the notebook preview 
 | `PollingSource` | polls once (and fetches when the poll reports new data); its modified time moves only when the fetch returned rows, to the moment it found them (a cursor's `modified_at` is informational) |
 | `DeltaTableSource` | reads the Delta log only; when the table's version moved, reads the table again and, if its rows changed (in any order: a version that only compacted files changes nothing), holds the new rows |
 | `SpiralDBTableSource` | holds no rows (every read scans the pinned version); reads the table's current version (metadata only: no row, and `max_rows` does not apply) and pins it when it is newer, so the next read returns the new rows; an `asof` you gave never moves; record ids are the hash of the key, so only new or changed rows are new entries (a version that moves without a change, if SpiralDB moves it on compaction, re-runs the nodes below and reuses every stored result) |
-| Every other source | nothing yet: build a new source object and bind it (`job.bind(sources=...)`) to read changed data |
+| `CSVSource` | reads the file's modification time and size; when either changed, reads the file again and holds the new rows if they changed (in any order) |
+| `SQLiteTableSource`, `PostgreSQLTableSource`, `DBTableSource` | reads the whole table again and holds the new rows if they changed (in any order, so an unordered `SELECT` is not a change) |
+| `CachedSource` | checks the source it wraps; when that took in new data, compares the rows' record hashes with the cache (a read; nothing is written) and moves only when the cache will gain rows (a row removed from the wrapped source stays cached) |
+| `DerivedSource` | over a source, checks it; over a job node, reads the node's stored rows again once the node ran again; holds the new rows if they changed |
+| `SourceProxy` | checks the source bound to it; its modified time follows that source's, and binding or unbinding moves it |
 
-A table whose columns changed, or a SpiralDB table dropped and created again, fails the check:
-the source's schema and table are part of its identity, so build a new source to read it.
+A database table has no cheap and exact sign of a change, so each check of a SQLite or
+PostgreSQL source reads the whole table, one full read per run, as building the source did.
+For a large table, build the source over a narrower table or view, or keep the data in a
+store that records versions (Delta, SpiralDB), whose check reads only the version.
+
+A table or file whose columns changed (a CSV file's types are inferred again on each read,
+so a null in a column that had none is a change of type), a table that is gone or empty, or a
+SpiralDB table dropped and created again, fails the check: the source's schema and table are
+part of its identity, so build a new source to read it.
 
 A check that raises does not fail the run. The run issues one `SourceCheckFailedWarning` per
 source, naming the source and the error; the source keeps its data and modified time; the
