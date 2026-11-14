@@ -11,6 +11,7 @@ applies its operator to zero-row inputs, as the sync path does.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,7 +39,7 @@ WITH_ROWS = ("g1", "g1", "g2")
 NO_MATCH = ("g2", "g2", "g3")
 
 
-def _path_column() -> pa.ChunkedArray:
+def _path_column() -> pa.ChunkedArray[Any]:
     """Three ``Path`` values in the logical type the data context stores them with."""
     converter = contexts.resolve_context(None).type_converter
     table = converter.python_dicts_to_arrow_table(
@@ -217,7 +218,9 @@ def _function_stream(groups: tuple[str, ...]) -> StreamProtocol:
 
 def _cached_function_stream(groups: tuple[str, ...]) -> StreamProtocol:
     """``describe_x`` through a ``CachedFunctionPod`` over the ``g1`` rows."""
-    pod = CachedFunctionPod(describe_x.pod, result_database=InMemoryArrowDatabase())
+    # The decorated function's pod, as the hashing tests pass it (typed loosely).
+    inner: Any = describe_x.pod
+    pod = CachedFunctionPod(inner, result_database=InMemoryArrowDatabase())
     return pod(_g1(_source(groups)))
 
 
@@ -292,7 +295,7 @@ def _int8_table() -> pa.Table:
     )
 
 
-def _arrow_table_source(tmp_path: Path) -> StreamProtocol:
+def _arrow_table_source(tmp_path: Path) -> ArrowTableSource:
     """An in-memory source."""
     return ArrowTableSource(_int8_table(), tag_columns=["id"], source_id="kinds")
 

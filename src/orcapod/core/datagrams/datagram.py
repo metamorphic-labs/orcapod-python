@@ -46,7 +46,7 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def context_key_field() -> pa.Field:
+def context_key_field() -> pa.Field[Any]:
     """The field of a datagram's data context column (``_context_key``)."""
     return pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False)
 

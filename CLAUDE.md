@@ -745,6 +745,16 @@ then through the data context's type converter — never call `pa.array(values)`
 inference widens `int8` to `int64`, `float32` to `double`, and takes decimal precision from the
 data. The rules:
 
+- **The Arrow schema is never computed** (developer, November 13, 2026, ITL-912): "Generally
+  Orcapod should never have to compute anything to get the arrow schema, all function pods and
+  operator pods can deterministically derive the output stream schema from the input stream
+  schemas, and ultimately no source can be created without having schema specified somehow."
+  A table with no rows (before a run, after `clear_cache()`, a zero-row result or input) has
+  exactly the types of the rows: get it from `streams/base.typed_zero_row_table`, never from
+  the Python schema, and never by computing, reading or polling a row or calling a function.
+  An operator's is its result over its inputs' zero-row tables; a function pod's is the
+  input's tags plus the declared outputs (`function_zero_row_table`); a source's is the table
+  or schema it holds. A new stream kind implements `_typed_zero_row_table`.
 - **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on

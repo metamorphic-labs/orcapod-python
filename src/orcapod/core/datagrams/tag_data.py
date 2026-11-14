@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field:
+def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
     """The field of source-info column ``name`` holding ``token``, as a row's table has it."""
     import pyarrow as _pa
 

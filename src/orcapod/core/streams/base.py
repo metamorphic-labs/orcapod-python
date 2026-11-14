@@ -4,7 +4,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.head import (
@@ -80,7 +80,7 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
         that reads, polls or derives its rows later, a pod stream not yet computed.
     """
     method = getattr(stream, "_typed_zero_row_table", None)
-    return method() if callable(method) else None
+    return cast("pa.Table | None", method()) if callable(method) else None
 
 
 def check_head_size(n: int) -> None:

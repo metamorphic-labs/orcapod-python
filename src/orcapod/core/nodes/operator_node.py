@@ -1193,7 +1193,8 @@ class OperatorJobNode(OperatorNodeBase):
             inputs.append(zero_rows)
         # static_process, not process: an invocation recorded by a tracker would add
         # a step to whatever pipeline is being built while this table is read.
-        result = self._operator.static_process(*inputs)
+        operator = cast(StaticOutputOperatorPod, self._operator)
+        result = operator.static_process(*inputs)
         return result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
 
     def _make_empty_table(self) -> "pa.Table":
@@ -1486,6 +1487,16 @@ class OperatorJobNode(OperatorNodeBase):
         memory (before a run, or after ``clear_cache()``), a node in
         ``CacheMode.REPLAY`` with a database returns the rows stored there; in
         any other mode it returns a zero-row table with the node's columns.
+
+        That zero-row table has the columns, Arrow types and nullability of the
+        node's rows, system tags and source info included: it is the operator's
+        result over its inputs' zero-row tables, got without computing or reading
+        a row (ITL-912). Known limitation: when an input cannot say its Arrow
+        types without rows (a ``PollingSource`` before its first poll, an unbound
+        input slot or ``SourceProxy``, a ``DerivedSource``, or a loaded node with
+        no live upstream), the table is built from the node's Python output
+        schema, as before: an ``int8`` column reads as ``int64`` and the
+        system-tag columns are absent.
 
         Loaded nodes raise when no readable stored cache is available.
         """
