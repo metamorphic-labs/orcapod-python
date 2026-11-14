@@ -342,6 +342,113 @@ def test_max_concurrency_one_raises_the_first_failing_row(orchestrator: str) -> 
         run_job(job, orchestrator, "fail_fast")
 
 
+def rows_of(table: Any) -> list[tuple[tuple[str, Any], ...]]:
+    """The rows of ``table``, each a sorted tuple of (column, value), sorted."""
+    return sorted(tuple(sorted(row.items())) for row in table.to_pylist())
+
+
+@pytest.mark.parametrize("position", list(FAILING_POSITIONS))
+def test_fail_fast_leaves_the_nodes_with_no_run(
+    orchestrator: str, build: Callable[..., PipelineJob], position: str
+) -> None:
+    """After a fail_fast raise, the failing node and the node after it hold no run.
+
+    A run that raised defines no rows (ITL-1093): each node reads as a node with no run,
+    every row stored under its content hash, also the downstream node the async run
+    cancelled. Another job stores rows of other values first, so a node still holding
+    its previous run's rows reads fewer rows than a node with no run.
+    """
+    store = InMemoryArrowDatabase()
+    run_job(build(store, [100 + i for i in range(N_ROWS)]), orchestrator, "continue")
+    xs = xs_failing_at(FAILING_POSITIONS[position])
+    job = build(store, xs)
+    run_job(job, orchestrator, "continue")
+    for label in ("f", "down"):
+        assert len(job.nodes[label].as_table()) == N_ROWS - 1, label
+
+    with pytest.raises(ValueError):
+        run_job(job, orchestrator, "fail_fast")
+
+    for label in ("f", "down"):
+        no_run = rows_of(build(store, xs).nodes[label].as_table())
+        assert rows_of(job.nodes[label].as_table()) == no_run, label
+        # Also the other job's rows: not the previous run's rows only.
+        assert len(no_run) == 2 * N_ROWS - 1, label
+
+
+# The row ``sibling`` leaves uncomputed until the run that is cancelled.
+SIBLING_X = 2
+sibling_mode = {"mode": "fail"}
+
+
+@function_pod(output_keys="w")
+async def sibling(x: int) -> int:
+    """Return ``x``; at ``SIBLING_X`` fail, or wait until cancelled, as ``sibling_mode`` says."""
+    if x == SIBLING_X:
+        if sibling_mode["mode"] == "fail":
+            raise ValueError("sibling failed")
+        await asyncio.Event().wait()
+    return x
+
+
+def branches_job(store: Any, xs: list[int]) -> PipelineJob:
+    """Source -> ``f`` (fails on a negative x), and source -> ``g`` (``sibling``)."""
+    job = PipelineJob(name="itl879", database=store)
+    with job:
+        source = source_of(xs)
+        checked.pod(source, label="f")
+        sibling.pod(source, label="g")
+    return job
+
+
+def test_a_node_cancelled_on_another_branch_holds_no_run() -> None:
+    """A node the async run cancels, not downstream of the failure, holds no run either.
+
+    ``g`` waits at its one uncomputed row until the failure of ``f`` cancels it. Its
+    previous run's rows are not held: it reads as a node with no run (ITL-1093).
+    """
+    store = InMemoryArrowDatabase()
+    other = [100 + i for i in range(N_ROWS)]
+    run_job(branches_job(store, other), "async", "continue")
+    xs = xs_failing_at(N_ROWS - 1)
+    job = branches_job(store, xs)
+    sibling_mode["mode"] = "fail"
+    run_job(job, "async", "continue")
+    assert len(job.nodes["g"].as_table()) == N_ROWS - 1
+
+    sibling_mode["mode"] = "wait"
+    try:
+        with pytest.raises(ValueError, match=r"^bad x="):
+            run_job(job, "async", "fail_fast")
+    finally:
+        sibling_mode["mode"] = "fail"
+
+    no_run = rows_of(branches_job(store, xs).nodes["g"].as_table())
+    assert rows_of(job.nodes["g"].as_table()) == no_run
+    assert len(no_run) == 2 * N_ROWS - 1
+
+
+def test_an_observer_failing_at_node_end_is_called_once(orchestrator: str) -> None:
+    """An ``on_node_end`` that raises is not called again; its error is the run's."""
+
+    class FailsAtNodeEnd(Recorder):
+        """A recorder whose ``on_node_end`` raises for node ``f``."""
+
+        def on_node_end(self, node_label: str, node_hash: str) -> None:
+            """Record the node end, then raise for ``f``."""
+            super().on_node_end(node_label, node_hash)
+            if node_label == "f":
+                raise RuntimeError("observer failed")
+
+    recorder = FailsAtNodeEnd()
+    job = function_job(InMemoryArrowDatabase(), [1, 2, 3])
+    with pytest.raises(RuntimeError, match="^observer failed$") as info:
+        run_job(job, orchestrator, "continue", recorder)
+
+    assert type(info.value) is RuntimeError
+    assert recorder.of("node_end", "f") == [None]
+
+
 def test_nothing_left_running_after_fail_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

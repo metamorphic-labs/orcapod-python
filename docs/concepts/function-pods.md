@@ -568,7 +568,9 @@ has finished. When rows of several nodes fail before the run stops, one error is
 the others are noted on it (`error.__notes__`): a store error first (see "When the store
 cannot be written" below), then a `TypeIdentityError`, and otherwise the error of the node
 that comes first in the pipeline. A node cancelled by the failure commits the results it
-wrote before it stops.
+wrote before it stops. A run that raised defines no rows: afterwards the failing node, and
+every node the run cancelled, reads as a node with no finished run, every row stored under
+its key.
 
 What is stored after such a run:
 

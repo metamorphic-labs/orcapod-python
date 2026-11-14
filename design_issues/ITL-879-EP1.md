@@ -29,9 +29,11 @@ in topological order (ties: the order the failures happened), the others noted o
 (`_single_failure`). A function node cancelled by another node's failure commits what it
 wrote (`_commit_after_failure`) before the cancellation propagates, as a failing node does:
 the job's flush commits neither its ephemeral store nor its result table ahead of its
-pipeline records (CodeRabbit, PR #379). An observer whose `on_node_end` raises as the node
-fails does not skip that commit either, as on the sync path. Rows run concurrently, so the row raised is the first to fail, the first
-in input order only with `max_concurrency=1`. Storage guarantee, as documented in
+pipeline records (CodeRabbit, PR #379); it then holds no rows, as a node whose run raised
+(ITL-1093). An observer whose `on_node_end` raises as the node fails does not skip that
+commit either, as on the sync path, and is not called a second time. Rows run concurrently,
+so the row raised is the first to fail, the first in input order only with
+`max_concurrency=1`. Storage guarantee, as documented in
 `docs/concepts/function-pods.md`: every stored row is a correct, complete result of its input
 row; the failing row is never stored; which other rows are stored is not specified. No
 hash, golden value or stored layout changed. Regressions:

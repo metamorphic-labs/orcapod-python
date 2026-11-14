@@ -3445,13 +3445,14 @@ class FunctionJobNode(FunctionNodeBase):
         obs = observer if observer is not None else NoOpObserver()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
-        node_started = False
+        # Whether the node has started for the observer and not yet ended.
+        node_open = False
         try:
             tag_schema = self._input_stream.output_schema(
                 columns={"system_tags": True}
             )[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
-            node_started = True
+            node_open = True
 
             if self._cached_function_pod is not None:
                 # ----------------------------------------------------------
@@ -3695,6 +3696,8 @@ class FunctionJobNode(FunctionNodeBase):
                     run_id=run_id,
                 )
 
+            # Ended for the observer here, also when the call raises: not again below.
+            node_open = False
             ctx_obs.on_node_end(node_label, node_hash)
             # The run is complete: stamp the node as the sync execute() does, before
             # the finally closes the output, so every downstream node, which stamps
@@ -3710,7 +3713,7 @@ class FunctionJobNode(FunctionNodeBase):
             raise
         except Exception as run_error:
             try:
-                if node_started:
+                if node_open:
                     # The node ends for the observer before it raises, as in execute;
                     # a failing observer must not replace a store error on its way out.
                     with keep_store_error(
