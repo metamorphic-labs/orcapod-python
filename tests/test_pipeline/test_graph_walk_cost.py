@@ -292,26 +292,30 @@ class TestStreams:
         _assert_linear(counter, shape)
 
     @pytest.mark.parametrize(
-        "walk",
+        ("walk", "stages"),
         [
-            pytest.param(lambda s: s.output_schema(), id="output_schema"),
-            pytest.param(lambda s: s.keys(), id="keys"),
-            pytest.param(lambda s: s.head(), id="head"),
+            pytest.param(lambda s: s.output_schema(), STAGES, id="output_schema"),
+            pytest.param(lambda s: s.keys(), STAGES, id="keys"),
+            # head() and the preview of a stream that has not run build their table
+            # from its zero-row table, which carries the system tags (2 ** (stages + 1)
+            # columns): the system-tag stage count (ITL-1114, ITL-1132).
+            pytest.param(lambda s: s.head(), SYSTEM_TAG_STAGES, id="head"),
             # The notebook preview is the Jupyter display hook.
-            pytest.param(lambda s: s._repr_html_(), id="preview"),
+            pytest.param(lambda s: s._repr_html_(), SYSTEM_TAG_STAGES, id="preview"),
         ],
     )
     def test_a_schema_walk_is_linear(
         self,
         shape: str,
         walk: Callable[[Any], Any],
+        stages: int,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A schema query, ``head()`` or the preview asks each stream a bounded number of times."""
-        stream = _guarded_build(shape, monkeypatch)
-        with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
+        stream = _guarded_build(shape, monkeypatch, stages)
+        with _count_schema_queries(monkeypatch, _budget(shape, stages)) as counter:
             walk(stream)
-        _assert_linear(counter, shape)
+        _assert_linear(counter, shape, stages)
 
     def test_the_system_tag_schema_walk_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
@@ -323,15 +327,56 @@ class TestStreams:
             stream.output_schema(all_info=True)
         _assert_linear(counter, shape, SYSTEM_TAG_STAGES)
 
+    def test_the_zero_row_derivation_asks_each_stream_once(
+        self, shape: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stream's zero-row table (ITL-912) is derived once per node, with its schema walks bounded."""
+        # typed_zero_row_table is the zero-row derivation head() makes on a stream that
+        # has not run; _typed_zero_row_table is its per-stream hook.
+        from orcapod.core.streams.base import typed_zero_row_table
+
+        # The zero-row table carries the system tags (2 ** (stages + 1) columns), so
+        # the stage count is the system-tag one (ITL-1114, ITL-1132).
+        stages = SYSTEM_TAG_STAGES
+        stream = _guarded_build(shape, monkeypatch, stages)
+        methods = (*_COUNTED_METHODS, "_typed_zero_row_table", "_zero_row_table")
+        with _count_schema_queries(monkeypatch, _budget(shape, stages), methods) as c:
+            table = typed_zero_row_table(stream)
+        assert table is not None and table.num_rows == 0
+        _assert_linear(c, shape, stages)
+        with _count_schema_queries(
+            monkeypatch, _budget(shape, stages), ("_typed_zero_row_table",)
+        ) as once:
+            typed_zero_row_table(stream)
+        assert once.max_per_object == 1
+
+    @pytest.mark.parametrize("all_info", [False, True])
+    def test_head_of_a_stream_that_has_not_run_is_linear_with_the_zero_row_table(
+        self, shape: str, all_info: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``head()`` builds its typed zero-row table by walking each stream a bounded number of times."""
+        # The head's table is built from the zero-row table, which carries the system
+        # tags whatever the config: the system-tag stage count (ITL-1114, ITL-1132).
+        stages = SYSTEM_TAG_STAGES
+        stream = _guarded_build(shape, monkeypatch, stages)
+        methods = (*_COUNTED_METHODS, "_typed_zero_row_table", "_zero_row_table")
+        with _count_schema_queries(monkeypatch, _budget(shape, stages), methods) as c:
+            view = stream.head(all_info=all_info)
+        assert view.as_table().num_rows == 0
+        _assert_linear(c, shape, stages)
+
     def test_the_poll_check_asks_each_stream_once(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``head()`` asks each stream once whether reading its schema would poll a source."""
         # The private hook is the walk head() makes to learn whether reading the
         # schema would poll a source.
-        stream = _guarded_build(shape, monkeypatch)
+        # head() builds a zero-row table with the system tags: 8 stages (ITL-1132).
+        stream = _guarded_build(shape, monkeypatch, SYSTEM_TAG_STAGES)
         with _count_schema_queries(
-            monkeypatch, _budget(shape), methods=("_schema_requires_io",)
+            monkeypatch,
+            _budget(shape, SYSTEM_TAG_STAGES),
+            methods=("_schema_requires_io",),
         ) as counter:
             stream.head()
         assert counter.max_per_object == 1
