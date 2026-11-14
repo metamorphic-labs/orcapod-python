@@ -617,8 +617,9 @@ takes it in and moves its modified time, and the nodes below it run; one that fi
 moves nothing, and a current job stays current. What each kind of source checks is in
 [Sources](sources.md#what-a-source-does-at-a-run). A check that raises does not fail the
 run: a `SourceCheckFailedWarning` names the source and the error, the run proceeds with the
-data the source already holds, and the summary lists the source in `unchecked_sources`.
-`head()` and the preview never check.
+data the source already holds, and the summary lists the source in `unchecked_sources` (a
+node's `run()` that runs nothing makes no summary and keeps its `last_run`: the warning is
+the report). `head()` and the preview never check.
 
 A source that cannot see its data change (an in-memory source: a `DictSource` copies the
 list it is given) is not re-read: build a new source object and bind it

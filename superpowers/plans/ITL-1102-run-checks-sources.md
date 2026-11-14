@@ -166,3 +166,16 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
   DerivedSource (origin check / job node re-read after it ran), SourceProxy (forward
   last_modified, stamp bind/unbind, delegate check). Targeted suites: 10319 passed.
 - Next: CI, wait for #380 to merge, then CodeRabbit per the brief.
+
+## CodeRabbit round 1 (review of d801b22d; plan approved by the coordinator, November 14, 2026)
+
+- Delta, CSV, DB table sources compare the raw table read with the raw table held (every
+  column, `system_tag_columns` included), before building the stream.
+- `CachedSource` and `DerivedSource` re-read when the inner source's / origin's modified time
+  moved since they last read it (the inner check's return value is not trusted: another
+  wrapper may have consumed the change), and record that time only after the read and
+  comparison succeed.
+- `SourceJobNode.run()` checks its bound source; a bare source's `run()` does not (decision).
+- Declined: a held `node.run()` makes no summary; the warning is the report (docs say so).
+- #380's findings (operator lazy materialization cleanup: fixed in #388; load-only
+  `add_records` spy: declined) answered on their threads.

@@ -336,3 +336,27 @@ def test_a_check_that_keeps_failing_warns_at_every_run() -> None:
     failed = [w for w in caught if issubclass(w.category, SourceCheckFailedWarning)]
     assert len(failed) == 2
     assert all(w.filename == __file__ for w in failed)
+
+
+def test_a_source_node_run_checks_its_bound_source() -> None:
+    source = _source()
+    job = _checked_job(source)
+    _ = job.nodes["s"].run()
+    assert source.checks == 1
+    source.error = OSError("boom")
+    with pytest.warns(SourceCheckFailedWarning, match="'s'"):
+        view = job.nodes["s"].run(load_only=True)
+    assert len(view.as_table()) == 3  # the rows the source already holds
+
+
+def test_a_held_node_run_with_a_failed_check_keeps_its_last_run() -> None:
+    """A node.run() that runs nothing makes no summary: the warning is the report."""
+    source = _source()
+    job = _checked_job(source)
+    job.nodes["picked"].run()
+    first = job.nodes["picked"].last_run
+    source.error = OSError("boom")
+    with pytest.warns(SourceCheckFailedWarning):
+        job.nodes["picked"].run()
+    assert job.nodes["picked"].last_run is first
+    assert first is not None and first.unchecked_sources == ()

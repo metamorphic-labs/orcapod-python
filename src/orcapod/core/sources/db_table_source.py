@@ -117,8 +117,9 @@ class DBTableSource(RootSource):
         # SELECT (e.g. SELECT rowid, * FROM "t") without duplicating the rest of init.
         self._query = _query if _query is not None else f'SELECT * FROM "{table_name}"'
         table = self._read_table(connector)
-        # The columns the source was built with: a check refuses a table that changed them.
-        self._table_schema: pa.Schema = table.schema
+        # The rows as read, columns and types included: a check compares a new read
+        # with them, and refuses a table whose columns changed.
+        self._table: pa.Table = table
 
         # Step 4: Enrich via SourceStreamBuilder (same pipeline as all other RootSources)
         self._tag_columns: Collection[str] = resolved_tag_columns
@@ -188,7 +189,8 @@ class DBTableSource(RootSource):
         A database table has no cheap exact sign of a change, so every check reads the
         whole table, as building the source did, and compares it with the rows held,
         in any order: a table that returns the same rows in another order (an
-        unordered ``SELECT``) is unchanged.
+        unordered ``SELECT``) is unchanged. The rows are compared as read, every column
+        included (a ``system_tag_columns`` column too; ``same_rows``).
 
         Returns:
             ``True`` if the source now holds new rows.
@@ -200,16 +202,16 @@ class DBTableSource(RootSource):
         """
         with self._open_connector() as connector:
             table = self._read_table(connector)
-        if not table.schema.equals(self._table_schema, check_metadata=True):
+        if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
                 f"Table {self._table_name!r} changed its columns: the source was "
-                f"built with {self._table_schema}, the table now has {table.schema}. "
+                f"built with {self._table.schema}, the table now has {table.schema}. "
                 "Build a new source to read it"
             )
-        stream = self._build(table).stream
-        if same_rows(self._stream.as_table(), stream.as_table()):
+        if same_rows(self._table, table):
             return False
-        self._stream = stream
+        self._stream = self._build(table).stream
+        self._table = table
         self._update_modified_time()
         return True
 

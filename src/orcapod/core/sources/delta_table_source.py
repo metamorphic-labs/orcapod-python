@@ -66,8 +66,9 @@ class DeltaTableSource(RootSource):
         self._record_id_column = record_id_column
         self._version: int = self._delta_table.version()
         table = self._read_table()
-        # The columns the source was built with: a check refuses a table that changed them.
-        self._table_schema: pa.Schema = table.schema
+        # The rows as read, columns and types included: a check compares a new read
+        # with them, and refuses a table whose columns changed.
+        self._table: pa.Table = table
         result = self._build(table)
         self._stream = result.stream
         self._tag_columns = result.tag_columns
@@ -100,7 +101,9 @@ class DeltaTableSource(RootSource):
 
         Only the Delta log is read when the version did not move. A version that moved
         without changing the rows (``OPTIMIZE``, a metadata change) leaves the held rows
-        and the modified time as they are.
+        and the modified time as they are. The rows are compared as read from the
+        table, every column included (a ``system_tag_columns`` column too), in any
+        order (``same_rows``).
 
         Returns:
             ``True`` if the source now holds new rows.
@@ -114,18 +117,20 @@ class DeltaTableSource(RootSource):
         if version == self._version:
             return False
         table = self._read_table()
-        if not table.schema.equals(self._table_schema, check_metadata=True):
+        if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
                 f"Delta table {str(self._delta_table_path)!r} changed its columns at "
-                f"version {version}: the source was built with {self._table_schema}, "
+                f"version {version}: the source was built with {self._table.schema}, "
                 f"the table now has {table.schema}. Build a new DeltaTableSource to "
                 "read it"
             )
+        if same_rows(self._table, table):
+            self._version = version
+            return False
         stream = self._build(table).stream
         self._version = version
-        if same_rows(self._stream.as_table(), stream.as_table()):
-            return False
         self._stream = stream
+        self._table = table
         self._update_modified_time()
         return True
 

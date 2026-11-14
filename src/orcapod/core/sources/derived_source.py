@@ -482,33 +482,39 @@ class DerivedSource(RootSource):
         """Take in the origin's rows if they changed since this source read them.
 
         Developer, November 14, 2026 (ITL-1102). Over a source, the origin is checked
-        first (``check_for_new_data``); over a job node, its stored rows are read again
-        only after the node ran again (its modified time moved). The rows read are
-        compared with the rows held, in any order; when they differ the source holds
-        the new ones and moves its modified time. A source that has not read its origin
-        yet holds nothing: its next read reads the origin as it is.
+        first (``check_for_new_data``). Then the origin's rows are read again only when
+        its modified time moved since this source last read them: a source origin that
+        took in new data, by this check or by a check made through another source over
+        it, or a job node that ran again. The rows read are compared with the rows
+        held, in any order; when they differ the source holds the new ones and moves its
+        modified time. A read or comparison that raises leaves everything as it was, so
+        the next check reads again. A source that has not read its origin yet holds
+        nothing: its next read reads the origin as it is.
 
         Returns:
             ``True`` if the source now holds new rows.
         """
         if isinstance(self._origin, RootSource):
-            if not self._origin.check_for_new_data():
-                return False
-        elif self._origin.last_modified == self._origin_seen:
+            _ = self._origin.check_for_new_data()
+        seen = self._origin.last_modified
+        if seen == self._origin_seen:
             return False
         held = self._held_rows()
         if held is None:
             return False
-        self._origin_seen = self._origin.last_modified
         if self._tags_as_data is not None:
             stream, has_rows = self._build_derived_stream(self._tags_as_data)
-            if same_rows(held, stream.as_table()):
+            unchanged = same_rows(held, stream.as_table())
+            self._origin_seen = seen
+            if unchanged:
                 return False
             self._cached_stream = stream if has_rows else None
         else:
             records = self._origin_records()
             read = self._empty_origin_table() if records is None else records
-            if same_rows(held, read):
+            unchanged = same_rows(held, read)
+            self._origin_seen = seen
+            if unchanged:
                 return False
             self._cached_table = read
         self._update_modified_time()

@@ -63,8 +63,9 @@ class CSVSource(RootSource):
         self._record_id_column = record_id_column
         self._file_state = _file_state(file_path)
         table = self._read_table()
-        # The columns the source was built with: a check refuses a file that changed them.
-        self._table_schema: pa.Schema = table.schema
+        # The rows as read, columns and types included: a check compares a new read
+        # with them, and refuses a table whose columns changed.
+        self._table: pa.Table = table
         result = self._build(table)
         self._stream = result.stream
         self._tag_columns = result.tag_columns
@@ -98,7 +99,9 @@ class CSVSource(RootSource):
 
         Only the file's modification time and size are read when neither changed. A
         file written again with the same rows, in any order, leaves the held rows and
-        the modified time as they are.
+        the modified time as they are. The rows are compared as read from the file,
+        every column included (a ``system_tag_columns`` column too), in any order
+        (``same_rows``).
 
         Returns:
             ``True`` if the source now holds new rows.
@@ -111,17 +114,19 @@ class CSVSource(RootSource):
         if state == self._file_state:
             return False
         table = self._read_table()
-        if not table.schema.equals(self._table_schema, check_metadata=True):
+        if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
                 f"CSV file {self._file_path!r} changed its columns: the source was "
-                f"built with {self._table_schema}, the file now has {table.schema}. "
+                f"built with {self._table.schema}, the file now has {table.schema}. "
                 "Build a new CSVSource to read it"
             )
+        if same_rows(self._table, table):
+            self._file_state = state
+            return False
         stream = self._build(table).stream
         self._file_state = state
-        if same_rows(self._stream.as_table(), stream.as_table()):
-            return False
         self._stream = stream
+        self._table = table
         self._update_modified_time()
         return True
 

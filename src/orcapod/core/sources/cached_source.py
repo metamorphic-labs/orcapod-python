@@ -2,6 +2,7 @@ from __future__ import annotations
 
 
 import logging
+from datetime import datetime
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -103,6 +104,10 @@ class CachedSource(RootSource):
         self._cache_path_prefix = cache_path_prefix
         self._explicit_cache_path = cache_path
         self._cached_stream: ArrowTableStream | None = None
+        # The wrapped source's modified time when the cache last took in its rows, or
+        # last found it had them all (ITL-1102): a check compares it with the wrapped
+        # source's time, not with what the wrapped source's own check returned.
+        self._source_seen: datetime | None = self._source_modified_time()
 
     # -------------------------------------------------------------------------
     # Serialization
@@ -310,6 +315,7 @@ class CachedSource(RootSource):
         Raises if the source cannot provide data (e.g. an unbound
         ``SourceProxy``).
         """
+        seen = self._source_modified_time()
         live_with_hash = self._live_records()
         # Store in DB with hash as record ID (skip_duplicates deduplicates).
         # The data context column is appended after the record hashes are computed:
@@ -322,6 +328,11 @@ class CachedSource(RootSource):
             skip_duplicates=True,
         )
         self._cache_database.flush()
+        self._source_seen = seen
+
+    def _source_modified_time(self) -> datetime | None:
+        """The wrapped source's modified time, or ``None`` if it has none."""
+        return getattr(self._source, "last_modified", None)
 
     def _cached_record_hashes(self) -> set[bytes]:
         """The record hashes of the rows cached under the current data context."""
@@ -342,22 +353,29 @@ class CachedSource(RootSource):
     def check_for_new_data(self) -> bool:
         """Check the wrapped source; move only if the cache would gain rows (ITL-1102).
 
-        The wrapped source is checked first. When it took in new data, its rows are
-        hashed and compared with the rows already cached (a read of the cache; nothing
-        is written): the cache keeps every row it ever held, so rows that were removed
-        from the wrapped source change nothing. When it would gain rows, the merged
-        rows held in memory are dropped (the next read writes the new rows to the cache
-        and merges them) and the modified time moves.
+        The wrapped source is checked first. When its modified time moved since the
+        cache last took in its rows (by this check, or by a check made through another
+        source that wraps it), its rows are hashed and compared with the rows already
+        cached (a read of the cache; nothing is written): the cache keeps every row it
+        ever held, so rows that were removed from the wrapped source change nothing.
+        When it would gain rows, the merged rows held in memory are dropped (the next
+        read writes the new rows to the cache and merges them) and the modified time
+        moves. A comparison that raises leaves everything as it was, so the next check
+        compares again.
 
         Returns:
             ``True`` if the cache will gain rows at the next read.
         """
         if not isinstance(self._source, RootSource):
             return False
-        if not self._source.check_for_new_data():
+        _ = self._source.check_for_new_data()
+        seen = self._source_modified_time()
+        if seen == self._source_seen:
             return False
         live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
-        if {h for h in live if h is not None} <= self._cached_record_hashes():
+        gains = not {h for h in live if h is not None} <= self._cached_record_hashes()
+        self._source_seen = seen
+        if not gains:
             return False
         self._cached_stream = None
         self._update_modified_time()

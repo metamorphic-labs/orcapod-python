@@ -558,3 +558,131 @@ def test_source_proxy_follows_its_delegate(delta_path: Path) -> None:
     assert proxy.check_for_new_data() is True
     assert proxy.last_modified == live.last_modified
     assert _keys(proxy) == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Review round (ITL-1102): system-tag columns, shared and failed checks
+# ---------------------------------------------------------------------------
+
+_REV_SCHEMA = pa.schema(
+    [
+        pa.field("k", pa.int64(), False),
+        pa.field("x", pa.int64(), False),
+        pa.field("rev", pa.large_string(), False),
+    ]
+)
+
+
+def _rev_rows(rev: str) -> pa.Table:
+    return pa.table(
+        {"k": [0, 1], "x": [0, 10], "rev": pa.array([rev, rev], pa.large_string())},
+        schema=_REV_SCHEMA,
+    )
+
+
+def _system_tag_values(source: Any) -> list[Any]:
+    table = source.as_table(columns={"system_tags": True})
+    names = [n for n in table.column_names if "rev" in n and n != "rev"]
+    names = names or ["rev"]
+    return sorted(str(v) for n in names for v in table.column(n).to_pylist())
+
+
+def test_delta_a_change_in_a_system_tag_column_only_is_taken_in(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rev"
+    deltalake.write_deltalake(str(path), _rev_rows("a"))
+    source = DeltaTableSource(
+        path, tag_columns="k", record_id_column="k", system_tag_columns=["rev"]
+    )
+    deltalake.write_deltalake(str(path), _rev_rows("b"), mode="overwrite")
+    assert source.check_for_new_data() is True
+    assert "a" not in _system_tag_values(source)
+
+
+def test_csv_a_change_in_a_system_tag_column_only_is_taken_in(tmp_path: Path) -> None:
+    path = tmp_path / "rev.csv"
+    path.write_text("k,x,rev\n0,0,a\n1,10,a\n")
+    source = CSVSource(
+        str(path), tag_columns="k", record_id_column="k", system_tag_columns=["rev"]
+    )
+    path.write_text("k,x,rev\n0,0,b\n1,10,b\n")
+    assert source.check_for_new_data() is True
+    assert "a" not in _system_tag_values(source)
+
+
+def test_sqlite_a_change_in_a_system_tag_column_only_is_taken_in(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rev.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE t (k INTEGER PRIMARY KEY NOT NULL, x INTEGER NOT NULL, "
+            "rev TEXT NOT NULL)"
+        )
+        conn.executemany("INSERT INTO t VALUES (?, ?, 'a')", [(0, 0), (1, 10)])
+    source = SQLiteTableSource(
+        path, "t", record_id_column="k", system_tag_columns=["rev"]
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE t SET rev = 'b'")
+    assert source.check_for_new_data() is True
+    assert "a" not in _system_tag_values(source)
+
+
+def test_two_derived_sources_over_one_source_both_take_in_its_change(
+    delta_path: Path,
+) -> None:
+    origin = _delta(delta_path)
+    first = DerivedSource(origin, tags_as_data={"k": "k_value"})
+    second = DerivedSource(origin, tags_as_data={"k": "k_value"})
+    assert _values(first, "k_value") == _values(second, "k_value") == [0, 1, 2]
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert first.check_for_new_data() is True
+    assert second.check_for_new_data() is True  # the origin's change is consumed
+    assert _values(second, "k_value") == [0, 1, 2, 3]
+
+
+def test_a_derived_source_retries_a_read_that_raised(csv_path: Path) -> None:
+    job = _job(_csv(csv_path))
+    _run(job, "sync")
+    stored = job.nodes["rowwise"].as_source()
+    assert _values(stored, "y") == [1, 11, 21]
+    _write_csv(csv_path, [0, 1, 2, 3])
+    _run(job, "sync")
+    with patch.object(
+        DerivedSource, "_origin_records", side_effect=OSError("store unreachable")
+    ):
+        with pytest.raises(OSError, match="store unreachable"):
+            stored.check_for_new_data()
+    assert _values(stored, "y") == [1, 11, 21]
+    assert stored.check_for_new_data() is True
+    assert _values(stored, "y") == [1, 11, 21, 31]
+
+
+def test_two_cached_sources_over_one_source_both_move(delta_path: Path) -> None:
+    origin = _delta(delta_path)
+    first = CachedSource(origin, cache_database=InMemoryArrowDatabase())
+    second = CachedSource(origin, cache_database=InMemoryArrowDatabase())
+    assert _keys(first) == _keys(second) == [0, 1, 2]
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    assert first.check_for_new_data() is True
+    before = second.last_modified
+    assert second.check_for_new_data() is True  # the origin's change is consumed
+    assert second.last_modified != before
+    assert _keys(second) == [0, 1, 2, 3]
+
+
+def test_a_cached_source_retries_a_comparison_that_raised(delta_path: Path) -> None:
+    source = CachedSource(_delta(delta_path), cache_database=InMemoryArrowDatabase())
+    assert _keys(source) == [0, 1, 2]
+    before = source.last_modified
+    deltalake.write_deltalake(str(delta_path), _rows([3]), mode="append")
+    with patch.object(
+        CachedSource, "_cached_record_hashes", side_effect=OSError("cache unreachable")
+    ):
+        with pytest.raises(OSError, match="cache unreachable"):
+            source.check_for_new_data()
+    assert source.last_modified == before
+    assert source.check_for_new_data() is True
+    assert _keys(source) == [0, 1, 2, 3]
