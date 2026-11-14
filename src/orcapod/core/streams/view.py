@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -306,7 +305,11 @@ class StreamView:
             return self
         if self._is_window() and self.pool is None and self.sorted_by_tags:
             return self
-        table = arrow_utils.sort_by_tag_columns(self.table, self.tag_columns)
+        # arrow_utils is read when a view is sorted, not imported: it sits above this
+        # module in the import graph (types, protocols, side effects), as the array
+        # logical type does for the display.
+        arrow_utils = importlib.import_module("orcapod.utils.arrow_utils")
+        table: pa.Table = arrow_utils.sort_by_tag_columns(self.table, self.tag_columns)
         if self._is_window() and self.pool is None and self._holds_every_row():
             return dataclasses.replace(self, table=table, sorted_by_tags=True)
         view = self._as_pool()

@@ -478,7 +478,7 @@ class StreamBase(TraceableBase):
         return [e for e in self.iter_data()]
 
     # The origin a ``run()`` view gives its rows: computed by this stream.
-    _RUN_ORIGIN = "computed"
+    _RUN_ORIGIN: str = "computed"
 
     def run(self) -> StreamView:
         """Compute the whole stream and return a ``StreamView`` of all its rows.

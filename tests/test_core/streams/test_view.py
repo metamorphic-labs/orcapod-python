@@ -121,10 +121,8 @@ def test_a_partial_view_is_cut_within_the_rows_computed_so_far() -> None:
         next(rows)
     partial = stream.head()
     assert partial.status is ViewStatus.PARTIAL
-    assert partial.tail(2).header() == (
-        f"{partial.kind}[{partial.label}] — last 2 of "
-        f"{partial.header().split(' — ', 1)[1]}"
-    )
+    name, rows = partial.header().split(" — ", 1)
+    assert partial.tail(2).header() == f"{name} — last 2 of {rows}"
     assert len(partial.tail(2)) == 2
 
 
@@ -132,7 +130,7 @@ def test_view_methods_check_the_number_of_rows() -> None:
     """``head`` and ``tail`` take a non-negative ``int``."""
     view = _source().run()
     with pytest.raises(TypeError):
-        view.head(2.5)  # type: ignore[arg-type]
+        view.head(2.5)  # pyright: ignore[reportArgumentType] - the wrong type is the test
     with pytest.raises(ValueError):
         view.tail(-1)
 

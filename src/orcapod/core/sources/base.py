@@ -192,7 +192,7 @@ class RootSource(StreamBase):
         return self._stream.as_table(columns=columns, all_info=all_info)
 
     # A source's rows are its own, not computed: a run() view says "all N rows".
-    _RUN_ORIGIN = "held"
+    _RUN_ORIGIN: str = "held"
 
     def _display_name(self) -> str:
         """The name a preview header shows: the label when one was given, else the

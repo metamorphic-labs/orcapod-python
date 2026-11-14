@@ -172,7 +172,7 @@ class SideEffectPodStream(StreamBase):
         )
 
     # The rows a run() view shows were passed on while delivering, not computed.
-    _RUN_ORIGIN = "delivered"
+    _RUN_ORIGIN: str = "delivered"
 
     def run(self) -> StreamView:
         """Deliver the side effects for every row and return a ``StreamView`` of the rows.
@@ -840,7 +840,7 @@ class SideEffectNode(StreamBase):
         )
 
     # The rows a run() view shows were passed on while delivering, not computed.
-    _RUN_ORIGIN = "delivered"
+    _RUN_ORIGIN: str = "delivered"
 
     def run(self) -> StreamView:
         """Deliver the side effects for every row and return a ``StreamView`` of the rows.

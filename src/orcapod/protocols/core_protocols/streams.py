@@ -49,6 +49,22 @@ class StreamViewProtocol(Protocol):
         """The rows as a Polars DataFrame."""
         ...
 
+    def __len__(self) -> int:
+        """The number of rows in ``table``."""
+        ...
+
+    def head(self, n: int = 10) -> "StreamViewProtocol":
+        """A view of the first ``n`` rows of this view; never reads or computes."""
+        ...
+
+    def tail(self, n: int = 10) -> "StreamViewProtocol":
+        """A view of the last ``n`` rows of this view; never reads or computes."""
+        ...
+
+    def sort_by_tags(self) -> "StreamViewProtocol":
+        """A view of this view's rows in tag order; never reads or computes."""
+        ...
+
     def _repr_html_(self) -> str:
         """The notebook preview of the rows."""
         ...
