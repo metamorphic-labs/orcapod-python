@@ -158,4 +158,5 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
 
 ## Status
 
-- Stage 1: implemented, targeted tests green (tests/test_pipeline + test_core subsets + docs).
+- Stage 1: committed 42826d93, pushed, draft PR #384.
+- Stage 2: Delta + SpiralDB implemented (reload.same_rows helper), tests in tests/test_core/sources/test_source_check_for_new_data.py.

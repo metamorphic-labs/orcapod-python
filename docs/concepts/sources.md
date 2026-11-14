@@ -430,7 +430,12 @@ whose sources are unchanged computes nothing. `head()` and the notebook preview 
 |---|---|
 | `ArrowTableSource`, `DictSource`, `ListSource`, `DataFrameSource` | nothing: data held in memory cannot change; build a new source and bind it to run on new data |
 | `PollingSource` | polls once (and fetches when the poll reports new data); its modified time moves only when the fetch returned rows, to the moment it found them (a cursor's `modified_at` is informational) |
+| `DeltaTableSource` | reads the Delta log only; when the table's version moved, reads the table again and, if its rows changed (in any order: a version that only compacted files changes nothing), holds the new rows |
+| `SpiralDBTableSource` | holds no rows (every read scans the pinned version); reads the table's current version (metadata only: no row, and `max_rows` does not apply) and pins it when it is newer, so the next read returns the new rows; an `asof` you gave never moves; record ids are the hash of the key, so only new or changed rows are new entries (a version that moves without a change, if SpiralDB moves it on compaction, re-runs the nodes below and reuses every stored result) |
 | Every other source | nothing yet: build a new source object and bind it (`job.bind(sources=...)`) to read changed data |
+
+A table whose columns changed, or a SpiralDB table dropped and created again, fails the check:
+the source's schema and table are part of its identity, so build a new source to read it.
 
 A check that raises does not fail the run. The run issues one `SourceCheckFailedWarning` per
 source, naming the source and the error; the source keeps its data and modified time; the

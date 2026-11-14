@@ -149,8 +149,8 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
             unchecked.append(name)
             warnings.warn(
                 f"Source {name!r} could not be checked for new data: "
-                f"{type(exc).__name__}: {exc}. The run proceeds with the data the "
-                "source already holds.",
+                f"{type(exc).__name__}: {str(exc).rstrip('.')}. The run proceeds "
+                "with the data the source already holds.",
                 SourceCheckFailedWarning,
                 stacklevel=2,
             )
