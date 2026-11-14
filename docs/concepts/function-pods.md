@@ -841,7 +841,9 @@ rows under that key is an empty result, not an error.
   difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949). A
   joined or merged stream (one pair of system-tag columns per input), or one with no
   system-tag columns, is refused too: make the join part of the pipeline, or store the joined
-  stream and bind the stored source.
+  stream and bind the stored source. A pipeline built directly over a raw `ArrowTableStream`
+  still compiles, for now: its source node's rows carry no system-tag columns, although the
+  slot predicts a pair.
 - The results are read from the store recorded in the file. Pass
   `PipelineJob.load(path, database=...)` if the store has moved.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each

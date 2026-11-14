@@ -691,3 +691,25 @@ def test_a_refused_joined_stream_keeps_the_previous_binding() -> None:
     with pytest.raises(SourceSpecMismatchError):
         job.bind(sources={"src": _joined_stream(x_nullable=True)})
     assert job.nodes["src"].bound_source is before
+
+
+def test_a_pipeline_built_over_a_raw_stream_still_compiles() -> None:
+    """A raw stream as a pipeline's leaf is accepted as before; binding it is refused.
+
+    The one exception to ITL-1126, pending the developer's decision: the slot built
+    from the leaf takes the leaf as it is (its rows carry no system tags, although
+    the slot predicts a pair). Binding the same stream to the slot afterwards goes
+    through the bind check and is refused.
+    """
+    raw = _raw_stream(x_nullable=True)
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(raw, label="renamed")
+    (slot,) = [name for name in job.nodes if name != "renamed"]
+    assert job.nodes[slot].bound_source is raw
+    assert job.nodes["renamed"].as_table().num_rows == 0
+    _ = job.run()
+    assert job.nodes["renamed"].as_table().column("y").to_pylist() == [1]
+    with pytest.raises(SourceSpecMismatchError, match="exactly one source-id"):
+        job.bind(sources={slot: raw})
+    assert job.nodes[slot].bound_source is raw

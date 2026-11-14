@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
+from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
 from orcapod.types import Schema
 
@@ -283,6 +286,21 @@ class TestSourceNodeAsTable:
         assert isinstance(table, pa.Table)
 
 
+def _mock_source_with_the_slots_system_tags(
+    node: SourceJobNode, tag_schema: Schema, data_schema: Schema
+) -> MagicMock:
+    """Return a mock source of the slot's schema carrying the slot's system-tag pair.
+
+    A bound source must carry exactly one source-id and one record-id system-tag
+    column (ITL-1126); the slot's own names make the bind pass rows unchanged.
+    """
+    tag_keys = node.keys(columns={"system_tags": True})[0]
+    mock_source = MagicMock()
+    mock_source.output_schema.return_value = (tag_schema, data_schema)
+    mock_source.keys.return_value = (tag_keys, tuple(data_schema.keys()))
+    return mock_source
+
+
 class TestSourceNodeColumnConfig:
     """SourceNodeBase must honour column_config / all_info in keys() and output_schema()."""
 
@@ -385,15 +403,17 @@ class TestSourceNodeColumnConfig:
 
     def test_bound_keys_delegates_to_source(self, tag_schema, data_schema):
         """Bound SourceJobNode.keys() delegates to bound_source.output_schema()."""
-        from unittest.mock import MagicMock
         from orcapod.core.nodes.source_node import SourceJobNode
         from orcapod.types import ColumnConfig
 
-        mock_source = MagicMock()
-        mock_source.output_schema.return_value = (tag_schema, data_schema)
-
-        job_node = SourceJobNode(name="x", bound_source=mock_source)
-        mock_source.output_schema.reset_mock()  # clear init-time schema derivation call
+        job_node = SourceJobNode(
+            name="x", tag_schema=tag_schema, data_schema=data_schema
+        )
+        mock_source = _mock_source_with_the_slots_system_tags(
+            job_node, tag_schema, data_schema
+        )
+        job_node.bound_source = mock_source
+        mock_source.output_schema.reset_mock()  # clear bind-time schema check call
 
         cfg = ColumnConfig(system_tags=True)
         job_node.keys(columns=cfg, all_info=False)
@@ -414,15 +434,17 @@ class TestSourceNodeColumnConfig:
 
     def test_bound_output_schema_delegates_to_source(self, tag_schema, data_schema):
         """Bound SourceJobNode.output_schema() delegates to bound_source.output_schema()."""
-        from unittest.mock import MagicMock
         from orcapod.core.nodes.source_node import SourceJobNode
         from orcapod.types import ColumnConfig
 
-        mock_source = MagicMock()
-        mock_source.output_schema.return_value = (tag_schema, data_schema)
-
-        job_node = SourceJobNode(name="x", bound_source=mock_source)
-        # Reset call history accumulated during __init__ (schema derivation).
+        job_node = SourceJobNode(
+            name="x", tag_schema=tag_schema, data_schema=data_schema
+        )
+        mock_source = _mock_source_with_the_slots_system_tags(
+            job_node, tag_schema, data_schema
+        )
+        job_node.bound_source = mock_source
+        # Reset call history accumulated during the bind (schema check).
         mock_source.output_schema.reset_mock()
         cfg = ColumnConfig(system_tags=True)
         job_node.output_schema(columns=cfg, all_info=False)

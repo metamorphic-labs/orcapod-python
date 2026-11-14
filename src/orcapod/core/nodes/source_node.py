@@ -776,6 +776,34 @@ class SourceJobNode(SourceNodeBase):
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()
 
+    def _accept_pipeline_leaf(self, stream: StreamProtocol) -> None:
+        """Bind *stream*, a leaf of the pipeline this slot was built from.
+
+        ``Pipeline.compile`` makes each leaf stream a slot through ``from_stream``, with
+        the slot's schema taken from that same stream. A leaf with exactly one
+        source-id and one record-id system-tag column is bound as any source is
+        (``bound_source``). A leaf without exactly one pair (a raw ``ArrowTableStream``
+        has none) is bound as it is, as before ITL-1126, so a pipeline built directly
+        over a raw stream still compiles: its rows carry the stream's own system-tag
+        columns, not the pair the slot predicts. This is the only place a source
+        without exactly one pair is bound. PENDING the developer's decision (option
+        "A"): refuse such a leaf here too, as every other way of binding does.
+
+        Args:
+            stream: The leaf stream, whose schema the slot was built from.
+
+        Raises:
+            SourceSpecMismatchError: If a leaf with one pair does not fit the slot.
+        """
+        source_ids, record_ids = _system_tag_columns(stream, self._tag_schema.keys())
+        if len(source_ids) == 1 and len(record_ids) == 1:
+            self.bound_source = stream
+            return
+        self._bound_source = stream
+        self._declared_form = None
+        self._invalidate_content_hash_cache()
+        self._invalidate_pipeline_hash_cache()
+
     def _declared_form_for(self, source: StreamProtocol) -> _DeclaredForm | None:
         """Check *source* and return how its rows become rows of the declared schema.
 
@@ -1074,6 +1102,10 @@ class SourceJobNode(SourceNodeBase):
            **bound** ``SourceJobNode`` whose ``content_hash()`` delegates to
            the concrete stream.
 
+        Used by ``Pipeline.compile`` for each leaf of the pipeline: the stream is
+        bound through ``_accept_pipeline_leaf``, which also accepts a leaf without
+        exactly one system-tag pair (a raw ``ArrowTableStream``), as before ITL-1126.
+
         Args:
             stream: The stream to wrap.
             name: Optional explicit slot name. In all three cases, when *name*
@@ -1089,12 +1121,14 @@ class SourceJobNode(SourceNodeBase):
         match stream:
             case SourceJobNode():
                 # Case 1: copy — preserve bound_source, do NOT wrap the SJN itself.
-                return cls(
+                node = cls(
                     name=name if name is not None else stream.name,
                     tag_schema=stream.tag_schema,
                     data_schema=stream.data_schema,
-                    bound_source=stream.bound_source,
                 )
+                if stream.bound_source is not None:
+                    node._accept_pipeline_leaf(stream.bound_source)
+                return node
             case SourceNode():
                 # Case 2: unbound — schema placeholder; SJN hash = SourceNode hash.
                 return cls(
@@ -1121,12 +1155,11 @@ class SourceJobNode(SourceNodeBase):
                         slot_name = stream.source_id
                     else:
                         slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-                return cls(
-                    name=slot_name,
-                    tag_schema=tag_schema,
-                    data_schema=data_schema,
-                    bound_source=stream,
+                node = cls(
+                    name=slot_name, tag_schema=tag_schema, data_schema=data_schema
                 )
+                node._accept_pipeline_leaf(stream)
+                return node
 
     def as_node(self) -> SourceNode:
         """Return the lightweight ``SourceNode`` equivalent of this job node.
