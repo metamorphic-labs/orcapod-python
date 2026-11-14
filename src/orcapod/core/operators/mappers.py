@@ -1,6 +1,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
@@ -140,6 +141,7 @@ class MapData(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             rename_map: dict[str, str] | None = None
             unmapped: list[str] | None = None
             async for tag, data in inputs[0]:
@@ -289,6 +291,7 @@ class MapTags(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             rename_map: dict[str, str] | None = None
             unmapped: list[str] | None = None
             async for tag, data in inputs[0]:

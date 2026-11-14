@@ -763,42 +763,14 @@ def _meta_case(case: Case) -> Case:
     return Case(case.label, case.make_op, make_sources)
 
 
-# Operators whose paths disagree on meta columns in ways that are not a local
-# Join-style fix. Strict, so a fix flags them.
-_MATERIALIZE_DROPS_META = (
-    "ITL-846: barrier-mode async_execute rebuilds its input with "
-    "_materialize_to_stream, which drops Data meta columns"
-)
-_SYNC_DROPS_META = (
-    "ITL-846: the sync path drops Data meta columns that the async path keeps (a raw "
-    "ArrowTableStream lists its __ columns as data columns, so the sync selection "
-    "or _materialize_to_stream discards them)"
-)
-META_XFAIL: dict[str, str] = {
-    "merge_join": _MATERIALIZE_DROPS_META,
-    "batch_2": _MATERIALIZE_DROPS_META,
-    "batch_all": _MATERIALIZE_DROPS_META,
-    "group_by": _MATERIALIZE_DROPS_META,
-    "polars_filter": _MATERIALIZE_DROPS_META,
-    "select_data_columns": _SYNC_DROPS_META,
-    "index": _SYNC_DROPS_META,
-    "pick": _SYNC_DROPS_META,
-}
-META_CASES = [
-    pytest.param(
-        _meta_case(c),
-        id=c.label,
-        marks=[pytest.mark.xfail(strict=True, reason=META_XFAIL[c.label])]
-        if c.label in META_XFAIL
-        else [],
-    )
-    for c in CASES
-]
+# Every operator, with each input carrying its own meta columns. No operator keeps
+# them, on either path (ITL-1080; see ``test_no_operator_carries_raw_stream_meta``).
+META_CASES = [pytest.param(_meta_case(c), id=c.label) for c in CASES]
 
 
 @pytest.mark.parametrize("case", META_CASES)
 def test_async_meta_equals_sync(case: Case) -> None:
-    """The async path's Data meta columns equal the sync path's (Join drops them on both)."""
+    """The async path's Data meta columns equal the sync path's: none, on both (ITL-1080)."""
     sources = case.make_sources()
     expected = sync_rows(case.make_op(), *sources)
     actual = async_rows(case.make_op(), *sources)

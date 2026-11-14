@@ -7,6 +7,7 @@ import typing
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.system_constants import constants
@@ -430,6 +431,7 @@ class Index(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             async for tag, data in inputs[0]:
                 result = self._process_one(tag, data)
                 if result is not None:

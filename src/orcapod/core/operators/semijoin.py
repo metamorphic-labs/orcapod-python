@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.operators.match_keys import frozen_scalar
@@ -194,6 +195,7 @@ class SemiJoin(BinaryOperator):
                 input's pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             left_ch, right_ch = inputs[0], inputs[1]
 
             # Phase 1: Build right-side lookup

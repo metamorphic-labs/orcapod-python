@@ -2,6 +2,7 @@ import logging
 from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
@@ -127,6 +128,7 @@ class SelectTagColumns(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             tags_to_drop: list[str] | None = None
             async for tag, data in inputs[0]:
                 if tags_to_drop is None:
@@ -255,6 +257,7 @@ class SelectDataColumns(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             pkts_to_drop: list[str] | None = None
             async for tag, data in inputs[0]:
                 if pkts_to_drop is None:
@@ -378,6 +381,7 @@ class DropTagColumns(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             effective_drops: list[str] | None = None
             async for tag, data in inputs[0]:
                 if effective_drops is None:
@@ -508,6 +512,7 @@ class DropDataColumns(UnaryOperator):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             effective_drops: list[str] | None = None
             async for tag, data in inputs[0]:
                 if effective_drops is None:
