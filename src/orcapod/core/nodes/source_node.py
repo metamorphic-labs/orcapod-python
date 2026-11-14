@@ -983,15 +983,22 @@ class SourceJobNode(SourceNodeBase):
     def run(self, *, load_only: bool = False) -> StreamView:
         """Read the bound source's rows and return a ``StreamView`` of all of them.
 
-        A source is read, never computed, so ``load_only`` changes nothing; a job
-        node's ``run()`` takes it (ITL-1095).
+        A source is read, never computed, so ``load_only`` changes nothing, except that
+        a load-only run refuses a bound stream that computes or delivers when read
+        (ITL-1121); a job node's ``run()`` takes it (ITL-1095).
 
         Args:
             load_only: Accepted for every job node; a source reads its rows either way.
 
         Raises:
             UnboundSourceError: When no concrete source is bound.
+            ValueError: If ``load_only`` and the bound stream computes or delivers
+                when read (``node_run.refuse_unloadable_inputs``).
         """
+        if load_only:
+            from orcapod.pipeline.node_run import refuse_unloadable_inputs
+
+            refuse_unloadable_inputs(self)
         return super().run()
 
     @property
@@ -1063,8 +1070,8 @@ class SourceJobNode(SourceNodeBase):
 
         Returns:
             ``None`` when the source's rows already are rows of the declared schema
-            (same types, column order and system-tag names and order), so they pass
-            unchanged;
+            (the same type objects, column order and system-tag names and order), so
+            they pass unchanged;
             otherwise the ``_DeclaredForm`` that makes them so.
 
         Raises:
@@ -1091,8 +1098,11 @@ class SourceJobNode(SourceNodeBase):
             for name in source.keys(columns={"system_tags": True})[0]
             if name not in source_tag
         ]
+        # Exactly the declared types: a structural class of the declared identity is
+        # another class object, and the slot shows the declared one.
         if (
-            not narrower
+            dict(source_tag) == dict(self._tag_schema)
+            and dict(source_data) == dict(self._data_schema)
             and not renames
             and tuple(source_tag.keys()) == tag_order
             and tuple(source_data.keys()) == data_order
