@@ -109,6 +109,40 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
     return table
 
 
+def typed_zero_row_input(stream: object) -> pa.Table | None:
+    """Return ``stream``'s zero-row table as a pod reads it: in the large-normalized form.
+
+    What a function pod or an operator takes from an input's zero-row table
+    (``typed_zero_row_table``): the input's types in the form its rows have downstream
+    (``arrow_utils.normalize_to_large_types`` with ``keep_null=True``: ``string`` to
+    ``large_string``, ``binary`` to ``large_binary``, ``list`` to ``large_list``,
+    recursively), as the populated path normalizes them (ITL-912). Only layouts change:
+    width, nullability, field names and logical types are kept, and no value is cast
+    (there is none). A source's own table is not changed: ``typed_zero_row_table`` still
+    gives it as it holds it.
+
+    Args:
+        stream: The input whose zero-row table a pod reads.
+
+    Returns:
+        The normalized zero-row table, or ``None`` when ``stream`` cannot type it
+        without rows.
+    """
+    table = typed_zero_row_table(stream)
+    if table is None:
+        return None
+    return table.cast(
+        pa.schema(
+            [
+                field.with_type(
+                    arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+                )
+                for field in table.schema
+            ]
+        ).with_metadata(table.schema.metadata or {})
+    )
+
+
 def _derive_zero_row_table(stream: object) -> pa.Table | None:
     """Ask ``stream`` for its zero-row table and drop the meta columns; no memo."""
     method = getattr(stream, "_typed_zero_row_table", None)

@@ -1255,7 +1255,16 @@ class OperatorJobNode(OperatorNodeBase):
         # table is read.
         operator = cast(StaticOutputOperatorPod, self._operator)
         result = operator.zero_row_result(*inputs)
-        return result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        table = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        # The column order of the node's rows (``_rows_to_table``): user tags, system
+        # tags, data, source info; an operator's own table may order them otherwise
+        # (a join lists its data before its system tags).
+        tag_keys, data_keys = result.keys()
+        names = table.column_names
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+        data = [n for n in data_keys if n in names]
+        return table.select([*tag_keys, *system_tags, *data, *source_info])
 
     def _make_empty_table(self) -> "pa.Table":
         """Build the zero-row table this node reads as when it holds no rows.

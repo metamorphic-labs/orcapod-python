@@ -18,6 +18,7 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    typed_zero_row_input,
     typed_zero_row_table,
 )
 from orcapod.core.streams.view import (
@@ -303,7 +304,7 @@ class StaticOutputOperatorPod(TraceableBase):
         """
         from orcapod.system_constants import constants
 
-        table = typed_zero_row_table(upstream)
+        table = typed_zero_row_input(upstream)
         if table is None:
             return None
         # The column order of a row-built table (``_rows_to_table``): user tags,

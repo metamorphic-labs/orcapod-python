@@ -19,7 +19,7 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
     schema_requires_io,
-    typed_zero_row_table,
+    typed_zero_row_input,
 )
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -996,7 +996,7 @@ def function_zero_row_table(
     """
     from orcapod.core.datagrams.tag_data import Data
 
-    input_table = typed_zero_row_table(input_stream)
+    input_table = typed_zero_row_input(input_stream)
     if input_table is None:
         return None
     system_tags = [

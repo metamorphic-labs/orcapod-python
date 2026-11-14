@@ -117,3 +117,13 @@ def _make_empty_table(self):
 - #369 (ITL-1080) touches the same block of `OperatorJobNode.async_execute` and
   `_materialize_as_stream`; on merge, keep #369's taps and route its `_materialize_upstream`
   empty-rows branch through `typed_zero_row_table` before the Python-schema fallback.
+
+## Follow-up (coordinator probe, head 45698b4c): non-large inputs
+
+Finding: a source holding `string` tags/data gives `string` in a function or operator node's
+zero-row table, `large_string` once rows exist. Fix: a consumer of an input's zero-row table
+(`function_zero_row_table`, `_zero_row_input`, the pod stream's `_typed_zero_row_table`)
+normalizes it with `arrow_utils.normalize_to_large_types(keep_null=True)` per field, as the
+populated path does (a type-only change; no cast of values). A source's own table is not
+touched. Steps: failing test (tests/test_core/streams/test_zero_row_large_types.py) -> fix ->
+targeted tests -> one commit/push -> source report (main vs branch).
