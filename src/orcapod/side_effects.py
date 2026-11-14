@@ -1275,6 +1275,11 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             except Exception as exc:
                 self.clear_cache()
                 raise StoreWriteError(database.base_path, flush=True) from exc
+            except BaseException:
+                # An interruption leaves the commit's outcome unknown: the node holds no
+                # run, so the next run runs and commits again (ITL-1121).
+                self.clear_cache()
+                raise
 
     # ------------------------------------------------------------------
     # Async execution

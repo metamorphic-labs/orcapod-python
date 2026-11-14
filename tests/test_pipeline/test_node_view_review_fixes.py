@@ -404,3 +404,90 @@ def test_a_full_run_over_an_input_that_delivers_reads_it(kind: str) -> None:
     node = _node_over(kind, _delivering_stream())
     assert node.run().as_table().num_rows == 2
     assert len(_UPSTREAM_DELIVERED) == 2
+
+
+def _job_over_source_bound_to_a_delivering_stream() -> PipelineJob:
+    """``tw`` (``_twice``) over source slot ``s``, run once, then bound to a stream that
+    delivers when read."""
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(
+            [{"id": 1, "x": 1}, {"id": 2, "x": 2}], tag_columns=["id"], source_id="s"
+        )
+        _twice_pod(source, label="tw")
+    job.run()
+    job.bind(sources={"s": _delivering_stream()})
+    return job
+
+
+@pytest.mark.parametrize("how", ["sync", "async", "node.run", "source.run"])
+def test_a_load_only_run_refuses_a_source_slot_bound_to_a_delivering_stream(
+    how: str,
+) -> None:
+    """A source slot reads its bound stream: refused before it is read."""
+    _UPSTREAM_DELIVERED.clear()
+    job = _job_over_source_bound_to_a_delivering_stream()
+    with pytest.raises(ValueError, match="delivers its side effects when it is read"):
+        if how == "node.run":
+            job.nodes["tw"].run(load_only=True)
+        elif how == "source.run":
+            job.nodes["tw"].upstreams[0].run(load_only=True)
+        else:
+            job.run(orchestrator=ORCHESTRATORS[how](), load_only=True)
+    assert _UPSTREAM_DELIVERED == []
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_run_refuses_a_stream_that_reads_a_delivering_stream(
+    kind: str,
+) -> None:
+    """An operator's stream outside a job over a side-effect stream delivers when read."""
+    _UPSTREAM_DELIVERED.clear()
+    stream: Any = _delivering_stream().select_data_columns(["x"])
+    node = _node_over(kind, stream)
+    with pytest.raises(ValueError, match="delivers its side effects when it is read"):
+        node.run(load_only=True)
+    assert _UPSTREAM_DELIVERED == []
+
+
+def test_a_load_only_operator_run_without_a_database_is_loaded_only() -> None:
+    """Its rows come from a load-only run: shown as such, and not a full run's result."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.operators import MapData
+    from orcapod.core.streams import ViewStatus
+
+    node = OperatorJobNode(
+        operator=MapData({"x": "y"}),
+        input_streams=(_base_stream(),),
+        pipeline_database=None,
+    )
+    assert node.run(load_only=True).status == ViewStatus.LOADED_ONLY
+    assert node.holds_current_run(load_only=True)
+    assert not node.holds_current_run(load_only=False)
+    assert node.run().status == ViewStatus.ROWS
+
+
+def test_an_interrupted_log_commit_leaves_the_side_effect_node_without_a_run() -> None:
+    """A standalone side-effect node with a store: a KeyboardInterrupt while its run commits
+    the invocation log clears the node, so the next run runs (and commits) again."""
+    from unittest import mock
+
+    from orcapod.side_effects import SideEffectJobNode
+
+    _DELIVERED.clear()
+    node = SideEffectJobNode(_tap(_deliver_own), _base_stream())
+    node.attach_databases(InMemoryArrowDatabase())
+    with (
+        mock.patch.object(
+            InMemoryArrowDatabase, "flush", side_effect=KeyboardInterrupt
+        ),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        node.run()
+    assert not node.holds_current_run(load_only=False)
+    assert node.is_stale
+    with mock.patch.object(
+        InMemoryArrowDatabase, "flush", autospec=True, side_effect=lambda self: None
+    ) as flush:
+        node.run()
+    assert flush.call_count >= 1

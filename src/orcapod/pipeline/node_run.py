@@ -14,7 +14,7 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -48,23 +48,55 @@ def depends_on_job_nodes(node: Any) -> bool:
     return any(_is_job_node(upstream) for upstream in node.upstreams)
 
 
+def _streams_read_by(node: Any) -> Iterator[Any]:
+    """Yield the streams outside a job that a run of ``node`` reads.
+
+    The node's inputs, the stream bound to a source slot among them, and, through every
+    stream outside a job, that stream's own inputs; a job node other than a source slot
+    is not entered (the run reads its held rows or runs it as a node of its own).
+
+    Args:
+        node: A job node; for a source slot, its bound stream is what it reads.
+    """
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    pending: list[Any] = (
+        [node.bound_source] if isinstance(node, SourceJobNode) else list(node.upstreams)
+    )
+    seen: list[Any] = []
+    while pending:
+        stream = pending.pop()
+        if stream is None or any(stream is other for other in seen):
+            continue
+        seen.append(stream)
+        if isinstance(stream, SourceJobNode):
+            pending.append(stream.bound_source)
+            continue
+        if _is_job_node(stream):
+            continue
+        yield stream
+        pending.extend(getattr(stream, "upstreams", ()))
+
+
 def refuse_delivering_inputs(node: Any) -> None:
     """Refuse a load-only run of ``node`` over an input that delivers when it is read.
 
     A load-only run computes, delivers and writes nothing (ITL-1095). The stream a
     side-effect pod returns outside a job (``SideEffectPodStream``) delivers its side
-    effects on every read, so a load-only run cannot read it; it is refused before
-    anything is read (ITL-1121). Another stream outside a job is read as it always is.
+    effects on every read, so a load-only run cannot read it, directly, through a
+    source slot bound to it, or through a stream outside a job that reads it; it is
+    refused before anything is read (ITL-1121). Another stream outside a job is read
+    as it always is.
 
     Args:
-        node: A job node a load-only run would run.
+        node: A job node a load-only run would run or read.
 
     Raises:
-        ValueError: If an input of ``node`` is a ``SideEffectPodStream``.
+        ValueError: If a run of ``node`` would read a ``SideEffectPodStream``.
     """
     from orcapod.side_effects import SideEffectPodStream
 
-    for upstream in node.upstreams:
+    for upstream in _streams_read_by(node):
         if isinstance(upstream, SideEffectPodStream):
             raise ValueError(
                 f"A load-only run cannot run node {node.label!r}: its input "

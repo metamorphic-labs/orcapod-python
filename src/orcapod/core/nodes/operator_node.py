@@ -1574,6 +1574,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                     self._cached_output_stream = self._operator.process(
                         *self._input_streams,
                     )
+                    # As in the branches with a database (ITL-1121).
+                    self._run_load_only = load_only
                     self._update_modified_time()
                     computed = True
                 if computed:

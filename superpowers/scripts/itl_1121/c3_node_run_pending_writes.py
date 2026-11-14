@@ -9,6 +9,8 @@ committed pipeline-record version only references committed results after node.r
 import tempfile
 from pathlib import Path
 
+from typing import Any
+
 import deltalake
 import pyarrow as pa
 
@@ -29,36 +31,49 @@ def col(table: deltalake.DeltaTable, name: str) -> set[object]:
     )
 
 
+# Every Delta commit, in the order it happened: (table directory, rows written). Commit
+# timestamps have millisecond resolution, so equal timestamps could not order two commits;
+# the order of the write calls does.
+COMMITS: list[tuple[str, pa.Table]] = []
+_real_write = deltalake.write_deltalake
+
+
+def _recording_write(table_or_uri: Any, data: Any, *args: Any, **kwargs: Any) -> Any:
+    COMMITS.append(
+        (str(table_or_uri), pa.table(data) if not isinstance(data, pa.Table) else data)
+    )
+    return _real_write(table_or_uri, data, *args, **kwargs)
+
+
+deltalake.write_deltalake = _recording_write  # pyright: ignore[reportAttributeAccessIssue]  # a recording wrapper for this script only
+
+
 def check(root: Path) -> None:
+    pipeline = [
+        t for path, t in COMMITS if "_result" not in path and "leftover" not in path
+    ]
+    results = [t for path, t in COMMITS if "_result" in path]
     tables = {
         ("result" if "_result" in t.relative_to(root).parts else "pipeline"): t
         for t in {log.parent for log in root.rglob("_delta_log")}
         if t.name != "leftover"
     }
-    result_history = deltalake.DeltaTable(str(tables["result"])).history()
-    pipeline_history = deltalake.DeltaTable(str(tables["pipeline"])).history()
+    history = {
+        kind: len(deltalake.DeltaTable(str(t)).history()) for kind, t in tables.items()
+    }
     print(
-        f"  pipeline commits: {len(pipeline_history)}, result commits: {len(result_history)}"
+        f"  recorded commits: pipeline {len(pipeline)}, result {len(results)}; "
+        f"table histories: {history}"
     )
+    committed: set[object] = set()
     bad = 0
-    for entry in pipeline_history:
-        records = deltalake.DeltaTable(
-            str(tables["pipeline"]), version=entry["version"]
-        )
-        versions = [
-            r["version"] for r in result_history if r["timestamp"] <= entry["timestamp"]
-        ]
-        committed = (
-            col(
-                deltalake.DeltaTable(str(tables["result"]), version=max(versions)),
-                "__record_id",
-            )
-            if versions
-            else set()
-        )
-        if not col(records, "__data_id") <= committed:
-            bad += 1
-    print(f"  pipeline versions referencing uncommitted results: {bad}")
+    for path, table in COMMITS:
+        if "_result" in path:
+            committed |= set(table.column("__record_id").to_pylist())
+        elif "leftover" not in path:
+            if not set(table.column("__data_id").to_pylist()) <= committed:
+                bad += 1
+    print(f"  pipeline commits referencing a result not committed before them: {bad}")
 
 
 for batch_size, n in [(50, 120), (5, 40)]:
@@ -81,6 +96,7 @@ for batch_size, n in [(50, 120), (5, 40)]:
                 ),
                 label="dbl",
             )
+        COMMITS.clear()
         print(f"batch_size={batch_size}, rows={n}: node.run()")
         job.nodes["dbl"].run()
         check(root)
