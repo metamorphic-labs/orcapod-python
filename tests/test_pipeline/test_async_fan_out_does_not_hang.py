@@ -216,10 +216,39 @@ def test_replay_operator_node_reads_its_input(buffer_size: int) -> None:
         assert got.equals(expected)
 
 
+class _ReaderThatSignals:
+    """Reads a channel and sets ``reading`` when a read starts."""
+
+    def __init__(self, channel: Channel[tuple[TagProtocol, DataProtocol]]) -> None:
+        self._reader = channel.reader
+        self.reading = asyncio.Event()
+
+    async def receive(self) -> tuple[TagProtocol, DataProtocol]:
+        self.reading.set()
+        return await self._reader.receive()
+
+    def __aiter__(self) -> "_ReaderThatSignals":
+        return self
+
+    async def __anext__(self) -> tuple[TagProtocol, DataProtocol]:
+        self.reading.set()
+        return await self._reader.__anext__()
+
+    async def collect(self) -> list[tuple[TagProtocol, DataProtocol]]:
+        return [row async for row in self]
+
+
 class _FailingOutput:
-    """A writable channel whose sends fail: it stands for a failed downstream node."""
+    """A writable channel whose sends fail: it stands for a failed downstream node.
+
+    A send fails only once ``after`` is set.
+    """
+
+    def __init__(self, after: asyncio.Event) -> None:
+        self._after = after
 
     async def send(self, item: tuple[TagProtocol, DataProtocol]) -> None:
+        _ = await self._after.wait()
         raise RuntimeError("downstream failed")
 
     async def close(self) -> None:
@@ -230,11 +259,15 @@ def test_failed_replay_leaves_no_input_reader_running() -> None:
     """When a REPLAY node fails, its input readers have ended by the time it raises."""
 
     async def run() -> set[asyncio.Task[Any]]:
-        node = replay_job(InMemoryArrowDatabase()).nodes["OUT"]
-        upstream: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=4)
-        # The upstream stays open, so the node's reader of it is still waiting.
-        with pytest.raises(RuntimeError, match="downstream failed"):
-            await node.async_execute([upstream.reader], _FailingOutput())
+        # ``asyncio.timeout``, unlike ``asyncio.wait_for`` on 3.11, adds no task.
+        async with asyncio.timeout(RUN_TIMEOUT):
+            node = replay_job(InMemoryArrowDatabase()).nodes["OUT"]
+            upstream: Channel[tuple[TagProtocol, DataProtocol]] = Channel(4)
+            reader = _ReaderThatSignals(upstream)
+            # The replay fails once the node's reader of the upstream is waiting on
+            # it: the upstream stays open.
+            with pytest.raises(RuntimeError, match="downstream failed"):
+                await node.async_execute([reader], _FailingOutput(after=reader.reading))
         return asyncio.all_tasks() - {asyncio.current_task()}
 
-    assert asyncio.run(asyncio.wait_for(run(), RUN_TIMEOUT)) == set()
+    assert asyncio.run(run()) == set()

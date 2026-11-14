@@ -1061,9 +1061,16 @@ _Row = tuple[TagProtocol, DataProtocol]
 
 
 class _FailingChannel:
-    """A readable channel whose reading fails: it stands for a failed right input."""
+    """A readable channel whose reading fails: it stands for a failed right input.
+
+    A read fails once ``after`` is set.
+    """
+
+    def __init__(self, after: asyncio.Event) -> None:
+        self._after = after
 
     async def receive(self) -> _Row:
+        _ = await self._after.wait()
         raise RuntimeError("right input failed")
 
     def __aiter__(self) -> "_FailingChannel":
@@ -1147,17 +1154,19 @@ class TestSemiJoinRightEndsWhileLeftOpen:
     async def test_right_input_error_surfaces_while_left_is_open(self):
         left = _id_stream([2], "a")
         left_ch, output_ch = Channel[_Row](4), Channel[_Row](4)
+        left_reader = _SignallingReader(left_ch, signal_on_call=2)
         await left_ch.writer.send(next(iter(left.iter_data())))
 
+        # The right input fails once the second left receive waits on the open,
+        # empty left channel. ``asyncio.timeout``, unlike ``asyncio.wait_for`` on
+        # 3.11, adds no task.
         with pytest.raises(RuntimeError, match="right input failed"):
-            await asyncio.wait_for(
-                SemiJoin().async_execute(
-                    [left_ch.reader, _FailingChannel()],
+            async with asyncio.timeout(_HANG_GUARD_SECONDS):
+                await SemiJoin().async_execute(
+                    [left_reader, _FailingChannel(after=left_reader.waiting)],
                     output_ch.writer,
                     input_pipeline_hashes=hashes(left, left),
-                ),
-                _HANG_GUARD_SECONDS,
-            )
+                )
         assert await output_ch.reader.collect() == []  # the output is closed
         # Nothing is left reading the left input.
         assert asyncio.all_tasks() == {asyncio.current_task()}
