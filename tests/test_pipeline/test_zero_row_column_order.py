@@ -22,7 +22,7 @@ order and accepts both.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -54,6 +54,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.types import CacheMode
 
 ORCHESTRATORS = {
@@ -245,7 +246,8 @@ def _node(
 ) -> OperatorJobNode:
     """An operator node of ``step`` over the plain streams the step reads, outside a job."""
     stream = _stream(step, pairs, groups)
-    return OperatorJobNode(stream.producer, stream.upstreams, **kwargs)
+    operator = cast(OperatorPodProtocol, stream.producer)
+    return OperatorJobNode(operator, stream.upstreams, **kwargs)
 
 
 @pytest.mark.parametrize("pairs", PAIRS)
@@ -323,9 +325,11 @@ def test_a_job_run_and_a_node_run_share_one_stored_table(
         else DeltaTableDatabase(tmp_path)
     )
     schemas = []
+    nodes = []
     for how, ids in zip(order, ([1, 2], [3, 4]), strict=True):
         job = _join_job(ids)
         node = job.nodes["joined"]
+        nodes.append(node)
         node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
         if how == "job":
             _ = job.run(orchestrator=SyncPipelineOrchestrator())
@@ -335,7 +339,7 @@ def test_a_job_run_and_a_node_run_share_one_stored_table(
         if store_kind == "delta_flushed":
             store.flush()
     assert schemas[0].equals(schemas[1])
-    stored = node.get_all_records(all_info=True)
+    stored = nodes[-1].get_all_records(all_info=True)
     assert stored is not None
     assert stored.num_rows == 4
 

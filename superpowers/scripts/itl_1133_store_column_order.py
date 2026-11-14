@@ -1,5 +1,7 @@
 """ITL-1133 reproduction (found during ITL-1131): one operator node table, two column orders.
 
+Fails on main before the ITL-1133 fix (52d67858); prints OK for every case after it.
+
 A job run keeps and stores an operator node's rows in row order (user tags, system tags,
 data, source info: ``_rows_to_table``); a direct ``node.run()`` (``_compute_and_store``)
 in ``CacheMode.LOG`` stores them in the operator's own order (a join: user tags, data,

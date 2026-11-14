@@ -84,3 +84,10 @@ Coordinator decision (2026-11-14): approve a–d; item 4 (direct node) out of sc
 ## Progress notes
 
 - 2026-11-14: sweep done, coordinator approved a–d, item 4 out of scope.
+- 2026-11-14: a-d done (commits on branch). Coordinator then moved ITL-1133 into this PR
+  (developer: one stored column order): writer change (`_kept_output`, `_compute_output`)
+  and option B (reorder on read, `_in_row_order_on_read`, own commit; developer approved B,
+  no layout bump). Migration assessment: only `odb_v1` held two orders; `odb_v1` unreleased
+  (introduced 2026-11-12, ITL-967). Merged main 0208dca4 (#387): predicted schema order
+  equals the row order on every job node.
+- Remaining: full suite, draft PR, CI, CodeRabbit; after PR #380 merges, flip its strict xfail.
