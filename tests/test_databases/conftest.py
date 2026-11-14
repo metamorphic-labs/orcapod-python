@@ -11,18 +11,19 @@ subprocess, or a real endpoint from MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SE
 
 from __future__ import annotations
 
-import contextlib
 import os
-import socket
-import subprocess
 import sys
-import tempfile
-import time
 import types
 import uuid
 from unittest.mock import MagicMock
 
 import pytest
+
+from tests.test_databases.moto_server import (
+    S3_ACCESS_KEY as _S3_ACCESS_KEY,
+    S3_SECRET_KEY as _S3_SECRET_KEY,
+    moto_server as _moto_server,
+)
 
 # Only install the stub if psycopg is not already importable.
 try:
@@ -37,17 +38,7 @@ except ImportError:
 # S3 fixtures
 # ---------------------------------------------------------------------------
 
-_S3_ACCESS_KEY = "testing"
-_S3_SECRET_KEY = "testing"
 _S3_BUCKET = "test-bucket"
-_MOTO_START_TIMEOUT_SECONDS = 60.0
-
-
-def _free_localhost_port() -> int:
-    """Return a TCP port on 127.0.0.1 that is free right now."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _make_bucket(endpoint: str, access_key: str, secret_key: str, bucket: str) -> None:
@@ -62,57 +53,6 @@ def _make_bucket(endpoint: str, access_key: str, secret_key: str, bucket: str) -
     if not fs.exists(bucket):
         fs.call_s3("create_bucket", Bucket=bucket)
         fs.invalidate_cache()
-
-
-@contextlib.contextmanager
-def _moto_server():
-    """Run a moto S3 server in a subprocess and yield its endpoint URL.
-
-    A subprocess, not ``ThreadedMotoServer``: deltalake holds the GIL while it works
-    on a table, so a server thread in the test process cannot answer it and an append
-    hangs. Raises ``RuntimeError`` with the server's output if it does not come up.
-    """
-    port = _free_localhost_port()
-    endpoint = f"http://127.0.0.1:{port}"
-    env = {
-        **os.environ,
-        "AWS_ACCESS_KEY_ID": _S3_ACCESS_KEY,
-        "AWS_SECRET_ACCESS_KEY": _S3_SECRET_KEY,
-    }
-    with tempfile.TemporaryFile() as log:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "moto.server", "-H", "127.0.0.1", "-p", str(port)],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-        try:
-            deadline = time.monotonic() + _MOTO_START_TIMEOUT_SECONDS
-            while True:
-                if proc.poll() is not None:
-                    break
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=1):
-                        pass
-                except OSError:
-                    if time.monotonic() > deadline:
-                        break
-                    time.sleep(0.1)
-                    continue
-                yield endpoint
-                return
-            log.seek(0)
-            output = log.read().decode(errors="replace")
-            raise RuntimeError(
-                f"The moto S3 server did not start on {endpoint}:\n{output}"
-            )
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
 
 
 @pytest.fixture(scope="session")
