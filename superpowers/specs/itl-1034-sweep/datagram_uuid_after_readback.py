@@ -32,7 +32,7 @@ t = pa.table(
 
 
 def job(store):
-    j = PipelineJob(name="j", store=store)
+    j = PipelineJob(name="j", database=store)
     with j:
         f.pod(ArrowTableSource(t, tag_columns=["k"], source_id="src"), label="n")
     return j

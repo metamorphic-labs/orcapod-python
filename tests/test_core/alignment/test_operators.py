@@ -378,7 +378,7 @@ def run_case(case: OpCase, scenario: str, input_order: str, orchestrator: str) -
     """Run ``case`` as the operator node ``op`` of a job; return the node and sources."""
     sources = make_sources(scenario, input_order)
     case.prepare(sources)
-    job = PipelineJob(name="ops", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="ops", database=InMemoryArrowDatabase())
     with job:
         output = case.build(sources)
     label = output.label

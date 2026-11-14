@@ -18,7 +18,7 @@ t = pa.table(
 )
 for op in (SemiJoin, MergeJoin):
     for orch in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
-        job = PipelineJob(name="j", store=InMemoryArrowDatabase())
+        job = PipelineJob(name="j", database=InMemoryArrowDatabase())
         with job:
             src = ArrowTableSource(t, tag_columns=["k"], source_id="src")
             op()(src, src, label="op")

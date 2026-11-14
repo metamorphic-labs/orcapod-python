@@ -30,7 +30,7 @@ def run(nullable: bool) -> None:
         )
 
     store = InMemoryArrowDatabase()
-    job = PipelineJob(name="j", store=store)
+    job = PipelineJob(name="j", database=store)
     with job:
         Join()(
             ArrowTableSource(table("x"), tag_columns=["k"], source_id="t"),
@@ -51,7 +51,7 @@ def run(nullable: bool) -> None:
     )
     path = Path(tempfile.mkdtemp()) / "j.json"
     job.save(path)
-    loaded_job = PipelineJob.load(str(path), store=store)
+    loaded_job = PipelineJob.load(str(path), database=store)
     loaded = loaded_job.nodes["op"]
     loaded.attach_databases(
         pipeline_database=store.at("j"), cache_mode=CacheMode.REPLAY
@@ -97,7 +97,7 @@ def identities(nullable: bool) -> None:
         ),
     )
     store = InMemoryArrowDatabase()
-    job = PipelineJob(name="j", store=store)
+    job = PipelineJob(name="j", database=store)
     with job:
         Join()(
             ArrowTableSource(t, tag_columns=["k"], source_id="t"),
@@ -109,7 +109,7 @@ def identities(nullable: bool) -> None:
     job.run()
     path = Path(tempfile.mkdtemp()) / "j.json"
     job.save(path)
-    loaded = PipelineJob.load(str(path), store=store).nodes["op"]
+    loaded = PipelineJob.load(str(path), database=store).nodes["op"]
     live = job.nodes["op"]
     print("== identities, nullable", nullable)
     for a, b in zip(live.upstreams, loaded.upstreams):

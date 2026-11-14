@@ -261,7 +261,7 @@ def read_back(
     if how == "load":
         saved = directory / "job.json"
         run.job.save(saved)
-        loaded = PipelineJob.load(str(saved), store=run.store)
+        loaded = PipelineJob.load(str(saved), database=run.store)
         # A loaded operator node reads its stored rows in REPLAY mode, and the saved job
         # does not keep the cache mode (a loaded node is OFF): attach it again, the
         # public way. Since ITL-1043 the loaded node then reads what the store holds.

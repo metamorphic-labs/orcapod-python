@@ -118,7 +118,7 @@ def test_a_side_effect_node_gives_every_row_once_aligned(
         """Record the delivered row's ``x``."""
         delivered.append(x)
 
-    job = PipelineJob(name="side_effects", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="side_effects", database=InMemoryArrowDatabase())
     with job:
         SideEffectPod(deliver)(sources.a, label="delivered")
     job.run(orchestrator=ORCHESTRATORS[orchestrator]())

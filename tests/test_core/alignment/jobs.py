@@ -84,7 +84,7 @@ def build_job(
     """Record the alignment job of ``scenario`` on ``store``; the oracle knows ``y``."""
     sources = make_sources(scenario, input_order)
     derive_y(sources)
-    job = PipelineJob(name=JOB_NAME, store=store)
+    job = PipelineJob(name=JOB_NAME, database=store)
     pod = gated_fragile if fragile else gated_scale
     with job:
         scaled = pod.pod(sources.a, label="scaled")
