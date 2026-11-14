@@ -159,21 +159,22 @@ def test_group_by_referential_key_stays_scalar_in_both_roles() -> None:
     grouped = GroupBy(["x"])(_ref(GROUP_ROWS, ["s", "x"], "G"))
     tag_schema, data_schema = grouped.output_schema()
     assert tag_schema["x"] is int and data_schema["x"] is int
-    assert stream_references(grouped) == ("s", "x")
+    # The non-key ``s`` is dropped in both roles (ITL-1070).
+    assert stream_references(grouped) == ("x",)
     for tag, data in grouped.iter_data():
         assert tag["x"] == data["x"] and isinstance(data["x"], int)
 
 
-def test_group_by_referential_non_key_is_the_same_list_in_both_roles() -> None:
+def test_group_by_drops_a_referential_non_key_in_both_roles() -> None:
     grouped = GroupBy(["s"])(_ref(GROUP_ROWS, ["s", "x"], "G"))
-    tag_schema, data_schema = grouped.output_schema()
-    assert tag_schema["x"] == list[int] and data_schema["x"] == list[int]
-    rows = {tag["s"]: (tag, data) for tag, data in grouped.iter_data()}
-    tag, data = rows["s1"]
-    # Section 8.3: the same member order in both roles, and the data follows it.
-    assert tag["x"] == data["x"] == [10, 20]
-    assert data["y"] == [4, 5]
-    assert grouped.as_table().column_names.count("x") == 1
+    # ITL-1070: a non-key tag is dropped; a referential one leaves the data group
+    # too, with its source info.
+    assert grouped.keys() == (("s",), ("s", "y"))
+    names = grouped.as_table(all_info=True).column_names
+    assert "x" not in names and "_source_x" not in names
+    rows = {tag["s"]: data for tag, data in grouped.iter_data()}
+    # The dropped ``x`` still orders the members.
+    assert rows["s1"]["y"] == [4, 5]
 
 
 def test_group_by_prediction_matches_the_result() -> None:

@@ -1,15 +1,19 @@
 """An EDI-shaped pipeline on referential tags, end to end (ITL-1023).
 
 Specification "Orcapod v0.4 — Referential Tags" (ITL-1004), section 15.7: two time series
-(spikes, gaze) share five key columns and each has a key column ``timestamp`` (as the real
-EDI tables do); a third table is keyed on a subset of the keys. Both time series are grouped
-by the shared keys, each ``timestamp`` is renamed in both roles with ``map_tags`` (developer,
-November 12, 2026) so the join does not equate them, the three are joined, and a function
-reads the timestamp lists and a key column by name. A source's
-declared tags are referential by default (developer, November 12, 2026), so the keys and
-timestamps are data as well as tags, with no ``tags_as_data`` copy and no hand-written drop
-before the join. The third table keeps its tags plain (``tag_only_columns``), so the join
-meets plain with referential (section 9.2) and referential with referential (section 9.3).
+(spikes, gaze) share five key columns and each has a column ``timestamp``; a third table is
+keyed on a subset of the keys. Both time series are grouped by the shared keys, each
+``timestamp`` list is renamed with ``map_data`` so the join does not collide on it, the
+three are joined, and a function reads the timestamp lists and a key column by name. A
+source's declared tags are referential by default (developer, November 12, 2026), so the
+keys are data as well as tags, with no ``tags_as_data`` copy and no hand-written drop before
+the join. The third table keeps its tags plain (``tag_only_columns``), so the join meets
+plain with referential (section 9.2) and referential with referential (section 9.3).
+
+``GroupBy`` keeps only its ``by`` tags (ITL-1070), so a ``timestamp`` declared as a tag
+would be dropped by the grouping: it is declared as data at the source, and the grouping
+makes it a list. Its members are then ordered by record id, not by time, so the function
+sorts them.
 
 The pipeline runs through a function node on the in-memory store and on Delta, with the
 sync and the async orchestrator; a second run on the same store computes nothing.
@@ -19,7 +23,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from pathlib import Path
 
 import pytest
@@ -73,26 +77,22 @@ CALLS: list[int] = []
 def align(spike_time: list[int], gaze_time: list[int], unit: int) -> str:
     """Summarize one unit's spike and gaze timestamps; reads the key ``unit`` as data."""
     CALLS.append(unit)
-    return f"unit {unit}: spikes {spike_time} gaze {gaze_time}"
+    return f"unit {unit}: spikes {sorted(spike_time)} gaze {sorted(gaze_time)}"
 
 
 def _streams() -> tuple[Any, Any, Any]:
     """Return the grouped spikes, the grouped gaze and the trials table."""
-    spikes = op.sources.DictSource(
-        SPIKES, tag_columns=[*KEYS, "timestamp"], source_id="spikes"
-    )
-    gaze = op.sources.DictSource(
-        GAZE, tag_columns=[*KEYS, "timestamp"], source_id="gaze"
-    )
+    spikes = op.sources.DictSource(SPIKES, tag_columns=KEYS, source_id="spikes")
+    gaze = op.sources.DictSource(GAZE, tag_columns=KEYS, source_id="gaze")
     trials = op.sources.DictSource(
         TRIALS,
         tag_columns=["lab", "subject"],
         tag_only_columns=["lab", "subject"],
         source_id="trials",
     )
-    # A referential tag renamed with map_tags is renamed in both roles.
-    spikes_by_unit = spikes.group_by(KEYS).map_tags({"timestamp": "spike_time"})
-    gaze_by_unit = gaze.group_by(KEYS).map_tags({"timestamp": "gaze_time"})
+    # ``timestamp`` is data: renamed with map_data so the join does not collide on it.
+    spikes_by_unit = spikes.group_by(KEYS).map_data({"timestamp": "spike_time"})
+    gaze_by_unit = gaze.group_by(KEYS).map_data({"timestamp": "gaze_time"})
     return spikes_by_unit, gaze_by_unit, trials
 
 
@@ -110,11 +110,13 @@ def test_the_join_merges_the_shared_keys_into_one_data_column_each() -> None:
     # (``lab`` and ``subject`` of the trials table): one data column each.
     for key in KEYS:
         assert key in tags and data.count(key) == 1
-    assert {"spike_time", "gaze_time"} <= set(tags) & set(data)
+    assert {"spike_time", "gaze_time"} <= set(data)
+    assert not {"spike_time", "gaze_time"} & set(tags)
     assert joined.as_table().column_names.count("unit") == 1
     rows = {tag["unit"]: data for tag, data in joined.iter_data()}
-    assert rows[1]["spike_time"] == [10, 20, 30]
-    assert rows[1]["gaze_time"] == [2, 12]
+    # The timestamps are data, ordered by record id: compared as sets of values.
+    assert set(cast("list[int]", rows[1]["spike_time"])) == {10, 20, 30}
+    assert set(cast("list[int]", rows[1]["gaze_time"])) == {2, 12}
     assert rows[2]["condition"] == "dark"
 
 
@@ -150,17 +152,17 @@ def test_edi_shaped_pipeline_runs_and_second_run_computes_nothing(
     node = job.nodes["align"]
     tag_keys, data_keys = node.keys()
     # The pod call lets the input's referential tags fall through (developer decision,
-    # November 12, 2026): every key and both timestamp lists stay referential, beside
-    # the function's output. ``condition`` (plain data of the trials table) does not.
-    for name in [*KEYS, "spike_time", "gaze_time"]:
+    # November 12, 2026): every key stays referential, beside the function's output.
+    # Plain data (the timestamp lists, ``condition`` of the trials table) does not.
+    for name in KEYS:
         assert name in tag_keys and name in data_keys
-    assert "summary" in data_keys and "condition" not in data_keys
+    assert "summary" in data_keys
+    assert not {"spike_time", "gaze_time", "condition"} & set(data_keys)
     table = node.as_table()
     # A referential tag is stored and shown once.
     assert table.column_names.count("unit") == 1
     for tag, data in node.iter_data():
         assert tag["unit"] == data["unit"]
-        assert tag["spike_time"] == data["spike_time"]
     rows = sorted(table.to_pylist(), key=lambda r: r["unit"])
     assert [r["summary"] for r in rows] == [
         "unit 1: spikes [10, 20, 30] gaze [2, 12]",

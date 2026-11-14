@@ -298,22 +298,6 @@ def test_join_after_group_by_folds_the_group_digest() -> None:
     assert token == arrow_utils.fold_source_info_tokens([group_token, "Z::row_0::s"])
 
 
-def test_join_on_a_list_valued_reference_folds_element_by_element() -> None:
-    left = GroupBy(["s"])(
-        _ref([{"s": "a", "x": 1, "p": 0}, {"s": "a", "x": 2, "p": 1}], ["s", "x"], "L")
-    )
-    right = GroupBy(["s"])(
-        _ref([{"s": "a", "x": 1, "q": 0}, {"s": "a", "x": 2, "q": 1}], ["s", "x"], "R")
-    )
-    joined = Join()(left, right)
-    assert_provenance_has_the_shape_of_its_data(joined)
-    (tokens,) = _source_column(joined, "x")
-    assert tokens == [
-        arrow_utils.fold_source_info_tokens(["L::row_0::x", "R::row_0::x"]),
-        arrow_utils.fold_source_info_tokens(["L::row_1::x", "R::row_1::x"]),
-    ]
-
-
 # ── the helpers ─────────────────────────────────────────────────────────────
 
 

@@ -79,7 +79,7 @@ does not make it compute again.
 | Operator | Referential tag `x` |
 |---|---|
 | `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). Every other data-name collision is still an error. |
-| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below); a non-key becomes the same list in both roles, in the same member order, with one source-info token per member. |
+| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key is dropped, as every non-key tag is: in both roles, with its source info. Declare a column as data, not as a tag, to keep it as a list in the grouped output. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag leaves `x` a data column. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |
@@ -107,9 +107,8 @@ several referential inputs), no single member's token is true for it. Its source
 then one **merged token**, `merged:source_fold_v1:<hex>`: the SHA-256 digest of the
 members' tokens, sorted, so it does not depend on row or input order. It is a merged
 token for a group of one member too, and a merged token can itself be a member of a
-later merge. A merged key that is a list (two grouped streams joined on a list-valued
-referential tag) gets one merged token per element. No content hash, pipeline hash, record id or
-function result identity reads source info, so these tokens move no stored result.
+later merge. No content hash, pipeline hash, record id or function result identity reads
+source info, so these tokens move no stored result.
 
 ```python
 sessions = op.sources.DictSource(
