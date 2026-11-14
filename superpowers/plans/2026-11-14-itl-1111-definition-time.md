@@ -49,3 +49,18 @@ this same latent gap: report it).
 2. Helper + memo in the four owners; invalidation hooks.
 3. Re-measure every walk at 20 stages; table for the PR and worker_done.
 4. Golden + hash label rule tests unchanged; full suite; changelog fragment; design_issues entry.
+
+## Progress (2026-11-14)
+
+- Coordinator approved option A with invalidation (upstreams setter, `job.bind`); direct
+  `bound_source` assignment left stale (strict xfail test), reported.
+- Two more exponential walks found and fixed: eager f-string debug logs formatting nested
+  stream reprs in `process` / `__call__` (now `%s`), and `_schema_requires_io` (now visits
+  each upstream once, no memo). `repr` of derived streams / nodes bounded to one level
+  (`short_stream_repr`), approved as option A.
+- System-tag columns double per join stage: expected (developer); docs sentence in
+  `docs/reference/hashing.md` (ITL-1114). Tests: 20 stages for schema walks, 8 stages for
+  all_info and job.run.
+- Stream `run()` staleness walk still exponential on #380 head + this branch: reported, not
+  fixed (operators 2x per stage, function pods 4x per stage).
+- Done: tests, fix, changelog fragment, design_issues/ITL-1111-GW1.md. Next: PR, CI, CodeRabbit.

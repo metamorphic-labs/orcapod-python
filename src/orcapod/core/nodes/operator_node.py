@@ -30,6 +30,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
+    short_stream_repr,
 )
 from orcapod.core.streams.view import (
     STALE_NOTE,
@@ -430,9 +431,11 @@ class OperatorNodeBase(StreamBase):
         self._update_modified_time()
 
     def __repr__(self) -> str:
+        # Upstreams by class and label only: their own repr would nest every path (ITL-1111).
+        upstreams = ", ".join(short_stream_repr(s) for s in self._input_streams)
         return (
-            f"{type(self).__name__}(operator={self._operator!r}, "
-            f"upstreams={self._input_streams!r})"
+            f"{type(self).__name__}(label={self.label!r}, operator={self._operator!r}, "
+            f"upstreams=({upstreams}))"
         )
 
     @abstractmethod

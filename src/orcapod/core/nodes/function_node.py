@@ -33,6 +33,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
+    short_stream_repr,
 )
 from orcapod.core.streams.view import (
     BLUEPRINT_NOTE,
@@ -733,9 +734,11 @@ class FunctionNodeBase(StreamBase):
         )
 
     def __repr__(self) -> str:
+        # The input by class and label only: its own repr would nest every path (ITL-1111).
         return (
-            f"{type(self).__name__}(data_function={self._data_function!r}, "
-            f"input_stream={self._input_stream!r})"
+            f"{type(self).__name__}(label={self.label!r}, "
+            f"data_function={self._data_function!r}, "
+            f"input_stream={short_stream_repr(self._input_stream)})"
         )
 
     @abstractmethod

@@ -32,6 +32,7 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.sources import DictSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 
 STAGES = 20
@@ -87,9 +88,11 @@ class _CallCounter:
 
 @contextmanager
 def _count_schema_queries(
-    monkeypatch: pytest.MonkeyPatch, budget: int
+    monkeypatch: pytest.MonkeyPatch,
+    budget: int,
+    methods: tuple[str, ...] = _COUNTED_METHODS,
 ) -> Iterator[_CallCounter]:
-    """Count ``output_schema`` / ``keys`` calls on every stream class, per object."""
+    """Count calls of ``methods`` on every stream class, per object."""
     counter = _CallCounter(budget)
 
     def wrap(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -102,7 +105,7 @@ def _count_schema_queries(
 
     with monkeypatch.context() as patch:
         for cls in _all_stream_classes():
-            for name in _COUNTED_METHODS:
+            for name in methods:
                 if name in cls.__dict__:
                     patch.setattr(cls, name, wrap(cls.__dict__[name]))
         yield counter
@@ -234,6 +237,40 @@ class TestStreams:
             stream.output_schema(all_info=True)
         _assert_linear(counter, shape, SYSTEM_TAG_STAGES)
 
+    def test_the_poll_check_asks_each_stream_once(
+        self, shape: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The private hook is the walk head() makes to learn whether reading the
+        # schema would poll a source.
+        stream = _guarded_build(shape, monkeypatch)
+        with _count_schema_queries(
+            monkeypatch, _budget(shape), methods=("_schema_requires_io",)
+        ) as counter:
+            stream.head()
+        assert counter.max_per_object == 1
+
+    def test_repr_is_bounded(self, shape: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        stream = _guarded_build(shape, monkeypatch)
+        with _count_schema_queries(monkeypatch, _budget(shape)):
+            text = repr(stream)
+        assert len(text) < 500
+        assert type(stream).__name__ in text
+
+    def test_a_join_error_is_bounded_and_names_the_inputs_and_the_column(
+        self, shape: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stream = _guarded_build(shape, monkeypatch)
+        left = stream.map_data({"x": "y"}, label="left_branch")
+        right = stream.map_data({"x": "y"}, label="right_branch")
+        with _count_schema_queries(monkeypatch, _budget(shape)):
+            with pytest.raises(InputValidationError) as excinfo:
+                left.join(right)
+        message = str(excinfo.value)
+        assert len(message) < 1000
+        assert "left_branch" in message
+        assert "right_branch" in message
+        assert "'y'" in message
+
     def test_hashes_are_unchanged_by_asking_twice(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -290,6 +327,15 @@ class TestPipelineJob:
         with _count_schema_queries(monkeypatch, budget) as counter:
             job.run(orchestrator=orchestrator())
         _assert_linear(counter, shape, SYSTEM_TAG_STAGES)
+
+    def test_node_reprs_are_bounded(
+        self, shape: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job = _guarded_build_job(shape, monkeypatch)
+        for node in job.nodes.values():
+            with _count_schema_queries(monkeypatch, _budget(shape)):
+                text = repr(node)
+            assert len(text) < 500
 
     def test_a_node_schema_walk_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch

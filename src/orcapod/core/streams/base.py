@@ -54,6 +54,24 @@ def schema_requires_io(stream: object, config: ColumnConfig) -> bool:
     return bool(check(config)) if callable(check) else False
 
 
+def short_stream_repr(stream: object) -> str:
+    """Name a stream by its class and label only, as a derived stream's ``repr`` lists it.
+
+    A derived stream's ``repr`` names its upstreams this way, never by their own
+    ``repr``: that one names their upstreams in turn, so a graph whose stages split
+    and join again would print every path, 2 ** stages long (ITL-1111).
+
+    Args:
+        stream: An upstream stream.
+
+    Returns:
+        ``<ClassName 'label'>``, or ``<ClassName>`` when the stream has no label.
+    """
+    label = getattr(stream, "label", None)
+    name = type(stream).__name__
+    return f"<{name} {label!r}>" if label is not None else f"<{name}>"
+
+
 def check_head_size(n: int) -> None:
     """Check the row count given to ``head``.
 

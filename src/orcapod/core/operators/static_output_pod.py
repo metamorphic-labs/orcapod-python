@@ -17,6 +17,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
+    short_stream_repr,
 )
 from orcapod.core.streams.view import (
     STALE_NOTE,
@@ -659,7 +660,14 @@ class DynamicPodStream(StreamBase):
         )
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(kernel={self.producer}, upstreams={self.upstreams})"
+        # Upstreams by class and label only: their own repr would nest every path (ITL-1111).
+        upstreams = ", ".join(
+            short_stream_repr(upstream) for upstream in self.upstreams
+        )
+        return (
+            f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
+            f"upstreams=({upstreams}))"
+        )
 
 
 def _upstream_state(stream: StreamProtocol) -> tuple[str, object]:
