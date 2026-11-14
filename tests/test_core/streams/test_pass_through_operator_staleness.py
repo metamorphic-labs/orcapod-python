@@ -26,6 +26,7 @@ from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     DropDataColumns,
+    DropNulls,
     DropTagColumns,
     Join,
     MapData,
@@ -35,8 +36,12 @@ from orcapod.core.operators import (
     SelectTagColumns,
     SemiJoin,
 )
-from orcapod.core.operators.static_output_pod import DynamicPodStream
+from orcapod.core.operators.static_output_pod import (
+    DynamicPodStream,
+    StaticOutputOperatorPod,
+)
 from orcapod.core.sources import ArrowTableSource, DictSource
+from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.streams import HeadStatus
@@ -97,6 +102,21 @@ def _unrelated() -> ArrowTableSource:
         schema=schema,
     )
     return ArrowTableSource(table, tag_columns=["j"], source_id="unrelated")
+
+
+def _partner() -> ArrowTableSource:
+    """A source keyed like ``_source`` (tag ``id``) with data ``q``."""
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("q", pa.int64(), nullable=False),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [pa.array(IDS, type=pa.int64()), pa.array(IDS, type=pa.int64())],
+        schema=schema,
+    )
+    return ArrowTableSource(table, tag_columns=["id"], source_id="partner")
 
 
 def _stamped_pod() -> FunctionPod:
@@ -178,6 +198,7 @@ def _counting_operator_runs(streams: list[StreamProtocol]) -> Iterator[Counter[i
             if not isinstance(stream, DynamicPodStream):
                 continue
             pod = stream.producer
+            assert isinstance(pod, StaticOutputOperatorPod)
             original = pod.static_process
 
             def counting(
@@ -200,6 +221,7 @@ def _read(stream: StreamProtocol, how: str) -> int:
     if how == "iter_data":
         return len(list(stream.iter_data()))
     if how == "flow":
+        assert isinstance(stream, StreamBase)
         return len(stream.flow())
     raise AssertionError(how)
 
@@ -344,3 +366,42 @@ def test_a_reset_further_up_a_chain_still_reruns_the_operator(operator: str) -> 
         assert stream.as_table().equals(after)
     assert runs == Counter()
     assert _stale(streams) == [False] * len(streams)
+
+
+RESETS: list[Callable[[], None]] = []
+
+
+def double_and_reset(y: int) -> int:
+    """Return ``2 * y``; the first call runs the pending reset, if any."""
+    CALLS["double_and_reset"] += 1
+    if RESETS:
+        RESETS.pop()()
+    return 2 * y
+
+
+@pytest.mark.parametrize("reader", ["drop_nulls", "join"])
+def test_a_reset_while_a_reading_operator_reads_leaves_it_stale(reader: str) -> None:
+    """An upstream reset while the operator reads its input: the kept result is not current.
+
+    The operator reads a pod stream whose function resets the pod stream above it on its
+    first call, so the operator reads rows of two states. The operator stream is then
+    stale, and its next read gives rows of the state after the reset only.
+    """
+    first = _stamped_pod().process(_source())
+    second = function_pod(output_keys="z")(double_and_reset).pod.process(first)
+    stream = (
+        DropNulls()(second) if reader == "drop_nulls" else Join()(second, _partner())
+    )
+
+    def reset_first() -> None:
+        """Move to a new epoch and reset the first pod stream."""
+        EPOCH[0] = 1
+        getattr(first, "clear_cache")()
+
+    RESETS.append(reset_first)
+    _ = stream.as_table()
+    assert RESETS == []
+    assert getattr(stream, "is_stale")
+    zs = cast(list[int], stream.as_table().column("z").to_pylist())
+    assert sorted(zs) == sorted(2 * (1000 + i) for i in IDS)
+    assert _stale(_chain_of(stream)) == [False, False, False]
