@@ -175,3 +175,4 @@ schema memo). Steps:
   3.12 6434 passed 11 skipped 9 xfailed; async files + review-fix tests on 3.11 651 passed.
   LEFT: CI, one CodeRabbit review, plan to coordinator, worker_done.
 - 2026-11-14: CodeRabbit 4575098786 (5dd8d6a3 round): #380 behaviour, also on main; declined with repro c11 (coordinator files it); _streams_read_by docstring corrected. CR review at 21:07Z rate limited; retries ~21:28Z, ~21:48Z.
+- 2026-11-14: merged #390 (653c138e; one conflict in OperatorJobNode.run, kept _compute_output + _run_load_only) and #389 (810d1b03, clean). Scripts unchanged. 3.12 targets 9348 passed; async 3.11 651 passed. CR retry 1 at 21:38Z rate limited; last retry ~21:58Z.
