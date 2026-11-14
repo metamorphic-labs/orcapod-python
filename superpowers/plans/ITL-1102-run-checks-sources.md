@@ -204,3 +204,9 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
   invariant "the modified time moves exactly when the next read would present a different
   set of rows". Mirror tests: shared cache with add, add-then-delete, delete-only, from both
   wrappers in both orders.
+
+## CodeRabbit round 5 (incremental review of ec0b7617; coordinator decision)
+
+- A cache shared through `cache_path` by wrappers over different source objects is not
+  followed by the check: documented (docstring, sources.md); comparing on every check is
+  ITL-1143 (cost: a full cache read per run).
