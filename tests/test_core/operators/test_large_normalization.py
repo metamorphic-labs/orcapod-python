@@ -109,12 +109,13 @@ def _cases(row_counts: tuple[int, ...]) -> list[tuple[str, str, int]]:
 
 
 def _job_tables(
-    source: str, operator: str, orchestrator: str, tmp_path: Path
+    source: str, operator: str, n_rows: int, orchestrator: str, tmp_path: Path
 ) -> tuple[pa.Table, list[pa.Table]]:
-    """The operator's node table, and every other node's, after a job run."""
+    """The operator's node table, and every other node's, after a job run over
+    inputs of ``n_rows`` rows."""
     job = PipelineJob(name="itl1122", database=InMemoryArrowDatabase())
     with job:
-        OPERATORS[operator](build_source(source, 2, tmp_path), 2, "op")
+        OPERATORS[operator](build_source(source, n_rows, tmp_path), n_rows, "op")
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     tables = {
         label: node.as_table(columns=ALL_COLUMNS) for label, node in job.nodes.items()
@@ -153,15 +154,19 @@ def test_zero_row_schema_equals_populated(
 
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])
-@pytest.mark.parametrize(("source", "operator", "n_rows"), _cases((2,)))
+@pytest.mark.parametrize(("source", "operator", "n_rows"), _cases((2, 0)))
 def test_job_has_no_non_large_type_and_equals_plain(
     source: str, operator: str, n_rows: int, orchestrator: str, tmp_path: Path
 ) -> None:
-    op_table, other_tables = _job_tables(source, operator, orchestrator, tmp_path)
+    """With rows and without, a job node equals the same operator on a plain stream."""
+    op_table, other_tables = _job_tables(
+        source, operator, n_rows, orchestrator, tmp_path
+    )
+    assert (op_table.num_rows > 0) == (n_rows > 0)
     assert non_large_columns(op_table) == []
     for table in other_tables:
         assert non_large_columns(table) == []
-    plain = OPERATORS[operator](build_source(source, 2, tmp_path), 2, None)
+    plain = OPERATORS[operator](build_source(source, n_rows, tmp_path), n_rows, None)
     assert _user_schema(op_table) == _user_schema(plain.as_table(columns=ALL_COLUMNS))
 
 

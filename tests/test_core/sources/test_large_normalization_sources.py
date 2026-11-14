@@ -24,6 +24,7 @@ from orcapod.core.sources import (
     ListSource,
     PollingSource,
 )
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.operators import SelectTagColumns
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
@@ -106,6 +107,27 @@ def test_user_arrow_table_keeps_width_and_nullability() -> None:
         "l", pa.large_list(pa.field("item", pa.int8(), nullable=False)), nullable=False
     )
     assert out.schema.field("s") == pa.field("s", pa.large_string(), nullable=True)
+
+
+def test_list_view_is_not_supported_today() -> None:
+    """Pins today's behaviour: ``list_view`` is not a supported type (ITL-1129).
+
+    A source refuses a ``list_view`` column (the Arrow hasher cannot hash it); a raw
+    ``ArrowTableStream`` holds it as given, untyped and unhashable. Supporting it
+    (normalized to ``large_list``) is a deliberate later change.
+    """
+    table = pa.table(
+        {
+            "t": pa.array(["a"], pa.large_string()),
+            "lv": pa.array([["x"]], pa.list_view(pa.string())),
+        }
+    )
+    with pytest.raises(ValueError, match="list_view"):
+        _ = ArrowTableSource(table, tag_columns=["t"], source_id="lv")
+    stream = ArrowTableStream(table, tag_columns=["t"])
+    assert stream.as_table().schema.field("lv").type == pa.list_view(pa.string())
+    with pytest.raises(ValueError, match="list_view"):
+        _ = stream.content_hash()
 
 
 def test_list_source_is_large() -> None:

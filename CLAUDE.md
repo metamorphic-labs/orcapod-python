@@ -756,15 +756,17 @@ when no type is known.
 
 Large variants everywhere (developer, November 14, 2026, ITL-1122): every column of every table
 Orcapod presents or stores has its string, binary and list types in their large variants
-(`large_string`, `large_binary`, `large_list`, recursively), with no exception: a user's own
-Arrow table (`ArrowTableSource`, a raw `ArrowTableStream`) and an explicit Arrow `schema=` /
-`data_schema=` are normalized too. The one place is `ArrowTableStream.__init__`
-(`arrow_utils.normalize_table_to_large_types(table, keep_null=True)`), where every source and
-every operator result becomes a stream; never add a per-source or per-operator normalization.
-Names, nullability (top level and nested), field metadata, widths and logical (extension) types
-are untouched, and large and non-large variants hash identically, so no hash or default source
-id moves. Not covered: what is inside a library value (numpy, pandas, polars, torch) keeps its
-library's own distinction.
+(`large_string`, `large_binary`, `large_list`, recursively), for every supported Arrow type, with
+no exception: a user's own Arrow table (`ArrowTableSource`, a raw `ArrowTableStream`) and an
+explicit Arrow `schema=` / `data_schema=` are normalized too. The one place is
+`ArrowTableStream.__init__` (`arrow_utils.normalize_table_to_large_types(table, keep_null=True)`),
+where every source and every operator result becomes a stream; never add a per-source or
+per-operator normalization. Names, nullability (top level and nested), field metadata, widths and
+logical (extension) types are untouched, and large and non-large variants hash identically, so no
+hash or default source id moves. Not covered: what is inside a library value (numpy, pandas,
+polars, torch) keeps its library's own distinction. `list_view` and `large_list_view` are not
+supported: a source refuses them (the Arrow hasher cannot hash them) and a raw `ArrowTableStream`
+holds them as given (ITL-1129).
 
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large

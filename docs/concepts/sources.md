@@ -56,7 +56,8 @@ Every source gives the large variants of string, binary and list types (`large_s
 a data frame, a CSV file or a database table. A `string` column you give comes back as
 `large_string`. Only the layout changes: names, nullability, widths (`int8` stays `int8`) and
 logical types are kept, and the two variants hash identically, so no hash depends on which
-one you gave.
+one you gave. The Arrow `list_view` and `large_list_view` types are not supported: a source
+refuses a column of either type.
 
 ### SpiralDB tables
 
