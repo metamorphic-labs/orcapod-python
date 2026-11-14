@@ -783,7 +783,9 @@ data. The rules:
   when any function or operator job node it depends on is (core/nodes/staleness.py), and a
   SourceJobNode is modified when it is bound or its bound source is. A run skips inputs
   whose entry is already stored. A loaded operator's stored view raises when its run's rows
-  cannot be named (ITL-1043).
+  cannot be named (ITL-1043). job.run(load_only=True) computes nothing and writes nothing: function nodes
+  load their own stored entries for this run's inputs and skip (and count) the others,
+  operators run without storing, side-effect nodes pass rows on undelivered.
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
 - DerivedSource over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with tags_as_data.

@@ -541,6 +541,42 @@ print(summary.ok, summary.failed_rows)
 # False 3
 ```
 
+### Loading without computing: `run(load_only=True)`
+
+A job node shows the rows of its current run, so a job built over a store that already holds
+its results is empty until it runs. A run that finds every result stored computes nothing,
+but it does compute the results that are missing. `job.run(load_only=True)` fills the nodes
+with what is already stored for this run's inputs and never computes: sources are read,
+operators run on the rows that reach them, each function node takes the stored results of
+its inputs and skips the inputs that have none, no side effect is delivered and nothing is
+written to the store. The summary counts what each node loaded and skipped:
+
+```python
+more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]
+
+load_job = PipelineJob(name="bmi_demo", database=db)
+with load_job:
+    source = DictSource(data=more_mice, tag_columns=["subject_id"], source_id="mice")
+    compute_bmi.pod(source, label="bmi")
+
+print(load_job.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
+# 0
+calls.clear()
+summary = load_job.run(load_only=True)
+print(summary)
+# Load-only run of job 'bmi_demo': 1 row without a stored result skipped.
+#   bmi: 4 rows: 3 loaded, 1 not stored (skipped)
+print(load_job.nodes["bmi"].as_table().num_rows, "rows; function calls:", len(calls))
+# 3 rows; function calls: 0
+```
+
+`summary.nodes["bmi"].not_stored` is the number of skipped inputs, and
+`summary.nodes[label].inputs_incomplete` names the function nodes above a node that skipped
+inputs. A function node passes on only the rows it loaded, so the rows below it are
+incomplete: a group formed after it may lack members, and the result stored for a smaller
+group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
+on the asynchronous orchestrator.
+
 ### When results are committed
 
 Inside `job.run()`, each function node commits its results and pipeline records to the
