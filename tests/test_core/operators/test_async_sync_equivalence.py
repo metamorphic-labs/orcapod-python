@@ -1328,3 +1328,141 @@ def test_async_null_logical_key_matches_nothing_as_the_sync_path_does() -> None:
         for operands in ((left, right), (right, left)):
             expected = sync_rows(operator(), *operands)
             assert_equivalent(expected, async_rows(operator(), *operands))
+
+
+# ── no operator carries its inputs' Data meta columns (ITL-1080, rule B) ────
+
+
+def _assert_no_input_meta(rows: list[Row]) -> None:
+    """No output row carries a Data meta column."""
+    for _, data in rows:
+        assert data.meta_columns == ()
+        assert not [
+            name
+            for name in data.as_table(all_info=True).column_names
+            if "__m" in name or "__computed" in name
+        ]
+
+
+@pytest.mark.parametrize(
+    "case", [pytest.param(_meta_case(c), id=c.label) for c in CASES]
+)
+def test_no_operator_carries_raw_stream_meta(case: Case) -> None:
+    """A raw ``ArrowTableStream``'s ``__`` columns reach no operator output, on either path.
+
+    Join's rule (ITL-854/857), generalized to every operator: meta columns describe how
+    an input row was produced; an operator's output row was produced by the operator.
+    The prediction leaves the ``__`` names out as well.
+    """
+    sources = case.make_sources()
+    expected = sync_rows(case.make_op(), *sources)
+    actual = async_rows(case.make_op(), *sources)
+    _assert_no_input_meta(expected)
+    _assert_no_input_meta(actual)
+    _, data_schema = case.make_op().output_schema(*sources)
+    assert not [name for name in data_schema if name.startswith("__")]
+
+
+def cached_meta_source(
+    source_id: str, offset: int = 0, mergeable: bool = False
+) -> StreamProtocol:
+    """A cached function pod's output whose every row's ``Data`` carries ``__computed``.
+
+    Tags ``k: int16`` and ``t: int8``; data ``y: int``, ``yl: list[int]``,
+    ``yd: dict[str, int]`` and nullable ``yn: int | None``; only ``y`` and ``yl`` when
+    ``mergeable``, the columns ``MergeJoin`` can merge (it cannot sort dicts or nulls).
+    """
+    source = _source(
+        {
+            "k": pa.array([1, 2, 3], pa.int16()),
+            "t": pa.array([5, 5, 6], pa.int8()),
+            "a": pa.array([1, 2, 3], pa.int8()),
+        },
+        tags=("k", "t"),
+        source_id=source_id,
+    )
+
+    def outputs(a: int) -> tuple[int, list[int], dict[str, int], int | None]:
+        return a + offset, [a, a + 1], {"q": a}, None if a == 2 else a
+
+    def merged_outputs(a: int) -> tuple[int, list[int]]:
+        return a + offset, [a, a + 1]
+
+    function_pod = FunctionPod(
+        PythonDataFunction(  # pyright: ignore[reportArgumentType]  # PythonDataFunction is not yet typed as matching DataFunctionProtocol (baselined in other tests); it works at runtime
+            merged_outputs if mergeable else outputs,
+            output_keys=("y", "yl") if mergeable else ("y", "yl", "yd", "yn"),
+            function_name=f"outputs_{source_id}",
+        )
+    )
+    pod = CachedFunctionPod(function_pod, result_database=InMemoryArrowDatabase())
+    stream = pod(source)
+    assert all(data.meta_columns for _, data in stream.iter_data())
+    return stream
+
+
+CACHED_META_CASES = [
+    Case("join", Join, lambda: (cached_meta_source("p"), source_b(nested=False))),
+    Case(
+        "merge_join",
+        MergeJoin,
+        lambda: (
+            cached_meta_source("p", mergeable=True),
+            cached_meta_source("q", 10, mergeable=True),
+        ),
+    ),
+    Case("semijoin", SemiJoin, lambda: (cached_meta_source("p"), source_b())),
+    Case("batch_2", lambda: Batch(batch_size=2), lambda: (cached_meta_source("p"),)),
+    Case("batch_all", Batch, lambda: (cached_meta_source("p"),)),
+    Case("group_by", lambda: GroupBy(["t"]), lambda: (cached_meta_source("p"),)),
+    Case(
+        "polars_filter",
+        lambda: PolarsFilter(constraints={"t": 5}),
+        lambda: (cached_meta_source("p"),),
+    ),
+    Case("map_tags", lambda: MapTags({"t": "tb"}), lambda: (cached_meta_source("p"),)),
+    Case("map_data", lambda: MapData({"y": "w"}), lambda: (cached_meta_source("p"),)),
+    Case(
+        "select_tag_columns",
+        lambda: SelectTagColumns(["k"]),
+        lambda: (cached_meta_source("p"),),
+    ),
+    Case(
+        "select_data_columns",
+        lambda: SelectDataColumns(["y"]),
+        lambda: (cached_meta_source("p"),),
+    ),
+    Case(
+        "drop_tag_columns",
+        lambda: DropTagColumns(["t"]),
+        lambda: (cached_meta_source("p"),),
+    ),
+    Case(
+        "drop_data_columns",
+        lambda: DropDataColumns(["yl"]),
+        lambda: (cached_meta_source("p"),),
+    ),
+    Case("index", lambda: Index("yl", 0), lambda: (cached_meta_source("p"),)),
+    Case("pick", lambda: Pick("yd", "q"), lambda: (cached_meta_source("p"),)),
+    Case("drop_nulls", lambda: DropNulls("yn"), lambda: (cached_meta_source("p"),)),
+    Case("drop_nulls_all", DropNulls, lambda: (cached_meta_source("p"),)),
+]
+
+
+@pytest.mark.parametrize(
+    "case", CACHED_META_CASES, ids=[c.label for c in CACHED_META_CASES]
+)
+def test_no_operator_carries_cached_pod_meta(case: Case) -> None:
+    """A cached pod's ``__computed`` reaches no operator output, on either path.
+
+    The stream hides the column in ``as_table()`` but every row's ``Data`` carries it,
+    so a per-row async path used to keep it while the sync path lost it.
+    """
+    sources = case.make_sources()
+    expected = sync_rows(case.make_op(), *sources)
+    actual = async_rows(case.make_op(), *sources)
+    assert expected
+    _assert_no_input_meta(expected)
+    _assert_no_input_meta(actual)
+    assert_equivalent(expected, actual)
+    assert_same_meta(expected, actual)
