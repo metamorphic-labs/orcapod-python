@@ -234,7 +234,12 @@ class SelectDataColumns(UnaryOperator):
         It takes two streams as input and raises an error if the inputs are not valid.
         """
         # TODO: remove redundant logic
-        tag_columns, data_columns = stream.keys()
+        tag_columns, listed_columns = stream.keys()
+        # A raw stream lists its meta (``__``) columns as data; they are not data
+        # columns to select, as on the async path (ITL-1080).
+        data_columns = [
+            c for c in listed_columns if not c.startswith(constants.META_PREFIX)
+        ]
         columns_to_select = self.columns
         missing_columns = set(columns_to_select) - set(data_columns)
         if missing_columns and self.strict:
@@ -495,7 +500,12 @@ class DropDataColumns(UnaryOperator):
         It takes two streams as input and raises an error if the inputs are not valid.
         """
         # TODO: remove redundant logic
-        _, data_columns = stream.keys()
+        _, listed_columns = stream.keys()
+        # A raw stream lists its meta (``__``) columns as data; they are not data
+        # columns to drop, as on the async path (ITL-1080).
+        data_columns = [
+            c for c in listed_columns if not c.startswith(constants.META_PREFIX)
+        ]
         missing_columns = set(self.columns) - set(data_columns)
         if missing_columns and self.strict:
             raise InputValidationError(

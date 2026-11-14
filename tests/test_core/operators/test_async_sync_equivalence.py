@@ -1648,3 +1648,33 @@ def test_without_meta_fields_keeps_optional_fields() -> None:
     kept = without_meta_fields(schema)
     assert dict(kept) == {"x": int, "y": int}
     assert kept.optional_fields == frozenset({"x"})
+
+
+@pytest.mark.parametrize(
+    "make_op",
+    [
+        lambda: SelectDataColumns(["i32", "__note"]),
+        lambda: DropDataColumns(["__note"]),
+    ],
+    ids=["select", "drop"],
+)
+def test_strict_selection_naming_a_meta_column_raises_alike(
+    make_op: Callable[[], StaticOutputOperatorPod],
+) -> None:
+    """A raw stream's ``__`` column is not a data column for a strict selection.
+
+    The sync path found it in ``keys()``; the async path, whose ``Data`` keeps it as
+    meta, reported it missing (CodeRabbit, #369). Both now report it missing.
+    """
+    source = _with_meta(
+        source_b(nested=False), {"__note": pa.array(["a", "b", "c"], pa.string())}
+    )
+    with pytest.raises(
+        InputValidationError, match="Missing data columns"
+    ) as sync_error:
+        _ = make_op()(source)
+    with pytest.raises(
+        InputValidationError, match="Missing data columns"
+    ) as async_error:
+        _ = async_rows(make_op(), source)
+    assert str(async_error.value) == str(sync_error.value)
