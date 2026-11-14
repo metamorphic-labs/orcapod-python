@@ -219,7 +219,7 @@ class SpiralDBTableSource(RootSource):
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
         overrides: Optional pyspiral client config overrides passed through to
-            ``SpiralDBConnector``, e.g. ``{"server.url": "http://api.spiraldb.dev"}``.
+            ``SpiralDBConnector``, e.g. ``{"server.url": "https://api.spiraldb.dev"}``.
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
             v0.3; ``True`` for all of them. Every other tag column is referential:
             also a data column of the same name (ITL-1023).
