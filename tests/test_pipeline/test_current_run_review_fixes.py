@@ -867,3 +867,38 @@ def test_a_commit_interrupted_by_a_non_exception_clears_the_nodes_it_ran() -> No
         job.nodes["summed"].run()
     for label in ("rowwise", "grouped", "summed"):
         assert job.nodes[label].as_table().num_rows == 0, label
+
+
+def test_a_job_run_whose_final_commit_is_interrupted_clears_the_nodes_it_ran() -> None:
+    """An interruption during ``job.run()``'s end-of-run commit (its last flush) leaves
+    the outcome unknown: the nodes the run ran hold nothing, as for ``node.run()``."""
+    original = InMemoryArrowDatabase.flush
+    calls = 0
+
+    def counting(self: Any) -> None:
+        """Count the flushes of a successful run."""
+        nonlocal calls
+        calls += 1
+        original(self)
+
+    with mock.patch.object(InMemoryArrowDatabase, "flush", counting):
+        _grouped_job(ROWS, InMemoryArrowDatabase()).run()
+    total, calls = calls, 0
+
+    def interrupt_last(self: Any) -> None:
+        """Interrupt the final flush, as a ``KeyboardInterrupt`` would."""
+        nonlocal calls
+        calls += 1
+        if calls == total:
+            raise _Stop()
+        original(self)
+
+    job = _grouped_job(ROWS, InMemoryArrowDatabase())
+    with (
+        mock.patch.object(InMemoryArrowDatabase, "flush", interrupt_last),
+        pytest.raises(_Stop),
+    ):
+        job.run()
+    for label in ("rowwise", "grouped", "summed"):
+        assert job.nodes[label].as_table().num_rows == 0, label
+        assert job.nodes[label].is_stale, label

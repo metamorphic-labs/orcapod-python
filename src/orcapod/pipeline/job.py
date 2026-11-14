@@ -1212,9 +1212,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # records ahead of their results (ITL-919).
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(exec_dag, load_only=load_only)
-        # Pre-v0.3 tables are reported for a run that runs something (ITL-954); a run
-        # that runs no node lists no store.
-        if plan.to_run:
+        # Pre-v0.3 tables are reported for a run that runs a node or leaves one out
+        # (ITL-954): an excluded node reports nothing itself, so the job's total counts
+        # its tables. Only a run that runs nothing and leaves nothing out lists no store.
+        if plan.to_run or excluded_hashes:
             self._report_unclaimed_tables_written_before_v03(excluded_hashes)
         # A load-only run writes nothing, and a run that runs no node touches no store,
         # so neither commits anything, not even pending writes of earlier operations.
@@ -1329,6 +1330,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             flush_error.add_note(pending_note)
             clear_run_rows(plan.to_run)
             raise flush_error from exc
+        except BaseException:
+            # An interruption (KeyboardInterrupt, cancellation) leaves the commit's
+            # outcome unknown: no node holds the run's rows. Re-raised unchanged.
+            clear_run_rows(plan.to_run)
+            raise
 
         # Mutate self in place.
         self._has_run = True
