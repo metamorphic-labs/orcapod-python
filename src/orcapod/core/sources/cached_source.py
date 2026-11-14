@@ -27,6 +27,7 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
+from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -356,6 +357,11 @@ class CachedSource(RootSource):
         all_records = self._read_cached_records()
         if all_records is None:
             all_records = self._empty_table()
+        # The rows read back are a table Orcapod creates: large variants, whatever
+        # the cache store keeps and whether it has rows (ITL-1122).
+        all_records = arrow_utils.normalize_table_to_large_types(
+            all_records, keep_null=True
+        )
 
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.
