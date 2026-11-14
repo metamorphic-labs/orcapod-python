@@ -30,6 +30,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.side_effects import SideEffectPod
 from orcapod.types import ColumnConfig
 
 ORCHESTRATORS = {
@@ -405,3 +406,39 @@ def test_a_zero_row_table_never_carries_a_meta_column() -> None:
 
     assert table is not None
     assert not [name for name in table.column_names if name.startswith("__")]
+
+
+def _side_effect_job() -> tuple[PipelineJob, list[int]]:
+    """A job with a side-effect node ``delivered`` over ``x`` and ``p``; not run."""
+    sent: list[int] = []
+
+    def deliver(ctx: Any, x: int, p: Path) -> None:
+        sent.append(x)
+
+    job = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
+    with job:
+        selected = SelectDataColumns(["x", "p"])(_g1(_source()))
+        _ = SideEffectPod(deliver)(selected, label="delivered")
+    return job, sent
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_side_effect_node_not_run_reads_as_zero_rows_typed_as_its_rows(
+    orchestrator: str,
+) -> None:
+    """A side-effect job node with no rows from a run has its input's zero-row table.
+
+    It holds the rows of its last run (ITL-1091); without them it reads as zero rows
+    with the types its rows have (ITL-912), and nothing is delivered to get them.
+    """
+    ran, _ = _side_effect_job()
+    _ = ran.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    after_run = ran.nodes["delivered"].as_table(all_info=True)
+    assert after_run.num_rows > 0
+
+    job, sent = _side_effect_job()
+    not_run = job.nodes["delivered"].as_table(all_info=True)
+
+    assert not_run.num_rows == 0
+    assert not_run.schema == after_run.schema
+    assert sent == []
