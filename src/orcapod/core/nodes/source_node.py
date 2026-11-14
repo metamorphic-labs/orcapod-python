@@ -825,7 +825,10 @@ class SourceJobNode(SourceNodeBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the bound source's head, or no rows when no source is bound."""
+        """Return the bound source's head, or no rows when no source is bound.
+
+        A narrower bound source's rows are shown as rows of the declared schema.
+        """
         if self._bound_source is None:
             check_head_size(n)
             return self._head_without_rows(
@@ -893,9 +896,11 @@ class SourceJobNode(SourceNodeBase):
     ) -> tuple[Schema, Schema]:
         """Return ``(tag_schema, data_schema)``, delegating to ``bound_source`` when set.
 
-        When ``bound_source`` is present, this is a transparent pass-through to
-        ``bound_source.output_schema(columns=columns, all_info=all_info)`` so callers
-        get the same result as querying the source directly.
+        When ``bound_source`` has the declared schema, this is a transparent
+        pass-through to ``bound_source.output_schema(columns=columns, all_info=all_info)``
+        so callers get the same result as querying the source directly. A narrower
+        bound source (``x: int`` for a declared ``x: int | None``) is given as the
+        declared schema (ITL-1112).
 
         When unbound, delegates to ``SourceNodeBase.output_schema()`` which includes
         system-tag schema entries derived from the declared schemas.
@@ -919,6 +924,9 @@ class SourceJobNode(SourceNodeBase):
         all_info: bool = False,
     ) -> pa.Table:
         """Materialize the concrete source as a PyArrow Table.
+
+        A narrower bound source's rows are given as rows of the declared schema
+        (ITL-1112).
 
         Args:
             columns: Column selection config.
