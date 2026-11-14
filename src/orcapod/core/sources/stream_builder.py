@@ -188,7 +188,7 @@ class SourceStreamBuilder:
 
         # A tag never has a meta column's name; the meta columns are dropped next,
         # so say so here rather than report the tag as missing (ITL-1080).
-        schema_utils.require_tag_names_not_meta(tag_columns_tuple)
+        schema_utils.require_names_not_meta(tag_columns_tuple)
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)

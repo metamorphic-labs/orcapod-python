@@ -587,8 +587,8 @@ ITL-1080): on the sync and the async path, in rows and in the predicted output s
 raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or function node's rows
 carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
 operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
-A tag column never has a name starting with the meta prefix (`__`): `ArrowTableStream`, the
-source builder and `MapTags` refuse one (`schema_utils.require_tag_names_not_meta`).
+The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
+with it, and `MapTags` / `MapData` refuse it as a new name (`schema_utils.require_names_not_meta`).
 
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,

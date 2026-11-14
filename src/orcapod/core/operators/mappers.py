@@ -28,6 +28,9 @@ class MapData(UnaryOperator):
     def __init__(
         self, name_map: Mapping[str, str], drop_unmapped: bool = False, **kwargs
     ):
+        # A data column never gets a meta column's name (ITL-1080): refused here,
+        # so no path (sync, async or the prediction) can produce one.
+        schema_utils.require_names_not_meta(name_map.values())
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         super().__init__(**kwargs)
@@ -47,7 +50,12 @@ class MapData(UnaryOperator):
         return config
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
-        tag_columns, data_columns = stream.keys()
+        tag_columns, listed_columns = stream.keys()
+        # A raw stream lists its meta (``__``) columns as data; they are not data,
+        # are never renamed, and no operator carries them (ITL-1080).
+        data_columns = tuple(
+            c for c in listed_columns if not c.startswith(constants.META_PREFIX)
+        )
         unmapped_columns = set(data_columns) - set(self.name_map.keys())
 
         if not any(n in data_columns for n in self.name_map):
@@ -120,7 +128,8 @@ class MapData(UnaryOperator):
         new_data_schema = {
             self.name_map.get(k, k): v
             for k, v in data_schema.items()
-            if k in self.name_map or not self.drop_unmapped
+            if not k.startswith(constants.META_PREFIX)
+            and (k in self.name_map or not self.drop_unmapped)
         }
 
         return tag_schema, Schema(new_data_schema)
@@ -183,7 +192,7 @@ class MapTags(UnaryOperator):
     ):
         # A tag never gets a meta column's name (ITL-1080): refused here, so no
         # path (sync, async or the prediction) can produce one.
-        schema_utils.require_tag_names_not_meta(name_map.values())
+        schema_utils.require_names_not_meta(name_map.values())
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         super().__init__(**kwargs)

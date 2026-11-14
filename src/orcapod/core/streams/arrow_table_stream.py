@@ -81,7 +81,7 @@ class ArrowTableStream(StreamBase):
         prefix_info = {constants.SOURCE_PREFIX: source_info}
 
         # A tag never has a meta column's name (ITL-1080).
-        schema_utils.require_tag_names_not_meta(tag_columns)
+        schema_utils.require_names_not_meta(tag_columns)
         # determine tag columns first and then exclude any source info
         self._tag_columns = tuple(c for c in tag_columns if c in table.column_names)
         self._system_tag_columns = tuple(

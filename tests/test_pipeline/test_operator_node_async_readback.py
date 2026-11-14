@@ -721,3 +721,33 @@ def test_join_with_an_input_that_delivered_no_row_fails_alike_on_both_paths(
         error = error.exceptions[0]
     assert isinstance(error, InputValidationError)
     assert "'id'" in str(error)
+
+
+def test_rebuilt_upstream_keeps_the_upstream_data_context() -> None:
+    """Rows rebuilt as an upstream's stream keep that stream's data context.
+
+    Non-public on purpose: ``_materialize_upstream`` is how both orchestrators rebuild
+    an operator node's inputs, and a second data context is not reachable from a job.
+    """
+    import dataclasses
+
+    from orcapod.contexts import get_default_context
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.core.streams import ArrowTableStream
+
+    other = dataclasses.replace(get_default_context(), context_key="std:v0.9:other")
+    upstream = ArrowTableStream(
+        pa.table({"id": pa.array([1, 2], pa.int8()), "x": pa.array([3, 4], pa.int8())}),
+        tag_columns=["id"],
+        data_context=other,
+    )
+    rows = list(upstream.iter_data())
+    for buffer, zero_rows in ((rows, False), (rows, True), ([], False)):
+        stream = StaticOutputOperatorPod._materialize_upstream(
+            buffer, upstream, zero_rows=zero_rows
+        )
+        assert stream.data_context_key == "std:v0.9:other"
+        contexts_column = stream.as_table(columns={"context": True}).column(
+            "_context_key"
+        )
+        assert set(contexts_column.to_pylist()) <= {"std:v0.9:other"}

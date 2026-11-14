@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from orcapod.core.operators.meta_columns import WithoutMetaWriter
+from orcapod.core.operators.meta_columns import WithoutMetaWriter, without_meta_fields
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
 from orcapod.core.operators.match_keys import frozen_scalar
@@ -45,6 +45,9 @@ class SemiJoin(BinaryOperator):
         """
         left_tag_schema, left_data_schema = left_stream.output_schema()
         right_tag_schema, right_data_schema = right_stream.output_schema()
+        # A raw stream's meta (``__``) columns are not data and never match (ITL-1080).
+        left_data_schema = without_meta_fields(left_data_schema)
+        right_data_schema = without_meta_fields(right_data_schema)
 
         # Find overlapping columns across all columns (tags + data)
         left_all_schema = schema_utils.union_schemas(left_tag_schema, left_data_schema)
@@ -134,6 +137,9 @@ class SemiJoin(BinaryOperator):
         try:
             left_tag_schema, left_data_schema = left_stream.output_schema()
             right_tag_schema, right_data_schema = right_stream.output_schema()
+            # Meta (``__``) columns never match, as in ``binary_static_process``.
+            left_data_schema = without_meta_fields(left_data_schema)
+            right_data_schema = without_meta_fields(right_data_schema)
 
             # Check that overlapping columns have compatible types across all columns
             left_all_schema = schema_utils.union_schemas(

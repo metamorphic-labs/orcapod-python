@@ -1531,3 +1531,53 @@ def test_join_keeps_a_tag_and_drops_the_data_meta_columns() -> None:
     assert not [
         name for name in stream.as_table(all_info=True).column_names if "__m" in name
     ]
+
+
+def test_map_data_does_not_rename_a_meta_column_into_data() -> None:
+    """A raw stream's ``__`` column is meta: ``MapData`` renames it on neither path.
+
+    The sync path used to build its renames from ``keys()``, which on a raw stream
+    lists ``__`` columns, so the meta value reached a data column (CodeRabbit, #369).
+    """
+    source = _with_meta(source_a(), _meta_columns("m", 3))
+    expected = sync_rows(MapData({"__m_i8": "renamed"}), source)
+    actual = async_rows(MapData({"__m_i8": "renamed"}), source)
+    for rows in (expected, actual):
+        for _, data in rows:
+            assert "renamed" not in data.keys()
+    assert_equivalent(expected, actual)
+    _, predicted = MapData({"__m_i8": "renamed"}).output_schema(source)
+    assert "renamed" not in predicted
+
+
+def test_map_data_refuses_a_meta_named_target() -> None:
+    """A data column never gets a meta column's name: refused when built."""
+    with pytest.raises(InputValidationError, match="'__x'.*reserved for meta"):
+        _ = MapData({"i8": "__x"})
+
+
+def test_semijoin_does_not_match_on_a_meta_column() -> None:
+    """A ``__`` column both raw inputs carry is not a match key, on either path."""
+    left = _with_meta(source_c(), {"__shared": pa.array([1, 2, 3], pa.int8())})
+    right = _with_meta(
+        source_b(nested=False), {"__shared": pa.array([9, 9, 9], pa.int8())}
+    )
+    expected = sync_rows(SemiJoin(), left, right)
+    op = SemiJoin()
+    _ = op(left, right)  # records the common keys, as an operator node does
+    actual = async_rows(op, left, right)
+    assert len(expected) == len(actual) == 3
+    assert_equivalent(expected, actual)
+
+
+def test_without_meta_fields_keeps_optional_fields() -> None:
+    """Dropping the meta fields leaves the optionality of the others (CodeRabbit, #369)."""
+    from orcapod.core.operators.meta_columns import without_meta_fields
+    from orcapod.types import Schema
+
+    schema = Schema(
+        {"x": int, "y": int, "__note": str}, optional_fields={"x", "__note"}
+    )
+    kept = without_meta_fields(schema)
+    assert dict(kept) == {"x": int, "y": int}
+    assert kept.optional_fields == frozenset({"x"})

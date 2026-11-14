@@ -69,7 +69,12 @@ def without_meta_fields(schema: Schema) -> Schema:
             name: data_type
             for name, data_type in schema.items()
             if not name.startswith(constants.META_PREFIX)
-        }
+        },
+        optional_fields={
+            name
+            for name in schema.optional_fields
+            if not name.startswith(constants.META_PREFIX)
+        },
     )
 
 
