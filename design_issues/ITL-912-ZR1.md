@@ -36,4 +36,5 @@ Still built from the Python schema (no Arrow schema exists without rows): a `Pol
 before its first poll and an unbound input slot or `SourceProxy` (declared with a Python
 `Schema` only; reported to the developer as a design gap), a `DerivedSource` (its
 `_empty_origin_table` is left as it is), and a loaded node with no live upstream and no stored
-table. `Index` and `Pick` over zero rows lack system-tag columns (ITL-985).
+table. `Index` and `Pick` over zero rows lack system-tag columns (ITL-985). These remaining
+cases are tracked in ITL-1089.

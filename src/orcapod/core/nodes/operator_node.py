@@ -1496,7 +1496,7 @@ class OperatorJobNode(OperatorNodeBase):
         input slot or ``SourceProxy``, a ``DerivedSource``, or a loaded node with
         no live upstream), the table is built from the node's Python output
         schema, as before: an ``int8`` column reads as ``int64`` and the
-        system-tag columns are absent.
+        system-tag columns are absent (ITL-1089, ITL-985).
 
         Loaded nodes raise when no readable stored cache is available.
         """
