@@ -1328,6 +1328,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             flush_error.add_note(pending_note)
             clear_run_rows(plan.to_run)
             raise flush_error from exc
+        except BaseException:
+            # An interruption (KeyboardInterrupt, cancellation) leaves the commit's
+            # outcome unknown: no node holds the run's rows. Re-raised unchanged.
+            clear_run_rows(plan.to_run)
+            raise
 
         # Mutate self in place.
         self._has_run = True
