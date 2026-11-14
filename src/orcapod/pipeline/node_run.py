@@ -14,6 +14,7 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import StoreError, StoreWriteError
@@ -64,6 +65,24 @@ def _job_name(node: Any) -> str:
     database = getattr(node, "_pipeline_database", None)
     base_path: tuple[str, ...] = getattr(database, "base_path", ())
     return "/".join(base_path)
+
+
+def clear_run_rows(nodes: Iterable[Any]) -> None:
+    """Drop the rows of a run whose end-of-run commit failed from every node it filled.
+
+    A run that raised defines no rows (ITL-1093): each function and operator job node of
+    the run is cleared (not run, stale) before the commit's error propagates. What was
+    committed stays stored. A load-only run writes nothing, so its commit has nothing
+    to fail on.
+
+    Args:
+        nodes: The nodes of the run.
+    """
+    from orcapod.core.nodes.staleness import RunHoldingNode
+
+    for node in nodes:
+        if isinstance(node, RunHoldingNode):
+            node.clear_cache()  # pyright: ignore[reportAttributeAccessIssue]  # every RunHoldingNode is a job node with clear_cache
 
 
 def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
@@ -134,8 +153,11 @@ def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
         try:
             store.flush()
         except StoreError:
+            # A run whose commit failed did not complete: no node holds its rows.
+            clear_run_rows(run_nodes)
             raise
         except Exception as exc:
+            clear_run_rows(run_nodes)
             raise StoreWriteError(store.base_path, flush=True) from exc
     return RunSummary(
         _job_name(target),

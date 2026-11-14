@@ -312,3 +312,76 @@ def test_the_cascade_commits_every_write(tmp_path: Path) -> None:
     assert CALLS == []
     assert summary.nodes["rowwise"].reused == 6
     assert summary.nodes["summed"].reused == 2
+
+
+class TestFailedFinalCommit:
+    """A run whose end-of-run commit fails leaves no node holding its rows."""
+
+    @staticmethod
+    def _flush_calls(run: Any) -> int:
+        """How many flushes ``run()`` makes on an in-memory store."""
+        calls = 0
+        original = InMemoryArrowDatabase.flush
+
+        def counting(self: Any) -> None:
+            nonlocal calls
+            calls += 1
+            original(self)
+
+        with mock.patch.object(InMemoryArrowDatabase, "flush", counting):
+            run()
+        return calls
+
+    @staticmethod
+    def _failing_last_flush(total_calls: int) -> Any:
+        """A flush that fails on call number ``total_calls`` (the final commit)."""
+        calls = 0
+        original = InMemoryArrowDatabase.flush
+
+        def flush(self: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == total_calls:
+                raise OSError("disk full")
+            original(self)
+
+        return mock.patch.object(InMemoryArrowDatabase, "flush", flush)
+
+    @pytest.mark.parametrize("orchestrator", ["sync", "async"])
+    def test_a_job_run_whose_commit_fails_leaves_every_node_empty(
+        self, orchestrator: str
+    ) -> None:
+        from orcapod.errors import StoreWriteError
+        from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+        kinds = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
+        total = self._flush_calls(
+            lambda: _build(ROWS, InMemoryArrowDatabase()).run(
+                orchestrator=kinds[orchestrator]()
+            )
+        )
+        job = _build(ROWS, InMemoryArrowDatabase())
+        with self._failing_last_flush(total), pytest.raises(StoreWriteError):
+            job.run(orchestrator=kinds[orchestrator]())
+        for label in ("rowwise", "grouped", "summed"):
+            node = job.nodes[label]
+            assert node.as_table().num_rows == 0, label
+            assert node.head().status is ViewStatus.NOT_COMPUTED, label
+            assert node.is_stale, label
+        job.run(orchestrator=kinds[orchestrator]())
+        assert _totals(job.nodes["summed"].as_table()) == [(0, 63), (1, 93)]
+
+    def test_a_cascade_whose_commit_fails_leaves_every_node_empty(self) -> None:
+        from orcapod.errors import StoreWriteError
+
+        total = self._flush_calls(
+            lambda: _build(ROWS, InMemoryArrowDatabase()).nodes["summed"].run()
+        )
+        job = _build(ROWS, InMemoryArrowDatabase())
+        with self._failing_last_flush(total), pytest.raises(StoreWriteError):
+            job.nodes["summed"].run()
+        for label in ("rowwise", "grouped", "summed"):
+            assert job.nodes[label].as_table().num_rows == 0, label
+            assert job.nodes[label].is_stale, label
+        view = job.nodes["summed"].run()
+        assert _totals(view.as_table()) == [(0, 63), (1, 93)]

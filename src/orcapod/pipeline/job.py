@@ -28,6 +28,7 @@ from orcapod.errors import (
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
+from orcapod.pipeline.node_run import clear_run_rows
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -1237,10 +1238,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         except StoreReadError as exc:
             # A stored table could not be read: report the read failure itself.
             exc.add_note(pending_note)
+            # A run whose commit failed did not complete: no node holds its rows.
+            clear_run_rows(prepared.exec_dag.nodes())
             raise
         except Exception as exc:
             flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
             flush_error.add_note(pending_note)
+            clear_run_rows(prepared.exec_dag.nodes())
             raise flush_error from exc
 
         # Mutate self in place.
