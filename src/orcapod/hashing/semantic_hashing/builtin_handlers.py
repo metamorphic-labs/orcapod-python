@@ -777,7 +777,8 @@ def register_builtin_python_type_handlers(
         type_converter: Optional ``TypeConverterProtocol`` forwarded to
             ``TypeObjectHandler``, ``FunctionSignatureExtractor``, and
             ``SchemaHandler`` for stable canonical type-name resolution via
-            ``get_logical_type()`` and Arrow-translatability validation.
+            ``get_logical_type_for_python_type()`` and Arrow-translatability
+            validation.
             When ``None`` (the default), all three handlers fall back to the raw
             ``"type:<module>.<qualname>"`` serialisation and skip Arrow validation.
     """

@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from orcapod import SourceNode
+from orcapod import SourceNode, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.sources import DictSource
 from orcapod.types import Schema
@@ -297,6 +297,56 @@ def test_hashing_a_type_has_no_effect_beyond_registering_it(fresh_module: Any) -
     assert converter.get_logical_type(module.Point) is logical_type
 
 
+def test_a_function_annotated_with_a_class_hashes_the_same_before_and_after(
+    fresh_module: Any,
+) -> None:
+    """A parameter annotation resolves its class as a type hashed as a value does."""
+    module = fresh_module(
+        """
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Point:
+            x: int
+
+        def first_x(p: Point, rest: list[Point] | None = None) -> int:
+            return p.x
+        """
+    )
+    hasher = get_default_context().semantic_hasher
+    before = hasher.hash_object(module.first_x)
+    _ = _register_by_building_a_source(module.Point, module.Point(1))
+    assert hasher.hash_object(module.first_x) == before
+
+
+def test_a_data_function_stores_one_signature_hash_whatever_was_registered_first(
+    fresh_module: Any,
+) -> None:
+    """The signature hash stored with every result row does not depend on the order."""
+    module = fresh_module(
+        """
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Point:
+            x: int
+
+        def read_x(p: Point) -> int:
+            return p.x
+        """
+    )
+
+    def stored_signature_hash() -> bytes:
+        pod = function_pod(output_keys="y")(module.read_x)
+        return pod.pod.data_function.get_function_variation_data()[
+            "function_signature_hash"
+        ]
+
+    # The first pod is built before anything has registered Point.
+    before = stored_signature_hash()
+    assert stored_signature_hash() == before
+
+
 # ---------------------------------------------------------------------------
 # One store, two processes: a pipeline built before the source, then after it
 # ---------------------------------------------------------------------------
@@ -412,3 +462,86 @@ def test_one_stored_table_per_node_whatever_is_built_first(tmp_path: Path) -> No
         tmp_path / "store" / "operators"
     ).list_table_paths()
     assert len(operator_tables) == 1, operator_tables
+
+
+_SAVE_LOAD_SCRIPT = textwrap.dedent(
+    """\
+    import json
+    import sys
+    import warnings
+
+    warnings.simplefilter("ignore")
+    sys.path.insert(0, sys.argv[1])
+    work, mode = sys.argv[2], sys.argv[3]
+
+    from readings import Reading
+
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.operators import MapData
+    from orcapod.sources import DictSource
+
+    # Building the source registers Reading, in both processes before the job exists.
+    source = DictSource(
+        [{"id": 1, "r": Reading(3, "mV"), "n": 3}, {"id": 2, "r": Reading(4, "V"), "n": 4}],
+        tag_columns=["id"],
+        data_schema={"id": int, "r": Reading, "n": int},
+        source_id="readings",
+    )
+    if mode == "save":
+
+        @function_pod(output_keys="unit")
+        def unit_of(r: Reading) -> str:
+            return r.unit
+
+        job = PipelineJob(name="demo", database=DeltaTableDatabase(work + "/store"))
+        with job:
+            renamed = MapData({"n": "count"})(source, label="renamed")
+            unit_of.pod(renamed, label="unit_of")
+        job.run()
+        job.save(work + "/job.json")
+        reused = None
+    else:
+        job = PipelineJob.load(work + "/job.json")
+        job.bind(sources={"readings": source})
+        job.run(load_only=True)
+        reused = {label: node.reused for label, node in job.last_run.nodes.items()}
+    hashes = {
+        label: [node.pipeline_hash().to_string(), node.content_hash().to_string()]
+        for label, node in sorted(job.nodes.items())
+    }
+    print(json.dumps({"hashes": hashes, "reused": reused}))
+    """
+)
+
+
+def test_a_saved_job_loads_in_a_fresh_process_with_the_saved_hashes(
+    tmp_path: Path,
+) -> None:
+    """Every node of a job over a user class loads with its saved hashes and results.
+
+    The class is registered before the load here (the source is built first); a job
+    loaded before anything registers its class is ITL-1138.
+    """
+    _ = (tmp_path / "readings.py").write_text(_CLASS_MODULE)
+    _ = (tmp_path / "save_load.py").write_text(_SAVE_LOAD_SCRIPT)
+
+    def run(mode: str) -> dict[str, Any]:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(tmp_path / "save_load.py"),
+                str(tmp_path),
+                str(tmp_path),
+                mode,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr[-3000:]
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    saved = run("save")
+    loaded = run("load")
+    assert loaded["hashes"] == saved["hashes"]
+    assert loaded["reused"] == {"unit_of": 2}
