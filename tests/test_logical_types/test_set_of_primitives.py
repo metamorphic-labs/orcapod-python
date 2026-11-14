@@ -274,6 +274,7 @@ FRESH_CASES: dict[str, tuple[Any, Any]] = {
     "str": (set[str], {"b", "a"}),
     "bytes": (set[bytes], {b"y", b"x"}),
     "path": (set[pathlib.Path], {pathlib.Path("/a/b"), pathlib.Path("/a/c")}),
+    "list_of_sets": (list[set[int]], [{3, 1}, {2}]),
 }
 
 
@@ -297,6 +298,6 @@ def test_a_loaded_job_in_a_fresh_process_reads_a_set(case: str, tmp_path: Path) 
     assert result.returncode == 0, result.stderr[-2000:]
     read = json.loads(result.stdout.strip().splitlines()[-1])
     assert read["schema"] == str(declared)
-    assert read["python_type"] == "set"
+    assert read["python_type"] == type(value).__name__
     assert read["elements"] == sorted(repr(v) for v in value)
     assert read["row_hash"] == in_process_hash
