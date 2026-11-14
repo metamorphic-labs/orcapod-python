@@ -107,8 +107,9 @@ class _RowChecker:
         self.failures: list[str] = []
         self.state = _Row()
         self.checked: set[str] = set()
-        # (member, column, value) of every data element no single origin explained.
-        self.unresolved: list[tuple[int, str, Any]] = []
+        # (member, column, value, token) of every data element no single origin
+        # explained.
+        self.unresolved: list[tuple[int, str, Any, str | None]] = []
 
     def fail(self, column: str, message: str) -> None:
         """Record a failure of ``column`` in this row."""
@@ -223,7 +224,7 @@ class _RowChecker:
                 member = position if column in self.layout.members else 0
                 if origin is None:
                     if column not in self.layout.merged:
-                        self.unresolved.append((member, column, value))
+                        self.unresolved.append((member, column, value, token))
                     continue
                 if column in self.layout.merged:
                     self._assign_merged(column, origin)
@@ -252,45 +253,62 @@ class _RowChecker:
 
         A value several origin rows share (a null of a nullable column) names no origin;
         with no token and no system tag, no other column may name one either, and the
-        member's values and tags would then go unchecked. Such elements must still be
-        the values of one origin row whose tags are the member's tags: one such row is
-        the member's origin; none fails the row; several leave it ambiguous, its values
-        and tags those of every candidate.
+        member's values and tags would then go unchecked. So, source by source, the
+        member's unexplained elements that source gives must be the values of one of its
+        rows whose tags are the member's tags: one such row is the member's origin of
+        that source (and a derived column's token is then checked against it); none
+        leaves those elements unexplained, which fails the row; several leave it
+        ambiguous, its values and tags those of every candidate.
         """
-        for member in sorted({m for m, _, _ in self.unresolved}):
-            known = self.state.members[member].values()
+        for member in sorted({m for m, _, _, _ in self.unresolved}):
+            known = self.state.members[member]
             entries = [
-                (column, value)
-                for m, column, value in self.unresolved
-                if m == member and not any(self.oracle.holds(column, o) for o in known)
+                (column, value, token)
+                for m, column, value, token in self.unresolved
+                if m == member
+                and not any(self.oracle.holds(column, o) for o in known.values())
             ]
             if not entries:
                 continue
             tags = self._member_tags(member)
-            candidates = [
-                o
-                for o in self.oracle.origins
-                if all(
-                    self.oracle.holds(column, o)
-                    and self.oracle.expected_value(column, o) == value
-                    for column, value in entries
-                )
-                and all(
-                    o.values[self.oracle.base_name(k)] == v
-                    for k, v in tags.items()
-                    if self.oracle.base_name(k) in o.values
-                )
-            ]
-            column = entries[0][0]
-            if not candidates:
+            explained: set[str] = set()
+            for source in sorted({o.source_id for o in self.oracle.origins}):
+                if source in known:
+                    continue
+                rows = [o for o in self.oracle.origins if o.source_id == source]
+                given = [e for e in entries if self.oracle.holds(e[0], rows[0])]
+                if not given:
+                    continue
+                candidates = [
+                    o
+                    for o in rows
+                    if all(
+                        self.oracle.expected_value(column, o) == value
+                        for column, value, _ in given
+                    )
+                    and all(
+                        o.values[self.oracle.base_name(k)] == v
+                        for k, v in tags.items()
+                        if self.oracle.base_name(k) in o.values
+                    )
+                ]
+                if not candidates:
+                    continue
+                explained.update(column for column, _, _ in given)
+                if len(candidates) == 1:
+                    (origin,) = candidates
+                    self._assign(member, given[0][0], origin)
+                    self.checked.update(column for column, _, _ in given)
+                    for column, _, token in given:
+                        if token is not None and column in self.oracle.derivations:
+                            self._check_function_token(column, origin, token)
+            unexplained = {c: v for c, v, _ in entries if c not in explained}
+            if unexplained:
                 self.fail(
-                    column,
-                    f"no origin row has the values {dict(entries)!r} with the tags "
+                    next(iter(unexplained)),
+                    f"no origin row has the values {unexplained!r} with the tags "
                     f"{tags!r}",
                 )
-            elif len(candidates) == 1:
-                self._assign(member, column, candidates[0])
-                self.checked.update(c for c, _ in entries)
 
     def _assign_merged(self, column: str, origin: Origin) -> None:
         """Record the origin of one element of a merged column (one element per input)."""
