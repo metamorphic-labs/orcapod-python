@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class StreamViewProtocol(Protocol):
-    """The readily available first rows of a stream, as ``head`` returns them.
+    """Rows of a stream, as ``head`` and ``run`` return them.
 
     ``orcapod.core.streams.view.StreamView`` is the implementation.
     """
@@ -192,6 +192,19 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         Returns:
             pa.Table: Complete stream data as a PyArrow Table
+        """
+        ...
+
+    def run(self) -> "StreamViewProtocol":
+        """Compute the whole stream and return a view of all its rows.
+
+        Does the work ``as_table()`` does, through the same path and cache; a job node
+        runs as it does in a job. Every stream has it, with no argument: it is the one
+        way to compute a stream outside a job (ITL-1081). ``head()`` and the notebook
+        preview never compute.
+
+        Returns:
+            StreamView: Every computed row, with the default column configuration.
         """
         ...
 

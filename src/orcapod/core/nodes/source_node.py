@@ -336,6 +336,25 @@ class SourceNodeBase(TraceableBase, ABC):
         """Render ``head()`` in tag order for a notebook; never computes."""
         return preview_html(self)
 
+    def run(self) -> StreamView:
+        """Read the bound source's rows and return a ``StreamView`` of all of them.
+
+        Does the work ``as_table()`` does (``StreamBase.run``): a ``SourceJobNode`` reads
+        its bound source (polling or reading it as that source's own ``run()`` does), and
+        an input slot with no source bound raises.
+
+        Raises:
+            UnboundSourceError: When no concrete source is bound.
+        """
+        table = self.as_table()
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys()[0],
+            total_rows=table.num_rows,
+            display_all_rows=False,
+        )
+
     async def async_iter_data(self):
         """Asynchronous iterator over (tag, data) pairs.
 

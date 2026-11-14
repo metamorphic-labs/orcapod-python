@@ -730,6 +730,16 @@ class SpiralDBTableSource(RootSource):
             ),
         )
 
+    def run(self) -> StreamView:
+        """Read the whole table into memory and return a ``StreamView`` of every row.
+
+        Does what ``as_table()`` does: one scan of every row the source reads (``where``,
+        ``limit``, ``max_rows`` and the pinned version applied), held in memory. Nothing
+        is kept on the source, so every call scans again. ``head(n)`` and the notebook
+        preview are the bounded read: they read only the first ``n`` rows.
+        """
+        return super().run()
+
     def _display_name(self) -> str:
         """The name a preview header shows: the label when one was given, else the
         table's name (the default source id also carries the table's id)."""

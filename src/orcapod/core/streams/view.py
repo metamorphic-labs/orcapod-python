@@ -1,10 +1,15 @@
-"""The first rows of a stream that are readily available, and their notebook preview (ITL-991).
+"""A view of a stream's rows and its notebook preview (ITL-991, ITL-1081).
 
-``head(n)`` on a stream, source or node returns a ``StreamView``: at most ``n`` rows the
+``head(n)`` on a stream, source or node returns a ``StreamView`` of at most ``n`` rows the
 object already holds, has cached from an earlier computation, has stored, or can read from
 its table with a bounded read. It never computes: no user function is called, no operator
 is run, no side effect is delivered, no source is polled and nothing is written. The
 notebook preview of a stream is its ``head()`` rendered by ``StreamView._repr_html_``.
+
+``run()`` on a stream computes it (the work ``as_table()`` does) and returns a
+``StreamView`` of all the computed rows (developer, November 13, 2026, ITL-1081). The
+view's own methods (``head``, ``tail``, ``sort_by_tags``) choose what is shown; each
+returns a new view and never touches the stream.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -80,9 +86,13 @@ _ORIGIN_NOUNS = {
     "read": "rows",
     "computed": "computed rows",
     "stored": "stored rows",
+    "delivered": "delivered rows",
 }
 
 # Display limits of the preview.
+# A view nobody cut to n rows (the view ``run()`` returns, or a sort of it) shows at most
+# this many rows: the first and the last half, with Polars' ellipsis row between.
+_DISPLAY_ROWS = 10
 _MAX_TEXT = 80
 _TEXT_START = 56
 _TEXT_END = 20
@@ -91,7 +101,15 @@ _MAX_LIST_ITEMS = 5
 
 @dataclass(frozen=True)
 class StreamView:
-    """At most ``n`` readily available rows of a stream, and how they were obtained.
+    """Rows of a stream, and how they were obtained.
+
+    ``head(n)`` on a stream returns a view of at most ``n`` readily available rows;
+    ``run()`` returns a view of all the computed rows. The view's ``head``, ``tail`` and
+    ``sort_by_tags`` return a new view of its own rows, with a header that says what they
+    are; they never read, compute or change the stream. A view holds the columns it was
+    made with: for other column groups (system tags, source info, context, content
+    hashes) ask the stream, ``stream.as_table(columns=...)`` or
+    ``stream.head(columns=...)``, which after ``run()`` read the computed rows.
 
     Attributes:
         table: The rows, with the exact Arrow types the stream gives them. When the
@@ -105,17 +123,28 @@ class StreamView:
             ``None``. For ``PARTIAL``, the number of rows computed so far.
         total_is_estimate: ``True`` when ``total_rows`` is a recorded estimate.
         origin: What the rows are: ``"held"`` (in memory), ``"read"`` (a bounded read
-            of a table), ``"computed"`` (cached from an earlier computation) or
-            ``"stored"`` (a job node's store).
-        note: For a head without rows, the explanation shown instead of the default;
-            for a head with rows, a remark shown after the row count.
+            of a table), ``"computed"`` (cached from an earlier computation),
+            ``"stored"`` (a job node's store) or ``"delivered"`` (the rows a side-effect
+            stream passed on while delivering).
+        note: For a view without rows, the explanation shown instead of the default;
+            for a view with rows, a remark shown after the row count.
         description: When given, the whole text after the name in the header, written
             by a stream that words its own rows (a table-backed source naming its
             ``where``); otherwise the header is built from the fields above.
         sorted_by_tags: ``True`` when the rows were asked for in tag order (the notebook
-            preview): the header then says so, and for a bounded read or a partial
-            computation says they are the rows read or computed so far, in tag order.
-            A ``description`` words its own sorting.
+            preview, ``sort_by_tags``): the header then says so, and for a bounded read
+            or a partial computation says they are the rows read or computed so far, in
+            tag order. A ``description`` words its own sorting.
+        start: The position of the first row of ``table`` among the rows it was cut
+            from (``tail`` of a view moves it), counted from 0.
+        pool: When set, the rows were cut from or sorted within a set of rows that is
+            not the stream's whole sequence (a few rows read, a view already cut), and
+            this is the header text naming that set; ``pool_rows`` is its size.
+        pool_rows: The number of rows of ``pool``.
+        display_all_rows: ``True`` when the display shows every row (a view cut to
+            ``n`` rows by ``head`` or ``tail``); ``False`` for a view nobody cut (the
+            view ``run()`` returns, or a sort of it), whose display shows the first and
+            the last rows of a long view, as Polars does. The header gives the count.
     """
 
     table: pa.Table
@@ -129,6 +158,10 @@ class StreamView:
     note: str | None = None
     description: str | None = None
     sorted_by_tags: bool = False
+    start: int = 0
+    pool: str | None = None
+    pool_rows: int = 0
+    display_all_rows: bool = True
 
     @classmethod
     def of_rows(
@@ -143,8 +176,9 @@ class StreamView:
         origin: str = "held",
         note: str | None = None,
         description: str | None = None,
+        display_all_rows: bool = True,
     ) -> StreamView:
-        """Return a head with rows of ``stream``."""
+        """Return a view with rows of ``stream``."""
         return cls(
             table=table,
             status=status,
@@ -156,6 +190,7 @@ class StreamView:
             origin=origin,
             note=note,
             description=description,
+            display_all_rows=display_all_rows,
         )
 
     @classmethod
@@ -208,6 +243,121 @@ class StreamView:
         return self.table.num_rows
 
     # ------------------------------------------------------------------
+    # Choosing what is shown
+    # ------------------------------------------------------------------
+
+    def head(self, n: int = 10) -> StreamView:
+        """Return a view of the first ``n`` rows of this view.
+
+        Never reads or computes anything: the rows are this view's. The header says
+        which rows they are ("first 10 of 1,234 computed rows").
+
+        Args:
+            n: The largest number of rows to keep.
+
+        Raises:
+            TypeError: If ``n`` is not an ``int``.
+            ValueError: If ``n`` is negative.
+        """
+        _check_row_count(n)
+        view = self._cuttable()
+        return dataclasses.replace(
+            view, table=view.table.slice(0, n), display_all_rows=True
+        )
+
+    def tail(self, n: int = 10) -> StreamView:
+        """Return a view of the last ``n`` rows of this view.
+
+        Never reads or computes anything: the rows are this view's. The header says
+        which rows they are ("last 10 of 1,234 computed rows", "rows 11–20 of 1,234
+        computed rows").
+
+        Args:
+            n: The largest number of rows to keep.
+
+        Raises:
+            TypeError: If ``n`` is not an ``int``.
+            ValueError: If ``n`` is negative.
+        """
+        _check_row_count(n)
+        view = self._cuttable()
+        dropped = max(view.table.num_rows - n, 0)
+        return dataclasses.replace(
+            view,
+            table=view.table.slice(dropped),
+            start=view.start + dropped,
+            display_all_rows=True,
+        )
+
+    def sort_by_tags(self) -> StreamView:
+        """Return a view of this view's rows in tag order.
+
+        The rows are ordered as ``as_table(columns={"sort_by_tags": True})`` orders them
+        (``arrow_utils.sort_by_tag_columns``: ascending by the tag columns, nulls last).
+        Rows with equal tags are then ordered by the system tag columns the view holds;
+        the view ``run()`` returns holds none, so such rows keep their order in the view,
+        where ``as_table`` with ``sort_by_tags`` orders them by their system tags. A view
+        of all of a stream's rows sorts them all ("all 1,234 computed rows, sorted by
+        tags"); a view of some of them sorts those, and its header says so ("first 10 of
+        1,234 computed rows, then sorted by tags"). A view with no tag column or no rows
+        is returned as it is. Never reads or computes anything.
+        """
+        if not self.tag_columns or self.table.num_rows == 0:
+            return self
+        if self._is_window() and self.pool is None and self.sorted_by_tags:
+            return self
+        table = arrow_utils.sort_by_tag_columns(self.table, self.tag_columns)
+        if self._is_window() and self.pool is None and self._holds_every_row():
+            return dataclasses.replace(self, table=table, sorted_by_tags=True)
+        view = self._as_pool()
+        return dataclasses.replace(
+            view, table=table, pool=f"{view.pool}, then sorted by tags"
+        )
+
+    def _is_window(self) -> bool:
+        """Whether the rows are a run of the stream's own row sequence, so that a cut
+        can be named by position: a ``ROWS`` view with no ``description``, unsorted or
+        sorted among all of the stream's rows."""
+        return (
+            self.status is ViewStatus.ROWS
+            and self.description is None
+            and (not self.sorted_by_tags or self._total_is_exact())
+        )
+
+    def _total_is_exact(self) -> bool:
+        """Whether the stream's row count is known exactly."""
+        return self.total_rows is not None and not self.total_is_estimate
+
+    def _holds_every_row(self) -> bool:
+        """Whether ``table`` holds every row of the stream."""
+        return (
+            self._total_is_exact()
+            and self.start == 0
+            and self.table.num_rows == self.total_rows
+        )
+
+    def _cuttable(self) -> StreamView:
+        """Return this view in a form whose rows can be cut by position: itself when its
+        rows are a run of the stream's rows (or of a pool), else a pool of its rows."""
+        if self.status not in (ViewStatus.ROWS, ViewStatus.PARTIAL):
+            return self
+        if self.pool is not None or self._is_window():
+            return self
+        return self._as_pool()
+
+    def _as_pool(self) -> StreamView:
+        """Return this view as a pool: its rows, named by its current header text."""
+        return dataclasses.replace(
+            self,
+            pool=self.description or self._describe(),
+            pool_rows=self.table.num_rows,
+            start=0,
+            description=None,
+            note=None,
+            sorted_by_tags=False,
+        )
+
+    # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
 
@@ -218,6 +368,8 @@ class StreamView:
     def _describe(self) -> str:
         """Return the header text after the name, for this status."""
         shown = self.table.num_rows
+        if self.pool is not None:
+            return _window_text(self.pool, shown, self.start, self.pool_rows)
         if self.status is ViewStatus.ROWS:
             text = self._describe_rows(shown)
         elif self.status is ViewStatus.PARTIAL:
@@ -241,6 +393,16 @@ class StreamView:
         if shown == 0 and (total is None or total == 0):
             return "computed: no rows" if self.origin == "computed" else f"no {noun}"
         suffix = ", sorted by tags" if self.sorted_by_tags else ""
+        if self.start and shown:
+            # A cut past the first row (``tail``): name the rows by position.
+            first, last = self.start + 1, self.start + shown
+            if total is None:
+                return f"rows {first:,}–{last:,}{suffix}"
+            if self.total_is_estimate:
+                return f"rows {first:,}–{last:,} of about {total:,}"
+            if last == total:
+                return f"last {shown:,} of {total:,} {noun}{suffix}"
+            return f"rows {first:,}–{last:,} of {total:,} {noun}{suffix}"
         if total is None:
             return f"first {shown:,} {_rows(shown)}{suffix}"
         if self.total_is_estimate:
@@ -261,15 +423,41 @@ class StreamView:
             c for c in self.table.column_names if c not in self.tag_columns
         ]
         table = self.table.select(order)
+        rows = table.num_rows
+        half = _DISPLAY_ROWS // 2
+        # Only the rows the display shows are summarised; the others are left null,
+        # because Polars shows the first and last ``half`` of a long frame only.
+        shown = (
+            table
+            if self._displays_every_row()
+            else pa.concat_tables([table.slice(0, half), table.slice(rows - half)])
+        )
         columns = []
         for name in table.column_names:
-            column = table.column(name)
-            summary = _summarise(column)
+            summary = _summarise(shown.column(name))
             if summary is None:
-                columns.append(column)
-            else:
+                columns.append(table.column(name))
+            elif shown is table:
                 columns.append(pa.chunked_array([summary], type=pa.large_string()))
+            else:
+                columns.append(
+                    pa.chunked_array(
+                        [
+                            pa.array(summary[:half], type=pa.large_string()),
+                            pa.nulls(rows - 2 * half, type=pa.large_string()),
+                            pa.array(summary[half:], type=pa.large_string()),
+                        ]
+                    )
+                )
         return pl.DataFrame(pa.table(columns, names=table.column_names))
+
+    def _displays_every_row(self) -> bool:
+        """Whether the display shows every row: a view cut to ``n`` rows, or a short one."""
+        return self.display_all_rows or self.table.num_rows <= _DISPLAY_ROWS
+
+    def _display_rows(self) -> int:
+        """Return Polars' ``tbl_rows`` for this view: all rows, or ``_DISPLAY_ROWS``."""
+        return -1 if self._displays_every_row() else _DISPLAY_ROWS
 
     def _tags_line(self) -> str:
         """Return the line naming the tag columns, or an empty string when there are none."""
@@ -287,7 +475,7 @@ class StreamView:
             parts.append(f"<div><small>{html.escape(tags, quote=False)}</small></div>")
         if self.table.num_columns:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
-            with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=-1):
+            with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
                 parts.append(self._display_frame()._repr_html_())
         return "\n".join(parts)
 
@@ -298,7 +486,7 @@ class StreamView:
         if tags:
             lines.append(tags)
         if self.table.num_columns:
-            with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=-1):
+            with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
                 lines.append(str(self._display_frame()))
         return "\n".join(lines)
 
@@ -308,6 +496,31 @@ class StreamView:
             f"StreamView({self.kind}[{self.label}], status={self.status.value}, "
             f"rows={self.table.num_rows})"
         )
+
+
+def _check_row_count(n: int) -> None:
+    """Check a number of rows given to a view's ``head`` or ``tail``.
+
+    Raises:
+        TypeError: If ``n`` is not an ``int``.
+        ValueError: If ``n`` is negative.
+    """
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError(f"the number of rows must be an int, got {type(n).__name__}")
+    if n < 0:
+        raise ValueError(f"the number of rows must not be negative, got {n}")
+
+
+def _window_text(pool: str, shown: int, start: int, pool_rows: int) -> str:
+    """Return the header text for ``shown`` rows from ``start`` of a pool of
+    ``pool_rows`` rows named ``pool``."""
+    if shown == pool_rows:
+        return pool
+    if start == 0:
+        return f"first {shown:,} of {pool}"
+    if start + shown == pool_rows:
+        return f"last {shown:,} of {pool}"
+    return f"rows {start + 1:,}–{start + shown:,} of {pool}"
 
 
 _MAX_NAME = 48

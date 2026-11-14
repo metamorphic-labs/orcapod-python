@@ -477,6 +477,38 @@ class StreamBase(TraceableBase):
         """
         return [e for e in self.iter_data()]
 
+    # The origin a ``run()`` view gives its rows: computed by this stream.
+    _RUN_ORIGIN = "computed"
+
+    def run(self) -> StreamView:
+        """Compute the whole stream and return a ``StreamView`` of all its rows.
+
+        The one way to compute any stream outside a job (developer, November 13, 2026,
+        ITL-1081): ``head()`` and the notebook preview never compute. ``run()`` does
+        exactly the work ``as_table()`` does, through the same code path and cache, so
+        a stream already computed is not computed again, and one whose inputs changed is
+        computed again. The view holds every row with the default column configuration;
+        its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. For other
+        column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
+        ``run()``: they read the computed rows.
+
+        Returns:
+            A ``StreamView`` of all the rows ``as_table()`` returns, with status
+            ``ROWS``.
+        """
+        return self._view_of_rows(self.as_table(), self._RUN_ORIGIN)
+
+    def _view_of_rows(self, table: "pa.Table", origin: str) -> StreamView:
+        """Return the ``run()`` view of ``table``, every row of this stream."""
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys()[0],
+            total_rows=table.num_rows,
+            origin=origin,
+            display_all_rows=False,
+        )
+
     def head(
         self,
         n: int = 10,

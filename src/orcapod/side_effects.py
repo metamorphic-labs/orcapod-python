@@ -171,6 +171,22 @@ class SideEffectPodStream(StreamBase):
             config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
         )
 
+    # The rows a run() view shows were passed on while delivering, not computed.
+    _RUN_ORIGIN = "delivered"
+
+    def run(self) -> StreamView:
+        """Deliver the side effects for every row and return a ``StreamView`` of the rows.
+
+        Does exactly what ``as_table()`` does: every call delivers every side effect
+        again (no invocation log is written), because the stream keeps no rows. The view holds the rows that call
+        passed on. ``head()`` and the notebook preview never deliver, so they keep showing
+        no rows.
+
+        Returns:
+            A ``StreamView`` of the rows this call delivered for.
+        """
+        return super().run()
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         for tag, data in self._input_stream.iter_data():
             result = _execute_side_effect_row(
@@ -822,6 +838,22 @@ class SideEffectNode(StreamBase):
         return self._head_without_rows(
             config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
         )
+
+    # The rows a run() view shows were passed on while delivering, not computed.
+    _RUN_ORIGIN = "delivered"
+
+    def run(self) -> StreamView:
+        """Deliver the side effects for every row and return a ``StreamView`` of the rows.
+
+        Does exactly what ``as_table()`` does: every call delivers every side effect
+        again, standalone, with no invocation log, also on a ``SideEffectJobNode`` (a job run logs its deliveries through ``execute``), because the stream keeps no rows. The view holds the rows that call
+        passed on. ``head()`` and the notebook preview never deliver, so they keep showing
+        no rows.
+
+        Returns:
+            A ``StreamView`` of the rows this call delivered for.
+        """
+        return super().run()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Standalone iteration — executes delivery with no DB logging."""

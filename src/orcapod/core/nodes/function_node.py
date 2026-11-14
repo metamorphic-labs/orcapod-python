@@ -3251,8 +3251,17 @@ class FunctionJobNode(FunctionNodeBase):
             if pkt is not None
         )
 
-    def run(self) -> None:
-        """Eagerly compute all input data, filling pipeline and result databases.
+    def run(self) -> StreamView:
+        """Eagerly compute all input data, filling pipeline and result databases, and
+        return a ``StreamView`` of the node's rows.
+
+        Computes as a job run computes this node, unlike ``as_table()``, which only
+        reads. A node whose upstream is unavailable (``CACHE_ONLY``) or whose function
+        pod is a placeholder (``READ_ONLY``) computes nothing: the view holds its stored
+        rows.
+
+        Returns:
+            A ``StreamView`` of every row ``as_table()`` then returns.
 
         Raises:
             RuntimeError: If the node was loaded without a function pod, or
@@ -3268,13 +3277,14 @@ class FunctionJobNode(FunctionNodeBase):
         if self._load_status in (LoadStatus.CACHE_ONLY, LoadStatus.READ_ONLY):
             # CACHE_ONLY: upstream unavailable; computation requires a live input stream.
             # READ_ONLY: function pod is a proxy placeholder — cannot compute.
-            # Callers should use iter_data() to serve existing DB results.
-            return
+            # The view serves the existing DB results, as iter_data() does.
+            return self._view_of_rows(self.as_table(), "stored")
         if self.is_stale:
             # Discard any stale in-memory entries before a fresh computation run
             # so that rerunning does not mix old cached entries with new results.
             self.clear_cache()
         self.execute(self._input_stream)
+        return self._view_of_rows(self.as_table(), "computed")
 
     # ------------------------------------------------------------------
     # Async channel execution

@@ -490,7 +490,9 @@ class DynamicPodStream(StreamBase):
             self._cached_stream = None
             self._cached_time = max_upstream_time
 
-    def run(self, *args: Any, **kwargs: Any) -> None:
+    def _refresh(self) -> None:
+        """Run the operator unless its kept result is current: the one computation
+        path of ``as_table``, ``iter_data`` and so ``run``."""
         self._update_cache_status()
 
         # recompute if cache is invalid
@@ -506,7 +508,7 @@ class DynamicPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        self.run()
+        self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
@@ -515,7 +517,7 @@ class DynamicPodStream(StreamBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        self.run()
+        self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )

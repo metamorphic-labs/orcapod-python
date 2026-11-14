@@ -1386,8 +1386,12 @@ class OperatorJobNode(OperatorNodeBase):
         )
         self._update_modified_time()
 
-    def run(self) -> None:
-        """Execute the operator according to the current cache mode.
+    def run(self) -> StreamView:
+        """Execute the operator according to the current cache mode, and return a
+        ``StreamView`` of the node's rows.
+
+        Computes as a job run computes this node, unlike ``as_table()``, which only
+        reads.
 
         Without a database:
             Always compute via the operator's ``process()`` method.
@@ -1396,25 +1400,27 @@ class OperatorJobNode(OperatorNodeBase):
             - **OFF**: always compute, no DB writes.
             - **LOG**: always compute, write results to DB.
             - **REPLAY**: skip computation, load from DB.
+
+        Returns:
+            A ``StreamView`` of every row ``as_table()`` then returns.
         """
         if self._loaded:
             raise self._cannot_compute_error()
         if self.is_stale:
             self.clear_cache()
 
-        if self._cached_output_stream is not None:
-            return
-
-        if self._pipeline_database is not None:
-            if self._cache_mode == CacheMode.REPLAY:
-                self._replay_from_cache()
+        if self._cached_output_stream is None:
+            if self._pipeline_database is not None:
+                if self._cache_mode == CacheMode.REPLAY:
+                    self._replay_from_cache()
+                else:
+                    self._compute_and_store()
             else:
-                self._compute_and_store()
-        else:
-            self._cached_output_stream = self._operator.process(
-                *self._input_streams,
-            )
-            self._update_modified_time()
+                self._cached_output_stream = self._operator.process(
+                    *self._input_streams,
+                )
+                self._update_modified_time()
+        return self._view_of_rows(self.as_table(), "computed")
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Return an iterator over (tag, data) pairs.
