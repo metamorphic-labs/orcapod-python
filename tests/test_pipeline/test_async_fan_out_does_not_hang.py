@@ -81,7 +81,7 @@ LAST_OPERATORS = {
 
 def operator_job(last: str) -> PipelineJob:
     """``A`` and ``B`` from one source, ``C`` from ``Join(A, B)``, then ``last`` of C and A."""
-    job = PipelineJob(name="fan_out", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="fan_out", database=InMemoryArrowDatabase())
     with job:
         src = make_source(N_ROWS)
         a = MapData({"x": "a"})(src, label="A")
@@ -138,7 +138,7 @@ def add(a: int, b: int) -> int:
 
 def function_job(store: InMemoryArrowDatabase, n_rows: int) -> PipelineJob:
     """The issue's graph: ``SemiJoin(C, A)`` where ``A`` also feeds ``C``."""
-    job = PipelineJob(name="fan_out_pods", store=store)
+    job = PipelineJob(name="fan_out_pods", database=store)
     with job:
         src = make_source(n_rows)
         a = plus_one.pod(src, label="A")
@@ -180,7 +180,7 @@ def replay_job(store: InMemoryArrowDatabase) -> PipelineJob:
     ``OUT`` first runs once in ``CacheMode.LOG`` with the sync orchestrator, so it has
     stored rows; then it is switched to ``CacheMode.REPLAY``.
     """
-    job = PipelineJob(name="replay", store=store)
+    job = PipelineJob(name="replay", database=store)
     with job:
         a = plus_one.pod(make_source(REPLAY_ROWS), label="A")
         SelectDataColumns(["a"])(a, label="OUT")
