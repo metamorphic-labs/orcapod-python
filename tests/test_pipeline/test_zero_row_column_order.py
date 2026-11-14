@@ -421,3 +421,69 @@ class TestOperatorCacheWrittenInOperatorOrder:
         table = self._replay(DeltaTableDatabase(old), [3, 4]).as_table(all_info=True)
         assert table.num_rows == 4
         assert table.schema.equals(self._expected())
+
+
+COLUMN_CONFIGS: dict[str, dict[str, Any]] = {
+    "default": {},
+    "system_tags": {"columns": {"system_tags": True}},
+    "source": {"columns": {"source": True}},
+    "context": {"columns": {"context": True}},
+    "content_hash": {"columns": {"content_hash": True}},
+    "meta": {"columns": {"meta": True}},
+    "all_info": {"all_info": True},
+}
+
+
+def _schema_items(
+    schemas: tuple[Any, Any],
+) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
+    """The tag and data schemas as ordered (name, Python type) lists."""
+    tag_schema, data_schema = schemas
+    return list(tag_schema.items()), list(data_schema.items())
+
+
+def _computed(step: str, pairs: int) -> Any:
+    """The operator's computed result over the step's inputs.
+
+    A schema prediction is verified against ``static_process(...).output_schema(...)``
+    (CLAUDE.md's standing exception to the public-interface rule).
+    """
+    stream = _stream(step, pairs, WITH_ROWS)
+    return stream.producer.static_process(*stream.upstreams)  # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]  # an operator's stream has a producer with static_process
+
+
+_NULLABLE_MEMBER = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Batch and GroupBy predict list[int | None] for the nullable column n; their "
+        "computed table's large_list<item: int8> (nullable items) reads as list[int] "
+        "(ITL-1136: the Arrow-to-Python reading drops list item nullability)"
+    ),
+)
+PREDICTION_STEPS = [
+    pytest.param(step, marks=_NULLABLE_MEMBER)
+    if step in ("batch", "group_by")
+    else step
+    for step in OPERATOR_STEPS
+]
+
+
+@pytest.mark.parametrize("config", list(COLUMN_CONFIGS))
+@pytest.mark.parametrize("pairs", PAIRS)
+@pytest.mark.parametrize("step", PREDICTION_STEPS)
+class TestOutputSchemaPrediction:
+    """Every operator predicts the schema of its computed result (ITL-1135)."""
+
+    def test_plain_stream(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        predicted = _stream(step, pairs, WITH_ROWS).output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert _schema_items(predicted) == _schema_items(computed)
+
+    def test_job_node(self, step: str, pairs: int, config: str) -> None:
+        kwargs = COLUMN_CONFIGS[config]
+        job = _job(step, pairs, WITH_ROWS)
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        predicted = job.nodes["op"].output_schema(**kwargs)
+        computed = _computed(step, pairs).output_schema(**kwargs)
+        assert _schema_items(predicted) == _schema_items(computed)
