@@ -120,6 +120,19 @@ _SCRIPT = textwrap.dedent(
         job.save(work + "/job.json")
         print(json.dumps(describe(job)))
     else:
+        if mode == "load_old_file":
+            # A file as an earlier Orcapod wrote it: the format before orcapod_version,
+            # and no saved hashes on the source slots.
+            with open(work + "/job.json") as f:
+                data = json.load(f)
+            data["orcapod_pipeline_job_version"] = "0.1.0"
+            data.pop("orcapod_version", None)
+            for descriptor in data["pipeline"]["nodes"].values():
+                if descriptor["node_type"] == "source":
+                    descriptor.pop("pipeline_hash", None)
+                    descriptor.pop("content_hash", None)
+            with open(work + "/job.json", "w") as f:
+                json.dump(data, f)
         # Nothing registers the class before the load.
         job = PipelineJob.load(work + "/job.json")
         import classes
@@ -185,3 +198,14 @@ def test_a_slot_whose_class_is_never_registered_refuses_the_source_clearly(
     assert "'p'" in error
     assert "classes.Exact" in error
     assert "not registered" in error
+
+
+def test_a_file_without_the_slots_saved_hashes_loads_and_binds(
+    tmp_path: Path, saved_job
+) -> None:
+    """With no saved hashes, the slot restores its type at bind and hashes as saved."""
+    saved = saved_job("Exact")
+    loaded = _run(tmp_path, "load_old_file", str(tmp_path / "work"), "Exact")
+    assert "bind_error" not in loaded, loaded.get("bind_error")
+    assert loaded.pop("_reused") == {"add": 2, "read_u": 2}
+    assert loaded == saved

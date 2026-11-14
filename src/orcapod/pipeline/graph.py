@@ -394,6 +394,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             descriptor.get("data_context_key")
                         ),
                     )
+                    # The saved hashes, and the saved type text of a column whose
+                    # class this process has not registered yet (ITL-1138).
+                    node._keep_saved(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
+                        pipeline_hash=descriptor.get("pipeline_hash"),
+                        content_hash=descriptor.get("content_hash"),
+                        saved_types={"tag": saved_tag, "data": saved_data},
+                        nullable=saved_nullable,
+                    )
                     # Restore label from descriptor if set explicitly
                     stored_label = descriptor.get("label")
                     if stored_label and stored_label != node_name:
