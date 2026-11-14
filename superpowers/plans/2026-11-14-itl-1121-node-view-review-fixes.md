@@ -174,3 +174,4 @@ schema memo). Steps:
   the fixed behaviour. Tests: pipeline/nodes/operators/function_pod/side_effect_pod/golden on
   3.12 6434 passed 11 skipped 9 xfailed; async files + review-fix tests on 3.11 651 passed.
   LEFT: CI, one CodeRabbit review, plan to coordinator, worker_done.
+- 2026-11-14: CodeRabbit 4575098786 (5dd8d6a3 round): #380 behaviour, also on main; declined with repro c11 (coordinator files it); _streams_read_by docstring corrected. CR review at 21:07Z rate limited; retries ~21:28Z, ~21:48Z.

@@ -53,7 +53,8 @@ def _streams_read_by(node: Any) -> Iterator[Any]:
 
     The node's inputs, the stream bound to a source slot among them, and, through every
     stream outside a job, that stream's own inputs; a job node other than a source slot
-    is not entered (the run reads its held rows or runs it as a node of its own).
+    is not entered: the run reads the rows the node holds (none if it has not run in
+    this process).
 
     Args:
         node: A job node; for a source slot, its bound stream is what it reads.
