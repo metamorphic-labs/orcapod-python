@@ -1,11 +1,9 @@
-import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
-from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
-from orcapod.core.operators.drop_nulls import DropNulls
+from orcapod.core.operators.key_nullability import reconcile_key_nullability
 from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
@@ -23,13 +21,6 @@ else:
     pc = LazyModule("pyarrow.compute")
     pl = LazyModule("polars")
 
-logger = logging.getLogger(__name__)
-
-# DropNulls' own rule, reused so that SemiJoin narrows a key exactly as DropNulls
-# does (ITL-829); never a copy of it.
-_narrow_schema = DropNulls._narrow_schema  # pyright: ignore[reportPrivateUsage]  # shared on purpose with DropNulls
-_narrow_table = DropNulls._narrow_table  # pyright: ignore[reportPrivateUsage]  # shared on purpose with DropNulls
-
 
 class SemiJoin(BinaryOperator):
     """
@@ -42,55 +33,10 @@ class SemiJoin(BinaryOperator):
     If there are no overlapping columns between the streams, the entire
     left stream is returned unchanged.
 
-    The output stream preserves the schema of the left stream exactly, with
-    one exception. A key that is a tag column on both inputs and is nullable
-    (``T | None``) on one of them only is first narrowed on that side as
-    ``DropNulls`` would: rows with a null in it are dropped and it becomes
-    ``T``. So a left key nullable against a non-nullable right key comes out
-    ``T`` (ITL-829). A null key never matches anyway, so this changes types,
-    never which rows match. A key nullable on both sides is not narrowed.
+    The output stream preserves the schema of the left stream exactly. A shared
+    tag key that is ``T`` in one input and ``T | None`` in the other is accepted
+    (a null key matches nothing) and keeps the left input's type (ITL-829).
     """
-
-    @staticmethod
-    def _nullable_key_names(
-        left_tag_schema: Schema, right_tag_schema: Schema
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Return the shared tag keys to narrow on the left and on the right.
-
-        A key is narrowed on a side when it is a tag column of both inputs and
-        its type admits ``None`` on that side only. Whether a type admits
-        ``None`` is decided by ``DropNulls``' own schema rule.
-
-        Args:
-            left_tag_schema: The left input's tag schema.
-            right_tag_schema: The right input's tag schema.
-
-        Returns:
-            The names to narrow on the left and on the right, each in the left
-            input's tag order.
-        """
-        shared = [name for name in left_tag_schema if name in right_tag_schema]
-        left_narrow = _narrow_schema(left_tag_schema, shared)
-        right_narrow = _narrow_schema(right_tag_schema, shared)
-        left_nullable = [n for n in shared if left_narrow[n] != left_tag_schema[n]]
-        right_nullable = [n for n in shared if right_narrow[n] != right_tag_schema[n]]
-        return (
-            tuple(n for n in left_nullable if n not in right_nullable),
-            tuple(n for n in right_nullable if n not in left_nullable),
-        )
-
-    @classmethod
-    def _narrowed_tag_schemas(
-        cls, left_tag_schema: Schema, right_tag_schema: Schema
-    ) -> tuple[Schema, Schema]:
-        """Return both tag schemas with the keys nullable on one side only narrowed."""
-        left_names, right_names = cls._nullable_key_names(
-            left_tag_schema, right_tag_schema
-        )
-        return (
-            _narrow_schema(left_tag_schema, left_names),
-            _narrow_schema(right_tag_schema, right_names),
-        )
 
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -101,18 +47,15 @@ class SemiJoin(BinaryOperator):
         """
         left_tag_schema, left_data_schema = left_stream.output_schema()
         right_tag_schema, right_data_schema = right_stream.output_schema()
-        left_names, right_names = self._nullable_key_names(
+        # A shared tag key may differ in nullability only (ITL-829).
+        left_tag_schema, right_tag_schema = reconcile_key_nullability(
             left_tag_schema, right_tag_schema
         )
-        narrowed_left_tags = _narrow_schema(left_tag_schema, left_names)
-        narrowed_right_tags = _narrow_schema(right_tag_schema, right_names)
 
         # Find overlapping columns across all columns (tags + data)
-        left_all_schema = schema_utils.union_schemas(
-            narrowed_left_tags, left_data_schema
-        )
+        left_all_schema = schema_utils.union_schemas(left_tag_schema, left_data_schema)
         right_all_schema = schema_utils.union_schemas(
-            narrowed_right_tags, right_data_schema
+            right_tag_schema, right_data_schema
         )
 
         common_keys = tuple(
@@ -126,20 +69,6 @@ class SemiJoin(BinaryOperator):
         # include source info and system tags for left stream
         left_table = left_stream.as_table(columns={"source": True, "system_tags": True})
         right_table = right_stream.as_table()
-
-        # A shared tag key nullable on one side only: that side goes through
-        # DropNulls' rule first, so the result is DropNulls then SemiJoin (ITL-829).
-        if left_names or right_names:
-            logger.info(
-                "SemiJoin: dropping rows with a null key and narrowing the key to"
-                + " non-nullable, on the left for %s and on the right for %s",
-                list(left_names),
-                list(right_names),
-            )
-        if left_names:
-            left_table = _narrow_table(left_table, left_names)
-        if right_names:
-            right_table = _narrow_table(right_table, right_names)
 
         # A key must have one Arrow type on both sides (up to large layouts);
         # otherwise Polars would silently unify, e.g., int8 with int16.
@@ -193,19 +122,10 @@ class SemiJoin(BinaryOperator):
     ) -> tuple[Schema, Schema]:
         """
         Returns the output types for the semi-join operation.
-
-        The output has the left stream's schema, except that a shared tag key
-        nullable on the left only is narrowed to ``T``.
+        The output preserves the exact schema of the left stream.
         """
-        tag_schema, data_schema = left_stream.output_schema(
-            columns=columns, all_info=all_info
-        )
-        left_names, _ = self._nullable_key_names(
-            left_stream.output_schema()[0], right_stream.output_schema()[0]
-        )
-        if not left_names:
-            return tag_schema, data_schema
-        return _narrow_schema(tag_schema, left_names), data_schema
+        # Semi-join preserves the left stream's schema exactly
+        return left_stream.output_schema(columns=columns, all_info=all_info)
 
     def validate_binary_inputs(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -220,9 +140,8 @@ class SemiJoin(BinaryOperator):
         try:
             left_tag_schema, left_data_schema = left_stream.output_schema()
             right_tag_schema, right_data_schema = right_stream.output_schema()
-
-            # A shared tag key nullable on one side only is narrowed there first.
-            left_tag_schema, right_tag_schema = self._narrowed_tag_schemas(
+            # A shared tag key may differ in nullability only (ITL-829).
+            left_tag_schema, right_tag_schema = reconcile_key_nullability(
                 left_tag_schema, right_tag_schema
             )
 
@@ -313,7 +232,6 @@ class SemiJoin(BinaryOperator):
             # Phase 2: Probe — stream left rows
             common_keys: tuple[str, ...] | None = None
             right_lookup: set[tuple[object, ...]] = set()
-            left_names: tuple[str, ...] = ()
 
             async for tag, data in left_ch:
                 if common_keys is None:
@@ -339,21 +257,6 @@ class SemiJoin(BinaryOperator):
                             self._key_arrow_type(right_tag, right_data, key),
                         )
 
-                    # A shared tag key nullable on the left only is narrowed on
-                    # every emitted left row, as on the sync path (ITL-829). The
-                    # right side needs nothing: a null key never matches.
-                    left_names, right_names = self._nullable_key_names(
-                        tag.schema(), right_tag.schema()
-                    )
-                    if left_names or right_names:
-                        logger.info(
-                            "SemiJoin: dropping rows with a null key and narrowing"
-                            + " the key to non-nullable, on the left for %s and on"
-                            + " the right for %s",
-                            list(left_names),
-                            list(right_names),
-                        )
-
                     # Build right-side lookup; a row with a null key never matches.
                     for rt, rp in right_rows:
                         right_key = self._match_key(rt, rp, common_keys)
@@ -363,37 +266,9 @@ class SemiJoin(BinaryOperator):
                 # Probe
                 left_key = self._match_key(tag, data, common_keys)
                 if left_key is not None and left_key in right_lookup:
-                    await output.send(self._narrowed_row(tag, data, left_names))
+                    await output.send((tag, data))
         finally:
             await output.close()
-
-    @staticmethod
-    def _narrowed_row(
-        tag: TagProtocol, data: DataProtocol, names: Sequence[str]
-    ) -> tuple[TagProtocol, DataProtocol]:
-        """Return a left row with ``names`` narrowed by ``DropNulls``' rule.
-
-        The row's tag and data tables go through ``DropNulls._narrow_table``, as
-        the sync path's left table does, so the row has the sync row's types.
-
-        Args:
-            tag: A left row's tag, non-null in every name.
-            data: The row's data.
-            names: The shared tag keys nullable on the left only.
-
-        Returns:
-            The row itself when ``names`` is empty, otherwise the rebuilt row.
-        """
-        if not names:
-            return tag, data
-        tag_table = _narrow_table(tag.as_table(columns={"system_tags": True}), names)
-        data_table = _narrow_table(
-            data.as_table(columns={"source": True, "meta": True}), names
-        )
-        return (
-            Tag(tag_table, data_context=tag.data_context_key),
-            Data(data_table, data_context=data.data_context_key),
-        )
 
     @staticmethod
     def _key_table(tag: TagProtocol, data: DataProtocol, key: str) -> "pa.Table":

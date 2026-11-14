@@ -157,7 +157,7 @@ def source_c() -> ArrowTableSource:
 
 
 def source_nullable_k() -> ArrowTableSource:
-    """Tag ``k: int16``, nullable with a null; for ``SemiJoin`` against a non-null ``k``."""
+    """Tag ``k: int16``, nullable with a null; for a join against a non-nullable ``k``."""
     return _source(
         {
             "k": pa.array([1, None, 3, 4], pa.int16()),
@@ -292,6 +292,18 @@ CASES = [
     Case("join_2_reversed", Join, lambda: (source_b(), source_a())),
     Case("join_3", Join, lambda: (source_a(), source_b(), source_c())),
     Case("join_3_rotated", Join, lambda: (source_c(), source_a(), source_b())),
+    # A shared tag key nullable in one input only (ITL-829).
+    Case("join_nullable_key", Join, lambda: (source_nullable_k(), source_b())),
+    Case(
+        "join_3_nullable_key",
+        Join,
+        lambda: (source_c(), source_nullable_k(), source_b()),
+    ),
+    Case(
+        "merge_join_nullable_key",
+        MergeJoin,
+        lambda: (source_b(nested=False), source_nullable_k()),
+    ),
     Case(
         "merge_join",
         MergeJoin,
@@ -299,7 +311,7 @@ CASES = [
     ),
     Case("semijoin", SemiJoin, lambda: (source_c(), source_b(nested=False))),
     Case("semijoin_nested", SemiJoin, lambda: (source_a(), source_b())),
-    # A shared tag key nullable on one side only is narrowed there (ITL-829).
+    # A shared tag key nullable in one input only (ITL-829).
     Case(
         "semijoin_left_nullable_key",
         SemiJoin,
@@ -801,6 +813,7 @@ _SYNC_DROPS_META = (
 )
 META_XFAIL: dict[str, str] = {
     "merge_join": _MATERIALIZE_DROPS_META,
+    "merge_join_nullable_key": _MATERIALIZE_DROPS_META,
     "batch_2": _MATERIALIZE_DROPS_META,
     "batch_all": _MATERIALIZE_DROPS_META,
     "group_by": _MATERIALIZE_DROPS_META,
