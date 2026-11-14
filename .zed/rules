@@ -708,6 +708,19 @@ side when its inputs' types disagree; a result's type never depends on data valu
 order or the path the data took; and inferring a type from Python values is a last resort for
 when no type is known.
 
+Who normalizes (developer, November 14, 2026, ITL-1122): every Arrow table Orcapod creates has
+its types in their large variants. That covers a source's table built from Python values, a data
+frame, a file or a store, the rows a CachedSource reads back from its cache, and every operator's
+and function pod's output. Two exceptions keep the types as given, with no normalization between
+large and non-large: (1) an Arrow table or Arrow schema the user made: ArrowTableSource, and an
+Arrow schema= / data_schema= given to CSVSource, DictSource or DataFrameSource, kept at
+that source; (2) a store that keeps the large / non-large distinction recoverably (written both
+ways, each reads back as written). No shipped source store does (measured in ITL-1122): a CSV
+file, Delta Lake, SQLite, PostgreSQL and SpiralDB give one type for both, so their sources are
+large. DataFrameSource and PollingSource convert through Polars, which has only large layouts,
+so an Arrow table handed to them comes out large; ArrowTableSource is the source that keeps a
+user's Arrow types.
+
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
 for consistency). Infer an Arrow type from Python values only when no Arrow type is known, and
