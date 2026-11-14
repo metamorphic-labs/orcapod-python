@@ -10,8 +10,10 @@ applies its operator to zero-row inputs, as the sync path does.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
+from unittest import mock
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,9 +24,16 @@ import pytest
 from orcapod import contexts, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.nodes import OperatorJobNode
-from orcapod.core.operators import Batch, Join, PolarsFilter, SelectDataColumns
+from orcapod.core.operators import (
+    Batch,
+    Join,
+    PolarsFilter,
+    SelectDataColumns,
+    SemiJoin,
+)
 from orcapod.core.sources import ArrowTableSource, DeltaTableSource
 from orcapod.core.sources.cached_source import CachedSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.base import typed_zero_row_table
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
@@ -589,3 +598,143 @@ def test_head_of_a_join_whose_keys_disagree_raises_as_its_run_does() -> None:
 
     assert str(at_head.value) == str(at_run.value)
     assert "could not read" in joined._repr_html_()
+
+
+@function_pod(output_keys="y", result_database=InMemoryArrowDatabase())
+def cached_double(x: int) -> int:
+    """A function pod with a result cache: its rows carry ``__computed``."""
+    return 2 * x
+
+
+def test_a_cached_data_function_has_its_meta_column_with_zero_rows() -> None:
+    """With and without rows, a cached data function's table has the same columns."""
+    with_rows = cached_double.pod(_g1(_source(WITH_ROWS))).as_table(all_info=True)
+    no_rows = cached_double.pod(_g1(_source(NO_MATCH))).as_table(all_info=True)
+
+    assert with_rows.num_rows > 0
+    assert no_rows.num_rows == 0
+    assert no_rows.schema == with_rows.schema
+
+
+def _string_stream(groups: tuple[str, ...]) -> StreamProtocol:
+    """A raw stream whose ``grp`` tag is a ``string`` (not ``large_string``) column."""
+    return ArrowTableStream(
+        pa.table(
+            {
+                "id": pa.array([1, 2, 3], pa.int8()),
+                "grp": pa.array(list(groups), pa.string()),
+                "x": pa.array([10, 20, 30], pa.int8()),
+            }
+        ),
+        tag_columns=["id", "grp"],
+    )
+
+
+def test_head_of_a_filter_has_the_large_types_its_run_gives() -> None:
+    """A filter's run normalizes ``string`` to ``large_string``; its head does too."""
+    keep_g1 = PolarsFilter(constraints={"grp": "g1"})
+
+    head = keep_g1(_string_stream(WITH_ROWS)).head(all_info=True).table
+    ran = keep_g1(_string_stream(WITH_ROWS)).as_table(all_info=True)
+
+    assert head.schema.field("grp").type == pa.large_string()
+    assert head.schema == ran.schema
+
+
+def test_an_input_with_a_meta_data_column_gives_a_zero_row_table() -> None:
+    """A raw stream lists a ``__`` column as data; an operator node over it still
+    reads as zero rows before a run, without that column."""
+    raw = ArrowTableStream(
+        pa.table(
+            {
+                "id": pa.array([1, 2], pa.int8()),
+                "x": pa.array([1, 2], pa.int8()),
+                "__debug": pa.array(["a", "b"], pa.large_string()),
+            }
+        ),
+        tag_columns=["id"],
+    )
+    job = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
+    with job:
+        _ = SelectDataColumns(["x"])(raw, label="op")
+    node = _op(job)
+
+    head = node.head(all_info=True).table
+    table = node.as_table(all_info=True)
+
+    assert head.num_rows == table.num_rows == 0
+    assert head.schema == table.schema
+    assert table.schema.field("x").type == pa.int8()
+    assert not any("__debug" in name for name in table.column_names)
+
+
+# Both branches share the data columns, which SemiJoin ignores: not under test here.
+@pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
+def test_a_shared_upstream_is_derived_once_per_zero_row_table() -> None:
+    """Ten stacked diamonds derive the source's zero-row table once, not 2**10 times."""
+    stream: StreamProtocol = _source()
+    for _ in range(10):
+        stream = SemiJoin()(
+            PolarsFilter(constraints={"grp": "g1"})(stream),
+            PolarsFilter(constraints={"grp": "g2"})(stream),
+        )
+    original = ArrowTableSource._typed_zero_row_table
+    # A spy on the non-public hook: the test is about how often it is asked.
+    with mock.patch.object(
+        ArrowTableSource, "_typed_zero_row_table", autospec=True, side_effect=original
+    ) as spy:
+        head = stream.head(all_info=True).table
+        assert spy.call_count == 1
+        _ = stream.head(all_info=True)
+        # A new outermost call derives again: nothing is kept between calls.
+        assert spy.call_count == 2
+    assert head.schema.field("id").type == pa.int8()
+
+
+class _PerThreadTable(ArrowTableSource):
+    """A source whose zero-row table names the thread that asked for it."""
+
+    def _typed_zero_row_table(self) -> pa.Table:
+        name = threading.current_thread().name
+        return pa.table({"id": pa.array([], pa.int8()), name: pa.array([], pa.int8())})
+
+
+class _AsksTwice(ArrowTableSource):
+    """Asks for ``inner``'s zero-row table, waits for the other thread, asks again."""
+
+    def __init__(self, inner: StreamProtocol, gate: threading.Barrier, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.inner = inner
+        self.gate = gate
+        self.seen: dict[str, list[list[str]]] = {}
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        name = threading.current_thread().name
+        first = typed_zero_row_table(self.inner)
+        self.gate.wait()
+        second = typed_zero_row_table(self.inner)
+        assert first is not None and second is not None
+        self.seen[name] = [first.column_names, second.column_names]
+        return None
+
+
+def test_two_concurrent_zero_row_derivations_never_share_a_memo() -> None:
+    """Each thread's outermost call has its own memo: no table crosses threads."""
+    gate = threading.Barrier(2)
+    inner = _PerThreadTable(_int8_table(), tag_columns=["id"], source_id="inner")
+    outer = _AsksTwice(
+        inner, gate, table=_int8_table(), tag_columns=["id"], source_id="outer"
+    )
+    threads = [
+        threading.Thread(target=typed_zero_row_table, args=(outer,), name=name)
+        for name in ("t1", "t2")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert outer.seen == {
+        "t1": [["id", "t1"], ["id", "t1"]],
+        "t2": [["id", "t2"], ["id", "t2"]],
+    }

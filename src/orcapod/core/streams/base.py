@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -58,6 +59,12 @@ ZERO_ROW_INPUT_COLUMNS = ColumnConfig(system_tags=True, source=True)
 """The column groups of a zero-row table: what a node's rows carry downstream."""
 
 
+_ZERO_ROW_MEMO: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
+    ContextVar("_ZERO_ROW_MEMO", default=None)
+)
+"""The zero-row tables derived during one outermost ``typed_zero_row_table`` call."""
+
+
 def typed_zero_row_table(stream: object) -> pa.Table | None:
     """Return ``stream``'s table with no rows and the Arrow types its rows would have.
 
@@ -71,6 +78,10 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
     A stream that does not say (``_typed_zero_row_table``) cannot know its Arrow types
     without rows. The caller then builds the table from the Python output schema.
 
+    Within one outermost call each stream is derived once, so an upstream that several
+    inputs share is not derived again per path; the memo is discarded when that call
+    returns and is never shared between threads or tasks.
+
     Args:
         stream: The stream, node or source whose zero-row table is wanted.
 
@@ -79,6 +90,27 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
         a function pod's stream or node (ITL-985), an unbound input slot, a source
         that reads, polls or derives its rows later, a pod stream not yet computed.
     """
+    memo = _ZERO_ROW_MEMO.get()
+    if memo is None:
+        # The outermost call: a memo for this derivation only, so an upstream that
+        # several inputs share (a diamond) is derived once. ``reset`` discards it, and
+        # a ContextVar keeps it apart from other threads and tasks.
+        token = _ZERO_ROW_MEMO.set({})
+        try:
+            return typed_zero_row_table(stream)
+        finally:
+            _ZERO_ROW_MEMO.reset(token)
+    known = memo.get(id(stream))
+    if known is not None and known[0] is stream:
+        return known[1]
+    table = _derive_zero_row_table(stream)
+    # The stream is held with its table, so its id is not reused during the call.
+    memo[id(stream)] = (stream, table)
+    return table
+
+
+def _derive_zero_row_table(stream: object) -> pa.Table | None:
+    """Ask ``stream`` for its zero-row table and drop the meta columns; no memo."""
     method = getattr(stream, "_typed_zero_row_table", None)
     table = cast("pa.Table | None", method()) if callable(method) else None
     if table is None:

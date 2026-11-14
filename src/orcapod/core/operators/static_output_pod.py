@@ -312,7 +312,9 @@ class StaticOutputOperatorPod(TraceableBase):
         names = table.column_names
         system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
         source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
-        table = table.select([*tag_keys, *system_tags, *data_keys, *source_info])
+        # A raw stream lists its meta columns as data; the zero-row table has none.
+        data = [n for n in data_keys if not n.startswith(constants.META_PREFIX)]
+        table = table.select([*tag_keys, *system_tags, *data, *source_info])
         return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._flag_source_info_nullability(table),
             tag_keys,
@@ -323,8 +325,9 @@ class StaticOutputOperatorPod(TraceableBase):
         """This operator's result over zero-row inputs, for its zero-row table (ITL-912).
 
         ``static_process`` over the inputs, or, for an operator whose output schema is
-        its input's (``OUTPUT_SCHEMA_IS_INPUT_SCHEMA``), the input itself, so no
-        predicate or other user code is evaluated. A run never comes here: it calls
+        its input's (``OUTPUT_SCHEMA_IS_INPUT_SCHEMA``), the input's columns in the
+        large-normalized form a run gives them, so no predicate or other user code is
+        evaluated. A run never comes here: it calls
         ``static_process`` (or ``process``) whether its inputs have rows or not.
 
         Args:
@@ -334,8 +337,24 @@ class StaticOutputOperatorPod(TraceableBase):
             A stream with no rows and the columns and Arrow types of the result.
         """
         if self.OUTPUT_SCHEMA_IS_INPUT_SCHEMA:
+            from orcapod.utils import arrow_utils
+
             (only,) = inputs
-            return only
+            # The input's columns, each in the large-normalized form a run gives it.
+            schema = only.as_table(columns=ZERO_ROW_INPUT_COLUMNS).schema
+            normalized = pa.schema(
+                [
+                    field.with_type(
+                        arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+                    )
+                    for field in schema
+                ]
+            )
+            return ArrowTableStream(
+                normalized.empty_table(),
+                tag_columns=only.keys()[0],
+                data_context=only.data_context_key,
+            )
         return self.static_process(*inputs)
 
     @staticmethod

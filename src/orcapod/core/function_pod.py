@@ -1366,9 +1366,18 @@ class FunctionPodStream(StreamBase):
                 yield tag, data
 
     def _zero_row_output_table(self) -> pa.Table | None:
-        """This stream's rows' table with no row; see ``function_zero_row_table``."""
+        """This stream's rows' table with no row; see ``function_zero_row_table``.
+
+        A cached data function's rows carry the result cache's ``__computed`` meta
+        column, so its zero-row table does too.
+        """
+        meta = None
+        if isinstance(self._function_pod.data_function, CachedDataFunction):
+            from orcapod.core.result_cache import ResultCache
+
+            meta = Schema({ResultCache.RESULT_COMPUTED_FLAG: bool})
         return function_zero_row_table(
-            self._input_stream, self.output_schema()[1], self.data_context
+            self._input_stream, self.output_schema()[1], self.data_context, meta
         )
 
     def _typed_zero_row_table(self) -> pa.Table | None:
