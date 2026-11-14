@@ -331,6 +331,30 @@ class StaticOutputOperatorPod(TraceableBase):
         )
 
     @staticmethod
+    def _kept_output(
+        result: StreamProtocol,
+        rows: Sequence[tuple[TagProtocol, DataProtocol]],
+    ) -> StreamProtocol:
+        """Return what an operator node keeps, and stores, of a run of its operator.
+
+        The rows of the run as ``_materialize_to_stream`` builds them, or, with no row,
+        the result with no rows in the same order (``_zero_rows_in_row_order``). Every
+        way a node runs its operator (a job run, sync or async, and ``node.run()`` on
+        its own) keeps this, so a node has one column order, the row order, in memory
+        and in its stored table (ITL-1133).
+
+        Args:
+            result: The operator's result of the run.
+            rows: ``result``'s rows, in order.
+
+        Returns:
+            A stream over the rows, in row order.
+        """
+        if rows:
+            return StaticOutputOperatorPod._materialize_to_stream(rows)
+        return StaticOutputOperatorPod._zero_rows_in_row_order(result)
+
+    @staticmethod
     def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
         """Declare each ``_source_*`` field nullable only if some row's token is ``None``.
 

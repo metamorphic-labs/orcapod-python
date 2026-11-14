@@ -1419,17 +1419,10 @@ class OperatorJobNode(OperatorNodeBase):
         # Materialize
         output = list(result_stream.iter_data())
 
-        # Cache
-        if output:
-            self._cached_output_stream = StaticOutputOperatorPod._materialize_to_stream(
-                output
-            )
-        else:
-            # The result with no rows, in the column order of a run with rows
-            # (ITL-1131).
-            self._cached_output_stream = (
-                StaticOutputOperatorPod._zero_rows_in_row_order(result_stream)
-            )
+        # Cache, in row order with or without rows (ITL-1131, ITL-1133)
+        self._cached_output_stream = StaticOutputOperatorPod._kept_output(
+            result_stream, output
+        )
 
         self._update_modified_time()
 
@@ -1444,11 +1437,19 @@ class OperatorJobNode(OperatorNodeBase):
         ctx_obs.on_node_end(node_label, node_hash)
         return output
 
+    def _compute_output(self) -> StreamProtocol:
+        """Run the operator over the node's inputs and return what the node keeps.
+
+        The rows in row order, as a job run keeps them (``_kept_output``), so a node
+        run on its own has the columns, in memory and stored, of the same node in a
+        job (ITL-1133). The rows are computed here, not when first read.
+        """
+        result = self._operator.process(*self._input_streams)
+        return StaticOutputOperatorPod._kept_output(result, list(result.iter_data()))
+
     def _compute_and_store(self) -> None:
         """Compute operator output, optionally store in DB."""
-        self._cached_output_stream = self._operator.process(
-            *self._input_streams,
-        )
+        self._cached_output_stream = self._compute_output()
 
         if self._cache_mode == CacheMode.OFF:
             self._update_modified_time()
@@ -1524,9 +1525,7 @@ class OperatorJobNode(OperatorNodeBase):
                     self._compute_and_store()
                     computed = True
             else:
-                self._cached_output_stream = self._operator.process(
-                    *self._input_streams,
-                )
+                self._cached_output_stream = self._compute_output()
                 self._update_modified_time()
                 computed = True
         table = self.as_table()
