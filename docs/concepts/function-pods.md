@@ -577,6 +577,13 @@ incomplete: a group formed after it may lack members, and the result stored for 
 group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
 on the asynchronous orchestrator.
 
+A load-only run reads only job nodes, sources and streams that neither compute nor deliver.
+A pod's stream built outside the job (a function pod's, which computes when it is read, or a
+side-effect pod's, which delivers) is refused with a `ValueError` before anything is read,
+whether a node of the job reads it, a source slot is bound to it or an operator's stream
+outside the job reads it. Build the pod inside the job, so its node loads its stored results,
+or run without `load_only`.
+
 ### Running again: what a run runs
 
 `job.run()`, `await job.run_async()` and `job.nodes[label].run()` decide what to run from

@@ -491,3 +491,105 @@ def test_an_interrupted_log_commit_leaves_the_side_effect_node_without_a_run() -
     ) as flush:
         node.run()
     assert flush.call_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Developer decision (November 14, 2026): a load-only run also refuses an input that
+# computes when read ("Refuse is consistent")
+# ---------------------------------------------------------------------------
+
+_UPSTREAM_CALLS: list[int] = []
+_COMPUTES = "computes when it is read"
+
+
+@function_pod(output_keys="x")
+def _recorded_copy(x: int) -> int:
+    """Return ``x``, recording the call."""
+    _UPSTREAM_CALLS.append(x)
+    return x
+
+
+def _computing_stream(kind: str) -> Any:
+    """A stream outside a job that computes ``_recorded_copy`` when read.
+
+    ``pod``: the function pod's stream; ``cached``: a cached function pod's stream over
+    an empty store; ``wrapped``: an operator's stream outside a job over the pod's
+    stream. (A ``FunctionNode`` outside a job is a blueprint: reading it raises.)
+    """
+    from orcapod.core.cached_function_pod import CachedFunctionPod
+
+    base = _base_stream()
+    pod: Any = _recorded_copy.pod
+    if kind == "pod":
+        return pod(base)
+    if kind == "cached":
+        return CachedFunctionPod(pod, result_database=InMemoryArrowDatabase())(base)
+    stream: Any = pod(base)
+    return stream.select_data_columns(["x"])
+
+
+@pytest.mark.parametrize("stream_kind", ["pod", "cached", "wrapped"])
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_run_refuses_an_input_that_computes(
+    kind: str, stream_kind: str
+) -> None:
+    """Refused before the input is read: its function is never called."""
+    _UPSTREAM_CALLS.clear()
+    node = _node_over(kind, _computing_stream(stream_kind))
+    with pytest.raises(ValueError, match=_COMPUTES):
+        node.run(load_only=True)
+    assert _UPSTREAM_CALLS == []
+    assert not node.holds_current_run(load_only=True)
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_cascade_refuses_an_input_that_computes(kind: str) -> None:
+    """The computing input feeds a node the cascade would run first."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.operators import DropNulls
+    from orcapod.types import CacheMode
+
+    _UPSTREAM_CALLS.clear()
+    first = _node_over(kind, _computing_stream("pod"))
+    target = OperatorJobNode(
+        operator=DropNulls(),
+        input_streams=(first,),
+        pipeline_database=InMemoryArrowDatabase(),
+        cache_mode=CacheMode.OFF,
+    )
+    with pytest.raises(ValueError, match=_COMPUTES):
+        target.run(load_only=True)
+    assert _UPSTREAM_CALLS == []
+
+
+@pytest.mark.parametrize("how", ["sync", "async", "node.run", "source.run"])
+def test_a_load_only_run_refuses_a_source_slot_bound_to_a_computing_stream(
+    how: str,
+) -> None:
+    """A source slot bound to a function pod's stream outside a job: refused."""
+    _UPSTREAM_CALLS.clear()
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(
+            [{"id": 1, "x": 1}, {"id": 2, "x": 2}], tag_columns=["id"], source_id="s"
+        )
+        _twice_pod(source, label="tw")
+    job.run()
+    job.bind(sources={"s": _computing_stream("pod")})
+    with pytest.raises(ValueError, match=_COMPUTES):
+        if how == "node.run":
+            job.nodes["tw"].run(load_only=True)
+        elif how == "source.run":
+            job.nodes["tw"].upstreams[0].run(load_only=True)
+        else:
+            job.run(orchestrator=ORCHESTRATORS[how](), load_only=True)
+    assert _UPSTREAM_CALLS == []
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_full_run_over_an_input_that_computes_reads_it(kind: str) -> None:
+    """Unchanged: a run without ``load_only`` reads (computes) the outside stream."""
+    _UPSTREAM_CALLS.clear()
+    node = _node_over(kind, _computing_stream("pod"))
+    assert node.run().as_table().num_rows == 2
+    assert len(_UPSTREAM_CALLS) == 2

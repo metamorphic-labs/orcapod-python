@@ -1531,7 +1531,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         """
         from orcapod.pipeline.node_run import (
             depends_on_job_nodes,
-            refuse_delivering_inputs,
+            refuse_unloadable_inputs,
             run_with_dependencies,
         )
         from orcapod.pipeline.run_summary import warn_row_failures
@@ -1549,7 +1549,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         if self._loaded:
             raise self._cannot_compute_error()
         if load_only:
-            refuse_delivering_inputs(self)
+            refuse_unloadable_inputs(self)
         if self.is_stale or not self._holds_run(load_only=load_only):
             # Stale, or a load-only run's output asked for by a full run: run again.
             self.clear_cache()

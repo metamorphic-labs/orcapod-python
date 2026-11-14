@@ -63,12 +63,17 @@ except ValueError as exc:
     print(f"side-effect node, run(load_only=True) refused: {exc}")
 print(f"  upstream delivered {len(UP)}, own delivered {len(OWN)}")
 
-# Unchanged (reported to the coordinator): an outside FunctionPodStream is read, so a
-# load-only run computes its function.
+# A function pod's stream outside a job computes when read. Before the developer's decision
+# (November 14, 2026, "Refuse is consistent") a load-only run read it and called the
+# function; since then it is refused as well.
 fn_upstream: Any = inc.pod(base)  # a FunctionPodStream, outside a job
 dbl_pod: Any = dbl.pod
 fnode = FunctionJobNode(dbl_pod, fn_upstream, pipeline_database=InMemoryArrowDatabase())
-fview = fnode.run(load_only=True)
-print(
-    f"function node over a pod stream, run(load_only=True): upstream function called {len(CALLS)} times; status {fview.status}"
-)
+try:
+    fnode.run(load_only=True)
+    print(
+        f"function node over a pod stream, run(load_only=True): upstream calls {len(CALLS)}"
+    )
+except ValueError as exc:
+    print(f"function node over a pod stream, run(load_only=True) refused: {exc}")
+print(f"  upstream function calls: {len(CALLS)}")

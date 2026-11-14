@@ -302,7 +302,7 @@ def run_job_node(
     """
     from orcapod.pipeline.node_run import (
         depends_on_job_nodes,
-        refuse_delivering_inputs,
+        refuse_unloadable_inputs,
         run_with_dependencies,
     )
     from orcapod.pipeline.run_summary import warn_row_failures
@@ -313,7 +313,7 @@ def run_job_node(
         summary = run_with_dependencies(node, load_only=load_only)
     else:
         if load_only:
-            refuse_delivering_inputs(node)
+            refuse_unloadable_inputs(node)
         summary = run_alone()
     if summary is None:
         return
