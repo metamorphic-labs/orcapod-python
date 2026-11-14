@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest import mock
 
 import pyarrow as pa
@@ -81,11 +81,13 @@ ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchest
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    """Start every test with no recorded calls and a delivery that succeeds."""
     CALLS.clear()
     FAIL["tap"] = False
 
 
 def _source(data: list[dict[str, int]] = ROWS) -> DictSource:
+    """An in-memory source of ``data`` with tags ``g`` and ``k``."""
     return DictSource(data, tag_columns=["g", "k"], source_id="s")
 
 
@@ -110,6 +112,7 @@ class FailsAtNodeEnd(NoOpObserver):
     """An observer whose ``on_node_end`` raises for one node."""
 
     def __init__(self, label: str) -> None:
+        """Keep the label of the node this observer acts at."""
         self.label = label
 
     def on_node_end(self, node_label: str, node_hash: str) -> None:
@@ -128,6 +131,7 @@ class FailsAtNodeEnd(NoOpObserver):
 
 
 def test_an_observer_failing_at_the_end_of_a_load_only_node_leaves_it_empty() -> None:
+    """An observer raising at a load-only node's end leaves the node empty and stale."""
     db = InMemoryArrowDatabase()
     _grouped_job(ROWS, db).run()
     job = _grouped_job(ROWS, db)
@@ -138,6 +142,7 @@ def test_an_observer_failing_at_the_end_of_a_load_only_node_leaves_it_empty() ->
 
 
 def test_a_failed_commit_of_a_node_run_alone_leaves_it_empty() -> None:
+    """A node run alone whose commit fails holds nothing afterwards."""
     from orcapod.core.nodes import FunctionJobNode
 
     table = pa.table(
@@ -156,6 +161,7 @@ def test_a_failed_commit_of_a_node_run_alone_leaves_it_empty() -> None:
     )
 
     def fail(self: Any) -> None:
+        """A flush that always fails."""
         raise OSError("disk full")
 
     with (
@@ -182,11 +188,13 @@ def test_a_failed_run_clears_every_node_it_ran() -> None:
 
 
 def test_a_failed_cascade_clears_every_node_it_ran() -> None:
+    """A node.run() cascade whose commit fails clears every node it ran."""
     job = PipelineJob(name="f", database=InMemoryArrowDatabase())
     with job:
         fails_on_21.pod(inc.pod(_source(), label="up"), label="down")
 
     def fail(self: Any) -> None:
+        """A flush that always fails."""
         raise OSError("disk full")
 
     with (
@@ -200,6 +208,7 @@ def test_a_failed_cascade_clears_every_node_it_ran() -> None:
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_a_failed_operator_store_leaves_the_operator_empty(orchestrator: str) -> None:
+    """An operator whose LOG write fails holds nothing afterwards."""
     db = InMemoryArrowDatabase()
     job = PipelineJob(name="o", database=db)
     with job:
@@ -230,6 +239,7 @@ def _tap_job(db: Any) -> PipelineJob:
 
 
 def test_a_failed_side_effect_run_makes_the_nodes_below_it_stale() -> None:
+    """A failed side-effect run makes it and every node below it stale."""
     job = _tap_job(InMemoryArrowDatabase())
     job.run()
     assert job.nodes["down"].as_table().num_rows == 6
@@ -243,6 +253,7 @@ def test_a_failed_side_effect_run_makes_the_nodes_below_it_stale() -> None:
 
 
 def test_a_side_effect_node_whose_output_cannot_close_holds_nothing() -> None:
+    """A side-effect run whose output close fails holds no rows."""
     from orcapod.channels import Channel
 
     job = _tap_job(InMemoryArrowDatabase())
@@ -261,6 +272,7 @@ def test_a_side_effect_node_whose_output_cannot_close_holds_nothing() -> None:
             raise OSError("output cannot be closed")
 
     async def run() -> None:
+        """Run the node's channel entry point."""
         inputs: Channel[Any] = Channel(buffer_size=16)
         for item in job.nodes["rows"].iter_data():
             await inputs.writer.send(item)
@@ -286,6 +298,7 @@ def _pending(db: InMemoryArrowDatabase) -> dict[str, int]:
 
 
 def _add_pending_write(db: InMemoryArrowDatabase) -> None:
+    """Leave one uncommitted write of another table in ``db``."""
     db.add_records(
         ("elsewhere",),
         pa.table({"__rid": [b"r1"], "v": [1]}),
@@ -297,6 +310,7 @@ def _add_pending_write(db: InMemoryArrowDatabase) -> None:
 def test_a_load_only_run_leaves_pending_writes_as_it_found_them(
     orchestrator: str,
 ) -> None:
+    """A load-only job run and cascade flush nothing: pending writes stay pending."""
     db = InMemoryArrowDatabase()
     _grouped_job(ROWS, db).run()
     _add_pending_write(db)
@@ -319,6 +333,7 @@ def test_a_load_only_run_leaves_pending_writes_as_it_found_them(
 
 
 def _source_table() -> ArrowTableSource:
+    """A three-row Arrow source with tag ``k`` and data ``x``, non-null."""
     table = pa.table(
         {"k": [0, 1, 2], "x": [1, 2, 3]},
         schema=pa.schema(
@@ -332,6 +347,7 @@ def _source_table() -> ArrowTableSource:
 
 
 def test_a_standalone_log_run_commits_its_write(tmp_path: Path) -> None:
+    """A standalone LOG operator run commits its write before returning."""
     node = OperatorJobNode(
         operator=SelectDataColumns(["x"]),
         input_streams=[_source_table()],
@@ -350,6 +366,7 @@ def test_a_standalone_log_run_commits_its_write(tmp_path: Path) -> None:
 
 
 def test_a_standalone_log_run_after_a_load_only_run_stores(tmp_path: Path) -> None:
+    """A full standalone run after a load-only run computes and stores."""
     db = InMemoryArrowDatabase()
     node = OperatorJobNode(
         operator=SelectDataColumns(["x"]),
@@ -366,6 +383,7 @@ def test_a_standalone_log_run_after_a_load_only_run_stores(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_an_operator_filled_by_a_load_only_run_says_so(orchestrator: str) -> None:
+    """An operator filled by a load-only run shows ``loaded_only``."""
     db = InMemoryArrowDatabase()
     _grouped_job(ROWS, db).run()
     job = _grouped_job(ROWS, db)
@@ -378,6 +396,7 @@ def test_an_operator_filled_by_a_load_only_run_says_so(orchestrator: str) -> Non
 def test_an_unrun_loaded_operator_without_its_operator_keeps_its_columns(
     tmp_path: Path,
 ) -> None:
+    """An operator node rebuilt without its operator keeps its saved columns."""
     db = InMemoryArrowDatabase()
     job = PipelineJob(name="l", database=db)
     with job:
@@ -405,6 +424,7 @@ def test_an_unrun_loaded_operator_without_its_operator_keeps_its_columns(
 
 
 def test_a_bound_source_with_no_modified_time_makes_its_slot_unknown() -> None:
+    """A source slot bound to a stream with no modified time has none."""
     stream = ArrowTableStream(pa.table({"k": [0], "x": [1]}), tag_columns=["k"])
     slot = SourceJobNode(name="s", bound_source=stream)
     assert slot.last_modified is not None
@@ -435,6 +455,7 @@ def test_freshness_of_shared_ancestors_is_checked_once_per_traversal() -> None:
     calls = 0
 
     def counting(self: Any) -> bool:
+        """Count the staleness checks, then check."""
         nonlocal calls
         calls += 1
         return original(self)
@@ -457,6 +478,7 @@ def test_a_held_dependency_keeps_its_incomplete_inputs_in_the_summary() -> None:
 
 
 def test_a_run_with_every_node_held_says_so() -> None:
+    """The headline of a run with every node held says there was nothing to do."""
     job = _grouped_job(ROWS, InMemoryArrowDatabase())
     job.run()
     summary = job.run()
@@ -475,6 +497,7 @@ def _deliver_x(x: int, ctx: Any) -> None:
 
 
 def test_a_loaded_job_without_its_side_effect_node_names_it(tmp_path: Path) -> None:
+    """A loaded job missing a side-effect node fails load-only naming ITL-1094."""
     tap = side_effect_pod(_deliver_x)
     assert isinstance(tap, SideEffectPod)
     db = InMemoryArrowDatabase()
@@ -531,6 +554,7 @@ def test_a_run_with_failed_rows_is_retried_by_the_next_run(orchestrator: str) ->
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_an_unchanged_rerun_touches_no_store(orchestrator: str) -> None:
+    """A re-run with nothing to run flushes nothing."""
     db = InMemoryArrowDatabase()
     job = _grouped_job(ROWS, db)
     job.run(orchestrator=ORCHESTRATORS[orchestrator]())
@@ -544,6 +568,7 @@ def test_an_unchanged_rerun_touches_no_store(orchestrator: str) -> None:
 
 
 def test_a_held_load_only_node_keeps_its_missing_inputs_in_the_summary() -> None:
+    """A held load-only node still reports the inputs it skipped."""
     db = InMemoryArrowDatabase()
     _grouped_job(ROWS[:3], db).run()
     job = _grouped_job(ROWS, db)
@@ -564,6 +589,7 @@ class StopsAtNodeEnd(NoOpObserver):
     """An observer that interrupts the run at the end of one node."""
 
     def __init__(self, label: str) -> None:
+        """Keep the label of the node this observer acts at."""
         self.label = label
 
     def on_node_end(self, node_label: str, node_hash: str) -> None:
@@ -577,6 +603,7 @@ class StopsAtNodeEnd(NoOpObserver):
 
 
 def test_an_interrupted_run_clears_the_nodes_it_ran() -> None:
+    """A run interrupted by a non-Exception clears the nodes it ran."""
     job = _grouped_job(ROWS, InMemoryArrowDatabase())
     with pytest.raises(_Stop):
         job.run(observer=StopsAtNodeEnd("summed"))
@@ -585,6 +612,7 @@ def test_an_interrupted_run_clears_the_nodes_it_ran() -> None:
 
 
 def test_a_loaded_operator_that_lost_an_input_names_it(tmp_path: Path) -> None:
+    """A loaded operator whose saved input was not restored names ITL-1094."""
     tap = side_effect_pod(_deliver_x)
     assert isinstance(tap, SideEffectPod)
     db = InMemoryArrowDatabase()
@@ -603,12 +631,22 @@ def test_a_loaded_operator_that_lost_an_input_names_it(tmp_path: Path) -> None:
     job.run()
     job.save(tmp_path / "job.json")
     loaded = PipelineJob.load(tmp_path / "job.json", database=db)
-    loaded.bind(sources={"s": _source()})
+    loaded.bind(
+        sources={
+            "s": _source(),
+            "w": DictSource(
+                [{"g": r["g"], "k": r["k"], "w": r["x"]} for r in ROWS],
+                tag_columns=["g", "k"],
+                source_id="w",
+            ),
+        }
+    )
     with pytest.raises(RuntimeError, match=r"'joined'.*ITL-1094"):
         loaded.run(load_only=True)
 
 
 def test_an_async_cache_only_node_holds_the_rows_it_sent() -> None:
+    """An async CACHE_ONLY node holds the stored rows it sent."""
     from orcapod.channels import Channel
     from orcapod.core.nodes import FunctionJobNode
     from orcapod.pipeline.serialization import LoadStatus
@@ -625,6 +663,7 @@ def test_an_async_cache_only_node_holds_the_rows_it_sent() -> None:
     db = InMemoryArrowDatabase()
 
     def node() -> Any:
+        """A function node over the two-row table, on the shared store."""
         return FunctionJobNode(
             inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
             ArrowTableStream(table, tag_columns=["k"]),
@@ -637,6 +676,7 @@ def test_an_async_cache_only_node_holds_the_rows_it_sent() -> None:
     cached._load_status = LoadStatus.CACHE_ONLY  # pyright: ignore[reportPrivateUsage]  # the load status is what this test is about
 
     async def run() -> list[Any]:
+        """Run the node's channel entry point."""
         inputs: Channel[Any] = Channel(buffer_size=4)
         output: Channel[Any] = Channel(buffer_size=4)
         await inputs.writer.close()
@@ -661,3 +701,193 @@ def test_every_node_a_load_only_run_fills_says_so(orchestrator: str) -> None:
         assert job.nodes[label].head().status is ViewStatus.LOADED_ONLY, label
     assert job.nodes["tap"].run(load_only=True).status is ViewStatus.LOADED_ONLY
     assert job.nodes["s"].head().status is ViewStatus.ROWS
+
+
+# ---------------------------------------------------------------------------
+# Third review round
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+def test_a_direct_async_run_drains_the_inputs_of_a_held_node(
+    error_policy: Literal["continue", "fail_fast"],
+) -> None:
+    """A held node's incoming channel is read even when the caller passes the whole
+    graph: a source with more rows than the channel buffer does not block the run."""
+    from orcapod.pipeline.dag import OrcaDAG
+
+    rows = [{"g": i % 2, "k": i, "x": i} for i in range(64)]
+    job = _grouped_job(rows, InMemoryArrowDatabase())
+    job.run()
+    rowwise, grouped, summed = (job.nodes[n] for n in ("rowwise", "grouped", "summed"))
+    source = rowwise.upstreams[0]
+    dag: OrcaDAG[Any] = OrcaDAG()
+    for upstream, downstream in (
+        (source, rowwise),
+        (rowwise, grouped),
+        (grouped, summed),
+    ):
+        dag.add_edge(upstream, downstream)
+    held = {rowwise: list(rowwise.iter_data())}
+    summed.clear_cache()
+    grouped.clear_cache()
+    orchestrator = AsyncPipelineOrchestrator(buffer_size=2, error_policy=error_policy)
+
+    async def run() -> None:
+        """Run the whole graph with ``rowwise`` held, under a time limit."""
+        await asyncio.wait_for(orchestrator.run_async(dag, held_rows=held), timeout=30)
+
+    asyncio.run(run())
+    assert summed.as_table().num_rows == 2
+
+
+def test_a_loaded_job_runs_its_bound_branch_beside_a_broken_unbound_one(
+    tmp_path: Path,
+) -> None:
+    """The ITL-1094 check covers only the nodes the run includes: a branch below an
+    unbound source and a dropped node is left out, the bound branch loads."""
+    tap = side_effect_pod(_deliver_x)
+    assert isinstance(tap, SideEffectPod)
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="m3", database=db)
+    with job:
+        tapped: Any = tap.process(_source(), label="delivered")
+        inc.pod(tapped, label="broken")
+        dbl.pod(
+            inc.pod(
+                DictSource(
+                    [{"g": 0, "k": 9, "x": 5}],
+                    tag_columns=["g", "k"],
+                    source_id="other",
+                ),
+                label="up2",
+            ),
+            label="bound_branch",
+        )
+    job.run()
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(tmp_path / "job.json", database=db)
+    loaded.bind(
+        sources={
+            "other": DictSource(
+                [{"g": 0, "k": 9, "x": 5}], tag_columns=["g", "k"], source_id="other"
+            )
+        }
+    )
+    loaded.run(load_only=True)
+    assert loaded.nodes["bound_branch"].as_table().num_rows == 1
+    assert loaded.nodes["broken"].as_table().num_rows == 0
+
+
+def test_a_cache_only_node_keeps_its_rows_over_an_input_with_no_modified_time() -> None:
+    """``as_table`` judges a ``CACHE_ONLY`` node as ``head`` and ``iter_data`` do: its
+    unavailable input does not make the rows it holds stale."""
+    from orcapod.channels import Channel
+    from orcapod.core.nodes import FunctionJobNode
+    from orcapod.pipeline.serialization import LoadStatus
+
+    table = pa.table(
+        {"k": [0, 1], "x": [1, 2]},
+        schema=pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        ),
+    )
+    db = InMemoryArrowDatabase()
+    stream = ArrowTableStream(table, tag_columns=["k"])
+    FunctionJobNode(
+        inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+        stream,
+        pipeline_database=db,
+    ).run()
+    cached = FunctionJobNode(
+        inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+        stream,
+        pipeline_database=db,
+    )
+    # An unavailable input (as from_descriptor makes it) is the case here.
+    cached._load_status = LoadStatus.CACHE_ONLY  # pyright: ignore[reportPrivateUsage]  # the load status is what this test is about
+
+    async def run() -> None:
+        """Feed nothing: a CACHE_ONLY node serves what is stored."""
+        inputs: Channel[Any] = Channel(buffer_size=4)
+        output: Channel[Any] = Channel(buffer_size=4)
+        await inputs.writer.close()
+        await cached.async_execute(inputs.reader, output.writer)
+        _ = await output.reader.collect()
+
+    asyncio.run(run())
+    stream._set_modified_time(None)  # pyright: ignore[reportPrivateUsage]  # an input with no modified time is what this test is about
+    assert cached.as_table().num_rows == 2
+    assert len(list(cached.iter_data())) == 2
+
+
+def test_a_commit_interrupted_by_a_non_exception_clears_the_nodes_it_ran() -> None:
+    """An interruption during the end-of-run commit (the last flush of the run) leaves
+    its outcome unknown: the nodes the run ran hold nothing."""
+    original = InMemoryArrowDatabase.flush
+    calls = 0
+
+    def counting(self: Any) -> None:
+        """Count the flushes of a successful run."""
+        nonlocal calls
+        calls += 1
+        original(self)
+
+    with mock.patch.object(InMemoryArrowDatabase, "flush", counting):
+        _grouped_job(ROWS, InMemoryArrowDatabase()).nodes["summed"].run()
+    total, calls = calls, 0
+
+    def interrupt_last(self: Any) -> None:
+        """Interrupt the final flush, as a ``KeyboardInterrupt`` would."""
+        nonlocal calls
+        calls += 1
+        if calls == total:
+            raise _Stop()
+        original(self)
+
+    job = _grouped_job(ROWS, InMemoryArrowDatabase())
+    with (
+        mock.patch.object(InMemoryArrowDatabase, "flush", interrupt_last),
+        pytest.raises(_Stop),
+    ):
+        job.nodes["summed"].run()
+    for label in ("rowwise", "grouped", "summed"):
+        assert job.nodes[label].as_table().num_rows == 0, label
+
+
+def test_a_job_run_whose_final_commit_is_interrupted_clears_the_nodes_it_ran() -> None:
+    """An interruption during ``job.run()``'s end-of-run commit (its last flush) leaves
+    the outcome unknown: the nodes the run ran hold nothing, as for ``node.run()``."""
+    original = InMemoryArrowDatabase.flush
+    calls = 0
+
+    def counting(self: Any) -> None:
+        """Count the flushes of a successful run."""
+        nonlocal calls
+        calls += 1
+        original(self)
+
+    with mock.patch.object(InMemoryArrowDatabase, "flush", counting):
+        _grouped_job(ROWS, InMemoryArrowDatabase()).run()
+    total, calls = calls, 0
+
+    def interrupt_last(self: Any) -> None:
+        """Interrupt the final flush, as a ``KeyboardInterrupt`` would."""
+        nonlocal calls
+        calls += 1
+        if calls == total:
+            raise _Stop()
+        original(self)
+
+    job = _grouped_job(ROWS, InMemoryArrowDatabase())
+    with (
+        mock.patch.object(InMemoryArrowDatabase, "flush", interrupt_last),
+        pytest.raises(_Stop),
+    ):
+        job.run()
+    for label in ("rowwise", "grouped", "summed"):
+        assert job.nodes[label].as_table().num_rows == 0, label
+        assert job.nodes[label].is_stale, label

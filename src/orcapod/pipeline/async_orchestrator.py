@@ -261,7 +261,11 @@ class AsyncPipelineOrchestrator:
                         writer = _CollectingWriter(writer, collector)
 
                     if held_rows is not None and node in held_rows:
-                        # Not run: the rows of its current run feed its successors.
+                        # Not run: the rows of its current run feed its successors. Its
+                        # own inputs are read and discarded, so no producer blocks on
+                        # a channel nobody reads.
+                        for upstream in in_edges.get(node, []):
+                            tg.create_task(_drain(edge_readers[(upstream, node)]))
                         _start_node(
                             tg, failed_nodes, node, _send_held(held_rows[node], writer)
                         )
@@ -632,6 +636,12 @@ class _RowsInFlight:
         from orcapod.pipeline.observer import NoOpLogger
 
         return NoOpLogger()
+
+
+async def _drain(reader: Any) -> None:
+    """Read ``reader`` to its end, keeping nothing."""
+    async for _ in reader:
+        pass
 
 
 async def _send_held(

@@ -620,12 +620,11 @@ run: a `SourceCheckFailedWarning` names the source and the error, the run procee
 data the source already holds, and the summary lists the source in `unchecked_sources`.
 `head()` and the preview never check.
 
-A source that cannot see its data change (an in-memory source, such as a list a
-`DictSource` was built from and that was changed afterwards) is not re-read: build a new
-source object and bind it (`job.bind(sources=...)`), which makes every node that reads it
-stale, or call `clear_cache()` on each node that reads it directly (one per branch). To
-deliver a side effect again (with `track_completion=False`), call `clear_cache()` on its
-node first.
+A source that cannot see its data change (an in-memory source: a `DictSource` copies the
+list it is given) is not re-read: build a new source object and bind it
+(`job.bind(sources=...)`); every node that reads it becomes stale and runs, while clearing
+the nodes below would only read the same data again. To deliver a side effect again (with
+`track_completion=False`), call `clear_cache()` on its node first.
 
 `node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,
 and a run's writes are committed when it ends; when everything is held there is nothing to

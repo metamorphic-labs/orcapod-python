@@ -629,7 +629,7 @@ class FunctionNodeBase(StreamBase):
         # hashes are then built from the same rows, and they are the current ones
         # (ITL-1045). ``iter_data`` clears a stale cache too, but only after the
         # cached table would already have been read.
-        if self.is_stale:
+        if self._read_finds_stale():
             self.clear_cache()
         if self._cached_output_table is None:
             self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
@@ -647,6 +647,10 @@ class FunctionNodeBase(StreamBase):
         return self._shape_table(
             self._cached_output_table, column_config, all_content_hashes
         )
+
+    def _read_finds_stale(self) -> bool:
+        """Whether a read finds the rows this node holds out of date."""
+        return self.is_stale
 
     def _table_from_pairs(
         self, pairs: "list[tuple[TagProtocol, DataProtocol]]"
@@ -1639,6 +1643,13 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._run_failed = failed
         self._cached_output_table = None
         self._cached_content_hash_column = None
+
+    def _read_finds_stale(self) -> bool:
+        """Whether a read finds the rows held out of date; never for ``CACHE_ONLY``,
+        whose input is unavailable (``head`` and ``iter_data`` judge it the same way)."""
+        from orcapod.pipeline.serialization import LoadStatus
+
+        return self.load_status != LoadStatus.CACHE_ONLY and self.is_stale
 
     def _holds_run(self, *, load_only: bool) -> bool:
         """Whether the node holds a completed run that a run need not redo.
