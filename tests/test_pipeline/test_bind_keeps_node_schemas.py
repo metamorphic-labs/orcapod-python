@@ -125,6 +125,7 @@ def test_no_accepted_bind_changes_a_path_or_a_table_schema(
             first = snapshot
         assert snapshot == first, label
 
+    assert first is not None
     # The last bound source, the narrower CSV, is rebuilt from its file on load.
     job.save(str(tmp_path / "job.json"))
     loaded = PipelineJob.load(str(tmp_path / "job.json"))
