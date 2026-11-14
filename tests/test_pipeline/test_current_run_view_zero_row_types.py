@@ -37,6 +37,7 @@ def inc(x: int) -> int:
 
 @pytest.fixture(autouse=True)
 def _reset_failure() -> None:
+    """Let ``inc`` succeed at the start of each test."""
     FAIL["on"] = False
 
 
@@ -80,6 +81,7 @@ def _assert_reads_with(
 
 
 def _assert_empty_with(job: PipelineJob, expected: dict[str, pa.Schema]) -> None:
+    """Each node reads zero rows and has exactly the ``expected`` schema."""
     _assert_reads_with(job, expected, rows=False)
 
 
@@ -97,6 +99,8 @@ def _run_schemas(orchestrator: str) -> dict[str, pa.Schema]:
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 class TestOneSchemaInEveryState:
+    """``as_table(all_info=True)`` of every node keeps its run's schema in each state."""
+
     def test_the_populated_tables_keep_the_narrow_input_types(
         self, orchestrator: str
     ) -> None:
@@ -113,9 +117,11 @@ class TestOneSchemaInEveryState:
             ), label
 
     def test_before_a_run(self, orchestrator: str) -> None:
+        """A fresh job: every node reads zero rows with its run's schema."""
         _assert_empty_with(_job(), _run_schemas(orchestrator))
 
     def test_after_a_run_and_after_clear_cache(self, orchestrator: str) -> None:
+        """A run fills each node; ``clear_cache()`` empties it with the same schema."""
         expected = _run_schemas(orchestrator)
         job = _job()
         _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
@@ -125,6 +131,7 @@ class TestOneSchemaInEveryState:
         _assert_empty_with(job, expected)
 
     def test_after_a_failed_run(self, orchestrator: str) -> None:
+        """A run that raised leaves every node empty, with its run's schema."""
         expected = _run_schemas(orchestrator)
         job = _job()
         FAIL["on"] = True
@@ -135,6 +142,7 @@ class TestOneSchemaInEveryState:
         _assert_empty_with(job, expected)
 
     def test_while_stale(self, orchestrator: str) -> None:
+        """A rebound source makes every node stale and empty, with the same schema."""
         expected = _run_schemas(orchestrator)
         job = _job()
         _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
@@ -146,6 +154,7 @@ class TestOneSchemaInEveryState:
         _assert_empty_with(job, expected)
 
     def test_after_a_load_only_run(self, orchestrator: str) -> None:
+        """A load-only run over a store filled by a run shows that run's schema."""
         expected = _run_schemas(orchestrator)
         db = InMemoryArrowDatabase()
         _ = _job(db).run(orchestrator=ORCHESTRATORS[orchestrator]())
@@ -181,6 +190,7 @@ class TestOneSchemaInEveryState:
     def test_a_join_with_no_input_rows_keeps_its_column_order(
         self, orchestrator: str
     ) -> None:
+        """The join that received no rows has its populated schema, in order."""
         expected = _run_schemas(orchestrator)["joined"]
         job = _load_only_over_an_empty_store(orchestrator)
         assert job.nodes["joined"].as_table(all_info=True).schema.equals(expected)
@@ -195,4 +205,5 @@ def _load_only_over_an_empty_store(orchestrator: str) -> PipelineJob:
 
 
 def _fields_by_name(schema: pa.Schema) -> dict[str, "pa.Field[Any]"]:
+    """The fields of ``schema`` by name, so that their order is not compared."""
     return {field.name: field for field in schema}
