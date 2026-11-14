@@ -2144,6 +2144,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # and prevents spurious recomputation of already-processed data.
             self.get_cached_results(base_entry_ids=base_entry_ids)
 
+            # Base entry ids of the inputs that gave a row (a cache hit or a
+            # successful computation), one per input: the node's rows afterwards.
+            emitted_entry_ids: list[bytes] = []
             for tag, data, base_entry_id in upstream_entries:
                 ctx_obs.on_data_start(node_label, tag, data)
 
@@ -2152,6 +2155,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 ):
                     tag_out, result = self._cached_output_datas[base_entry_id]
                     ctx_obs.on_data_end(node_label, tag, data, result, cached=True)
+                    emitted_entry_ids.append(base_entry_id)
                     if result is not None:
                         output.append((tag_out, result))
                     continue
@@ -2199,6 +2203,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     continue
 
                 ctx_obs.on_data_end(node_label, tag, data, result, cached=False)
+                emitted_entry_ids.append(base_entry_id)
                 if result is not None:
                     output.append((tag_out, result))
                 self._commit_or_end_node(
@@ -2218,7 +2223,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             raise
 
         # The node's rows are those of this run's inputs, whatever else it caches.
-        self._set_run_rows(base_entry_ids)
+        self._set_run_rows(emitted_entry_ids)
         ctx_obs.on_node_end(node_label, node_hash)
         # Mark this node as freshly computed so subsequent iter_data() calls
         # skip the is_stale check and serve results directly from the in-memory cache.
@@ -3553,7 +3558,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
 
                 # Local dict: correlation_key → (original_tag, original_input_data)
                 input_store: dict[bytes, tuple[TagProtocol, DataProtocol, bytes]] = {}
-                # Base entry ids of this run's inputs, in arrival order (ITL-1093).
+                # Base entry ids of this run's inputs that gave a row (a cache hit or a
+                # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
 
                 async def route_inputs() -> None:
@@ -3561,7 +3567,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     try:
                         async for tag, data in input_channel:
                             base_entry_id = self.compute_base_entry_id(tag, data)
-                            run_entry_ids.append(base_entry_id)
                             # A cached EmptyData is a result that is gone (an
                             # ephemeral result from an earlier run): compute the row
                             # again, as the sync path does (ITL-923).
@@ -3578,6 +3583,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
+                                run_entry_ids.append(base_entry_id)
                                 await output.send((cached_tag, cached_data))
                             else:
                                 correlation_key = uuid.uuid4().bytes
@@ -3635,6 +3641,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                         # Commits every commit_every_rows rows inside a job (ITL-919);
                         # no await in between, so no other row interleaves.
                         self._row_processed()
+                        run_entry_ids.append(base_entry_id)
                         await output.send((clean_tag, output_data))
 
                 # Capture outer self so _NodeLabelObserver methods can

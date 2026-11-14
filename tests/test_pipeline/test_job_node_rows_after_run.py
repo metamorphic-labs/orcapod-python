@@ -76,10 +76,12 @@ ORCHESTRATORS = ["sync", "async"]
 
 
 def _source(data: list[dict[str, int]]) -> DictSource:
+    """Return a ``DictSource`` of ``data`` with tags ``g`` and ``k`` and source id ``s``."""
     return DictSource(data, tag_columns=["g", "k"], source_id="s")
 
 
 def _build(data: list[dict[str, int]], db: Any) -> PipelineJob:
+    """Return a job over ``db``: ``rowwise``, ``downstream`` of it, and ``grouped``."""
     job = PipelineJob(name="itl1093", database=db)
     with job:
         rowwise = inc.pod(_source(data), label="rowwise")
@@ -89,6 +91,7 @@ def _build(data: list[dict[str, int]], db: Any) -> PipelineJob:
 
 
 def _orchestrator(kind: str, error_policy: str = "continue") -> Any:
+    """Return the ``sync`` or ``async`` orchestrator with ``error_policy``."""
     if kind == "sync":
         return SyncPipelineOrchestrator(error_policy=error_policy)  # pyright: ignore[reportArgumentType]
     return AsyncPipelineOrchestrator(error_policy=error_policy)  # pyright: ignore[reportArgumentType]
@@ -121,18 +124,22 @@ def _reads(node: Any) -> dict[str, list[tuple[tuple[str, str], ...]]]:
 
 
 def _values(node: Any, key: Callable[[dict[str, Any]], Any]) -> list[Any]:
+    """Return ``key`` of every row of ``node.as_table()``, sorted."""
     return sorted(key(row) for row in node.as_table().to_pylist())
 
 
 def _expected_rowwise(data: list[dict[str, int]]) -> list[tuple[int, int]]:
+    """Return the ``(k, y)`` rows ``rowwise`` gives for ``data``, sorted."""
     return sorted((row["k"], row["x"] + 1) for row in data)
 
 
 def _expected_downstream(data: list[dict[str, int]]) -> list[tuple[int, int]]:
+    """Return the ``(k, z)`` rows ``downstream`` gives for ``data``, sorted."""
     return sorted((row["k"], 2 * (row["x"] + 1)) for row in data)
 
 
 def _expected_grouped(data: list[dict[str, int]]) -> list[tuple[int, int]]:
+    """Return the ``(g, total)`` rows ``grouped`` gives for ``data``, sorted."""
     sums: dict[int, int] = {}
     for row in data:
         sums[row["g"]] = sums.get(row["g"], 0) + row["x"]
@@ -163,6 +170,7 @@ def _check_run(job: PipelineJob, data: list[dict[str, int]]) -> None:
 
 
 def _snapshot(job: PipelineJob) -> dict[str, Any]:
+    """Return every public read of each function node of ``job``."""
     return {
         label: _reads(job.nodes[label])
         for label in ("rowwise", "downstream", "grouped")
@@ -174,6 +182,7 @@ class TestFreshJobPerRun:
 
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_each_run_returns_its_inputs_rows(self, kind: str) -> None:
+        """Every read after each run gives that run's rows; the full run reuses 3."""
         db = InMemoryArrowDatabase()
         for index, data in enumerate(SEQUENCE):
             job = _build(data, db)
@@ -185,6 +194,7 @@ class TestFreshJobPerRun:
                 assert summary.nodes["rowwise"].computed == 3
 
     def test_sync_and_async_agree_row_for_row(self) -> None:
+        """Both orchestrators give equal rows, system tags included, after every run."""
         snapshots: dict[str, list[dict[str, Any]]] = {}
         for kind in ORCHESTRATORS:
             db = InMemoryArrowDatabase()
@@ -197,6 +207,7 @@ class TestFreshJobPerRun:
 
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_node_run_returns_its_inputs_rows(self, kind: str) -> None:
+        """A node's ``run()`` after the job run shows that run's rows."""
         db = InMemoryArrowDatabase()
         for data in SEQUENCE:
             job = _build(data, db)
@@ -212,6 +223,7 @@ class TestSameJobRebound:
 
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_each_run_returns_its_inputs_rows(self, kind: str) -> None:
+        """Every read after each run of the rebound job gives that run's rows."""
         db = InMemoryArrowDatabase()
         job = _build(SEQUENCE[0], db)
         for data in SEQUENCE:
@@ -220,6 +232,7 @@ class TestSameJobRebound:
             _check_run(job, data)
 
     def test_sync_and_async_agree_row_for_row(self) -> None:
+        """Both orchestrators give equal rows after every run of the rebound job."""
         snapshots: dict[str, list[dict[str, Any]]] = {}
         for kind in ORCHESTRATORS:
             db = InMemoryArrowDatabase()
@@ -233,6 +246,7 @@ class TestSameJobRebound:
 
 
 def _single(pod: Any, data: list[dict[str, int]], db: Any) -> PipelineJob:
+    """Return a job over ``db`` applying ``pod`` to a source of ``data`` as ``node``."""
     job = PipelineJob(name="itl1093_single", database=db)
     with job:
         pod(_source(data), label="node")
@@ -244,6 +258,7 @@ class TestNullAndInactive:
 
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_null_value_is_a_row(self, kind: str) -> None:
+        """A row whose output value is null is one of the run's rows."""
         db = InMemoryArrowDatabase()
         _single(null_on_10.pod, ROWS, db).run(orchestrator=_orchestrator(kind))
         job = _single(null_on_10.pod, ROWS[:3], db)
@@ -256,8 +271,11 @@ class TestNullAndInactive:
 
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_inactive_function_gives_no_rows(self, kind: str) -> None:
+        """A run of an inactive function has no rows, though other results are stored."""
+
         @function_pod(output_keys="y")
         def add_one(x: int) -> int:
+            """Return ``x + 1``."""
             return x + 1
 
         db = InMemoryArrowDatabase()
@@ -286,6 +304,7 @@ class TestRaisedRun:
         ],
     )
     def test_raised_run_reads_as_no_run(self, kind: str, fn: Any, policy: str) -> None:
+        """After a run that raised, the node reads every stored row, as with no run."""
         db = InMemoryArrowDatabase()
         # Store the results of rows 3..5 first, then run rows 0..3, which fails at x=20.
         _single(fn.pod, ROWS[3:], db).run(orchestrator=_orchestrator(kind))
@@ -310,7 +329,8 @@ class TestDuplicateInputs:
     """
 
     @staticmethod
-    def _node() -> Any:
+    def _node(pod: Any) -> Any:
+        """Return a node applying ``pod`` to rows (k=0, x=5) twice and (k=2, x=7)."""
         import pyarrow as pa
 
         from orcapod.core.nodes import FunctionJobNode
@@ -327,27 +347,36 @@ class TestDuplicateInputs:
             schema=schema,
         )
         return FunctionJobNode(
-            inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+            pod,
             ArrowTableStream(table, tag_columns=["k"]),
             pipeline_database=InMemoryArrowDatabase(),
             result_database=InMemoryArrowDatabase(),
         )
 
-    def test_sync(self) -> None:
-        node = self._node()
-        view = node.run()
-        held = sorted((r["k"], r["y"]) for r in node.as_table().to_pylist())
-        assert held == [(0, 6), (0, 6), (2, 8)]
-        assert sorted((r["k"], r["y"]) for r in view.as_table().to_pylist()) == held
+    @staticmethod
+    def _flaky_pod() -> Any:
+        """Return a pod computing ``x + 1`` whose first call for ``x == 5`` raises."""
+        calls: list[int] = []
 
-    def test_async(self) -> None:
+        @function_pod(output_keys="y")
+        def flaky_inc(x: int) -> int:
+            """Return ``x + 1``; raise on the first call for ``x == 5``."""
+            calls.append(x)
+            if x == 5 and calls.count(5) == 1:
+                raise ValueError("transient failure")
+            return x + 1
+
+        return flaky_inc.pod
+
+    @staticmethod
+    def _run_async(node: Any) -> list[tuple[int, int]]:
+        """Run ``node`` with ``async_execute`` over its upstream; return the rows sent."""
         import asyncio
 
         from orcapod.channels import Channel
 
-        node = self._node()
-
         async def run() -> list[tuple[int, int]]:
+            """Feed the upstream's rows in and collect what the node sends out."""
             inputs = Channel(buffer_size=16)
             outputs = Channel(buffer_size=16)
             # The input stream is the node's own upstream (a test of async_execute).
@@ -361,6 +390,42 @@ class TestDuplicateInputs:
             ]
             return sorted(got)
 
-        received = asyncio.run(run())
+        return asyncio.run(run())
+
+    @staticmethod
+    def _held(node: Any) -> list[tuple[int, int]]:
+        """Return the node's ``(k, y)`` rows, sorted."""
+        return sorted((r["k"], r["y"]) for r in node.as_table().to_pylist())
+
+    def test_sync(self) -> None:
+        """Sync: both equal inputs are held, as the run returned them."""
+        node = self._node(inc.pod)
+        view = node.run()
+        assert self._held(node) == [(0, 6), (0, 6), (2, 8)]
+        assert sorted((r["k"], r["y"]) for r in view.as_table().to_pylist()) == (
+            self._held(node)
+        )
+
+    def test_async(self) -> None:
+        """Async: both equal inputs are held, as they were sent downstream."""
+        node = self._node(inc.pod)
+        received = self._run_async(node)
         assert received == [(0, 6), (0, 6), (2, 8)]
-        assert sorted((r["k"], r["y"]) for r in node.as_table().to_pylist()) == received
+        assert self._held(node) == received
+
+    def test_sync_one_of_two_equal_inputs_fails(self) -> None:
+        """Sync: an equal input that failed is not held; the one that succeeded is."""
+        node = self._node(self._flaky_pod())
+        received = sorted(
+            (tag.as_dict()["k"], data.as_dict()["y"])
+            for tag, data in node.execute(node.upstreams[0])
+        )
+        assert received == [(0, 6), (2, 8)]
+        assert self._held(node) == received
+
+    def test_async_one_of_two_equal_inputs_fails(self) -> None:
+        """Async: an equal input that failed is not held; the one that succeeded is."""
+        node = self._node(self._flaky_pod())
+        received = self._run_async(node)
+        assert received == [(0, 6), (2, 8)]
+        assert self._held(node) == received
