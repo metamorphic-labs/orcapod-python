@@ -22,10 +22,10 @@ from orcapod.core.streams.base import (
     check_head_size,
     typed_zero_row_table,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     SIDE_EFFECTS_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
@@ -165,13 +165,29 @@ class SideEffectPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return no rows: showing this stream must never deliver its side effects."""
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._head_without_rows(
-            config, HeadStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+            config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
         )
+
+    # The rows a run() view shows were passed on while delivering, not computed.
+    _RUN_ORIGIN: str = "delivered"
+
+    def run(self) -> StreamView:
+        """Deliver the side effects for every row and return a ``StreamView`` of the rows.
+
+        Does exactly what ``as_table()`` does: every call delivers every side effect
+        again (no invocation log is written), because the stream keeps no rows. The view holds the rows that call
+        passed on. ``head()`` and the notebook preview never deliver, so they keep showing
+        no rows.
+
+        Returns:
+            A ``StreamView`` of the rows this call delivered for.
+        """
+        return super().run()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         for tag, data in self._input_stream.iter_data():
@@ -854,13 +870,29 @@ class SideEffectNode(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return no rows: showing this stream must never deliver its side effects."""
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._head_without_rows(
-            config, HeadStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+            config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
         )
+
+    # The rows a run() view shows were passed on while delivering, not computed.
+    _RUN_ORIGIN: str = "delivered"
+
+    def run(self) -> StreamView:
+        """Deliver the side effects for every row and return a ``StreamView`` of the rows.
+
+        Does exactly what ``as_table()`` does: every call delivers every side effect
+        again, standalone, with no invocation log, also on a ``SideEffectJobNode`` (a job run logs its deliveries through ``execute``), because the stream keeps no rows. The view holds the rows that call
+        passed on. ``head()`` and the notebook preview never deliver, so they keep showing
+        no rows.
+
+        Returns:
+            A ``StreamView`` of the rows this call delivered for.
+        """
+        return super().run()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Standalone iteration — executes delivery with no DB logging."""

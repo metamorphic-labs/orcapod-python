@@ -14,7 +14,7 @@ from orcapod.core.function_pod import (
     WrappedFunctionPod,
     function_zero_row_table,
 )
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.view import StreamView
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.contexts.stored import StaleTables
@@ -483,7 +483,7 @@ class _CachedFunctionPodStream(FunctionPodStream):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first computed rows, with the columns ``as_table`` gives.
 
         The pod's result store is not looked up: that needs the input rows' hashes,

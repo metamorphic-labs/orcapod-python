@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import StreamBase, typed_zero_row_table
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
@@ -168,6 +168,9 @@ class RootSource(StreamBase):
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
 
+    # A source's rows are its own, not computed: a run() view says "all N rows".
+    _RUN_ORIGIN: str = "held"
+
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """The source's zero-row table, from the stream it holds; see ``typed_zero_row_table``.
 
@@ -193,7 +196,7 @@ class RootSource(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first ``n`` rows of the table the source holds, without computing.
 
         A source that reads its table when it is built holds it in memory, so this is a

@@ -21,11 +21,11 @@ from orcapod.core.streams.base import (
     schema_requires_io,
     typed_zero_row_table,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     STALE_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import StoreError, TypeIdentityError
@@ -1466,7 +1466,7 @@ class FunctionPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first rows already computed; never calls the function.
 
         After a complete computation (``as_table``, or iteration to the end) the rows are
@@ -1489,7 +1489,7 @@ class FunctionPodStream(StreamBase):
         )
         if has_results and self.is_stale:
             return self._head_without_rows(
-                config, HeadStatus.NOT_COMPUTED, note=STALE_NOTE
+                config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
         if has_results and schema_requires_io(self, config):
             # The input gave no rows, so its columns are still known only by polling
@@ -1500,9 +1500,9 @@ class FunctionPodStream(StreamBase):
                 and self._cached_input_iterator is None
             )
             return dataclasses.replace(
-                StreamHead.without_rows(
+                StreamView.without_rows(
                     self,
-                    HeadStatus.ROWS if finished else HeadStatus.PARTIAL,
+                    ViewStatus.ROWS if finished else ViewStatus.PARTIAL,
                     pa.table({}),
                     tag_columns=(),
                     note=SCHEMA_NEEDS_POLL_NOTE,
@@ -1523,7 +1523,7 @@ class FunctionPodStream(StreamBase):
                     type=pa.large_string(),
                 )
 
-            return StreamHead.of_rows(
+            return StreamView.of_rows(
                 self,
                 self._shape_table(
                     self._cached_output_table
@@ -1542,9 +1542,9 @@ class FunctionPodStream(StreamBase):
             and self._cached_input_iterator is None
         )
         if not finished and not self._cached_output_datas:
-            return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+            return self._head_without_rows(config, ViewStatus.NOT_COMPUTED)
         shown, total = self._computed_prefix(wanted, contiguous=not config.sort_by_tags)
-        status = HeadStatus.ROWS if finished else HeadStatus.PARTIAL
+        status = ViewStatus.ROWS if finished else ViewStatus.PARTIAL
         if not shown:
             # Nothing to show (an empty result, inputs that all gave no output so far,
             # or n == 0): the declared columns.
@@ -1553,7 +1553,7 @@ class FunctionPodStream(StreamBase):
                 config,
                 lambda: pa.array([], type=pa.large_string()),
             )
-            return StreamHead.of_rows(
+            return StreamView.of_rows(
                 self,
                 table,
                 tag_columns=tag_columns,
@@ -1561,7 +1561,7 @@ class FunctionPodStream(StreamBase):
                 status=status,
                 origin="computed",
             )
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             self._shape_table(
                 self._table_from_pairs(shown),
