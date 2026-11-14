@@ -230,7 +230,7 @@ def test_saved_job_equals_the_uncached_pods_and_loads(
     # Fields that differ between any two saves: the run id and the store's location.
     for doc in (plain_saved, cached_saved):
         doc["run"].pop("run_id")
-        doc["bindings"].pop("store")
+        doc["bindings"].pop("database")
     assert cached_saved == plain_saved
 
     # A loaded job reads its stored results; the pod cache is not part of it.

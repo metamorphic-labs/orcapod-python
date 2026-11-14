@@ -693,13 +693,66 @@ class TestPipelineJobSerialization:
         data = json.loads(path.read_text())
         assert data["orcapod_pipeline_job_version"] == "0.1.0"
         assert "orcapod_version" not in data
-        loaded = PipelineJob.load(str(path))
+        # The file keeps the pre-ITL-1082 key ``bindings.store``: it loads with an
+        # explicit database (the saved block is ignored).
+        loaded = PipelineJob.load(str(path), database=InMemoryArrowDatabase())
         # Hashes recomputed on load equal the ones the 0.1.0 writer stored.
         stored = {n["label"]: n for n in data["pipeline"]["nodes"].values()}
         assert set(loaded.pipeline.nodes) == set(stored)
         for label, node in loaded.pipeline.nodes.items():
             assert node.content_hash().to_string() == stored[label]["content_hash"]
             assert node.pipeline_hash().to_string() == stored[label]["pipeline_hash"]
+
+    def test_saved_file_names_the_database_under_bindings_database(
+        self, store, tmp_path
+    ):
+        """save() writes the database config as ``bindings.database``; load() reads it."""
+        src_a, src_b = _make_two_sources()
+        job = PipelineJob(database=store)
+        with job:
+            Join()(src_a, src_b)
+        path = tmp_path / "job.json"
+        job.save(str(path))
+        bindings = json.loads(path.read_text())["bindings"]
+        assert "store" not in bindings
+        assert bindings["database"] == store.to_config()
+        loaded = PipelineJob.load(str(path))
+        assert loaded.database is not None
+        assert loaded.database.to_config() == store.to_config()
+
+    def _file_with_old_key(self, store, tmp_path) -> Path:
+        """A saved job whose database block sits under the pre-rename key."""
+        src_a, src_b = _make_two_sources()
+        job = PipelineJob(database=store)
+        with job:
+            Join()(src_a, src_b)
+        path = tmp_path / "old.json"
+        job.save(str(path))
+        data = json.loads(path.read_text())
+        data["bindings"]["store"] = data["bindings"].pop("database")
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_file_with_the_old_store_key_raises_without_a_database(
+        self, store, tmp_path
+    ):
+        """No silent load without the database, no fallback read of the old key."""
+        path = self._file_with_old_key(store, tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            PipelineJob.load(str(path))
+        message = str(excinfo.value)
+        assert "bindings.store" in message
+        assert "bindings.database" in message
+        assert "saved before the rename" in message
+        assert "database=" in message
+
+    def test_file_with_the_old_store_key_loads_with_an_explicit_database(
+        self, store, tmp_path
+    ):
+        """An explicit database overrides the saved block, so the old key is moot."""
+        path = self._file_with_old_key(store, tmp_path)
+        loaded = PipelineJob.load(str(path), database=store)
+        assert loaded.database is store
 
     @pytest.mark.parametrize("version", ["9.9.9", "0.3.0", ""])
     def test_unknown_job_format_version_is_rejected(self, store, tmp_path, version):

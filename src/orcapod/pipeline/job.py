@@ -1325,10 +1325,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             else:
                 sources_block[spec_name] = {"source_type": "unknown"}
 
-        # Store config (best-effort)
-        store_block = None
+        # Database config (best-effort)
+        database_block = None
         if self._database is not None and hasattr(self._database, "to_config"):
-            store_block = self._database.to_config()
+            database_block = self._database.to_config()
 
         if not self._has_run:
             status = "pending"
@@ -1380,9 +1380,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             "pipeline": pipeline_data,
             "bindings": {
                 "sources": sources_block,
-                # ITL-1082: saved-file key, left as "store" pending a developer decision
-                # (read in load(); change both together).
-                "store": store_block,
+                "database": database_block,
             },
         }
 
@@ -1420,7 +1418,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             A read-only ``PipelineJob`` whose nodes serve their stored results.
 
         Raises:
-            ValueError: If the file's format version is unsupported.
+            ValueError: If the file's format version is unsupported, or if it was
+                saved before the database key was renamed (``bindings.store``
+                instead of ``bindings.database``) and no ``database`` is given.
+                An explicit ``database`` makes the saved block irrelevant, so
+                such a file then loads.
         """
         import json as _json
         import os
@@ -1492,8 +1494,18 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Reconstruct database
         effective_database = database
         if effective_database is None:
-            # ITL-1082: saved-file key, see save().
-            store_config = data.get("bindings", {}).get("store")
+            bindings = data.get("bindings", {})
+            if bindings.get("store") and "database" not in bindings:
+                # A file saved before ITL-1082 renamed the key. It is not read under
+                # the old name: the job would load without its database, silently.
+                raise ValueError(
+                    f"{path} names its database under the key 'bindings.store', "
+                    "which was renamed 'bindings.database' (ITL-1082); the file was "
+                    "saved before the rename. Load it with an explicit database: "
+                    "PipelineJob.load(path, database=...), or rewrite the key as "
+                    "'bindings.database' and save it again."
+                )
+            store_config = bindings.get("database")
             if store_config:
                 try:
                     from orcapod.pipeline.serialization import (

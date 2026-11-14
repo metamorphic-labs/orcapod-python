@@ -662,7 +662,7 @@ def test_loaded_function_node_without_store_says_how_to_attach_one(
 
     def drop_store(data: dict[str, Any]) -> None:
         """Remove the saved store configuration."""
-        data["bindings"]["store"] = None
+        data["bindings"]["database"] = None
 
     job = PipelineJob.load(_rewrite_job_file(saved, tmp_path, drop_store))
     node = job.nodes["dbl"]
@@ -685,7 +685,7 @@ def test_binding_a_store_makes_a_storeless_loaded_node_readable(
 
     def drop_store(data: dict[str, Any]) -> None:
         """Remove the saved store configuration."""
-        data["bindings"]["store"] = None
+        data["bindings"]["database"] = None
 
     job = PipelineJob.load(_rewrite_job_file(saved, tmp_path, drop_store))
     job.bind(database=DeltaTableDatabase(str(saved / "store")))
@@ -756,7 +756,7 @@ def test_loaded_job_without_a_store_cannot_run(
 
     def drop_store(data: dict[str, Any]) -> None:
         """Remove the saved store configuration."""
-        data["bindings"]["store"] = None
+        data["bindings"]["database"] = None
 
     job = PipelineJob.load(_rewrite_job_file(saved, tmp_path, drop_store))
     with pytest.raises(RuntimeError, match="cannot execute a loaded job"):
@@ -877,7 +877,7 @@ def test_unreconstructable_store_is_a_warning_with_the_remedy(
 
     def break_store(data: dict[str, Any]) -> None:
         """Replace the store configuration with an unknown type."""
-        data["bindings"]["store"] = {"type": "no_such_store_type"}
+        data["bindings"]["database"] = {"type": "no_such_store_type"}
 
     caplog.set_level(logging.INFO, logger="orcapod.pipeline.job")
     _ = PipelineJob.load(_rewrite_job_file(saved, tmp_path, break_store))
