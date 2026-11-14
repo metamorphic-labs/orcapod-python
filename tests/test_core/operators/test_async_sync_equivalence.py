@@ -1546,8 +1546,62 @@ def test_map_data_does_not_rename_a_meta_column_into_data() -> None:
         for _, data in rows:
             assert "renamed" not in data.keys()
     assert_equivalent(expected, actual)
-    _, predicted = MapData({"__m_i8": "renamed"}).output_schema(source)
-    assert "renamed" not in predicted
+    op = MapData({"__m_i8": "renamed"})
+    predicted = op.output_schema(source)
+    assert "renamed" not in predicted[1]
+    # Non-public on purpose: a prediction is verified against the static result.
+    assert predicted == op.static_process(source).output_schema()
+
+
+def test_map_data_meta_source_does_not_collide() -> None:
+    """A meta source is not a rename source, so it cannot collide with a data column."""
+    source = _with_meta(source_b(nested=False), _meta_columns("m", 3))
+    op = MapData({"__m_i8": "i32", "u8": "v8"})
+    expected = sync_rows(op, source)
+    actual = async_rows(MapData({"__m_i8": "i32", "u8": "v8"}), source)
+    for _, data in expected:
+        assert set(data.keys()) == {"i32", "v8", "f32", "ls"}
+    assert_equivalent(expected, actual)
+
+
+@pytest.mark.parametrize(
+    "name_map",
+    [{"absent": "a"}, {"__m_i8": "renamed"}],
+    ids=["absent_source", "meta_source"],
+)
+def test_map_data_dropping_every_data_column_raises_alike(
+    name_map: dict[str, str],
+) -> None:
+    """``drop_unmapped`` with no applicable source would leave no data column.
+
+    Before, both paths kept every data column while the prediction listed none.
+    """
+    source = _with_meta(source_b(nested=False), _meta_columns("m", 3))
+    with pytest.raises(InputValidationError, match="no data column") as sync_error:
+        _ = MapData(name_map, drop_unmapped=True)(source)
+    with pytest.raises(InputValidationError, match="no data column") as async_error:
+        _ = async_rows(MapData(name_map, drop_unmapped=True), source)
+    assert str(async_error.value) == str(sync_error.value)
+
+
+def test_map_tags_dropping_every_tag_agrees_on_both_paths() -> None:
+    """``MapTags`` with ``drop_unmapped`` and no applicable source drops every tag.
+
+    A stream may have no tags, so this is not an error. Before, the async path kept
+    every tag while the sync path and the prediction dropped them.
+    """
+    source = source_a()
+    op = MapTags({"absent": "a"}, drop_unmapped=True)
+    expected = sync_rows(op, source)
+    actual = async_rows(MapTags({"absent": "a"}, drop_unmapped=True), source)
+    assert op.output_schema(source)[0] == {}
+    for rows in (expected, actual):
+        assert len(rows) == 3
+        for tag, _ in rows:
+            assert tag.keys() == ()
+    for (tag, data), (sync_tag, sync_data) in zip(actual, expected):
+        assert data.content_hash() == sync_data.content_hash()
+        assert list(tag.system_tags().items()) == list(sync_tag.system_tags().items())
 
 
 def test_map_data_refuses_a_meta_named_target() -> None:

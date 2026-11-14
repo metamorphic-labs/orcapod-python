@@ -35,7 +35,7 @@ def _canonical_columns(columns: str | Collection[str]) -> tuple[str, ...]:
     return tuple(sorted(set(columns)))
 
 
-def _require_a_data_column(remaining: Collection[str]) -> None:
+def require_a_data_column(remaining: Collection[str]) -> None:
     """Refuse a selection whose result would have no data column.
 
     A stream needs at least one data column (``ArrowTableStream`` refuses a table
@@ -240,7 +240,7 @@ class SelectDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to select are present or use strict=False to ignore missing columns"
             )
-        _require_a_data_column([c for c in data_columns if c in columns_to_select])
+        require_a_data_column([c for c in data_columns if c in columns_to_select])
 
     def unary_output_schema(
         self,
@@ -292,7 +292,7 @@ class SelectDataColumns(UnaryOperator):
                                 f"specified columns to select are present or use "
                                 f"strict=False to ignore missing columns"
                             )
-                    _require_a_data_column([c for c in pkt_keys if c in self.columns])
+                    require_a_data_column([c for c in pkt_keys if c in self.columns])
                     pkts_to_drop = [c for c in pkt_keys if c not in self.columns]
                 if not pkts_to_drop:
                     await output.send((tag, data))
@@ -500,7 +500,7 @@ class DropDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to drop are present or use strict=False to ignore missing columns"
             )
-        _require_a_data_column([c for c in data_columns if c not in self.columns])
+        require_a_data_column([c for c in data_columns if c not in self.columns])
 
     def unary_output_schema(
         self,
@@ -549,7 +549,7 @@ class DropDataColumns(UnaryOperator):
                                 f"specified columns to drop are present or use "
                                 f"strict=False to ignore missing columns"
                             )
-                    _require_a_data_column(
+                    require_a_data_column(
                         [c for c in pkt_keys if c not in self.columns]
                     )
                     effective_drops = (
