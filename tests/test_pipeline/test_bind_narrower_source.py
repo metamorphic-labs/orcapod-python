@@ -423,7 +423,11 @@ def _abc_job(a_type: Any) -> PipelineJob:
 
 @pytest.mark.parametrize("a_type", [int, int | None], ids=["equal", "narrower"])
 def test_columns_follow_the_declared_order(a_type: Any) -> None:
-    """A source with its columns in another order gives them in the declared order."""
+    """A source with its columns in another order is shown in the declared order.
+
+    A convenience, not part of the bind invariant: column order is not (developer,
+    November 14, 2026).
+    """
     job = _abc_job(a_type)
     job.bind(
         sources={

@@ -754,6 +754,20 @@ side when its inputs' types disagree; a result's type never depends on data valu
 order or the path the data took; and inferring a type from Python values is a last resort for
 when no type is known.
 
+Large variants everywhere (developer, November 14, 2026, ITL-1122): every column of every table
+Orcapod presents or stores has its string, binary and list types in their large variants
+(`large_string`, `large_binary`, `large_list`, recursively), for every supported Arrow type, with
+no exception: a user's own Arrow table (`ArrowTableSource`, a raw `ArrowTableStream`) and an
+explicit Arrow `schema=` / `data_schema=` are normalized too. The one place is
+`ArrowTableStream.__init__` (`arrow_utils.normalize_table_to_large_types(table, keep_null=True)`),
+where every source and every operator result becomes a stream; never add a per-source or
+per-operator normalization. Names, nullability (top level and nested), field metadata, widths and
+logical (extension) types are untouched, and large and non-large variants hash identically, so no
+hash or default source id moves. Not covered: what is inside a library value (numpy, pandas,
+polars, torch) keeps its library's own distinction. `list_view` and `large_list_view` are not
+supported: a source refuses them (the Arrow hasher cannot hash them) and a raw `ArrowTableStream`
+holds them as given (ITL-1129).
+
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
 for consistency). Infer an Arrow type from Python values only when no Arrow type is known, and
@@ -777,6 +791,15 @@ data. The rules:
   rows is built in one place, `StreamBase._head_without_rows`, from the stream's
   `_zero_row_table(config)`, which equals `as_table(columns=config)` with no rows; a kind
   whose `as_table` shapes its table its own way overrides `_zero_row_table` with that shaping.
+  The zero-row table has the populated table's columns in the populated order too (ITL-1131).
+  A table built from rows (and a node's or operator input's table with no rows) is in row
+  order, user tags, system tags, data, source info, stated once in
+  `StaticOutputOperatorPod._in_row_order`; a node that keeps a run with no rows keeps
+  `_zero_rows_in_row_order`, and an operator's own empty result built from its input
+  goes through `_as_row_built_table`. An operator node keeps and stores the row order on every
+  path (`_kept_output`: a job run, sync or async, and `node.run()` on its own; ITL-1133),
+  and reads a stored operator cache in row order (`_in_row_order_on_read`). Never change
+  the order of any other populated table: stored tables depend on it.
 - **Type strictness** (developer, November 10, 2026): Orcapod is type strict. It never
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on
@@ -798,6 +821,9 @@ data. The rules:
   operator that round-trips through Polars casts its columns back
   to the normalized input types (`arrow_utils.restore_column_types`, or
   `restore_schema_nullability` when nullability is restored too).
+  This holds for every operator, also one that passes its rows through unchanged (select,
+  map, a no-op filter, `Join`, `SemiJoin`), on a plain stream as inside a job: its result
+  is an `ArrowTableStream` (ITL-1122).
 - List columns built by `Batch`, `GroupBy` and `MergeJoin` are typed by
   `arrow_utils.aggregated_list_type` (directly or through `build_aggregated_table`):
   `large_list<normalized T>`, or for a logical `T` the logical list type from the type converter
@@ -834,17 +860,20 @@ data. The rules:
 - `ArrowTableSource.__init__` raises `ValueError` if any `tag_columns` are not in the table.
 - The pipeline determines every node's schema; a bound source never changes it (developer,
   November 14, 2026, ITL-1112). No accepted bind changes any node's stored path or the
-  schema of any node's or stored table (column names with system tags, types, nullable
-  flags, order); only values differ. `SourceNodeBase.validate` is the one check, used by
+  columns of any node's or stored table (names, tag or data roles, types, nullable flags,
+  system-tag column names); only values differ. Column order is not part of it: matching a
+  source to a slot, columns match by name within the tag group and within the data group,
+  and their order never decides acceptance (developer, November 14, 2026). Do not reorder
+  columns without a reason. `SourceNodeBase.validate` is the one check, used by
   `PipelineJob.bind`, the `bound_source` setter (and `SourceJobNode.__init__`) and
   `PipelineJob.load`: per column the declared Python type (structural classes of one identity
   are one type, `equivalent_hints`), or `T` where the slot declares `T | None`; and exactly
   one source-id (`str`) and one record-id (`bytes`) system-tag column, no other. Anything
   else raises `SourceSpecMismatchError` before anything is bound. The
   source's rows are given as the declared schema at one place, `_DeclaredForm` (nullable
-  fields over the same arrays; the declared column order; the system-tag column NAMES of the
-  declared schema hash, taken from the source's own pair by prefix, the VALUES the source's
-  own). Limits: the check compares Python types, so a difference in Arrow width only
+  fields over the same arrays; the system-tag column NAMES of the declared schema hash,
+  taken from the source's own pair by prefix, the VALUES the source's own; as a stable
+  convenience, not a guarantee, the declared column order, source id before record id). Limits: the check compares Python types, so a difference in Arrow width only
   (`int32` against `int64`) is not yet refused (ITL-949). A source whose system-tag columns
   are not exactly one source-id and one record-id column (a joined or merged stream, a raw
   stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);
@@ -936,7 +965,7 @@ data. The rules:
   nullability (`T` against `T | None`), because a null key matches nothing (developer,
   November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it
   `T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output is the left
-  input's schema as it is. The rule is `core/operators/key_nullability.py`
+  input's schema as it is (its nullability; types in their large variants, ITL-1122). The rule is `core/operators/key_nullability.py`
   (`reconcile_key_nullability` on tag schemas before they are combined, `key_nullable` for the
   Arrow field flag, set by re-wrapping arrays, never by a cast). Equal nullability takes the
   unchanged path; any other type difference, and every data column, behaves as before.
