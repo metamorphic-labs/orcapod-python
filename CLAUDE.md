@@ -296,6 +296,15 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
   identifier is the container kind plus the element's identifier; the type hash treats them
   like any generic alias (origin and arguments). A change to how they are stored or hashed is
   a data context (global hash version) change, not a logical type change.
+- `set[T]` of a primitive is a native container too (developer, November 14, 2026, ITL-611):
+  `ListLogicalType` over an `ArrowElement`, extension name `set[<large Arrow type text>]`
+  (`set[int64]`), metadata `{"category": "set", "element_arrow_type": "int64"}`, elements in
+  the canonical set order (`sort_set_elements`). `list[T]` of a primitive stays a plain
+  `large_list`: never wrap it. Inside a dict value or tuple field a set of a primitive keeps
+  its plain storage (Arrow has no extension type in a struct field). A container's elements
+  are value-hashed only when its innermost element is a logical type. A saved schema rebuilds
+  an unregistered native container from its identifier (`serialization.parse_arrow_type_string`).
+  `frozenset[T]` is refused (ITL-1140).
 - On read, stored metadata must be one of the type's `readable_extension_metadata()`;
   otherwise raise `LogicalTypeIdentifierError`. Never wrap a stored column by name alone and
   never fall back to the storage type. List an older value in `also_reads` only when the
