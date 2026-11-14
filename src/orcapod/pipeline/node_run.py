@@ -282,7 +282,9 @@ def run_with_dependencies(
     run and its rows feed the nodes after it, a stream outside the job is read, every
     other node runs once, in dependency order, on the ``SyncPipelineOrchestrator``
     (error policy ``"continue"``). The run ends with a commit of every store it wrote
-    to, also, best-effort, when it fails.
+    to, also, best-effort, when it fails; a load-only run commits nothing (it writes
+    nothing, and pending writes of others stay pending). A run that raises leaves no
+    node it ran holding rows.
 
     Args:
         target: The job node whose ``run()`` this is.
@@ -328,10 +330,16 @@ def run_with_dependencies(
             plan.dag, observer=counter, load_only=load_only, held_rows=plan.held_rows
         )
     except Exception as run_error:
-        # Commit the writes that succeeded before the failure, as job.run() does.
-        flush_best_effort(run_error, *stores)
+        if not load_only:
+            # Commit the writes that succeeded before the failure, as job.run() does;
+            # a load-only run writes nothing, so it commits nothing (ITL-1095).
+            flush_best_effort(run_error, *stores)
+        # A run that raised leaves no node it ran holding rows: whether their writes
+        # were committed is unknown.
+        clear_run_rows(plan.to_run)
         raise
-    commit_run(stores, plan.to_run)
+    if not load_only:
+        commit_run(stores, plan.to_run)
     return RunSummary(
         _job_name(target),
         run_node_summaries(graph, counter, held=plan.held_counts),

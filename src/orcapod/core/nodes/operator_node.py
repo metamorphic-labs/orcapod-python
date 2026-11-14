@@ -17,6 +17,7 @@ directly from ``OperatorNodeBase``, neither from the other.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import sys
 import logging
 from abc import abstractmethod
@@ -34,6 +35,7 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.view import (
     JOB_NODE_NOT_RUN_NOTE,
+    LOADED_ONLY_OPERATOR_NOTE,
     STALE_NOTE,
     BLUEPRINT_NOTE,
     ViewStatus,
@@ -1402,43 +1404,48 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         obs = observer if observer is not None else NoOpObserver()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
-        ctx_obs.on_node_start(node_label, node_hash)
+        try:
+            ctx_obs.on_node_start(node_label, node_hash)
 
-        self._run_load_only = load_only
-        # Check REPLAY cache first
-        cached_output = self.get_cached_output()
-        if cached_output is not None:
-            output = list(cached_output.iter_data())
+            self._run_load_only = load_only
+            # Check REPLAY cache first
+            cached_output = self.get_cached_output()
+            if cached_output is not None:
+                output = list(cached_output.iter_data())
+                ctx_obs.on_node_end(node_label, node_hash)
+                return output
+
+            # Compute
+            result_stream = self._operator.process(*input_streams)
+
+            # Materialize
+            output = list(result_stream.iter_data())
+
+            # Cache
+            if output:
+                self._cached_output_stream = (
+                    StaticOutputOperatorPod._materialize_to_stream(output)
+                )
+            else:
+                self._cached_output_stream = result_stream
+
+            self._update_modified_time()
+
+            # Persist to DB only in LOG mode, and never in a load-only run.
+            if (
+                not load_only
+                and self._pipeline_database is not None
+                and self._cache_mode == CacheMode.LOG
+                and self._cached_output_stream is not None
+            ):
+                self._store_output_stream(self._cached_output_stream)
+
             ctx_obs.on_node_end(node_label, node_hash)
             return output
-
-        # Compute
-        result_stream = self._operator.process(*input_streams)
-
-        # Materialize
-        output = list(result_stream.iter_data())
-
-        # Cache
-        if output:
-            self._cached_output_stream = StaticOutputOperatorPod._materialize_to_stream(
-                output
-            )
-        else:
-            self._cached_output_stream = result_stream
-
-        self._update_modified_time()
-
-        # Persist to DB only in LOG mode, and never in a load-only run.
-        if (
-            not load_only
-            and self._pipeline_database is not None
-            and self._cache_mode == CacheMode.LOG
-            and self._cached_output_stream is not None
-        ):
-            self._store_output_stream(self._cached_output_stream)
-
-        ctx_obs.on_node_end(node_label, node_hash)
-        return output
+        except BaseException:
+            # A run that raised (its store write or an observer included) defines no rows.
+            self.clear_cache()
+            raise
 
     def _compute_and_store(self, *, store: bool = True) -> None:
         """Compute operator output, optionally store in DB.
@@ -1545,24 +1552,36 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             return self._run_view(computed=False)
         if self._loaded:
             raise self._cannot_compute_error()
-        if self.is_stale:
+        if self.is_stale or not self._holds_run(load_only=load_only):
+            # Stale, or a load-only run's output asked for by a full run: run again.
             self.clear_cache()
 
         computed = False
         if self._cached_output_stream is None:
-            if self._pipeline_database is not None:
-                if self._cache_mode == CacheMode.REPLAY:
-                    self._replay_from_cache()
+            try:
+                if self._pipeline_database is not None:
+                    if self._cache_mode == CacheMode.REPLAY:
+                        self._replay_from_cache()
+                    else:
+                        self._compute_and_store(store=not load_only)
+                        computed = True
+                        if self._cache_mode == CacheMode.LOG and not load_only:
+                            # Committed before run() returns, as at the end of a job
+                            # run.
+                            from orcapod.pipeline.node_run import commit_run
+
+                            commit_run([self._pipeline_database], [self])
+                    self._run_load_only = load_only
                 else:
-                    self._compute_and_store(store=not load_only)
+                    self._cached_output_stream = self._operator.process(
+                        *self._input_streams,
+                    )
+                    self._update_modified_time()
                     computed = True
-                self._run_load_only = load_only
-            else:
-                self._cached_output_stream = self._operator.process(
-                    *self._input_streams,
-                )
-                self._update_modified_time()
-                computed = True
+            except BaseException:
+                # A run that raised defines no rows.
+                self.clear_cache()
+                raise
         return self._run_view(computed=computed)
 
     def _run_view(self, *, computed: bool) -> StreamView:
@@ -1585,7 +1604,12 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         # computation, plain rows when replayed from the store or kept by execute().
         kept = self._cached_output_stream
         origin = "computed" if kept is None else head_of(kept.head(1), self).origin
-        return self._view_of_rows(table, origin)
+        view = self._view_of_rows(table, origin)
+        if self._run_load_only:
+            return dataclasses.replace(
+                view, status=ViewStatus.LOADED_ONLY, note=LOADED_ONLY_OPERATOR_NOTE
+            )
+        return view
 
     # Whether the output the node holds came from a load-only run (ITL-1095): its
     # input may lack rows, so a full run does not take it as complete.
@@ -1638,9 +1662,18 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         current = self._current_output()
         if current is not None:
             return current.as_table(columns=columns, all_info=all_info)
-        # Requires a live operator for schema derivation (pre-existing limitation).
         if self._operator is None:
-            return pa.table({})
+            # A node rebuilt without its operator: the columns of its saved schema.
+            tag_schema, data_schema = self.output_schema()
+            empty = pa.Table.from_pylist(
+                [],
+                schema=self.data_context.type_converter.python_schema_to_arrow_schema(
+                    tag_schema + data_schema
+                ),
+            )
+            return ArrowTableStream(
+                empty, tag_columns=tuple(tag_schema), data_context=self.data_context
+            ).as_table(columns=columns, all_info=all_info)
         empty_stream = ArrowTableStream(
             self._make_empty_table(),
             tag_columns=self.keys()[0],
@@ -1673,7 +1706,13 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             return self._head_without_rows(
                 config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        return head_of(self._cached_output_stream.head(n, columns=config), self)
+        head = head_of(self._cached_output_stream.head(n, columns=config), self)
+        if self._run_load_only:
+            # Output of a load-only run: its input may lack rows (ITL-1095).
+            return dataclasses.replace(
+                head, status=ViewStatus.LOADED_ONLY, note=LOADED_ONLY_OPERATOR_NOTE
+            )
+        return head
 
     # ------------------------------------------------------------------
     # DB retrieval
@@ -1922,5 +1961,14 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             self._update_modified_time()
 
             ctx_obs.on_node_end(node_label, node_hash)
+        except BaseException:
+            # A run that raised or was cancelled defines no rows.
+            self.clear_cache()
+            raise
         finally:
-            await output.close()
+            try:
+                await output.close()
+            except BaseException:
+                # A close that raises or is cancelled fails the run: no rows.
+                self.clear_cache()
+                raise
