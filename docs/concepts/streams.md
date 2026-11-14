@@ -265,6 +265,11 @@ the stream's results: each row is computed once and every read yields the same r
 feeds the stream. An upstream finishing its first computation during the read is not a change;
 a `clear_cache()` upstream between the reads is, and the next read starts again.
 
+The display marks the tag columns, which come first: in a notebook their headers are bold
+(in an accent colour), a vertical rule separates them from the data columns and a line under
+the header says "bold = tag"; as text, each tag column's name starts with `*` ("* = tag").
+Only the display is marked: the view's table and `as_table()` keep the plain names.
+
 In the preview, large cells are summarised (an array as `ndarray float64 (2, 3)`, bytes as
 `bytes (300 B)`, long text and long lists shortened); `head().table` keeps the full values.
 In a terminal, `print(stream.head())` prints the same preview as text.

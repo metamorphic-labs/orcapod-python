@@ -122,3 +122,10 @@ approval of the method proposal), each returning a new view with an honest capti
 
 ## Progress notes
 - 2026-11-13: survey done, decisions above approved; StreamView method proposal sent.
+- 2026-11-13: developer correction: run() takes no arguments; view methods head/tail/
+  sort_by_tags approved (no with_columns in v0.3); a cut view displays all rows, an uncut
+  long view first 5 + last 5. Pass-through operator staleness is ITL-1083 (strict xfail
+  test only). Display marks tag columns: text `*name` + "* = tag"; HTML bold accent
+  #2a7fb8 + rule after the last tag column + "bold = tag", by position via HTMLParser
+  post-processing of Polars' HTML (COLUMN_ROLE_MARKS is the one mapping).
+- Tasks 1-5 done; next: PR, CodeRabbit, CI.

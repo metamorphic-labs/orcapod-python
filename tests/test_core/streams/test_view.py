@@ -7,6 +7,7 @@ they are. They never read or compute anything (developer, November 13, 2026).
 
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from typing import Any
 
 import pyarrow as pa
@@ -165,3 +166,92 @@ def test_large_cells_of_a_long_view_are_summarised_where_shown() -> None:
     assert "0000aaa" in text and "0049aaa" in text
     assert "a" * 200 not in text
     assert view.table.equals(source.as_table())
+
+
+# ---------------------------------------------------------------------------
+# The display marks each column's role (developer, November 13, 2026)
+# ---------------------------------------------------------------------------
+
+
+class _Cells(HTMLParser):
+    """Collects every table row of an HTML display: each cell's text and style."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[tuple[str, str]]] = []
+        self._cell: list[str] | None = None
+        self._style = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self.rows.append([])
+        elif tag in ("th", "td"):
+            self._cell = []
+            self._style = dict(attrs).get("style") or ""
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("th", "td") and self._cell is not None:
+            self.rows[-1].append(("".join(self._cell), self._style))
+            self._cell = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _cells(view: Any) -> list[list[tuple[str, str]]]:
+    parser = _Cells()
+    parser.feed(view._repr_html_())
+    return parser.rows
+
+
+def _two_tags() -> DictSource:
+    return DictSource(
+        [{"a": 1, "b": 2, "x": 3, "y": 4}], tag_columns=["a", "b"], label="two"
+    )
+
+
+def test_html_display_marks_exactly_the_tag_columns() -> None:
+    """Tag headers are bold; a rule follows the last tag column on every row."""
+    rows = _cells(_two_tags().run())
+    header = rows[0]
+    assert [name for name, _ in header] == ["a", "b", "x", "y"]
+    bold = [name for name, style in header if "font-weight:bold" in style]
+    assert bold == ["a", "b"]
+    for row in rows:
+        ruled = [i for i, (_, style) in enumerate(row) if "border-right" in style]
+        assert ruled == [1]
+    html_text = _two_tags().run()._repr_html_()
+    assert "<small>bold = tag</small>" in html_text
+
+
+def test_html_display_of_odd_names_is_safe() -> None:
+    """Names with ``<``, ``&`` or ``*`` are escaped and marked by position."""
+    source = DictSource(
+        [{"a<b": 1, "c&d": 2, "*e": 3}], tag_columns=["a<b"], label="odd"
+    )
+    html_text = source.run()._repr_html_()
+    assert "<b" not in html_text.replace("<br", "")
+    header = _cells(source.run())[0]
+    assert [name for name, _ in header] == ["a<b", "c&d", "*e"]
+    assert [bool(style) for _, style in header] == [True, False, False]
+
+
+def test_a_view_without_tags_has_no_rule_and_no_legend() -> None:
+    """With no tag column, no header is styled and no legend is shown."""
+    view = ArrowTableStream(pa.table({"x": [3, 1, 2]})).run()
+    html_text = view._repr_html_()
+    assert "bold = tag" not in html_text
+    assert "style=" not in html_text.split("</style>", 1)[1]
+    assert "* = tag" not in str(view)
+
+
+def test_text_display_stars_the_tag_columns() -> None:
+    """The text display puts ``*`` before each tag column's name, and says so."""
+    text = str(_two_tags().run())
+    lines = text.split("\n")
+    assert lines[1] == "* = tag"
+    assert "*a" in text and "*b" in text
+    assert "*x" not in text and "*y" not in text
+    # Only the display is marked.
+    assert _two_tags().run().table.column_names == ["a", "b", "x", "y"]

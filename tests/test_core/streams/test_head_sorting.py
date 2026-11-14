@@ -243,7 +243,7 @@ def _preview_ids(html: str) -> list[int]:
     """The ``id`` cells of a preview, in the order they are shown."""
     import re
 
-    return [int(v) for v in re.findall(r"<td>(\d+)</td>", html)][::2]
+    return [int(v) for v in re.findall(r"<td[^>]*>(\d+)</td>", html)][::2]
 
 
 def test_the_preview_of_a_source_shows_rows_in_tag_order_and_says_so() -> None:

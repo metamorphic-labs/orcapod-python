@@ -280,4 +280,4 @@ def test_a_nodes_preview_is_the_same_after_any_completion_order(
     assert sync_node._repr_html_() == async_node._repr_html_()
     html = async_node._repr_html_()
     assert "all 6 rows, sorted by tags" in html
-    assert html.index("<td>0</td>") < html.index("<td>5</td>")
+    assert html.index(">0</td>") < html.index(">5</td>")

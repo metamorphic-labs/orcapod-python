@@ -21,7 +21,10 @@ import importlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, cast
+
+from typing_extensions import override
 
 from orcapod.utils.lazy_module import LazyModule
 
@@ -96,6 +99,45 @@ _MAX_TEXT = 80
 _TEXT_START = 56
 _TEXT_END = 20
 _MAX_LIST_ITEMS = 5
+
+
+@dataclass(frozen=True)
+class ColumnRoleMark:
+    """How the display marks the header of a column with one role.
+
+    Only the display is marked: never ``StreamView.table``, ``as_table()``,
+    ``as_polars_df()`` or a schema.
+
+    Attributes:
+        text_prefix: Put before the column's name in the text display.
+        html_style: Inline CSS of the column's header cell in the HTML display.
+        text_legend: The legend line of the text display naming this mark, or empty.
+        html_legend: The legend line of the HTML display naming this mark, or empty.
+    """
+
+    text_prefix: str = ""
+    html_style: str = ""
+    text_legend: str = ""
+    html_legend: str = ""
+
+
+# The one place that says how the display marks each column role (developer, November 13,
+# 2026, ITL-1081). Roles today: "tag" and "data". A new role (e.g. a referential tag) gets
+# its own entry here; the renderers need no change. The accent colour has a contrast of
+# about 4.3:1 on white and on #111; bold carries the meaning without the colour.
+COLUMN_ROLE_MARKS: dict[str, ColumnRoleMark] = {
+    "tag": ColumnRoleMark(
+        text_prefix="*",
+        html_style="font-weight:bold;color:#2a7fb8",
+        text_legend="* = tag",
+        html_legend="bold = tag",
+    ),
+    "data": ColumnRoleMark(),
+}
+
+# The HTML display draws this rule after the last column of each role, on every row, so
+# the table reads "tags | data". It takes the text colour, so it reads on any theme.
+ROLE_BOUNDARY_STYLE = "border-right:2px solid currentColor"
 
 
 @dataclass(frozen=True)
@@ -419,13 +461,31 @@ class StreamView:
             return f"all {total:,} {noun if total != 1 else noun[:-1]}{suffix}"
         return f"first {shown:,} of {total:,} {noun}{suffix}"
 
-    def _display_frame(self) -> pl.DataFrame:
-        """Return a Polars frame of the rows for display: tag columns first, large cells
-        summarised. ``table`` itself is never changed."""
-        order = [c for c in self.tag_columns if c in self.table.column_names] + [
-            c for c in self.table.column_names if c not in self.tag_columns
+    def _display_columns(self) -> list[tuple[str, str]]:
+        """Return the shown columns in display order, each with its role: tags first."""
+        tags = [c for c in self.tag_columns if c in self.table.column_names]
+        return [(c, "tag") for c in tags] + [
+            (c, "data") for c in self.table.column_names if c not in self.tag_columns
         ]
-        table = self.table.select(order)
+
+    def _legend(self, text: bool) -> str:
+        """Return the legend line of the marks the shown columns carry, or empty."""
+        roles = dict.fromkeys(role for _, role in self._display_columns())
+        legends = [
+            COLUMN_ROLE_MARKS[role].text_legend
+            if text
+            else COLUMN_ROLE_MARKS[role].html_legend
+            for role in roles
+        ]
+        return "; ".join(legend for legend in legends if legend)
+
+    def _display_frame(self, text: bool = False) -> pl.DataFrame:
+        """Return a Polars frame of the rows for display: tag columns first, large cells
+        summarised; for the text display, each header carries its role's prefix (a name
+        that would then clash with another column's stays unmarked). ``table`` itself is
+        never changed."""
+        columns_shown = self._display_columns()
+        table = self.table.select([name for name, _ in columns_shown])
         rows = table.num_rows
         half = _DISPLAY_ROWS // 2
         # Only the rows the display shows are summarised; the others are left null,
@@ -452,7 +512,19 @@ class StreamView:
                         ]
                     )
                 )
-        return pl.DataFrame(pa.table(columns, names=table.column_names))
+        names = list(table.column_names)
+        if text:
+            marked = [
+                COLUMN_ROLE_MARKS[role].text_prefix + n for n, role in columns_shown
+            ]
+            taken = set(names)
+            names = [
+                m if m == n or m not in taken else n
+                for m, n in zip(marked, names, strict=True)
+            ]
+            if len(set(names)) != len(names):
+                names = list(table.column_names)
+        return pl.DataFrame(pa.table(columns, names=names))
 
     def _displays_every_row(self) -> bool:
         """Whether the display shows every row: a view cut to ``n`` rows, or a short one."""
@@ -462,35 +534,35 @@ class StreamView:
         """Return Polars' ``tbl_rows`` for this view: all rows, or ``_DISPLAY_ROWS``."""
         return -1 if self._displays_every_row() else _DISPLAY_ROWS
 
-    def _tags_line(self) -> str:
-        """Return the line naming the tag columns, or an empty string when there are none."""
-        if not self.tag_columns:
-            return ""
-        return "tags: " + ", ".join(self.tag_columns)
-
     def _repr_html_(self) -> str:
-        """Return the notebook preview: header, tag line and the rows (large cells summarised)."""
+        """Return the notebook preview: header, legend and the rows (large cells
+        summarised), each column's header styled by its role (``COLUMN_ROLE_MARKS``)."""
         parts = [
             f"<div><strong>{html.escape(self.header(), quote=False)}</strong></div>"
         ]
-        tags = self._tags_line()
-        if tags:
-            parts.append(f"<div><small>{html.escape(tags, quote=False)}</small></div>")
+        legend = self._legend(text=False)
+        if legend:
+            parts.append(
+                f"<div><small>{html.escape(legend, quote=False)}</small></div>"
+            )
         if self.table.num_columns:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
-                parts.append(self._display_frame()._repr_html_())
+                frame_html = self._display_frame()._repr_html_()
+            roles = [role for _, role in self._display_columns()]
+            parts.append(_mark_columns(frame_html, roles))
         return "\n".join(parts)
 
     def __str__(self) -> str:
-        """Return the preview as text: header, tag line and the rows."""
+        """Return the preview as text: header, legend and the rows, each column's
+        header prefixed by its role's mark (``*`` for a tag)."""
         lines = [self.header()]
-        tags = self._tags_line()
-        if tags:
-            lines.append(tags)
+        legend = self._legend(text=True)
+        if legend:
+            lines.append(legend)
         if self.table.num_columns:
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
-                lines.append(str(self._display_frame()))
+                lines.append(str(self._display_frame(text=True)))
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -499,6 +571,96 @@ class StreamView:
             f"StreamView({self.kind}[{self.label}], status={self.status.value}, "
             f"rows={self.table.num_rows})"
         )
+
+
+def _mark_columns(frame_html: str, roles: Sequence[str]) -> str:
+    """Return Polars' HTML table ``frame_html`` with its columns styled by role.
+
+    The cells are found by position, never by name, so a name that HTML escapes is
+    handled as Polars wrote it. The header cell of a column gets its role's
+    ``html_style``; every cell of the last column of a role followed by another role gets
+    ``ROLE_BOUNDARY_STYLE``. Everything else is passed on unchanged.
+
+    Args:
+        frame_html: The HTML of the display frame, one column per entry of ``roles``.
+        roles: The role of each column, in display order.
+    """
+    header = [COLUMN_ROLE_MARKS[role].html_style for role in roles]
+    boundary = [
+        ROLE_BOUNDARY_STYLE if i + 1 < len(roles) and roles[i + 1] != roles[i] else ""
+        for i in range(len(roles))
+    ]
+    marker = _ColumnMarker(header, boundary)
+    marker.feed(frame_html)
+    marker.close()
+    return "".join(marker.out)
+
+
+class _ColumnMarker(HTMLParser):
+    """Copies Polars' HTML table, adding inline styles to cells by column position."""
+
+    def __init__(self, header: list[str], boundary: list[str]) -> None:
+        super().__init__(convert_charrefs=False)
+        self.header: list[str] = header
+        self.boundary: list[str] = boundary
+        self.out: list[str] = []
+        self.in_thead: bool = False
+        self.rows_in_thead: int = 0
+        self.column: int = 0
+
+    @override
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        raw = self.get_starttag_text() or f"<{tag}>"
+        if tag == "thead":
+            self.in_thead = True
+        elif tag == "tr":
+            self.column = 0
+            if self.in_thead:
+                self.rows_in_thead += 1
+        elif tag in ("th", "td") and not attrs:
+            index = self.column
+            self.column += 1
+            styles: list[str] = []
+            if index < len(self.header):
+                if self.in_thead and self.rows_in_thead == 1:
+                    styles.append(self.header[index])
+                styles.append(self.boundary[index])
+            style = ";".join(part for part in styles if part)
+            if style:
+                raw = f'<{tag} style="{html.escape(style)}">'
+        elif tag in ("th", "td"):
+            self.column += 1
+        self.out.append(raw)
+
+    @override
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "thead":
+            self.in_thead = False
+        self.out.append(f"</{tag}>")
+
+    @override
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.out.append(self.get_starttag_text() or f"<{tag}/>")
+
+    @override
+    def handle_data(self, data: str) -> None:
+        self.out.append(data)
+
+    @override
+    def handle_entityref(self, name: str) -> None:
+        self.out.append(f"&{name};")
+
+    @override
+    def handle_charref(self, name: str) -> None:
+        self.out.append(f"&#{name};")
+
+    @override
+    def handle_comment(self, data: str) -> None:
+        self.out.append(f"<!--{data}-->")
+
+    @override
+    def handle_decl(self, decl: str) -> None:
+        self.out.append(f"<!{decl}>")
 
 
 def _check_row_count(n: int) -> None:
