@@ -100,14 +100,13 @@ class _DeclaredForm:
             The same arrays, with the columns in ``nullable`` flagged nullable and the
             columns in ``renames`` renamed.
         """
-        fields = []
-        for field in table.schema:
+        schema = table.schema
+        for position, field in enumerate(table.schema):
             if field.name in self.nullable:
                 field = field.with_nullable(True)
             if field.name in self.renames:
                 field = field.with_name(self.renames[field.name])
-            fields.append(field)
-        schema = pa.schema(fields, metadata=table.schema.metadata)
+            schema = schema.set(position, field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
         # Same arrays under the declared fields: no cast, so no value or type changes.
         return pa.Table.from_arrays(table.columns, schema=schema)
 

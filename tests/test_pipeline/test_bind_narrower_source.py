@@ -275,20 +275,18 @@ def test_narrower_then_nullable_runs_append_to_one_path(
     """A run of a narrower source, then of a nullable one, append under the same path."""
     job = _job(tmp_path)
     job.bind(sources={"src": _arrow_source([1, 2], x_nullable=False)})
+    database = job.database
+    assert database is not None
     first = job.run(orchestrator=orchestrator())
     assert first.ok
-    paths = set(job.database.list_table_paths(()))  # pyright: ignore[reportOptionalMemberAccess]  # the job has a database
+    paths = set(database.list_table_paths(()))
     job.bind(sources={"src": _arrow_source([None, 3], x_nullable=True, ids=[2, 3])})
     second = job.run(orchestrator=orchestrator())
     assert second.ok
-    assert set(job.database.list_table_paths(())) == paths  # pyright: ignore[reportOptionalMemberAccess]  # the job has a database
+    assert set(database.list_table_paths(())) == paths
     assert sorted(job.nodes["inc"].as_table().column("z").to_pylist()) == [0, 4]
-    stored = [
-        job.database.get_all_records(path)  # pyright: ignore[reportOptionalMemberAccess]  # the job has a database
-        for path in paths
-        if path[-1] == "pdb_v2"
-    ]
-    assert [table.num_rows for table in stored] == [4]
+    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v2"]
+    assert [None if table is None else table.num_rows for table in stored] == [4]
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +329,8 @@ def test_loaded_csv_of_another_type_is_left_unbound(
     assert job.unbound_sources == ["csv"]
     with pytest.raises(UnboundSourceError):
         _ = _csv_slot(job).as_table()
+    with pytest.raises(RuntimeError, match="cannot execute a loaded job"):
+        _ = job.run()
     _ = (tmp_path / "fixed.csv").write_text("id,x\n0,7\n")
     job.bind(
         sources={
