@@ -18,7 +18,7 @@ import pytest
 from orcapod.core.operators import Join, MergeJoin, SemiJoin
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
     _source,  # pyright: ignore[reportPrivateUsage]  # shared test helper
@@ -268,6 +268,7 @@ def test_semijoin_ignores_a_data_column_that_differs_in_nullability() -> None:
     """``SemiJoin`` keys on shared tags only (ITL-1088), so a shared data column is
     neither a key nor checked: the result is every left row whose tag matches."""
     left, right = _data_pair()
-    result = SemiJoin()(left, right)
+    with pytest.warns(SemiJoinIgnoredColumnWarning, match="'y'"):
+        result = SemiJoin()(left, right)
     assert result.output_schema() == left.output_schema()
     assert result.as_table().column("y").to_pylist() == [1, 2]

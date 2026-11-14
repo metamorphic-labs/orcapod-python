@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -6,11 +7,13 @@ from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_typ
 from orcapod.core.operators.key_nullability import reconcile_key_nullability
 from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.streams import ArrowTableStream
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
+from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 
 if TYPE_CHECKING:
     import polars as pl
@@ -31,7 +34,8 @@ class SemiJoin(BinaryOperator):
     columns that are tag columns of both streams (ITL-1088): a row matches
     when its values in all of them equal a right row's. A name shared as a
     data column, or a tag on one side and a data column on the other, is not a
-    key and is ignored; the right stream's data columns are never read.
+    key and is ignored, with a ``SemiJoinIgnoredColumnWarning`` (provisional in
+    v0.3); the right stream's data columns are never read.
 
     If the streams share no tag column, the entire left stream is returned
     unchanged.
@@ -55,6 +59,97 @@ class SemiJoin(BinaryOperator):
             The names in both, in the left input's order.
         """
         return tuple(name for name in left_tag_keys if name in right_tag_keys)
+
+    @staticmethod
+    def _ignored_shared_names(
+        left_tag_keys: Collection[str],
+        left_data_keys: Collection[str],
+        right_tag_keys: Collection[str],
+        right_data_keys: Collection[str],
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return the shared names that are not match keys, with each side's role.
+
+        The decision is by name only: no value or type is read. Meta (``__``)
+        columns are not user columns and never count.
+
+        Args:
+            left_tag_keys: The left input's tag column names.
+            left_data_keys: The left input's data column names.
+            right_tag_keys: The right input's tag column names.
+            right_data_keys: The right input's data column names.
+
+        Returns:
+            ``(name, left role, right role)`` for each name shared as data on both
+            sides or as a tag on one side and data on the other, in the left
+            input's order; roles are ``"tag"`` or ``"data"``.
+        """
+        right_roles = {name: "tag" for name in right_tag_keys} | {
+            name: "data" for name in right_data_keys
+        }
+        left_roles = [(name, "tag") for name in left_tag_keys] + [
+            (name, "data") for name in left_data_keys
+        ]
+        return tuple(
+            (name, left_role, right_roles[name])
+            for name, left_role in left_roles
+            if name in right_roles
+            and not name.startswith(constants.META_PREFIX)
+            and (left_role, right_roles[name]) != ("tag", "tag")
+        )
+
+    def _warn_once_per_application(
+        self, left_stream: StreamProtocol, right_stream: StreamProtocol
+    ) -> None:
+        """Warn about shared non-key names once per operator and set of names.
+
+        One application is validated more than once: when the operator is
+        called, when a job builds its node and when the sync orchestrator runs
+        it over the rows it rebuilt. The ignored names are remembered on the
+        operator, so each set is warned about once.
+
+        Args:
+            left_stream: The left input.
+            right_stream: The right input.
+        """
+        left_tags, left_data = left_stream.keys()
+        right_tags, right_data = right_stream.keys()
+        ignored = self._ignored_shared_names(
+            left_tags, left_data, right_tags, right_data
+        )
+        if not ignored:
+            return
+        warned: set[tuple[tuple[str, str, str], ...]] | None = getattr(
+            self, "_warned_ignored", None
+        )
+        if warned is None:
+            warned = set()
+            self._warned_ignored: set[tuple[tuple[str, str, str], ...]] = warned
+        if ignored in warned:
+            return
+        warned.add(ignored)
+        self._warn_ignored(ignored)
+
+    @staticmethod
+    def _warn_ignored(ignored: Sequence[tuple[str, str, str]]) -> None:
+        """Issue ``SemiJoinIgnoredColumnWarning`` for the shared non-key names.
+
+        Args:
+            ignored: ``(name, left role, right role)`` per ignored name.
+        """
+        described = ", ".join(
+            f"'{name}' ({left_role} on the left, {right_role} on the right)"
+            for name, left_role, right_role in ignored
+        )
+        warnings.warn(
+            f"SemiJoin ignores the shared column(s) {described}: they are not used"
+            + " for matching. SemiJoin matches only on tag columns shared by both"
+            + " inputs. To silence this, rename or drop the column(s) on the right"
+            + " input before the semi join (map_data, drop_data_columns,"
+            + " select_data_columns, or map_tags for a tag), or filter"
+            + " orcapod.errors.SemiJoinIgnoredColumnWarning.",
+            SemiJoinIgnoredColumnWarning,
+            stacklevel=outside_orcapod_stacklevel(),
+        )
 
     def _checked_match_keys(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -159,6 +254,10 @@ class SemiJoin(BinaryOperator):
 
         Stores the common keys so that ``async_execute`` can use them
         to determine the correct empty-right behavior without data.
+
+        Warns:
+            SemiJoinIgnoredColumnWarning: Once per operator and set of names, when
+                the inputs share a name that is not a tag on both sides (ITL-1088).
         """
         try:
             self._validated_common_keys: tuple[str, ...] = self._checked_match_keys(
@@ -169,6 +268,7 @@ class SemiJoin(BinaryOperator):
             raise InputValidationError(
                 f"Input streams are not compatible for semi-join: {e}"
             ) from e
+        self._warn_once_per_application(left_stream, right_stream)
 
     def is_commutative(self) -> bool:
         return False
@@ -242,6 +342,17 @@ class SemiJoin(BinaryOperator):
                     # First left row — determine common keys (the shared tag
                     # columns, ITL-1088) and build index
                     common_keys = self._match_keys(tuple(tag.keys()), right_tag_keys)
+                    # Validation warns about shared non-key names; when it did not
+                    # run (a direct call), warn here, once, from the first rows.
+                    if not hasattr(self, "_validated_common_keys"):
+                        ignored = self._ignored_shared_names(
+                            tag.keys(),
+                            data.keys(),
+                            right_tag_keys,
+                            right_rows[0][1].keys(),
+                        )
+                        if ignored:
+                            self._warn_ignored(ignored)
 
                     if not common_keys:
                         # No common keys — pass all left rows through

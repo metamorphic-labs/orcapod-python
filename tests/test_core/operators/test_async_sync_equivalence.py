@@ -57,6 +57,12 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.utils import arrow_utils
 
+# The ``semijoin_shared_data_column`` case shares a data column name on purpose; SemiJoin
+# warns that it is not a match key (ITL-1088), which is tested in test_semijoin_tag_keys.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::orcapod.errors.SemiJoinIgnoredColumnWarning"
+)
+
 Row: TypeAlias = tuple[TagProtocol, DataProtocol]
 Column: TypeAlias = "pa.Array[Any] | pa.ChunkedArray[Any]"
 
