@@ -99,3 +99,29 @@ into the int-declared paths (`schema:f289a35f.../pdb_v2`, `_result/.../rdb_v2`).
   Loaded job: CSV changed type (warning, unbound, run fails as unbound, rebind works); CSV now
   narrower (bound, cast).
 - [ ] 7. Implement `_DeclaredForm` + entry points + `__init__` through setter + load handling.
+
+## Round 3 (coordinator, 2026-11-14): merge main (#375, ITL-912) + ITL-1126
+
+Main is 52d67858 (#375 merged). Conflict: `source_node.py` imports only (both kept). Semantic
+overlap: #375 added `SourceJobNode._typed_zero_row_table` returning the BOUND SOURCE's
+zero-row table, which is not the declared form (source's flags, column order, system-tag names).
+Downstream operator nodes type their zero-row tables (head before a run, `as_table` with nothing
+held) from it, so they would differ from their populated tables.
+
+- [ ] 8. Merge (import resolved). Failing test: zero-row table of a source node bound to a
+  narrower / reordered / transformed (renamed system tags) source equals its populated table
+  (`ZERO_ROW_INPUT_COLUMNS`), directly (`typed_zero_row_table(node)`) and through a downstream
+  operator node (`as_table(all_info=True)` before vs after run). Fix: `_typed_zero_row_table`
+  applies `self._declared_form` to the source's zero-row table.
+- [ ] 9. ITL-1126 (developer: refuse for now; ITL-1127 is the follow-up): `_fit` refuses every
+  source whose system-tag columns are not exactly one source-id and one record-id column,
+  narrower or not; message names the slot and the columns found. Remove
+  `_keeps_its_own_system_tags`; `_declared_form_for` loses its pass-through branch. Tests:
+  equal-schema joined stream refused (bind, setter, `SourceJobNode(...bound_source=)`), raw
+  `ArrowTableStream` with none refused, binding unchanged after refusal.
+- [ ] 10. Docs sentence, CLAUDE.md + .zed/rules, changelog fragment (Breaking: the refusal; way
+  around: make the join part of the pipeline, or store the joined stream and bind the stored
+  source; ITL-1127), design_issues/ITL-1112-BT1.md, PR description (Fixes ITL-1112, Fixes
+  ITL-1126; Known limits).
+- [ ] 11. Tests: tests/test_pipeline, tests/test_core/nodes, tests/test_core/sources, golden
+  (3.12; async files also 3.11); ruff, basedpyright; one push; CI; one '@coderabbitai review'.

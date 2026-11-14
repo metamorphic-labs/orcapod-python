@@ -20,7 +20,7 @@ from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import schema_requires_io
+from orcapod.core.streams.base import schema_requires_io, typed_zero_row_table
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -910,6 +910,13 @@ class SourceJobNode(SourceNodeBase):
         if self._declared_form is None:
             return self._bound_source.iter_data()
         return self._declared_rows(self._bound_source.iter_data(), self._declared_form)
+
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """The bound source's zero-row table; ``None`` when unbound or unknown.
+
+        See ``typed_zero_row_table``.
+        """
+        return typed_zero_row_table(self._bound_source)
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""
