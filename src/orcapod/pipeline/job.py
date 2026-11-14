@@ -7,7 +7,7 @@ import logging
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import orcapod
 from orcapod.core.nodes import JobNode
@@ -609,6 +609,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.core.nodes.function_node import FunctionNode
         from orcapod.core.nodes.operator_node import OperatorNode
         from orcapod.pipeline.graph import Pipeline
+        from orcapod.pipeline.loaded_side_effects import (
+            LoadedSideEffectJobNode,
+            LoadedSideEffectNode,
+        )
         from orcapod.side_effects import SideEffectNode
 
         if not self._compiled:
@@ -657,6 +661,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     label=job_node._label,
                     table_scope=job_node._table_scope,
                     tracker_manager=job_node.tracker_manager,
+                )
+
+            elif isinstance(job_node, LoadedSideEffectJobNode):
+                # No pod to wrap: the blueprint node is restored from the saved
+                # entry, with the saved blueprint identity (ITL-1094).
+                upstream_bp_hash = job_id_to_bp_hash[id(job_node._input_stream)]
+                node_map[node_hash] = LoadedSideEffectNode(
+                    job_node._descriptor,
+                    cast("cp.StreamProtocol", node_map[upstream_bp_hash]),
                 )
 
             elif isinstance(job_node, SideEffectJobNode):

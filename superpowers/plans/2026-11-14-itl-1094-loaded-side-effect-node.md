@@ -167,3 +167,13 @@ Plan (pending coordinator reply):
    pass-through to the input stream).
 3. (if approved) pin the upstream's pipeline hash in `_as_upstream_stream`.
 4. (if approved) `as_pipeline()` builds a `LoadedSideEffectNode` from the saved descriptor.
+
+Coordinator approved 1, 2 and 4 (C out of scope, reported in worker_done). Done:
+- Tests: `tests/test_pipeline/loaded_job/test_loaded_side_effect_column_configs.py` (7 of 12
+  failed before the fix: system_tags/all_info schemas, sync load-only below the SE node and
+  below a loaded function node, `_materialize_upstream` pipeline hash, `as_pipeline()`).
+- Fix: overrides removed; `_as_upstream_stream` returns `_RowsOfStream` pinned to
+  `upstream.pipeline_hash()` when `upstream.producer is None`; `as_pipeline()` builds
+  `LoadedSideEffectNode` from the saved descriptor.
+- After the fix only C remains in the table (`fa`, a loaded FunctionJobNode, under
+  system_tags/all_info).

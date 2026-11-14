@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
     from orcapod.side_effects import SideEffectPod
-    from orcapod.types import ColumnConfig, ContentHash, Schema
+    from orcapod.types import ContentHash
 
 
 class SavedSideEffectNode:
@@ -78,26 +78,6 @@ class SavedSideEffectNode:
             if config_dict is not None
             else DEFAULT_CONFIG
         )
-        self._output_schema: dict[str, Any] = descriptor.get("output_schema") or {}
-
-    def output_schema(self) -> tuple[Schema, Schema]:
-        """The saved output schema; every column ``T`` when nullability is unrecorded.
-
-        Raises:
-            ValueError: If a column's saved type cannot be restored to a Python type.
-        """
-        from orcapod.pipeline.serialization import deserialize_output_schema
-
-        return deserialize_output_schema(
-            self._output_schema, self.data_context.type_converter
-        )
-
-    def keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The saved tag and data column names."""
-        return (
-            tuple(self._output_schema.get("tag", {})),
-            tuple(self._output_schema.get("data", {})),
-        )
 
 
 def cannot_deliver_error(label: str | None) -> RuntimeError:
@@ -112,8 +92,11 @@ def cannot_deliver_error(label: str | None) -> RuntimeError:
 class LoadedSideEffectNode(SideEffectNode):
     """A side-effect node of a loaded pipeline blueprint: no pod, never delivers.
 
-    Built by ``Pipeline.load``. Its identity, schema and node uri are the saved ones.
-    A blueprint side-effect node delivers when it is read, so every read raises.
+    Built by ``Pipeline.load``, and by ``as_pipeline()`` of a loaded job. Its identity
+    and node uri are the saved ones. It passes its input's columns through, as every
+    side-effect node does: its schema under any column configuration is the restored
+    upstream's. A blueprint side-effect node delivers when it is read, so every read
+    raises.
 
     Args:
         descriptor: The node's entry in the saved file.
@@ -169,26 +152,6 @@ class LoadedSideEffectNode(SideEffectNode):
         return None
 
     @override
-    def output_schema(
-        self,
-        *,
-        columns: ColumnConfig | dict[str, Any] | None = None,
-        all_info: bool = False,
-    ) -> tuple[Schema, Schema]:
-        """The saved output schema."""
-        return self._saved.output_schema()
-
-    @override
-    def keys(
-        self,
-        *,
-        columns: ColumnConfig | dict[str, Any] | None = None,
-        all_info: bool = False,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The saved column names."""
-        return self._saved.keys()
-
-    @override
     def _rows_data_context(self) -> DataContext:
         return self._saved.data_context
 
@@ -207,9 +170,10 @@ class LoadedSideEffectNode(SideEffectNode):
 class LoadedSideEffectJobNode(SideEffectJobNode):
     """A side-effect node of a loaded job: no pod, never delivers.
 
-    Built by ``PipelineJob.load``. Its identity, schema and node uri are the saved
-    ones; the pipeline hash names the saved run's invocation log, which the node never
-    reads or writes. A load-only run (``loaded.run(load_only=True)``,
+    Built by ``PipelineJob.load``. Its identity and node uri are the saved ones; the
+    pipeline hash names the saved run's invocation log, which the node never reads or
+    writes. Its schema under any column configuration is the restored upstream's, as
+    for every side-effect node. A load-only run (``loaded.run(load_only=True)``,
     ``node.run(load_only=True)``) passes its input rows on, and the node holds them as
     loaded only, as every ``SideEffectJobNode`` does in such a run; its reads return
     those rows, and none before such a run. Any other run raises before anything is
@@ -280,26 +244,6 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
     @override
     def computed_label(self) -> str | None:
         return None
-
-    @override
-    def output_schema(
-        self,
-        *,
-        columns: ColumnConfig | dict[str, Any] | None = None,
-        all_info: bool = False,
-    ) -> tuple[Schema, Schema]:
-        """The saved output schema."""
-        return self._saved.output_schema()
-
-    @override
-    def keys(
-        self,
-        *,
-        columns: ColumnConfig | dict[str, Any] | None = None,
-        all_info: bool = False,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The saved column names."""
-        return self._saved.keys()
 
     @override
     def _rows_data_context(self) -> DataContext:
