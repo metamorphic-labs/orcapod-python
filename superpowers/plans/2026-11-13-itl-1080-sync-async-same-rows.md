@@ -81,3 +81,17 @@ input meta in every operator on both paths.
   sync/async difference; with an upstream that delivered no row, Join now raises on async as on
   sync (ITL-912), pinned by a test.
 - Next: PR, CodeRabbit, CI.
+
+## Merge of origin/main b4fde330 (#372, #374: ITL-829, ITL-1088)
+
+- `join.py`: `_joined_user_schemas` keeps `without_meta_fields` (shared helper) and takes
+  main's `reconcile_key_nullability`; main's `_shared_key_nullability` kept, main's copies of
+  `_without_meta` / `_without_meta_fields` dropped (replaced by `meta_columns`).
+- `semijoin.py`: main's `_match_keys` / `_checked_match_keys` taken whole. The PR's
+  `without_meta_fields` calls are dead (keys are tags on both sides; a tag can never be `__`)
+  and are removed; `WithoutMetaWriter` in `async_execute` stays. `_ignored_shared_names`
+  (main) already skips `__` names, so a shared `__` data column does not warn: pinned by
+  `test_shared_meta_column_is_neither_a_key_nor_warned_about` (sync, async validated, async
+  unvalidated; mutation-checked).
+- Equivalence test: main's new CASES kept; main's `META_XFAIL` (incl. its new
+  `merge_join_nullable_key`) dropped, since the meta rule fixes every case.
