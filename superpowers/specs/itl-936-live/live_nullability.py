@@ -114,7 +114,7 @@ def _workshop_path(
             calls.append(1)
             return 2 * x
 
-        job = PipelineJob(name="itl936", store=DeltaTableDatabase(store))
+        job = PipelineJob(name="itl936", database=DeltaTableDatabase(store))
         with job:
             joined = Join()(
                 SpiralDBTableSource(project, first, dataset=dataset),

@@ -117,7 +117,7 @@ def test_all_info_in_the_column_config_keeps_the_meta_columns(columns: Any) -> N
 
 
 def run_job(pod, store, orchestrator: str) -> PipelineJob:
-    job = PipelineJob(name="j", store=store)
+    job = PipelineJob(name="j", database=store)
     with job:
         pod.process(make_source(), label="add")
     job.run(orchestrator=ORCHESTRATORS[orchestrator]())
@@ -234,7 +234,7 @@ def test_saved_job_equals_the_uncached_pods_and_loads(
     assert cached_saved == plain_saved
 
     # A loaded job reads its stored results; the pod cache is not part of it.
-    loaded = PipelineJob.load(tmp_path / "cached.json", store=store)
+    loaded = PipelineJob.load(tmp_path / "cached.json", database=store)
     assert loaded.nodes["add"].as_table().to_pylist() == [
         {"k": 1, "total": 5},
         {"k": 2, "total": 10},
