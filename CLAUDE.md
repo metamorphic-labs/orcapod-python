@@ -837,8 +837,10 @@ data. The rules:
   schema of any node's or stored table (column names with system tags, types, nullable
   flags, order); only values differ. `SourceNodeBase.validate` is the one check, used by
   `PipelineJob.bind`, the `bound_source` setter (and `SourceJobNode.__init__`) and
-  `PipelineJob.load`: per column the declared Python type, or `T` where the slot declares
-  `T | None`; anything else raises `SourceSpecMismatchError` before anything is bound. The
+  `PipelineJob.load`: per column the declared Python type (structural classes of one identity
+  are one type, `equivalent_hints`), or `T` where the slot declares `T | None`; and exactly
+  one source-id (`str`) and one record-id (`bytes`) system-tag column, no other. Anything
+  else raises `SourceSpecMismatchError` before anything is bound. The
   source's rows are given as the declared schema at one place, `_DeclaredForm` (nullable
   fields over the same arrays; the declared column order; the system-tag column NAMES of the
   declared schema hash, taken from the source's own pair by prefix, the VALUES the source's

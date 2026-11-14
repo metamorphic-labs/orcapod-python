@@ -31,6 +31,7 @@ from orcapod.core.streams.base import (
     check_head_size,
 )
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.logical_types.user_class_identity import equivalent_hints
 from orcapod.system_constants import constants
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import ColumnConfig, Schema
@@ -60,13 +61,14 @@ def _is_narrower(declared: Any, given: Any) -> bool:
     """Return whether *given* is *declared* without its ``None`` member.
 
     ``int`` is narrower than ``int | None`` and ``int | str`` than ``int | str | None``;
-    nothing else is (developer, November 14, 2026, ITL-1112).
+    nothing else is (developer, November 14, 2026, ITL-1112). Structural classes of one
+    identity are one type here as everywhere (``equivalent_hints``).
 
     Args:
         declared: The slot's declared Python type of a column.
         given: The bound source's Python type of that column.
     """
-    return declared != given and _without_none(declared) == given
+    return declared != given and equivalent_hints(_without_none(declared), given)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -139,8 +141,8 @@ class _DeclaredForm:
 
 def _system_tag_columns(
     source: StreamProtocol, tag_names: Collection[str]
-) -> tuple[list[str], list[str]]:
-    """Return *source*'s source-id and record-id system-tag columns.
+) -> tuple[list[str], list[str], list[str]]:
+    """Return *source*'s source-id, record-id and any other system-tag columns.
 
     A root source, or a stream that keeps its system tags (a filter, a rename), has one
     of each; a stream that joins or merges inputs has one pair per input; a stream over a
@@ -150,6 +152,10 @@ def _system_tag_columns(
     Args:
         source: The stream being bound.
         tag_names: Its user tag columns.
+
+    Returns:
+        The source-id columns, the record-id columns, and every other system-tag
+        column, which no slot declares.
     """
     names = [
         name
@@ -158,35 +164,41 @@ def _system_tag_columns(
     ]
     source_id = f"{constants.SYSTEM_TAG_SOURCE_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
     record_id = f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
-    return (
-        [name for name in names if name.startswith(source_id)],
-        [name for name in names if name.startswith(record_id)],
-    )
+    source_ids = [name for name in names if name.startswith(source_id)]
+    record_ids = [name for name in names if name.startswith(record_id)]
+    others = [name for name in names if name not in {*source_ids, *record_ids}]
+    return source_ids, record_ids, others
 
 
-def _one_system_tag_pair_issue(source_ids: list[str], record_ids: list[str]) -> str:
+def _one_system_tag_pair_issue(
+    source_ids: list[str], record_ids: list[str], others: list[str]
+) -> str:
     """Return why a source without exactly one system-tag pair is refused, and the remedy.
 
     Args:
         source_ids: The source's source-id system-tag columns.
         record_ids: The source's record-id system-tag columns.
+        others: The source's other system-tag columns.
     """
-    found = sorted(source_ids + record_ids)
+    found = sorted(source_ids + record_ids + others)
+    issue = (
+        "a source must carry exactly one source-id and one record-id system-tag "
+        f"column and no other, not {found}"
+    )
     if not found:
         remedy = (
             "a stream without system-tag columns (a raw ArrowTableStream) cannot be "
             "bound or used as a pipeline's input; wrap its table as a source, e.g. "
             "ArrowTableSource(stream.as_table(), tag_columns=[...])"
         )
-    else:
+    elif len(source_ids) > 1 or len(record_ids) > 1:
         remedy = (
             "a joined or merged stream cannot be bound; make the join part of the "
             "pipeline, or store the joined stream and bind the stored source"
         )
-    return (
-        "a source must carry exactly one source-id and one record-id system-tag "
-        f"column, not {found}: {remedy} (binding such a stream is planned, ITL-1127)"
-    )
+    else:
+        return issue
+    return f"{issue}: {remedy} (binding such a stream is planned, ITL-1127)"
 
 
 class SourceNodeBase(TraceableBase, ABC):
@@ -433,7 +445,7 @@ class SourceNodeBase(TraceableBase, ABC):
             if extra:
                 issues.append(f"unexpected {role} columns: {sorted(extra)}")
             for name in declared.keys():
-                if name not in given or given[name] == declared[name]:
+                if name not in given or equivalent_hints(given[name], declared[name]):
                     continue
                 if _is_narrower(declared[name], given[name]):
                     narrower.add(name)
@@ -448,9 +460,19 @@ class SourceNodeBase(TraceableBase, ABC):
         # a source with exactly one pair can take. A joined or merged stream (one pair
         # per input) or a stream with none is refused (developer, November 14, 2026,
         # ITL-1126); binding one properly is ITL-1127.
-        source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
-        if len(source_ids) != 1 or len(record_ids) != 1:
-            issues.append(_one_system_tag_pair_issue(source_ids, record_ids))
+        source_ids, record_ids, others = _system_tag_columns(source, source_tag.keys())
+        if len(source_ids) != 1 or len(record_ids) != 1 or others:
+            issues.append(_one_system_tag_pair_issue(source_ids, record_ids, others))
+        else:
+            # The pair must have the types the slot predicts for it (str, bytes).
+            given_tags = source.output_schema(columns={"system_tags": True})[0]
+            for name, declared_type in ((source_ids[0], str), (record_ids[0], bytes)):
+                if given_tags[name] != declared_type:
+                    issues.append(
+                        f"system-tag column {name!r} is declared "
+                        f"{_type_text(declared_type)} but the source has "
+                        f"{_type_text(given_tags[name])}"
+                    )
 
         if issues:
             raise SourceSpecMismatchError(
@@ -814,8 +836,8 @@ class SourceJobNode(SourceNodeBase):
             SourceSpecMismatchError: If *source* does not fit the declared schema.
         """
         source_tag, source_data, narrower = self._fit(source)
-        # _fit has checked that the source has exactly one pair.
-        source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
+        # _fit has checked that the source has exactly one pair and nothing else.
+        source_ids, record_ids, _ = _system_tag_columns(source, source_tag.keys())
         declared_source_id, declared_record_id = system_tag_column_names(
             self._schema_hash_str
         )

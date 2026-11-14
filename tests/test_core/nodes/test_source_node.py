@@ -8,7 +8,7 @@ import pytest
 
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
-from orcapod.types import Schema
+from orcapod.types import ColumnConfig, Schema
 
 
 @pytest.fixture
@@ -295,8 +295,18 @@ def _mock_source_with_the_slots_system_tags(
     column (ITL-1126); the slot's own names make the bind pass rows unchanged.
     """
     tag_keys = node.keys(columns={"system_tags": True})[0]
+    with_system_tags = node.output_schema(columns={"system_tags": True})
+
+    def output_schema(
+        columns: ColumnConfig | dict[str, bool] | None = None, all_info: bool = False
+    ) -> tuple[Schema, Schema]:
+        """The slot's schema, with its system-tag pair when asked for."""
+        if ColumnConfig.handle_config(columns, all_info=all_info).system_tags:
+            return with_system_tags
+        return tag_schema, data_schema
+
     mock_source = MagicMock()
-    mock_source.output_schema.return_value = (tag_schema, data_schema)
+    mock_source.output_schema.side_effect = output_schema
     mock_source.keys.return_value = (tag_keys, tuple(data_schema.keys()))
     return mock_source
 

@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 
+import orcapod
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import MapData
@@ -144,3 +145,59 @@ def test_no_accepted_bind_changes_a_path_or_a_table_schema(
     # A loaded function node orders its meta columns unlike a fresh one, bind or not
     # (reported separately), so the loaded job is compared with itself.
     assert _snapshot(loaded, LOADED_NODES) == before
+
+
+@orcapod.dataclass(name="KeepsPoint")
+class _PointA:
+    """A structural class, identified by its name and fields."""
+
+    x: int
+    y: int
+
+
+@orcapod.dataclass(name="KeepsPoint")
+class _PointB:
+    """Another class object of the same structural identity as ``_PointA``."""
+
+    x: int
+    y: int
+
+
+def test_a_structural_class_of_the_same_identity_changes_no_path_or_schema(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A source of another class object of the slot's structural identity moves nothing.
+
+    The sources are built before the baseline hashes are taken: on main too, the
+    pipeline hash of a schema holding a structural class differs before and after a
+    source of that class is first built, bind or no bind (reported separately).
+    """
+    sources = [
+        DictSource(
+            cast(list[dict[str, Any]], [{"id": 0, "p": point_type(1, 2)}]),
+            tag_columns=["id"],
+            data_schema={"id": int, "p": point_type},
+            source_id="points",
+        )
+        for point_type in (_PointA, _PointB, _PointB)
+    ]
+    slot = SourceNode(
+        name="src",
+        tag_schema=Schema({"id": int}),
+        data_schema=Schema({"p": _PointA}),
+    )
+    job = PipelineJob(name="j", database=DeltaTableDatabase(str(tmp_path / "store")))
+    with job:
+        _ = MapData({"p": "q"})(slot, label="renamed")
+    hashes = {name: node.pipeline_hash() for name, node in job.nodes.items()}
+
+    snapshots = []
+    for source, bind in zip(sources, (_bind, _bind, _assign), strict=True):
+        bind(job, source)
+        assert {name: node.pipeline_hash() for name, node in job.nodes.items()} == (
+            hashes
+        )
+        assert job.run().ok
+        snapshots.append(_snapshot(job, ("src", "renamed")))
+    assert snapshots[1] == snapshots[0]
+    assert snapshots[2] == snapshots[0]

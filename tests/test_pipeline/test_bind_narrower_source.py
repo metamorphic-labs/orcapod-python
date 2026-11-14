@@ -12,6 +12,7 @@ moves: every pipeline hash and predicted schema is the declared one.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import pathlib
 from collections.abc import Callable
@@ -20,11 +21,16 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+import orcapod
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.operators import Join, MapData
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, typed_zero_row_table
+from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
+    StreamBase,
+    typed_zero_row_table,
+)
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -812,3 +818,168 @@ def test_the_predicted_schema_is_that_of_the_rows_bound_or_unbound(
             )
             assert {**tag, **data} == dict(rows), label
     assert all(p == predictions[0] for p in predictions), predictions
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit round 2: structural classes, extra system tags, system-tag types
+# ---------------------------------------------------------------------------
+
+
+@orcapod.dataclass(name="BindPoint")
+class _PointA:
+    """A structural class, identified by its name and fields."""
+
+    x: int
+    y: int
+
+
+@orcapod.dataclass(name="BindPoint")
+class _PointB:
+    """Another class object of the same structural identity as ``_PointA``."""
+
+    x: int
+    y: int
+
+
+@dataclasses.dataclass
+class _ExactA:
+    """An exact class: one type only with itself."""
+
+    x: int
+    y: int
+
+
+@dataclasses.dataclass
+class _ExactB:
+    """An exact class with the same fields as ``_ExactA``, yet another type."""
+
+    x: int
+    y: int
+
+
+def _rows(*rows: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return *rows* as a ``DictSource`` takes them (user-class values included)."""
+    return list(rows)
+
+
+def _point_job(point_type: Any) -> PipelineJob:
+    """Return an unbound job: slot ``src`` (``id: int``, ``p: point_type``) -> rename."""
+    slot = SourceNode(
+        name="src",
+        tag_schema=Schema({"id": int}),
+        data_schema=Schema({"p": point_type}),
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"p": "q"})(slot, label="renamed")
+    return job
+
+
+@pytest.mark.parametrize("bind", BINDS.values(), ids=BINDS.keys())
+def test_a_structural_class_of_the_same_identity_is_accepted(
+    bind: Callable[[PipelineJob, Any], None],
+) -> None:
+    """A column of another class object of the declared structural identity fits.
+
+    Two structural classes with equal identity records are one type in the schema
+    check and in the pipeline hash, so the bind moves no hash or schema.
+    """
+    job = _point_job(_PointA)
+    source = DictSource(
+        _rows({"id": 0, "p": _PointB(1, 2)}),
+        tag_columns=["id"],
+        data_schema={"id": int, "p": _PointB},
+        source_id="b",
+    )
+    assert source.output_schema()[1]["p"] is not _PointA
+    hashes = _pipeline_hashes(job)
+    schemas = {
+        label: node.output_schema(all_info=True) for label, node in job.nodes.items()
+    }
+    bind(job, source)
+    assert job.nodes["src"].bound_source is source  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode
+    assert _pipeline_hashes(job) == hashes
+    for label, node in job.nodes.items():
+        if isinstance(node, StreamBase):
+            # Predict afresh: the test is about the schema, not the memo.
+            node._forget_output_schema()  # pyright: ignore[reportPrivateUsage]
+        assert node.output_schema(all_info=True) == schemas[label], label
+    assert job.run().ok
+    assert job.nodes["renamed"].as_table().num_rows == 1
+
+
+@pytest.mark.parametrize("bind", BINDS.values(), ids=BINDS.keys())
+def test_an_exact_class_with_the_same_fields_is_refused(
+    bind: Callable[[PipelineJob, Any], None],
+) -> None:
+    """Two exact classes with the same fields are two types."""
+    job = _point_job(_ExactA)
+    source = DictSource(
+        _rows({"id": 0, "p": _ExactB(1, 2)}),
+        tag_columns=["id"],
+        data_schema={"id": int, "p": _ExactB},
+    )
+    with pytest.raises(SourceSpecMismatchError, match="data column 'p'"):
+        bind(job, source)
+
+
+def _stream_with_system_tags(columns: dict[str, pa.Array[Any]]) -> ArrowTableStream:
+    """Return a stream of tag ``id``, data ``x`` and the given system-tag columns."""
+    table = pa.table(
+        {
+            "id": pa.array([0], pa.int64()),
+            "x": pa.array([1], pa.int64()),
+            **columns,
+        },
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int64(), False),
+                pa.field("x", pa.int64(), False),
+                *(pa.field(name, array.type, False) for name, array in columns.items()),
+            ]
+        ),
+    )
+    return ArrowTableStream(table, tag_columns=["id"])
+
+
+SOURCE_ID = "_tag_source_id::abc"
+RECORD_ID = "_tag_record_id::abc"
+
+
+@pytest.mark.parametrize("x_type", [int, int | None], ids=["declared", "narrower"])
+@pytest.mark.parametrize("bind", ALL_BINDS.values(), ids=ALL_BINDS.keys())
+def test_an_extra_system_tag_column_is_refused(
+    bind: Callable[[PipelineJob, Any], None], x_type: Any
+) -> None:
+    """A system-tag column besides the one pair is not in the slot's schema."""
+    stream = _stream_with_system_tags(
+        {
+            SOURCE_ID: pa.array(["s"], pa.large_string()),
+            RECORD_ID: pa.array([b"r"], pa.large_binary()),
+            "_tag_extra": pa.array(["e"], pa.large_string()),
+        }
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(x_type), label="renamed")
+    with pytest.raises(SourceSpecMismatchError, match="_tag_extra"):
+        bind(job, stream)
+
+
+@pytest.mark.parametrize("x_type", [int, int | None], ids=["declared", "narrower"])
+@pytest.mark.parametrize("bind", ALL_BINDS.values(), ids=ALL_BINDS.keys())
+def test_a_system_tag_pair_of_other_types_is_refused(
+    bind: Callable[[PipelineJob, Any], None], x_type: Any
+) -> None:
+    """The source id must be ``str`` and the record id ``bytes``, as the slot predicts."""
+    stream = _stream_with_system_tags(
+        {
+            SOURCE_ID: pa.array(["s"], pa.large_string()),
+            RECORD_ID: pa.array(["r"], pa.large_string()),
+        }
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(x_type), label="renamed")
+    with pytest.raises(SourceSpecMismatchError, match=r"declared bytes but the source"):
+        bind(job, stream)
