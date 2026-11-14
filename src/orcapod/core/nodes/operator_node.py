@@ -30,8 +30,10 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    short_stream_repr,
 )
 from orcapod.core.streams.view import (
     JOB_NODE_NOT_RUN_NOTE,
@@ -323,6 +325,7 @@ class OperatorNodeBase(StreamBase):
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
         self._input_streams = value
+        self._forget_output_schema()
 
     def keys(
         self,
@@ -371,10 +374,16 @@ class OperatorNodeBase(StreamBase):
                     f"Cannot restore the output schema of loaded node {self.label!r}: "
                     f"{exc}"
                 ) from exc
-        return self._operator.output_schema(
-            *self._input_streams,
-            columns=columns,
-            all_info=all_info,
+        # Memoized (ITL-1111). The prediction depends on the operator's configuration
+        # and on the input streams' schemas and pipeline hashes; the ``upstreams``
+        # setter and a job's ``bind`` clear it when an input changes. Never on rows.
+        operator = self._operator
+        return self._memoized_output_schema(
+            columns,
+            all_info,
+            lambda: operator.output_schema(
+                *self._input_streams, columns=columns, all_info=all_info
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -428,9 +437,11 @@ class OperatorNodeBase(StreamBase):
         self._update_modified_time()
 
     def __repr__(self) -> str:
+        # Upstreams by class and label only: their own repr would nest every path (ITL-1111).
+        upstreams = ", ".join(short_stream_repr(s) for s in self._input_streams)
         return (
-            f"{type(self).__name__}(operator={self._operator!r}, "
-            f"upstreams={self._input_streams!r})"
+            f"{type(self).__name__}(label={self.label!r}, operator={self._operator!r}, "
+            f"upstreams=({upstreams}))"
         )
 
     @abstractmethod
@@ -1242,16 +1253,62 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             )
         return records.drop([constants.DATA_CONTEXT_COL])
 
-    def _make_empty_table(self) -> "pa.Table":
-        """Build a zero-row PyArrow table matching this node's full output schema.
+    def _typed_zero_row_table(self) -> "pa.Table | None":
+        """This node's zero-row table: its operator applied to zero-row inputs.
 
-        Uses ``arrow_utils.make_empty_table`` so field nullability is preserved:
-        plain types produce ``nullable=False`` fields and ``T | None`` types
-        produce ``nullable=True`` fields.
+        The sync path's rule (ITL-912): each input is the upstream's zero-row table
+        (``StaticOutputOperatorPod._zero_row_input``), and the operator's result over
+        those is this node's table with no rows, with the Arrow types, nullability,
+        system-tag and source-info columns its rows have. No row is computed or read,
+        no function is called and nothing is stored, and a result the node holds is
+        not consulted: the types follow from the inputs' types alone.
+
+        Returns:
+            The zero-row table with system tags and source info, or ``None`` when the
+            node has no operator or an input cannot say its Arrow types without rows
+            (see ``typed_zero_row_table``).
+        """
+        if self._operator is None:
+            return None
+        inputs: list[StreamProtocol] = []
+        for upstream in self._input_streams:
+            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
+            if zero_rows is None:
+                return None
+            inputs.append(zero_rows)
+        # zero_row_result calls static_process, not process: an invocation recorded by
+        # a tracker would add a step to whatever pipeline is being built while this
+        # table is read.
+        operator = cast(StaticOutputOperatorPod, self._operator)
+        result = operator.zero_row_result(*inputs)
+        table = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        # The column order of the node's rows (``_rows_to_table``): user tags, system
+        # tags, data, source info; an operator's own table may order them otherwise
+        # (a join lists its data before its system tags).
+        tag_keys, data_keys = result.keys()
+        names = table.column_names
+        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+        data = [n for n in data_keys if n in names]
+        return table.select([*tag_keys, *system_tags, *data, *source_info])
+
+    def _make_empty_table(self) -> "pa.Table":
+        """Build the zero-row table this node reads as when it holds no rows.
+
+        The node's operator applied to its inputs' zero-row tables
+        (``_typed_zero_row_table``), so the columns, Arrow types and nullability are
+        those of the node's rows. When an input cannot say its Arrow types without
+        rows (a known limitation, see ``as_table``), the table is built from the
+        node's Python output schema with ``arrow_utils.make_empty_table``: plain
+        types give ``nullable=False`` fields and ``T | None`` types
+        ``nullable=True`` fields.
 
         Requires ``self._operator is not None`` (pre-existing limitation shared
         with ``_replay_from_cache``).
         """
+        typed = self._typed_zero_row_table()
+        if typed is not None:
+            return typed
         tag_schema, data_schema = self.output_schema()
         return arrow_utils.make_empty_table(
             {**tag_schema, **data_schema},
@@ -1658,6 +1715,16 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         latest ``run()``, ``execute()`` or ``async_execute()``; before a run in this
         process, after ``clear_cache()`` or once the node is stale, a zero-row table
         with the node's columns, in every cache mode (ITL-1095).
+
+        That zero-row table has the columns, Arrow types and nullability of the
+        node's rows, system tags and source info included: it is the operator's
+        result over its inputs' zero-row tables, got without computing or reading
+        a row (ITL-912). Known limitation: when an input cannot say its Arrow
+        types without rows (a ``PollingSource`` before its first poll, an unbound
+        input slot or ``SourceProxy``, a ``DerivedSource``, or a loaded node with
+        no live upstream), the table is built from the node's Python output
+        schema: an ``int8`` column reads as ``int64`` and the system-tag columns
+        are absent (ITL-1089, ITL-985).
         """
         current = self._current_output()
         if current is not None:
@@ -1944,8 +2011,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 # inputs rebuilt with no rows, exactly as the sync orchestrator
                 # rebuilds them, so the node reads as computed and empty with the
                 # sync path's columns and Arrow types (ITL-1080). An input that
-                # delivered no row is rebuilt from its Python output schema, as on
-                # the sync path. Nothing is stored for it.
+                # delivered no row is its upstream's zero-row table, as on the sync
+                # path (ITL-912). Nothing is stored for it.
                 empty_result = operator.process(
                     *(
                         StaticOutputOperatorPod._materialize_upstream(
