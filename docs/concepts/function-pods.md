@@ -763,6 +763,13 @@ rows under that key is an empty result, not an error.
   node. A loaded operator not attached in `REPLAY` has no readable cache and raises from
   `as_table()` and `iter_data()`; read its input nodes instead (an in-memory input source
   must be bound first, see below), or build the job from your code.
+- A side-effect node is restored read-only, in its place in the graph, with its label,
+  pipeline hash (which names its invocation log), output schema and the content hash the file
+  records for it, so the nodes below it keep their own identity. The file holds neither the
+  side-effect function nor the pod's configuration (`on_error`, `track_completion`,
+  `drop_on_failure`, `max_concurrency`), so a loaded side-effect node never delivers and never
+  writes its invocation log: its reads return no rows, as for a side-effect job node that has
+  not run in this process, and its `run()` raises.
 - A loaded node has the pipeline hash, content hash, table path and output schema its run
   had (a source node whose data was not saved gets its run's content hash once its source is
   bound). The file records which columns may be null (`T | None`), because the Arrow type text

@@ -1,7 +1,27 @@
 # ITL-1094: a loaded job restores its side-effect nodes, read-only
 
 Branch `eywalker/itl-1094-a-loaded-job-has-no-side-effect-nodes`, from `origin/main` `a9b50350`.
-Status: PROPOSAL sent to the coordinator; waiting for the reply before any code.
+Status: option A APPROVED by the coordinator (2026-11-14). Implemented on main; draft PR.
+Coordinator notes: B (record the run content hash) is a follow-up note in the PR body; #380
+is now c1a97dea and puts SideEffectJobNode under the state rule (execute/async_execute take
+load_only, rows pass on and are HELD as load-only; run(*, load_only=False) is the cascade;
+the orchestrator special case is gone). PR stays draft until #380 merges and main is merged.
+
+Implementation note: the loaded classes live in `orcapod/pipeline/loaded_side_effects.py`
+(`LoadedSideEffectNode`, `LoadedSideEffectJobNode`), not as `from_descriptor` classmethods
+in `side_effects.py`: importing `serialization` from `side_effects.py` is an import cycle for
+basedpyright, and a separate module keeps `side_effects.py` (edited by #380 and #375) almost
+untouched: only `_rows_data_context()` and the `producer` annotation.
+
+## Merge of #380 (to do)
+
+- `LoadedSideEffectJobNode.execute` / `async_execute`: take `load_only`; with it, pass rows
+  on and hold them as load-only exactly as the live node (call super's load-only path, which
+  touches no pod); without it raise. `run(*, load_only=False)`: with load_only go through the
+  shared cascade (super().run(load_only=True)); without it raise before anything runs.
+- Test: bind the source, `loaded.run(load_only=True)` (sync + async): `down` loads 3 rows,
+  zero deliveries, side-effect nodes hold the rows as loaded-only; `loaded.run()` raises.
+- Docs: rewrite the side-effect bullet into #380's version of "Saving and loading a job".
 
 ## Reproduction (main a9b50350, public interface)
 
