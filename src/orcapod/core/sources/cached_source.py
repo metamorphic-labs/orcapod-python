@@ -374,11 +374,12 @@ class CachedSource(RootSource):
         (every row any source sharing the cache wrote, including rows since deleted from
         the wrapped source) and the live rows, so a row another source wrote to a shared
         cache moves this source too, and a row deleted from the wrapped source moves
-        nothing. The check compares only when the wrapped source's time moved, so it
-        follows a cache shared with sources over that same source object. A cache shared
-        through an explicit ``cache_path`` with a source over another source object
-        (another ``DeltaTableSource`` over the same table, say) is not followed: rows only
-        that other source wrote appear at this source's next rebuild (ITL-1143).
+        nothing.
+
+        The check guarantees nothing for two cached sources that share one cache (the
+        same database and ``cache_path``, or the same table): give each cached source
+        its own cache. A change missed there means a run does not compute the new rows;
+        nothing wrong is stored (ITL-1143).
 
         Returns:
             ``True`` if this source will present new rows at the next read.
