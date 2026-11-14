@@ -46,7 +46,8 @@ class ViewStatus(str, Enum):
             means the content is empty.
         PARTIAL: A computation stopped part way; the rows are those computed so far.
         NOT_COMPUTED: Nothing is computed, or what was computed is out of date.
-        NOTHING_STORED: A job node whose store holds no rows for it yet.
+        NOTHING_STORED: A stored view (``node.as_source()``) whose store holds no rows
+            for its node yet.
         UNAVAILABLE: No rows can exist here: a pipeline blueprint, an input slot with no
             source bound, or a source that is not available.
     """
@@ -63,6 +64,10 @@ STALE_NOTE = (
     "not computed: inputs changed since the last computation; run() recomputes it"
 )
 NOTHING_STORED_NOTE = "nothing stored; run the job"
+# A job node shows the rows of its current run only; before one it shows none (ITL-1095).
+JOB_NODE_NOT_RUN_NOTE = (
+    "not run; run() fills it; node.as_source() shows every stored result"
+)
 BLUEPRINT_NOTE = "pipeline blueprint; run it in a PipelineJob"
 SIDE_EFFECTS_NOTE = (
     "not run; run() delivers its side effects; displaying never delivers side effects"

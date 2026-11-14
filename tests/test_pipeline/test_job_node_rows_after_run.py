@@ -5,8 +5,8 @@ One store, a source of one ``source_id`` holding 3 rows, then 6, then the same 3
 the rows of that run's inputs through ``as_table``, ``iter_data``, ``head`` and ``run()``,
 and so does a consumer built over the node afterwards; the two orchestrators agree row for
 row. Stored results of other inputs stay stored and reusable. A run that raised defines no
-rows: the node then reads as a node with no run in this process (every row stored under
-its content hash).
+rows: the node then reads as a node with no run in this process, which is empty (ITL-1095);
+what was stored stays readable through ``as_source()``.
 """
 
 from __future__ import annotations
@@ -275,13 +275,7 @@ class TestNullAndInactive:
 
 
 class TestRaisedRun:
-    """A run that raised defines no rows: the node reads as a node with no run."""
-
-    @staticmethod
-    def _no_run_read(fn: Any, data: list[dict[str, int]], db: Any) -> list[Any]:
-        fresh = _single(fn.pod, data, db)
-        fresh.compile()
-        return _values(fresh.nodes["node"], lambda r: (r["k"], r["y"]))
+    """A run that raised defines no rows: the node reads as a node with no run (empty)."""
 
     @pytest.mark.parametrize(
         ("kind", "fn", "policy"),
@@ -299,12 +293,13 @@ class TestRaisedRun:
         with pytest.raises((ValueError, StoreWriteError)):
             job.run(orchestrator=_orchestrator(kind, policy))
         node = job.nodes["node"]
-        expected = self._no_run_read(fn, ROWS[:4], db)
-        assert _values(node, lambda r: (r["k"], r["y"])) == expected
+        assert _values(node, lambda r: (r["k"], r["y"])) == []
         reads = _reads(node)
-        assert reads["head"] == reads["as_table"]
-        # Nothing stored was dropped: the stored rows of the earlier run are among them.
-        assert {(3, 31), (4, 41), (5, 51)} <= set(expected)
+        assert reads["head"] == reads["as_table"] == []
+        assert node.is_stale
+        # Nothing stored was dropped: the stored view holds the earlier run's rows.
+        stored = {(r["k"], r["y"]) for r in node.as_source().as_table().to_pylist()}
+        assert {(3, 31), (4, 41), (5, 51)} <= stored
 
 
 class TestDuplicateInputs:

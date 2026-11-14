@@ -32,6 +32,7 @@ from orcapod.core.streams.base import (
     check_head_size,
 )
 from orcapod.core.streams.view import (
+    JOB_NODE_NOT_RUN_NOTE,
     STALE_NOTE,
     BLUEPRINT_NOTE,
     ViewStatus,
@@ -39,6 +40,7 @@ from orcapod.core.streams.view import (
     head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
+from orcapod.core.nodes.staleness import upstream_job_node_stale
 from orcapod.errors import (
     PipelineJobRequiredError,
     StoreReadError,
@@ -710,6 +712,8 @@ class OperatorJobNode(OperatorNodeBase):
                 pipeline_database=pipeline_database,
                 cache_mode=cache_mode,
             )
+        # A node that has not run in this process holds nothing and is stale (ITL-1095).
+        self._set_modified_time(None)
 
     # ------------------------------------------------------------------
     # as_node — return the lightweight OperatorNode equivalent
@@ -739,10 +743,16 @@ class OperatorJobNode(OperatorNodeBase):
     # ------------------------------------------------------------------
 
     def clear_cache(self) -> None:
-        """Clear output caches and node identity path cache."""
+        """Clear output caches and node identity path cache.
+
+        The node then holds no run: it is stale and reads empty, as before its first run
+        in this process (ITL-1095). Rows it stored stay stored (``as_source()``).
+        """
         super().clear_cache()  # clears _node_identity_path_cache + _update_modified_time
         self._cached_output_stream = None
         self._cached_output_table = None
+        # No content established: the node, and every node downstream, is stale.
+        self._set_modified_time(None)
 
     # ------------------------------------------------------------------
     # attach_databases
@@ -1424,7 +1434,10 @@ class OperatorJobNode(OperatorNodeBase):
                 )
                 self._update_modified_time()
                 computed = True
-        table = self.as_table()
+        # Read the kept output itself: a lazy input that finishes computing during this
+        # read stamps itself after the node, which would make as_table() judge it stale.
+        assert self._cached_output_stream is not None
+        table = self._cached_output_stream.as_table()
         if computed:
             # Without a database and in OFF mode the output stream is lazy: as_table()
             # computes it, and an uncomputed input finishes only then. Stamp the node
@@ -1437,26 +1450,41 @@ class OperatorJobNode(OperatorNodeBase):
         origin = "computed" if kept is None else head_of(kept.head(1), self).origin
         return self._view_of_rows(table, origin)
 
-    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        """Return an iterator over (tag, data) pairs.
+    @property
+    def is_stale(self) -> bool:
+        """Whether the rows this node holds are out of date, or it holds none.
 
-        Read-only: never triggers computation. Yields the rows of the latest
-        ``run()``, ``execute()`` or ``async_execute()``. With nothing cached in
-        memory (before a run, or after ``clear_cache()``), a node in
-        ``CacheMode.REPLAY`` with a database yields the rows stored there; in
-        any other mode it yields nothing. Call ``node.is_stale`` before
-        iterating if you need to detect outdated cached data.
-
-        Loaded nodes raise when no readable stored cache is available.
+        True before the node's first run in this process and after ``clear_cache()``
+        (no modified time), when an input or the operator was modified after the node's
+        run (``StreamBase.is_stale``), or when any job node it depends on is stale
+        (ITL-1095). A stale node reads empty until it runs again.
         """
-        if self._cached_output_stream is not None:
-            return self._cached_output_stream.iter_data()
-        db_stream = self._load_cached_stream_from_db()
-        if db_stream is not None:
-            return db_stream.iter_data()
-        if self._loaded:
-            raise self._no_stored_results_error()
-        return iter([])
+        return super().is_stale or upstream_job_node_stale(self.upstreams)
+
+    def _current_output(self) -> StreamProtocol | None:
+        """The output of the node's current run, or ``None`` when it holds none.
+
+        A node holds a run's output from the end of ``run()``, ``execute()`` or
+        ``async_execute()`` until it is cleared or becomes stale (an input or the
+        operator changed since). Before a run in this process it holds none, whatever
+        its cache mode and store hold (ITL-1095).
+        """
+        if self._cached_output_stream is None or self.is_stale:
+            return None
+        return self._cached_output_stream
+
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """Return an iterator over the (tag, data) rows of the node's current run.
+
+        Read-only: never computes and never reads the store. Yields the rows of the
+        latest ``run()``, ``execute()`` or ``async_execute()``; nothing before a run in
+        this process, after ``clear_cache()`` or once the node is stale, in every cache
+        mode (ITL-1095). ``as_source()`` reads what the node stored (``LOG``).
+        """
+        current = self._current_output()
+        if current is None:
+            return iter([])
+        return current.iter_data()
 
     def as_table(
         self,
@@ -1464,34 +1492,24 @@ class OperatorJobNode(OperatorNodeBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        """Return the output as a PyArrow table.
+        """Return the output of the node's current run as a PyArrow table.
 
-        Read-only: never triggers computation. Returns the rows of the latest
-        ``run()``, ``execute()`` or ``async_execute()``. With nothing cached in
-        memory (before a run, or after ``clear_cache()``), a node in
-        ``CacheMode.REPLAY`` with a database returns the rows stored there; in
-        any other mode it returns a zero-row table with the node's columns.
-
-        Loaded nodes raise when no readable stored cache is available.
+        Read-only: never computes and never reads the store. Returns the rows of the
+        latest ``run()``, ``execute()`` or ``async_execute()``; before a run in this
+        process, after ``clear_cache()`` or once the node is stale, a zero-row table
+        with the node's columns, in every cache mode (ITL-1095).
         """
-        if self._cached_output_stream is not None:
-            return self._cached_output_stream.as_table(
-                columns=columns, all_info=all_info
-            )
-        db_stream = self._load_cached_stream_from_db()
-        if db_stream is not None:
-            return db_stream.as_table(columns=columns, all_info=all_info)
-        if self._loaded:
-            raise self._no_stored_results_error()
-        # No cached or stored records yet: construct a zero-row table with the
-        # correct schema and route it through ArrowTableStream so that the
-        # ColumnConfig / all_info shaping is applied consistently.
+        current = self._current_output()
+        if current is not None:
+            return current.as_table(columns=columns, all_info=all_info)
         # Requires a live operator for schema derivation (pre-existing limitation).
         if self._operator is None:
             return pa.table({})
-        empty_records = self._make_empty_table()
-        tag_keys = self.keys()[0]
-        empty_stream = ArrowTableStream(empty_records, tag_columns=tag_keys)
+        empty_stream = ArrowTableStream(
+            self._make_empty_table(),
+            tag_columns=self.keys()[0],
+            data_context=self.data_context,
+        )
         return empty_stream.as_table(columns=columns, all_info=all_info)
 
     def head(
@@ -1501,66 +1519,25 @@ class OperatorJobNode(OperatorNodeBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the first rows the node holds or has stored; never runs the operator.
+        """Return the first rows of the node's current run; never runs the operator.
 
-        After a run (or ``execute``) the rows are the node's output in memory. Before
-        that, a node in ``CacheMode.REPLAY`` shows the first of its stored rows, read
-        from its whole stored table; in ``LOG`` and ``OFF`` it shows none, as
-        ``as_table`` does. A loaded node never raises here. See ``StreamBase.head``.
+        After a run (or ``execute``) the rows are the node's output in memory. Before a
+        run in this process the node shows no rows and says so, pointing to ``run()``
+        and to ``as_source()``, in every cache mode; once stale it says its inputs
+        changed (ITL-1095). The store is never read. See ``StreamBase.head``.
         """
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
-        if self._cached_output_stream is not None:
-            if not self._loaded and self.is_stale:
-                # run() would recompute; the kept rows are not the current result.
-                return self._head_without_rows(
-                    config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
-                )
-            return head_of(self._cached_output_stream.head(n, columns=config), self)
-        if self._cache_mode == CacheMode.REPLAY and self._pipeline_database is not None:
-            return self._head_from_store(n, config)
-        if self._loaded:
+        if self._cached_output_stream is None:
             return self._head_without_rows(
-                config,
-                ViewStatus.UNAVAILABLE,
-                note=(
-                    "loaded node whose results are not stored (cache mode OFF)"
-                    if self._cache_mode == CacheMode.OFF
-                    else "loaded node whose stored results are not replayed "
-                    f"(cache mode {self._cache_mode.value.upper()})"
-                ),
+                config, ViewStatus.NOT_COMPUTED, note=JOB_NODE_NOT_RUN_NOTE
             )
-        if self._cache_mode == CacheMode.LOG and self._pipeline_database is not None:
-            note = (
-                "not run in this session; rows of earlier runs are stored but not "
-                "replayed (cache mode LOG)"
-            )
-        else:
-            note = "not run; cache mode OFF stores nothing"
-        return self._head_without_rows(config, ViewStatus.NOT_COMPUTED, note=note)
-
-    def _head_from_store(self, n: int, config: ColumnConfig) -> StreamView:
-        """Return the first ``n`` of this node's stored rows.
-
-        Reads the node's whole stored slice (no bounded read exists yet) through the
-        same path as ``as_table`` and keeps nothing on the node. A loaded node whose
-        run's rows cannot be read (its cache table is absent, or none of its rows is the
-        run's) shows no rows and says why, where ``as_table`` raises.
-        """
-        try:
-            stream = self._load_cached_stream_from_db()
-        except _LoadedCacheUnreadableError as exc:
+        if self.is_stale:
+            # run() would recompute; the kept rows are not the current result.
             return self._head_without_rows(
-                config, ViewStatus.UNAVAILABLE, note=exc.head_note
+                config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        if stream is None or stream.as_table().num_rows == 0:
-            return self._head_without_rows(
-                config,
-                ViewStatus.NOTHING_STORED,
-                # A loaded job cannot run: say what the store holds instead.
-                note="the store holds no rows for its run" if self._loaded else None,
-            )
-        return stream.head(n, columns=config).for_stream(self, origin="stored")
+        return head_of(self._cached_output_stream.head(n, columns=config), self)
 
     # ------------------------------------------------------------------
     # DB retrieval

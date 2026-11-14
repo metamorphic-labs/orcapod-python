@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime
 from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -597,10 +598,34 @@ class SourceJobNode(SourceNodeBase):
 
     @bound_source.setter
     def bound_source(self, value: StreamProtocol | None) -> None:
-        """Bind *value* as the concrete source and invalidate both hash caches."""
+        """Bind *value* as the concrete source and invalidate both hash caches.
+
+        Binding stamps the slot as modified, so every job node fed by it is stale and
+        reads empty until it runs again (ITL-1095).
+        """
         self._bound_source = value
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()
+        self._update_modified_time()
+
+    @property
+    def last_modified(self) -> datetime | None:
+        """When the slot's content last changed: its binding or its bound source.
+
+        The later of the time the slot was bound and the bound source's own
+        ``last_modified`` (a ``CachedSource`` or ``PollingSource`` moves it when it
+        reads new rows). A bound source that does not know its modification time
+        leaves the binding time. A source whose rows change without its modified time
+        moving (a table read lazily, a file rewritten in place) is not seen: build a
+        new source object and bind it, or clear the dependent nodes.
+        """
+        own = self._modified_time
+        bound = (
+            self._bound_source.last_modified if self._bound_source is not None else None
+        )
+        if own is None or bound is None:
+            return own if bound is None else bound
+        return max(own, bound)
 
     # ------------------------------------------------------------------
     # Identity — delegate to bound source when set

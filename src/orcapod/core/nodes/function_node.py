@@ -36,10 +36,13 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.view import (
     BLUEPRINT_NOTE,
+    JOB_NODE_NOT_RUN_NOTE,
+    STALE_NOTE,
     ViewStatus,
     StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
+from orcapod.core.nodes.staleness import upstream_job_node_stale
 from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
@@ -1117,6 +1120,8 @@ class FunctionJobNode(FunctionNodeBase):
             result_database=result_database,
             ephemeral_database=ephemeral_database,
         )
+        # A node that has not run in this process holds nothing and is stale (ITL-1095).
+        self._set_modified_time(None)
 
     # ------------------------------------------------------------------
     # node_config property
@@ -1513,14 +1518,27 @@ class FunctionJobNode(FunctionNodeBase):
     def clear_cache(self) -> None:
         """Clear in-memory output caches, content hash cache, and node identity path cache.
 
-        The node then holds no run: it reads as a node with no completed run in this
-        process (every row stored under its content hash).
+        The node then holds no run: it is stale and reads empty, as before its first run
+        in this process (ITL-1095). Its stored results stay stored (``as_source()``).
         """
         super().clear_cache()
         self._cached_output_datas.clear()
         self._cached_output_table = None
         self._cached_content_hash_column = None
         self._run_entry_counts = None
+        # No content established: the node, and every node downstream, is stale.
+        self._set_modified_time(None)
+
+    @property
+    def is_stale(self) -> bool:
+        """Whether the rows this node holds are out of date, or it holds none.
+
+        True before the node's first run in this process and after ``clear_cache()``
+        (no modified time), when an input or the function pod was modified after the node's
+        run (``StreamBase.is_stale``), or when any job node it depends on is stale
+        (ITL-1095). A stale node reads empty until it runs again.
+        """
+        return super().is_stale or upstream_job_node_stale(self.upstreams)
 
     def _held_pairs(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Yield the (tag, data) rows this node holds; every read of them goes through here.
@@ -1529,17 +1547,18 @@ class FunctionJobNode(FunctionNodeBase):
         (two equal inputs give two rows, as downstream received them). The in-memory
         cache may hold more (results of other inputs, read from the store), which stay
         cached for reuse but are not rows of this run (ITL-1093). Without a completed
-        run in this process, every held row. Rows come in the order the cache holds
-        them. An input without output (an inactive function) is not a row.
+        run in this process there are no rows, whatever the cache or the store holds
+        (ITL-1095). Rows come in the order the cache holds them. An input without output
+        (an inactive function) is not a row.
         """
-        held = self._cached_output_datas
         counts = self._run_entry_counts
         if counts is None:
-            pairs: Iterable[tuple[TagProtocol, DataProtocol | None]] = held.values()
-        else:
-            pairs = (
-                pair for eid, pair in held.items() for _ in range(counts.get(eid, 0))
-            )
+            return
+        pairs: Iterable[tuple[TagProtocol, DataProtocol | None]] = (
+            pair
+            for eid, pair in self._cached_output_datas.items()
+            for _ in range(counts.get(eid, 0))
+        )
         for tag, data in pairs:
             if data is not None:
                 yield tag, data
@@ -3136,18 +3155,15 @@ class FunctionJobNode(FunctionNodeBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the first rows the node holds or has stored; never runs the function.
+        """Return the first rows of the node's current run; never runs the function.
 
         After a run (or ``execute``) the rows are the node's results in memory for that
-        run's inputs, the first of what ``as_table`` returns. Otherwise they are the first of its stored
-        rows: the node's whole stored slice is read and nothing is kept on the node.
-        With nothing stored, there are no rows. The node has all of its rows, so with
-        ``sort_by_tags`` (or ``all_info``) the head is exactly
-        ``as_table(...).slice(0, n)``, whatever order the rows were computed in. See
-        ``StreamBase.head``.
-
-        Warns:
-            StoreContentWarning: As for ``as_table``.
+        run's inputs, the first of what ``as_table`` returns. A node that has not run in
+        this process, or whose input changed since (stale), shows no rows and says so,
+        pointing to ``run()`` and to ``as_source()`` for its stored results (ITL-1095);
+        the store is not read. The node has all of its rows, so with ``sort_by_tags``
+        (or ``all_info``) the head is exactly ``as_table(...).slice(0, n)``, whatever
+        order the rows were computed in. See ``StreamBase.head``.
         """
         from orcapod.pipeline.serialization import LoadStatus
 
@@ -3158,51 +3174,15 @@ class FunctionJobNode(FunctionNodeBase):
             return self._head_without_rows(
                 config, ViewStatus.UNAVAILABLE, note="no store attached"
             )
-        current = status == LoadStatus.CACHE_ONLY or not self.is_stale
-        if current and (
-            self._run_entry_counts is not None or self._cached_output_datas
-        ):
-            return self._head_of_pairs(
-                list(self._held_pairs()), n, config, origin="held"
+        if self._run_entry_counts is None:
+            return self._head_without_rows(
+                config, ViewStatus.NOT_COMPUTED, note=JOB_NODE_NOT_RUN_NOTE
             )
-        return self._head_from_store(n, config)
-
-    def _head_from_store(self, n: int, config: ColumnConfig) -> StreamView:
-        """Return the first ``n`` of this node's stored rows.
-
-        Reads the node's whole stored slice (pipeline table joined with the result
-        table; no bounded read exists yet) and keeps nothing on the node.
-        """
-        if self._function_pod is None:
-            # A loaded node: its table is built from the stored Arrow records.
-            self._check_expected_rows()
-            fetched = self._fetch_joined_records()
-            stored = None if fetched is None else self._stored_rows_stream(fetched)
-            stored_ids = set(stored[0]) if stored is not None else set()
-            missing = 0
-            if fetched is not None:
-                missing = sum(
-                    1 for k in fetched.empty_data_tokens if k not in stored_ids
-                )
-            note = (
-                f"{missing:,} {'result' if missing == 1 else 'results'} not shown: kept "
-                "in an ephemeral store, which is not saved with the job"
-                if missing
-                else None
+        if status != LoadStatus.CACHE_ONLY and self.is_stale:
+            return self._head_without_rows(
+                config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-            if stored is not None:
-                return (
-                    stored[1]
-                    .head(n, columns=config)
-                    .for_stream(self, origin="stored", note=note)
-                )
-            return self._head_without_rows(config, ViewStatus.NOTHING_STORED, note=note)
-        if self._cached_function_pod is None:
-            return self._head_without_rows(config, ViewStatus.NOT_COMPUTED)
-        entries = list(self._load_cached_entries().values())
-        if not any(data is not None for _, data in entries):
-            return self._head_without_rows(config, ViewStatus.NOTHING_STORED)
-        return self._head_of_pairs(entries, n, config, origin="stored")
+        return self._head_of_pairs(list(self._held_pairs()), n, config, origin="held")
 
     # ------------------------------------------------------------------
     # Iteration
@@ -3214,54 +3194,33 @@ class FunctionJobNode(FunctionNodeBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        """Return this node's results as a PyArrow table.
+        """Return the rows of this node's current run as a PyArrow table.
 
-        A node loaded by ``PipelineJob.load`` has no function pod. Its table is
-        built from the Arrow records its saved run stored, so every column keeps
-        its stored type. Row order follows the store. With nothing stored, the
-        table has zero rows and the node's columns.
+        Read-only: never computes and never reads the store. Before a run in this
+        process, or once the node is stale, the table has zero rows and the node's
+        columns (ITL-1095); ``as_source()`` reads what the store holds.
 
         Raises:
-            RuntimeError: If the node was loaded and no store is attached, or some of
-                its results were kept in an ephemeral store, which is not saved with
-                the job.
-
-        Warns:
-            StoreContentWarning: Once per store, if the node was loaded from a job file
-                that records another number of pipeline records for its run than the
-                store holds. The read returns what the store holds.
+            RuntimeError: If the node was loaded and no store is attached.
         """
-        if self._function_pod is None:
-            self._require_readable_stub()
-            fetched = self._fetch_joined_records()
-            if fetched is None:
-                return super().as_table(columns=columns, all_info=all_info)
-            stored = self._stored_rows_stream(fetched)
-            stored_ids = set(stored[0]) if stored is not None else set()
-            ephemeral = [k for k in fetched.empty_data_tokens if k not in stored_ids]
-            if ephemeral:
-                raise RuntimeError(
-                    f"FunctionJobNode {self.label!r}: the saved run kept "
-                    f"{len(ephemeral)} of its results in an ephemeral store, which "
-                    "is not saved with the job, so they cannot be read into a "
-                    "table. iter_data() yields them as EmptyData placeholders."
-                )
-            if stored is not None:
-                return stored[1].as_table(columns=columns, all_info=all_info)
+        from orcapod.pipeline.serialization import LoadStatus
+
+        if self.load_status == LoadStatus.UNAVAILABLE:
+            raise self._no_store_error()
         return super().as_table(columns=columns, all_info=all_info)
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        """Yield this node's (tag, data) rows.
+        """Yield the (tag, data) rows of this node's current run.
 
-        Strictly read-only — never triggers computation. Callers must call
-        ``run()`` or ``execute()`` first if they want results computed.
+        Strictly read-only: never computes and never reads the store. Callers must
+        call ``run()`` (or run the job) first.
 
         After a completed run (``execute``, ``async_execute``, ``run()`` or a job run)
         the rows are exactly those of that run's inputs, on either orchestrator, even
-        though results of other inputs stay cached and stored (ITL-1093). A run that
-        raised defines no rows. Without a completed run in this process, on the first
-        call with an empty in-memory store and a DB attached, hot-loads every record
-        stored under the node's content hash (one-shot, no recompute) and yields them.
+        though results of other inputs stay cached and stored (ITL-1093). A node that
+        has not run in this process, whose run raised, or that is stale (its input
+        changed since its run) yields nothing (ITL-1095); ``as_source()`` reads every
+        row stored for it.
 
         Raises:
             RuntimeError: If ``load_status`` is UNAVAILABLE.
@@ -3271,34 +3230,9 @@ class FunctionJobNode(FunctionNodeBase):
         status = self.load_status
         if status == LoadStatus.UNAVAILABLE:
             raise self._no_store_error()
-
-        if status == LoadStatus.CACHE_ONLY:
-            # Upstream unavailable; serve entirely from DB.
-            if not self._cached_output_datas:
-                loaded = self._load_cached_entries()
-                self._cached_output_datas.update(loaded)
-                if loaded:
-                    self._cached_output_table = None
-                    self._cached_content_hash_column = None
-            yield from self._held_pairs()
-            return
-
-        # FULL / READ_ONLY — in-memory store may be populated from computation
-        # (via execute/run) or hot-loaded from DB.
-        if self.is_stale:
+        # A CACHE_ONLY node has no live input to be stale against.
+        if status != LoadStatus.CACHE_ONLY and self.is_stale:
             self.clear_cache()
-
-        if self._function_pod is None:
-            # A loaded node: its rows can come only from the store.
-            self._check_expected_rows()
-        if not self._cached_output_datas and self._cached_function_pod is not None:
-            # Hot-load from DB on the first call when store is empty.
-            loaded = self._load_cached_entries()
-            self._cached_output_datas.update(loaded)
-            if loaded:
-                self._cached_output_table = None
-                self._cached_content_hash_column = None
-
         yield from self._held_pairs()
 
     def run(self) -> StreamView:
