@@ -15,17 +15,19 @@ from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
+import polars as pl
 import pyarrow as pa
 import pytest
 
 from orcapod import contexts, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.nodes import OperatorJobNode
-from orcapod.core.operators import Batch, PolarsFilter, SelectDataColumns
+from orcapod.core.operators import Batch, Join, PolarsFilter, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource, DeltaTableSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.core.streams.base import typed_zero_row_table
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -513,3 +515,77 @@ def test_head_of_a_node_not_run_reads_no_source_row(node: str) -> None:
     assert head.num_rows == 0
     assert head.schema.field("id").type == pa.int8()
     assert any(name.startswith("_tag_") for name in head.column_names)
+
+
+UDF_CALLS: list[int] = []
+
+
+def _record_and_keep(batch: pl.Series) -> pl.Series:
+    """A user predicate: records the batch length and keeps every row."""
+    UDF_CALLS.append(len(batch))
+    return pl.Series([True] * len(batch))
+
+
+def _udf_filter(groups: tuple[str, ...]) -> StreamProtocol:
+    """A standalone filter whose predicate is user code (a job refuses to hash it)."""
+    return PolarsFilter([pl.col("x").map_batches(_record_and_keep, pl.Boolean)])(
+        _g1(_source(groups))
+    )
+
+
+def test_head_of_a_filter_never_calls_its_predicate() -> None:
+    """A filter's zero-row table is its input's: the predicate is not evaluated."""
+    UDF_CALLS.clear()
+
+    head = _udf_filter(WITH_ROWS).head(all_info=True).table
+
+    assert UDF_CALLS == []
+    assert head.num_rows == 0
+    assert head.schema == _g1(_source(WITH_ROWS)).as_table(all_info=True).schema
+
+
+def test_a_zero_row_run_of_a_filter_still_evaluates_its_predicate() -> None:
+    """A run with no input row evaluates the predicate once, over an empty batch."""
+    UDF_CALLS.clear()
+
+    table = _udf_filter(NO_MATCH).as_table(all_info=True)
+
+    assert UDF_CALLS == [0]
+    assert table.num_rows == 0
+
+
+def test_an_ill_typed_predicate_raises_at_run_not_at_head() -> None:
+    """``head()`` shows the input's columns; the run, even with no row, raises."""
+    stream = PolarsFilter([pl.col("grp") > 1])(_g1(_source(NO_MATCH)))
+
+    head = stream.head()
+
+    assert head.table.num_rows == 0
+    with pytest.raises(pl.exceptions.PolarsError):
+        _ = stream.as_table()
+
+
+def test_head_of_a_join_whose_keys_disagree_raises_as_its_run_does() -> None:
+    """Inputs that disagree on a key's Arrow type: ``head`` raises the run's error.
+
+    The notebook preview (``_repr_html_``, the notebook's display hook) never raises: it
+    shows the error.
+    """
+    wide = pa.table(
+        {
+            "id": pa.array([1, 2, 3], pa.int64()),
+            "grp": pa.array(list(WITH_ROWS), pa.large_string()),
+            "y": pa.array([4, 5, 6], pa.int8()),
+        }
+    )
+    joined = Join()(
+        _source(), ArrowTableSource(wide, tag_columns=["id", "grp"], source_id="b")
+    )
+
+    with pytest.raises(InputValidationError, match="'id'") as at_head:
+        _ = joined.head()
+    with pytest.raises(InputValidationError) as at_run:
+        _ = joined.run()
+
+    assert str(at_head.value) == str(at_run.value)
+    assert "could not read" in joined._repr_html_()

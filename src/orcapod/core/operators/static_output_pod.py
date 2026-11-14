@@ -5,7 +5,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Sequence
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod import contexts
@@ -54,6 +54,14 @@ class StaticOutputOperatorPod(TraceableBase):
     The static output stream is wrapped in ``DynamicPodStream`` which re-executes
     the pod as necessary to keep the output up-to-date.  Pod invocations are
     tracked by the tracker manager.
+    """
+
+    OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
+    """Whether the output has exactly its single input's columns and Arrow types.
+
+    Declared by an operator that only chooses which rows exist (``PolarsFilter``). Its
+    zero-row table is then its input's (``zero_row_result``), got without evaluating a
+    predicate, so no user code runs to learn the column types (ITL-912).
     """
 
     def __init__(
@@ -310,6 +318,25 @@ class StaticOutputOperatorPod(TraceableBase):
             tag_keys,
             upstream,
         )
+
+    def zero_row_result(self, *inputs: StreamProtocol) -> StreamProtocol:
+        """This operator's result over zero-row inputs, for its zero-row table (ITL-912).
+
+        ``static_process`` over the inputs, or, for an operator whose output schema is
+        its input's (``OUTPUT_SCHEMA_IS_INPUT_SCHEMA``), the input itself, so no
+        predicate or other user code is evaluated. A run never comes here: it calls
+        ``static_process`` (or ``process``) whether its inputs have rows or not.
+
+        Args:
+            inputs: The inputs as zero-row streams.
+
+        Returns:
+            A stream with no rows and the columns and Arrow types of the result.
+        """
+        if self.OUTPUT_SCHEMA_IS_INPUT_SCHEMA:
+            (only,) = inputs
+            return only
+        return self.static_process(*inputs)
 
     @staticmethod
     def _materialize_to_stream(
@@ -627,9 +654,8 @@ class DynamicPodStream(StreamBase):
                     data_context=StaticOutputOperatorPod._upstream_context(upstream),
                 )
             )
-        return self._pod.static_process(*inputs).as_table(
-            columns=ZERO_ROW_INPUT_COLUMNS
-        )
+        pod = cast(StaticOutputOperatorPod, self._pod)
+        return pod.zero_row_result(*inputs).as_table(columns=ZERO_ROW_INPUT_COLUMNS)
 
     def keys(
         self,
@@ -753,7 +779,7 @@ class DynamicPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the first rows of the operator's kept result; never runs the operator.
+        """Return the first rows of the operator's kept result; never runs it over rows.
 
         The head of an operator is not the operator over the heads of its inputs (a
         group over ten rows has the wrong members), so before the result is computed,

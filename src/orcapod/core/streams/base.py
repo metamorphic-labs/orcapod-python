@@ -632,7 +632,8 @@ class StreamBase(TraceableBase):
         """Compute the whole stream and return a ``StreamView`` of all its rows.
 
         The one way to compute any stream outside a job (developer, November 13, 2026,
-        ITL-1081): ``head()`` and the notebook preview never compute. ``run()`` does
+        ITL-1081): ``head()`` and the notebook preview never compute a row (see
+        ``head``). ``run()`` does
         exactly the work ``as_table()`` does, through the same code path and cache, so
         a stream already computed is not computed again, and one whose inputs changed is
         computed again. The view holds every row with the default column configuration;
@@ -672,8 +673,16 @@ class StreamBase(TraceableBase):
 
         The rows are ones the stream already holds, has cached from an earlier
         computation, has stored, or can read with a bounded read of its table. ``head``
-        never calls a function, runs an operator, delivers a side effect, polls a source
-        or writes anything. ``head`` takes the column configuration of ``as_table``,
+        never computes, reads, polls or delivers a row, never calls user code (a
+        function, a predicate, a side effect) and never writes. With no rows to show, it
+        learns the column types without data (ITL-912): each operator of the stream is
+        applied to zero-row inputs, which processes no data, so a chain of ``N``
+        operators applies up to ``N`` operators to empty tables (about 60 ms for 20); an
+        operator whose output schema is its input's (``OUTPUT_SCHEMA_IS_INPUT_SCHEMA``,
+        such as ``PolarsFilter``) is not applied at all. So a pipeline whose inputs
+        disagree on a column's Arrow type raises from ``head`` the
+        ``InputValidationError`` its run raises, and a filter with an ill-typed
+        predicate shows its input's columns: the error appears at the run. ``head`` takes the column configuration of ``as_table``,
         sorting included, and applies it to the rows the stream has, then takes the first
         ``n``. The default configuration does not sort, as ``as_table()`` does not, so
         the rows are the first ``n`` that ``as_table()`` would return. With

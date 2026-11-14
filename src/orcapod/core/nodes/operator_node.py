@@ -1250,10 +1250,11 @@ class OperatorJobNode(OperatorNodeBase):
             if zero_rows is None:
                 return None
             inputs.append(zero_rows)
-        # static_process, not process: an invocation recorded by a tracker would add
-        # a step to whatever pipeline is being built while this table is read.
+        # zero_row_result calls static_process, not process: an invocation recorded by
+        # a tracker would add a step to whatever pipeline is being built while this
+        # table is read.
         operator = cast(StaticOutputOperatorPod, self._operator)
-        result = operator.static_process(*inputs)
+        result = operator.zero_row_result(*inputs)
         return result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
 
     def _make_empty_table(self) -> "pa.Table":
@@ -1607,7 +1608,7 @@ class OperatorJobNode(OperatorNodeBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the first rows the node holds or has stored; never runs the operator.
+        """Return the first rows the node holds or has stored; never runs it over rows.
 
         After a run (or ``execute``) the rows are the node's output in memory. Before
         that, a node in ``CacheMode.REPLAY`` shows the first of its stored rows, read
