@@ -20,6 +20,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -62,7 +63,7 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
     """Return ``stream``'s table with no rows and the Arrow types its rows would have.
 
     The table has the user tags, system tags, data and source-info columns
-    (``ZERO_ROW_INPUT_COLUMNS``) in the order the stream's own table has them, with
+    (``ZERO_ROW_INPUT_COLUMNS``; never a meta column) in the order the stream's own table has them, with
     the Arrow types, nullability and logical types the stream's rows have (ITL-912). Getting it never computes, reads or polls a row:
     an in-memory table is sliced, a source answers from the table or schema it already
     holds, and an operator node applies its operator to its inputs' zero-row tables, as
@@ -80,7 +81,14 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
         that reads, polls or derives its rows later, a pod stream not yet computed.
     """
     method = getattr(stream, "_typed_zero_row_table", None)
-    return cast("pa.Table | None", method()) if callable(method) else None
+    table = cast("pa.Table | None", method()) if callable(method) else None
+    if table is None:
+        return None
+    # A row passed downstream carries no meta column (``_rows_to_table`` reads a row's
+    # data with source info only), so neither does its zero-row table: a cached
+    # function pod's ``__computed`` stays in that stream's own table.
+    meta = [n for n in table.column_names if n.startswith(constants.META_PREFIX)]
+    return table.drop(meta) if meta else table
 
 
 def check_head_size(n: int) -> None:

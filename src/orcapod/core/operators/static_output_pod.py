@@ -308,6 +308,7 @@ class StaticOutputOperatorPod(TraceableBase):
             tag_columns=tag_keys,
             producer=upstream.producer,
             upstreams=upstream.upstreams,
+            data_context=upstream.data_context,
         )
 
     @staticmethod
@@ -516,6 +517,7 @@ class DynamicPodStream(StreamBase):
                     tag_columns=upstream.keys()[0],
                     producer=upstream.producer,
                     upstreams=upstream.upstreams,
+                    data_context=upstream.data_context,
                 )
             )
         return self._pod.static_process(*inputs).as_table(

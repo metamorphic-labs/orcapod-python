@@ -451,9 +451,21 @@ class PollingSource(RootSource, Generic[T]):
         knows only the Python schema ``impl.schema()`` declares, which cannot say an
         Arrow type such as ``int8`` (a known limitation, ITL-912).
         """
-        if not self._batches:
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+        batches = list(self._batches)  # snapshot, as in ``_get_combined_stream``
+        if not batches:
             return None
-        return typed_zero_row_table(self._get_combined_stream())
+        # Each batch with no rows, combined as the batches themselves are (the same
+        # schema check and promotion), so the cost does not grow with the rows polled.
+        result: ArrowTableStream | None = None
+        for batch in batches:
+            table = typed_zero_row_table(batch)
+            if table is None:
+                return None
+            zero_rows = ArrowTableStream(table=table, tag_columns=self._tag_columns)
+            result = zero_rows if result is None else self._combine(result, zero_rows)
+        return typed_zero_row_table(result)
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll.

@@ -24,6 +24,7 @@ from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.operators import Batch, PolarsFilter, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource, DeltaTableSource
 from orcapod.core.sources.cached_source import CachedSource
+from orcapod.core.streams.base import typed_zero_row_table
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
@@ -349,3 +350,58 @@ def test_operator_node_over_each_source_kind_types_its_zero_row_table(
     assert expected.num_rows == 2
     assert table.num_rows == 0
     assert table.schema == expected.schema
+
+
+def test_a_filter_after_a_cached_function_pod_has_no_meta_column_with_zero_rows() -> (
+    None
+):
+    """A zero-row input carries no meta column, as a row passed downstream does not.
+
+    A cached function pod's own table has ``__computed``; an operator after it never
+    shows it, with rows or without.
+    """
+
+    def job(groups: tuple[str, ...]) -> PipelineJob:
+        """A filter keeping every column, after a cached function pod."""
+        new = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
+        with new:
+            _ = PolarsFilter(constraints={"grp": "g1"})(
+                _cached_function_stream(groups), label="op"
+            )
+        return new
+
+    ran = job(WITH_ROWS)
+    _ = ran.run(orchestrator=SyncPipelineOrchestrator())
+    in_job = _op(ran).as_table(all_info=True)
+    not_run = _op(job(WITH_ROWS)).as_table(all_info=True)
+
+    def plain(groups: tuple[str, ...]) -> pa.Table:
+        """The same filter over the cached function pod's stream, outside a job."""
+        stream = PolarsFilter(constraints={"grp": "g1"})(
+            _cached_function_stream(groups)
+        )
+        return stream.as_table(all_info=True)
+
+    plain_rows = plain(WITH_ROWS)
+    plain_zero_rows = plain(NO_MATCH)
+
+    assert in_job.num_rows > 0 and plain_rows.num_rows > 0
+    assert not_run.num_rows == plain_zero_rows.num_rows == 0
+    assert not_run.schema == in_job.schema
+    assert plain_zero_rows.schema == plain_rows.schema
+    assert not any(n.startswith("__") for n in not_run.column_names)
+
+
+def test_a_zero_row_table_never_carries_a_meta_column() -> None:
+    """The zero-row table of a cached function pod's stream has no ``__computed``.
+
+    Non-public on purpose: the test is about ``typed_zero_row_table``'s contract (user
+    tags, system tags, data, source info; no meta), which no public read shows today.
+    """
+    stream = _cached_function_stream(NO_MATCH)
+    assert "__computed" in stream.as_table(all_info=True).column_names
+
+    table = typed_zero_row_table(stream)
+
+    assert table is not None
+    assert not [name for name in table.column_names if name.startswith("__")]
