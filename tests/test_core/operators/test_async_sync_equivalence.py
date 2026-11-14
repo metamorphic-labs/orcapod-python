@@ -1438,3 +1438,44 @@ def test_no_operator_carries_cached_pod_meta(case: Case) -> None:
     _assert_no_input_meta(actual)
     assert_equivalent(expected, actual)
     assert_same_meta(expected, actual)
+
+
+# ── a selection that would leave no data column (ITL-1080) ──────────────────
+
+NO_DATA_COLUMN_OPS = {
+    "drop_every_data_column": lambda: DropDataColumns(["i32", "u8", "f32", "ls"]),
+    "drop_every_data_column_not_strict": lambda: DropDataColumns(
+        ["i32", "u8", "f32", "ls", "absent"], strict=False
+    ),
+    "select_no_data_column_not_strict": lambda: SelectDataColumns(
+        ["absent"], strict=False
+    ),
+}
+
+
+@pytest.mark.parametrize("make_op", NO_DATA_COLUMN_OPS.values(), ids=NO_DATA_COLUMN_OPS)
+def test_selection_leaving_no_data_column_raises_alike_on_both_paths(
+    make_op: Callable[[], StaticOutputOperatorPod],
+) -> None:
+    """A stream needs a data column: both paths refuse a result without one.
+
+    The sync path raises when the operator is applied, ``op(stream)``; the async
+    path on the first row, with the same error. Before, the sync path raised only
+    when the rows were read and the async path emitted rows with empty ``Data``.
+    """
+    source = source_b(nested=False)
+    with pytest.raises(InputValidationError, match="no data column") as sync_error:
+        _ = make_op()(source)
+    with pytest.raises(InputValidationError, match="no data column") as async_error:
+        _ = async_rows(make_op(), source)
+    assert str(async_error.value) == str(sync_error.value)
+
+
+def test_selection_leaving_only_meta_columns_raises() -> None:
+    """A raw stream's ``__`` columns are not data: they are not carried (ITL-1080)."""
+    source = _with_meta(source_b(nested=False), _meta_columns("m", 3))
+    op = DropDataColumns(["i32", "u8", "f32", "ls"])
+    with pytest.raises(InputValidationError, match="no data column"):
+        _ = op(source)
+    with pytest.raises(InputValidationError, match="no data column"):
+        _ = async_rows(DropDataColumns(["i32", "u8", "f32", "ls"]), source)

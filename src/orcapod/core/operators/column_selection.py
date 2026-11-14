@@ -35,6 +35,27 @@ def _canonical_columns(columns: str | Collection[str]) -> tuple[str, ...]:
     return tuple(sorted(set(columns)))
 
 
+def _require_a_data_column(remaining: Collection[str]) -> None:
+    """Refuse a selection whose result would have no data column.
+
+    A stream needs at least one data column (``ArrowTableStream`` refuses a table
+    without one), so the sync path checks this when the operator is applied and
+    the async path on the first row, with this one error. Meta (``__``) columns
+    are not data: no operator carries them (ITL-1080).
+
+    Args:
+        remaining: The data columns the result would have.
+
+    Raises:
+        InputValidationError: If ``remaining`` has no data column.
+    """
+    if not [c for c in remaining if not c.startswith(constants.META_PREFIX)]:
+        raise InputValidationError(
+            "The result would have no data column; a stream needs at least one. "
+            "Keep at least one data column."
+        )
+
+
 class SelectTagColumns(UnaryOperator):
     """
     Operator that selects specified columns from a stream.
@@ -219,6 +240,7 @@ class SelectDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to select are present or use strict=False to ignore missing columns"
             )
+        _require_a_data_column([c for c in data_columns if c in columns_to_select])
 
     def unary_output_schema(
         self,
@@ -270,6 +292,7 @@ class SelectDataColumns(UnaryOperator):
                                 f"specified columns to select are present or use "
                                 f"strict=False to ignore missing columns"
                             )
+                    _require_a_data_column([c for c in pkt_keys if c in self.columns])
                     pkts_to_drop = [c for c in pkt_keys if c not in self.columns]
                 if not pkts_to_drop:
                     await output.send((tag, data))
@@ -477,6 +500,7 @@ class DropDataColumns(UnaryOperator):
             raise InputValidationError(
                 f"Missing data columns: {missing_columns}. Make sure all specified columns to drop are present or use strict=False to ignore missing columns"
             )
+        _require_a_data_column([c for c in data_columns if c not in self.columns])
 
     def unary_output_schema(
         self,
@@ -525,6 +549,9 @@ class DropDataColumns(UnaryOperator):
                                 f"specified columns to drop are present or use "
                                 f"strict=False to ignore missing columns"
                             )
+                    _require_a_data_column(
+                        [c for c in pkt_keys if c not in self.columns]
+                    )
                     effective_drops = (
                         list(self.columns)
                         if self.strict
