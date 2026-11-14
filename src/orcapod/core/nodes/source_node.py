@@ -143,8 +143,9 @@ def _system_tag_columns(
     """Return *source*'s source-id and record-id system-tag columns.
 
     A root source, or a stream that keeps its system tags (a filter, a rename), has one
-    of each; a stream that joins or merges inputs has one pair per input; a source with
-    no rows may have none.
+    of each; a stream that joins or merges inputs has one pair per input; a stream over a
+    table without them (a raw ``ArrowTableStream``) has none. A slot accepts only the
+    first (ITL-1126).
 
     Args:
         source: The stream being bound.
@@ -161,24 +162,6 @@ def _system_tag_columns(
         [name for name in names if name.startswith(source_id)],
         [name for name in names if name.startswith(record_id)],
     )
-
-
-def _keeps_its_own_system_tags(source_ids: list[str], record_ids: list[str]) -> bool:
-    """Return whether a bound stream's system tags stay as they are, not the slot's.
-
-    The slot's rows carry one system-tag pair, under the slot's names. A stream with
-    exactly one pair takes those names; a joined or merged stream (one pair per input)
-    or a stream with none cannot. A narrower such stream is refused at bind; one of the
-    declared schema passes through with its own system tags, a known gap against the
-    rule that the pipeline determines every node's schema. Pending the developer's
-    decision (ITL-1112, "S1"): refusing these binds too is a change here and in
-    ``SourceNodeBase._fit``.
-
-    Args:
-        source_ids: The stream's source-id system-tag columns.
-        record_ids: The stream's record-id system-tag columns.
-    """
-    return len(source_ids) != 1 or len(record_ids) != 1
 
 
 class SourceNodeBase(TraceableBase, ABC):
@@ -381,14 +364,18 @@ class SourceNodeBase(TraceableBase, ABC):
         each the declared Python type, or, where the slot declares ``T | None``, ``T``
         (ITL-1112). Those are what every downstream pipeline hash, and so every stored
         path, is built from, so a source that fits never moves one. Column order and
-        ``optional_fields`` are not compared; neither enters the pipeline hash.
+        ``optional_fields`` are not compared; neither enters the pipeline hash. The
+        source must also carry exactly one source-id and one record-id system-tag
+        column, which take the slot's names; a joined or merged stream, or one with no
+        system tags, is refused (ITL-1126).
 
         Args:
             source: A concrete stream to validate.
 
         Raises:
             SourceSpecMismatchError: If a column is missing, unexpected, or of a type
-                the declared one does not accept.
+                the declared one does not accept, or the source's system-tag columns
+                are not exactly one source-id and one record-id column.
         """
         _ = self._fit(source)
 
@@ -431,16 +418,16 @@ class SourceNodeBase(TraceableBase, ABC):
                         f"{_type_text(given[name])}"
                     )
 
-        if narrower and not issues:
-            # A narrower source's rows are given with the slot's one system-tag pair,
-            # which only a source with exactly one pair can take.
-            source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
-            if _keeps_its_own_system_tags(source_ids, record_ids):
-                issues.append(
-                    "a narrower source must carry exactly one source-id and one "
-                    "record-id system-tag column, not "
-                    f"{sorted(source_ids + record_ids)}"
-                )
+        # The slot's rows carry one system-tag pair under the slot's names, which only
+        # a source with exactly one pair can take. A joined or merged stream (one pair
+        # per input) or a stream with none is refused (developer, November 14, 2026,
+        # ITL-1126); binding one properly is ITL-1127.
+        source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
+        if len(source_ids) != 1 or len(record_ids) != 1:
+            issues.append(
+                "a source must carry exactly one source-id and one record-id "
+                f"system-tag column, not {sorted(source_ids + record_ids)}"
+            )
 
         if issues:
             raise SourceSpecMismatchError(
@@ -797,19 +784,15 @@ class SourceJobNode(SourceNodeBase):
 
         Returns:
             ``None`` when the source's rows already are rows of the declared schema
-            (same types, column order and system-tag names), or are a joined or merged
-            stream of the declared schema, so its rows pass unchanged; otherwise the
-            ``_DeclaredForm`` that makes them so.
+            (same types, column order and system-tag names), so they pass unchanged;
+            otherwise the ``_DeclaredForm`` that makes them so.
 
         Raises:
             SourceSpecMismatchError: If *source* does not fit the declared schema.
         """
         source_tag, source_data, narrower = self._fit(source)
+        # _fit has checked that the source has exactly one pair.
         source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
-        if _keeps_its_own_system_tags(source_ids, record_ids):
-            # Of the declared schema (a narrower one was refused by _fit): passes
-            # through as it is.
-            return None
         declared_source_id, declared_record_id = system_tag_column_names(
             self._schema_hash_str
         )

@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
-from orcapod.core.nodes.source_node import SourceNode
+from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.operators import Join, MapData
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, typed_zero_row_table
@@ -494,25 +494,6 @@ def _xw_job() -> PipelineJob:
     return job
 
 
-def test_a_joined_stream_of_the_declared_schema_passes_through() -> None:
-    """An equal-schema stream with two system-tag pairs is bound as it is (known gap)."""
-    stream = _joined_stream(x_nullable=True)
-    job = _xw_job()
-    job.bind(sources={"src": stream})
-    assert job.nodes["src"].keys(all_info=True) == stream.keys(all_info=True)
-
-
-@pytest.mark.parametrize("bind", BINDS.values(), ids=BINDS.keys())
-def test_a_narrower_joined_stream_is_refused(
-    bind: Callable[[PipelineJob, Any], None],
-) -> None:
-    """A narrower stream with two system-tag pairs cannot take the slot's one pair."""
-    job = _xw_job()
-    with pytest.raises(SourceSpecMismatchError, match="system-tag"):
-        bind(job, _joined_stream(x_nullable=False))
-    assert job.nodes["src"].bound_source is None  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode
-
-
 def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
     """The ``__`` columns a job node's rows carry reach the rows of a narrower bind."""
 
@@ -544,25 +525,6 @@ def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
             sorted(data.as_table(columns={"meta": True}).column_names)
             for _, data in rows
         ] == own
-
-
-@pytest.mark.parametrize("bind", BINDS.values(), ids=BINDS.keys())
-def test_a_narrower_stream_without_system_tags_is_refused(
-    bind: Callable[[PipelineJob, Any], None],
-) -> None:
-    """A narrower stream with no system-tag pair cannot be given the slot's pair."""
-    schema = pa.schema(
-        [pa.field("id", pa.int64(), False), pa.field("x", pa.int64(), False)]
-    )
-    stream = ArrowTableStream(
-        pa.table({"id": [0], "x": [1]}, schema=schema), tag_columns=["id"]
-    )
-    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
-    with job:
-        _ = MapData({"x": "y"})(_slot(int | None), label="renamed")
-    with pytest.raises(SourceSpecMismatchError, match="system-tag"):
-        bind(job, stream)
-    assert job.nodes["src"].bound_source is None  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode
 
 
 # ---------------------------------------------------------------------------
@@ -646,3 +608,86 @@ def test_a_downstream_node_before_a_run_has_the_types_of_its_rows(
     assert after.num_rows > 0
     assert before.schema == after.schema
     assert head.schema == after.schema
+
+
+# ---------------------------------------------------------------------------
+# Not exactly one system-tag pair: refused (developer, November 14, 2026, ITL-1126)
+# ---------------------------------------------------------------------------
+
+
+def _raw_stream(x_nullable: bool) -> Any:
+    """Return an ``ArrowTableStream`` of tag ``id`` and data ``x``, ``w``: no system tags."""
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), False),
+            pa.field("x", pa.int64(), x_nullable),
+            pa.field("w", pa.large_string(), False),
+        ]
+    )
+    return ArrowTableStream(
+        pa.table({"id": [0], "x": [1], "w": ["p"]}, schema=schema), tag_columns=["id"]
+    )
+
+
+def _construct(job: PipelineJob, source: Any) -> None:
+    """Build a node for slot ``src`` with *source* bound at construction."""
+    slot = job.nodes["src"]
+    _ = SourceJobNode(
+        name="src",
+        tag_schema=slot.output_schema()[0],
+        data_schema=slot.output_schema()[1],
+        bound_source=source,
+    )
+
+
+ALL_BINDS: dict[str, Callable[[PipelineJob, Any], None]] = {
+    **BINDS,
+    "construction": _construct,
+}
+
+ONE_PAIR_REQUIRED: dict[str, Callable[[bool], Any]] = {
+    "joined": _joined_stream,
+    "no_system_tags": _raw_stream,
+}
+
+
+@pytest.mark.parametrize("x_nullable", [True, False], ids=["declared", "narrower"])
+@pytest.mark.parametrize(
+    "make_stream", ONE_PAIR_REQUIRED.values(), ids=ONE_PAIR_REQUIRED.keys()
+)
+@pytest.mark.parametrize("bind", ALL_BINDS.values(), ids=ALL_BINDS.keys())
+def test_a_stream_without_exactly_one_system_tag_pair_is_refused(
+    bind: Callable[[PipelineJob, Any], None],
+    make_stream: Callable[[bool], Any],
+    x_nullable: bool,
+) -> None:
+    """A joined stream, or one with no system tags, cannot take the slot's one pair.
+
+    The slot's rows carry one source-id and one record-id column, under the slot's
+    names. Refused whatever the column types; the error names the slot and the
+    system-tag columns found.
+    """
+    stream = make_stream(x_nullable)
+    found = [
+        name
+        for name in stream.keys(columns={"system_tags": True})[0]
+        if name.startswith("_tag")
+    ]
+    job = _xw_job()
+    with pytest.raises(SourceSpecMismatchError) as raised:
+        bind(job, stream)
+    message = str(raised.value)
+    assert "'src'" in message
+    assert "exactly one source-id and one record-id" in message
+    assert str(sorted(found)) in message
+    assert job.nodes["src"].bound_source is None
+
+
+def test_a_refused_joined_stream_keeps_the_previous_binding() -> None:
+    """After the refusal the slot keeps the source it had."""
+    job = _xw_job()
+    before = DictSource([{"id": 0, "x": 1, "w": "p"}], tag_columns=["id"])
+    job.bind(sources={"src": before})
+    with pytest.raises(SourceSpecMismatchError):
+        job.bind(sources={"src": _joined_stream(x_nullable=True)})
+    assert job.nodes["src"].bound_source is before
