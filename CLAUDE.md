@@ -840,6 +840,14 @@ data. The rules:
   async path) and never stored, so its identity is the fixed `("DropNulls", None)`,
   different from any list of names. System-tag, source-info, context and meta columns are
   never included. An explicitly empty collection is not "no argument": it raises `ValueError`.
+- `Join`, `MergeJoin` and `SemiJoin` accept a shared TAG key whose types differ only in
+  nullability (`T` against `T | None`), because a null key matches nothing (developer,
+  November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it
+  `T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output is the left
+  input's schema as it is. The rule is `core/operators/key_nullability.py`
+  (`reconcile_key_nullability` on tag schemas before they are combined, `key_nullable` for the
+  Arrow field flag, set by re-wrapping arrays, never by a cast). Equal nullability takes the
+  unchanged path; any other type difference, and every data column, behaves as before.
 - `GroupBy` requires every column in `by` to be a scalar tag column; it raises
   `InputValidationError` for unknown, data, or list-valued columns (the last usually means the
   stream came from `Batch` — group before batching, not after). Members are sorted by non-key

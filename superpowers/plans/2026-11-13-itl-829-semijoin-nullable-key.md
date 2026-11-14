@@ -84,3 +84,13 @@ adds `output = WithoutMetaWriter(output)`. Coordinator: merge main after both la
 ## Progress notes
 
 - [x] Diagnosis and proposal approved (coordinator, Nov 13).
+- [x] SUPERSEDED (developer, Nov 13): no narrowing. New rule, approved by the coordinator:
+  `Join`, `MergeJoin`, `SemiJoin` accept a shared TAG key differing only in nullability;
+  Join/MergeJoin key is `T` if any input has `T`, `T | None` only if all nullable; SemiJoin
+  output = left schema as is. Helper `core/operators/key_nullability.py`
+  (`reconcile_key_nullability`, `key_nullable`). Data columns unchanged.
+- [x] Implemented (commit c5571236); tests `test_join_key_nullability.py`, equivalence cases,
+  `test_drop_nulls.py::test_narrowed_nullable_key_joins_with_a_non_nullable_key` updated
+  (asserted the old Join error), golden entries `pipeline/join_key_nullability` (adds only).
+- [x] Docs (operators.md null-key paragraph), CLAUDE.md/.zed bullet, changelog, design issue SJ2.
+- [ ] Merge main after #367 and #369 land (coordinator tells); PR; CodeRabbit; CI.

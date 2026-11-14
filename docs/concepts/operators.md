@@ -67,6 +67,13 @@ not match each other (the SQL convention for nulls; `MergeJoin` and `SemiJoin` f
 another null, an empty list is not a null, and NaN equals NaN. The async path gives the same
 rows.
 
+Because a null key matches nothing, a shared tag column may differ between the inputs in
+nullability alone: `T` in one input and `T | None` in another is accepted by `Join`, `MergeJoin`
+and `SemiJoin`. In the output of `Join` and `MergeJoin` the column is `T` when any input has it
+`T`, and `T | None` only when every input has it nullable; `SemiJoin`'s output keeps the left
+input's type. Any other type difference is still an error, and a data column is never
+reconciled this way.
+
 A name is a tag or a data column, never both: if one input has `x` as a tag column and another has it as a data column, `Join` (and `MergeJoin`) raises `InputValidationError` when the graph is built; rename one with `map_tags` or `map_data`.
 
 Column order follows each operator's argument symmetry: commutative operators (`Join`,
