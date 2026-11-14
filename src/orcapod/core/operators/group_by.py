@@ -57,8 +57,8 @@ class GroupBy(UnaryOperator):
       order; they are the only tag columns of the output
     * ``probe`` is **dropped** (ITL-1070): a list of the members' values is not
       a key for the group, as SQL drops a non-key, non-aggregated column after
-      ``GROUP BY``.  A referential ``probe`` is one column in both roles, so it
-      leaves the data group too, with its source info
+      ``GROUP BY``.  A referential ``probe`` loses its tag role only: its data
+      column stays and becomes list-valued like ``path``
     * ``path`` becomes list-valued
     * the ``_source_*`` column of each data column becomes list-valued, one
       element per member, except that of a referential group key: its value is
@@ -69,14 +69,16 @@ class GroupBy(UnaryOperator):
 
     No data element ever comes from a tag value: ``GroupBy`` uses tags to form
     groups, but the data columns of the output are exactly the data columns of
-    the input.  The members' values of a dropped tag are not carried anywhere.
-    If a downstream step needs to know which member each element came from,
-    make that value a data column before grouping: declare it as data at the
-    source, or use ``DerivedSource(origin, tags_as_data={...})``.
+    the input.  The members' values of a dropped plain tag are not carried
+    anywhere.  If a downstream step needs to know which member each element
+    came from, make that value a data column before grouping: declare the tag
+    referential at the source (the default), declare it as data, or use
+    ``DerivedSource(origin, tags_as_data={...})``.
 
     Members are sorted by the input's non-group-key tag values, with ``record_id``
     appended as a final tiebreaker, so the emitted lists are stable across
-    runs.  This matters because orcapod hashes those lists to build the cache
+    runs.  The list of a referential non-key is therefore in its own value
+    order, and every other data list is aligned with it.  This matters because orcapod hashes those lists to build the cache
     key -- an unsorted list would make an identical member set hash differently
     and trigger a spurious recompute.  Groups themselves are emitted in
     group-key order for the same reason: a reordered input must produce an
@@ -204,16 +206,13 @@ class GroupBy(UnaryOperator):
             for name in (f"{constants.SOURCE_PREFIX}{c}" for c in self.by)
             if name in table.column_names
         )
-        # A tag that is not a key is dropped from the output (ITL-1070), but it
-        # still orders the members below, so the data lists keep their order.
-        # A referential tag is one column in both roles, so a dropped one leaves
-        # the data group too, together with its source info.
-        dropped_tags = tuple(c for c in tag_columns if c not in self.by)
-        dropped_columns = dropped_tags + tuple(
-            name
-            for name in (f"{constants.SOURCE_PREFIX}{c}" for c in dropped_tags)
-            if name in table.column_names
-        )
+        # A tag that is not a key loses its tag role (ITL-1070), but it still
+        # orders the members below, so the data lists keep their order.  A plain
+        # one is dropped; a referential one keeps its data column, aggregated
+        # like every other data column (developer, November 13, 2026).
+        references = stream_references(stream)
+        non_key_tags = tuple(c for c in tag_columns if c not in self.by)
+        dropped_columns = tuple(c for c in non_key_tags if c not in references)
         member_columns = tuple(
             c
             for c in table.column_names
@@ -236,7 +235,7 @@ class GroupBy(UnaryOperator):
         # consulting only the first would tie on exactly the fan-out rows the
         # tiebreaker exists for.  They are sorted by name so the key order is
         # itself independent of column order in the input table.
-        sort_columns = dropped_tags
+        sort_columns = non_key_tags
         sort_columns += tuple(
             sorted(
                 c
@@ -293,12 +292,12 @@ class GroupBy(UnaryOperator):
 
         # The keys, in the input's tag order rather than the order of `by`.  A
         # referential key stays referential: scalar in both roles (specification
-        # section 8.1); a referential non-key was dropped with the other non-keys.
+        # section 8.1); a referential non-key is now a plain (list) data column.
         return ArrowTableStream(
             grouped_table,
             tag_columns=[c for c in tag_columns if c in self.by],
             data_context=stream.data_context,
-            reference_tags=[c for c in stream_references(stream) if c in self.by],
+            reference_tags=[c for c in references if c in self.by],
         )
 
     # ------------------------------------------------------------------
@@ -324,8 +323,8 @@ class GroupBy(UnaryOperator):
             group keys, scalar, in the input's tag order, and the system tags,
             scalar under their suffixed names; every other user tag is
             dropped.  The data schema holds the input's data columns as
-            ``list[T]``, except that a referential key stays scalar and a
-            referential non-key is dropped with its tag.
+            ``list[T]`` (a referential non-key among them), except that a
+            referential key stays scalar.
         """
         tag_types, data_types = stream.output_schema(columns=columns, all_info=all_info)
         n_char = self.orcapod_config.hashing.system_tag_n_char
@@ -340,13 +339,9 @@ class GroupBy(UnaryOperator):
             # Any other user tag is dropped (ITL-1070).
 
         # A referential group key is scalar as data too (specification section 8.1);
-        # a referential non-key is dropped from the data group with its tag
-        # (ITL-1070).
-        dropped_references = set(stream_references(stream)) - set(self.by)
+        # a referential non-key keeps its data column, as a list (ITL-1070).
         out_data_types = {
-            name: t if name in self.by else list[t]
-            for name, t in data_types.items()
-            if name not in dropped_references
+            name: t if name in self.by else list[t] for name, t in data_types.items()
         }
 
         return Schema(out_tag_types), Schema(out_data_types)

@@ -1,19 +1,20 @@
 """An EDI-shaped pipeline on referential tags, end to end (ITL-1023).
 
 Specification "Orcapod v0.4 — Referential Tags" (ITL-1004), section 15.7: two time series
-(spikes, gaze) share five key columns and each has a column ``timestamp``; a third table is
-keyed on a subset of the keys. Both time series are grouped by the shared keys, each
-``timestamp`` list is renamed with ``map_data`` so the join does not collide on it, the
-three are joined, and a function reads the timestamp lists and a key column by name. A
-source's declared tags are referential by default (developer, November 12, 2026), so the
-keys are data as well as tags, with no ``tags_as_data`` copy and no hand-written drop before
-the join. The third table keeps its tags plain (``tag_only_columns``), so the join meets
-plain with referential (section 9.2) and referential with referential (section 9.3).
+(spikes, gaze) share five key columns and each has a key column ``timestamp`` (as the real
+EDI tables do); a third table is keyed on a subset of the keys. Each ``timestamp`` is
+renamed in both roles with ``map_tags`` (developer, November 12, 2026) so the join does not
+equate them, both time series are grouped by the shared keys, the three are joined, and a
+function reads the timestamp lists and a key column by name. A source's declared tags are
+referential by default (developer, November 12, 2026), so the keys and timestamps are data
+as well as tags, with no ``tags_as_data`` copy and no hand-written drop before the join. The
+third table keeps its tags plain (``tag_only_columns``), so the join meets plain with
+referential (section 9.2) and referential with referential (section 9.3).
 
-``GroupBy`` keeps only its ``by`` tags (ITL-1070), so a ``timestamp`` declared as a tag
-would be dropped by the grouping: it is declared as data at the source, and the grouping
-makes it a list. Its members are then ordered by record id, not by time, so the function
-sorts them.
+``GroupBy`` keeps only its ``by`` tags (ITL-1070); a referential timestamp, not a key,
+loses its tag role only and stays as a data list (developer, November 13, 2026). The
+members of a group are ordered by it, so each timestamp list is in time order and the
+function needs no sort.
 
 The pipeline runs through a function node on the in-memory store and on Delta, with the
 sync and the async orchestrator; a second run on the same store computes nothing.
@@ -23,7 +24,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 from pathlib import Path
 
 import pytest
@@ -77,22 +78,27 @@ CALLS: list[int] = []
 def align(spike_time: list[int], gaze_time: list[int], unit: int) -> str:
     """Summarize one unit's spike and gaze timestamps; reads the key ``unit`` as data."""
     CALLS.append(unit)
-    return f"unit {unit}: spikes {sorted(spike_time)} gaze {sorted(gaze_time)}"
+    return f"unit {unit}: spikes {spike_time} gaze {gaze_time}"
 
 
 def _streams() -> tuple[Any, Any, Any]:
     """Return the grouped spikes, the grouped gaze and the trials table."""
-    spikes = op.sources.DictSource(SPIKES, tag_columns=KEYS, source_id="spikes")
-    gaze = op.sources.DictSource(GAZE, tag_columns=KEYS, source_id="gaze")
+    spikes = op.sources.DictSource(
+        SPIKES, tag_columns=[*KEYS, "timestamp"], source_id="spikes"
+    )
+    gaze = op.sources.DictSource(
+        GAZE, tag_columns=[*KEYS, "timestamp"], source_id="gaze"
+    )
     trials = op.sources.DictSource(
         TRIALS,
         tag_columns=["lab", "subject"],
         tag_only_columns=["lab", "subject"],
         source_id="trials",
     )
-    # ``timestamp`` is data: renamed with map_data so the join does not collide on it.
-    spikes_by_unit = spikes.group_by(KEYS).map_data({"timestamp": "spike_time"})
-    gaze_by_unit = gaze.group_by(KEYS).map_data({"timestamp": "gaze_time"})
+    # A referential tag renamed with map_tags is renamed in both roles; grouping then
+    # keeps it as a time-ordered data list.
+    spikes_by_unit = spikes.map_tags({"timestamp": "spike_time"}).group_by(KEYS)
+    gaze_by_unit = gaze.map_tags({"timestamp": "gaze_time"}).group_by(KEYS)
     return spikes_by_unit, gaze_by_unit, trials
 
 
@@ -114,9 +120,11 @@ def test_the_join_merges_the_shared_keys_into_one_data_column_each() -> None:
     assert not {"spike_time", "gaze_time"} & set(tags)
     assert joined.as_table().column_names.count("unit") == 1
     rows = {tag["unit"]: data for tag, data in joined.iter_data()}
-    # The timestamps are data, ordered by record id: compared as sets of values.
-    assert set(cast("list[int]", rows[1]["spike_time"])) == {10, 20, 30}
-    assert set(cast("list[int]", rows[1]["gaze_time"])) == {2, 12}
+    # The members are ordered by the timestamp, so the lists are in time order.
+    assert rows[1]["spike_time"] == [10, 20, 30]
+    assert rows[1]["gaze_time"] == [2, 12]
+    # The other data lists follow the same member order.
+    assert rows[1]["gaze_x"] == [0.1 * 2, 0.1 * 12]
     assert rows[2]["condition"] == "dark"
 
 

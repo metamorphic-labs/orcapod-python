@@ -243,14 +243,17 @@ The output schema follows three rules:
 - **Group keys stay scalar tag columns** (`subject_id: str`), in the input's tag order. They are
   the only tag columns of the output.
 - **A tag that is not a key is dropped** (`probe`). A list of the members' values is not a key
-  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`.
+  for the group, just as SQL drops a non-key, non-aggregated column after `GROUP BY`. A
+  [referential tag](referential-tags.md) that is not a key loses its tag role only: its data
+  column stays, as a list like any other.
 - **Data columns become `list[T]`** (`spike_count: list[int]`), one element per member.
 
 !!! warning "Member tag values are not carried"
-    `GroupBy` does not keep the members' values of a non-key tag, as a tag or as data. If a
-    later step needs to know which member each element came from, make the column data
-    *before* grouping: declare it as data at the source, or derive a source that offers the tag
-    as data with `DerivedSource(origin, tags_as_data={...})`.
+    `GroupBy` does not keep the members' values of a plain non-key tag, as a tag or as data.
+    If a later step needs to know which member each element came from, make the column data
+    *before* grouping: keep the tag referential at the source (the default without
+    `tag_only_columns`), declare it as data at the source, or derive a source that offers the
+    tag as data with `DerivedSource(origin, tags_as_data={...})`.
 
 ```python
 from orcapod.sources import DerivedSource

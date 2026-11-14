@@ -79,7 +79,7 @@ does not make it compute again.
 | Operator | Referential tag `x` |
 |---|---|
 | `Join` | Plain with plain: as before. Plain with referential, or referential with referential: a referential tag and **one** data column `x`. When `x` is referential on several inputs, its source info is one merged token (below). Every other data-name collision is still an error. |
-| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key is dropped, as every non-key tag is: in both roles, with its source info. Declare a column as data, not as a tag, to keep it as a list in the grouped output. |
+| `GroupBy` | A group key stays scalar in both roles, and its source info is one merged token (below). A non-key loses its tag role, as every non-key tag does, but keeps its data column: a list like every other data column, one source-info token per member. The members are ordered by the non-key tags, so that list is in value order and the other data lists follow it. |
 | `SelectDataColumns`, `DropDataColumns` | Removing the data column leaves `x` a plain tag with the same values, with a `ReferenceMaterializationWarning`. |
 | `SelectTagColumns`, `DropTagColumns` | Removing the tag leaves `x` a data column. |
 | `MapTags` / `map_tags` | Renames the column in both roles; `tag_only=True` renames the tag only and leaves a plain tag. |

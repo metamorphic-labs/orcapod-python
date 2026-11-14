@@ -165,16 +165,20 @@ def test_group_by_referential_key_stays_scalar_in_both_roles() -> None:
         assert tag["x"] == data["x"] and isinstance(data["x"], int)
 
 
-def test_group_by_drops_a_referential_non_key_in_both_roles() -> None:
+def test_group_by_referential_non_key_keeps_its_data_as_a_list() -> None:
     grouped = GroupBy(["s"])(_ref(GROUP_ROWS, ["s", "x"], "G"))
-    # ITL-1070: a non-key tag is dropped; a referential one leaves the data group
-    # too, with its source info.
-    assert grouped.keys() == (("s",), ("s", "y"))
-    names = grouped.as_table(all_info=True).column_names
-    assert "x" not in names and "_source_x" not in names
+    # A non-key tag loses its tag role (ITL-1070); a referential one keeps its data
+    # column, aggregated like every other data column (developer, November 13, 2026).
+    tags, data = grouped.keys()
+    assert tags == ("s",) and set(data) == {"s", "x", "y"}
+    assert stream_references(grouped) == ("s",)
+    _, data_schema = grouped.output_schema()
+    assert data_schema["x"] == list[int]
     rows = {tag["s"]: data for tag, data in grouped.iter_data()}
-    # The dropped ``x`` still orders the members.
+    # ``x`` orders the members, and ``y`` follows that order.
+    assert rows["s1"]["x"] == [10, 20]
     assert rows["s1"]["y"] == [4, 5]
+    assert grouped.as_table().column_names.count("x") == 1
 
 
 def test_group_by_prediction_matches_the_result() -> None:
