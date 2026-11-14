@@ -27,7 +27,7 @@ import asyncio
 import pyarrow as pa
 import pytest
 
-from orcapod.channels import Channel
+from orcapod.channels import Channel, ChannelClosed
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
@@ -1076,6 +1076,34 @@ class _FailingChannel:
         return [await self.receive()]
 
 
+class _SignallingReader:
+    """Reads a channel and sets ``waiting`` when the given receive call starts."""
+
+    def __init__(self, channel: Channel[_Row], signal_on_call: int) -> None:
+        self._reader = channel.reader
+        self._signal_on_call = signal_on_call
+        self._calls = 0
+        self.waiting = asyncio.Event()
+
+    async def receive(self) -> _Row:
+        self._calls += 1
+        if self._calls == self._signal_on_call:
+            self.waiting.set()
+        return await self._reader.receive()
+
+    def __aiter__(self) -> "_SignallingReader":
+        return self
+
+    async def __anext__(self) -> _Row:
+        try:
+            return await self.receive()
+        except ChannelClosed:
+            raise StopAsyncIteration
+
+    async def collect(self) -> list[_Row]:
+        return [row async for row in self]
+
+
 # Guards a wait that must end at once; a timeout means the operator hung.
 _HANG_GUARD_SECONDS = 10
 
@@ -1136,9 +1164,9 @@ class TestSemiJoinRightEndsWhileLeftOpen:
 
     @pytest.mark.asyncio
     async def test_left_row_in_flight_when_right_ends_is_kept_once_in_order(self):
-        # When the right input ends, a receive on the empty left channel is pending.
-        # The row it then gets is emitted once, after the kept row and before the
-        # rows that follow it.
+        # The right input ends while a receive on the empty left channel is pending.
+        # The row that receive then gets is emitted once, after the kept row and
+        # before the rows that follow it.
         left = _id_stream([2, 3, 9, 4], "a")
         right = _id_stream([2, 3, 4], "b")
         left_rows = list(left.iter_data())
@@ -1147,16 +1175,21 @@ class TestSemiJoinRightEndsWhileLeftOpen:
             Channel[_Row](4),
             Channel[_Row](4),
         )
+        left_reader = _SignallingReader(left_ch, signal_on_call=2)
         await left_ch.writer.send(left_rows[0])
-        await feed(right, right_ch)
+        for row in right.iter_data():
+            await right_ch.writer.send(row)  # the right input stays open for now
 
         task = asyncio.create_task(
             SemiJoin().async_execute(
-                [left_ch.reader, right_ch.reader],
+                [left_reader, right_ch.reader],
                 output_ch.writer,
                 input_pipeline_hashes=hashes(left, right),
             )
         )
+        # The first left row is kept; the second receive waits on an empty channel.
+        _ = await asyncio.wait_for(left_reader.waiting.wait(), _HANG_GUARD_SECONDS)
+        await right_ch.writer.close()
         first, _ = await asyncio.wait_for(
             output_ch.reader.receive(), _HANG_GUARD_SECONDS
         )
