@@ -522,11 +522,7 @@ class DynamicPodStream(StreamBase):
         all_info: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return the (tag_keys, data_keys) column names for this stream."""
-        tag_schema, data_schema = self._pod.output_schema(
-            *self.upstreams,
-            columns=columns,
-            all_info=all_info,
-        )
+        tag_schema, data_schema = self.output_schema(columns=columns, all_info=all_info)
         return tuple(tag_schema.keys()), tuple(data_schema.keys())
 
     def output_schema(
@@ -536,10 +532,15 @@ class DynamicPodStream(StreamBase):
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
         """Return the (tag_schema, data_schema) for this stream."""
-        return self._pod.output_schema(
-            *self.upstreams,
-            columns=columns,
-            all_info=all_info,
+        # Memoized (ITL-1111). The prediction depends on the operator's configuration
+        # and on the upstreams' schemas and pipeline hashes, all fixed for the life of
+        # this stream; never on rows, so recomputing the rows when stale leaves it valid.
+        return self._memoized_output_schema(
+            columns,
+            all_info,
+            lambda: self._pod.output_schema(
+                *self.upstreams, columns=columns, all_info=all_info
+            ),
         )
 
     @property

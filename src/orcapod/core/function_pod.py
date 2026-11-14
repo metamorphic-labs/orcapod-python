@@ -1033,8 +1033,15 @@ class FunctionPodStream(StreamBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        return self._function_pod.output_schema(
-            self._input_stream, columns=columns, all_info=all_info
+        # Memoized (ITL-1111). The prediction depends on the function pod (its declared
+        # output types) and on the input stream's schema, both fixed for the life of
+        # this stream; never on rows.
+        return self._memoized_output_schema(
+            columns,
+            all_info,
+            lambda: self._function_pod.output_schema(
+                self._input_stream, columns=columns, all_info=all_info
+            ),
         )
 
     def _ensure_iterator(self) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -482,6 +482,56 @@ class StreamBase(TraceableBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]: ...
+
+    # Predicted output schemas by normalized column config; see
+    # ``_memoized_output_schema``. Set on first use, so a subclass that asks for its
+    # schema before ``StreamBase.__init__`` runs still works.
+    _output_schema_memo: dict[ColumnConfig, tuple[Schema, Schema]] | None = None
+
+    def _memoized_output_schema(
+        self,
+        columns: ColumnConfig | dict[str, Any] | None,
+        all_info: bool,
+        predict: Callable[[], tuple[Schema, Schema]],
+    ) -> tuple[Schema, Schema]:
+        """Return ``predict()``, computed once per normalized column config (ITL-1111).
+
+        A stream derived from upstreams predicts its schema by asking them for
+        theirs. Without a memo, a graph in which one stream feeds two branches that
+        join again asks the shared upstream once per path, so stacked
+        split-and-join stages cost 4x per stage. With it, every graph walk that
+        asks for schemas is linear in the nodes.
+
+        Only the prediction is kept: a ``(tag_schema, data_schema)`` pair of
+        immutable ``Schema`` objects, never rows or a table. The caller states what
+        its prediction depends on, and clears the memo
+        (``_forget_output_schema``) when one of those things changes. A config
+        that cannot be a dict key (``meta`` given as a list of names) is predicted
+        every time.
+
+        Args:
+            columns: The column config as the caller received it.
+            all_info: The ``all_info`` flag as the caller received it.
+            predict: Computes the schema from ``columns`` and ``all_info``.
+
+        Returns:
+            The predicted ``(tag_schema, data_schema)``.
+        """
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        try:
+            hash(config)
+        except TypeError:
+            return predict()
+        if self._output_schema_memo is None:
+            self._output_schema_memo = {}
+        memo = self._output_schema_memo
+        if config not in memo:
+            memo[config] = predict()
+        return memo[config]
+
+    def _forget_output_schema(self) -> None:
+        """Drop the memoized output schemas: an input of the prediction changed."""
+        self._output_schema_memo = None
 
     def __iter__(
         self,

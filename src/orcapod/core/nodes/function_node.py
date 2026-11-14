@@ -421,6 +421,7 @@ class FunctionNodeBase(StreamBase):
         if len(value) != 1:
             raise ValueError("FunctionPod can only have one upstream")
         self._input_stream = value[0]
+        self._forget_output_schema()
 
     # ------------------------------------------------------------------
     # Read-only overrides (for deserialized nodes without live function_pod)
@@ -476,10 +477,17 @@ class FunctionNodeBase(StreamBase):
                     f"Cannot restore the output schema of loaded node {self.label!r}: "
                     f"{exc}"
                 ) from exc
-        tag_schema = self._input_stream.output_schema(
-            columns=columns, all_info=all_info
-        )[0]
-        return tag_schema, self._data_function.output_data_schema
+        # Memoized (ITL-1111). The prediction depends on the data function's declared
+        # output types and on the input stream's schema; the ``upstreams`` setter and a
+        # job's ``bind`` clear it when the input changes. Never on rows.
+        return self._memoized_output_schema(
+            columns,
+            all_info,
+            lambda: (
+                self._input_stream.output_schema(columns=columns, all_info=all_info)[0],
+                self._data_function.output_data_schema,
+            ),
+        )
 
     def keys(
         self,
