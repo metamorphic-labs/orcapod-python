@@ -114,20 +114,26 @@ def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
     held: dict[Any, list[Any]] = {}
     seen: list[Any] = []
 
+    def is_current(node: Any) -> bool:
+        """Whether ``node`` holds a run this run does not redo."""
+        return isinstance(node, RunHoldingNode) and node.holds_current_run(
+            load_only=load_only
+        )
+
+    def is_source(node: Any) -> bool:
+        """Whether ``node`` is a job's source slot: read by the run, never held."""
+        return isinstance(node, SourceJobNode)
+
     def visit(node: Any) -> None:
         """Add ``node`` and, unless it is held or a source, what it depends on."""
         if any(node is other for other in seen):
             return
         seen.append(node)
         dag.add_node(node)
-        if (
-            node is not target
-            and isinstance(node, RunHoldingNode)
-            and node.holds_current_run(load_only=load_only)
-        ):
+        if node is not target and is_current(node):
             held[node] = list(node.iter_data())
             return
-        if isinstance(node, SourceJobNode):
+        if is_source(node):
             return
         if not _is_job_node(node):
             # A stream outside the job: its rows, read as the node's run reads them.
