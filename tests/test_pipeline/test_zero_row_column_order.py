@@ -338,3 +338,82 @@ def test_a_job_run_and_a_node_run_share_one_stored_table(
     stored = node.get_all_records(all_info=True)
     assert stored is not None
     assert stored.num_rows == 4
+
+
+def _write_in_operator_order(source_dir: Any, target_dir: Any) -> tuple[str, ...]:
+    """Copy the one operator cache table of ``source_dir`` as the old writer wrote it.
+
+    Test-only stand-in for an operator cache written before ITL-1133 by a node run on its
+    own: the same stored rows, with the user columns in a join's own order (user tags,
+    data, system tags, source info) and the bookkeeping (``__``) columns where they were.
+    """
+    source = DeltaTableDatabase(source_dir)
+    (path,) = [p for p in source.list_table_paths() if p[-1] == "odb_v1"]
+    rows = source.get_all_records(
+        path, record_id_column=OperatorJobNode.HASH_COLUMN_NAME
+    )
+    assert rows is not None
+    names = rows.column_names
+    user = [n for n in names if not n.startswith("__")]
+    system_tags = [n for n in user if n.startswith("_tag")]
+    source_info = [n for n in user if n.startswith("_source_")]
+    tags = [n for n in user if n == "id"]
+    data = [n for n in user if n not in {*tags, *system_tags, *source_info}]
+    old_order = iter([*tags, *data, *system_tags, *source_info])
+    reordered = [n if n.startswith("__") else next(old_order) for n in names]
+    target = DeltaTableDatabase(target_dir)
+    target.add_records(
+        path,
+        rows.select(reordered),
+        record_id_column=OperatorJobNode.HASH_COLUMN_NAME,
+    )
+    target.flush()
+    return path
+
+
+class TestOperatorCacheWrittenInOperatorOrder:
+    """A stored operator cache in a join's own order reads in row order (ITL-1133, B)."""
+
+    def _expected(self) -> pa.Schema:
+        job = _join_job([1, 2])
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        return _populated(job.nodes["joined"].as_table(all_info=True))
+
+    def _old_table(self, tmp_path: Any) -> Any:
+        written = tmp_path / "written"
+        store = DeltaTableDatabase(written)
+        job = _join_job([1, 2])
+        node = job.nodes["joined"]
+        node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+        _ = job.run(orchestrator=SyncPipelineOrchestrator())
+        store.flush()
+        old = tmp_path / "old"
+        _ = _write_in_operator_order(written, old)
+        return old
+
+    def _replay(self, store: DeltaTableDatabase, ids: list[int]) -> OperatorJobNode:
+        node = _join_job(ids).nodes["joined"]
+        node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
+        return node
+
+    def test_reads_in_row_order(self, tmp_path: Any) -> None:
+        old = self._old_table(tmp_path)
+        table = self._replay(DeltaTableDatabase(old), [1, 2]).as_table(all_info=True)
+        assert table.num_rows == 2
+        assert table.schema.equals(self._expected())
+
+    def test_accepts_a_row_order_append(self, tmp_path: Any) -> None:
+        old = self._old_table(tmp_path)
+        store = DeltaTableDatabase(old)
+        job = _join_job([3, 4])
+        node = job.nodes["joined"]
+        node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+        _ = node.run()
+        store.flush()
+        stored = node.get_all_records(all_info=True)
+        assert stored is not None
+        assert stored.num_rows == 4
+        # Both runs bind the same source ids, so the node's stored rows are all four.
+        table = self._replay(DeltaTableDatabase(old), [3, 4]).as_table(all_info=True)
+        assert table.num_rows == 4
+        assert table.schema.equals(self._expected())
