@@ -56,6 +56,11 @@ _PYTHON_TO_ARROW_MAP: "dict | None" = None
 # Using a ContextVar (rather than an instance attribute) keeps it thread-safe,
 # coroutine-safe, and explicitly scoped to the active call chain without
 # polluting the converter instance with temporary state.
+_FROZENSET_UNSUPPORTED = (
+    "{annotation!r} is not supported: declare set[T] instead. Support for frozenset "
+    "is to be evaluated in ITL-1140."
+)
+
 _register_in_progress: contextvars.ContextVar[set[type] | None] = (
     contextvars.ContextVar("_register_in_progress", default=None)
 )
@@ -371,7 +376,8 @@ class UniversalTypeConverter:
                     return self._make_or_get_list_logical_type(element_lt, is_set=False)
             return pa.large_list(inner)
 
-        # set[T] → pa.large_list(T). Same restriction as list[T] unless T has a LogicalType.
+        # set[T] → the native set container, a ListLogicalType extension: over T's
+        # logical type when T has one, otherwise over T's plain Arrow type (ITL-611).
         if origin is set:
             if not args:
                 raise ValueError(
@@ -387,7 +393,10 @@ class UniversalTypeConverter:
                 )
                 if element_lt is not None:
                     return self._make_or_get_list_logical_type(element_lt, is_set=True)
-            return pa.large_list(inner)
+            return self._make_or_get_arrow_element_set_type(args[0], inner)
+
+        if origin is frozenset:
+            raise ValueError(_FROZENSET_UNSUPPORTED.format(annotation=annotation))
 
         # dict[K, V] → pa.large_list(struct{key: K, value: V}).
         # Raise if K or V resolves to an extension type: the key/value land inside struct
@@ -398,8 +407,10 @@ class UniversalTypeConverter:
                     "Unparameterized 'dict' is not supported. Use 'dict[K, V]' with concrete "
                     "key and value types (e.g. dict[str, int])."
                 )
-            key_arrow = self.register_python_class(args[0])
-            val_arrow = self.register_python_class(args[1])
+            # A set of a plain type keeps its plain storage inside a dict: Arrow
+            # cannot hold its extension type in a struct field (ITL-611).
+            key_arrow = self._plain_set_storage(self.register_python_class(args[0]))
+            val_arrow = self._plain_set_storage(self.register_python_class(args[1]))
             if isinstance(key_arrow, pa.ExtensionType):
                 raise ValueError(
                     f"'dict[{args[0]}, ...]' is not yet supported: the key type maps to Arrow "
@@ -490,6 +501,78 @@ class UniversalTypeConverter:
             lt = ListLogicalType(element_logical_type, is_set=is_set)
             self._logical_type_registry.register_logical_type(lt)
         return lt.get_arrow_extension_type()
+
+    def _make_or_get_arrow_element_set_type(
+        self, element_annotation: Any, element_arrow_type: "pa.DataType"
+    ) -> "pa.DataType":
+        """Return the native set container of a plain Arrow element type (ITL-611).
+
+        Created and registered on first use, looked up by extension name after that,
+        like ``_make_or_get_list_logical_type``. The element's Python type is its
+        annotation without ``None``: ``set[int | None]`` and ``set[int]`` are one
+        container (``set[int64]``), as ``set[Path | None]`` and ``set[Path]`` are, so
+        the Python type a column reads as never depends on which was declared first.
+
+        Args:
+            element_annotation: The annotation of the set's elements.
+            element_arrow_type: The Arrow type the element annotation maps to; an
+                extension type here (a type with no registered logical type) is not
+                wrapped.
+
+        Returns:
+            The ``pa.ExtensionType`` of the set, or ``pa.large_list(element)`` when the
+            converter has no registry or the element is an extension type.
+        """
+        from orcapod.logical_types.list_logical_type_factory import (
+            ArrowElement,
+            ListLogicalType,
+        )
+
+        if self._logical_type_registry is None or isinstance(
+            element_arrow_type, pa.BaseExtensionType
+        ):
+            return pa.large_list(element_arrow_type)
+        origin = get_origin(element_annotation)
+        if origin is typing.Union or origin is types.UnionType:
+            non_none = [a for a in get_args(element_annotation) if a is not type(None)]
+            if len(non_none) == 1:
+                element_annotation = non_none[0]
+        lt = ListLogicalType(
+            ArrowElement(element_annotation, element_arrow_type), is_set=True
+        )
+        existing = self._logical_type_registry.get_by_arrow_extension_name(
+            lt.logical_type_name
+        )
+        if existing is None:
+            self._logical_type_registry.register_logical_type(lt)
+            existing = lt
+        return existing.get_arrow_extension_type()
+
+    def _plain_set_storage(self, arrow_type: "pa.DataType") -> "pa.DataType":
+        """Return a set of a plain element as its storage; any other type as it is.
+
+        Arrow cannot hold an extension type inside a struct field, so a set of a
+        plain element type keeps the plain ``large_list`` storage it had before it
+        was a native container where it is a dict value or a tuple field (ITL-611).
+
+        Args:
+            arrow_type: An Arrow type the converter produced.
+
+        Returns:
+            The storage type of a set of a plain element; otherwise ``arrow_type``.
+        """
+        from orcapod.logical_types.list_logical_type_factory import ListLogicalType
+
+        if not isinstance(arrow_type, pa.ExtensionType) or (
+            self._logical_type_registry is None
+        ):
+            return arrow_type
+        lt = self._logical_type_registry.get_by_arrow_extension_name(
+            arrow_type.extension_name
+        )
+        if isinstance(lt, ListLogicalType) and lt.element_logical_type is None:
+            return arrow_type.storage_type
+        return arrow_type
 
     def _find_factory_for_class(
         self,
@@ -1324,7 +1407,9 @@ class UniversalTypeConverter:
 
             if len(set(args)) == 1:
                 # Homogeneous tuple → fixed-size list
-                element_type = self.python_type_to_arrow_type(args[0])
+                element_type = self._plain_set_storage(
+                    self.python_type_to_arrow_type(args[0])
+                )
                 if hasattr(element_type, "extension_name"):
                     raise ValueError(
                         f"'tuple[{args[0]}, ...]' is not supported: the element type maps to "
@@ -1337,7 +1422,9 @@ class UniversalTypeConverter:
                 # Heterogeneous tuple → struct with indexed fields
                 fields = []
                 for i, arg_type in enumerate(args):
-                    field_type = self.python_type_to_arrow_type(arg_type)
+                    field_type = self._plain_set_storage(
+                        self.python_type_to_arrow_type(arg_type)
+                    )
                     if hasattr(field_type, "extension_name"):
                         raise ValueError(
                             f"'tuple[..., {arg_type}, ...]' is not supported: element type "
@@ -1354,8 +1441,10 @@ class UniversalTypeConverter:
                 raise ValueError(
                     f"dict type must have exactly two type arguments, got: {args}"
                 )
-            key_type = self.python_type_to_arrow_type(args[0])
-            value_type = self.python_type_to_arrow_type(args[1])
+            key_type = self._plain_set_storage(self.python_type_to_arrow_type(args[0]))
+            value_type = self._plain_set_storage(
+                self.python_type_to_arrow_type(args[1])
+            )
             key_value_struct = pa.struct([("key", key_type), ("value", value_type)])
             return pa.large_list(key_value_struct)
 
@@ -1391,7 +1480,7 @@ class UniversalTypeConverter:
                 )
             return self.python_type_to_arrow_type(next(iter(value_types)))
 
-        # Handle set types → lists
+        # Handle set types → the native set container (ITL-611)
         elif origin is set:
             if len(args) != 1:
                 raise ValueError(
@@ -1406,7 +1495,10 @@ class UniversalTypeConverter:
                 )
                 if element_lt is not None:
                     return self._make_or_get_list_logical_type(element_lt, is_set=True)
-            return pa.large_list(element_type)
+            return self._make_or_get_arrow_element_set_type(args[0], element_type)
+
+        elif origin is frozenset:
+            raise ValueError(_FROZENSET_UNSUPPORTED.format(annotation=python_type))
 
         else:
             raise ValueError(f"Unsupported generic type: {origin}")

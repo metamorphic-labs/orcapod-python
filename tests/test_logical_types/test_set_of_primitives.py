@@ -23,6 +23,7 @@ import pytest
 
 import orcapod as op
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import DictSource
 
 UTC = dt.timezone.utc
@@ -76,7 +77,7 @@ def _run_job(database: Any, declared: Any, value: Any, *, use_async: bool) -> An
         produced = _producer(declared, value).pod(_source(), label="produce")
         _consumer(declared).pod(produced, label="consume")
     if use_async:
-        job.run_async()
+        job.run(orchestrator=AsyncPipelineOrchestrator())
     else:
         job.run()
     return job
