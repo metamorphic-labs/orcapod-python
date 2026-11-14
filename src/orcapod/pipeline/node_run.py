@@ -52,14 +52,16 @@ def _streams_read_by(node: Any) -> Iterator[Any]:
     """Yield the streams outside a job that a run of ``node`` reads.
 
     The node's inputs, the stream bound to a source slot among them, and, through every
-    stream outside a job, that stream's own inputs; a job node other than a source slot
+    stream outside a job, that stream's own inputs. A job node other than a source slot
     is not entered: the run reads the rows the node holds (none if it has not run in
-    this process).
+    this process). Nor is an ``ArrowTableStream``: reading it reads only the table it
+    holds, whatever its ``upstreams`` name (ITL-1121).
 
     Args:
         node: A job node; for a source slot, its bound stream is what it reads.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
     pending: list[Any] = (
         [node.bound_source] if isinstance(node, SourceJobNode) else list(node.upstreams)
@@ -76,7 +78,8 @@ def _streams_read_by(node: Any) -> Iterator[Any]:
         if _is_job_node(stream):
             continue
         yield stream
-        pending.extend(getattr(stream, "upstreams", ()))
+        if not isinstance(stream, ArrowTableStream):
+            pending.extend(getattr(stream, "upstreams", ()))
 
 
 def refuse_unloadable_inputs(node: Any) -> None:
@@ -87,7 +90,8 @@ def refuse_unloadable_inputs(node: Any) -> None:
     job nodes, sources and streams that neither compute nor deliver (developer,
     November 14, 2026: "Refuse is consistent"; ITL-1121). Outside a job, a function
     pod's stream (``FunctionPodStream``, a cached pod's included) computes its rows when
-    read, and a side-effect pod's stream (``SideEffectPodStream``) delivers its side
+    read, and a side-effect pod's stream (``SideEffectPodStream``) or node
+    (``SideEffectNode``, the blueprint a ``Pipeline`` records) delivers its side
     effects. Such a stream is refused before anything is read, whether it is an input of
     ``node``, bound to a source slot, or read through another stream outside a job (an
     operator's stream over it).
@@ -99,10 +103,11 @@ def refuse_unloadable_inputs(node: Any) -> None:
         ValueError: If a run of ``node`` would read such a stream.
     """
     from orcapod.core.function_pod import FunctionPodStream
-    from orcapod.side_effects import SideEffectPodStream
+    from orcapod.side_effects import SideEffectNode, SideEffectPodStream
 
     for upstream in _streams_read_by(node):
-        if isinstance(upstream, SideEffectPodStream):
+        # A SideEffectJobNode is a job node: _streams_read_by never yields one.
+        if isinstance(upstream, (SideEffectPodStream, SideEffectNode)):
             what = (
                 "a side-effect pod's stream outside a job, which delivers its side "
                 "effects when it is read, and a load-only run delivers nothing"

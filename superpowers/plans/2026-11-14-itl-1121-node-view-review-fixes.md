@@ -176,3 +176,4 @@ schema memo). Steps:
   LEFT: CI, one CodeRabbit review, plan to coordinator, worker_done.
 - 2026-11-14: CodeRabbit 4575098786 (5dd8d6a3 round): #380 behaviour, also on main; declined with repro c11 (coordinator files it); _streams_read_by docstring corrected. CR review at 21:07Z rate limited; retries ~21:28Z, ~21:48Z.
 - 2026-11-14: merged #390 (653c138e; one conflict in OperatorJobNode.run, kept _compute_output + _run_load_only) and #389 (810d1b03, clean). Scripts unchanged. 3.12 targets 9348 passed; async 3.11 651 passed. CR retry 1 at 21:38Z rate limited; last retry ~21:58Z.
+- 2026-11-14: CodeRabbit round 2 (review 5907415238 of 9fc663d7): A 4575874462 (ArrowTableStream upstreams over-refused) and B 4575874471 (blueprint SideEffectNode delivered in a load-only run) reproduced (c12), approved, fixed in one commit with 13 tests. 3.12 targets 9438 passed; 3.11 async 664 passed.

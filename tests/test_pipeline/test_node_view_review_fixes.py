@@ -593,3 +593,91 @@ def test_a_full_run_over_an_input_that_computes_reads_it(kind: str) -> None:
     node = _node_over(kind, _computing_stream("pod"))
     assert node.run().as_table().num_rows == 2
     assert len(_UPSTREAM_CALLS) == 2
+
+
+# ---------------------------------------------------------------------------
+# PR #388 review round 2: what the load-only refusal walks through
+# ---------------------------------------------------------------------------
+
+
+def _held_table_over_a_computing_stream() -> Any:
+    """An ``ArrowTableStream`` holding its rows, whose ``upstreams`` name a function pod's
+    stream outside a job; reading it reads only the held table."""
+    import pyarrow as pa
+
+    from orcapod.core.streams import ArrowTableStream
+
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+        ]
+    )
+    return ArrowTableStream(
+        pa.table({"id": [1, 2], "x": [1, 2]}, schema=schema),
+        tag_columns=["id"],
+        upstreams=(_computing_stream("pod"),),
+    )
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_run_reads_a_table_stream_whatever_its_upstreams(
+    kind: str,
+) -> None:
+    """An ``ArrowTableStream`` neither computes nor delivers: not refused."""
+    _UPSTREAM_CALLS.clear()
+    node = _node_over(kind, _held_table_over_a_computing_stream())
+    node.run(load_only=True)
+    assert node.holds_current_run(load_only=True)
+    assert _UPSTREAM_CALLS == []
+
+
+def _blueprint_delivering_node() -> Any:
+    """A ``SideEffectNode`` outside a job: reading it delivers each row."""
+    from orcapod.side_effects import SideEffectNode
+
+    return SideEffectNode(_tap(_deliver_upstream), _base_stream())
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_run_refuses_a_side_effect_node_outside_a_job(kind: str) -> None:
+    """Refused before the input is read: nothing is delivered."""
+    _UPSTREAM_DELIVERED.clear()
+    node = _node_over(kind, _blueprint_delivering_node())
+    with pytest.raises(ValueError, match="delivers its side effects when it is read"):
+        node.run(load_only=True)
+    assert _UPSTREAM_DELIVERED == []
+    assert not node.holds_current_run(load_only=True)
+
+
+@pytest.mark.parametrize("how", ["sync", "async", "node.run", "source.run"])
+def test_a_load_only_run_refuses_a_source_slot_bound_to_a_side_effect_node(
+    how: str,
+) -> None:
+    """A source slot bound to a ``SideEffectNode`` outside a job: refused."""
+    _UPSTREAM_DELIVERED.clear()
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        source = DictSource(
+            [{"id": 1, "x": 1}, {"id": 2, "x": 2}], tag_columns=["id"], source_id="s"
+        )
+        _twice_pod(source, label="tw")
+    job.run()
+    job.bind(sources={"s": _blueprint_delivering_node()})
+    with pytest.raises(ValueError, match="delivers its side effects when it is read"):
+        if how == "node.run":
+            job.nodes["tw"].run(load_only=True)
+        elif how == "source.run":
+            job.nodes["tw"].upstreams[0].run(load_only=True)
+        else:
+            job.run(orchestrator=ORCHESTRATORS[how](), load_only=True)
+    assert _UPSTREAM_DELIVERED == []
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_full_run_over_a_side_effect_node_outside_a_job_reads_it(kind: str) -> None:
+    """Unchanged: a run without ``load_only`` reads it, which delivers."""
+    _UPSTREAM_DELIVERED.clear()
+    node = _node_over(kind, _blueprint_delivering_node())
+    assert node.run().as_table().num_rows == 2
+    assert len(_UPSTREAM_DELIVERED) == 2
