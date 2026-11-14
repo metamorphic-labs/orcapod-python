@@ -300,7 +300,11 @@ def run_job_node(
             ``RunSummary`` or ``None``.
         caller: The frame of the ``run()`` caller.
     """
-    from orcapod.pipeline.node_run import depends_on_job_nodes, run_with_dependencies
+    from orcapod.pipeline.node_run import (
+        depends_on_job_nodes,
+        refuse_delivering_inputs,
+        run_with_dependencies,
+    )
     from orcapod.pipeline.run_summary import warn_row_failures
 
     if node.holds_current_run(load_only=load_only):
@@ -308,6 +312,8 @@ def run_job_node(
     if depends_on_job_nodes(node):
         summary = run_with_dependencies(node, load_only=load_only)
     else:
+        if load_only:
+            refuse_delivering_inputs(node)
         summary = run_alone()
     if summary is None:
         return

@@ -48,6 +48,33 @@ def depends_on_job_nodes(node: Any) -> bool:
     return any(_is_job_node(upstream) for upstream in node.upstreams)
 
 
+def refuse_delivering_inputs(node: Any) -> None:
+    """Refuse a load-only run of ``node`` over an input that delivers when it is read.
+
+    A load-only run computes, delivers and writes nothing (ITL-1095). The stream a
+    side-effect pod returns outside a job (``SideEffectPodStream``) delivers its side
+    effects on every read, so a load-only run cannot read it; it is refused before
+    anything is read (ITL-1121). Another stream outside a job is read as it always is.
+
+    Args:
+        node: A job node a load-only run would run.
+
+    Raises:
+        ValueError: If an input of ``node`` is a ``SideEffectPodStream``.
+    """
+    from orcapod.side_effects import SideEffectPodStream
+
+    for upstream in node.upstreams:
+        if isinstance(upstream, SideEffectPodStream):
+            raise ValueError(
+                f"A load-only run cannot run node {node.label!r}: its input "
+                f"{upstream.label!r} is a side-effect pod's stream outside a job, which "
+                "delivers its side effects when it is read, and a load-only run "
+                "delivers nothing. Run it without load_only, or build the side-effect "
+                "pod inside the job."
+            )
+
+
 def _stores(nodes: list[Any]) -> list[ArrowDatabaseProtocol]:
     """The distinct stores the given nodes write to: pipeline and result databases."""
     found: list[ArrowDatabaseProtocol] = []
@@ -114,7 +141,8 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
     is read only when a node that runs reads it; a stream outside the job
     (``outside``) is read for the nodes it feeds; every other node runs. The same plan
     serves ``job.run()`` (its whole graph) and ``node.run()`` (the node and what it
-    depends on).
+    depends on). A load-only plan refuses, before reading anything, a node to run whose
+    input delivers when read (``refuse_delivering_inputs``).
 
     Args:
         graph: The run's node graph (``topological_sort``, ``predecessors``).
@@ -124,6 +152,9 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
 
     Returns:
         The plan.
+
+    Raises:
+        ValueError: As ``refuse_delivering_inputs``, for a load-only run.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.nodes.staleness import RunHoldingNode
@@ -154,6 +185,11 @@ def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> Run
         and not is_outside(node)
         and not any(node is c for c in current)
     ]
+    if load_only:
+        # Refused before any stream is read below: a load-only run cannot read an
+        # input that delivers (ITL-1121).
+        for node in to_run:
+            refuse_delivering_inputs(node)
     included: list[Any] = []
     for node in order:
         feeds_a_run = any(
@@ -222,6 +258,8 @@ def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
 
     Raises:
         StoreWriteError: If committing the run's writes failed.
+        ValueError: For a load-only run, if a node it would run reads an input that
+            delivers when read (``refuse_delivering_inputs``); nothing has run then.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.pipeline.dag import OrcaDAG

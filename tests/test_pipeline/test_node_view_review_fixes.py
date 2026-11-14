@@ -301,3 +301,99 @@ def test_an_execute_whose_input_raises_leaves_the_side_effect_node_stale(
     assert tap.is_stale and down.is_stale
     assert tap.as_table().num_rows == 0
     assert down.as_table().num_rows == 0
+
+
+# ---------------------------------------------------------------------------
+# Comment 6: a load-only run refuses an input that delivers when it is read
+# ---------------------------------------------------------------------------
+
+_UPSTREAM_DELIVERED: list[int] = []
+
+
+def _deliver_upstream(x: int, ctx: Any) -> None:
+    """The side effect of the stream outside a job: record the delivered value."""
+    _UPSTREAM_DELIVERED.append(x)
+
+
+def _deliver_own(x: int, ctx: Any) -> None:
+    """The side effect of the node under test: record the delivered value."""
+    _DELIVERED.append(x)
+
+
+@function_pod(output_keys="w")
+def _twice(x: int) -> int:
+    """Return ``2 * x``."""
+    return 2 * x
+
+
+def _delivering_stream() -> Any:
+    """A side-effect pod's stream outside a job: reading it delivers each row."""
+    from orcapod.side_effects import tap_pod
+
+    return tap_pod(_deliver_upstream).process(_base_stream())
+
+
+def _node_over(kind: str, stream: Any) -> Any:
+    """A job node of ``kind`` built directly over ``stream`` (no job)."""
+    from orcapod.core.nodes.function_node import FunctionJobNode
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.operators import MapData
+    from orcapod.side_effects import SideEffectJobNode, tap_pod
+    from orcapod.types import CacheMode
+
+    if kind == "side_effect":
+        return SideEffectJobNode(tap_pod(_deliver_own), stream)
+    if kind == "function":
+        return FunctionJobNode(
+            _twice.pod, stream, pipeline_database=InMemoryArrowDatabase()
+        )
+    return OperatorJobNode(
+        operator=MapData({"x": "renamed"}),
+        input_streams=(stream,),
+        pipeline_database=InMemoryArrowDatabase(),
+        cache_mode=CacheMode.OFF,
+    )
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_run_refuses_an_input_that_delivers(kind: str) -> None:
+    """Refused before the input is read: nothing is delivered and the node holds no run."""
+    _UPSTREAM_DELIVERED.clear()
+    _DELIVERED.clear()
+    node = _node_over(kind, _delivering_stream())
+    with pytest.raises(ValueError, match="delivers its side effects when it is read"):
+        node.run(load_only=True)
+    assert _UPSTREAM_DELIVERED == []
+    assert _DELIVERED == []
+    assert not node.holds_current_run(load_only=True)
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_load_only_cascade_refuses_an_input_that_delivers(kind: str) -> None:
+    """The input that delivers feeds a node the cascade would run first."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.operators import DropNulls
+    from orcapod.types import CacheMode
+
+    _UPSTREAM_DELIVERED.clear()
+    first = _node_over(kind, _delivering_stream())
+    target = OperatorJobNode(
+        operator=DropNulls(),
+        input_streams=(first,),
+        pipeline_database=InMemoryArrowDatabase(),
+        cache_mode=CacheMode.OFF,
+    )
+    with pytest.raises(ValueError, match="delivers its side effects when it is read"):
+        target.run(load_only=True)
+    assert _UPSTREAM_DELIVERED == []
+    assert not first.holds_current_run(load_only=True)
+    assert not target.holds_current_run(load_only=True)
+
+
+@pytest.mark.parametrize("kind", ["side_effect", "function", "operator"])
+def test_a_full_run_over_an_input_that_delivers_reads_it(kind: str) -> None:
+    """Unchanged: a full run reads the stream outside a job, which delivers."""
+    _UPSTREAM_DELIVERED.clear()
+    node = _node_over(kind, _delivering_stream())
+    assert node.run().as_table().num_rows == 2
+    assert len(_UPSTREAM_DELIVERED) == 2
