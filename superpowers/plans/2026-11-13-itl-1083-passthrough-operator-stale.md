@@ -92,7 +92,11 @@ pass-through cases are lazy. The fix is in `DynamicPodStream` and does not depen
   `DynamicPodStream` → read `last_modified` (settles its own check) then
   `("generation", gen)`; anything else → `("time", last_modified)`.
 - [ ] `__init__`: `self._reset_generation = 0`, `self._kept_states = None`.
-- [ ] `run`: after `static_process` and the stamp, `self._kept_states = <states now>`.
+- [x] `run`: note the states BEFORE `static_process` (a reset made while a reading operator
+  reads must be seen; noting after hid it, caught by
+  `test_a_reset_while_a_reading_operator_reads_leaves_it_stale`), keep them after the stamp.
+- [x] `is_stale` overridden: `_update_cache_status()` then `_cached_stream is None` (the
+  inherited time comparison called a fresh pass-through result stale).
 - [ ] `_update_cache_status`: unknown time (pod, or a time-tracked upstream) → discard with
   `_cached_time = None` (as before); otherwise discard when a state differs from the kept one or
   the pod / a time-tracked upstream is newer than `_cached_time`. A discard bumps the generation,
@@ -116,6 +120,6 @@ pass-through cases are lazy. The fix is in `DynamicPodStream` and does not depen
 
 ## Notes for a successor
 
-- Known extra work, accepted: none expected after the generation + pending-reset state.
+- Status 2026-11-13: fix and tests committed; broad suite green locally (3.12). Next: PR, CI, CodeRabbit.
 - Conflict: ITL-1081 renames `run()` → `_refresh()`; keep the edit inside `run` to one added
   line.
