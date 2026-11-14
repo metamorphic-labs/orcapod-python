@@ -129,3 +129,14 @@ approval of the method proposal), each returning a new view with an honest capti
   #2a7fb8 + rule after the last tag column + "bold = tag", by position via HTMLParser
   post-processing of Polars' HTML (COLUMN_ROLE_MARKS is the one mapping).
 - Tasks 1-5 done; next: PR, CodeRabbit, CI.
+
+## CodeRabbit round 1 (review 5900666998 of 4a4f7c94) — plan, awaiting coordinator
+
+| # | Finding | Verdict (evidence) | Action |
+| -- | -- | -- | -- |
+| a | streams.md:192 blanket "compute nothing" after run() | valid: side-effect stream delivers again, polling source polls again, SpiralDB reads again | reword streams.md:191-195 and the same claim in `StreamBase.run` docstring (streams/base.py:491-493) and `view.py:153` |
+| b | FunctionJobNode.run discards rows when input timestamp unknown | reproduced (no DB: FunctionJobNode over FunctionPodStream over a pass-through select over FunctionPodStream -> run() 0 rows); with the ITL-1083 fix (f652d737) applied, 25 rows: it is ITL-1083 | no code change; reply pointing to ITL-1083 |
+| c | ArrowTableStream run() says "computed rows", head() "rows" | valid; also FunctionJobNode (run "computed", head "rows", also after job.run) and OperatorJobNode in REPLAY / after job.run's execute (run "computed", head "rows") | `ArrowTableStream._RUN_ORIGIN = "held"`; FunctionJobNode.run origin "held" (head's noun for in-memory rows); OperatorJobNode.run origin = origin of its kept output stream's head; test: run().head(3).header() == head(3).header() for every kind + those modes |
+| d | nitpick: docstrings on 12 test helpers | valid | add |
+| - | LanguageTool "again" x2 streams.md:165; markdownlint MD037 plan line 52 | trivial | reword; backtick |
+| - | pre-merge "out of scope" (tag marks, tail, sort_by_tags) | declined: approved by developer/coordinator on ITL-1081 (progress notes) | say so in top-level comment |
