@@ -26,8 +26,8 @@ from orcapod.types import Schema
 
 @function_pod(output_keys="z")
 def const(y: int) -> int:
-    """Return 0 for any *y*."""
-    return 0
+    """Return *y*, so stored results show which source they came from."""
+    return y
 
 
 def _ints(source_id: str = "ints", start: int = 1) -> DictSource:
@@ -182,4 +182,5 @@ def test_an_accepted_rebind_runs_and_stores_the_new_rows(
     _ = job.run()
     job.bind(sources={"src": _ints(source_id="other", start=10)})
     _ = job.run()
-    assert job.nodes["const"].as_table().column("z").to_pylist() == [0, 0]
+    # Results of the first source (x 1, 2) would be [1, 2].
+    assert sorted(job.nodes["const"].as_table().column("z").to_pylist()) == [10, 11]

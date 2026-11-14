@@ -819,11 +819,14 @@ data. The rules:
   flags, order); only values differ. `SourceNodeBase.validate` is the one check, used by
   `PipelineJob.bind`, the `bound_source` setter (and `SourceJobNode.__init__`) and
   `PipelineJob.load`: per column the declared Python type, or `T` where the slot declares
-  `T | None`; anything else raises `SourceSpecMismatchError` before anything is bound. A
-  narrower source is given as the declared schema at one place, `_DeclaredForm` (nullable
-  fields over the same arrays; the system-tag column NAMES of the declared schema hash, the
-  VALUES the source's own). Limit: the check compares Python types, so a difference in Arrow
-  width only (`int32` against `int64`) is not yet refused (ITL-949).
+  `T | None`; anything else raises `SourceSpecMismatchError` before anything is bound. The
+  source's rows are given as the declared schema at one place, `_DeclaredForm` (nullable
+  fields over the same arrays; the declared column order; the system-tag column NAMES of the
+  declared schema hash, taken from the source's own pair by prefix, the VALUES the source's
+  own). Limits: the check compares Python types, so a difference in Arrow width only
+  (`int32` against `int64`) is not yet refused (ITL-949); a joined or merged stream (several
+  system-tag pairs) of the declared schema passes through with its own system tags, and a
+  narrower one is refused.
 - A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
   built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
   `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label

@@ -22,7 +22,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.source_node import SourceNode
-from orcapod.core.operators import MapData
+from orcapod.core.operators import Join, MapData
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -231,8 +231,10 @@ def test_rows_of_each_read_carry_the_declared_flags(tmp_path: pathlib.Path) -> N
         assert data.as_table().schema.field("x").nullable
     for _, data in asyncio.run(_collect(slot)):
         assert data.as_table().schema.field("x").nullable
-    head = slot.head(1, all_info=True).table
+    view = slot.head(1, all_info=True)
+    head = view.table
     assert head.schema.field("x").nullable
+    assert view.tag_columns == slot.keys(columns={"system_tags": True})[0]
     assert head.equals(slot.as_table(all_info=True).slice(0, 1))
 
 
@@ -391,3 +393,152 @@ def test_system_tag_values_and_source_info_are_the_sources_own(
     names = [c for c in bound.column_names if c.startswith("_tag_")]
     assert names == list(slot.keys(columns={"system_tags": True})[0][1:])
     assert not set(names) & set(direct.column_names)
+
+
+# ---------------------------------------------------------------------------
+# Column order, transformed streams and meta columns (CodeRabbit round 1)
+# ---------------------------------------------------------------------------
+
+
+def _abc_job(a_type: Any) -> PipelineJob:
+    """Return a job whose slot declares tag ``id`` and data ``a``, ``b``, ``c`` in order."""
+    slot = SourceNode(
+        name="src",
+        tag_schema=Schema({"id": int}),
+        data_schema=Schema({"a": a_type, "b": str, "c": float}),
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"a": "a2"})(slot, label="renamed")
+    return job
+
+
+@pytest.mark.parametrize("a_type", [int, int | None], ids=["equal", "narrower"])
+def test_columns_follow_the_declared_order(a_type: Any) -> None:
+    """A source with its columns in another order gives them in the declared order."""
+    job = _abc_job(a_type)
+    job.bind(
+        sources={
+            "src": DictSource(
+                [{"id": 0, "c": 1.5, "b": "s", "a": 1}], tag_columns=["id"]
+            )
+        }
+    )
+    node = job.nodes["src"]
+    assert list(node.output_schema()[1]) == ["a", "b", "c"]
+    table = node.as_table(columns={"source": True})
+    assert table.column_names == [
+        "id",
+        "a",
+        "b",
+        "c",
+        "_source_a",
+        "_source_b",
+        "_source_c",
+    ]
+    for _, data in node.iter_data():
+        assert data.as_table().column_names == ["a", "b", "c"]
+    for _, data in asyncio.run(_collect(node)):
+        assert data.as_table().column_names == ["a", "b", "c"]
+    assert node.head(1).table.column_names == ["id", "a", "b", "c"]
+    assert job.nodes["renamed"].as_table().column_names == ["id", "a2", "b", "c"]
+
+
+def _mapped_stream() -> Any:
+    """Return a stream (not a root source): a DictSource with ``q`` renamed to ``x``."""
+    source = DictSource([{"id": 0, "q": 1}], tag_columns=["id"], source_id="m")
+    return MapData({"q": "x"})(source)
+
+
+@pytest.mark.parametrize("x_type", [int, int | None], ids=["equal", "narrower"])
+def test_a_transformed_stream_gets_the_slots_system_tag_names(
+    tmp_path: pathlib.Path, x_type: Any
+) -> None:
+    """A stream's one system-tag pair takes the slot's names; its values stay its own."""
+    stream = _mapped_stream()
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(x_type), label="renamed")
+    job.bind(sources={"src": stream})
+    node = job.nodes["src"]
+    predicted = node.keys(columns={"system_tags": True})[0][1:]
+    table = node.as_table(columns={"system_tags": True})
+    names = [c for c in table.column_names if c.startswith("_tag_")]
+    assert names == list(predicted)
+    direct = stream.as_table(columns={"system_tags": True})
+    direct_names = [c for c in direct.column_names if c.startswith("_tag_")]
+    assert not set(direct_names) & set(names)
+    for mine, theirs in zip(names, direct_names, strict=True):
+        assert table.column(mine).to_pylist() == direct.column(theirs).to_pylist()
+
+
+def _joined_stream(x_nullable: bool) -> Any:
+    """Return a Join of two sources: two system-tag pairs, data ``x`` and ``w``."""
+    left = _arrow_source([1, 2], x_nullable=x_nullable)
+    right = DictSource([{"id": 0, "w": "p"}, {"id": 1, "w": "q"}], tag_columns=["id"])
+    return Join()(left, right)
+
+
+def _xw_job() -> PipelineJob:
+    """Return a job whose slot declares tag ``id`` and data ``x: int | None``, ``w``."""
+    slot = SourceNode(
+        name="src",
+        tag_schema=Schema({"id": int}),
+        data_schema=Schema({"x": int | None, "w": str}),
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(slot, label="renamed")
+    return job
+
+
+def test_a_joined_stream_of_the_declared_schema_passes_through() -> None:
+    """An equal-schema stream with two system-tag pairs is bound as it is (known gap)."""
+    stream = _joined_stream(x_nullable=True)
+    job = _xw_job()
+    job.bind(sources={"src": stream})
+    assert job.nodes["src"].keys(all_info=True) == stream.keys(all_info=True)
+
+
+@pytest.mark.parametrize("bind", BINDS.values(), ids=BINDS.keys())
+def test_a_narrower_joined_stream_is_refused(
+    bind: Callable[[PipelineJob, Any], None],
+) -> None:
+    """A narrower stream with two system-tag pairs cannot take the slot's one pair."""
+    job = _xw_job()
+    with pytest.raises(SourceSpecMismatchError, match="system-tag"):
+        bind(job, _joined_stream(x_nullable=False))
+    assert job.nodes["src"].bound_source is None  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode
+
+
+def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
+    """The ``__`` columns a job node's rows carry reach the rows of a narrower bind."""
+
+    @function_pod(output_keys="x")
+    def same(v: int) -> int:
+        """Return ``v``."""
+        return v
+
+    origin = PipelineJob(name="origin", database=InMemoryArrowDatabase())
+    with origin:
+        _ = same.pod(
+            DictSource([{"id": 0, "v": 1}], tag_columns=["id"], source_id="o"),
+            label="same",
+        )
+    _ = origin.run()
+    stream = origin.nodes["same"]
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(int | None), label="renamed")
+    job.bind(sources={"src": stream})
+    node = job.nodes["src"]
+    own = [
+        sorted(data.as_table(columns={"meta": True}).column_names)
+        for _, data in stream.iter_data()
+    ]
+    assert any("__computed" in names for names in own)
+    for rows in (list(node.iter_data()), asyncio.run(_collect(node))):
+        assert [
+            sorted(data.as_table(columns={"meta": True}).column_names)
+            for _, data in rows
+        ] == own

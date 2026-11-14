@@ -114,6 +114,13 @@ def test_no_accepted_bind_changes_a_path_or_a_table_schema(
             DictSource([{"id": 5, "x": None}, {"id": 6, "x": 6}], tag_columns=["id"]),
         ),
         ("csv with an empty cell", _bind, _csv(tmp_path, "a.csv", "id,x\n7,\n8,8\n")),
+        (
+            "stream over a source",
+            _assign,
+            MapData({"q": "x"})(
+                DictSource([{"id": 10, "q": 10}], tag_columns=["id"], source_id="m")
+            ),
+        ),
         ("narrower csv", _bind, _csv(tmp_path, "b.csv", "id,x\n9,9\n")),
     ]
     first: dict[str, Any] | None = None

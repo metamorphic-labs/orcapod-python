@@ -838,7 +838,8 @@ rows under that key is an empty result, not an error.
   any other (`SourceSpecMismatchError`, an `InputValidationError`). The pipeline determines
   every node's schema: binding a source never changes a node's stored path or the schema of
   any node's or stored table, only the values. The check compares Python types, so a
-  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949).
+  difference in Arrow width only (`int32` against `int64`) is not yet refused (ITL-949), and
+  a joined stream of the slot's schema is bound with its own system-tag columns.
 - The results are read from the store recorded in the file. Pass
   `PipelineJob.load(path, database=...)` if the store has moved.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each

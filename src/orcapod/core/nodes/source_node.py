@@ -11,7 +11,7 @@ import dataclasses
 import functools
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
@@ -31,6 +31,7 @@ from orcapod.core.streams.base import (
     check_head_size,
 )
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.system_constants import constants
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
@@ -70,22 +71,27 @@ def _is_narrower(declared: Any, given: Any) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class _DeclaredForm:
-    """How the rows of a narrower bound source become rows of the declared schema.
+    """How the rows of a bound source become rows of the declared schema.
 
-    A slot declaring ``x: int | None`` accepts a source of ``x: int`` and gives its rows
-    as rows of ``x: int | None`` (ITL-1112): the same arrays under nullable fields, and
-    the two system-tag columns, named after the source's schema hash, renamed after the
-    declared schema's. Nothing else differs: values, types, source-info columns and
-    their tokens pass unchanged, so the rows equal those of a source of the declared
-    schema with the same source id.
+    The pipeline determines every node's schema (ITL-1112). A slot declaring
+    ``x: int | None`` accepts a source of ``x: int`` and gives its rows as rows of
+    ``x: int | None``: the same arrays under nullable fields. The source's system-tag
+    columns take the slot's names (their values stay the source's own), and its tag and
+    data columns, with their source-info columns, the declared order. Nothing else
+    differs: values, types, source-info tokens and meta columns pass unchanged, so the
+    rows equal those of a source of the declared schema with the same source id.
 
     Attributes:
         nullable: The columns declared ``T | None`` that the source gives as ``T``.
         renames: The source's system-tag column names, mapped to the declared ones.
+        tag_order: The declared tag columns, in declared order.
+        data_order: The declared data columns, in declared order.
     """
 
     nullable: frozenset[str]
     renames: Mapping[str, str]
+    tag_order: tuple[str, ...]
+    data_order: tuple[str, ...]
 
     def apply(self, table: pa.Table) -> pa.Table:
         """Return *table*'s arrays under the declared fields and system-tag names.
@@ -97,8 +103,9 @@ class _DeclaredForm:
             table: Rows read from the bound source.
 
         Returns:
-            The same arrays, with the columns in ``nullable`` flagged nullable and the
-            columns in ``renames`` renamed.
+            The same arrays, with the columns in ``nullable`` flagged nullable, the
+            columns in ``renames`` renamed, and the tag, data and source-info columns in
+            declared order within the positions each group holds.
         """
         schema = table.schema
         for position, field in enumerate(table.schema):
@@ -108,7 +115,52 @@ class _DeclaredForm:
                 field = field.with_name(self.renames[field.name])
             schema = schema.set(position, field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
         # Same arrays under the declared fields: no cast, so no value or type changes.
-        return pa.Table.from_arrays(table.columns, schema=schema)
+        table = pa.Table.from_arrays(table.columns, schema=schema)
+        return table.select(self._declared_positions(table.column_names))
+
+    def _declared_positions(self, names: list[str]) -> list[int]:
+        """Return the column positions of *names* with each group in declared order.
+
+        The tag columns, the data columns and the data columns' source-info columns each
+        fill the positions their group holds, in declared order; every other column
+        keeps its position.
+        """
+        position = {name: index for index, name in enumerate(names)}
+        order = list(range(len(names)))
+        source_info = tuple(f"{constants.SOURCE_PREFIX}{n}" for n in self.data_order)
+        for group in (self.tag_order, self.data_order, source_info):
+            present = [name for name in group if name in position]
+            for slot, name in zip(
+                sorted(position[n] for n in present), present, strict=True
+            ):
+                order[slot] = position[name]
+        return order
+
+
+def _system_tag_columns(
+    source: StreamProtocol, tag_names: Collection[str]
+) -> tuple[list[str], list[str]]:
+    """Return *source*'s source-id and record-id system-tag columns.
+
+    A root source, or a stream that keeps its system tags (a filter, a rename), has one
+    of each; a stream that joins or merges inputs has one pair per input; a source with
+    no rows may have none.
+
+    Args:
+        source: The stream being bound.
+        tag_names: Its user tag columns.
+    """
+    names = [
+        name
+        for name in source.keys(columns={"system_tags": True})[0]
+        if name not in tag_names
+    ]
+    source_id = f"{constants.SYSTEM_TAG_SOURCE_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    record_id = f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    return (
+        [name for name in names if name.startswith(source_id)],
+        [name for name in names if name.startswith(record_id)],
+    )
 
 
 class SourceNodeBase(TraceableBase, ABC):
@@ -360,6 +412,16 @@ class SourceNodeBase(TraceableBase, ABC):
                         f"{_type_text(declared[name])} but the source has "
                         f"{_type_text(given[name])}"
                     )
+
+        if narrower and not issues:
+            # A narrower source's rows are given with the slot's one system-tag pair,
+            # which a joined or merged stream's several pairs cannot become.
+            source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
+            if len(source_ids) > 1 or len(record_ids) > 1:
+                issues.append(
+                    "a narrower source must carry one source-id and one record-id "
+                    f"system-tag column, not {sorted(source_ids + record_ids)}"
+                )
 
         if issues:
             raise SourceSpecMismatchError(
@@ -715,27 +777,47 @@ class SourceJobNode(SourceNodeBase):
             source: The stream being bound.
 
         Returns:
-            ``None`` when the source's schema equals the declared one, so its rows pass
-            unchanged; otherwise the ``_DeclaredForm`` of its narrower columns.
+            ``None`` when the source's rows already are rows of the declared schema
+            (same types, column order and system-tag names), or are a joined or merged
+            stream of the declared schema, so its rows pass unchanged; otherwise the
+            ``_DeclaredForm`` that makes them so.
 
         Raises:
             SourceSpecMismatchError: If *source* does not fit the declared schema.
         """
         source_tag, source_data, narrower = self._fit(source)
-        if not narrower:
+        source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
+        if len(source_ids) > 1 or len(record_ids) > 1:
+            # A joined or merged stream of the declared schema passes through, its
+            # system tags as they are: a known gap (ITL-1112). A narrower one was
+            # refused by _fit.
             return None
-        source_schema_hash = compute_source_schema_hash(
-            source_tag, source_data, self.data_context, self.orcapod_config
+        declared_source_id, declared_record_id = system_tag_column_names(
+            self._schema_hash_str
         )
+        renames = {
+            name: declared
+            for names, declared in (
+                (source_ids, declared_source_id),
+                (record_ids, declared_record_id),
+            )
+            for name in names
+            if name != declared
+        }
+        tag_order = tuple(self._tag_schema.keys())
+        data_order = tuple(self._data_schema.keys())
+        if (
+            not narrower
+            and not renames
+            and tuple(source_tag.keys()) == tag_order
+            and tuple(source_data.keys()) == data_order
+        ):
+            return None
         return _DeclaredForm(
             nullable=narrower,
-            renames=dict(
-                zip(
-                    system_tag_column_names(source_schema_hash),
-                    system_tag_column_names(self._schema_hash_str),
-                    strict=True,
-                )
-            ),
+            renames=renames,
+            tag_order=tag_order,
+            data_order=data_order,
         )
 
     def _declared_rows(
@@ -848,6 +930,7 @@ class SourceJobNode(SourceNodeBase):
             self._bound_source.head(
                 n,
                 columns=ColumnConfig(
+                    meta=True,
                     source=True,
                     system_tags=True,
                     context=True,
@@ -859,10 +942,12 @@ class SourceJobNode(SourceNodeBase):
         table = self._declared_stream(
             self._bound_source, self._declared_form, view.table
         ).as_table(columns=config)
+        renames = self._declared_form.renames
+        tag_columns = {renames.get(c, c) for c in view.tag_columns}
         return dataclasses.replace(
             view,
             table=table,
-            tag_columns=tuple(c for c in view.tag_columns if c in table.column_names),
+            tag_columns=tuple(c for c in table.column_names if c in tag_columns),
         )
 
     async def async_iter_data(
@@ -944,6 +1029,7 @@ class SourceJobNode(SourceNodeBase):
             return self._bound_source.as_table(columns=columns, all_info=all_info)
         table = self._bound_source.as_table(
             columns={
+                "meta": True,
                 "source": True,
                 "system_tags": True,
                 "context": True,
