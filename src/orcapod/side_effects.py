@@ -1183,8 +1183,11 @@ class SideEffectJobNode(SideEffectNode):
                 database.flush()
             except StoreReadError:
                 # A stored table could not be read: report the read failure itself.
+                # The run raised, so it leaves the node no rows.
+                self._held_rows = None
                 raise
             except Exception as exc:
+                self._held_rows = None
                 raise StoreWriteError(database.base_path, flush=True) from exc
         return self._view_of_rows(self.as_table(), "held")
 

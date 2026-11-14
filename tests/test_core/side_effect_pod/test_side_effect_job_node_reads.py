@@ -24,6 +24,7 @@ from orcapod import function_pod
 from orcapod.core.sources import DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import StoreWriteError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -387,3 +388,27 @@ def test_head_after_a_run_that_passed_on_no_rows_never_polls() -> None:
     assert len(head) == 0
     assert "its last run passed on no rows" in head.header()
     assert sent == []
+
+
+class _FailingFlushDatabase(InMemoryArrowDatabase):
+    """An in-memory database whose commit fails."""
+
+    @override
+    def flush(self) -> None:
+        """Fail, as a store that cannot be written does."""
+        raise OSError("the store cannot be written")
+
+
+def test_node_run_whose_log_commit_fails_leaves_no_rows() -> None:
+    """A ``node.run()`` that raises at its commit leaves the node no rows to read."""
+    job, sent = _job()
+    node = job.nodes["delivered"]
+    # The job hands its nodes scoped views of its database; attach the failing one
+    # to the node itself.
+    node.attach_databases(pipeline_database=_FailingFlushDatabase())
+    with pytest.raises(StoreWriteError):
+        _ = node.run()
+    assert len(sent) == ROWS
+    assert list(node.iter_data()) == []
+    assert node.head().status is ViewStatus.NOT_COMPUTED
+    assert len(sent) == ROWS
