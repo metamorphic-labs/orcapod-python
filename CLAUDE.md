@@ -754,18 +754,17 @@ side when its inputs' types disagree; a result's type never depends on data valu
 order or the path the data took; and inferring a type from Python values is a last resort for
 when no type is known.
 
-Who normalizes (developer, November 14, 2026, ITL-1122): every Arrow table Orcapod creates has
-its types in their large variants. That covers a source's table built from Python values, a data
-frame, a file or a store, the rows a `CachedSource` reads back from its cache, and every operator's
-and function pod's output. Two exceptions keep the types as given, with no normalization between
-large and non-large: (1) an Arrow table or Arrow schema the user made: `ArrowTableSource`, and an
-Arrow `schema=` / `data_schema=` given to `CSVSource`, `DictSource` or `DataFrameSource`, kept at
-that source; (2) a store that keeps the large / non-large distinction recoverably (written both
-ways, each reads back as written). No shipped source store does (measured in ITL-1122): a CSV
-file, Delta Lake, SQLite, PostgreSQL and SpiralDB give one type for both, so their sources are
-large. `DataFrameSource` and `PollingSource` convert through Polars, which has only large layouts,
-so an Arrow table handed to them comes out large; `ArrowTableSource` is the source that keeps a
-user's Arrow types.
+Large variants everywhere (developer, November 14, 2026, ITL-1122): every column of every table
+Orcapod presents or stores has its string, binary and list types in their large variants
+(`large_string`, `large_binary`, `large_list`, recursively), with no exception: a user's own
+Arrow table (`ArrowTableSource`, a raw `ArrowTableStream`) and an explicit Arrow `schema=` /
+`data_schema=` are normalized too. The one place is `ArrowTableStream.__init__`
+(`arrow_utils.normalize_table_to_large_types(table, keep_null=True)`), where every source and
+every operator result becomes a stream; never add a per-source or per-operator normalization.
+Names, nullability (top level and nested), field metadata, widths and logical (extension) types
+are untouched, and large and non-large variants hash identically, so no hash or default source
+id moves. Not covered: what is inside a library value (numpy, pandas, polars, torch) keeps its
+library's own distinction.
 
 Respect the Arrow types the inputs already have, normalized to their large variants (developer,
 November 10, 2026: large and non-large variants hash identically, so always normalize to large
@@ -812,8 +811,8 @@ data. The rules:
   to the normalized input types (`arrow_utils.restore_column_types`, or
   `restore_schema_nullability` when nullability is restored too).
   This holds for every operator, also one that passes its rows through unchanged (select,
-  map, a no-op filter, `Join`, `SemiJoin`), on a plain stream as inside a job (ITL-1122): one
-  place, `core/operators/large_types.with_large_types`, applied beside `without_input_meta`.
+  map, a no-op filter, `Join`, `SemiJoin`), on a plain stream as inside a job: its result
+  is an `ArrowTableStream` (ITL-1122).
 - List columns built by `Batch`, `GroupBy` and `MergeJoin` are typed by
   `arrow_utils.aggregated_list_type` (directly or through `build_aggregated_table`):
   `large_list<normalized T>`, or for a logical `T` the logical list type from the type converter

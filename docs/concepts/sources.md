@@ -50,23 +50,13 @@ columns are known.
 
 ### Arrow types of a source
 
-Orcapod gives every Arrow table it creates the large variants of string, binary and list types
-(`large_string`, `large_binary`, `large_list`, recursively). Large and non-large variants hash
-identically, so this never changes a hash. Two cases keep the types you gave:
-
-- **An Arrow table or Arrow schema you made.** `ArrowTableSource` keeps the table's types, so a
-  `string` column stays `string`. An Arrow schema passed as `schema=` to `CSVSource` or
-  `DataFrameSource`, or as `data_schema=` to `DictSource`, is applied as given.
-- **A store that keeps the distinction.** None of the stores the sources read does: a CSV
-  file, Delta Lake, SQLite, PostgreSQL and SpiralDB each give one type for `string` and
-  `large_string`. So `CSVSource` (without `schema=`), `DeltaTableSource`, the SQL sources and
-  `SpiralDBTableSource` give large types.
-
-Every other source builds its own table and gives large types: `DictSource` and `ListSource`
-from Python values, `DataFrameSource` and `PollingSource` through Polars (which has only large
-layouts, so an Arrow table handed to them comes out large too), `CachedSource` from the rows it
-reads back from its cache, and `DerivedSource` from stored records. To keep your own Arrow
-types, use `ArrowTableSource`.
+Every source gives the large variants of string, binary and list types (`large_string`,
+`large_binary`, `large_list`, recursively), whatever its input: an Arrow table of your own
+(`ArrowTableSource`), an Arrow schema you pass (`schema=` or `data_schema=`), Python values,
+a data frame, a CSV file or a database table. A `string` column you give comes back as
+`large_string`. Only the layout changes: names, nullability, widths (`int8` stays `int8`) and
+logical types are kept, and the two variants hash identically, so no hash depends on which
+one you gave.
 
 ### SpiralDB tables
 

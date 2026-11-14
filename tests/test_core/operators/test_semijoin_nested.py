@@ -5,7 +5,8 @@ non-key column ("Data type list<item: int8> is not supported in join non-key
 field"), so a list, large_list, struct or struct-backed logical column on either
 input failed. ITL-829 (first case): Acero also rejected a key that is ``string``
 on one side and ``large_string`` on the other ("Incompatible data types for
-corresponding join field keys"), e.g. a user's ``string`` table against a ``DictSource``.
+corresponding join field keys"), e.g. a ``CSVSource`` against a ``DictSource``; since
+ITL-1122 every stream presents the large variant, so that meeting no longer occurs.
 
 The result is the left input's rows that match a right row, in left order, with
 the left input's Arrow schema in its large variants (ITL-1122: ``string`` is
@@ -360,12 +361,12 @@ def test_null_scalar_key_never_matches() -> None:
 
 
 def test_string_vs_large_string_key_user_vs_dict() -> None:
-    """ITL-829 (first case): a user's ``string`` key against a DictSource's
-    ``large_string`` key, in both directions.
+    """ITL-829 (first case): a user's ``string`` key against a DictSource's key, in
+    both directions.
 
-    A CSVSource gave the ``string`` key until ITL-1122 (a CSV file keeps no large /
-    non-large distinction, so its table is now large); a user's own Arrow table is
-    the source that keeps ``string``.
+    The ``string`` / ``large_string`` meeting no longer reaches an operator: every
+    stream presents the large variant (ITL-1122), so the user's ``string`` key is
+    ``large_string`` at its source already.
     """
     user_source = _source(
         {
@@ -378,7 +379,7 @@ def test_string_vs_large_string_key_user_vs_dict() -> None:
     dict_source = DictSource(
         data=[{"id": "a", "y": 1}, {"id": "c", "y": 3}], tag_columns=["id"]
     )
-    assert user_source.as_table().schema.field("id").type == pa.string()
+    assert user_source.as_table().schema.field("id").type == pa.large_string()
     assert dict_source.as_table().schema.field("id").type == pa.large_string()
 
     assert_semijoin_result(

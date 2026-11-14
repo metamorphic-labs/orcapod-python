@@ -21,11 +21,6 @@ class CSVSource(RootSource):
     The file is read once at construction time using PyArrow's CSV reader,
     converted to an Arrow table, and enriched by ``SourceStreamBuilder``
     (source-info, schema-hash, system tags).
-
-    A CSV file keeps no distinction between large and non-large Arrow types, so
-    the table read from it is Orcapod's and takes the large variants (``string``
-    is ``large_string``; ITL-1122). An Arrow ``schema`` given by the user is
-    applied as it is: the user chose those types.
     """
 
     def __init__(
@@ -51,8 +46,6 @@ class CSVSource(RootSource):
             table = table.cast(schema)
         else:
             table = table.cast(arrow_utils.infer_schema_nullable(table))
-            # The file has no large / non-large distinction: Orcapod's table is large.
-            table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
 
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(
