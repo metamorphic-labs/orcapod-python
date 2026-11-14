@@ -49,7 +49,9 @@ def _strs() -> DictSource:
 def _str_tags() -> DictSource:
     """Return a source with tag ``id: str`` and data ``x: int``."""
     return DictSource(
-        [{"id": "a", "x": 1}, {"id": "b", "x": 2}], tag_columns=["id"], source_id="stags"
+        [{"id": "a", "x": 1}, {"id": "b", "x": 2}],
+        tag_columns=["id"],
+        source_id="stags",
     )
 
 
@@ -172,7 +174,9 @@ def test_an_accepted_bind_moves_no_pipeline_hash(
     assert _pipeline_hashes(job) == before
 
 
-def test_an_accepted_rebind_runs_and_stores_the_new_rows(tmp_path: pathlib.Path) -> None:
+def test_an_accepted_rebind_runs_and_stores_the_new_rows(
+    tmp_path: pathlib.Path,
+) -> None:
     """A rebind to a source of the declared types runs and stores its rows."""
     job = _fresh_job(tmp_path)
     _ = job.run()
