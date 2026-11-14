@@ -10,7 +10,8 @@ The table a stream or node gives when it has no row was built from its Python ou
 no stored table, or after a zero-row async run (`OperatorJobNode._make_empty_table`); the
 sync orchestrator's input for an upstream that produced no row
 (`SyncPipelineOrchestrator._materialize_as_stream`); and a function pod's stream or node with
-no row (`_table_from_pairs([])`). So `int8` read as `int64`, list items and source-info
+no row (`_table_from_pairs([])`); and a side-effect pod's stream or node that delivered no row
+(`side_effects._table_of_rows`). So `int8` read as `int64`, list items and source-info
 columns changed nullability, system-tag columns went missing (operator nodes) and a function
 pod lost its input's tag types and its context and source-info columns. Zero-row and
 non-empty results must have the same types, and the developer's rule (November 13, 2026) is
@@ -25,7 +26,8 @@ delegate to the wrapped source, a polling source to what it polled, a proxy to i
 an operator node or `DynamicPodStream` applies its operator (`static_process`) to its inputs'
 zero-row tables; a function pod's stream or node joins its input's tag columns to the zero-row
 form of its output `Data` (`function_zero_row_table`, `Data.function_output_zero_row_table`,
-built from the same converter call and field builders a computed row uses). Inputs a job
+built from the same converter call and field builders a computed row uses); a side-effect
+pod's stream or node gives its input's (it passes rows through), with the context column. Inputs a job
 builds from rows use `StaticOutputOperatorPod._zero_row_input` (row-built column order,
 `_rows_to_table`'s source-info nullability rule). Nothing is stored, so no hash, stored schema or
 path changes; nothing is computed, read, polled or called. Regressions:

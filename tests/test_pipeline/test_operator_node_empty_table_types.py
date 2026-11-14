@@ -29,6 +29,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.types import ColumnConfig
 
 ORCHESTRATORS = {
     "sync": SyncPipelineOrchestrator,
@@ -172,7 +173,12 @@ class _RowsMustNotBeRead(ArrowTableSource):
     def iter_data(self):
         raise AssertionError("the source's rows were read")
 
-    def as_table(self, *, columns=None, all_info=False):
+    def as_table(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> pa.Table:
         raise AssertionError("the source's rows were read")
 
 
@@ -296,14 +302,17 @@ def _int8_table() -> pa.Table:
 
 
 def _arrow_table_source(tmp_path: Path) -> ArrowTableSource:
-    """An in-memory source."""
+    """An in-memory source; ``tmp_path`` is unused (every maker takes it)."""
+    del tmp_path
     return ArrowTableSource(_int8_table(), tag_columns=["id"], source_id="kinds")
 
 
 def _cached_source(tmp_path: Path) -> StreamProtocol:
     """A cached source over an in-memory source; its cache is never read here."""
+    del tmp_path
     return CachedSource(
-        _arrow_table_source(tmp_path), cache_database=InMemoryArrowDatabase()
+        ArrowTableSource(_int8_table(), tag_columns=["id"], source_id="kinds"),
+        cache_database=InMemoryArrowDatabase(),
     )
 
 
