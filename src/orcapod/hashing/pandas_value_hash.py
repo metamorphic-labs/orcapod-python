@@ -116,9 +116,10 @@ storage alike, through one check, ``require_restorable`` (ITL-1054): MultiIndex 
 would be written in another order (level names that are also level positions,
 ``names=[1, 0]``), and values storage cannot read back (a nested, dictionary or fixed-size
 ``pd.ArrowDtype`` column or index level; a categorical, period, timedelta, interval, date or
-``pd.ArrowDtype`` column axis; tuple categories), column labels that would read back as
-another label (``False`` reads back ``True``), and labels and names that collide once written
-as text.
+``pd.ArrowDtype`` column axis; tuple categories; a ``time64[ns]`` index level holding
+sub-microsecond values), column labels and index level names that would read back as another
+label or name (``False`` reads back ``True``; ``"__index_level_0__"`` reads back unnamed), and
+labels and names that collide once written as text.
 A value Arrow cannot convert is refused by ``pandas_frame_to_arrow``. Both messages name the
 column, index level or column-axis level.
 """
@@ -130,6 +131,7 @@ import json
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -670,12 +672,15 @@ def _level_by_position(axis: pd.Index, position: int) -> pd.Index:
     return unnamed.get_level_values(position).rename(axis.names[position])
 
 
-def _parts(frame: pd.DataFrame, rows: int | None) -> Iterator[tuple[str, pd.DataFrame]]:
-    """Yield each part of ``frame`` storage writes, alone in a frame, with its description.
+def _parts(
+    frame: pd.DataFrame, rows: int | None
+) -> Iterator[tuple[str, Callable[[], pd.DataFrame]]]:
+    """Yield each part of ``frame`` storage writes, with a function building it alone in a frame.
 
     The parts are the levels of the column axis, the columns, and the index levels, each by
     position. A part's frame holds the first ``rows`` rows of it (all rows when ``None``); a
-    column-axis level is a zero-row frame with that level as its column labels.
+    column-axis level is a zero-row frame with that level as its column labels. Building a
+    part can itself fail (pandas cannot make every Index a column axis), so it is a function.
     """
     subset = frame if rows is None else frame.iloc[:rows]
     columns = frame.columns
@@ -686,21 +691,31 @@ def _parts(frame: pd.DataFrame, rows: int | None) -> Iterator[tuple[str, pd.Data
         )
         yield (
             f"{where} (dtype {level.dtype})",
-            pd.DataFrame(index=pd.RangeIndex(0), columns=level.unique()),
+            partial(_column_axis_alone, level),
         )
     for position in range(subset.shape[1]):
-        column = subset.iloc[:, [position]]
         yield (
-            f"column {columns[position]!r} (dtype {column.dtypes.iloc[0]})",
-            column.set_axis(pd.RangeIndex(1), axis=1).reset_index(drop=True),
+            f"column {columns[position]!r} (dtype {subset.dtypes.iloc[position]})",
+            partial(_column_alone, subset, position),
         )
     index = subset.index
     for position in range(index.nlevels):
         level = _level_by_position(index, position)
         yield (
             f"index level {position} (name {index.names[position]!r}, dtype {level.dtype})",
-            pd.DataFrame(index=level),
+            partial(pd.DataFrame, index=level),
         )
+
+
+def _column_axis_alone(level: pd.Index) -> pd.DataFrame:
+    """A zero-row frame whose column labels are the distinct labels of ``level``."""
+    return pd.DataFrame(index=pd.RangeIndex(0), columns=level.unique())
+
+
+def _column_alone(frame: pd.DataFrame, position: int) -> pd.DataFrame:
+    """Column ``position`` of ``frame`` alone, with a plain column label and row index."""
+    column = frame.iloc[:, [position]]
+    return column.set_axis(pd.RangeIndex(1), axis=1).reset_index(drop=True)
 
 
 def _failing_part(
@@ -714,11 +729,12 @@ def _failing_part(
         attempt: The step that failed on the whole frame.
 
     Returns:
-        The description of the part, or ``None`` when every part alone succeeds.
+        The description of the part, or ``None`` when every part alone succeeds. A part
+        that cannot even be built alone is the failing part.
     """
-    for description, part in _parts(frame, rows):
+    for description, build in _parts(frame, rows):
         try:
-            attempt(part)
+            attempt(build())
         except Exception:  # noqa: BLE001 - any failure of the step locates the part
             return description
     return None
@@ -830,6 +846,69 @@ def _require_labels_restored(columns: pd.Index, restored: pd.Index) -> None:
                 )
 
 
+def _name_as_written(name: Any) -> Any:
+    """Return an index level name as storage writes it: its text, a tuple's parts each as text.
+
+    ``None`` stays ``None``.
+    """
+    if name is None:
+        return None
+    if isinstance(name, tuple):
+        return str(tuple(_name_as_written(part) for part in name))  # pyright: ignore[reportUnknownVariableType]
+    return str(name)
+
+
+def _require_index_names_restored(index: pd.Index, restored: pd.Index) -> None:
+    """Raise if an index level name would read back from storage as another name.
+
+    Storage writes a level name as text, so ``1`` reads back ``"1"``: that is no change. A
+    name whose text changes is: pyarrow drops a name that looks like its own generated field
+    name (``"__index_level_0__"``), and the level reads back unnamed.
+
+    Args:
+        index: The index of the frame.
+        restored: The index of the frame storage restores, with as many levels.
+
+    Raises:
+        ValueError: If a level's name changes; the message names the level and both names.
+    """
+    for position, (name, back) in enumerate(zip(index.names, restored.names)):
+        if _name_as_written(name) != back:
+            raise ValueError(
+                f"index level {position} (name {name!r}): the name would read back from "
+                f"storage as {back!r}. Rename the index level (pyarrow drops a name of the "
+                "form '__index_level_<n>__')."
+            )
+
+
+def _require_index_values_restored(table: pa.Table, frame: pd.DataFrame) -> None:
+    """Raise if an index level's values cannot be converted back to pandas.
+
+    Storage restores each index level from its Arrow column, and that conversion can fail on
+    the values alone, which a zero-row read never meets: a ``pd.ArrowDtype`` ``time64[ns]``
+    level holding a value that is not a whole number of microseconds raises. So each index
+    level is converted once, in full.
+
+    Args:
+        table: ``pandas_frame_to_arrow(frame)``: the columns, then one field per index level.
+        frame: The frame.
+
+    Raises:
+        ValueError: If an index level cannot be converted; the message names it.
+    """
+    width = frame.shape[1]
+    for position in range(frame.index.nlevels):
+        try:
+            table.column(width + position).to_pandas()
+        except Exception as exc:  # noqa: BLE001 - pandas and pyarrow raise many kinds here
+            raise ValueError(
+                f"index level {position} (name {frame.index.names[position]!r}, dtype "
+                f"{_level_by_position(frame.index, position).dtype}): storage would write "
+                "this value but it cannot be read back "
+                f"({type(exc).__name__}: {exc})."
+            ) from exc
+
+
 def require_restorable(table: pa.Table, frame: pd.DataFrame) -> pd.DataFrame:
     """Return the zero-row frame storage restores for ``frame``, refusing what it would not.
 
@@ -844,12 +923,16 @@ def require_restorable(table: pa.Table, frame: pd.DataFrame) -> pd.DataFrame:
       column or index level; a categorical, period, timedelta, interval, date or
       ``pd.ArrowDtype`` column axis; a categorical whose categories cannot be restored
       (tuples read back as arrays, which cannot be categories).
+    - An index level whose values cannot be converted back (a ``pd.ArrowDtype`` ``time64[ns]``
+      level holding sub-microsecond values).
     - The frame read back would have another number of columns or index levels, distinct
-      column labels that read back equal, or a column label that reads back as another label
-      (``False`` reads back ``True``).
+      column labels that read back equal, a column label that reads back as another label
+      (``False`` reads back ``True``), or an index level name that reads back as another
+      name (``"__index_level_0__"`` reads back unnamed).
 
-    No rows are converted: what storage restores is read from ``table.slice(0, 0)``, which
-    keeps the schema and the dictionary (the categories) of each categorical column.
+    What storage restores is read from ``table.slice(0, 0)``, which keeps the schema and the
+    dictionary (the categories) of each categorical column; the only rows converted are the
+    index levels', once each.
 
     Args:
         table: ``pandas_frame_to_arrow(frame)``.
@@ -901,6 +984,8 @@ def require_restorable(table: pa.Table, frame: pd.DataFrame) -> pd.DataFrame:
             "as text)."
         )
     _require_labels_restored(frame.columns, restored.columns)
+    _require_index_names_restored(frame.index, restored.index)
+    _require_index_values_restored(table, frame)
     return restored
 
 
@@ -938,16 +1023,16 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
             the frame cannot be converted to Arrow, storage would not restore it
             (``require_restorable``), or a label or name is outside the grammar.
     """
+    # Storage's refusals come first, with storage's own message, so the hash and
+    # ``python_to_storage`` refuse a value alike (ITL-1054); the grammar checks follow.
+    table = pandas_frame_to_arrow(df)
+    axes = _restored_axes(table, df)
     for label, dtype in zip(df.columns, df.dtypes):
         if dtype != np.dtype(object):
-            # A dtype outside the grammar is reported by name, before Arrow refuses it.
             try:
                 pandas_dtype_descriptor(dtype)
             except ValueError as exc:
                 raise ValueError(f"column {label!r}: {exc}") from exc
-    table = pandas_frame_to_arrow(df)
-    # Refuses what storage would not restore, with storage's own message (ITL-1054).
-    axes = _restored_axes(table, df)
     # The frame's own labels and names must be in the grammar, although the descriptor
     # holds them in the form storage restores: storage writes some as text, and the text of
     # an arbitrary object (its ``repr``, with a memory address) must never reach a hash.

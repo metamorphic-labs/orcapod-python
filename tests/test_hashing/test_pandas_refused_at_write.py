@@ -176,6 +176,50 @@ def _refused() -> dict[str, tuple[pd.DataFrame | pd.Series, str]]:
         r"column axis level 1: the label .*False.* would read back from storage as "
         r".*True",
     )
+    cases["frame, arrow float16 column axis"] = (
+        pd.DataFrame(
+            [[1, 2]],
+            columns=pd.Index(_arrow_values(pa.array([0.5, 1.5], pa.float16())).array),
+        ),
+        r"column axis.*cannot convert",
+    )
+    cases["frame, arrow uuid (extension type) column"] = (
+        _arrow_values(pa.array([b"0123456789abcdef"] * 2, pa.uuid())).to_frame("col"),
+        r"column 'col'.*cannot be read back",
+    )
+    cases["frame, interval categories"] = (
+        pd.DataFrame({"a": pd.Categorical(pd.interval_range(0, 2))}),
+        r"column 'a'.*cannot be read back",
+    )
+    sub_microsecond = pd.Index(
+        pd.arrays.ArrowExtensionArray(
+            pa.array([1, 2000], pa.int64()).view(pa.time64("ns"))
+        )
+    )
+    cases["frame, time64[ns] index with sub-microsecond values"] = (
+        pd.DataFrame({"a": [1, 2]}, index=sub_microsecond),
+        r"index level 0.*cannot be read back.*non-zero nanoseconds",
+    )
+    cases["series, time64[ns] index with sub-microsecond values"] = (
+        pd.Series([1, 2], name="s", index=sub_microsecond),
+        r"index level 0.*cannot be read back.*non-zero nanoseconds",
+    )
+    cases["frame, index named like a generated field"] = (
+        pd.DataFrame({"a": [1]}, index=pd.Index([7], name="__index_level_0__")),
+        r"index level 0 \(name '__index_level_0__'\): the name would read back from "
+        r"storage as None",
+    )
+    cases["frame, MultiIndex level named like a generated field"] = (
+        pd.DataFrame(
+            {"a": [1]},
+            index=pd.MultiIndex.from_tuples([(7, 8)], names=["x", "__index_level_1__"]),
+        ),
+        r"index level 1 \(name '__index_level_1__'\): the name would read back",
+    )
+    cases["series, index named like a generated field"] = (
+        pd.Series([1], name="s", index=pd.Index([7], name="__index_level_0__")),
+        r"index level 0 \(name '__index_level_0__'\): the name would read back",
+    )
     return cases
 
 
@@ -220,6 +264,23 @@ ACCEPTED: dict[str, pd.DataFrame | pd.Series] = {
     ),
     "int column axis": pd.DataFrame([[1, 2]], columns=pd.Index([0, 1])),
     "string categories": pd.DataFrame({"a": pd.Categorical(["x", "y"])}),
+    "time64[ns] index, whole microseconds": pd.DataFrame(
+        {"a": [1, 2]},
+        index=pd.Index(
+            pd.arrays.ArrowExtensionArray(
+                pa.array([1000, 2000], pa.int64()).view(pa.time64("ns"))
+            )
+        ),
+    ),
+    "int, tuple and timestamp index names": pd.DataFrame(
+        {"a": [1]},
+        index=pd.MultiIndex.from_tuples(
+            [(7, 8, 9)], names=[5, ("a", 1), pd.Timestamp("2020-01-01")]
+        ),
+    ),
+    "index named like a field, but not generated": pd.DataFrame(
+        {"a": [1]}, index=pd.Index([7], name="__index_level__")
+    ),
 }
 
 
@@ -230,6 +291,15 @@ def _logical(
     if isinstance(value, pd.Series):
         return LogicalPandasSeries()
     return LogicalPandasDataFrame()
+
+
+def _name_text(name: Any) -> Any:
+    """An index level name as storage writes it: its text, a tuple's parts each as text."""
+    if name is None:
+        return None
+    if isinstance(name, tuple):
+        return str(tuple(_name_text(part) for part in name))
+    return str(name)
 
 
 def _hash(value: Any) -> Any:
@@ -271,8 +341,8 @@ def test_restorable_neighbours_are_accepted(name: str) -> None:
     logical = _logical(value)
     back = logical.storage_to_python(logical.python_to_storage(value))
     assert list(back.index) == list(value.index)
-    assert [None if n is None else str(n) for n in back.index.names] == [
-        None if n is None else str(n) for n in value.index.names
+    assert [_name_text(n) for n in back.index.names] == [
+        _name_text(n) for n in value.index.names
     ]
     assert _hash(back) == _hash(value)
 

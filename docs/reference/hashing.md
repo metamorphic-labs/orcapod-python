@@ -1581,13 +1581,21 @@ pyarrow version:
   would be written, and read back, with the levels swapped, and nothing would raise.
 - **Values storage cannot read back.** A `pd.ArrowDtype` column (or Series) of a list,
   large list, fixed-size list, list view, struct, map, dictionary, run-end or union type,
-  or of fixed-size binary; an index level of a `pd.ArrowDtype` list, large list, fixed-size
-  list, struct, map, dictionary, fixed-size binary or `float16` type; a column axis (any
-  level of it) that is categorical, period, timedelta, interval, `datetime.date` objects, or
-  a `pd.ArrowDtype` timestamp, duration, bool, date or decimal, which includes a Series
-  named with a `pd.Timedelta`, `pd.Period` or `datetime.date`; a categorical column, Series
-  or index whose categories are tuples (they read back as arrays, which cannot be
-  categories; ITL-1115).
+  of fixed-size binary, or of an Arrow extension type (`uuid`, `json`, `bool8`, a fixed-shape
+  tensor); an index level of a `pd.ArrowDtype` list, large list, fixed-size list, struct,
+  map, dictionary, fixed-size binary or `float16` type; a column axis (any level of it) that
+  is categorical, period, timedelta, interval, `datetime.date` objects, or a `pd.ArrowDtype`
+  timestamp, duration, time, bool, date, decimal or unsigned integer, which includes a
+  Series named with a `pd.Timedelta`, `pd.Period` or `datetime.date`; a categorical column,
+  Series or index whose categories are tuples (they read back as arrays, which cannot be
+  categories; ITL-1115) or intervals.
+- **Index levels whose values cannot be read back.** A `pd.ArrowDtype` `time64[ns]` index
+  level holding a value that is not a whole number of microseconds (ITL-1118). The failure
+  depends on the values, so each index level is converted once, in full, when a value is
+  written or hashed; columns are checked without converting any row.
+- **Index level names that would read back as another name.** pyarrow drops a name of the
+  form `__index_level_<n>__` (its own name for an unnamed level), so such a level reads back
+  unnamed (ITL-1119). Names are compared as the text storage writes for them.
 - **Column labels that would read back as another label.** pyarrow restores a bool label
   from its text, so the label `False` (a one-column bool axis, a Series named `False`, a
   `False` in a level of a MultiIndex column axis) reads back `True` (ITL-1116). Labels are
@@ -1597,7 +1605,8 @@ pyarrow version:
   back would have lost its index. Distinct labels that read back equal (the labels `True`
   and `False` both read back `True`) would come back as duplicates.
 - **Values Arrow cannot convert** (mixed or non-Arrow values, `complex128`, sparse columns,
-  an index of a type Arrow does not support).
+  a categorical of periods, a `float16` column axis, an index of a type Arrow does not
+  support).
 
 Before v0.3 such values were written: a value of the first kind reads back changed, and one
 of the second kind cannot be read at all.
