@@ -825,8 +825,9 @@ data. The rules:
   declared schema hash, taken from the source's own pair by prefix, the VALUES the source's
   own). Limits: the check compares Python types, so a difference in Arrow width only
   (`int32` against `int64`) is not yet refused (ITL-949); a joined or merged stream (several
-  system-tag pairs) of the declared schema passes through with its own system tags, and a
-  narrower one is refused.
+  system-tag pairs) or a stream with none, of the declared schema, passes through with its
+  own system tags (`_keeps_its_own_system_tags`, pending the developer), and a narrower one
+  is refused.
 - A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
   built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
   `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label

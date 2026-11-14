@@ -23,6 +23,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import Join, MapData
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -542,3 +543,22 @@ def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
             sorted(data.as_table(columns={"meta": True}).column_names)
             for _, data in rows
         ] == own
+
+
+@pytest.mark.parametrize("bind", BINDS.values(), ids=BINDS.keys())
+def test_a_narrower_stream_without_system_tags_is_refused(
+    bind: Callable[[PipelineJob, Any], None],
+) -> None:
+    """A narrower stream with no system-tag pair cannot be given the slot's pair."""
+    schema = pa.schema(
+        [pa.field("id", pa.int64(), False), pa.field("x", pa.int64(), False)]
+    )
+    stream = ArrowTableStream(
+        pa.table({"id": [0], "x": [1]}, schema=schema), tag_columns=["id"]
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "y"})(_slot(int | None), label="renamed")
+    with pytest.raises(SourceSpecMismatchError, match="system-tag"):
+        bind(job, stream)
+    assert job.nodes["src"].bound_source is None  # pyright: ignore[reportAttributeAccessIssue]  # "src" is a SourceJobNode

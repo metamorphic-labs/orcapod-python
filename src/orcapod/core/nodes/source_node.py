@@ -163,6 +163,24 @@ def _system_tag_columns(
     )
 
 
+def _keeps_its_own_system_tags(source_ids: list[str], record_ids: list[str]) -> bool:
+    """Return whether a bound stream's system tags stay as they are, not the slot's.
+
+    The slot's rows carry one system-tag pair, under the slot's names. A stream with
+    exactly one pair takes those names; a joined or merged stream (one pair per input)
+    or a stream with none cannot. A narrower such stream is refused at bind; one of the
+    declared schema passes through with its own system tags, a known gap against the
+    rule that the pipeline determines every node's schema. Pending the developer's
+    decision (ITL-1112, "S1"): refusing these binds too is a change here and in
+    ``SourceNodeBase._fit``.
+
+    Args:
+        source_ids: The stream's source-id system-tag columns.
+        record_ids: The stream's record-id system-tag columns.
+    """
+    return len(source_ids) != 1 or len(record_ids) != 1
+
+
 class SourceNodeBase(TraceableBase, ABC):
     """Abstract base for SourceNode and SourceJobNode.
 
@@ -415,12 +433,13 @@ class SourceNodeBase(TraceableBase, ABC):
 
         if narrower and not issues:
             # A narrower source's rows are given with the slot's one system-tag pair,
-            # which a joined or merged stream's several pairs cannot become.
+            # which only a source with exactly one pair can take.
             source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
-            if len(source_ids) > 1 or len(record_ids) > 1:
+            if _keeps_its_own_system_tags(source_ids, record_ids):
                 issues.append(
-                    "a narrower source must carry one source-id and one record-id "
-                    f"system-tag column, not {sorted(source_ids + record_ids)}"
+                    "a narrower source must carry exactly one source-id and one "
+                    "record-id system-tag column, not "
+                    f"{sorted(source_ids + record_ids)}"
                 )
 
         if issues:
@@ -787,21 +806,19 @@ class SourceJobNode(SourceNodeBase):
         """
         source_tag, source_data, narrower = self._fit(source)
         source_ids, record_ids = _system_tag_columns(source, source_tag.keys())
-        if len(source_ids) > 1 or len(record_ids) > 1:
-            # A joined or merged stream of the declared schema passes through, its
-            # system tags as they are: a known gap (ITL-1112). A narrower one was
-            # refused by _fit.
+        if _keeps_its_own_system_tags(source_ids, record_ids):
+            # Of the declared schema (a narrower one was refused by _fit): passes
+            # through as it is.
             return None
         declared_source_id, declared_record_id = system_tag_column_names(
             self._schema_hash_str
         )
         renames = {
             name: declared
-            for names, declared in (
-                (source_ids, declared_source_id),
-                (record_ids, declared_record_id),
+            for name, declared in (
+                (source_ids[0], declared_source_id),
+                (record_ids[0], declared_record_id),
             )
-            for name in names
             if name != declared
         }
         tag_order = tuple(self._tag_schema.keys())
