@@ -184,3 +184,38 @@ def test_an_accepted_rebind_runs_and_stores_the_new_rows(
     _ = job.run()
     # Results of the first source (x 1, 2) would be [1, 2].
     assert sorted(job.nodes["const"].as_table().column("z").to_pylist()) == [10, 11]
+
+
+def _two_by_two_slot_job() -> PipelineJob:
+    """Return a job whose slot declares tags ``a``, ``b`` and data ``x``, ``y``, in order."""
+    slot = SourceNode(
+        name="src",
+        tag_schema=Schema({"a": int, "b": int}),
+        data_schema=Schema({"x": int, "y": int}),
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        _ = MapData({"x": "x2"})(slot, label="renamed")
+    return job
+
+
+def test_columns_match_by_name_within_each_group_whatever_their_order() -> None:
+    """Tags and data in another order than declared are accepted (developer, November 14,
+    2026): within the tag group and the data group, columns match by name."""
+    job = _two_by_two_slot_job()
+    reordered = DictSource(
+        [{"y": 2, "b": 1, "x": 3, "a": 0}], tag_columns=["b", "a"], source_id="r"
+    )
+    job.bind(sources={"src": reordered})
+    assert job.run().ok
+
+
+def test_a_column_in_the_other_role_is_refused() -> None:
+    """A column that is a tag on one side and data on the other is refused: the role
+    (tag or data) is part of the match, its position is not."""
+    job = _two_by_two_slot_job()
+    swapped = DictSource(
+        [{"a": 0, "b": 1, "x": 3, "y": 2}], tag_columns=["a", "x"], source_id="s"
+    )
+    with pytest.raises(SourceSpecMismatchError, match="tag columns"):
+        job.bind(sources={"src": swapped})

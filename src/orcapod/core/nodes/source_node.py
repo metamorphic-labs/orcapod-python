@@ -79,9 +79,10 @@ class _DeclaredForm:
     The pipeline determines every node's schema (ITL-1112). A slot declaring
     ``x: int | None`` accepts a source of ``x: int`` and gives its rows as rows of
     ``x: int | None``: the same arrays under nullable fields. The source's system-tag
-    columns take the slot's names and order, source id then record id (their values stay
-    the source's own), and its tag and data columns, with their source-info columns, the
-    declared order. Nothing else
+    columns take the slot's names (their values stay the source's own). As a stable
+    convenience, not a guarantee (column order is not part of a node's schema), the
+    columns come in the declared order: tags, data and source info as declared, the
+    system tags source id first. Nothing else
     differs: values, types, source-info tokens and meta columns pass unchanged, so the
     rows equal those of a source of the declared schema with the same source id.
 
