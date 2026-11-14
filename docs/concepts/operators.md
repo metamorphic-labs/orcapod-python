@@ -152,6 +152,11 @@ stream. The right stream's data columns are discarded. SemiJoin is **not commuta
 the order of inputs matters. The first stream is the one being filtered; the second stream
 provides the set of matching tags.
 
+The match keys are exactly the columns that are tag columns of both streams. A name the two
+streams share as a data column, or a tag in one and a data column in the other, is not a key
+and is ignored: the right stream's data columns are never read. If the streams share no tag
+column, every left row is returned.
+
 ```python
 from orcapod.sources import DictSource
 from orcapod.operators import SemiJoin
