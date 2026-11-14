@@ -26,7 +26,10 @@ running and every node closes its output in its existing `finally`; the failing 
 machinery is unchanged. Its exception-group handler now always raises ONE exception: a store
 error, then a `TypeIdentityError` (both as before), then the exception of the node earliest
 in topological order (ties: the order the failures happened), the others noted on it
-(`_single_failure`). Rows run concurrently, so the row raised is the first to fail, the first
+(`_single_failure`). A function node cancelled by another node's failure commits what it
+wrote (`_commit_after_failure`) before the cancellation propagates, as a failing node does:
+the job's flush commits neither its ephemeral store nor its result table ahead of its
+pipeline records (CodeRabbit, PR #379). Rows run concurrently, so the row raised is the first to fail, the first
 in input order only with `max_concurrency=1`. Storage guarantee, as documented in
 `docs/concepts/function-pods.md`: every stored row is a correct, complete result of its input
 row; the failing row is never stored; which other rows are stored is not specified. No

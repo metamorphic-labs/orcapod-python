@@ -3622,6 +3622,12 @@ class FunctionJobNode(FunctionNodeBase):
             # the finally closes the output, so every downstream node, which stamps
             # after it has seen that close, is newer than this one (ITL-1042).
             self._update_modified_time()
+        except asyncio.CancelledError as cancelled:
+            # Another node's failure cancelled this one: commit what it wrote, as a
+            # failing node does. The job's flush commits neither a node's ephemeral
+            # store nor its result table ahead of its pipeline records.
+            self._commit_after_failure(cancelled)
+            raise
         except Exception as run_error:
             if node_started:
                 # The node ends for the observer before it raises, as in execute; a

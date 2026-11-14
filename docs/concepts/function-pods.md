@@ -557,9 +557,11 @@ start. The asynchronous orchestrator computes rows concurrently (up to the pod's
 first in input order only with `max_concurrency=1`, cancels every row and node still running,
 and closes their channels before it raises. A function already running in a worker thread
 cannot be interrupted: its result is discarded, never stored, and `job.run()` returns once it
-has finished. When rows of several nodes fail before the run stops, the error raised is the
-one of the node that comes first in the pipeline; the others are noted on it
-(`error.__notes__`).
+has finished. When rows of several nodes fail before the run stops, one error is raised and
+the others are noted on it (`error.__notes__`): a store error first (see "When the store
+cannot be written" below), then a `TypeIdentityError`, and otherwise the error of the node
+that comes first in the pipeline. A node cancelled by the failure commits the results it
+wrote before it stops.
 
 What is stored after such a run:
 
