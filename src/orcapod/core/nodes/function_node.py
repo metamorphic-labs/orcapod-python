@@ -21,7 +21,8 @@ import contextlib
 import logging
 import uuid
 from abc import abstractmethod
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from orcapod import contexts
@@ -1054,6 +1055,10 @@ class FunctionJobNode(FunctionNodeBase):
     _current_tables_checked: bool = False
     # Set once a store that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
+    # Base entry ids of the inputs of the last completed run in this process, each with
+    # its number of inputs; None when no run completed (ITL-1093). A class default so
+    # nodes rebuilt from a saved descriptor start without a run.
+    _run_entry_counts: Counter[bytes] | None = None
 
     def __init__(
         self,
@@ -1083,6 +1088,7 @@ class FunctionJobNode(FunctionNodeBase):
         ] = {}
         self._cached_output_table: "pa.Table | None" = None
         self._cached_content_hash_column: "pa.Array | None" = None
+        self._run_entry_counts = None
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
@@ -1505,9 +1511,42 @@ class FunctionJobNode(FunctionNodeBase):
     # ------------------------------------------------------------------
 
     def clear_cache(self) -> None:
-        """Clear in-memory output caches, content hash cache, and node identity path cache."""
+        """Clear in-memory output caches, content hash cache, and node identity path cache.
+
+        The node then holds no run: it reads as a node with no completed run in this
+        process (every row stored under its content hash).
+        """
         super().clear_cache()
         self._cached_output_datas.clear()
+        self._cached_output_table = None
+        self._cached_content_hash_column = None
+        self._run_entry_counts = None
+
+    def _held_pairs(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """Yield the (tag, data) rows this node holds; every read of them goes through here.
+
+        After a completed run, the rows are those of that run's inputs: one per input
+        (two equal inputs give two rows, as downstream received them). The in-memory
+        cache may hold more (results of other inputs, read from the store), which stay
+        cached for reuse but are not rows of this run (ITL-1093). Without a completed
+        run in this process, every held row. Rows come in the order the cache holds
+        them. An input without output (an inactive function) is not a row.
+        """
+        held = self._cached_output_datas
+        counts = self._run_entry_counts
+        if counts is None:
+            pairs: Iterable[tuple[TagProtocol, DataProtocol | None]] = held.values()
+        else:
+            pairs = (
+                pair for eid, pair in held.items() for _ in range(counts.get(eid, 0))
+            )
+        for tag, data in pairs:
+            if data is not None:
+                yield tag, data
+
+    def _set_run_rows(self, entry_ids: list[bytes]) -> None:
+        """Make the inputs of a completed run, by base entry id, the rows this node holds."""
+        self._run_entry_counts = Counter(entry_ids)
         self._cached_output_table = None
         self._cached_content_hash_column = None
 
@@ -1872,6 +1911,11 @@ class FunctionJobNode(FunctionNodeBase):
         (populated from DB if needed), compute if missing, fire
         ``on_data_end`` or ``on_data_crash``.
 
+        Afterwards the node's rows (``iter_data``, ``as_table``, ``head``) are those
+        of this run's inputs. If the run raises, it defines no rows: the node drops
+        its in-memory rows and reads as a node with no run in this process; what was
+        stored stays stored.
+
         Args:
             input_stream: The input stream to process.
             observer: Optional execution observer for hooks.
@@ -1910,23 +1954,24 @@ class FunctionJobNode(FunctionNodeBase):
         tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
         ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
 
-        # Collect upstream entries and resolve base_entry_ids (stable across recomputation)
-        upstream_entries: list[tuple[TagProtocol, DataProtocol, bytes]] = [
-            (tag, data, self.compute_base_entry_id(tag, data))
-            for tag, data in input_stream.iter_data()
-        ]
-        base_entry_ids = [eid for _, _, eid in upstream_entries]
-
-        # Hot-load any already-computed results from DB into _cached_output_datas.
-        # get_cached_results() is called for its side effect (populating the
-        # in-memory cache); the returned dict is intentionally discarded here so
-        # that the per-data cache-hit check below uses _cached_output_datas
-        # directly — which includes None-output entries (function returned None)
-        # and prevents spurious recomputation of already-processed data.
-        self.get_cached_results(base_entry_ids=base_entry_ids)
-
         output: list[tuple[TagProtocol, DataProtocol]] = []
         try:
+            # Collect upstream entries and resolve base_entry_ids (stable across
+            # recomputation)
+            upstream_entries: list[tuple[TagProtocol, DataProtocol, bytes]] = [
+                (tag, data, self.compute_base_entry_id(tag, data))
+                for tag, data in input_stream.iter_data()
+            ]
+            base_entry_ids = [eid for _, _, eid in upstream_entries]
+
+            # Hot-load any already-computed results from DB into _cached_output_datas.
+            # get_cached_results() is called for its side effect (populating the
+            # in-memory cache); the returned dict is intentionally discarded here so
+            # that the per-data cache-hit check below uses _cached_output_datas
+            # directly — which includes None-output entries (function returned None)
+            # and prevents spurious recomputation of already-processed data.
+            self.get_cached_results(base_entry_ids=base_entry_ids)
+
             for tag, data, base_entry_id in upstream_entries:
                 ctx_obs.on_data_start(node_label, tag, data)
 
@@ -1993,8 +2038,15 @@ class FunctionJobNode(FunctionNodeBase):
             )
         except Exception as run_error:
             self._commit_after_failure(run_error)
+            # A run that raised defines no rows: the node reads as one with no run.
+            self.clear_cache()
+            raise
+        except BaseException:
+            self.clear_cache()
             raise
 
+        # The node's rows are those of this run's inputs, whatever else it caches.
+        self._set_run_rows(base_entry_ids)
         ctx_obs.on_node_end(node_label, node_hash)
         # Mark this node as freshly computed so subsequent iter_data() calls
         # skip the is_stale check and serve results directly from the in-memory cache.
@@ -3086,8 +3138,8 @@ class FunctionJobNode(FunctionNodeBase):
     ) -> StreamView:
         """Return the first rows the node holds or has stored; never runs the function.
 
-        After a run (or ``execute``) the rows are the node's results in memory, the
-        first of what ``as_table`` returns. Otherwise they are the first of its stored
+        After a run (or ``execute``) the rows are the node's results in memory for that
+        run's inputs, the first of what ``as_table`` returns. Otherwise they are the first of its stored
         rows: the node's whole stored slice is read and nothing is kept on the node.
         With nothing stored, there are no rows. The node has all of its rows, so with
         ``sort_by_tags`` (or ``all_info``) the head is exactly
@@ -3107,9 +3159,11 @@ class FunctionJobNode(FunctionNodeBase):
                 config, ViewStatus.UNAVAILABLE, note="no store attached"
             )
         current = status == LoadStatus.CACHE_ONLY or not self.is_stale
-        if current and self._cached_output_datas:
+        if current and (
+            self._run_entry_counts is not None or self._cached_output_datas
+        ):
             return self._head_of_pairs(
-                list(self._cached_output_datas.values()), n, config, origin="held"
+                list(self._held_pairs()), n, config, origin="held"
             )
         return self._head_from_store(n, config)
 
@@ -3197,13 +3251,17 @@ class FunctionJobNode(FunctionNodeBase):
         return super().as_table(columns=columns, all_info=all_info)
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        """Yield all computed (tag, data) pairs for this node.
+        """Yield this node's (tag, data) rows.
 
         Strictly read-only — never triggers computation. Callers must call
         ``run()`` or ``execute()`` first if they want results computed.
 
-        On the first call with an empty in-memory store and a DB attached,
-        hot-loads all existing records from the DB (one-shot, no recompute).
+        After a completed run (``execute``, ``async_execute``, ``run()`` or a job run)
+        the rows are exactly those of that run's inputs, on either orchestrator, even
+        though results of other inputs stay cached and stored (ITL-1093). A run that
+        raised defines no rows. Without a completed run in this process, on the first
+        call with an empty in-memory store and a DB attached, hot-loads every record
+        stored under the node's content hash (one-shot, no recompute) and yields them.
 
         Raises:
             RuntimeError: If ``load_status`` is UNAVAILABLE.
@@ -3222,11 +3280,7 @@ class FunctionJobNode(FunctionNodeBase):
                 if loaded:
                     self._cached_output_table = None
                     self._cached_content_hash_column = None
-            yield from (
-                (tag, pkt)
-                for tag, pkt in self._cached_output_datas.values()
-                if pkt is not None
-            )
+            yield from self._held_pairs()
             return
 
         # FULL / READ_ONLY — in-memory store may be populated from computation
@@ -3245,11 +3299,7 @@ class FunctionJobNode(FunctionNodeBase):
                 self._cached_output_table = None
                 self._cached_content_hash_column = None
 
-        yield from (
-            (tag, pkt)
-            for tag, pkt in self._cached_output_datas.values()
-            if pkt is not None
-        )
+        yield from self._held_pairs()
 
     def run(self) -> StreamView:
         """Eagerly compute all input data, filling pipeline and result databases, and
@@ -3311,6 +3361,11 @@ class FunctionJobNode(FunctionNodeBase):
         In ``CACHE_ONLY`` mode the upstream is unavailable; all cached results
         are served directly from persistent storage without touching the input
         channel.
+
+        Afterwards the node's rows are those of this run's inputs, as after
+        ``execute``, although every stored result was loaded into its cache. If the
+        run raises or is cancelled, it defines no rows: the node drops its in-memory
+        rows and reads as a node with no run in this process.
 
         Args:
             input_channel: Single readable channel of (tag, data) pairs.
@@ -3405,12 +3460,15 @@ class FunctionJobNode(FunctionNodeBase):
 
                 # Local dict: correlation_key → (original_tag, original_input_data)
                 input_store: dict[bytes, tuple[TagProtocol, DataProtocol, bytes]] = {}
+                # Base entry ids of this run's inputs, in arrival order (ITL-1093).
+                run_entry_ids: list[bytes] = []
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
                     try:
                         async for tag, data in input_channel:
                             base_entry_id = self.compute_base_entry_id(tag, data)
+                            run_entry_ids.append(base_entry_id)
                             # A cached EmptyData is a result that is gone (an
                             # ephemeral result from an earlier run): compute the row
                             # again, as the sync path does (ITL-923).
@@ -3589,6 +3647,9 @@ class FunctionJobNode(FunctionNodeBase):
                     tg.create_task(record_and_forward())
                 # Commit the last rows inside a job (ITL-919); a no-op otherwise.
                 self._commit_at_node_end()
+                # The node's rows are those of this run's inputs, as the sync path's:
+                # the cache also holds every stored result loaded above.
+                self._set_run_rows(run_entry_ids)
             else:
                 # No-DB path: delegate dispatch entirely to the pod. The pod closes
                 # the writer it is given; that close waits for the finally below, so
@@ -3607,6 +3668,13 @@ class FunctionJobNode(FunctionNodeBase):
             self._update_modified_time()
         except Exception as run_error:
             self._commit_after_failure(run_error)
+            # A run that raised defines no rows: the node reads as one with no run,
+            # as on the sync path.
+            self.clear_cache()
+            raise
+        except BaseException:
+            # Cancelled part-way: no rows either.
+            self.clear_cache()
             raise
         finally:
             await output.close()

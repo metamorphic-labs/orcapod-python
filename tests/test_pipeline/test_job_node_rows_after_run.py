@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.data_function import PythonDataFunction
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import StoreWriteError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -63,7 +64,7 @@ def store_fails_on_20(x: int) -> int:
     failed write of the node's results does.
     """
     if x == 20:
-        raise StoreWriteError("simulated failed store write")
+        raise StoreWriteError(("simulated", "results"))
     return x + 1
 
 
@@ -104,7 +105,8 @@ ALL = {"system_tags": True}
 def _reads(node: Any) -> dict[str, list[tuple[tuple[str, str], ...]]]:
     """Every public read of ``node``, rows with system tags, canonical."""
     iterated = [
-        {**tag.as_dict(all_info=True), **data.as_dict()} for tag, data in node.iter_data()
+        {**tag.as_dict(all_info=True), **data.as_dict()}
+        for tag, data in node.iter_data()
     ]
     return {
         "as_table": _canonical(node.as_table(columns=ALL).to_pylist()),
@@ -161,7 +163,10 @@ def _check_run(job: PipelineJob, data: list[dict[str, int]]) -> None:
 
 
 def _snapshot(job: PipelineJob) -> dict[str, Any]:
-    return {label: _reads(job.nodes[label]) for label in ("rowwise", "downstream", "grouped")}
+    return {
+        label: _reads(job.nodes[label])
+        for label in ("rowwise", "downstream", "grouped")
+    }
 
 
 class TestFreshJobPerRun:
@@ -227,10 +232,10 @@ class TestSameJobRebound:
         assert snapshots["sync"] == snapshots["async"]
 
 
-def _single(fn: Any, data: list[dict[str, int]], db: Any) -> PipelineJob:
+def _single(pod: Any, data: list[dict[str, int]], db: Any) -> PipelineJob:
     job = PipelineJob(name="itl1093_single", database=db)
     with job:
-        fn.pod(_source(data), label="node")
+        pod(_source(data), label="node")
     return job
 
 
@@ -240,8 +245,8 @@ class TestNullAndInactive:
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_null_value_is_a_row(self, kind: str) -> None:
         db = InMemoryArrowDatabase()
-        _single(null_on_10, ROWS, db).run(orchestrator=_orchestrator(kind))
-        job = _single(null_on_10, ROWS[:3], db)
+        _single(null_on_10.pod, ROWS, db).run(orchestrator=_orchestrator(kind))
+        job = _single(null_on_10.pod, ROWS[:3], db)
         job.run(orchestrator=_orchestrator(kind))
         node = job.nodes["node"]
         assert _values(node, lambda r: (r["k"], r["y"])) == [(0, 1), (1, None), (2, 21)]
@@ -252,14 +257,16 @@ class TestNullAndInactive:
     @pytest.mark.parametrize("kind", ORCHESTRATORS)
     def test_inactive_function_gives_no_rows(self, kind: str) -> None:
         @function_pod(output_keys="y")
-        def inactive_inc(x: int) -> int:
+        def add_one(x: int) -> int:
             return x + 1
 
         db = InMemoryArrowDatabase()
-        _single(inactive_inc, ROWS[3:], db).run(orchestrator=_orchestrator(kind))
+        _single(add_one.pod, ROWS[3:], db).run(orchestrator=_orchestrator(kind))
         # A function switched off produces no output for the inputs it is given.
-        inactive_inc.pod.data_function.set_active(False)
-        job = _single(inactive_inc, ROWS[:3], db)
+        data_function: object = add_one.pod.data_function
+        assert isinstance(data_function, PythonDataFunction)
+        data_function.set_active(False)
+        job = _single(add_one.pod, ROWS[:3], db)
         job.run(orchestrator=_orchestrator(kind))
         node = job.nodes["node"]
         assert node.as_table().num_rows == 0
@@ -272,7 +279,7 @@ class TestRaisedRun:
 
     @staticmethod
     def _no_run_read(fn: Any, data: list[dict[str, int]], db: Any) -> list[Any]:
-        fresh = _single(fn, data, db)
+        fresh = _single(fn.pod, data, db)
         fresh.compile()
         return _values(fresh.nodes["node"], lambda r: (r["k"], r["y"]))
 
@@ -287,8 +294,8 @@ class TestRaisedRun:
     def test_raised_run_reads_as_no_run(self, kind: str, fn: Any, policy: str) -> None:
         db = InMemoryArrowDatabase()
         # Store the results of rows 3..5 first, then run rows 0..3, which fails at x=20.
-        _single(fn, ROWS[3:], db).run(orchestrator=_orchestrator(kind))
-        job = _single(fn, ROWS[:4], db)
+        _single(fn.pod, ROWS[3:], db).run(orchestrator=_orchestrator(kind))
+        job = _single(fn.pod, ROWS[:4], db)
         with pytest.raises((ValueError, StoreWriteError)):
             job.run(orchestrator=_orchestrator(kind, policy))
         node = job.nodes["node"]
@@ -298,3 +305,67 @@ class TestRaisedRun:
         assert reads["head"] == reads["as_table"]
         # Nothing stored was dropped: the stored rows of the earlier run are among them.
         assert {(3, 31), (4, 41), (5, 51)} <= set(expected)
+
+
+class TestDuplicateInputs:
+    """Two inputs with one base entry id give two held rows, as downstream receives them.
+
+    Only a stream without system tags can carry two such inputs (a source gives every
+    row its own record id), so the node is built directly over an ``ArrowTableStream``.
+    """
+
+    @staticmethod
+    def _node() -> Any:
+        import pyarrow as pa
+
+        from orcapod.core.nodes import FunctionJobNode
+        from orcapod.core.streams import ArrowTableStream
+
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        )
+        table = pa.Table.from_arrays(
+            [pa.array([0, 0, 2], pa.int64()), pa.array([5, 5, 7], pa.int64())],
+            schema=schema,
+        )
+        return FunctionJobNode(
+            inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+            ArrowTableStream(table, tag_columns=["k"]),
+            pipeline_database=InMemoryArrowDatabase(),
+            result_database=InMemoryArrowDatabase(),
+        )
+
+    def test_sync(self) -> None:
+        node = self._node()
+        view = node.run()
+        held = sorted((r["k"], r["y"]) for r in node.as_table().to_pylist())
+        assert held == [(0, 6), (0, 6), (2, 8)]
+        assert sorted((r["k"], r["y"]) for r in view.as_table().to_pylist()) == held
+
+    def test_async(self) -> None:
+        import asyncio
+
+        from orcapod.channels import Channel
+
+        node = self._node()
+
+        async def run() -> list[tuple[int, int]]:
+            inputs = Channel(buffer_size=16)
+            outputs = Channel(buffer_size=16)
+            # The input stream is the node's own upstream (a test of async_execute).
+            for item in node.upstreams[0].iter_data():
+                await inputs.writer.send(item)
+            await inputs.writer.close()
+            await node.async_execute(inputs.reader, outputs.writer)
+            got = [
+                (tag.as_dict()["k"], data.as_dict()["y"])
+                async for tag, data in outputs.reader
+            ]
+            return sorted(got)
+
+        received = asyncio.run(run())
+        assert received == [(0, 6), (0, 6), (2, 8)]
+        assert sorted((r["k"], r["y"]) for r in node.as_table().to_pylist()) == received
