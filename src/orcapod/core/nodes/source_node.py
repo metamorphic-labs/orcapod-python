@@ -43,6 +43,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _type_text(data_type: Any) -> str:
+    """Return *data_type* as it is written in an annotation (``int``, ``int | None``)."""
+    return data_type.__name__ if isinstance(data_type, type) else str(data_type)
+
+
 class SourceNodeBase(TraceableBase, ABC):
     """Abstract base for SourceNode and SourceJobNode.
 
@@ -237,43 +242,45 @@ class SourceNodeBase(TraceableBase, ABC):
     # ------------------------------------------------------------------
 
     def validate(self, source: "StreamProtocol") -> None:
-        """Check that *source* is schema-compatible with this node's declared schema.
+        """Check that *source* has this slot's declared schema.
+
+        The source's tag and data columns must have the declared names, roles and
+        Python types (ITL-1112): those are what every downstream pipeline hash, and so
+        every stored path, is built from, so a source that passes never moves one.
+        Column order and ``optional_fields`` are not compared; neither enters the
+        pipeline hash.
 
         Args:
             source: A concrete stream to validate.
 
         Raises:
-            SourceSpecMismatchError: If schema columns don't match.
+            SourceSpecMismatchError: If a column is missing, unexpected, or of another
+                type than declared.
         """
         source_tag, source_data = source.output_schema()
 
-        tag_issues: list[str] = []
-        data_issues: list[str] = []
-
-        spec_tag_cols = set(self._tag_schema.keys())
-        src_tag_cols = set(source_tag.keys())
-        if spec_tag_cols != src_tag_cols:
-            missing = spec_tag_cols - src_tag_cols
-            extra = src_tag_cols - spec_tag_cols
+        issues: list[str] = []
+        for role, declared, given in (
+            ("tag", self._tag_schema, source_tag),
+            ("data", self._data_schema, source_data),
+        ):
+            missing = set(declared.keys()) - set(given.keys())
+            extra = set(given.keys()) - set(declared.keys())
             if missing:
-                tag_issues.append(f"missing tag columns: {sorted(missing)}")
+                issues.append(f"missing {role} columns: {sorted(missing)}")
             if extra:
-                tag_issues.append(f"unexpected tag columns: {sorted(extra)}")
+                issues.append(f"unexpected {role} columns: {sorted(extra)}")
+            issues.extend(
+                f"{role} column {name!r} is declared {_type_text(declared[name])} "
+                f"but the source has {_type_text(given[name])}"
+                for name in declared.keys()
+                if name in given and given[name] != declared[name]
+            )
 
-        spec_data_cols = set(self._data_schema.keys())
-        src_data_cols = set(source_data.keys())
-        if spec_data_cols != src_data_cols:
-            missing = spec_data_cols - src_data_cols
-            extra = src_data_cols - spec_data_cols
-            if missing:
-                data_issues.append(f"missing data columns: {sorted(missing)}")
-            if extra:
-                data_issues.append(f"unexpected data columns: {sorted(extra)}")
-
-        if tag_issues or data_issues:
+        if issues:
             raise SourceSpecMismatchError(
                 f"SourceNode '{self._name}' is not compatible with the provided source. "
-                + "; ".join(tag_issues + data_issues)
+                + "; ".join(issues)
             )
 
     def as_table(
@@ -597,7 +604,16 @@ class SourceJobNode(SourceNodeBase):
 
     @bound_source.setter
     def bound_source(self, value: StreamProtocol | None) -> None:
-        """Bind *value* as the concrete source and invalidate both hash caches."""
+        """Bind *value* as the concrete source and invalidate both hash caches.
+
+        A source is checked against the slot's declared schema first (``validate``), so
+        one of other column types is refused before anything changes. ``None`` unbinds.
+
+        Raises:
+            SourceSpecMismatchError: If *value*'s schema differs from the declared one.
+        """
+        if value is not None:
+            self.validate(value)
         self._bound_source = value
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()

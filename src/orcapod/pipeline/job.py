@@ -417,7 +417,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         When *sources* is provided, each concrete source is validated against
         its matching ``SourceJobNode`` slot schema, then the corresponding
-        ``SourceJobNode.bound_source`` is updated in-place.
+        ``SourceJobNode.bound_source`` is updated in-place. A source fits its slot
+        when its tag and data columns have the declared names, roles and Python
+        types, so a bind never changes a pipeline hash (ITL-1112). Every source is
+        validated before anything is changed: a refused source leaves the job's
+        bindings and database as they were.
 
         When *database* is provided and differs from the current database,
         ``_distribute_databases()`` is called so that all job nodes receive
@@ -429,15 +433,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             execution_context: Replaces the current execution context.
 
         Raises:
-            SourceSpecMismatchError: If any source's schema is incompatible.
+            SourceSpecMismatchError: If any source's columns differ from its slot's
+                declared names, roles or types.
             ValueError: If a source key has no matching ``SourceJobNode`` slot.
         """
         from orcapod.core.nodes.source_node import SourceNodeBase
 
         database_changed = database is not None and database is not self._database
-
-        if database is not None:
-            self._database = database
 
         if sources is not None:
             source_names = {
@@ -456,6 +458,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 if isinstance(node, SourceNodeBase) and node.name in sources:
                     node.validate(sources[node.name])
 
+        # Every source is validated before anything changes: a refused source leaves
+        # the job as it was, its database included (ITL-1112).
+        if database is not None:
+            self._database = database
+
+        if sources is not None:
             # Update bound_source on SourceJobNodes and maintain both dicts.
             for h, job_node in (self._persistent_node_map or {}).items():
                 if isinstance(job_node, SourceJobNode) and job_node.name in sources:
