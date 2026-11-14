@@ -40,7 +40,7 @@ def fresh_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     def load(source: str) -> ModuleType:
         name = f"itl1137_classes_{next(_module_numbers)}"
-        (tmp_path / f"{name}.py").write_text(textwrap.dedent(source))
+        _ = (tmp_path / f"{name}.py").write_text(textwrap.dedent(source))
         return importlib.import_module(name)
 
     return load
@@ -397,8 +397,8 @@ def test_one_stored_table_per_node_whatever_is_built_first(tmp_path: Path) -> No
     """A job whose pods never name the class stores each node at one path."""
     from orcapod.databases import DeltaTableDatabase
 
-    (tmp_path / "readings.py").write_text(_CLASS_MODULE)
-    (tmp_path / "run_job.py").write_text(_RUN_SCRIPT)
+    _ = (tmp_path / "readings.py").write_text(_CLASS_MODULE)
+    _ = (tmp_path / "run_job.py").write_text(_RUN_SCRIPT)
     first = _run(tmp_path, "pipeline_first")
     second = _run(tmp_path, "source_first")
     third = _run(tmp_path, "pipeline_first")
