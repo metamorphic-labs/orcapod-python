@@ -466,6 +466,19 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 )
                 reconstructed[node_hash] = node
 
+            elif node_type == "side_effect":
+                # Restored read-only: the file holds no side-effect function (ITL-1094).
+                up_hashes = upstream_map.get(node_hash, [])
+                upstream_node = reconstructed.get(up_hashes[0]) if up_hashes else None
+                if upstream_node is None:
+                    raise ValueError(
+                        f"The saved side-effect node {descriptor.get('label')!r} has "
+                        "no upstream node in the file."
+                    )
+                reconstructed[node_hash] = SideEffectNode.from_descriptor(
+                    descriptor, input_stream=upstream_node
+                )
+
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
         pipeline._unrecorded_output_nullability = unrecorded_output_nullability

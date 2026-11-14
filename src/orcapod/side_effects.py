@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     )
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
+    from orcapod.contexts import DataContext
     from orcapod.types import ContentHash, Schema
 else:
     pa = LazyModule("pyarrow")
@@ -800,7 +801,8 @@ class SideEffectNode(StreamBase):
     # ------------------------------------------------------------------
 
     @property
-    def producer(self) -> SideEffectPod:  # type: ignore[override]
+    def producer(self) -> SideEffectPod | None:  # type: ignore[override]
+        """The node's pod; ``None`` for a node loaded from a saved file (ITL-1094)."""
         return self._pod
 
     @property
@@ -897,8 +899,12 @@ class SideEffectNode(StreamBase):
             column_config,
             tag_keys=lambda: self.keys()[0],
             declared_schema=lambda: self.output_schema(all_info=True),
-            type_converter=self._pod.data_context.type_converter,
+            type_converter=self._rows_data_context().type_converter,
         )
+
+    def _rows_data_context(self) -> DataContext:
+        """The data context the node's rows are typed and hashed with: its pod's."""
+        return self._pod.data_context
 
     @property
     def node_uri(self) -> tuple[str, ...]:
@@ -908,6 +914,31 @@ class SideEffectNode(StreamBase):
         convention as ``FunctionNode.node_uri`` and ``OperatorNode.node_uri``.
         """
         return self._pod.uri
+
+    @classmethod
+    def from_descriptor(
+        cls, descriptor: dict[str, Any], input_stream: StreamProtocol
+    ) -> SideEffectNode:
+        """Restore a side-effect node of a saved pipeline, read-only (ITL-1094).
+
+        The saved file holds no side-effect function and no pod configuration, so the
+        node cannot deliver: every read or run that would deliver raises. Its label,
+        content hash, pipeline hash, output schema, node uri, data context and Orcapod
+        configuration are the saved ones.
+
+        Args:
+            descriptor: The node's entry in the saved file (``node_type``
+                ``"side_effect"``).
+            input_stream: The restored node upstream of it.
+
+        Returns:
+            The read-only node.
+
+        Raises:
+            ValueError: If the descriptor lacks ``content_hash``, ``pipeline_hash`` or
+                ``node_uri``.
+        """
+        return _LoadedSideEffectNode(descriptor, input_stream)
 
 
 # ---------------------------------------------------------------------------
@@ -996,6 +1027,30 @@ class SideEffectJobNode(SideEffectNode):
             exc.add_context(node_label=self.label)
             raise
         self._current_log_checked = True
+
+    @classmethod
+    @override
+    def from_descriptor(
+        cls, descriptor: dict[str, Any], input_stream: StreamProtocol
+    ) -> SideEffectJobNode:
+        """Restore a side-effect node of a saved job, read-only (ITL-1094).
+
+        Used by ``PipelineJob.load``. The node has no side-effect function: it never
+        delivers and never writes its invocation log. Its reads follow every
+        ``SideEffectJobNode``: with no rows from a run in this process, none.
+        ``execute``, ``async_execute`` and ``run()`` raise.
+
+        Args:
+            descriptor: The node's entry in the saved file.
+            input_stream: The restored job node upstream of it.
+
+        Returns:
+            The read-only job node.
+
+        Raises:
+            ValueError: As for ``SideEffectNode.from_descriptor``.
+        """
+        return _LoadedSideEffectJobNode(descriptor, input_stream)
 
     # ------------------------------------------------------------------
     # DB attachment
@@ -1280,3 +1335,293 @@ class SideEffectJobNode(SideEffectNode):
             self._hold(passed_on)
         finally:
             await output.close()
+
+
+# ---------------------------------------------------------------------------
+# Side-effect nodes restored from a saved file (ITL-1094)
+# ---------------------------------------------------------------------------
+
+
+class _SavedSideEffectNode:
+    """What a saved pipeline or job file records for one side-effect node.
+
+    The file holds the node's label, content hash, pipeline hash, output schema, node
+    uri, data context and Orcapod configuration; it holds neither the side-effect
+    function nor the pod configuration.
+
+    Args:
+        descriptor: The node's entry in the saved file.
+
+    Raises:
+        ValueError: If the descriptor lacks ``content_hash``, ``pipeline_hash`` or
+            ``node_uri``.
+    """
+
+    def __init__(self, descriptor: dict[str, Any]) -> None:
+        from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
+        from orcapod.contexts import resolve_saved_context
+        from orcapod.types import ContentHash
+
+        missing = [
+            name
+            for name in ("content_hash", "pipeline_hash", "node_uri")
+            if not descriptor.get(name)
+        ]
+        if missing:
+            raise ValueError(
+                f"The saved side-effect node {descriptor.get('label')!r} has no "
+                f"{', '.join(missing)}."
+            )
+        self.descriptor = descriptor
+        self.label: str | None = descriptor.get("label")
+        self.content_hash = ContentHash.from_string(descriptor["content_hash"])
+        self.pipeline_hash = ContentHash.from_string(descriptor["pipeline_hash"])
+        self.node_uri: tuple[str, ...] = tuple(descriptor["node_uri"])
+        self.data_context = resolve_saved_context(descriptor.get("data_context_key"))
+        config_dict = descriptor.get("config")
+        self.orcapod_config = (
+            OrcapodConfig.from_dict(config_dict)
+            if config_dict is not None
+            else DEFAULT_CONFIG
+        )
+        self._output_schema: dict[str, Any] = descriptor.get("output_schema") or {}
+
+    def output_schema(self) -> tuple[Schema, Schema]:
+        """The saved output schema (every column ``T`` when nullability is unrecorded).
+
+        Raises:
+            ValueError: If a column's saved type cannot be restored to a Python type.
+        """
+        from orcapod.pipeline.serialization import deserialize_output_schema
+
+        return deserialize_output_schema(
+            self._output_schema, self.data_context.type_converter
+        )
+
+    def keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The saved tag and data column names."""
+        return (
+            tuple(self._output_schema.get("tag", {})),
+            tuple(self._output_schema.get("data", {})),
+        )
+
+
+def _cannot_deliver_error(label: str | None) -> RuntimeError:
+    """The error for asking a loaded side-effect node to deliver."""
+    return RuntimeError(
+        f"Side-effect node {label!r} was loaded from a saved file, which holds no "
+        "side-effect function, so it cannot deliver. Build the job from its code to "
+        "run its side effects."
+    )
+
+
+class _LoadedSideEffectNode(SideEffectNode):
+    """A side-effect node of a loaded pipeline blueprint: no pod, never delivers.
+
+    Built by ``SideEffectNode.from_descriptor``. Every method that would use the pod
+    reads the saved record instead, or raises.
+
+    Args:
+        descriptor: The node's entry in the saved file.
+        input_stream: The restored node upstream of it.
+    """
+
+    def __init__(
+        self, descriptor: dict[str, Any], input_stream: StreamProtocol
+    ) -> None:
+        saved = _SavedSideEffectNode(descriptor)
+        super().__init__(
+            # A loaded node has no pod: every method that would use it is overridden.
+            side_effect_pod=None,  # pyright: ignore[reportArgumentType]
+            input_stream=input_stream,
+            label=saved.label,
+        )
+        self._saved = saved
+        self._descriptor = descriptor
+        self._data_context = saved.data_context
+        self._orcapod_config = saved.orcapod_config
+
+    @property
+    @override
+    def producer(self) -> SideEffectPod | None:
+        """None: a loaded node has no pod."""
+        return None
+
+    @override
+    def identity_structure(self) -> Any:
+        """The saved content hash: what the saved node's identity hashed to."""
+        return self._saved.content_hash
+
+    @override
+    def pipeline_identity_structure(self) -> Any:
+        """The saved pipeline hash."""
+        return self._saved.pipeline_hash
+
+    @override
+    def content_hash(self, hasher=None) -> ContentHash:
+        """The saved content hash."""
+        return self._saved.content_hash
+
+    @override
+    def pipeline_hash(self, hasher=None) -> ContentHash:
+        """The saved pipeline hash."""
+        return self._saved.pipeline_hash
+
+    @override
+    def computed_label(self) -> str | None:
+        return None
+
+    @override
+    def output_schema(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        """The saved output schema."""
+        return self._saved.output_schema()
+
+    @override
+    def keys(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The saved column names."""
+        return self._saved.keys()
+
+    @override
+    def _rows_data_context(self) -> DataContext:
+        return self._saved.data_context
+
+    @property
+    @override
+    def node_uri(self) -> tuple[str, ...]:
+        """The saved node uri."""
+        return self._saved.node_uri
+
+    @override
+    def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+        """Raise: a blueprint node delivers when read, and this one cannot deliver."""
+        raise _cannot_deliver_error(self.label)
+
+
+class _LoadedSideEffectJobNode(SideEffectJobNode):
+    """A side-effect node of a loaded job: no pod, never delivers (ITL-1094).
+
+    Built by ``SideEffectJobNode.from_descriptor``. Its reads are those of every
+    ``SideEffectJobNode``: the rows its last run in this process passed on, and with
+    none, no rows. It cannot run: ``execute``, ``async_execute`` and ``run()`` raise
+    before anything is read, delivered or logged.
+
+    Args:
+        descriptor: The node's entry in the saved file.
+        input_stream: The restored job node upstream of it.
+    """
+
+    def __init__(
+        self, descriptor: dict[str, Any], input_stream: StreamProtocol
+    ) -> None:
+        saved = _SavedSideEffectNode(descriptor)
+        super().__init__(
+            # A loaded node has no pod: every method that would use it is overridden.
+            side_effect_pod=None,  # pyright: ignore[reportArgumentType]
+            input_stream=input_stream,
+            label=saved.label,
+        )
+        self._saved = saved
+        self._descriptor = descriptor
+        self._data_context = saved.data_context
+        self._orcapod_config = saved.orcapod_config
+
+    @property
+    @override
+    def producer(self) -> SideEffectPod | None:
+        """None: a loaded node has no pod."""
+        return None
+
+    @override
+    def identity_structure(self) -> Any:
+        """The saved content hash: what the saved node's identity hashed to."""
+        return self._saved.content_hash
+
+    @override
+    def pipeline_identity_structure(self) -> Any:
+        """The saved pipeline hash."""
+        return self._saved.pipeline_hash
+
+    @override
+    def content_hash(self, hasher=None) -> ContentHash:
+        """The saved content hash."""
+        return self._saved.content_hash
+
+    @override
+    def pipeline_hash(self, hasher=None) -> ContentHash:
+        """The saved pipeline hash: it names the saved run's invocation log."""
+        return self._saved.pipeline_hash
+
+    @override
+    def computed_label(self) -> str | None:
+        return None
+
+    @override
+    def output_schema(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        """The saved output schema."""
+        return self._saved.output_schema()
+
+    @override
+    def keys(
+        self,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The saved column names."""
+        return self._saved.keys()
+
+    @override
+    def _rows_data_context(self) -> DataContext:
+        return self._saved.data_context
+
+    @property
+    @override
+    def node_uri(self) -> tuple[str, ...]:
+        """The saved node uri."""
+        return self._saved.node_uri
+
+    @override
+    def execute(
+        self,
+        input_stream: StreamProtocol,
+        *,
+        observer: ExecutionObserverProtocol | None = None,
+        run_id: str | None = None,
+    ) -> list[tuple[TagProtocol, DataProtocol]]:
+        """Raise: the node has no side-effect function."""
+        raise _cannot_deliver_error(self.label)
+
+    @override
+    async def async_execute(
+        self,
+        inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+        output: WritableChannel[tuple[TagProtocol, DataProtocol]],
+        *,
+        observer: ExecutionObserverProtocol | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        """Close ``output`` and raise: the node has no side-effect function."""
+        try:
+            raise _cannot_deliver_error(self.label)
+        finally:
+            await output.close()
+
+    @override
+    def run(self) -> StreamView:
+        """Raise: the node has no side-effect function."""
+        raise _cannot_deliver_error(self.label)

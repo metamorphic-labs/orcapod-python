@@ -15,7 +15,7 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
-from orcapod.side_effects import SideEffectJobNode
+from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.contexts.stored import (
     report_unclaimed_tables,
@@ -1622,6 +1622,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     expected_row_count=expected_rows.get(bp_node.label),
                 )
                 job._persistent_node_map[node_hash] = ojn
+
+            elif isinstance(bp_node, SideEffectNode):
+                # Read-only: it never delivers (ITL-1094). Its upstream is the restored
+                # job node, so the nodes below it keep their position in the graph.
+                preds = list(job._hash_graph.predecessors(node_hash))
+                job._persistent_node_map[node_hash] = SideEffectJobNode.from_descriptor(
+                    getattr(bp_node, "_descriptor", None) or {},
+                    input_stream=job._persistent_node_map[preds[0]],
+                )
 
         # Update _nodes to point to job nodes (FunctionJobNode/OperatorJobNode stubs)
         # rather than blueprint nodes, so that job.nodes["label"].get_all_records()
