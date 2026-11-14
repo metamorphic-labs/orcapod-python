@@ -1708,10 +1708,13 @@ class OperatorJobNode(OperatorNodeBase):
                     assert self._cached_output_stream is not None
                     for tag, data in self._cached_output_stream.iter_data():
                         await output.send((tag, data))
-                    await asyncio.gather(*discards)
+                    _ = await asyncio.gather(*discards)
                 finally:
                     for discard in discards:
-                        discard.cancel()
+                        _ = discard.cancel()
+                    # Wait for the readers to end; a failure of the replay stays the
+                    # error raised.
+                    _ = await asyncio.gather(*discards, return_exceptions=True)
                 ctx_obs.on_node_end(node_label, node_hash)
                 return  # finally block closes output
 

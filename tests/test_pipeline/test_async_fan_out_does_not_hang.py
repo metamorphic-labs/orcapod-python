@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.channels import Channel
 from orcapod.core.operators import (
     DropDataColumns,
     Join,
@@ -34,6 +35,7 @@ from orcapod.core.operators import (
 )
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode
 
@@ -212,3 +214,27 @@ def test_replay_operator_node_reads_its_input(buffer_size: int) -> None:
         expected = expected_job.nodes[label].as_table().sort_by([("k", "ascending")])
         assert got.num_rows == REPLAY_ROWS
         assert got.equals(expected)
+
+
+class _FailingOutput:
+    """A writable channel whose sends fail: it stands for a failed downstream node."""
+
+    async def send(self, item: tuple[TagProtocol, DataProtocol]) -> None:
+        raise RuntimeError("downstream failed")
+
+    async def close(self) -> None:
+        pass
+
+
+def test_failed_replay_leaves_no_input_reader_running() -> None:
+    """When a REPLAY node fails, its input readers have ended by the time it raises."""
+
+    async def run() -> set[asyncio.Task[Any]]:
+        node = replay_job(InMemoryArrowDatabase()).nodes["OUT"]
+        upstream: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=4)
+        # The upstream stays open, so the node's reader of it is still waiting.
+        with pytest.raises(RuntimeError, match="downstream failed"):
+            await node.async_execute([upstream.reader], _FailingOutput())
+        return asyncio.all_tasks() - {asyncio.current_task()}
+
+    assert asyncio.run(asyncio.wait_for(run(), RUN_TIMEOUT)) == set()
