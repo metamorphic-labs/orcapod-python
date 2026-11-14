@@ -885,8 +885,8 @@ class SourceJobNode(SourceNodeBase):
 
         Returns:
             ``None`` when the source's rows already are rows of the declared schema
-            (same types, column order and system-tag names and order), so they pass
-            unchanged;
+            (the same type objects, column order and system-tag names and order), so
+            they pass unchanged;
             otherwise the ``_DeclaredForm`` that makes them so.
 
         Raises:
@@ -913,8 +913,11 @@ class SourceJobNode(SourceNodeBase):
             for name in source.keys(columns={"system_tags": True})[0]
             if name not in source_tag
         ]
+        # Exactly the declared types: a structural class of the declared identity is
+        # another class object, and the slot shows the declared one.
         if (
-            not narrower
+            dict(source_tag) == dict(self._tag_schema)
+            and dict(source_data) == dict(self._data_schema)
             and not renames
             and tuple(source_tag.keys()) == tag_order
             and tuple(source_data.keys()) == data_order
