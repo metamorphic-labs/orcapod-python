@@ -56,6 +56,11 @@ class WalkBudgetExceeded(AssertionError):
 
 
 def _all_stream_classes() -> set[type]:
+    """Return ``StreamBase`` and every subclass of it defined so far.
+
+    Returns:
+        The stream, source and node classes whose methods are counted.
+    """
     seen: set[type] = set()
     pending: list[type] = [StreamBase]
     while pending:
@@ -68,7 +73,25 @@ def _all_stream_classes() -> set[type]:
 
 
 class _CallCounter:
+    """Count calls per object and stop a walk that passes a budget.
+
+    Records one call per wrapped method call, keyed by the object called. Every
+    counted object is kept until the counter is released, so the id of a
+    short-lived stream (a run makes many) is never reused by another object and
+    two objects' counts never merge.
+
+    Attributes:
+        budget: The most calls allowed in total before ``WalkBudgetExceeded``.
+        per_object: Calls per object, keyed by ``id``.
+        total: Calls in total.
+    """
+
     def __init__(self, budget: int) -> None:
+        """Start with no calls counted.
+
+        Args:
+            budget: The most calls allowed in total.
+        """
         self.budget = budget
         self.per_object: collections.Counter[int] = collections.Counter()
         self.total = 0
@@ -77,6 +100,14 @@ class _CallCounter:
         self._counted: dict[int, object] = {}
 
     def record(self, obj: object) -> None:
+        """Count one call on ``obj``.
+
+        Args:
+            obj: The object whose method was called.
+
+        Raises:
+            WalkBudgetExceeded: If the total passes the budget.
+        """
         self._counted[id(obj)] = obj
         self.per_object[id(obj)] += 1
         self.total += 1
@@ -87,6 +118,7 @@ class _CallCounter:
 
     @property
     def max_per_object(self) -> int:
+        """The most calls any one object received, 0 when none was counted."""
         return max(self.per_object.values(), default=0)
 
 
@@ -100,8 +132,11 @@ def _count_schema_queries(
     counter = _CallCounter(budget)
 
     def wrap(method: Callable[..., Any]) -> Callable[..., Any]:
+        """Return ``method`` wrapped to count each call on its object."""
+
         @functools.wraps(method)
         def counted(self: object, *args: Any, **kwargs: Any) -> Any:
+            """Count the call, then call the original method."""
             counter.record(self)
             return method(self, *args, **kwargs)
 
@@ -117,20 +152,31 @@ def _count_schema_queries(
 
 @function_pod(output_keys="a")
 def _branch_a(x: int) -> int:
+    """One branch of a function-pod stage."""
     return x + 1
 
 
 @function_pod(output_keys="b")
 def _branch_b(x: int) -> int:
+    """The other branch of a function-pod stage."""
     return x + 2
 
 
 @function_pod(output_keys="x")
 def _merge(a: int, b: int) -> int:
+    """Join the two branches of a function-pod stage."""
     return a + b
 
 
 def _operator_stage(stream: Any) -> Any:
+    """Split ``stream`` into two renamed branches and join them again with operators.
+
+    Args:
+        stream: The previous stage's output, with tag ``id`` and data ``x``.
+
+    Returns:
+        A stream with the same columns: five operator streams per stage.
+    """
     a = stream.map_data({"x": "a"})
     b = stream.map_data({"x": "b"})
     joined = a.join(b)
@@ -138,6 +184,14 @@ def _operator_stage(stream: Any) -> Any:
 
 
 def _function_pod_stage(stream: Any) -> Any:
+    """Split ``stream`` into two function-pod branches and merge them.
+
+    Args:
+        stream: The previous stage's output, with tag ``id`` and data ``x``.
+
+    Returns:
+        A stream with the same columns: three stream nodes per stage.
+    """
     return _merge.pod(_branch_a.pod(stream), _branch_b.pod(stream))
 
 
@@ -149,20 +203,32 @@ SHAPES: dict[str, tuple[Callable[[Any], Any], int]] = {
 
 
 def _node_count(shape: str, stages: int) -> int:
+    """Return the number of nodes ``stages`` stages of ``shape`` make, with the source."""
     return SHAPES[shape][1] * stages + 1
 
 
 def _budget(shape: str, stages: int = STAGES) -> int:
+    """Return the most calls a walk over ``stages`` stages of ``shape`` may make."""
     return MAX_CALLS_PER_NODE * _node_count(shape, stages)
 
 
 def _source() -> DictSource:
+    """Return the three-row source every graph starts from."""
     return DictSource(
         [{"id": i, "x": i} for i in range(3)], tag_columns=["id"], source_id="src"
     )
 
 
 def _build(shape: str, stages: int = STAGES) -> Any:
+    """Build ``stages`` stacked stages of ``shape`` as plain streams.
+
+    Args:
+        shape: A key of ``SHAPES``.
+        stages: The number of stages.
+
+    Returns:
+        The last stage's output stream.
+    """
     stage, _ = SHAPES[shape]
     stream = _source()
     for _ in range(stages):
@@ -171,6 +237,15 @@ def _build(shape: str, stages: int = STAGES) -> Any:
 
 
 def _build_job(shape: str, stages: int = STAGES) -> PipelineJob:
+    """Record ``stages`` stacked stages of ``shape`` in a job and compile it.
+
+    Args:
+        shape: A key of ``SHAPES``.
+        stages: The number of stages.
+
+    Returns:
+        The compiled job, over an in-memory database.
+    """
     job = PipelineJob(name="stacked", database=InMemoryArrowDatabase())
     with job:
         _build(shape, stages)
@@ -194,19 +269,24 @@ def _guarded_build_job(
 
 
 def _assert_linear(counter: _CallCounter, shape: str, stages: int = STAGES) -> None:
+    """Assert that no object received more than its share and the total is in budget."""
     assert counter.max_per_object <= MAX_CALLS_PER_NODE
     assert counter.total <= _budget(shape, stages)
 
 
 @pytest.fixture(params=sorted(SHAPES))
 def shape(request: pytest.FixtureRequest) -> str:
+    """Run each test once per stage shape."""
     return request.param
 
 
 class TestStreams:
+    """Walks over plain streams, outside a job."""
+
     def test_building_the_graph_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Building the stages asks each stream a bounded number of times."""
         with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
             _build(shape)
         _assert_linear(counter, shape)
@@ -227,6 +307,7 @@ class TestStreams:
         walk: Callable[[Any], Any],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A schema query, ``head()`` or the preview asks each stream a bounded number of times."""
         stream = _guarded_build(shape, monkeypatch)
         with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
             walk(stream)
@@ -235,6 +316,7 @@ class TestStreams:
     def test_the_system_tag_schema_walk_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Predicting the schema with system tags asks each stream a bounded number of times."""
         stream = _guarded_build(shape, monkeypatch, SYSTEM_TAG_STAGES)
         budget = _budget(shape, SYSTEM_TAG_STAGES)
         with _count_schema_queries(monkeypatch, budget) as counter:
@@ -244,6 +326,7 @@ class TestStreams:
     def test_the_poll_check_asks_each_stream_once(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """``head()`` asks each stream once whether reading its schema would poll a source."""
         # The private hook is the walk head() makes to learn whether reading the
         # schema would poll a source.
         stream = _guarded_build(shape, monkeypatch)
@@ -254,6 +337,7 @@ class TestStreams:
         assert counter.max_per_object == 1
 
     def test_repr_is_bounded(self, shape: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A stream's ``repr`` names its upstreams by class and label, not by their ``repr``."""
         stream = _guarded_build(shape, monkeypatch)
         with _count_schema_queries(monkeypatch, _budget(shape)):
             text = repr(stream)
@@ -263,6 +347,7 @@ class TestStreams:
     def test_a_join_error_is_bounded_and_names_the_inputs_and_the_column(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A join of two inputs sharing a data column fails with a short message naming both."""
         stream = _guarded_build(shape, monkeypatch)
         left = stream.map_data({"x": "y"}, label="left_branch")
         right = stream.map_data({"x": "y"}, label="right_branch")
@@ -278,6 +363,7 @@ class TestStreams:
     def test_hashes_are_unchanged_by_asking_twice(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Two builds of the same graph have equal hashes and schemas, memo or not."""
         first = _guarded_build(shape, monkeypatch)
         with _count_schema_queries(monkeypatch, _budget(shape)):
             first.output_schema()
@@ -288,9 +374,12 @@ class TestStreams:
 
 
 class TestPipelineJob:
+    """Walks over the nodes of a ``PipelineJob``."""
+
     def test_recording_and_compiling_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Recording the stages in a job and compiling it asks each node a bounded number of times."""
         with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
             _build_job(shape)
         _assert_linear(counter, shape)
@@ -298,6 +387,7 @@ class TestPipelineJob:
     def test_save_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """Saving the job asks each node a bounded number of times."""
         job = _guarded_build_job(shape, monkeypatch)
         with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
             job.save(tmp_path / "job.json")
@@ -306,6 +396,7 @@ class TestPipelineJob:
     def test_load_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """Loading the saved job asks each node a bounded number of times."""
         job = _guarded_build_job(shape, monkeypatch)
         with _count_schema_queries(monkeypatch, _budget(shape)):
             job.save(tmp_path / "job.json")
@@ -326,6 +417,7 @@ class TestPipelineJob:
         orchestrator: type,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A run on either orchestrator asks each node a bounded number of times."""
         job = _guarded_build_job(shape, monkeypatch, SYSTEM_TAG_STAGES)
         budget = _budget(shape, SYSTEM_TAG_STAGES)
         with _count_schema_queries(monkeypatch, budget) as counter:
@@ -335,6 +427,7 @@ class TestPipelineJob:
     def test_node_reprs_are_bounded(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Every job node's ``repr`` names its upstreams by class and label only."""
         job = _guarded_build_job(shape, monkeypatch)
         for node in job.nodes.values():
             with _count_schema_queries(monkeypatch, _budget(shape)):
@@ -344,6 +437,7 @@ class TestPipelineJob:
     def test_a_node_schema_walk_is_linear(
         self, shape: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Asking the last node for its schema asks each node a bounded number of times."""
         job = _guarded_build_job(shape, monkeypatch)
         last = list(job.nodes.values())[-1]
         with _count_schema_queries(monkeypatch, _budget(shape)) as counter:
@@ -358,10 +452,12 @@ class TestPipelineJob:
 
 
 def _one_row_source(value: int | float | str) -> DictSource:
+    """Return a one-row source named ``src`` whose data column ``x`` holds ``value``."""
     return DictSource([{"id": 1, "x": value}], tag_columns=["id"], source_id="src")
 
 
 def _rename_job() -> PipelineJob:
+    """Return a job ``src`` -> ``renamed`` (``x`` to ``y``) -> ``renamed_again`` (``y`` to ``z``)."""
     job = PipelineJob(name="rebind", database=InMemoryArrowDatabase())
     with job:
         renamed = _one_row_source(1).map_data({"x": "y"}, label="renamed")
@@ -370,6 +466,7 @@ def _rename_job() -> PipelineJob:
 
 
 def _function_job() -> PipelineJob:
+    """Return a job with one function node, ``plus_one``, over ``src``."""
     job = PipelineJob(name="rebind_function", database=InMemoryArrowDatabase())
     with job:
         _branch_a.pod(_one_row_source(1), label="plus_one")
@@ -377,9 +474,12 @@ def _function_job() -> PipelineJob:
 
 
 class TestMemoInvalidation:
+    """A memoized schema is predicted again when an input of the prediction changes."""
+
     def test_bind_to_a_source_of_another_column_type_changes_downstream_schemas(
         self,
     ) -> None:
+        """``job.bind`` to a source with another column type changes every downstream schema."""
         job = _rename_job()
         assert job.nodes["renamed"].output_schema()[1]["y"] is int
         assert job.nodes["renamed_again"].output_schema()[1]["z"] is int
@@ -391,6 +491,7 @@ class TestMemoInvalidation:
         assert job.nodes["renamed_again"].output_schema()[1]["z"] is str
 
     def test_setting_an_operator_nodes_upstreams_changes_its_schema(self) -> None:
+        """Setting an operator node's ``upstreams`` changes its own schema."""
         job = _rename_job()
         node = job.nodes["renamed"]
         assert node.output_schema()[1]["y"] is int
@@ -400,6 +501,7 @@ class TestMemoInvalidation:
         assert node.output_schema()[1]["y"] is float
 
     def test_setting_a_function_nodes_upstreams_changes_its_schema(self) -> None:
+        """Setting a function node's ``upstreams`` changes its own schema."""
         job = _function_job()
         node = job.nodes["plus_one"]
         assert node.output_schema()[0]["id"] is int
@@ -422,9 +524,27 @@ class TestMemoInvalidation:
     def test_assigning_bound_source_directly_changes_downstream_schemas(
         self,
     ) -> None:
+        """A direct ``bound_source`` assignment should change the downstream schemas."""
         job = _rename_job()
         assert job.nodes["renamed_again"].output_schema()[1]["z"] is int
 
         job.nodes["src"].bound_source = _one_row_source("a")
 
         assert job.nodes["renamed_again"].output_schema()[1]["z"] is str
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Setting a wired node's upstreams clears its own memo only; the nodes "
+            "downstream of it keep theirs (ITL-1111). Nothing in orcapod sets "
+            "upstreams after construction."
+        ),
+    )
+    def test_setting_upstreams_changes_downstream_schemas(self) -> None:
+        """Setting a node's ``upstreams`` should change the schemas downstream of it."""
+        job = _rename_job()
+        assert job.nodes["renamed_again"].output_schema()[1]["z"] is int
+
+        job.nodes["renamed"].upstreams = (_one_row_source(1.5),)
+
+        assert job.nodes["renamed_again"].output_schema()[1]["z"] is float
