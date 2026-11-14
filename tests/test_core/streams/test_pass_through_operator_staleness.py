@@ -44,7 +44,7 @@ from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.streams import HeadStatus
+from orcapod.streams import ViewStatus
 
 IDS = [3, 1, 4, 0, 2]
 
@@ -220,6 +220,8 @@ def _read(stream: StreamProtocol, how: str) -> int:
         return stream.as_table().num_rows
     if how == "iter_data":
         return len(list(stream.iter_data()))
+    if how == "run":
+        return stream.run().as_table().num_rows
     if how == "flow":
         assert isinstance(stream, StreamBase)
         return len(stream.flow())
@@ -259,7 +261,7 @@ def test_the_reported_reproduction() -> None:
     assert selected.as_table().num_rows == 3
     assert not getattr(selected, "is_stale")
     head = selected.head()
-    assert head.status is HeadStatus.ROWS, head.header()
+    assert head.status is ViewStatus.ROWS, head.header()
     assert head.table.num_rows == 3
     with _counting_operator_runs([selected]) as runs:
         assert selected.as_table().num_rows == 3
@@ -267,7 +269,7 @@ def test_the_reported_reproduction() -> None:
     assert len(calls) == 3
 
 
-@pytest.mark.parametrize("how", ["as_table", "iter_data", "flow"])
+@pytest.mark.parametrize("how", ["as_table", "iter_data", "flow", "run"])
 @pytest.mark.parametrize("upstream", UPSTREAMS)
 @pytest.mark.parametrize("operator", sorted(PASS_THROUGH))
 def test_a_pass_through_operator_stream_is_current_after_a_read(
@@ -281,7 +283,7 @@ def test_a_pass_through_operator_stream_is_current_after_a_read(
     calls = sum(CALLS.values())
     assert _stale(streams) == [False] * len(streams)
     head = stream.head(100)
-    assert head.status is HeadStatus.ROWS, head.header()
+    assert head.status is ViewStatus.ROWS, head.header()
     assert head.table.num_rows == len(IDS)
     with _counting_operator_runs(streams) as runs:
         assert stream.as_table().num_rows == len(IDS)
@@ -291,7 +293,7 @@ def test_a_pass_through_operator_stream_is_current_after_a_read(
     assert _stale(streams) == [False] * len(streams)
 
 
-@pytest.mark.parametrize("how", ["as_table", "iter_data", "flow"])
+@pytest.mark.parametrize("how", ["as_table", "iter_data", "flow", "run"])
 @pytest.mark.parametrize("operator", sorted(PASS_THROUGH))
 def test_a_pod_stream_over_a_pass_through_operator_stream_reads_once(
     operator: str, how: str
@@ -304,10 +306,10 @@ def test_a_pod_stream_over_a_pass_through_operator_stream_reads_once(
     assert CALLS == Counter(stamped=len(IDS), double=len(IDS))
     assert _stale(streams) == [False] * len(streams)
     CALLS.clear()
-    for again in ("as_table", "iter_data", "flow"):
+    for again in ("as_table", "iter_data", "flow", "run"):
         assert _read(last, again) == len(IDS)
     head = last.head(100)
-    assert head.status is HeadStatus.ROWS, head.header()
+    assert head.status is ViewStatus.ROWS, head.header()
     assert head.table.num_rows == len(IDS)
     assert CALLS == Counter()
     assert _stale(streams) == [False] * len(streams)
@@ -329,7 +331,7 @@ def test_a_real_change_after_the_read_still_reruns_the_operator(
     assert _read(stream, "as_table") == len(IDS)
     EPOCH[0] = 1
     getattr(first, "clear_cache")()
-    assert stream.head(100).status is HeadStatus.NOT_COMPUTED
+    assert stream.head(100).status is ViewStatus.NOT_COMPUTED
     with _counting_operator_runs(streams) as runs:
         table = stream.as_table()
     assert runs[0] == 1
