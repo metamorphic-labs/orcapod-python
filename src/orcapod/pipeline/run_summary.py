@@ -80,6 +80,9 @@ class RunSummary:
             for new data at the start of the run (ITL-1102): each raised in
             ``check_for_new_data``, was reported by a ``SourceCheckFailedWarning``,
             and fed the run with the data it already held.
+        ran_nothing: Whether the run ran no node: every node held a current run
+            (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
+            run that ran only a side-effect or operator node is not "nothing to do".
     """
 
     def __init__(
@@ -90,6 +93,7 @@ class RunSummary:
         load_only: bool = False,
         target: str | None = None,
         unchecked_sources: Sequence[str] = (),
+        ran_nothing: bool = False,
     ) -> None:
         """Build the summary.
 
@@ -99,12 +103,14 @@ class RunSummary:
             load_only: Whether the run loaded stored results only.
             target: The label of the node whose ``run()`` this was, if any.
             unchecked_sources: The sources that could not be checked for new data.
+            ran_nothing: Whether the run ran no node (every node held a current run).
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
         self.load_only: bool = load_only
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
+        self.ran_nothing: bool = ran_nothing
 
     @property
     def failed_rows(self) -> int:
@@ -159,10 +165,9 @@ class RunSummary:
             if self.target is None
             else f"node {self.target!r} and the nodes it depends on"
         )
-        if self.nodes and all(
-            node.held and not (node.computed or node.reused or node.failed)
-            for node in self.nodes.values()
-        ):
+        # From what the run ran, not from the function nodes' counts: a run that ran
+        # only a side-effect or operator node did something (ITL-1121).
+        if self.ran_nothing:
             run = "Load-only run" if self.load_only else "Run"
             return f"{run} of {subject}: nothing to do; every node holds a current run."
         if self.load_only:

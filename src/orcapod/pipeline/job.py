@@ -1376,6 +1376,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             run_node_summaries(prepared.exec_dag, counter, held=plan.held_counts),
             load_only=load_only,
             unchecked_sources=unchecked_sources,
+            ran_nothing=not plan.to_run,
         )
         return self._last_run
 
