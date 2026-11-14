@@ -7,10 +7,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.base import TraceableBase
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
     default_note,
     preview_html,
 )
@@ -65,6 +65,47 @@ def check_head_size(n: int) -> None:
         raise TypeError(f"head() takes an int number of rows, got {type(n).__name__}")
     if n < 0:
         raise ValueError(f"head() takes a non-negative number of rows n, got {n}")
+
+
+def _column_names(columns: tuple[str | Collection[str], ...]) -> tuple[str, ...]:
+    """Normalize the positional names of ``drop_columns`` and ``select_columns``.
+
+    The names are given as one or more strings, or as one collection of strings
+    that is the only positional argument.
+
+    Args:
+        columns: The positional arguments as received.
+
+    Returns:
+        The names, in the order given.
+
+    Raises:
+        TypeError: When no name is given, a collection is mixed with further
+            positional arguments, or a name is not a string.
+        ValueError: When the one collection given is empty.
+    """
+    if not columns:
+        raise TypeError("expected at least one column name")
+    first = columns[0]
+    if isinstance(first, str):
+        names: tuple[object, ...] = columns
+    elif len(columns) > 1:
+        raise TypeError(
+            "give the column names either as strings or as one collection of "
+            "strings, not both"
+        )
+    elif isinstance(first, Collection):
+        names = tuple(first)
+        if not names:
+            raise ValueError(
+                "expected at least one column name, got an empty collection"
+            )
+    else:
+        raise TypeError(f"expected column names as strings, got {type(first).__name__}")
+    not_strings = [name for name in names if not isinstance(name, str)]
+    if not_strings:
+        raise TypeError(f"column names must be strings, got {not_strings!r}")
+    return tuple(str(name) for name in names)
 
 
 class StreamBase(TraceableBase):
@@ -298,6 +339,75 @@ class StreamBase(TraceableBase):
 
         return DropDataColumns(data_columns, strict=strict)(self, label=label)
 
+    def drop_columns(
+        self,
+        *columns: str | Collection[str],
+        strict: bool = True,
+        label: str | None = None,
+    ) -> StreamBase:
+        """Drop the named columns, whether each is a tag or a data column.
+
+        ``s.drop_columns("a", "b")`` equals ``s.drop_columns(["a", "b"])``. A
+        dropped data column's source-info column goes with it; system tags are
+        kept. See ``orcapod.core.operators.DropColumns``.
+
+        Args:
+            *columns: One or more column names, or one collection of names as the
+                only positional argument.
+            strict: When ``True`` (the default), a name that is neither a tag nor
+                a data column raises ``InputValidationError``; when ``False`` it
+                is ignored.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream without the named columns.
+
+        Raises:
+            TypeError: When no name is given, a collection is mixed with further
+                positional arguments, or a name is not a string.
+            ValueError: When the one collection given is empty.
+            InputValidationError: When a ``strict`` name is missing, or when no
+                data column would remain.
+        """
+        from orcapod.core.operators import DropColumns
+
+        return DropColumns(_column_names(columns), strict=strict)(self, label=label)
+
+    def select_columns(
+        self,
+        *columns: str | Collection[str],
+        strict: bool = True,
+        label: str | None = None,
+    ) -> StreamBase:
+        """Keep exactly the named columns, tag or data; drop every other one.
+
+        ``s.select_columns("a", "b")`` equals ``s.select_columns(["a", "b"])``.
+        Every user tag and data column not named is dropped, with the source-info
+        column of each dropped data column; system tags are kept. Naming no tag
+        is allowed. See ``orcapod.core.operators.SelectColumns``.
+
+        Args:
+            *columns: One or more column names, or one collection of names as the
+                only positional argument.
+            strict: When ``True`` (the default), a name that is neither a tag nor
+                a data column raises ``InputValidationError``; when ``False`` it
+                is ignored.
+            label: Optional node label for the pipeline graph.
+
+        Returns:
+            The stream with only the named columns.
+
+        Raises:
+            TypeError: When no name is given, a collection is mixed with further
+                positional arguments, or a name is not a string.
+            ValueError: When the one collection given is empty.
+            InputValidationError: When a ``strict`` name is missing, or when no
+                data column is named.
+        """
+        from orcapod.core.operators import SelectColumns
+
+        return SelectColumns(_column_names(columns), strict=strict)(self, label=label)
+
     def pick(
         self,
         column: str,
@@ -477,13 +587,48 @@ class StreamBase(TraceableBase):
         """
         return [e for e in self.iter_data()]
 
+    # The origin a ``run()`` view gives its rows: computed by this stream.
+    _RUN_ORIGIN: str = "computed"
+
+    def run(self) -> StreamView:
+        """Compute the whole stream and return a ``StreamView`` of all its rows.
+
+        The one way to compute any stream outside a job (developer, November 13, 2026,
+        ITL-1081): ``head()`` and the notebook preview never compute. ``run()`` does
+        exactly the work ``as_table()`` does, through the same code path and cache, so
+        a stream already computed is not computed again, and one whose inputs changed is
+        computed again. The view holds every row with the default column configuration;
+        its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. For other
+        column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
+        ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
+        a job node, an in-memory source) they read the rows ``run()`` gave; a stream that
+        keeps none does its ``as_table()`` work again (a side-effect stream delivers
+        again, a polling source polls again).
+
+        Returns:
+            A ``StreamView`` of all the rows ``as_table()`` returns, with status
+            ``ROWS``.
+        """
+        return self._view_of_rows(self.as_table(), self._RUN_ORIGIN)
+
+    def _view_of_rows(self, table: "pa.Table", origin: str) -> StreamView:
+        """Return the ``run()`` view of ``table``, every row of this stream."""
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys()[0],
+            total_rows=table.num_rows,
+            origin=origin,
+            display_all_rows=False,
+        )
+
     def head(
         self,
         n: int = 10,
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return at most ``n`` rows that are readily available, without computing.
 
         The rows are ones the stream already holds, has cached from an earlier
@@ -515,7 +660,7 @@ class StreamBase(TraceableBase):
             all_info: Include every column group and sort by tags, as for ``as_table``.
 
         Returns:
-            A ``StreamHead`` with the rows and a ``status`` that tells an empty result
+            A ``StreamView`` with the rows and a ``status`` that tells an empty result
             from one that is not computed.
 
         Raises:
@@ -524,21 +669,21 @@ class StreamBase(TraceableBase):
         """
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
-        return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+        return self._head_without_rows(config, ViewStatus.NOT_COMPUTED)
 
     def _head_without_rows(
         self,
         config: ColumnConfig,
-        status: HeadStatus,
+        status: ViewStatus,
         note: str | None = None,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return a head with no rows: the stream's columns from its declared schema.
 
         When reading the schema would poll a source (``schema_requires_io``), the head
         has no columns either, and the note says so.
         """
         if schema_requires_io(self, config):
-            return StreamHead.without_rows(
+            return StreamView.without_rows(
                 self,
                 status,
                 pa.table({}),
@@ -549,7 +694,7 @@ class StreamBase(TraceableBase):
         table = arrow_utils.make_empty_table(
             {**tag_schema, **data_schema}, self.data_context.type_converter
         )
-        return StreamHead.without_rows(
+        return StreamView.without_rows(
             self, status, table, tag_columns=tuple(tag_schema.keys()), note=note
         )
 

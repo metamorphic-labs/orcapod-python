@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import StreamBase
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
@@ -43,11 +43,6 @@ class RootSource(StreamBase):
         Concrete subclasses must ensure ``_source_id`` is set by the end of
         ``__init__``.  File-backed sources (DeltaTableSource, CSVSource) default
         to the file path; ``ArrowTableSource`` defaults to the table's data hash.
-
-    Field resolution:
-        All sources expose ``resolve_field(record_id, field_name)``.  The default
-        implementation raises ``NotImplementedError``; concrete subclasses
-        that back addressable data should override it.
 
     Concrete subclasses must set ``self._stream`` in their ``__init__`` to get
     the default stream delegation behavior. They may also override
@@ -88,24 +83,6 @@ class RootSource(StreamBase):
     def identity_structure(self) -> Any:
         """Default identity based on class name, output schema, and source_id."""
         return (self.__class__.__name__, self.output_schema(), self.source_id)
-
-    # -------------------------------------------------------------------------
-    # Field resolution
-    # -------------------------------------------------------------------------
-
-    def resolve_field(self, record_id: str, field_name: str) -> Any:
-        """Resolve a field value for a record.
-
-        Not implemented by default. Subclasses that back addressable data
-        should override this method.
-
-        Raises:
-            NotImplementedError: Always, by default.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement resolve_field. "
-            f"Cannot resolve field {field_name!r} for record {record_id!r}."
-        )
 
     # -------------------------------------------------------------------------
     # PipelineElementProtocol — schema-only identity (base case of Merkle chain)
@@ -191,6 +168,9 @@ class RootSource(StreamBase):
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
 
+    # A source's rows are its own, not computed: a run() view says "all N rows".
+    _RUN_ORIGIN: str = "held"
+
     def _display_name(self) -> str:
         """The name a preview header shows: the label when one was given, else the
         source id (a source id is the source's name), e.g. a table's name. The label
@@ -205,7 +185,7 @@ class RootSource(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first ``n`` rows of the table the source holds, without computing.
 
         A source that reads its table when it is built holds it in memory, so this is a

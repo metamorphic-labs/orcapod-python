@@ -427,7 +427,7 @@ against `static_process(...).output_schema(...)`; see "Important implementation 
 src/orcapod/
 ├── types.py                    # Schema, ColumnConfig, ContentHash
 ├── system_constants.py         # Column prefixes and separators
-├── errors.py                   # InputValidationError, DuplicateTagError, FieldNotResolvableError
+├── errors.py                   # InputValidationError, DuplicateTagError
 ├── config.py                   # Config dataclass
 ├── contexts/                   # DataContext (semantic_hasher, arrow_hasher, type_converter)
 ├── protocols/
@@ -462,7 +462,7 @@ src/orcapod/
 │       ├── semijoin.py         # SemiJoin (binary, non-commutative)
 │       ├── batch.py            # Batch (group rows by count, types become list[T])
 │       ├── group_by.py         # GroupBy (many→one reduction keyed on tag values)
-│       ├── column_selection.py # Select/Drop Tag/Data columns
+│       ├── column_selection.py # Select/Drop Tag/Data columns; SelectColumns/DropColumns (tag or data)
 │       ├── mappers.py          # MapTags, MapData (rename columns)
 │       ├── filters.py          # PolarsFilter
 │       └── drop_nulls.py       # DropNulls (drop rows with a null in named or all columns, T | None → T)
@@ -513,6 +513,10 @@ conversion. Two specializations:
 
 **Stream** (`core/streams/arrow_table_stream.py`) — immutable (Tag, Data) sequence.
 Key methods: `output_schema()`, `keys()`, `iter_data()`, `as_table()`.
+Every stream, source and node has `run()` with no arguments (developer, November 13, 2026,
+ITL-1081): it does the work `as_table()` does (a job node runs as in a job) and returns a
+`StreamView` of every row; the view's `head`/`tail`/`sort_by_tags` choose what is shown.
+`head()` and the notebook preview never compute. Never give `run()` arguments.
 
 **Source** (`core/sources/`) — produces a stream from external data. `ArrowTableSource` is the
 core implementation; CSV/Delta/DataFrame/Dict/List sources all delegate to it internally. Each

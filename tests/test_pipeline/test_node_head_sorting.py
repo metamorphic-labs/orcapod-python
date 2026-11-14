@@ -23,7 +23,7 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.streams import HeadStatus
+from orcapod.streams import ViewStatus
 from orcapod.types import CacheMode
 
 N_ROWS = 6
@@ -86,7 +86,7 @@ def _store(kind: str, tmp_path: Path) -> ArrowDatabaseProtocol:
 
 
 def _build(pod: Any, store: ArrowDatabaseProtocol, order: list[int]) -> PipelineJob:
-    job = PipelineJob(name="itl1053", store=store)
+    job = PipelineJob(name="itl1053", database=store)
     with job:
         pod.pod(_source(order), label="node")
     return job
@@ -133,7 +133,7 @@ def test_a_function_nodes_head_is_the_prefix_of_as_table_in_any_completion_order
     )
     for node in (job.nodes["node"], fresh.nodes["node"]):
         head = node.head(n, **CONFIGS[config])
-        assert head.status is HeadStatus.ROWS
+        assert head.status is ViewStatus.ROWS
         assert head.table.equals(node.as_table(**CONFIGS[config]).slice(0, n))
     assert CALLS == []
 
@@ -177,7 +177,7 @@ def test_an_operator_nodes_head_is_the_prefix_of_as_table(
     ran.execute(_source(order))
     for each in (ran, node(CacheMode.REPLAY)):
         head = each.head(3, **CONFIGS[config])
-        assert head.status is HeadStatus.ROWS
+        assert head.status is ViewStatus.ROWS
         assert head.table.equals(each.as_table(**CONFIGS[config]).slice(0, 3))
     sorted_ids = node(CacheMode.REPLAY).head(3, all_info=True).table.column("id")
     assert sorted_ids.to_pylist() == [0, 1, 2]
@@ -207,7 +207,7 @@ def _tie_source() -> ArrowTableSource:
 def _tie_run(kind: str) -> Any:
     """Run ``_tie_source`` through a function node; ``async`` completes rows in reverse."""
     gates.clear()
-    job = PipelineJob(name="ties", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="ties", database=InMemoryArrowDatabase())
     if kind == "sync":
         with job:
             triple.pod(_tie_source(), label="node")
@@ -280,4 +280,4 @@ def test_a_nodes_preview_is_the_same_after_any_completion_order(
     assert sync_node._repr_html_() == async_node._repr_html_()
     html = async_node._repr_html_()
     assert "all 6 rows, sorted by tags" in html
-    assert html.index("<td>0</td>") < html.index("<td>5</td>")
+    assert html.index(">0</td>") < html.index(">5</td>")
