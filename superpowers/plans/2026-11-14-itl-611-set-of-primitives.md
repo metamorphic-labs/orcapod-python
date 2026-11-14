@@ -117,3 +117,15 @@ movement are waiting on the developer. **No library code until the coordinator's
 ## Progress notes
 
 - 2026-11-14: design sent; prototype patch measured (kept outside the repo); Task 1 next.
+
+## Follow-up dispatch (2026-11-14, task_ac04b84f8f2a)
+
+- [ ] Merge `origin/main` (834ee639, PR #391 ITL-1137: `TypeObjectHandler` and
+  `canonical_annotation_str` register a type before hashing it). Check its interaction with
+  the hash-visitor rule (Task 3) and native-container registration (Task 2).
+- [ ] Targeted tests (3.12, one process): tests/test_logical_types, tests/test_hashing (golden,
+  label rule), tests/test_semantic_types, tests/test_pipeline loaded-job tests, ITL-611 tests.
+- [ ] Golden diff against main adds lines only.
+- [ ] Push; CI green on 3.11/3.12/3.13. PR stays DRAFT (never `gh pr ready`).
+- [ ] After the developer marks ready: CodeRabbit rounds (plan via coordinator `ask`).
+- [ ] Reproduce: `hash_object` of a set of datetimes; is it reachable in a row hash via #393?
