@@ -467,5 +467,7 @@ class TestRefusedOrFailedRunAfterAGoodRun:
         # The async orchestrator raises its task group's error around it.
         with pytest.raises((RuntimeError, ExceptionGroup)):
             job.run(orchestrator=_orchestrator(kind), observer=FailsAtNodeEnd())
-        # Every stored row (the 6-row run's), read from the store.
-        assert _values(node, lambda r: r["k"]) == [0, 1, 2, 3, 4, 5]
+        # The node holds no run (it reads empty, ITL-1095); the store keeps every row.
+        assert _values(node, lambda r: r["k"]) == []
+        stored = node.as_source().as_table().to_pylist()
+        assert sorted(r["k"] for r in stored) == [0, 1, 2, 3, 4, 5]

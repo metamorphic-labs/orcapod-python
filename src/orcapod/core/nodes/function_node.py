@@ -1627,21 +1627,21 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from orcapod.pipeline.observer import NoOpObserver
         from orcapod.pipeline.serialization import LoadStatus
 
-        if self.load_status == LoadStatus.UNAVAILABLE:
-            raise self._no_store_error()
-        require_same_data_context(
-            input_stream.data_context_key, self._stored_data_context_key
-        )
         node_label = self.label
         node_hash = self.content_hash().to_string()
         obs = observer if observer is not None else NoOpObserver()
         ctx_obs = obs.contextualize(*self.node_identity_path)
-        tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
-        ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
         output: list[tuple[TagProtocol, DataProtocol]] = []
         loaded_ids: list[bytes] = []
         not_stored = 0
         try:
+            if self.load_status == LoadStatus.UNAVAILABLE:
+                raise self._no_store_error()
+            require_same_data_context(
+                input_stream.data_context_key, self._stored_data_context_key
+            )
+            tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
+            ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
             inputs = [
                 (tag, data, self.compute_base_entry_id(tag, data))
                 for tag, data in input_stream.iter_data()
