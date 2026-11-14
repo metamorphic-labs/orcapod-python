@@ -25,7 +25,9 @@ def test_server_answers_while_open_and_is_gone_after():
 
 
 def test_server_is_stopped_when_the_body_raises():
+    endpoint = ""
     with pytest.raises(ZeroDivisionError):
         with moto_server() as endpoint:
             raise ZeroDivisionError
+    assert endpoint
     assert _refuses_connections(endpoint)
