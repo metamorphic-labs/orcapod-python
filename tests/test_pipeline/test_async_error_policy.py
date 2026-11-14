@@ -22,6 +22,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.function_pod import FunctionPod
+from orcapod.core.operators import Batch
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RowFailuresWarning
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -29,7 +30,7 @@ from orcapod.pipeline import async_orchestrator as async_orchestrator_module
 from orcapod.pipeline.observer import NoOpObserver
 from orcapod.side_effects import InvocationContext, SideEffectPod, SideEffectPodConfig
 from orcapod.sources import DictSource
-from orcapod.types import PodConfig
+from orcapod.types import CacheMode, PodConfig
 
 RUN_TIMEOUT_SECONDS = 60
 N_ROWS = 6
@@ -188,6 +189,7 @@ def run_job(
         return job.run(orchestrator=orch, observer=observer)
 
     async def guarded() -> Any:
+        """Run the job, failing after ``RUN_TIMEOUT_SECONDS`` instead of hanging."""
         async with asyncio.timeout(RUN_TIMEOUT_SECONDS):
             return await job.run_async(orchestrator=orch, observer=observer)
 
@@ -457,12 +459,18 @@ def test_nothing_left_running_after_fail_fast(
 
     # The orchestrator's channels are internal; record them through its module's names.
     class RecordingChannel(async_orchestrator_module.Channel[Any]):
+        """A ``Channel`` that records itself in ``created``."""
+
         def __post_init__(self) -> None:
+            """Set up the channel, then record it."""
             super().__post_init__()
             created.append(self)
 
     class RecordingBroadcastChannel(async_orchestrator_module.BroadcastChannel[Any]):
+        """A ``BroadcastChannel`` that records itself in ``created``."""
+
         def __init__(self, buffer_size: int = 64) -> None:
+            """Set up the channel with ``buffer_size``, then record it."""
             super().__init__(buffer_size)
             created.append(self)
 
@@ -477,6 +485,7 @@ def test_nothing_left_running_after_fail_fast(
         triple.pod(out, label="down2")  # fan-out: a broadcast channel
 
     async def main() -> set[asyncio.Task[Any]]:
+        """Run the job under a timeout guard; return the tasks still pending after it."""
         async with asyncio.timeout(RUN_TIMEOUT_SECONDS):
             with pytest.raises(ValueError):
                 await job.run_async(
@@ -490,6 +499,45 @@ def test_nothing_left_running_after_fail_fast(
         # Closed state is private to the channel classes.
         closed = channel._closed
         assert closed.is_set() if isinstance(closed, asyncio.Event) else closed
+
+
+def stored_aggregates(
+    job_store: Any, policy: str, xs: list[int], mc: int | None
+) -> int:
+    """Run source -> ``f`` -> ``Batch`` node ``B`` (LOG mode) async; count ``B``'s stored rows."""
+    log = InMemoryArrowDatabase()
+    job = function_job(job_store, xs, max_concurrency=mc)
+    with job:
+        Batch()(job.nodes["f"], label="B")
+    job.nodes["B"].attach_databases(pipeline_database=log, cache_mode=CacheMode.LOG)
+    if policy == "fail_fast":
+        with pytest.raises(ValueError):
+            run_job(job, "async", policy)
+    else:
+        run_job(job, "async", policy)
+    tables = [log.get_all_records(path) for path in log.list_table_paths()]
+    return sum(table.num_rows for table in tables if table is not None)
+
+
+@pytest.mark.parametrize("max_concurrency", [1, None])
+@pytest.mark.parametrize("position", list(FAILING_POSITIONS))
+def test_an_aggregate_downstream_stores_nothing_after_fail_fast(
+    max_concurrency: int | None, position: str
+) -> None:
+    """A ``Batch`` node after the failing node never stores an aggregate of partial input.
+
+    The failing node closes its output before the run cancels the others; the aggregate
+    must not take that close for the end of its input. Under ``continue`` the same job
+    stores its one aggregate, so the store is read where the aggregate would be.
+    """
+    xs = xs_failing_at(FAILING_POSITIONS[position])
+    assert (
+        stored_aggregates(InMemoryArrowDatabase(), "continue", xs, max_concurrency) == 1
+    )
+    assert (
+        stored_aggregates(InMemoryArrowDatabase(), "fail_fast", xs, max_concurrency)
+        == 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +583,7 @@ class _Node:
     """A stand-in node: only its label is read."""
 
     def __init__(self, label: str) -> None:
+        """Name the node ``label``."""
         self.label = label
 
 
