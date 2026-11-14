@@ -7,7 +7,7 @@ import json as _json
 import logging
 from collections.abc import Collection
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.types import Schema
 from orcapod.logical_types.identifier import (
@@ -1046,21 +1046,26 @@ def _native_container_storage(metadata: bytes, type_converter: Any) -> Any | Non
     )
 
     try:
-        description = _json.loads(metadata.decode("utf-8"))
+        description: object = _json.loads(metadata.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
-    if not isinstance(description, dict) or description.get("category") not in (
-        LIST_CATEGORY,
-        SET_CATEGORY,
-    ):
+    if not isinstance(description, dict):
         return None
-    element_text = description.get(ELEMENT_ARROW_TYPE_KEY)
+    fields = cast("dict[str, object]", description)
+    if fields.get("category") not in (LIST_CATEGORY, SET_CATEGORY):
+        return None
+    element_text = fields.get(ELEMENT_ARROW_TYPE_KEY)
     if isinstance(element_text, str):
         return pa.large_list(parse_arrow_type_string(element_text, type_converter))
-    element_name = description.get("element_ext_name")
+    element_name = fields.get("element_ext_name")
     if not isinstance(element_name, str):
         return None
-    element_metadata = (description.get("element_ext_metadata") or "").encode("utf-8")
+    element_metadata_text = fields.get("element_ext_metadata")
+    element_metadata = (
+        element_metadata_text.encode("utf-8")
+        if isinstance(element_metadata_text, str)
+        else b""
+    )
     element = type_converter.get_logical_type_by_arrow_extension_name(element_name)
     if element is not None:
         return pa.large_list(element.get_arrow_extension_type().storage_type)

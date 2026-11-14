@@ -570,7 +570,7 @@ class ListLogicalTypeFactory:
         self,
         arrow_extension_name: str,
         element_storage_type: "pa.DataType",
-        metadata: dict,
+        metadata: dict[str, Any],
         element_arrow_text: str,
         converter: "TypeConverterProtocol",
     ) -> ListLogicalType:
