@@ -1,6 +1,10 @@
 # ITL-1122: large normalization applied unevenly — evaluation and plan
 
-Status: EVALUATION DONE, waiting for the coordinator's answers (Q1–Q3) before any code.
+Status: DONE (PR #389). The rule below was REPLACED the same day by the developer: "let's go
+ahead and always convert all non-large variants into large variants everywhere" (no exception for
+a user's Arrow table or explicit schema). Implemented in one place, `ArrowTableStream.__init__`;
+the per-source / per-operator fixes F1-F3 planned below were folded into it and removed. The
+measurements below remain the record of what was uneven on `main` 3a7f3850.
 
 ## The rule (developer, November 14, 2026)
 
