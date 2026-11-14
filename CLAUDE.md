@@ -513,10 +513,11 @@ conversion. Two specializations:
 
 **Stream** (`core/streams/arrow_table_stream.py`) — immutable (Tag, Data) sequence.
 Key methods: `output_schema()`, `keys()`, `iter_data()`, `as_table()`.
-Every stream, source and node has `run()` with no arguments (developer, November 13, 2026,
-ITL-1081): it does the work `as_table()` does (a job node runs as in a job) and returns a
+Every stream, source and node has `run()` with no positional arguments (developer, November 13,
+2026, ITL-1081): it does the work `as_table()` does (a job node runs as in a job) and returns a
 `StreamView` of every row; the view's `head`/`tail`/`sort_by_tags` choose what is shown.
-`head()` and the notebook preview never compute. Never give `run()` arguments.
+`head()` and the notebook preview never compute. A job node's `run()` takes one keyword-only
+argument, `load_only` (ITL-1095); never give any other `run()` an argument.
 
 **Source** (`core/sources/`) — produces a stream from external data. `ArrowTableSource` is the
 core implementation; CSV/Delta/DataFrame/Dict/List sources all delegate to it internally. Each
@@ -827,6 +828,12 @@ data. The rules:
   cannot be named (ITL-1043). `job.run(load_only=True)` computes nothing and writes nothing: function nodes
   load their own stored entries for this run's inputs and skip (and count) the others,
   operators run without storing, side-effect nodes pass rows on undelivered.
+  A job node's `run(*, load_only=False)` is state-driven: a node that holds a completed,
+  non-stale run (for a full run: not load-only, nor anything above it) runs nothing;
+  otherwise its non-current dependencies run first, each once, on the sync orchestrator
+  (`pipeline/node_run.py`), and the run commits as `job.run()` does. A failed end-of-run
+  commit clears every node of the run. A load-only run's rows have status
+  `loaded_only`. Only job nodes' `run()` takes an argument (`load_only`).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - `DerivedSource` over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.

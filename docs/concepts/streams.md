@@ -205,7 +205,7 @@ What `run()` does on each kind of object:
 | A `PollingSource` | polls, as `as_table()` does |
 | A `CachedSource` | reads its cache and writes the wrapped source's new rows to it |
 | A function pod's or operator's output stream | computes what is not computed yet |
-| A job node | runs the node as a job run would (`as_table()` of a job node only reads), then returns the view of that run's rows |
+| A job node | runs the node as a job run would, after every job node it depends on that holds no current run (each once), commits, and returns the view of that run's rows; a node that holds a current run (completed in this process and not stale) runs nothing. `run(load_only=True)` loads stored results only. `as_table()` of a job node only reads |
 | A side-effect stream | delivers its side effects for every row, on every call, and returns the rows it passed on; `head()` still shows none |
 | A pipeline blueprint node, an unbound input slot | raises, as `as_table()` does |
 

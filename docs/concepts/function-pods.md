@@ -578,6 +578,31 @@ incomplete: a group formed after it may lack members, and the result stored for 
 group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
 on the asynchronous orchestrator.
 
+### Running one node: `node.run()`
+
+`job.nodes[label].run()` runs that node as `job.run()` would, together with the job nodes
+it depends on, and returns a view of its rows. What runs depends on each node's state
+(developer, November 13, 2026):
+
+| State of a node | What it shows | `run()` | `run(load_only=True)` |
+|---|---|---|---|
+| Not run in this process (a fresh or loaded job), cleared, or stale | nothing: `head()` says "not run" (`not_computed`) | runs it | loads it |
+| Filled by a load-only run | the rows it loaded: status `loaded_only`, "N loaded, M inputs without a stored result" | runs it, computing what it skipped | nothing: shows what it holds |
+| Filled by a run (`job.run()` or `run()`) | that run's rows (`rows`) | nothing: shows what it holds | nothing: shows what it holds |
+
+A node is stale when anything it depends on changed after its run: an upstream node ran
+again or was cleared, or a source was bound again (`job.bind(sources=...)`). Before a node
+runs, every job node it depends on that is not current for that kind of run runs first,
+each once, in order; the others feed it their rows. A load-only run's rows are never current
+for a full run, nor are the rows of any node below them. `node.last_run` holds the counts,
+as `job.last_run` does for `job.run()`, and the run's writes are committed when it ends.
+Side effects above the node are delivered as `job.run()` delivers them; a node that holds a
+current run is not run again, so to deliver a side effect again (with
+`track_completion=False`), call `clear_cache()` on its node first. Staleness comes from
+modified times only: a source whose rows change without its object changing (a table read
+lazily, a file rewritten in place) is not seen. Build a new source object and bind it, or
+clear the nodes, to run them again.
+
 ### When results are committed
 
 Inside `job.run()`, each function node commits its results and pipeline records to the
