@@ -206,7 +206,7 @@ class Join(NonZeroInputOperator):
 
         tag_keys, _ = [set(k) for k in stream.keys()]
         table = without_meta_columns(
-            stream.as_table(columns={"source": True, "system_tags": True})
+            stream.as_table(columns={"source": True, "system_tags": True}), tag_keys
         )
         # trick to get cartesian product; use int8 explicitly so that zero-row
         # tables don't produce a null-typed column that Polars rejects on join
@@ -221,7 +221,8 @@ class Join(NonZeroInputOperator):
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
             next_tag_keys, _ = next_stream.keys()
             next_table = without_meta_columns(
-                next_stream.as_table(columns={"source": True, "system_tags": True})
+                next_stream.as_table(columns={"source": True, "system_tags": True}),
+                next_tag_keys,
             )
             next_table = arrow_utils.append_to_system_tags(
                 next_table,

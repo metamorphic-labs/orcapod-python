@@ -1479,3 +1479,55 @@ def test_selection_leaving_only_meta_columns_raises() -> None:
         _ = op(source)
     with pytest.raises(InputValidationError, match="no data column"):
         _ = async_rows(DropDataColumns(["i32", "u8", "f32", "ls"]), source)
+
+
+# ── a tag named with the meta prefix (ITL-1080) ──────────────────────────────
+#
+# A ``__`` name is a meta column: a datagram keeps it apart from its tags, so a tag with
+# such a name would stop being a tag on every path that rebuilds rows. No route may
+# produce one.
+
+
+def _table_with_meta_named_column() -> pa.Table:
+    return pa.table(
+        {
+            "k": pa.array([1, 2], pa.int16()),
+            "__g": pa.array([1, 1], pa.int8()),
+            "x": pa.array([3, 4], pa.int8()),
+        }
+    )
+
+
+def test_a_stream_refuses_a_tag_named_with_the_meta_prefix() -> None:
+    with pytest.raises(InputValidationError, match="'__g'.*reserved for meta"):
+        _ = ArrowTableStream(_table_with_meta_named_column(), tag_columns=["k", "__g"])
+
+
+def test_a_source_refuses_a_tag_named_with_the_meta_prefix() -> None:
+    """Not "tag column not found": the source would drop the meta column first."""
+    with pytest.raises(InputValidationError, match="'__g'.*reserved for meta"):
+        _ = ArrowTableSource(
+            _table_with_meta_named_column(), tag_columns=["k", "__g"], source_id="s"
+        )
+
+
+def test_map_tags_refuses_a_meta_named_target() -> None:
+    """Refused when built, so neither path nor the prediction can produce one."""
+    with pytest.raises(InputValidationError, match="'__t'.*reserved for meta"):
+        _ = MapTags({"ta": "__t"})
+
+
+def test_join_keeps_a_tag_and_drops_the_data_meta_columns() -> None:
+    """Join drops only data meta columns; a tag is never one (it once dropped by prefix).
+
+    A stream with a ``__`` tag cannot be built, so the one case left is data meta
+    next to ordinary tags: the tags all survive, the meta columns do not.
+    """
+    left = _with_meta(source_a(), _meta_columns("m", 3))
+    stream = Join()(left, source_b(nested=False))
+    tag_keys, data_keys = stream.keys()
+    assert set(tag_keys) == {"k", "ta"}
+    assert not [name for name in data_keys if name.startswith("__")]
+    assert not [
+        name for name in stream.as_table(all_info=True).column_names if "__m" in name
+    ]

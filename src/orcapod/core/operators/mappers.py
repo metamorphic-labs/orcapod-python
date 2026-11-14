@@ -9,6 +9,7 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.utils import schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -180,6 +181,9 @@ class MapTags(UnaryOperator):
     def __init__(
         self, name_map: Mapping[str, str], drop_unmapped: bool = False, **kwargs
     ):
+        # A tag never gets a meta column's name (ITL-1080): refused here, so no
+        # path (sync, async or the prediction) can produce one.
+        schema_utils.require_tag_names_not_meta(name_map.values())
         self.name_map = dict(name_map)
         self.drop_unmapped = drop_unmapped
         super().__init__(**kwargs)

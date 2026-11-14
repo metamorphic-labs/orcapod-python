@@ -13,7 +13,7 @@ a source-info column for each (``_source___x``); other streams hide them from
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING
 
 from orcapod.channels import WritableChannel
@@ -31,19 +31,24 @@ else:
 _META_SOURCE_PREFIX = f"{constants.SOURCE_PREFIX}{constants.META_PREFIX}"
 
 
-def without_meta_columns(table: "pa.Table") -> "pa.Table":
-    """Drop the meta columns, and a raw stream's source-info columns for them.
+def without_meta_columns(table: "pa.Table", tag_columns: Collection[str]) -> "pa.Table":
+    """Drop the data meta columns, and a raw stream's source-info columns for them.
+
+    A tag column is never a meta column, whatever its name: a raw stream may name
+    a tag with the ``__`` prefix, and it stays.
 
     Args:
         table: A stream's table.
+        tag_columns: The stream's tag columns.
 
     Returns:
-        The table without its ``__`` and ``_source___`` columns.
+        The table without its ``__`` data columns and ``_source___`` columns.
     """
     meta = [
         name
         for name in table.column_names
         if name.startswith((constants.META_PREFIX, _META_SOURCE_PREFIX))
+        and name not in tag_columns
     ]
     return table.drop_columns(meta) if meta else table
 
@@ -109,9 +114,10 @@ def without_input_meta(
     table = stream.as_table(
         columns={"source": True, "system_tags": True, "context": True}
     )
+    tag_columns = stream.keys()[0]
     return ArrowTableStream(
-        without_meta_columns(table),
-        tag_columns=stream.keys()[0],
+        without_meta_columns(table, tag_columns),
+        tag_columns=tag_columns,
         data_context=stream.data_context_key,
     )
 

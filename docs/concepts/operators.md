@@ -41,7 +41,8 @@ No operator carries its inputs' meta columns: the `__`-prefixed columns, such as
 function pod's `__computed`, that describe how an input row was produced. An operator's
 output row is produced by the operator, so its `Data` holds none of them and its predicted
 output schema lists none, on the sync and the async path alike. A way to carry them forward
-across operators is an open design question (ITL-867).
+across operators is an open design question (ITL-867). A tag column can never have a meta column's
+name: a stream, a source and `MapTags` refuse a tag whose name starts with `__`.
 
 ## Operator categories
 

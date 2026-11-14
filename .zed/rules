@@ -567,6 +567,8 @@ No operator carries its inputs' Data meta (`__`) columns (developer, November 13
 ITL-1080): on the sync and the async path, in rows and in the predicted output schema, for a
 raw ArrowTableStream's `__` columns and for the meta a cached pod's or function node's rows
 carry. One rule, core/operators/meta_columns.py. A carry-forward mode is ITL-867.
+A tag column never has a name starting with the meta prefix (`__`): ArrowTableStream, the
+source builder and MapTags refuse one (schema_utils.require_tag_names_not_meta).
 
 Operator or derived source? (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,
