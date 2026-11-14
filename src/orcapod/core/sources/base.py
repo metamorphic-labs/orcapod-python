@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import StreamBase
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
@@ -205,7 +205,7 @@ class RootSource(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first ``n`` rows of the table the source holds, without computing.
 
         A source that reads its table when it is built holds it in memory, so this is a

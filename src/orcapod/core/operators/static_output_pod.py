@@ -16,10 +16,10 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     STALE_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
     head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
@@ -527,7 +527,7 @@ class DynamicPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first rows of the operator's kept result; never runs the operator.
 
         The head of an operator is not the operator over the heads of its inputs (a
@@ -544,7 +544,7 @@ class DynamicPodStream(StreamBase):
             )
         return self._head_without_rows(
             config,
-            HeadStatus.NOT_COMPUTED,
+            ViewStatus.NOT_COMPUTED,
             note=STALE_NOTE if had_result else None,
         )
 

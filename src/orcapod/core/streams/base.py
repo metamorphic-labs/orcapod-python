@@ -7,10 +7,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.base import TraceableBase
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
     default_note,
     preview_html,
 )
@@ -483,7 +483,7 @@ class StreamBase(TraceableBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return at most ``n`` rows that are readily available, without computing.
 
         The rows are ones the stream already holds, has cached from an earlier
@@ -515,7 +515,7 @@ class StreamBase(TraceableBase):
             all_info: Include every column group and sort by tags, as for ``as_table``.
 
         Returns:
-            A ``StreamHead`` with the rows and a ``status`` that tells an empty result
+            A ``StreamView`` with the rows and a ``status`` that tells an empty result
             from one that is not computed.
 
         Raises:
@@ -524,21 +524,21 @@ class StreamBase(TraceableBase):
         """
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
-        return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+        return self._head_without_rows(config, ViewStatus.NOT_COMPUTED)
 
     def _head_without_rows(
         self,
         config: ColumnConfig,
-        status: HeadStatus,
+        status: ViewStatus,
         note: str | None = None,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return a head with no rows: the stream's columns from its declared schema.
 
         When reading the schema would poll a source (``schema_requires_io``), the head
         has no columns either, and the note says so.
         """
         if schema_requires_io(self, config):
-            return StreamHead.without_rows(
+            return StreamView.without_rows(
                 self,
                 status,
                 pa.table({}),
@@ -549,7 +549,7 @@ class StreamBase(TraceableBase):
         table = arrow_utils.make_empty_table(
             {**tag_schema, **data_schema}, self.data_context.type_converter
         )
-        return StreamHead.without_rows(
+        return StreamView.without_rows(
             self, status, table, tag_columns=tuple(tag_schema.keys()), note=note
         )
 

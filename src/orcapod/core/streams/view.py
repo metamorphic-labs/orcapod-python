@@ -1,10 +1,10 @@
 """The first rows of a stream that are readily available, and their notebook preview (ITL-991).
 
-``head(n)`` on a stream, source or node returns a ``StreamHead``: at most ``n`` rows the
+``head(n)`` on a stream, source or node returns a ``StreamView``: at most ``n`` rows the
 object already holds, has cached from an earlier computation, has stored, or can read from
 its table with a bounded read. It never computes: no user function is called, no operator
 is run, no side effect is delivered, no source is polled and nothing is written. The
-notebook preview of a stream is its ``head()`` rendered by ``StreamHead._repr_html_``.
+notebook preview of a stream is its ``head()`` rendered by ``StreamView._repr_html_``.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ else:
     pl = LazyModule("polars")
 
 
-class HeadStatus(str, Enum):
-    """Where the rows of a ``StreamHead`` came from, or why it has none.
+class ViewStatus(str, Enum):
+    """Where the rows of a ``StreamView`` came from, or why it has none.
 
     Attributes:
         ROWS: The rows are the first rows of the stream's complete content. Zero rows
@@ -50,25 +50,26 @@ class HeadStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
-NOT_COMPUTED_NOTE = "not computed; as_table(), iter_data() or a job run computes it"
-STALE_NOTE = "not computed: inputs changed since the last computation"
+NOT_COMPUTED_NOTE = "not computed; run() computes it"
+STALE_NOTE = (
+    "not computed: inputs changed since the last computation; run() recomputes it"
+)
 NOTHING_STORED_NOTE = "nothing stored; run the job"
 BLUEPRINT_NOTE = "pipeline blueprint; run it in a PipelineJob"
 SIDE_EFFECTS_NOTE = (
-    "not run; iterating it or a job run delivers its side effects; "
-    "displaying never delivers side effects"
+    "not run; run() delivers its side effects; displaying never delivers side effects"
 )
 
 _DEFAULT_NOTES = {
-    HeadStatus.NOT_COMPUTED: NOT_COMPUTED_NOTE,
-    HeadStatus.NOTHING_STORED: NOTHING_STORED_NOTE,
-    HeadStatus.UNAVAILABLE: "no rows available",
+    ViewStatus.NOT_COMPUTED: NOT_COMPUTED_NOTE,
+    ViewStatus.NOTHING_STORED: NOTHING_STORED_NOTE,
+    ViewStatus.UNAVAILABLE: "no rows available",
 }
 
 SCHEMA_NEEDS_POLL_NOTE = "columns not known until its source is polled"
 
 
-def default_note(status: HeadStatus) -> str:
+def default_note(status: ViewStatus) -> str:
     """Return the note shown for a head with ``status`` and no rows of its own."""
     return _DEFAULT_NOTES[status]
 
@@ -89,7 +90,7 @@ _MAX_LIST_ITEMS = 5
 
 
 @dataclass(frozen=True)
-class StreamHead:
+class StreamView:
     """At most ``n`` readily available rows of a stream, and how they were obtained.
 
     Attributes:
@@ -118,7 +119,7 @@ class StreamHead:
     """
 
     table: pa.Table
-    status: HeadStatus
+    status: ViewStatus
     kind: str
     label: str
     tag_columns: tuple[str, ...] = ()
@@ -137,12 +138,12 @@ class StreamHead:
         *,
         tag_columns: tuple[str, ...],
         total_rows: int | None,
-        status: HeadStatus = HeadStatus.ROWS,
+        status: ViewStatus = ViewStatus.ROWS,
         total_is_estimate: bool = False,
         origin: str = "held",
         note: str | None = None,
         description: str | None = None,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return a head with rows of ``stream``."""
         return cls(
             table=table,
@@ -161,12 +162,12 @@ class StreamHead:
     def without_rows(
         cls,
         stream: Any,
-        status: HeadStatus,
+        status: ViewStatus,
         table: pa.Table,
         *,
         tag_columns: tuple[str, ...],
         note: str | None = None,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return a head of ``stream`` with no rows: ``table`` holds its columns only."""
         return cls(
             table=table.slice(0, 0),
@@ -179,7 +180,7 @@ class StreamHead:
 
     def for_stream(
         self, stream: Any, *, origin: str | None = None, note: str | None = None
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the same rows shown as ``stream`` (a source over its inner stream, a node
         over its cached output), optionally with another origin or note."""
         return dataclasses.replace(
@@ -217,9 +218,9 @@ class StreamHead:
     def _describe(self) -> str:
         """Return the header text after the name, for this status."""
         shown = self.table.num_rows
-        if self.status is HeadStatus.ROWS:
+        if self.status is ViewStatus.ROWS:
             text = self._describe_rows(shown)
-        elif self.status is HeadStatus.PARTIAL:
+        elif self.status is ViewStatus.PARTIAL:
             total = self.total_rows if self.total_rows is not None else shown
             suffix = ", sorted by tags" if self.sorted_by_tags else ""
             if shown == total:
@@ -304,7 +305,7 @@ class StreamHead:
     def __repr__(self) -> str:
         """Return a short description: kind, label, status and row count."""
         return (
-            f"StreamHead({self.kind}[{self.label}], status={self.status.value}, "
+            f"StreamView({self.kind}[{self.label}], status={self.status.value}, "
             f"rows={self.table.num_rows})"
         )
 
@@ -346,11 +347,11 @@ def preview_html(stream: Any) -> str:
 
 def head_of(
     head: Any, stream: Any, *, origin: str | None = None, note: str | None = None
-) -> StreamHead:
+) -> StreamView:
     """Return ``head`` (another stream's) shown as ``stream``.
 
-    A ``StreamHead`` keeps every field. Any other result of ``head`` (a
-    ``StreamHeadProtocol``) is adapted from what that protocol gives: its rows, status
+    A ``StreamView`` keeps every field. Any other result of ``head`` (a
+    ``StreamViewProtocol``) is adapted from what that protocol gives: its rows, status
     and total.
 
     Args:
@@ -359,10 +360,10 @@ def head_of(
         origin: Another origin for the rows, if given.
         note: Another note, if given.
     """
-    if not isinstance(head, StreamHead):
-        head = StreamHead(
+    if not isinstance(head, StreamView):
+        head = StreamView(
             table=head.table,
-            status=HeadStatus(head.status),
+            status=ViewStatus(head.status),
             kind=type(stream).__name__,
             label=display_name(stream),
             total_rows=head.total_rows,

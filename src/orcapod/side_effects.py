@@ -21,10 +21,10 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     SIDE_EFFECTS_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.errors import (
@@ -163,12 +163,12 @@ class SideEffectPodStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return no rows: showing this stream must never deliver its side effects."""
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._head_without_rows(
-            config, HeadStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+            config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
         )
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
@@ -815,12 +815,12 @@ class SideEffectNode(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return no rows: showing this stream must never deliver its side effects."""
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._head_without_rows(
-            config, HeadStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
+            config, ViewStatus.NOT_COMPUTED, note=SIDE_EFFECTS_NOTE
         )
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:

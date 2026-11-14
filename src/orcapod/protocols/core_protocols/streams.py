@@ -16,10 +16,10 @@ if TYPE_CHECKING:
     from orcapod.protocols.core_protocols.pod import PodProtocol
 
 
-class StreamHeadProtocol(Protocol):
+class StreamViewProtocol(Protocol):
     """The readily available first rows of a stream, as ``head`` returns them.
 
-    ``orcapod.core.streams.head.StreamHead`` is the implementation.
+    ``orcapod.core.streams.view.StreamView`` is the implementation.
     """
 
     @property
@@ -29,7 +29,7 @@ class StreamHeadProtocol(Protocol):
 
     @property
     def status(self) -> str:
-        """Where the rows came from, or why there are none (a ``HeadStatus``)."""
+        """Where the rows came from, or why there are none (a ``ViewStatus``)."""
         ...
 
     @property
@@ -201,7 +201,7 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> "StreamHeadProtocol":
+    ) -> "StreamViewProtocol":
         """Return at most ``n`` readily available rows, without computing.
 
         The rows are ones the stream already holds, has cached from an earlier
@@ -209,7 +209,7 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         function, runs an operator, delivers a side effect, polls or writes.
 
         Returns:
-            StreamHead: The rows, and a status that tells an empty result from one
+            StreamView: The rows, and a status that tells an empty result from one
             that is not computed.
         """
         ...

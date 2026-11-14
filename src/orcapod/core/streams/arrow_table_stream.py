@@ -11,7 +11,7 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.head import StreamHead
+from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
@@ -251,7 +251,7 @@ class ArrowTableStream(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first ``n`` rows of the table this stream holds.
 
         Without sorting only those rows are assembled: content hashes, when asked for,
@@ -266,7 +266,7 @@ class ArrowTableStream(StreamBase):
             table = self._assemble_table(config, limit=None).slice(0, n)
         else:
             table = self._assemble_table(config, limit=n)
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             table,
             tag_columns=self.keys(columns=config)[0],

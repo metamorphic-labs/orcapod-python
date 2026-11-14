@@ -33,10 +33,10 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.head import (
+from orcapod.core.streams.view import (
     BLUEPRINT_NOTE,
-    HeadStatus,
-    StreamHead,
+    ViewStatus,
+    StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
@@ -665,12 +665,12 @@ class FunctionNodeBase(StreamBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return no rows: a node of this kind holds no data. See ``StreamBase.head``."""
         check_head_size(n)
         return self._head_without_rows(
             ColumnConfig.handle_config(columns, all_info=all_info),
-            HeadStatus.UNAVAILABLE,
+            ViewStatus.UNAVAILABLE,
             note=BLUEPRINT_NOTE,
         )
 
@@ -680,7 +680,7 @@ class FunctionNodeBase(StreamBase):
         n: int,
         config: ColumnConfig,
         origin: str,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first ``n`` of ``pairs`` as this node's head.
 
         A ``None`` output (a filtered input) is not a row. An ``EmptyData`` placeholder
@@ -710,7 +710,7 @@ class FunctionNodeBase(StreamBase):
                 f"{missing:,} {'result' if missing == 1 else 'results'} not shown: "
                 "kept in an ephemeral store that is gone"
             )
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             table,
             tag_columns=self.keys(columns=config)[0],
@@ -3083,7 +3083,7 @@ class FunctionJobNode(FunctionNodeBase):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the first rows the node holds or has stored; never runs the function.
 
         After a run (or ``execute``) the rows are the node's results in memory, the
@@ -3104,7 +3104,7 @@ class FunctionJobNode(FunctionNodeBase):
         status = self.load_status
         if status == LoadStatus.UNAVAILABLE:
             return self._head_without_rows(
-                config, HeadStatus.UNAVAILABLE, note="no store attached"
+                config, ViewStatus.UNAVAILABLE, note="no store attached"
             )
         current = status == LoadStatus.CACHE_ONLY or not self.is_stale
         if current and self._cached_output_datas:
@@ -3113,7 +3113,7 @@ class FunctionJobNode(FunctionNodeBase):
             )
         return self._head_from_store(n, config)
 
-    def _head_from_store(self, n: int, config: ColumnConfig) -> StreamHead:
+    def _head_from_store(self, n: int, config: ColumnConfig) -> StreamView:
         """Return the first ``n`` of this node's stored rows.
 
         Reads the node's whole stored slice (pipeline table joined with the result
@@ -3142,12 +3142,12 @@ class FunctionJobNode(FunctionNodeBase):
                     .head(n, columns=config)
                     .for_stream(self, origin="stored", note=note)
                 )
-            return self._head_without_rows(config, HeadStatus.NOTHING_STORED, note=note)
+            return self._head_without_rows(config, ViewStatus.NOTHING_STORED, note=note)
         if self._cached_function_pod is None:
-            return self._head_without_rows(config, HeadStatus.NOT_COMPUTED)
+            return self._head_without_rows(config, ViewStatus.NOT_COMPUTED)
         entries = list(self._load_cached_entries().values())
         if not any(data is not None for _, data in entries):
-            return self._head_without_rows(config, HeadStatus.NOTHING_STORED)
+            return self._head_without_rows(config, ViewStatus.NOTHING_STORED)
         return self._head_of_pairs(entries, n, config, origin="stored")
 
     # ------------------------------------------------------------------

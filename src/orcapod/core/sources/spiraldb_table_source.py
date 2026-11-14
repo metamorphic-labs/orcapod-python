@@ -45,7 +45,7 @@ from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size
-from orcapod.core.streams.head import HeadStatus, StreamHead
+from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import InputValidationError, SourceTooLargeError
 from orcapod.types import ColumnConfig
@@ -695,7 +695,7 @@ class SpiralDBTableSource(RootSource):
         *,
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
-    ) -> StreamHead:
+    ) -> StreamView:
         """Return the source's first ``n`` rows, read in one bounded scan.
 
         At most ``n`` rows are read (fewer when the source's ``limit`` is smaller), with
@@ -709,8 +709,8 @@ class SpiralDBTableSource(RootSource):
         head = self._head(n, columns=config)
         tag_columns = self.keys(columns=config)[0]
         if not head.rows_read:
-            empty = StreamHead.without_rows(
-                self, HeadStatus.NOT_COMPUTED, head.rows, tag_columns=tag_columns
+            empty = StreamView.without_rows(
+                self, ViewStatus.NOT_COMPUTED, head.rows, tag_columns=tag_columns
             )
             return dataclasses.replace(
                 empty,
@@ -718,7 +718,7 @@ class SpiralDBTableSource(RootSource):
                 total_is_estimate=True,
                 description=self._head_note(head),
             )
-        return StreamHead.of_rows(
+        return StreamView.of_rows(
             self,
             head.rows,
             tag_columns=tag_columns,

@@ -131,7 +131,7 @@ print(subjects.head(3).as_table().column("age").to_pylist())
 # [9, 10, 11]
 ```
 
-`head()` returns a `StreamHead`: the rows as a PyArrow table (`.table`, `.as_table()`,
+`head()` returns a `StreamView`: the rows as a PyArrow table (`.table`, `.as_table()`,
 `.as_polars_df()`), the row count when it is known without computing (`.total_rows`), and a
 `.status` that says where the rows came from. A stream downstream of a computation shows rows
 only once they are computed:
@@ -144,7 +144,7 @@ def to_months(age: int) -> int:
 
 months = to_months.pod(subjects, label="months")
 print(months.head().header())
-# FunctionPodStream[months] — not computed; as_table(), iter_data() or a job run computes it
+# FunctionPodStream[months] — not computed; run() computes it
 print(months.head().status.value, months.head().table.column_names)
 # not_computed ['subject_id', 'age_months']
 
