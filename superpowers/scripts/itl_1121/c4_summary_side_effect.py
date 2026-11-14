@@ -20,12 +20,22 @@ def deliver(y: int, ctx: Any) -> None:
     DELIVERED.append(y)
 
 
-for name, orch in [("sync", SyncPipelineOrchestrator), ("async", AsyncPipelineOrchestrator)]:
+for name, orch in [
+    ("sync", SyncPipelineOrchestrator),
+    ("async", AsyncPipelineOrchestrator),
+]:
     for via in ("job.run", "node.run"):
         DELIVERED.clear()
         job = PipelineJob(name="j", database=InMemoryArrowDatabase())
         with job:
-            rows = inc.pod(DictSource([{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"), label="rowwise")
+            rows = inc.pod(
+                DictSource(
+                    [{"k": i, "x": i} for i in range(3)],
+                    tag_columns=["k"],
+                    source_id="s",
+                ),
+                label="rowwise",
+            )
             tap_pod(deliver).process(rows, label="tap")
         job.run(orchestrator=orch())
         first = len(DELIVERED)
@@ -38,17 +48,29 @@ for name, orch in [("sync", SyncPipelineOrchestrator), ("async", AsyncPipelineOr
                 continue  # node.run() is sync only
             job.nodes["tap"].run()
             summary = job.nodes["tap"].last_run
-        print(f"--- {name} {via}: first run delivered {first}; second run delivered {len(DELIVERED)}")
+        print(
+            f"--- {name} {via}: first run delivered {first}; second run delivered {len(DELIVERED)}"
+        )
         print(repr(summary))
 
 # The same with an operator node below the held function node instead of a side effect.
-for name, orch in [("sync", SyncPipelineOrchestrator), ("async", AsyncPipelineOrchestrator)]:
+for name, orch in [
+    ("sync", SyncPipelineOrchestrator),
+    ("async", AsyncPipelineOrchestrator),
+]:
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
-        rows = inc.pod(DictSource([{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"), label="rowwise")
+        rows = inc.pod(
+            DictSource(
+                [{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"
+            ),
+            label="rowwise",
+        )
         rows.select_data_columns(["y"], label="op")
     job.run(orchestrator=orch())
     job.nodes["op"].clear_cache()
     summary = job.run(orchestrator=orch())
-    print(f"--- {name} job.run, operator node cleared: op holds_current_run={job.nodes['op'].holds_current_run(load_only=False)}")
+    print(
+        f"--- {name} job.run, operator node cleared: op holds_current_run={job.nodes['op'].holds_current_run(load_only=False)}"
+    )
     print(repr(summary))

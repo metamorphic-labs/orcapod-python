@@ -39,14 +39,25 @@ def dbl(y: int) -> int:
     return 2 * y
 
 
-schema = pa.schema([pa.field("k", pa.int64(), nullable=False), pa.field("x", pa.int64(), nullable=False)])
-base = ArrowTableStream(pa.table({"k": [1, 2, 3], "x": [1, 2, 3]}, schema=schema), tag_columns=["k"])
+schema = pa.schema(
+    [
+        pa.field("k", pa.int64(), nullable=False),
+        pa.field("x", pa.int64(), nullable=False),
+    ]
+)
+base = ArrowTableStream(
+    pa.table({"k": [1, 2, 3], "x": [1, 2, 3]}, schema=schema), tag_columns=["k"]
+)
 
-upstream: Any = tap_pod(deliver_up).process(base)  # a SideEffectPodStream, outside a job
+upstream: Any = tap_pod(deliver_up).process(
+    base
+)  # a SideEffectPodStream, outside a job
 print("input type:", type(upstream).__name__)
 node = SideEffectJobNode(tap_pod(deliver_own), upstream)
 view = node.run(load_only=True)
-print(f"side-effect node, run(load_only=True): upstream delivered {len(UP)}, own delivered {len(OWN)}, rows {view.as_table().num_rows}")
+print(
+    f"side-effect node, run(load_only=True): upstream delivered {len(UP)}, own delivered {len(OWN)}, rows {view.as_table().num_rows}"
+)
 node.clear_cache()
 node.run(load_only=True)
 print(f"  again after clear_cache(): upstream delivered {len(UP)} in total")
@@ -54,4 +65,6 @@ print(f"  again after clear_cache(): upstream delivered {len(UP)} in total")
 fn_upstream: Any = inc.pod(base)  # a FunctionPodStream, outside a job
 fnode = FunctionJobNode(dbl.pod, fn_upstream, pipeline_database=InMemoryArrowDatabase())
 fview = fnode.run(load_only=True)
-print(f"function node over a pod stream, run(load_only=True): upstream function called {len(CALLS)} times; status {fview.status}")
+print(
+    f"function node over a pod stream, run(load_only=True): upstream function called {len(CALLS)} times; status {fview.status}"
+)

@@ -32,11 +32,19 @@ class Reader(NoOpObserver):
 def build(db: Any) -> PipelineJob:
     job = PipelineJob(name="j", database=db)
     with job:
-        inc.pod(DictSource([{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"), label="rowwise")
+        inc.pod(
+            DictSource(
+                [{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"
+            ),
+            label="rowwise",
+        )
     return job
 
 
-for name, orch in [("sync", SyncPipelineOrchestrator), ("async", AsyncPipelineOrchestrator)]:
+for name, orch in [
+    ("sync", SyncPipelineOrchestrator),
+    ("async", AsyncPipelineOrchestrator),
+]:
     for load_only in (False, True):
         db = InMemoryArrowDatabase()
         if load_only:

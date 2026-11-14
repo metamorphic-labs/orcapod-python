@@ -6,7 +6,6 @@ Delta store with a small batch_size and rows left pending before the run, that e
 committed pipeline-record version only references committed results after node.run().
 """
 
-import sys
 import tempfile
 from pathlib import Path
 
@@ -25,7 +24,9 @@ def double(x: int) -> int:
 
 
 def col(table: deltalake.DeltaTable, name: str) -> set:
-    return set(delta_to_pyarrow_dataset(table).to_table(columns=[name])[name].to_pylist())
+    return set(
+        delta_to_pyarrow_dataset(table).to_table(columns=[name])[name].to_pylist()
+    )
 
 
 def check(root: Path) -> None:
@@ -36,12 +37,25 @@ def check(root: Path) -> None:
     }
     result_history = deltalake.DeltaTable(str(tables["result"])).history()
     pipeline_history = deltalake.DeltaTable(str(tables["pipeline"])).history()
-    print(f"  pipeline commits: {len(pipeline_history)}, result commits: {len(result_history)}")
+    print(
+        f"  pipeline commits: {len(pipeline_history)}, result commits: {len(result_history)}"
+    )
     bad = 0
     for entry in pipeline_history:
-        records = deltalake.DeltaTable(str(tables["pipeline"]), version=entry["version"])
-        versions = [r["version"] for r in result_history if r["timestamp"] <= entry["timestamp"]]
-        committed = col(deltalake.DeltaTable(str(tables["result"]), version=max(versions)), "__record_id") if versions else set()
+        records = deltalake.DeltaTable(
+            str(tables["pipeline"]), version=entry["version"]
+        )
+        versions = [
+            r["version"] for r in result_history if r["timestamp"] <= entry["timestamp"]
+        ]
+        committed = (
+            col(
+                deltalake.DeltaTable(str(tables["result"]), version=max(versions)),
+                "__record_id",
+            )
+            if versions
+            else set()
+        )
         if not col(records, "__data_id") <= committed:
             bad += 1
     print(f"  pipeline versions referencing uncommitted results: {bad}")
@@ -52,10 +66,21 @@ for batch_size, n in [(50, 120), (5, 40)]:
         root = Path(tmp)
         store = DeltaTableDatabase(root, batch_size=batch_size)
         for i in range(batch_size - 1):  # pending, never flushed
-            store.add_record(("leftover",), f"left-{i}".encode(), pa.table({"v": pa.array([i], pa.int64())}))
+            store.add_record(
+                ("leftover",),
+                f"left-{i}".encode(),
+                pa.table({"v": pa.array([i], pa.int64())}),
+            )
         job = PipelineJob(name="j", database=store)
         with job:
-            double.pod(DictSource([{"k": i, "x": i} for i in range(n)], tag_columns=["k"], source_id="s"), label="dbl")
+            double.pod(
+                DictSource(
+                    [{"k": i, "x": i} for i in range(n)],
+                    tag_columns=["k"],
+                    source_id="s",
+                ),
+                label="dbl",
+            )
         print(f"batch_size={batch_size}, rows={n}: node.run()")
         job.nodes["dbl"].run()
         check(root)

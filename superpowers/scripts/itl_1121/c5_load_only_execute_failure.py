@@ -31,14 +31,26 @@ def deliver(y: int, ctx: Any) -> None:
 def build() -> PipelineJob:
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
-        rows = inc.pod(DictSource([{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"), label="rowwise")
+        rows = inc.pod(
+            DictSource(
+                [{"k": i, "x": i} for i in range(3)], tag_columns=["k"], source_id="s"
+            ),
+            label="rowwise",
+        )
         tapped: Any = tap_pod(deliver).process(rows, label="tap")
         tapped.select_data_columns(["y"], label="down")
     return job
 
 
-schema = pa.schema([pa.field("k", pa.int64(), nullable=False), pa.field("y", pa.int64(), nullable=False)])
-failing = boom.pod(ArrowTableStream(pa.table({"k": [1], "y": [1]}, schema=schema), tag_columns=["k"]))
+schema = pa.schema(
+    [
+        pa.field("k", pa.int64(), nullable=False),
+        pa.field("y", pa.int64(), nullable=False),
+    ]
+)
+failing = boom.pod(
+    ArrowTableStream(pa.table({"k": [1], "y": [1]}, schema=schema), tag_columns=["k"])
+)
 
 
 class FailingChannel:
@@ -60,7 +72,9 @@ for mode in ("sync full", "sync load_only", "async load_only"):
             tap.execute(failing, load_only=True)
         else:
             out = Channel()
-            asyncio.run(tap.async_execute([FailingChannel()], out.writer, load_only=True))
+            asyncio.run(
+                tap.async_execute([FailingChannel()], out.writer, load_only=True)
+            )
     except Exception as exc:
         print(f"{mode}: raised {type(exc).__name__}: {exc}")
     print(
