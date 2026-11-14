@@ -224,3 +224,80 @@ def test_a_job_with_no_function_node_says_what_ran(how: str) -> None:
     if how != "node.run":  # a held node.run() makes no summary (see above)
         second = _run_job_or_node(job, how)
         assert _NOTHING_TO_DO in repr(second).splitlines()[0]
+
+
+# ---------------------------------------------------------------------------
+# Comment 5: a load-only execute() whose input raises clears the side-effect node
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="z")
+def _boom(y: int) -> int:
+    """Always raise."""
+    raise RuntimeError("input failed")
+
+
+def _failing_y_stream() -> Any:
+    """A pod stream outside a job (tag ``k``, data ``z``) that raises when read."""
+    import pyarrow as pa
+
+    from orcapod.core.streams import ArrowTableStream
+
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("y", pa.int64(), nullable=False),
+        ]
+    )
+    return _boom.pod(
+        ArrowTableStream(
+            pa.table({"k": [1], "y": [1]}, schema=schema), tag_columns=["k"]
+        )
+    )
+
+
+class _FailingChannel:
+    """An input channel whose iteration raises."""
+
+    def __aiter__(self) -> _FailingChannel:
+        return self
+
+    async def __anext__(self) -> Any:
+        raise RuntimeError("input failed")
+
+
+@pytest.mark.parametrize("path", ["sync", "async"])
+@pytest.mark.parametrize("load_only", [False, True])
+def test_an_execute_whose_input_raises_leaves_the_side_effect_node_stale(
+    path: str, load_only: bool
+) -> None:
+    """The node and the node below it read as not run, whatever the run kind.
+
+    ``execute``/``async_execute`` are the node's run entry points (orchestrators call
+    them); this test is about them, so it calls them directly.
+    """
+    import asyncio
+
+    from orcapod.channels import Channel
+    from orcapod.side_effects import tap_pod
+
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        rows = inc.pod(_source(), label="rowwise")
+        tapped: Any = tap_pod(_deliver).process(rows, label="tap")
+        tapped.select_data_columns(["y"], label="down")
+    job.run()
+    tap, down = job.nodes["tap"], job.nodes["down"]
+    # The async delivery path reads its input inside a task group, which raises the
+    # input's error in an ExceptionGroup.
+    with pytest.raises((RuntimeError, ExceptionGroup)):
+        if path == "sync":
+            tap.execute(_failing_y_stream(), load_only=load_only)
+        else:
+            out: Channel[Any] = Channel()
+            asyncio.run(
+                tap.async_execute([_FailingChannel()], out.writer, load_only=load_only)
+            )
+    assert tap.is_stale and down.is_stale
+    assert tap.as_table().num_rows == 0
+    assert down.as_table().num_rows == 0
