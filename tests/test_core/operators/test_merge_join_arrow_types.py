@@ -33,7 +33,7 @@ import pytest
 from orcapod.contexts import get_default_context, get_default_type_converter
 from orcapod.hashing.arrow_hashers import StarfixArrowHasher
 from orcapod.core.operators import MergeJoin, PolarsFilter
-from orcapod.core.sources import CSVSource, DictSource
+from orcapod.core.sources import DictSource
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
@@ -517,18 +517,25 @@ class TestDisagreeingInputs:
         with pytest.raises(InputValidationError, match=r"'k'"):
             MergeJoin().static_process(first, second)
 
-    def test_csv_and_dict_sources_on_a_string_column(self, tmp_path: Path) -> None:
-        """A CSV ``string`` column colliding with a dict ``large_string`` one merges."""
-        csv_path = tmp_path / "labels.csv"
-        csv_path.write_text("id,label\n1,a\n2,b\n")
-        csv_source = CSVSource(str(csv_path), tag_columns=["id"])
+    def test_user_string_and_dict_sources_on_a_string_column(self) -> None:
+        """A user's ``string`` column colliding with a dict ``large_string`` one merges.
+
+        A CSVSource gave ``string`` here until ITL-1122 (a CSV file keeps no large /
+        non-large distinction, so its table is now large); a user's own Arrow table
+        is the source that keeps ``string``.
+        """
+        user_source = ArrowTableSource(
+            _table({"id": (pa.int64(), [1, 2]), "label": (pa.string(), ["a", "b"])}),
+            tag_columns=["id"],
+            source_id="user",
+        )
         dict_source = DictSource(
             [{"id": 1, "label": "x"}, {"id": 2, "label": "y"}], tag_columns=["id"]
         )
-        assert csv_source.as_table().schema.field("label").type == pa.string()
+        assert user_source.as_table().schema.field("label").type == pa.string()
         assert dict_source.as_table().schema.field("label").type == pa.large_string()
 
-        table = MergeJoin()(csv_source, dict_source).as_table()
+        table = MergeJoin()(user_source, dict_source).as_table()
         assert table.schema.field("label").type == pa.large_list(pa.large_string())
         labels = table.sort_by("id").column("label").to_pylist()
         assert labels == [["a", "x"], ["b", "y"]]

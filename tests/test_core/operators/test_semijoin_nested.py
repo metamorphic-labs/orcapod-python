@@ -5,7 +5,7 @@ non-key column ("Data type list<item: int8> is not supported in join non-key
 field"), so a list, large_list, struct or struct-backed logical column on either
 input failed. ITL-829 (first case): Acero also rejected a key that is ``string``
 on one side and ``large_string`` on the other ("Incompatible data types for
-corresponding join field keys"), e.g. a ``CSVSource`` against a ``DictSource``.
+corresponding join field keys"), e.g. a user's ``string`` table against a ``DictSource``.
 
 The result is the left input's rows that match a right row, in left order, with
 the left input's Arrow schema exactly (types, top-level and nested nullability,
@@ -26,7 +26,7 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.operators import SemiJoin
-from orcapod.core.sources import ArrowTableSource, CSVSource, DictSource
+from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -352,24 +352,41 @@ def test_null_scalar_key_never_matches() -> None:
 # ── key types ───────────────────────────────────────────────────────────────
 
 
-def test_string_vs_large_string_key_csv_vs_dict(tmp_path: Path) -> None:
-    """ITL-829 (first case): a CSVSource's ``string`` key against a DictSource's
-    ``large_string`` key, in both directions."""
-    csv_path = tmp_path / "a.csv"
-    _ = csv_path.write_text("id,x\nc,3\na,1\nb,2\n")
-    csv = CSVSource(str(csv_path), tag_columns=["id"])
+def test_string_vs_large_string_key_user_vs_dict() -> None:
+    """ITL-829 (first case): a user's ``string`` key against a DictSource's
+    ``large_string`` key, in both directions.
+
+    A CSVSource gave the ``string`` key until ITL-1122 (a CSV file keeps no large /
+    non-large distinction, so its table is now large); a user's own Arrow table is
+    the source that keeps ``string``.
+    """
+    user_source = _source(
+        {
+            "id": pa.array(["c", "a", "b"], pa.string()),
+            "x": pa.array([3, 1, 2], pa.int64()),
+        },
+        tags=("id",),
+        source_id="user",
+    )
     dict_source = DictSource(
         data=[{"id": "a", "y": 1}, {"id": "c", "y": 3}], tag_columns=["id"]
     )
-    assert csv.as_table().schema.field("id").type == pa.string()
+    assert user_source.as_table().schema.field("id").type == pa.string()
     assert dict_source.as_table().schema.field("id").type == pa.large_string()
 
     assert_semijoin_result(
-        csv, dict_source, expected_rows(csv, lambda row: row["id"] in ("a", "c"))
+        user_source,
+        dict_source,
+        expected_rows(user_source, lambda row: row["id"] in ("a", "c")),
     )
-    assert_semijoin_result(dict_source, csv, expected_rows(dict_source, lambda _: True))
+    assert_semijoin_result(
+        dict_source, user_source, expected_rows(dict_source, lambda _: True)
+    )
     # The stream convenience method takes the same path.
-    assert csv.semi_join(dict_source).as_table().column("id").to_pylist() == ["c", "a"]
+    assert user_source.semi_join(dict_source).as_table().column("id").to_pylist() == [
+        "c",
+        "a",
+    ]
 
 
 def mismatched_key_sources() -> tuple[ArrowTableSource, ArrowTableSource]:
