@@ -148,3 +148,9 @@ Reproduction scripts: `superpowers/scripts/itl_1121/c1..c6_*.py` (committed).
   full `uv run pytest tests/` + test-objective, draft PR (top line "Stacked on #380: merge after
   it. Fixes ITL-1121"), orca linear attach / worktree set --pr, signed replies on the nine #381
   findings (3: evidence c3; 7: ITL-1097), CI green, CodeRabbit round, worker_done.
+- 2026-11-14 (resumed): changelog, design issue, draft PR #388, #381 replies (6 threads + 1 top-level),
+  CodeRabbit round 1 on #388 fixed (C, D/F, H, I; 75324abc) and answered (A, B, E, G, J, K, L),
+  KeyboardInterrupt log-commit fix (c9). Developer decision: a load-only run also refuses a
+  computing outside stream (d06ffcf7, node_run.refuse_unloadable_inputs). main merged (#382, #383).
+  LEFT: name the coordinator's follow-up issue in the reply to finding G (thread 4574191943);
+  CI and a CodeRabbit review of the head; worker_done.
