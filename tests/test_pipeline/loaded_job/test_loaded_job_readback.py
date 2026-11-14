@@ -801,8 +801,7 @@ def test_loaded_function_node_cannot_execute(saved: pathlib.Path) -> None:
         _ = job.nodes["dbl"].execute(job.nodes["dsrc"])
     assert str(excinfo.value) == (
         "FunctionJobNode 'dbl' was loaded by PipelineJob.load and has no function "
-        "pod, so it cannot compute; read its stored results with as_table() or "
-        "iter_data()."
+        "pod, so it cannot compute; read its stored results with as_source()."
     )
 
 

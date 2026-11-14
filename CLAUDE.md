@@ -814,13 +814,19 @@ data. The rules:
   by the user is never changed. `SourceStreamBuilder.build` has no bare-hash default: it
   needs a `source_id` or a `source_kind`.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
-- After a run, a `FunctionJobNode` returns exactly the rows of that run's inputs, sync or
-  async (ITL-1093; a run that raised defines no rows). Read without a completed run in this
-  process (a fresh or loaded job), it returns every record stored under its content hash for
-  the current data context, not only its current inputs. A run skips inputs whose entry is
-  already stored.
+- A job node shows its current run; `node.as_source()` shows everything stored for it
+  (developer, November 13, 2026, ITL-1095). After a run, a `FunctionJobNode` returns exactly
+  the rows of that run's inputs, sync or async (ITL-1093). Before a run in this process (a
+  fresh or loaded job), after a run that raised, after `clear_cache()`, and while stale, every
+  function and operator job node reads empty (zero typed rows; `head()` is `not_computed` and
+  points to `run()` and `as_source()`), in every cache mode: no read touches the store. A
+  never-run or cleared node has no modified time, so it is stale; a job node is stale also
+  when any function or operator job node it depends on is (`core/nodes/staleness.py`), and a
+  `SourceJobNode` is modified when it is bound or its bound source is. A run skips inputs
+  whose entry is already stored. A loaded operator's stored view raises when its run's rows
+  cannot be named (ITL-1043).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
-- `DerivedSource` over a job node before `run()` → presents zero rows with the origin's columns
+- `DerivedSource` over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with `tags_as_data`.
 - Join requires non-overlapping data columns; raises `InputValidationError` on collision.
 - MergeJoin requires colliding data columns to have identical Python types; merges into sorted

@@ -42,7 +42,7 @@ from orcapod.core.streams.view import (
     StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.core.nodes.staleness import upstream_job_node_stale
+from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
@@ -1035,7 +1035,7 @@ class _JoinedRecords(NamedTuple):
     empty_taginfo_rows: dict[bytes, dict]
 
 
-class FunctionJobNode(FunctionNodeBase):
+class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     """DB-backed execution node for function pod invocations.
 
     Created by ``PipelineJob`` at run time; never recorded inside a plain
@@ -1529,17 +1529,6 @@ class FunctionJobNode(FunctionNodeBase):
         # No content established: the node, and every node downstream, is stale.
         self._set_modified_time(None)
 
-    @property
-    def is_stale(self) -> bool:
-        """Whether the rows this node holds are out of date, or it holds none.
-
-        True before the node's first run in this process and after ``clear_cache()``
-        (no modified time), when an input or the function pod was modified after the node's
-        run (``StreamBase.is_stale``), or when any job node it depends on is stale
-        (ITL-1095). A stale node reads empty until it runs again.
-        """
-        return super().is_stale or upstream_job_node_stale(self.upstreams)
-
     def _held_pairs(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Yield the (tag, data) rows this node holds; every read of them goes through here.
 
@@ -1626,7 +1615,7 @@ class FunctionJobNode(FunctionNodeBase):
         return RuntimeError(
             f"FunctionJobNode {self.label!r} was loaded by PipelineJob.load and has no "
             "function pod, so it cannot compute; read its stored results with "
-            "as_table() or iter_data()."
+            "as_source()."
         )
 
     def _stored_record_count(self) -> int:
@@ -3241,8 +3230,8 @@ class FunctionJobNode(FunctionNodeBase):
 
         Computes as a job run computes this node, unlike ``as_table()``, which only
         reads. A node whose upstream is unavailable (``CACHE_ONLY``) or whose function
-        pod is a placeholder (``READ_ONLY``) computes nothing: the view holds its stored
-        rows.
+        pod is a placeholder (``READ_ONLY``) computes nothing and holds no rows; its
+        stored rows are read with ``as_source()``.
 
         Returns:
             A ``StreamView`` of every row ``as_table()`` then returns. It says "rows",
@@ -3263,7 +3252,7 @@ class FunctionJobNode(FunctionNodeBase):
         if self._load_status in (LoadStatus.CACHE_ONLY, LoadStatus.READ_ONLY):
             # CACHE_ONLY: upstream unavailable; computation requires a live input stream.
             # READ_ONLY: function pod is a proxy placeholder — cannot compute.
-            # The view serves the existing DB results, as iter_data() does.
+            # Neither runs, so the view holds no rows (ITL-1095).
             return self._view_of_rows(self.as_table(), "held")
         if self.is_stale:
             # Discard any stale in-memory entries before a fresh computation run

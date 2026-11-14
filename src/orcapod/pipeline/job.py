@@ -1396,10 +1396,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """Deserialize a ``PipelineJob`` from a JSON file to read its stored results.
 
         A loaded job is for reading the results its saved run stored; it cannot be
-        run again, because function pods are not saved with the job. Read a
-        function node with ``job.nodes[label].as_table()``, ``iter_data()`` or
-        ``get_all_records()``. Operators can store outputs when caching is enabled;
-        reading a loaded operator without a readable cache raises ``RuntimeError``.
+        run again, because function pods are not saved with the job. Its nodes have
+        not run in this process, so they are empty (ITL-1095): read a node's stored
+        results through its stored view, ``job.nodes[label].as_source()``, or with
+        ``get_all_records()``. Operators store outputs only when caching is enabled;
+        the stored view of a loaded operator whose run's rows cannot be named raises
+        ``RuntimeError``.
 
         The embedded ``Pipeline`` blueprint is always restored. Sources whose data
         lives in files (CSV, Delta) are rebuilt from the saved config. In-memory
@@ -1415,7 +1417,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 over any database configuration in the file.
 
         Returns:
-            A read-only ``PipelineJob`` whose nodes serve their stored results.
+            A read-only ``PipelineJob`` whose nodes' stored views serve their stored
+            results.
 
         Raises:
             ValueError: If the file's format version is unsupported, or if it was

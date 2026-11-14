@@ -40,7 +40,7 @@ from orcapod.core.streams.view import (
     head_of,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.core.nodes.staleness import upstream_job_node_stale
+from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.errors import (
     PipelineJobRequiredError,
     StoreReadError,
@@ -621,7 +621,7 @@ class OperatorNode(OperatorNodeBase):
 # ---------------------------------------------------------------------------
 
 
-class OperatorJobNode(OperatorNodeBase):
+class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
     """DB-backed execution node for operator pod invocations.
 
     Stream node representing an operator invocation with optional DB persistence.
@@ -1479,17 +1479,6 @@ class OperatorJobNode(OperatorNodeBase):
         kept = self._cached_output_stream
         origin = "computed" if kept is None else head_of(kept.head(1), self).origin
         return self._view_of_rows(table, origin)
-
-    @property
-    def is_stale(self) -> bool:
-        """Whether the rows this node holds are out of date, or it holds none.
-
-        True before the node's first run in this process and after ``clear_cache()``
-        (no modified time), when an input or the operator was modified after the node's
-        run (``StreamBase.is_stale``), or when any job node it depends on is stale
-        (ITL-1095). A stale node reads empty until it runs again.
-        """
-        return super().is_stale or upstream_job_node_stale(self.upstreams)
 
     def _current_output(self) -> StreamProtocol | None:
         """The output of the node's current run, or ``None`` when it holds none.
