@@ -11,12 +11,14 @@ applies its operator to zero-row inputs, as the sync path does.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
 import pytest
 
 from orcapod import contexts, function_pod
+from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.nodes import OperatorJobNode
 from orcapod.core.operators import Batch, PolarsFilter, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
@@ -189,26 +191,88 @@ def test_not_yet_run_table_reads_no_source_row() -> None:
     assert table.schema == expected
 
 
-def test_not_yet_run_table_calls_no_function() -> None:
-    """Downstream of a function pod that has not run, the node calls no function.
+@dataclass(frozen=True)
+class Point:
+    """A user class a function returns."""
 
-    A function node that has not run cannot say its Arrow types without rows (ITL-985),
-    so the operator node keeps its table built from the Python schema, with no row.
-    """
-    calls: list[int] = []
+    a: int
+    b: str
 
-    @function_pod(output_keys="x2")
-    def double_x(x: int) -> int:
-        """Double ``x``, counting calls."""
-        calls.append(x)
-        return x * 2
 
+CALLS: list[int] = []
+
+
+@function_pod(output_keys=("n", "maybe", "where", "items", "point"))
+def describe_x(x: int) -> tuple[int, int | None, Path, list[int], Point]:
+    """Outputs of each kind: plain, optional, logical, list and user class."""
+    CALLS.append(x)
+    return x, None, Path(f"/{x}"), [x, x], Point(x, str(x))
+
+
+def _function_stream(groups: tuple[str, ...]) -> StreamProtocol:
+    """``describe_x`` over the ``g1`` rows of a source with the given groups."""
+    return describe_x.pod(_g1(_source(groups)))
+
+
+def _cached_function_stream(groups: tuple[str, ...]) -> StreamProtocol:
+    """``describe_x`` through a ``CachedFunctionPod`` over the ``g1`` rows."""
+    pod = CachedFunctionPod(describe_x.pod, result_database=InMemoryArrowDatabase())
+    return pod(_g1(_source(groups)))
+
+
+@pytest.mark.parametrize(
+    "make", [_function_stream, _cached_function_stream], ids=["plain", "cached"]
+)
+def test_function_pod_stream_zero_rows_has_the_computed_types(
+    make: Callable[[tuple[str, ...]], StreamProtocol],
+) -> None:
+    """A function pod over zero rows gives the table of its computed rows, no row."""
+    expected = make(WITH_ROWS).as_table(all_info=True)
+    assert expected.num_rows > 0
+    CALLS.clear()
+
+    table = make(NO_MATCH).as_table(all_info=True)
+
+    assert CALLS == []
+    assert table.num_rows == 0
+    assert table.schema == expected.schema
+
+
+def _function_job(groups: tuple[str, ...] = WITH_ROWS) -> PipelineJob:
+    """A job: ``describe_x`` over the ``g1`` rows, then an operator labelled ``op``."""
     job = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
     with job:
-        _ = SelectDataColumns(["x2"])(double_x.pod(_g1(_source())), label="op")
+        _ = SelectDataColumns(["n", "where", "items"])(
+            describe_x.pod(_g1(_source(groups)), label="fn"), label="op"
+        )
+    return job
 
-    table = _op(job).as_table(all_info=True)
 
-    assert calls == []
-    assert table.num_rows == 0
-    assert "x2" in table.column_names
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_function_node_zero_row_tables_have_the_computed_types(
+    orchestrator: str,
+) -> None:
+    """A function node, and an operator after it, type their zero-row tables.
+
+    Before a run and after a run with no row, both tables equal the tables of a run
+    with rows, and the function is never called for them.
+    """
+    ran = _function_job()
+    _ = ran.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    expected_fn = ran.nodes["fn"].as_table(all_info=True).schema
+    expected_op = _op(ran).as_table(all_info=True).schema
+    CALLS.clear()
+
+    not_run = _function_job()
+    assert not_run.nodes["fn"].as_table(all_info=True).schema == expected_fn
+    assert _op(not_run).as_table(all_info=True).schema == expected_op
+    assert CALLS == []
+
+    no_rows = _function_job(NO_MATCH)
+    _ = no_rows.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    fn_table = no_rows.nodes["fn"].as_table(all_info=True)
+    op_table = _op(no_rows).as_table(all_info=True)
+    assert fn_table.num_rows == op_table.num_rows == 0
+    assert fn_table.schema == expected_fn
+    assert op_table.schema == expected_op
+    assert CALLS == []

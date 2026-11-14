@@ -13,6 +13,7 @@ from orcapod.contexts import DataContext
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
     typed_zero_row_table,
@@ -485,6 +486,22 @@ class DynamicPodStream(StreamBase):
         """Clear the cached stream, forcing recomputation on next access."""
         self._cached_stream = None
         self._cached_time = None
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """The pod's result over its upstreams' zero-row tables (ITL-912).
+
+        The rule an operator node follows (``OperatorJobNode._typed_zero_row_table``):
+        no row is computed or read, and nothing this stream holds is consulted.
+        """
+        inputs: list[StreamProtocol] = []
+        for upstream in self._upstreams:
+            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream)
+            if zero_rows is None:
+                return None
+            inputs.append(zero_rows)
+        return self._pod.static_process(*inputs).as_table(
+            columns=ZERO_ROW_INPUT_COLUMNS
+        )
 
     def keys(
         self,
