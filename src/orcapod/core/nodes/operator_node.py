@@ -1573,6 +1573,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                     )
                     self._update_modified_time()
                     computed = True
+                if computed:
+                    # Without a database and in OFF mode the output is lazy: building
+                    # the view computes it, so a failure there is the run's (ITL-1121).
+                    return self._run_view(computed=True)
             except BaseException:
                 # A run that raised defines no rows.
                 self.clear_cache()

@@ -85,3 +85,61 @@ def test_an_observer_reading_a_node_in_on_node_end_sees_its_rows(
     assert observer.seen["rowwise"] == 3
     assert node.as_table().num_rows == 3
     assert node.holds_current_run(load_only=load_only)
+
+
+# ---------------------------------------------------------------------------
+# Comment 2: an operator node's lazy output that fails to materialize clears the node
+# ---------------------------------------------------------------------------
+
+_FAIL = {"on": True}
+
+
+@function_pod(output_keys="y")
+def flaky(x: int) -> int:
+    """Raise while ``_FAIL["on"]``; else return ``x + 1``."""
+    if _FAIL["on"]:
+        raise RuntimeError("input failed")
+    return x + 1
+
+
+def _base_stream() -> Any:
+    """Two rows, tag ``id`` and data ``x``, both non-nullable ``int64``."""
+    import pyarrow as pa
+
+    from orcapod.core.streams import ArrowTableStream
+
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+        ]
+    )
+    return ArrowTableStream(
+        pa.table({"id": [1, 2], "x": [1, 2]}, schema=schema), tag_columns=["id"]
+    )
+
+
+@pytest.mark.parametrize("with_database", [False, True])
+def test_an_operator_run_whose_lazy_output_raises_holds_no_run(
+    with_database: bool,
+) -> None:
+    """No database, or ``CacheMode.OFF``: the output is computed when the view is built;
+    if that raises, the node reads as one with no run, and the next run computes."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.operators import MapData
+    from orcapod.types import CacheMode
+
+    _FAIL["on"] = True
+    node = OperatorJobNode(
+        operator=MapData({"y": "z"}),
+        input_streams=(flaky.pod(_base_stream()),),
+        pipeline_database=InMemoryArrowDatabase() if with_database else None,
+        cache_mode=CacheMode.OFF,
+    )
+    with pytest.raises(RuntimeError, match="input failed"):
+        node.run()
+    assert not node.holds_current_run(load_only=False)
+    assert node.is_stale
+    assert node.as_table().num_rows == 0
+    _FAIL["on"] = False
+    assert node.run().as_table().num_rows == 2
