@@ -695,6 +695,11 @@ class _PerThreadTable(ArrowTableSource):
     """A source whose zero-row table names the thread that asked for it."""
 
     def _typed_zero_row_table(self) -> pa.Table:
+        """A zero-row table with an ``id`` column and a column named after the thread.
+
+        Returns:
+            The table, which tells which thread's derivation made it.
+        """
         name = threading.current_thread().name
         return pa.table({"id": pa.array([], pa.int8()), name: pa.array([], pa.int8())})
 
@@ -703,12 +708,26 @@ class _AsksTwice(ArrowTableSource):
     """Asks for ``inner``'s zero-row table, waits for the other thread, asks again."""
 
     def __init__(self, inner: StreamProtocol, gate: threading.Barrier, **kwargs: Any):
+        """Hold the stream to ask and the barrier the two threads meet at.
+
+        Args:
+            inner: The stream whose zero-row table each thread asks for twice.
+            gate: Synchronizes the two threads: each waits there between its two
+                asks, so one thread's first ask happens before the other's second.
+            **kwargs: As for ``ArrowTableSource``.
+        """
         super().__init__(**kwargs)
         self.inner = inner
         self.gate = gate
+        # The column names each thread got from its two asks, by thread name.
         self.seen: dict[str, list[list[str]]] = {}
 
     def _typed_zero_row_table(self) -> pa.Table | None:
+        """Ask ``inner`` twice around the barrier and record what came back.
+
+        Returns:
+            ``None`` on purpose: the answers are recorded in ``seen``.
+        """
         name = threading.current_thread().name
         first = typed_zero_row_table(self.inner)
         self.gate.wait()
@@ -720,20 +739,28 @@ class _AsksTwice(ArrowTableSource):
 
 def test_two_concurrent_zero_row_derivations_never_share_a_memo() -> None:
     """Each thread's outermost call has its own memo: no table crosses threads."""
-    gate = threading.Barrier(2)
+    gate = threading.Barrier(2, timeout=10)
     inner = _PerThreadTable(_int8_table(), tag_columns=["id"], source_id="inner")
     outer = _AsksTwice(
         inner, gate, table=_int8_table(), tag_columns=["id"], source_id="outer"
     )
-    threads = [
-        threading.Thread(target=typed_zero_row_table, args=(outer,), name=name)
-        for name in ("t1", "t2")
-    ]
+    errors: list[BaseException] = []
+
+    def derive() -> None:
+        try:
+            _ = typed_zero_row_table(outer)
+        except BaseException as error:  # noqa: BLE001 - reported by the test below
+            errors.append(error)
+            gate.abort()  # the other thread stops waiting at once
+
+    threads = [threading.Thread(target=derive, name=name) for name in ("t1", "t2")]
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=10)
 
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
     assert outer.seen == {
         "t1": [["id", "t1"], ["id", "t1"]],
         "t2": [["id", "t2"], ["id", "t2"]],
