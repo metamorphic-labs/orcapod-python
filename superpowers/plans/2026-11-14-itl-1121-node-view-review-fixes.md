@@ -137,3 +137,14 @@ Reproduction scripts: `superpowers/scripts/itl_1121/c1..c6_*.py` (committed).
 ## Progress notes
 
 - 2026-11-14: reproduction table sent and approved (see decisions). Scripts committed (86902ec0).
+- 2026-11-14 (session stopped at usage limit): DONE and pushed: fixes 1, 2, 4, 5, 6 (each its own
+  commit, tests in tests/test_pipeline/test_node_view_review_fixes.py, 32 pass), docs 8, test 9.
+  Fix 6 lives in node_run.plan_run (refuse_delivering_inputs) because plan_run reads outside
+  streams as held rows; plus run_job_node / OperatorJobNode.run alone paths.
+  Observation for the coordinator: a node.run() of a node holding a current run makes no summary;
+  node.last_run stays the previous run's (existing #380 behaviour, not changed).
+  LEFT: changelog.d/ITL-1121.md (### Fixed), design_issues/ITL-1121-NV1.md, the FunctionPodStream
+  three lines for the coordinator (repro in superpowers/scripts/itl_1121/c6_*.py), basedpyright,
+  full `uv run pytest tests/` + test-objective, draft PR (top line "Stacked on #380: merge after
+  it. Fixes ITL-1121"), orca linear attach / worktree set --pr, signed replies on the nine #381
+  findings (3: evidence c3; 7: ITL-1097), CI green, CodeRabbit round, worker_done.

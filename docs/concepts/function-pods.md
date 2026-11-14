@@ -832,14 +832,16 @@ notify_job.run()
 node = notify_job.nodes["notify"]
 print(node.as_table().num_rows, len(list(node.iter_data())), len(sent))
 # 3 3 3
-node.run()  # delivers only what the invocation log does not record: nothing here
+node.run()  # holds a current run: runs nothing and delivers nothing
 print(len(sent))
 # 3
 ```
 
 - With `track_completion=True` (the default), a run delivers only the rows whose delivery the
-  node's invocation log does not record. With `track_completion=False`, every run, a second
-  `job.run()` or `node.run()`, delivers every row again; reads still deliver nothing.
+  node's invocation log does not record. With `track_completion=False`, a run delivers every
+  row. A node that holds a current run is not run again, so a second `job.run()` or
+  `node.run()` delivers nothing; call `clear_cache()` on the node first to deliver again.
+  Reads never deliver.
 - The rows a read returns are those the last run in this process passed on: under
   `on_error="log"`, a row whose delivery failed is left out with `drop_on_failure=True`
   (the default) and kept with `drop_on_failure=False`, as for the nodes downstream.
