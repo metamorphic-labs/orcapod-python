@@ -149,8 +149,46 @@ def test_a_side_effect_node_gives_every_row_once_aligned(
             assert_rows_aligned(
                 table, layout, sources.oracle, node.data_context, expected_rows=expected
             )
+            before = len(delivered)
             preview = node.head(100, **config).as_table()
             assert preview.num_rows == 0, f"the preview has {preview.num_rows} rows"
+            # Showing the node must never deliver, not only show no row.
+            assert len(delivered) == before, "the preview delivered side effects"
         except AssertionError as exc:
             failures.append(f"[{name}] {exc}")
     assert not failures, "\n".join(failures)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ITL-1091: reading a side-effect job node after job.run() delivers every side "
+        "effect again (6 rows: 6 deliveries after run, 12 after iter_data, 18 after "
+        "as_table); the docs say a job node's as_table only reads"
+    ),
+)
+def test_a_read_of_a_side_effect_node_after_its_run_delivers_nothing() -> None:
+    """After ``job.run()``, iterating or tabling the side-effect node delivers nothing.
+
+    A job node keeps the rows ``run()`` gave and its ``as_table()`` only reads
+    (docs/concepts/streams.md); the run already delivered every row once.
+    """
+    sources = make_sources("unique")
+    delivered: list[int] = []
+
+    def deliver(x: int, s: str, m: int | None, ctx: Any) -> None:
+        """Record the delivered row's ``x``."""
+        delivered.append(x)
+
+    job = PipelineJob(name="side_effects", database=InMemoryArrowDatabase())
+    with job:
+        SideEffectPod(deliver)(sources.a, label="delivered")
+    job.run()
+    once = sorted(keys_a("unique", "shuffled"))
+    assert sorted(delivered) == once
+    node = job.nodes["delivered"]
+    list(node.iter_data())
+    node.as_table(all_info=True)
+    assert sorted(delivered) == once, (
+        f"{len(delivered)} deliveries after the reads, {len(once)} rows"
+    )

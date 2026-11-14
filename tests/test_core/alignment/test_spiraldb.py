@@ -133,3 +133,39 @@ def test_tables_are_aligned_across_scan_batches(source: Any, config_name: str) -
         source.data_context,
         expected_rows=rows(oracle, SOURCE_ID),
     )
+
+
+@pytest.mark.parametrize("config_name", list(COLUMN_CONFIGS))
+@pytest.mark.parametrize("n", [1, 3])
+def test_previews_are_aligned_across_scan_batches(
+    source: Any, n: int, config_name: str
+) -> None:
+    """``head(n)`` is a bounded read of the first ``n`` rows in key order (scan order).
+
+    1 row stays inside the first two-row batch, 3 cross into the second. Each preview
+    holds exactly those rows, each aligned, in key order, or in tag order when the
+    configuration sorts (the rows the bounded read holds, sorted).
+    """
+    written = written_table()
+    oracle = oracle_of(written, source)
+    config = COLUMN_CONFIGS[config_name]
+    tags, data = source.keys()
+    layout = Layout(
+        tag_keys=tuple(tags),
+        data_keys=tuple(data),
+        content_hash_column=content_hash_column(config),
+    )
+    table = source.head(n, **config).as_table()
+    assert table.num_rows == n
+    assert_requested_columns(table, config, layout)
+    assert_rows_aligned(
+        table,
+        layout,
+        oracle,
+        source.data_context,
+        expected_rows=rows(oracle, SOURCE_ID)[:n],
+    )
+    if not (config.get("all_info") or config.get("columns", {}).get("sort_by_tags")):
+        assert table.equals(source.as_table(**config).slice(0, n)), (
+            "an unsorted preview is not the first rows of as_table"
+        )

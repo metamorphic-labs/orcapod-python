@@ -107,6 +107,8 @@ class _RowChecker:
         self.failures: list[str] = []
         self.state = _Row()
         self.checked: set[str] = set()
+        # (member, column, value) of every data element no single origin explained.
+        self.unresolved: list[tuple[int, str, Any]] = []
 
     def fail(self, column: str, message: str) -> None:
         """Record a failure of ``column`` in this row."""
@@ -218,9 +220,11 @@ class _RowChecker:
             ):
                 self._check_present_token(column, value, token)
                 origin = self._resolve(column, value, token)
-                if origin is None:
-                    continue
                 member = position if column in self.layout.members else 0
+                if origin is None:
+                    if column not in self.layout.merged:
+                        self.unresolved.append((member, column, value))
+                    continue
                 if column in self.layout.merged:
                     self._assign_merged(column, origin)
                 else:
@@ -228,6 +232,65 @@ class _RowChecker:
                     self.checked.add(column)
                 if token is not None and column in self.oracle.derivations:
                     self._check_function_token(column, origin, token)
+
+    def _member_tags(self, member: int) -> dict[str, Any]:
+        """The user tag values of ``member``: its element of a list-valued tag."""
+        tags: dict[str, Any] = {}
+        for column in self.layout.tag_keys:
+            if column not in self.row:
+                continue
+            if column in self.layout.members:
+                elements = self._elements(column)
+                if member < len(elements):
+                    tags[column] = elements[member]
+            else:
+                tags[column] = self.row[column]
+        return tags
+
+    def resolve_remaining(self) -> None:
+        """Explain, by everything the row shows, the elements no single value explained.
+
+        A value several origin rows share (a null of a nullable column) names no origin;
+        with no token and no system tag, no other column may name one either, and the
+        member's values and tags would then go unchecked. Such elements must still be
+        the values of one origin row whose tags are the member's tags: one such row is
+        the member's origin; none fails the row; several leave it ambiguous, its values
+        and tags those of every candidate.
+        """
+        for member in sorted({m for m, _, _ in self.unresolved}):
+            known = self.state.members[member].values()
+            entries = [
+                (column, value)
+                for m, column, value in self.unresolved
+                if m == member and not any(self.oracle.holds(column, o) for o in known)
+            ]
+            if not entries:
+                continue
+            tags = self._member_tags(member)
+            candidates = [
+                o
+                for o in self.oracle.origins
+                if all(
+                    self.oracle.holds(column, o)
+                    and self.oracle.expected_value(column, o) == value
+                    for column, value in entries
+                )
+                and all(
+                    o.values[self.oracle.base_name(k)] == v
+                    for k, v in tags.items()
+                    if self.oracle.base_name(k) in o.values
+                )
+            ]
+            column = entries[0][0]
+            if not candidates:
+                self.fail(
+                    column,
+                    f"no origin row has the values {dict(entries)!r} with the tags "
+                    f"{tags!r}",
+                )
+            elif len(candidates) == 1:
+                self._assign(member, column, candidates[0])
+                self.checked.update(c for c, _ in entries)
 
     def _assign_merged(self, column: str, origin: Origin) -> None:
         """Record the origin of one element of a merged column (one element per input)."""
@@ -501,6 +564,7 @@ def assert_rows_aligned(
         checker = _RowChecker(index, row, layout, oracle, function_tokens)
         checker.resolve_data()
         checker.check_system_tags()
+        checker.resolve_remaining()
         checker.check_values()
         if hash_column in row:
             data_row = table.slice(index, 1).select(list(layout.data_keys))
@@ -566,7 +630,8 @@ def assert_requested_columns(
             for ``head``, which shows rows in stream order.
     """
     columns = config.get("columns", {})
-    all_info = bool(config.get("all_info"))
+    # all_info given at the top or inside the column config (ITL-1067, #363).
+    all_info = bool(config.get("all_info")) or bool(columns.get("all_info"))
     names = table.column_names
     if all_info or columns.get("content_hash"):
         assert layout.content_hash_column in names, (

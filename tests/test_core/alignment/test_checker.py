@@ -347,6 +347,37 @@ def test_a_null_data_value_no_origin_has_is_named() -> None:
         assert_rows_aligned(nulled, layout, oracle, context)
 
 
+def test_a_row_only_its_tags_can_resolve_is_still_checked() -> None:
+    """A null shared by several rows names no origin; the row's tags must then match one."""
+    table, _, oracle, context = source_table()
+    # Only the nullable m: a null m is the value of several rows, and nothing else
+    # (no token, no system tag) names the row.
+    bare = table.select([*TAG_COLUMNS, "m"])
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("m",))
+    assert_rows_aligned(bare, layout, oracle, context)
+    m = bare.column("m").to_pylist()
+    g = bare.column("g").to_pylist()
+    index = m.index(None)
+    g[index] = next(v for v in g if v != g[index])
+    changed = bare.set_column(
+        bare.column_names.index("g"), bare.field("g"), pa.array(g, bare.field("g").type)
+    )
+    with pytest.raises(
+        AssertionError, match="column 'm': no origin row has the values"
+    ):
+        assert_rows_aligned(changed, layout, oracle, context)
+
+
+def test_all_info_inside_the_column_config_asks_for_every_group() -> None:
+    """``{"columns": {"all_info": True}}`` asks what top-level ``all_info`` asks (#363)."""
+    table, layout, *_ = source_table()
+    embedded = {"columns": {"all_info": True}}
+    assert_requested_columns(table.sort_by([("g", "ascending")]), embedded, layout)
+    data_only = table.select([*TAG_COLUMNS, *layout.data_keys])
+    with pytest.raises(AssertionError):
+        assert_requested_columns(data_only, embedded, layout)
+
+
 def test_a_row_without_a_pair_for_a_source_of_its_data_fails() -> None:
     """A joined row whose B pair is gone, or is A's pair copied over B's, fails."""
     sources = make_sources("unique")

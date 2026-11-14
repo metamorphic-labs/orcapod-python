@@ -183,3 +183,9 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
     sort puts nulls last at every depth. This was reported to the coordinator.
   New: a job-backed `SideEffectPod` node test (`SideEffectNode.as_table` has its own
   concatenation) on both orchestrators. 6503 pass, no marks.
+* Nov 14 (CodeRabbit on 2926e559): the checker resolves an element no single value
+  explains by the member's tags (one origin: checked; none: fails), and reads all_info
+  inside the column config. SpiralDB previews: head(1) and head(3) under every config
+  across the batch boundary. Side-effect previews must deliver nothing. One strict
+  xfail, ITL-1091: a read of a side-effect job node after job.run() delivers every side
+  effect again (6 -> 12 -> 18). 6527 pass, 1 xfailed.
