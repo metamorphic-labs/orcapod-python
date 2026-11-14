@@ -488,11 +488,14 @@ class DerivedSource(RootSource):
         it, or a job node that ran again. The rows read are compared with the rows
         held, in any order; when they differ the source holds the new ones and moves its
         modified time. A read or comparison that raises leaves everything as it was, so
-        the next check reads again. A source that has not read its origin yet holds
-        nothing: its next read reads the origin as it is.
+        the next check reads again. A source that holds nothing (it has not read its
+        origin yet, or read none of its rows: a job node that had not run) reads the
+        origin at its next read; when the origin's time moved, its own time moves too,
+        so a node that read no rows from it runs again.
 
         Returns:
-            ``True`` if the source now holds new rows.
+            ``True`` if the source's modified time moved: it holds new rows, or it holds
+            none and its origin changed.
         """
         if isinstance(self._origin, RootSource):
             _ = self._origin.check_for_new_data()
@@ -501,7 +504,9 @@ class DerivedSource(RootSource):
             return False
         held = self._held_rows()
         if held is None:
-            return False
+            self._origin_seen = seen
+            self._update_modified_time()
+            return True
         if self._tags_as_data is not None:
             stream, has_rows = self._build_derived_stream(self._tags_as_data)
             unchanged = same_rows(held, stream.as_table())

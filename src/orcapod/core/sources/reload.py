@@ -25,6 +25,42 @@ else:
     pl = LazyModule("polars")
 
 
+def keep_nullable_columns(read: pa.Table, held: pa.Schema) -> pa.Table:
+    """Return ``read`` with each column that ``held`` has nullable marked nullable again.
+
+    A source that infers nullability from its data (a CSV file read without a schema, a
+    database whose connector gives no column information) reads a nullable column whose
+    nulls are all gone as non-nullable. That column keeps its nullable type: its new
+    values are valid values of it. Only a field that is nullable in ``held`` and
+    non-nullable in ``read``, with the same name and type, changes; it is re-wrapped
+    over the same arrays, never cast. Every other difference (a column added, removed
+    or retyped, a null in a column ``held`` has non-nullable) is left for the caller's
+    schema check to refuse.
+
+    Args:
+        read: The table as read again.
+        held: The schema of the table the source holds.
+
+    Returns:
+        ``read``, or the same arrays under a schema with those fields nullable.
+    """
+    nullable = {field.name: field for field in held if field.nullable}
+    fields = [
+        field.with_nullable(True)
+        if not field.nullable
+        and field.name in nullable
+        and field.type.equals(nullable[field.name].type)
+        else field
+        for field in read.schema
+    ]
+    schema = pa.schema(fields)
+    if read.schema.metadata is not None:
+        schema = schema.with_metadata(read.schema.metadata)
+    if schema.equals(read.schema, check_metadata=True):
+        return read
+    return pa.Table.from_arrays(read.columns, schema=schema)
+
+
 def same_rows(held: pa.Table, read: pa.Table) -> bool:
     """Return whether two tables hold the same rows, in any order.
 

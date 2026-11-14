@@ -686,3 +686,79 @@ def test_a_cached_source_retries_a_comparison_that_raised(delta_path: Path) -> N
     assert source.last_modified == before
     assert source.check_for_new_data() is True
     assert _keys(source) == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (ITL-1102): inferred nullability, a derived source holding nothing
+# ---------------------------------------------------------------------------
+
+
+def test_csv_a_column_that_loses_its_nulls_keeps_its_nullable_type(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nulls.csv"
+    path.write_text("k,x\n0,\n1,10\n")
+    source = _csv(path)
+    before = source.output_schema()
+    path.write_text("k,x\n0,0\n1,10\n")  # no null left: still the nullable column
+    assert source.check_for_new_data() is True
+    assert _values(source, "x") == [0, 10]
+    path.write_text("k,x\n0,\n1,10\n2,20\n")  # a null again
+    assert source.check_for_new_data() is True
+    assert _values(source, "x") == [10, 20]
+    assert source.output_schema() == before
+
+
+def test_csv_a_null_in_a_column_built_without_one_fails_the_check(
+    csv_path: Path,
+) -> None:
+    source = _csv(csv_path)
+    csv_path.write_text("k,x\n0,\n1,10\n")
+    with pytest.raises(ValueError, match="changed its columns"):
+        source.check_for_new_data()
+    assert _keys(source) == [0, 1, 2]
+
+
+def _connector_without_column_info(x: list[int | None]) -> MagicMock:
+    connector = MagicMock()
+    connector.get_table_names.return_value = ["t"]
+    connector.get_pk_columns.return_value = ["k"]
+    connector.get_column_info.return_value = []
+    table = pa.table(
+        {"k": pa.array(range(len(x)), pa.int64()), "x": pa.array(x, pa.int64())}
+    )
+    connector.iter_batches.side_effect = lambda _query: iter(table.to_batches())
+    return connector
+
+
+def test_db_table_source_inferred_nullability_keeps_a_column_nullable() -> None:
+    connector = _connector_without_column_info([None, 10])
+    source = DBTableSource(connector, "t", record_id_column="k")
+    before = source.output_schema()
+    filled = _connector_without_column_info([0, 10])
+    connector.iter_batches.side_effect = filled.iter_batches.side_effect
+    assert source.check_for_new_data() is True
+    assert _values(source, "x") == [0, 10]
+    assert source.output_schema() == before
+
+
+@function_pod(output_keys="z")
+def twice(y: int) -> int:
+    """Return ``2 * y``."""
+    return 2 * y
+
+
+def test_a_derived_source_that_held_no_rows_moves_when_its_origin_runs(
+    csv_path: Path,
+) -> None:
+    upstream = _job(_csv(csv_path))
+    derived = DerivedSource(upstream.nodes["rowwise"], tags_as_data={"k": "k_value"})
+    downstream = PipelineJob(name="down", database=InMemoryArrowDatabase())
+    with downstream:
+        twice.pod(derived, label="doubled")
+    _run(downstream, "sync")
+    assert downstream.nodes["doubled"].as_table().num_rows == 0
+    _run(upstream, "sync")
+    _run(downstream, "sync")
+    zs = sorted(r["z"] for r in downstream.nodes["doubled"].as_table().to_pylist())
+    assert zs == [2, 22, 42]

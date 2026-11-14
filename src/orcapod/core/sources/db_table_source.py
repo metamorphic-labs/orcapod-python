@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.reload import same_rows
+from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     SourceStreamResult,
@@ -131,8 +131,17 @@ class DBTableSource(RootSource):
         if self._source_id is None:
             self._source_id = result.source_id
 
-    def _read_table(self, connector: DBConnectorProtocol) -> pa.Table:
+    def _read_table(
+        self, connector: DBConnectorProtocol, held: pa.Schema | None = None
+    ) -> pa.Table:
         """Read every row of the table through ``connector``, with its nullability.
+
+        Args:
+            connector: The connector to read through.
+            held: The schema of the table the source holds, when the read is a check's.
+                Where nullability is inferred from the rows (the connector gives no
+                column information), a column ``held`` has nullable stays nullable
+                (``keep_nullable_columns``).
 
         Raises:
             ValueError: If the table is not found or is empty.
@@ -161,7 +170,8 @@ class DBTableSource(RootSource):
         # No column info available — fall back to inferring nullable flags
         # from actual data so columns without nulls are not spuriously marked
         # nullable=True (Arrow's default).
-        return table.cast(arrow_utils.infer_schema_nullable(table))
+        inferred = table.cast(arrow_utils.infer_schema_nullable(table))
+        return inferred if held is None else keep_nullable_columns(inferred, held)
 
     def _build(self, table: pa.Table) -> SourceStreamResult:
         """Enrich ``table`` as this source's stream (source info, system tags)."""
@@ -201,7 +211,7 @@ class DBTableSource(RootSource):
                 source to read it.
         """
         with self._open_connector() as connector:
-            table = self._read_table(connector)
+            table = self._read_table(connector, held=self._table.schema)
         if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
                 f"Table {self._table_name!r} changed its columns: the source was "

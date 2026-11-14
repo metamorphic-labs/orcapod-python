@@ -179,3 +179,12 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
 - Declined: a held `node.run()` makes no summary; the warning is the report (docs say so).
 - #380's findings (operator lazy materialization cleanup: fixed in #388; load-only
   `add_records` spy: declined) answered on their threads.
+
+## CodeRabbit round 2 (incremental review of 5be53b0f; plan approved by the coordinator)
+
+- `reload.keep_nullable_columns`: where nullability is inferred (CSV without `schema=`, a
+  DB connector without column info), a column that lost its nulls is re-wrapped nullable
+  (never cast); a null added to a non-nullable column is still a failed check.
+- `DerivedSource` holding no rows moves when its origin's time moves.
+- ITL-1095 fragment: "reads no source rows to process them".
+- Declined: run_async checks off the event loop (follow-up), `run_sources` deque, test docstrings.

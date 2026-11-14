@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.reload import same_rows
+from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     SourceStreamResult,
@@ -114,6 +114,10 @@ class CSVSource(RootSource):
         if state == self._file_state:
             return False
         table = self._read_table()
+        if self._schema is None:
+            # Nullability is inferred from the rows: a column that lost its nulls is
+            # still the nullable column the source was built with.
+            table = keep_nullable_columns(table, self._table.schema)
         if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
                 f"CSV file {self._file_path!r} changed its columns: the source was "

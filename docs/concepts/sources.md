@@ -439,7 +439,7 @@ and neither does a source's own `run()` outside a job (`source.run()` does what
 | `CSVSource` | reads the file's modification time and size; when either changed, reads the file again and holds the new rows if they changed (in any order) |
 | `SQLiteTableSource`, `PostgreSQLTableSource`, `DBTableSource` | reads the whole table again and holds the new rows if they changed (in any order, so an unordered `SELECT` is not a change) |
 | `CachedSource` | checks the source it wraps; when that source's modified time moved since the cache last took in its rows (also when another source over it made the check), compares the rows' record hashes with the cache (a read; nothing is written) and moves only when the cache will gain rows (a row removed from the wrapped source stays cached) |
-| `DerivedSource` | over a source, checks it; reads the origin's rows again when the origin's modified time moved since this source read them (a source that took in new data, a job node that ran again); holds the new rows if they changed |
+| `DerivedSource` | over a source, checks it; reads the origin's rows again when the origin's modified time moved since this source read them (a source that took in new data, a job node that ran again); holds the new rows if they changed; one that holds no rows (over a job node that had not run) moves when its origin's time moves |
 | `SourceProxy` | checks the source bound to it; its modified time follows that source's, and binding or unbinding moves it |
 
 Rows read again are compared with the rows read before, as read from the table or file
@@ -455,7 +455,10 @@ store that records versions (Delta, SpiralDB), whose check reads only the versio
 A table or file whose columns changed (a CSV file's types are inferred again on each read,
 so a null in a column that had none is a change of type), a table that is gone or empty, or a
 SpiralDB table dropped and created again, fails the check: the source's schema and table are
-part of its identity, so build a new source to read it.
+part of its identity, so build a new source to read it. A column that loses its nulls keeps
+its nullable type (where nullability is inferred from the rows: a CSV file read without
+`schema=`, a database whose connector gives no column information), so it is not a
+change of columns.
 
 A check that raises does not fail the run. The run issues one `SourceCheckFailedWarning` per
 source, naming the source and the error; the source keeps its data and modified time; the
