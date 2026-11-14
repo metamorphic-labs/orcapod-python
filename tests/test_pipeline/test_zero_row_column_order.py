@@ -237,6 +237,26 @@ class TestJobNode:
         _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
         _assert_same_schema(job.nodes["op"].as_table(all_info=True), expected)
 
+    @pytest.mark.parametrize("groups", [WITH_ROWS, NO_ROWS], ids=["rows", "no_rows"])
+    def test_load_only_run(
+        self, step: str, pairs: int, orchestrator: str, groups: tuple[str, ...]
+    ) -> None:
+        """A load-only run (ITL-1095) gives the node the schema of a full run."""
+        expected = self._expected(step, pairs, orchestrator)
+        job = _job(step, pairs, groups)
+        _ = job.run(orchestrator=ORCHESTRATORS[orchestrator](), load_only=True)
+        assert job.nodes["op"].as_table(all_info=True).schema.equals(expected)
+
+    @pytest.mark.parametrize("groups", [WITH_ROWS, NO_ROWS], ids=["rows", "no_rows"])
+    def test_node_run_runs_its_upstreams(
+        self, step: str, pairs: int, orchestrator: str, groups: tuple[str, ...]
+    ) -> None:
+        """``node.run()`` on a job node, which runs the nodes it depends on first."""
+        expected = self._expected(step, pairs, orchestrator)
+        job = _job(step, pairs, groups)
+        _ = job.nodes["op"].run()
+        assert job.nodes["op"].as_table(all_info=True).schema.equals(expected)
+
 
 OPERATOR_STEPS = [step for step in STEPS if step != "function_pod"]
 
