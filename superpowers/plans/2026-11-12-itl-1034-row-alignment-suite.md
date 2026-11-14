@@ -189,3 +189,8 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   across the batch boundary. Side-effect previews must deliver nothing. One strict
   xfail, ITL-1091: a read of a side-effect job node after job.run() delivers every side
   effect again (6 -> 12 -> 18). 6527 pass, 1 xfailed.
+* Nov 14 (CodeRabbit on 647c4d45): origins are recovered source by source, and a
+  recovered origin's function tokens are checked. Merged main through b746c630 (#372,
+  #374, #367, #369, #377). ITL-1091 is fixed by #377, so the strict xfail is gone. A
+  side-effect job node's preview after its run now shows the rows the run passed on
+  (each aligned under every config) and still delivers nothing. 6530 pass, no marks.

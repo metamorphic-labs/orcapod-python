@@ -9,7 +9,8 @@ forced completion order on the async ones, both stores and every tie scenario.
 
 A job's ``SideEffectPod`` node builds its tables with its own tag/data concatenation
 (``SideEffectNode.as_table``), not a stream's: its iterated rows and its tables under every
-configuration must hold every input row once, each aligned, and its preview no row.
+configuration must hold every input row once, each aligned. After the run its preview
+shows the rows the run passed on, each aligned, and no read delivers again (ITL-1091).
 """
 
 from __future__ import annotations
@@ -105,11 +106,12 @@ def test_run_summary_and_table_belong_to_the_rows_that_ran(
 def test_a_side_effect_node_gives_every_row_once_aligned(
     scenario: str, orchestrator: str
 ) -> None:
-    """A job's side-effect node: rows and every configured table aligned; no preview.
+    """A job's side-effect node: rows, tables and previews aligned; delivered once.
 
-    The run delivers each input row once. The node's own iteration and its tables under
-    every configuration hold every row of A exactly once, each aligned; its preview has
-    no row under any configuration, by design (showing it must never deliver).
+    The run delivers each input row once. The node's own iteration, its tables and its
+    previews under every configuration hold every row of A exactly once, each aligned:
+    after the run the node holds the rows the run passed on (ITL-1091), and showing it
+    never delivers.
     """
     sources = make_sources(scenario)
     delivered: list[int] = []
@@ -151,22 +153,21 @@ def test_a_side_effect_node_gives_every_row_once_aligned(
             )
             before = len(delivered)
             preview = node.head(100, **config).as_table()
-            assert preview.num_rows == 0, f"the preview has {preview.num_rows} rows"
-            # Showing the node must never deliver, not only show no row.
+            assert_requested_columns(preview, config, layout)
+            assert_rows_aligned(
+                preview,
+                layout,
+                sources.oracle,
+                node.data_context,
+                expected_rows=expected,
+            )
+            # Showing the node must never deliver.
             assert len(delivered) == before, "the preview delivered side effects"
         except AssertionError as exc:
             failures.append(f"[{name}] {exc}")
     assert not failures, "\n".join(failures)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-1091: reading a side-effect job node after job.run() delivers every side "
-        "effect again (6 rows: 6 deliveries after run, 12 after iter_data, 18 after "
-        "as_table); the docs say a job node's as_table only reads"
-    ),
-)
 def test_a_read_of_a_side_effect_node_after_its_run_delivers_nothing() -> None:
     """After ``job.run()``, iterating or tabling the side-effect node delivers nothing.
 
