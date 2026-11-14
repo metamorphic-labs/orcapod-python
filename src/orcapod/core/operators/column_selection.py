@@ -37,11 +37,13 @@ def _canonical_columns(columns: str | Collection[str]) -> tuple[str, ...]:
 
 
 def require_a_data_column(remaining: Collection[str]) -> None:
-    """Refuse a selection whose result would have no data column.
+    """Refuse a column operation whose result would have no data column.
 
     A stream needs at least one data column (``ArrowTableStream`` refuses a table
     without one), so the sync path checks this when the operator is applied and
-    the async path on the first row, with this one error. Meta (``__``) columns
+    the async path on the first row, with this one error. Every column operator
+    (``SelectDataColumns``, ``DropDataColumns``, ``SelectColumns``,
+    ``DropColumns``, ``MapData``) uses it. Meta (``__``) columns
     are not data: no operator carries them (ITL-1080).
 
     Args:
@@ -52,8 +54,7 @@ def require_a_data_column(remaining: Collection[str]) -> None:
     """
     if not [c for c in remaining if not c.startswith(constants.META_PREFIX)]:
         raise InputValidationError(
-            "The result would have no data column; a stream needs at least one. "
-            "Keep at least one data column."
+            "no data column would remain: a stream needs at least one data column"
         )
 
 
@@ -583,25 +584,6 @@ class DropDataColumns(UnaryOperator):
         )
 
 
-def _require_a_data_column(remaining_data_columns: Collection[str]) -> None:
-    """Raise unless at least one data column remains.
-
-    A stream needs at least one data column (``ArrowTableStream`` refuses a table
-    without one), so a column operator whose result would have none is refused
-    when it is called, before any row is built.
-
-    Args:
-        remaining_data_columns: The data columns the result would keep.
-
-    Raises:
-        InputValidationError: When ``remaining_data_columns`` is empty.
-    """
-    if not remaining_data_columns:
-        raise InputValidationError(
-            "no data column would remain: a stream needs at least one data column"
-        )
-
-
 def _is_meta(name: str) -> bool:
     """Whether ``name`` is a meta column or a raw stream's source-info column for one."""
     return name.startswith(
@@ -688,7 +670,7 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
             )
         _, data_removed = self._removals(tag_columns, data_columns)
         try:
-            _require_a_data_column([c for c in data_columns if c not in data_removed])
+            require_a_data_column([c for c in data_columns if c not in data_removed])
         except InputValidationError as error:
             raise InputValidationError(
                 f"{self.__class__.__name__}({list(self.columns)}) would leave no data "
@@ -780,6 +762,7 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
                 pipeline hash.
         """
         try:
+            output = WithoutMetaWriter(output)
             removals: tuple[list[str], list[str]] | None = None
             async for tag, data in inputs[0]:
                 if removals is None:
@@ -791,8 +774,6 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
                     tag = tag.drop(*tags_removed)
                 if data_removed:
                     data = data.drop(*data_removed)
-                if data.meta_columns:
-                    data = data.drop_meta_columns(*data.meta_columns)
                 await output.send((tag, data))
         finally:
             await output.close()
