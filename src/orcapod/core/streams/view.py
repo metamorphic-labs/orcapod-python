@@ -83,6 +83,12 @@ LOADED_ONLY_OPERATOR_NOTE = (
     "loaded only: the output of a load-only run, whose inputs may lack rows"
 )
 
+# A side-effect node whose rows came from a load-only run: it passed them on and delivered
+# nothing (ITL-1095).
+LOADED_ONLY_SIDE_EFFECT_NOTE = (
+    "loaded only: a load-only run passed these rows on and delivered nothing"
+)
+
 _DEFAULT_NOTES = {
     ViewStatus.NOT_COMPUTED: NOT_COMPUTED_NOTE,
     ViewStatus.NOTHING_STORED: NOTHING_STORED_NOTE,

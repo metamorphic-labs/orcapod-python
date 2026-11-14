@@ -272,7 +272,10 @@ class RunSummary:
 def _counts(node: NodeRunSummary, load_only: bool) -> str:
     """A node's counts as text: what a full run did, or what a load-only run loaded."""
     if node.held and not (node.computed or node.reused or node.failed):
-        return "held from the previous run"
+        text = "held from the previous run"
+        if node.not_stored:
+            text += f" ({node.not_stored} inputs without a stored result)"
+        return text
     if not load_only:
         return (
             f"{node.computed} computed, {node.reused} from store, {node.failed} failed"
@@ -477,9 +480,18 @@ def run_node_summaries(
         )
         label: str = getattr(node, "label")  # every graph node is labelled
         if held_rows is not None:
+            # A held node keeps what its run skipped: a load-only run's missing
+            # inputs are still missing.
             summaries.append(
                 NodeRunSummary(
-                    label, 0, 0, 0, None, inputs_incomplete=labels, held=held_rows
+                    label,
+                    0,
+                    0,
+                    0,
+                    None,
+                    not_stored=getattr(node, "last_run_not_stored", 0),
+                    inputs_incomplete=labels,
+                    held=held_rows,
                 )
             )
             continue

@@ -65,7 +65,11 @@ from orcapod.contexts.stored import (
     report_rows_of_other_data_contexts,
     report_unexpected_row_count,
 )
-from orcapod.utils.store_errors import commit_best_effort, keep_store_error
+from orcapod.utils.store_errors import (
+    commit_best_effort,
+    keep_store_error,
+    store_error_of,
+)
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
     DataFunctionExecutorProtocol,
@@ -1117,6 +1121,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
     _run_load_only: bool = False
     _run_not_stored: int = 0
+    # Rows of the last completed run whose function raised (error_policy "continue"):
+    # such a run is never current, so the next run retries them (ITL-1095).
+    _run_failed: int = 0
 
     def __init__(
         self,
@@ -1583,6 +1590,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._run_entry_counts = None
         self._run_load_only = False
         self._run_not_stored = 0
+        self._run_failed = 0
         # No content established: the node, and every node downstream, is stale.
         self._set_modified_time(None)
 
@@ -1610,7 +1618,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 yield tag, data
 
     def _set_run_rows(
-        self, entry_ids: list[bytes], *, load_only: bool = False, not_stored: int = 0
+        self,
+        entry_ids: list[bytes],
+        *,
+        load_only: bool = False,
+        not_stored: int = 0,
+        failed: int = 0,
     ) -> None:
         """Make the inputs of a completed run, by base entry id, the rows this node holds.
 
@@ -1618,17 +1631,26 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             entry_ids: The base entry ids of the run's inputs whose rows the node holds.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
+            failed: How many rows of the run failed (error policy ``"continue"``).
         """
         self._run_entry_counts = Counter(entry_ids)
         self._run_load_only = load_only
         self._run_not_stored = not_stored
+        self._run_failed = failed
         self._cached_output_table = None
         self._cached_content_hash_column = None
 
     def _holds_run(self, *, load_only: bool) -> bool:
-        """Whether the node holds a completed run; a load-only one only for ``load_only``."""
-        return self._run_entry_counts is not None and (
-            load_only or not self._run_load_only
+        """Whether the node holds a completed run that a run need not redo.
+
+        A load-only run's rows are good only for another load-only run. A run that left
+        failed rows is never good: the next run retries them, reading the rest from the
+        store (ITL-1095).
+        """
+        return (
+            self._run_entry_counts is not None
+            and self._run_failed == 0
+            and (load_only or not self._run_load_only)
         )
 
     @property
@@ -2215,6 +2237,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # Base entry ids of the inputs that gave a row (a cache hit or a
             # successful computation), one per input: the node's rows afterwards.
             emitted_entry_ids: list[bytes] = []
+            failed_rows = 0
             for tag, data, base_entry_id in upstream_entries:
                 ctx_obs.on_data_start(node_label, tag, data)
 
@@ -2268,6 +2291,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     if error_policy == "fail_fast":
                         ctx_obs.on_node_end(node_label, node_hash)
                         raise
+                    failed_rows += 1
                     continue
 
                 ctx_obs.on_data_end(node_label, tag, data, result, cached=False)
@@ -2282,7 +2306,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 self._commit_at_node_end, ctx_obs, node_label, node_hash
             )
             # The node's rows are those of this run's inputs, whatever else it caches.
-            self._set_run_rows(emitted_entry_ids)
+            self._set_run_rows(emitted_entry_ids, failed=failed_rows)
             ctx_obs.on_node_end(node_label, node_hash)
         except Exception as run_error:
             self._commit_after_failure(run_error)
@@ -3361,14 +3385,27 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 self._cached_output_table = None
                 self._cached_content_hash_column = None
 
-            for tag, data in self._cached_output_datas.values():
-                if data is not None:
+            sent: list[bytes] = []
+            for entry_id, (tag, data) in list(self._cached_output_datas.items()):
+                if data is not None and not isinstance(data, EmptyData):
                     ctx_obs.on_data_start(node_label, tag, data)
                     ctx_obs.on_data_end(node_label, tag, data, data, cached=True)
                     await output.send((tag, data))
+                    sent.append(entry_id)
+            # The node holds the rows it sent: a completed load of what is stored
+            # (ITL-1095), stamped before the output closes (ITL-1042).
+            self._set_run_rows(sent, load_only=True)
+            self._update_modified_time()
             ctx_obs.on_node_end(node_label, node_hash)
+        except BaseException:
+            self.clear_cache()
+            raise
         finally:
-            await output.close()
+            try:
+                await output.close()
+            except BaseException:
+                self.clear_cache()
+                raise
 
     # ------------------------------------------------------------------
     # Head
@@ -3632,6 +3669,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
     ) -> None:
@@ -3654,12 +3692,20 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             input_channel: Single readable channel of (tag, data) pairs.
             output: Writable channel for output (tag, data) pairs.
             observer: Optional execution observer for hooks.
+            error_policy: ``"continue"`` skips rows whose function raised;
+                ``"fail_fast"`` raises the exception of the first row whose function
+                raised, as ``execute`` does, and cancels the rows still in flight.
+                Rows run concurrently, so that is the first row to fail, not
+                necessarily the first in input order.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
             load_only: As for ``execute``: fill the node with the stored results of
                 its input rows and compute nothing (ITL-1095).
 
         Raises:
+            Exception: Under ``"fail_fast"``, the exception of the first row whose
+                function raised, inside the ``ExceptionGroup`` of the node's task
+                group. *output* is closed first.
             RuntimeError: If the node was loaded by ``PipelineJob.load``: without a
                 store it has nothing to serve, and it has no function pod to
                 compute with. *output* is closed first.
@@ -3709,11 +3755,14 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         obs = observer if observer is not None else NoOpObserver()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
+        # Whether the node has started for the observer and not yet ended.
+        node_open = False
         try:
             tag_schema = self._input_stream.output_schema(
                 columns={"system_tags": True}
             )[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
+            node_open = True
 
             if self._cached_function_pod is not None:
                 # ----------------------------------------------------------
@@ -3755,6 +3804,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 # Base entry ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
+                # Rows whose function raised (error policy "continue").
+                failed_rows: list[int] = [0]
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
@@ -3913,6 +3964,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                             # The pod re-raises a failed store read or write after
                             # this call; name the node it belongs to.
                             error.add_context(node_label=node_label)
+                        else:
+                            failed_rows[0] += 1
                         ctx_obs.on_data_crash(node_label, clean, data, error)
                         # Clean up the dangling input_store entry so it doesn't
                         # accumulate memory during long-running calls with errors.
@@ -3935,6 +3988,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                             [compute_channel.reader],
                             result_channel.writer,
                             observer=_NodeLabelObserver(),
+                            error_policy=error_policy,
                             run_id=run_id,
                         )
                     )
@@ -3943,7 +3997,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 self._commit_at_node_end()
                 # The node's rows are those of this run's inputs, as the sync path's:
                 # the cache also holds every stored result loaded above.
-                self._set_run_rows(run_entry_ids)
+                self._set_run_rows(run_entry_ids, failed=failed_rows[0])
             else:
                 # No-DB path: delegate dispatch entirely to the pod. The pod closes
                 # the writer it is given; that close waits for the finally below, so
@@ -3952,19 +4006,40 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     [input_channel],
                     _CloseDeferredWriter(output),
                     observer=ctx_obs,
+                    error_policy=error_policy,
                     run_id=run_id,
                 )
 
+            # Ended for the observer here, also when the call raises: not again below.
+            node_open = False
             ctx_obs.on_node_end(node_label, node_hash)
             # The run is complete: stamp the node as the sync execute() does, before
             # the finally closes the output, so every downstream node, which stamps
             # after it has seen that close, is newer than this one (ITL-1042).
             self._update_modified_time()
-        except Exception as run_error:
-            self._commit_after_failure(run_error)
-            # A run that raised defines no rows: the node reads as one with no run,
-            # as on the sync path.
+        except asyncio.CancelledError as cancelled:
+            # Another node's failure cancelled this one: commit what it wrote, as a
+            # failing node does. The job's flush commits neither a node's ephemeral
+            # store nor its result table ahead of its pipeline records.
+            self._commit_after_failure(cancelled)
+            # A cancelled run defines no rows: the node reads as one with no run.
             self.clear_cache()
+            raise
+        except Exception as run_error:
+            try:
+                if node_open:
+                    # The node ends for the observer before it raises, as in execute;
+                    # a failing observer must not replace a store error on its way out.
+                    with keep_store_error(
+                        store_error_of(run_error), "Observer on_node_end"
+                    ):
+                        ctx_obs.on_node_end(node_label, node_hash)
+            finally:
+                # Also when the observer raised instead, as execute commits then.
+                self._commit_after_failure(run_error)
+                # A run that raised defines no rows: the node reads as one with no
+                # run, as on the sync path.
+                self.clear_cache()
             raise
         except BaseException:
             # Cancelled part-way: no rows either.

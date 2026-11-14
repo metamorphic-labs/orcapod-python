@@ -11,7 +11,7 @@ and delivers no side effect.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 from unittest import mock
 
 import pytest
@@ -52,11 +52,13 @@ ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchest
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    """Start every test with no recorded calls or deliveries."""
     CALLS.clear()
     DELIVERED.clear()
 
 
 def _source(data: list[dict[str, int]]) -> DictSource:
+    """An in-memory source of ``data`` with tags ``g`` and ``k``."""
     return DictSource(data, tag_columns=["g", "k"], source_id="s")
 
 
@@ -75,10 +77,12 @@ def _build(data: list[dict[str, int]], db: Any) -> PipelineJob:
 
 
 def _run(job: PipelineJob, orchestrator: str, **kwargs: Any) -> Any:
+    """Run ``job`` on the named orchestrator."""
     return job.run(orchestrator=ORCHESTRATORS[orchestrator](), **kwargs)
 
 
 def _totals(job: PipelineJob) -> list[tuple[int, int]]:
+    """The ``(g, total)`` rows of ``summed``, sorted."""
     return sorted(
         (r["g"], r["total"]) for r in job.nodes["summed"].as_table().to_pylist()
     )
@@ -86,6 +90,7 @@ def _totals(job: PipelineJob) -> list[tuple[int, int]]:
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_a_second_run_of_an_unchanged_job_does_nothing(orchestrator: str) -> None:
+    """No computation, store access, source read or delivery; every node held."""
     job = _build(ROWS, InMemoryArrowDatabase())
     _run(job, orchestrator)
     assert len(DELIVERED) == 6
@@ -134,6 +139,7 @@ def test_a_cleared_node_runs_again_with_the_nodes_below_it(orchestrator: str) ->
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_clearing_a_side_effect_node_delivers_it_again(orchestrator: str) -> None:
+    """``clear_cache()`` on a side-effect node makes the next run deliver again."""
     job = _build(ROWS, InMemoryArrowDatabase())
     _run(job, orchestrator)
     DELIVERED.clear()
@@ -145,6 +151,7 @@ def test_clearing_a_side_effect_node_delivers_it_again(orchestrator: str) -> Non
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_a_rebound_source_runs_every_node_below_it(orchestrator: str) -> None:
+    """Binding a new source object makes every node below it run; new inputs compute."""
     job = _build(ROWS[:3], InMemoryArrowDatabase())
     _run(job, orchestrator)
     CALLS.clear()
@@ -158,6 +165,7 @@ def test_a_rebound_source_runs_every_node_below_it(orchestrator: str) -> None:
 def test_a_full_run_after_a_load_only_run_runs_the_load_only_nodes(
     orchestrator: str,
 ) -> None:
+    """Load-only rows are never current for a full run: it computes what was skipped."""
     db = InMemoryArrowDatabase()
     _run(_build(ROWS[:3], db), orchestrator)
     CALLS.clear()
@@ -173,6 +181,7 @@ def test_a_full_run_after_a_load_only_run_runs_the_load_only_nodes(
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_a_load_only_run_after_a_full_run_does_nothing(orchestrator: str) -> None:
+    """A full run's rows are current for a load-only run too."""
     job = _build(ROWS, InMemoryArrowDatabase())
     _run(job, orchestrator)
     CALLS.clear()
@@ -182,6 +191,7 @@ def test_a_load_only_run_after_a_full_run_does_nothing(orchestrator: str) -> Non
 
 
 def test_run_async_follows_the_rule() -> None:
+    """``run_async`` holds current nodes as ``run`` does."""
     job = _build(ROWS, InMemoryArrowDatabase())
     asyncio.run(job.run_async())
     CALLS.clear()
@@ -193,11 +203,13 @@ def test_run_async_follows_the_rule() -> None:
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_a_failed_commit_clears_only_the_nodes_that_ran(orchestrator: str) -> None:
+    """A failed end-of-run commit clears the nodes that ran; held nodes keep rows."""
     job = _build(ROWS, InMemoryArrowDatabase())
     _run(job, orchestrator)
     job.nodes["summed"].clear_cache()
 
     def fail(self: Any) -> None:
+        """A flush that always fails."""
         raise OSError("disk full")
 
     with (
@@ -208,3 +220,21 @@ def test_a_failed_commit_clears_only_the_nodes_that_ran(orchestrator: str) -> No
     assert job.nodes["summed"].as_table().num_rows == 0
     assert job.nodes["rowwise"].as_table().num_rows == 6
     assert job.nodes["grouped"].as_table().num_rows == 2
+
+
+@pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_partly_held_run_under_each_error_policy(
+    orchestrator: str, error_policy: Literal["continue", "fail_fast"]
+) -> None:
+    """Held nodes feed the nodes that run, on both orchestrators and error policies."""
+    job = _build(ROWS, InMemoryArrowDatabase())
+    kind = ORCHESTRATORS[orchestrator]
+    job.run(orchestrator=kind(error_policy=error_policy))
+    CALLS.clear()
+    job.nodes["summed"].clear_cache()
+    summary = job.run(orchestrator=kind(error_policy=error_policy))
+    assert CALLS == []
+    assert summary.nodes["rowwise"].held == 6
+    assert summary.nodes["summed"].reused == 2
+    assert _totals(job) == [(0, 63), (1, 93)]

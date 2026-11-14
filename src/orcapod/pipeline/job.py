@@ -74,6 +74,9 @@ class _PreparedRun:
         pipeline_uri: ``<job name>@<snapshot hash>``, passed to the observer.
         pipeline_db: The job's view of the store.
         result_db: The job's function-result view of the store.
+        plan: What the run runs and holds (``plan_run``, ITL-1095).
+        unchecked_sources: The sources the start-of-run check could not check
+            (``check_sources``, ITL-1102).
     """
 
     exec_dag: OrcaDAG[Any]
@@ -81,6 +84,8 @@ class _PreparedRun:
     pipeline_uri: str
     pipeline_db: "ArrowDatabaseProtocol"
     result_db: "ArrowDatabaseProtocol"
+    plan: "RunPlan"
+    unchecked_sources: tuple[str, ...]
 
 
 def _with_counter(
@@ -943,10 +948,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
         prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # Every source first takes in any new data, moving its modified time (ITL-1102).
-        unchecked = check_sources(prepared.exec_dag.nodes())
         # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = plan_run(prepared.exec_dag, load_only=load_only)
+        plan = prepared.plan
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
@@ -960,7 +963,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 held_rows=plan.held_rows,
             )
         summary = self._finish_run(
-            prepared, counter, plan, load_only=load_only, unchecked_sources=unchecked
+            prepared,
+            counter,
+            plan,
+            load_only=load_only,
+            unchecked_sources=prepared.unchecked_sources,
         )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
@@ -1013,10 +1020,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "it."
             )
         prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # Every source first takes in any new data, moving its modified time (ITL-1102).
-        unchecked = check_sources(prepared.exec_dag.nodes())
         # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = plan_run(prepared.exec_dag, load_only=load_only)
+        plan = prepared.plan
         counter = RunCountingObserver()
         with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = await orchestrator.run_async(
@@ -1029,7 +1034,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 held_rows=plan.held_rows,
             )
         summary = self._finish_run(
-            prepared, counter, plan, load_only=load_only, unchecked_sources=unchecked
+            prepared,
+            counter,
+            plan,
+            load_only=load_only,
+            unchecked_sources=prepared.unchecked_sources,
         )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
@@ -1136,18 +1145,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
 
         # A loaded job whose graph lost a node (PipelineJob.load does not restore
-        # side-effect nodes yet, ITL-1094) cannot feed the node below it.
+        # side-effect nodes yet, ITL-1094) cannot feed the nodes below it: every saved
+        # input of a node must be a restored node.
         if self._loaded:
-            for node in self._persistent_node_map.values():
-                inputs = getattr(node, "upstreams", ())
-                if isinstance(node, (FunctionJobNode, OperatorJobNode)) and any(
-                    upstream is None for upstream in inputs
-                ):
+            for node_hash, node in self._persistent_node_map.items():
+                if not isinstance(node, (FunctionJobNode, OperatorJobNode)):
+                    continue
+                if node_hash not in self._hash_graph:
+                    continue
+                missing = [
+                    upstream
+                    for upstream in self._hash_graph.predecessors(node_hash)
+                    if upstream not in self._persistent_node_map
+                ]
+                if missing:
                     raise RuntimeError(
-                        f"Node {node.label!r} of the loaded job has lost an input node: "
-                        "PipelineJob.load does not restore side-effect nodes yet "
-                        "(ITL-1094), so the nodes below one cannot run, not even "
-                        "load-only. Read their stored results with node.as_source()."
+                        f"Node {node.label!r} of the loaded job has lost "
+                        f"{len(missing)} of its input nodes: PipelineJob.load does not "
+                        "restore side-effect nodes yet (ITL-1094), so the nodes below "
+                        "one cannot run, not even load-only. Read their stored results "
+                        "with node.as_source()."
                     )
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
@@ -1208,9 +1225,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # this run writes. Those rows would otherwise count towards a table's
         # batch_size, which could then be reached mid-run and commit this run's pipeline
         # records ahead of their results (ITL-919).
-        # A load-only run writes nothing, so it commits nothing, not even pending writes
-        # of earlier operations (ITL-1095).
-        if table_committing is not None and not load_only:
+        # Every source first takes in any new data, moving its modified time, before
+        # the state rule judges any node (ITL-1102).
+        unchecked = check_sources(exec_dag.nodes())
+        # The state rule (ITL-1095): a node that holds a current run is not run again.
+        plan = plan_run(exec_dag, load_only=load_only)
+        # A load-only run writes nothing, and a run that runs no node touches no store,
+        # so neither commits anything, not even pending writes of earlier operations.
+        if table_committing is not None and not load_only and plan.to_run:
             try:
                 pipeline_db.flush()
             except StoreError as exc:
@@ -1227,6 +1249,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             pipeline_uri=pipeline_uri,
             pipeline_db=pipeline_db,
             result_db=result_db,
+            plan=plan,
+            unchecked_sources=unchecked,
         )
 
     @contextlib.contextmanager
@@ -1259,10 +1283,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                             node._batched_commits(commit_every_rows)  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' commit cadence
                         )
                 yield
-        except Exception as run_error:
+        except BaseException as run_error:
             # Commit the writes that did succeed before the failure, so their rows
-            # do not look dropped, then report the failure itself.
-            if not load_only:
+            # do not look dropped, then report the failure itself. A cancelled or
+            # interrupted run commits nothing more, but clears its nodes too.
+            if isinstance(run_error, Exception) and not load_only:
                 flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
             clear_run_rows(plan.to_run)
             raise
@@ -1305,8 +1330,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             + "have been stored."
         )
         try:
-            if not load_only:
-                # A load-only run writes nothing and commits nothing (ITL-1095).
+            if not load_only and plan.to_run:
+                # A load-only run writes nothing and commits nothing, and a run that
+                # ran no node touches no store (ITL-1095).
                 pipeline_db.flush()
                 result_db.flush()
         except StoreReadError as exc:
