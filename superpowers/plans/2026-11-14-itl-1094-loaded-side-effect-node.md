@@ -24,6 +24,15 @@ untouched: only `_rows_data_context()` and the `producer` annotation.
   case now drives the guard with an unknown node type, the Join case now checks that a
   load-only run reaches the operator and delivers nothing.
 
+- #380 round 3 (8314c934) and its CI fix (7de3512b) merged locally. The guard now sits after
+  the exclusion walk and skips excluded nodes; kept, wording without ITL-1094. Round 3's
+  test of a broken unbound branch now drops the node by an unknown `node_type`.
+- `tests/test_core/streams/test_run.py` (#380's): a job node's `run(*, load_only=False)`
+  is decided by subclass, not class name, so `LoadedSideEffectJobNode` is covered
+  (coordinator-approved; the red CI on dbf9c310).
+- Stacked PR (coordinator, developer away): ready once CI is green, before #380 merges;
+  act only on review findings in this PR's own files; forward findings in #380's code.
+
 ### Planned before the merge
 
 - `LoadedSideEffectJobNode.execute` / `async_execute`: take `load_only`; with it, pass rows
