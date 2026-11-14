@@ -571,12 +571,15 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     """Base of the operators that act on named columns, tag or data alike (ITL-1084).
 
     A subclass says only which of a group's columns it removes (``_removed``);
-    everything else is shared. For names of one group the rows equal those of the
-    tag-only or data-only operator: system tags pass through, the source-info
-    column of a removed data column goes with it, and the stream's column order is
-    kept. Unlike those operators, no meta (``__``) column of the input is carried,
-    on either path, as ``Join`` does; and a result without a data column is refused
-    when the operator is called, on both paths.
+    everything else is shared. ``DropColumns`` of one group's names gives the rows
+    of ``DropTagColumns`` or ``DropDataColumns``; ``SelectColumns`` gives those of
+    ``SelectTagColumns`` or ``SelectDataColumns`` when its names also include every
+    column of the other group. System tags pass through, the source-info column of
+    a removed data column goes with it, and the stream's column order is kept.
+    Unlike those operators, no data meta (``__``) column of the input is carried,
+    on either path, as ``Join`` does (a ``__``-named tag is a tag and is kept); and a
+    result without a data column is refused when the operator is called, on both
+    paths.
     """
 
     _verb: ClassVar[str] = ""
@@ -682,7 +685,12 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
         }
         return ArrowTableStream(
             table.drop_columns(
-                [c for c in table.column_names if c in removed or _is_meta(c)]
+                [
+                    c
+                    for c in table.column_names
+                    # A ``__``-named tag is a user tag, not meta: only data meta goes.
+                    if c in removed or (_is_meta(c) and c not in tag_columns)
+                ]
             ),
             tag_columns=[c for c in tag_columns if c not in tags_removed],
             data_context=stream.data_context_key,

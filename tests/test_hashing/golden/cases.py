@@ -1277,24 +1277,33 @@ def pipeline_column_selection() -> dict[str, Any]:
 
 @case("pipeline", "tag_and_data_columns")
 def pipeline_tag_and_data_columns() -> dict[str, Any]:
-    """``DropColumns`` and ``SelectColumns`` across tag and data columns (ITL-1084)."""
-    from orcapod.operators import DropColumns, SelectColumns
+    """``DropColumns`` and ``SelectColumns`` across tag and data columns (ITL-1084).
 
-    out = _prefixed(
-        "drop", stream_summary(DropColumns(columns=["subject", "age"])(_subjects()))
+    ``stream_summary`` keys rows by user tags, so every stream pinned here keeps a
+    tag whose values are unique per row.
+    """
+    from orcapod.operators import DropColumns, SelectColumns
+    from orcapod.sources import DictSource
+
+    cohort_subjects = DictSource(
+        data=[
+            {"cohort": "a", "subject": "s1", "age": 3, "weight": 20.5},
+            {"cohort": "a", "subject": "s2", "age": 4, "weight": 22.25},
+            {"cohort": "b", "subject": "s3", "age": 5, "weight": 19.0},
+        ],
+        tag_columns=["cohort", "subject"],
+        source_id="cohort_subjects",
     )
-    out.update(
-        _prefixed(
-            "select",
-            stream_summary(SelectColumns(columns=["cohort", "weight"])(_grouped())),
-        )
-    )
-    out.update(
-        _prefixed(
-            "select_tag_and_data",
-            stream_summary(SelectColumns(columns=["subject", "age"])(_subjects())),
-        )
-    )
+    streams = {
+        "drop": DropColumns(columns=["cohort", "age"])(cohort_subjects),
+        "select": SelectColumns(columns=["subject", "weight"])(cohort_subjects),
+        "select_tag_and_data": SelectColumns(columns=["subject", "age"])(_subjects()),
+    }
+    out: dict[str, Any] = {}
+    for name, stream in streams.items():
+        row_keys = [_row_key(tag.as_dict()) for tag, _ in stream.iter_data()]
+        assert len(set(row_keys)) == len(row_keys) == 3, (name, row_keys)
+        out.update(_prefixed(name, stream_summary(stream)))
     return out
 
 
