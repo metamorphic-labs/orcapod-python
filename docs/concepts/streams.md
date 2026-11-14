@@ -189,11 +189,11 @@ ten, and its header gives the count.
 
 A view holds the default column groups only. For system tags, source info, the data context
 or content hashes, ask the stream after `run()`. A function pod's or operator's output stream,
-a job node, an in-memory source and a `CachedSource` keep the rows `run()` gave: their
-`as_table(columns=...)` and `head(columns=...)` read those rows and compute nothing. Other
-streams do their `as_table()` work again: a side-effect stream delivers its side effects again
-(its `head()` shows no rows), a polling source polls again and a `SpiralDBTableSource` reads
-its whole table again. A view never asks its stream for more columns, because for those
+a job node (a job's side-effect node included), an in-memory source and a `CachedSource` keep
+the rows `run()` gave: their `as_table(columns=...)` and `head(columns=...)` read those rows,
+compute nothing and deliver no side effect. Other streams do their `as_table()` work again: a
+side-effect stream outside a job delivers its side effects again (its `head()` shows no rows),
+a polling source polls again and a `SpiralDBTableSource` reads its whole table again. A view never asks its stream for more columns, because for those
 streams asking again is not a read.
 
 What `run()` does on each kind of object:
@@ -206,7 +206,8 @@ What `run()` does on each kind of object:
 | A `CachedSource` | reads its cache and writes the wrapped source's new rows to it |
 | A function pod's or operator's output stream | computes what is not computed yet |
 | A job node | runs the node as a job run would, after every job node it depends on that holds no current run (each once), commits, and returns the view of that run's rows; a node that holds a current run (completed in this process and not stale) runs nothing. `run(load_only=True)` loads stored results only. `as_table()` of a job node only reads |
-| A side-effect stream | delivers its side effects for every row, on every call, and returns the rows it passed on; `head()` still shows none |
+| A job's side-effect node | runs as a job node does (row above): delivers what its invocation log does not record (every row again without `track_completion`), then returns the rows it passed on; a node that holds a current run delivers nothing (`clear_cache()` it first to deliver again); every read only reads |
+| A side-effect stream outside a job | delivers its side effects for every row, on every call, and returns the rows it passed on; `head()` still shows none |
 | A pipeline blueprint node, an unbound input slot | raises, as `as_table()` does |
 
 What each kind of object shows:
@@ -217,7 +218,8 @@ What each kind of object shows:
 | An operator's or function pod's output stream | the rows already computed, or none with status `not_computed` |
 | A job node | the rows of its current run (after `job.run()` or `node.run()`); before a run in this process, or once stale, none (`not_computed`), pointing to `run()` and to `node.as_source()`, the view of every stored result |
 | A pipeline blueprint node, an unbound input slot | none (`unavailable`) |
-| A side-effect stream | none: showing it never delivers its side effects |
+| A job's side-effect node | the rows its last run passed on, else none (`not_computed`); it never delivers, and neither do its `as_table()`, `iter_data()` and other reads |
+| A side-effect stream outside a job | none: showing it never delivers its side effects |
 
 `head(n, columns=..., all_info=...)` takes the same column configuration as `as_table`,
 sorting included, and applies it to the rows it has before taking the first `n`. The default
