@@ -99,7 +99,7 @@ PIPELINES: dict[str, Callable[[StreamProtocol], object]] = {
 
 def _job(pipeline: str, groups: tuple[str, ...] = WITH_ROWS) -> PipelineJob:
     """A job holding ``pipeline`` over a source with the given groups; not run."""
-    job = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
     with job:
         _ = PIPELINES[pipeline](_source(groups))
     return job
@@ -185,7 +185,7 @@ class _RowsMustNotBeRead(ArrowTableSource):
 def test_not_yet_run_table_reads_no_source_row() -> None:
     """The node types its zero-row table from the source's schema, not its rows."""
     expected = _schema_after_run("select_after_filter", "sync")
-    job = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
     with job:
         _ = PIPELINES["select_after_filter"](
             _RowsMustNotBeRead(
@@ -250,7 +250,7 @@ def test_function_pod_stream_zero_rows_has_the_computed_types(
 
 def _function_job(groups: tuple[str, ...] = WITH_ROWS) -> PipelineJob:
     """A job: ``describe_x`` over the ``g1`` rows, then an operator labelled ``op``."""
-    job = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
+    job = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
     with job:
         _ = SelectDataColumns(["n", "where", "items"])(
             describe_x.pod(_g1(_source(groups)), label="fn"), label="op"
@@ -336,7 +336,7 @@ def test_operator_node_over_each_source_kind_types_its_zero_row_table(
 
     def job() -> PipelineJob:
         """A job selecting ``x`` from a fresh source of this kind."""
-        new = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
+        new = PipelineJob(name="itl912", database=InMemoryArrowDatabase())
         with new:
             _ = SelectDataColumns(["x"])(make_source(tmp_path), label="op")
         return new
