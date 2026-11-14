@@ -159,12 +159,18 @@ Reproduction scripts: `superpowers/scripts/itl_1121/c1..c6_*.py` (committed).
 
 #380 merged as e4b4319c (it had merged #375 ITL-912 typed zero-row tables and #387 ITL-1111
 schema memo). Steps:
-- [ ] `git merge origin/main` (no rebase); resolve function_node.py, operator_node.py,
+- [x] `git merge origin/main` (no rebase); resolve function_node.py, operator_node.py,
   side_effects.py, node_run.py, job.py, CLAUDE.md, .zed/rules keeping every #388 fix and main's
   #375 / #387 behaviour.
-- [ ] Doc fix: CLAUDE.md / .zed/rules "A failed end-of-run commit clears every node of the run"
+- [x] Doc fix: CLAUDE.md / .zed/rules "A failed end-of-run commit clears every node of the run"
   -> only the nodes that ran (`run_with_dependencies` -> `commit_run(stores, plan.to_run)`).
-- [ ] Re-run every script in superpowers/scripts/itl_1121/: each shows the fixed behaviour.
-- [ ] Tests: tests/test_pipeline, tests/test_core/{nodes,operators,function_pod,side_effect_pod},
+- [x] Re-run every script in superpowers/scripts/itl_1121/: each shows the fixed behaviour.
+- [x] Tests: tests/test_pipeline, tests/test_core/{nodes,operators,function_pod,side_effect_pod},
   golden (3.12; async files also 3.11; one process).
 - [ ] One push; CI green; one signed `@coderabbitai review`; plan to coordinator before code.
+- 2026-11-14 (merge task): merged #380's final head 8c44199b first (1aa7ca2f, no conflicts:
+  the true base), then origin/main e4b4319c (6b5db050; main's tree equals 8c44199b, so every
+  conflict of the squash took this branch's side). Doc fix 8455c2f0. All itl_1121 scripts show
+  the fixed behaviour. Tests: pipeline/nodes/operators/function_pod/side_effect_pod/golden on
+  3.12 6434 passed 11 skipped 9 xfailed; async files + review-fix tests on 3.11 651 passed.
+  LEFT: CI, one CodeRabbit review, plan to coordinator, worker_done.
