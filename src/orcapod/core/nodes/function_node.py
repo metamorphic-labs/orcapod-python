@@ -1720,7 +1720,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
         finally:
-            await output.close()
+            try:
+                await output.close()
+            except BaseException:
+                # A close that raises or is cancelled fails the run: no rows.
+                self.clear_cache()
+                raise
 
     def set_ephemeral_store(self, store: "ArrowDatabaseProtocol | None") -> None:
         """Assign or remove the ephemeral result store.
@@ -3908,4 +3913,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
         finally:
-            await output.close()
+            try:
+                await output.close()
+            except BaseException:
+                # A close that raises or is cancelled fails the run: no rows.
+                self.clear_cache()
+                raise

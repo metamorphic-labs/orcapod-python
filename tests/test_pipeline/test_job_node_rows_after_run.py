@@ -21,6 +21,7 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import StoreWriteError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.core.streams import ViewStatus
 from orcapod.sources import DictSource
 
 
@@ -471,3 +472,68 @@ class TestRefusedOrFailedRunAfterAGoodRun:
         assert _values(node, lambda r: r["k"]) == []
         stored = node.as_source().as_table().to_pylist()
         assert sorted(r["k"] for r in stored) == [0, 1, 2, 3, 4, 5]
+
+
+class TestAsyncOutputCloseFails:
+    """An async run whose output cannot be closed defines no rows (ITL-1093)."""
+
+    def test_failed_close_leaves_no_run_rows(self) -> None:
+        """A close that raises after every row was sent leaves the node with no run."""
+        import asyncio
+
+        import pyarrow as pa
+
+        from orcapod.channels import Channel
+        from orcapod.core.nodes import FunctionJobNode
+        from orcapod.core.streams import ArrowTableStream
+
+        class CloseFails:
+            """An output writer that keeps what it is sent and raises on close."""
+
+            def __init__(self) -> None:
+                """Start with no rows."""
+                self.sent: list[Any] = []
+
+            async def send(self, item: Any) -> None:
+                """Keep ``item``."""
+                self.sent.append(item)
+
+            async def close(self) -> None:
+                """Raise, as a closed or broken channel would."""
+                raise OSError("output cannot be closed")
+
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("x", pa.int64(), nullable=False),
+            ]
+        )
+        table = pa.Table.from_arrays(
+            [pa.array([0, 1], pa.int64()), pa.array([5, 6], pa.int64())],
+            schema=schema,
+        )
+        node = FunctionJobNode(
+            inc.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+            ArrowTableStream(table, tag_columns=["k"]),
+            pipeline_database=InMemoryArrowDatabase(),
+            result_database=InMemoryArrowDatabase(),
+        )
+        output = CloseFails()
+
+        async def run() -> None:
+            """Run the node over its upstream's rows into ``output``."""
+            inputs = Channel(buffer_size=16)
+            # The input stream is the node's own upstream (a test of async_execute).
+            for item in node.upstreams[0].iter_data():
+                await inputs.writer.send(item)
+            await inputs.writer.close()
+            await node.async_execute(inputs.reader, output)  # pyright: ignore[reportArgumentType]  # a test double of the writer
+
+        with pytest.raises(OSError, match="cannot be closed"):
+            asyncio.run(run())
+        assert len(output.sent) == 2
+        # No run is held: the node reads empty (ITL-1095); the store keeps the rows.
+        assert node.head(10).status is ViewStatus.NOT_COMPUTED
+        assert _values(node, lambda r: (r["k"], r["y"])) == []
+        stored = node.as_source().as_table().to_pylist()
+        assert sorted((r["k"], r["y"]) for r in stored) == [(0, 6), (1, 7)]
