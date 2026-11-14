@@ -150,6 +150,32 @@ def _refused() -> dict[str, tuple[pd.DataFrame | pd.Series, str]]:
             pd.DataFrame([[1, 2], [3, 4]], columns=axis),
             r"column axis.*cannot be read back",
         )
+    tuples = pd.Categorical([(1, 2), (3, 4)])
+    cases["frame, tuple categories"] = (
+        pd.DataFrame({"a": tuples}),
+        r"column 'a'.*cannot be read back",
+    )
+    cases["series, tuple categories"] = (
+        pd.Series(tuples, name="s"),
+        r"column 's'.*cannot be read back",
+    )
+    cases["frame, tuple categories index"] = (
+        pd.DataFrame({"a": [1, 2]}, index=pd.CategoricalIndex(tuples)),
+        r"index level 0.*cannot be read back",
+    )
+    cases["frame, column label False"] = (
+        pd.DataFrame([[7]], columns=pd.Index([False])),
+        r"column axis: the label False would read back from storage as True",
+    )
+    cases["series, name False"] = (
+        pd.Series([7], name=False),
+        r"column axis: the label False would read back from storage as True",
+    )
+    cases["frame, column level holding False"] = (
+        pd.DataFrame([[7]], columns=pd.MultiIndex.from_tuples([("a", False)])),
+        r"column axis level 1: the label .*False.* would read back from storage as "
+        r".*True",
+    )
     return cases
 
 
@@ -187,6 +213,11 @@ ACCEPTED: dict[str, pd.DataFrame | pd.Series] = {
     "datetime column axis": pd.DataFrame(
         [[1, 2]], columns=pd.DatetimeIndex(["2020-01-01", "2020-01-02"], tz="UTC")
     ),
+    "column label True": pd.DataFrame([[7]], columns=pd.Index([True])),
+    "series named True": pd.Series([7], name=True),
+    "text and int labels": pd.DataFrame([[1, 2, 3]], columns=["a", "False", 0]),
+    "int column axis": pd.DataFrame([[1, 2]], columns=[0, 1]),
+    "string categories": pd.DataFrame({"a": pd.Categorical(["x", "y"])}),
 }
 
 

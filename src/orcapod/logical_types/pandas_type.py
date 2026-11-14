@@ -130,7 +130,7 @@ class LogicalPandasDataFrame(IgnoreListLogicalType):
         """
         pandas_attrs_as_stored(value.attrs)  # refuses attrs that are not JSON
         table = pandas_frame_to_arrow(value)
-        require_restorable(table.schema, value)
+        require_restorable(table, value)
         return _table_to_ipc_bytes(table)
 
     def storage_to_python(
@@ -208,7 +208,7 @@ class LogicalPandasSeries(IgnoreListLogicalType):
         pandas_attrs_as_stored(value.attrs)  # refuses attrs that are not JSON
         df = value.to_frame(name=col_name)
         table = pandas_frame_to_arrow(df)
-        require_restorable(table.schema, df)
+        require_restorable(table, df)
         return _table_to_ipc_bytes(table)
 
     def storage_to_python(

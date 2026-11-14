@@ -116,7 +116,9 @@ storage alike, through one check, ``require_restorable`` (ITL-1054): MultiIndex 
 would be written in another order (level names that are also level positions,
 ``names=[1, 0]``), and values storage cannot read back (a nested, dictionary or fixed-size
 ``pd.ArrowDtype`` column or index level; a categorical, period, timedelta, interval, date or
-``pd.ArrowDtype`` column axis), besides labels and names that collide once written as text.
+``pd.ArrowDtype`` column axis; tuple categories), column labels that would read back as
+another label (``False`` reads back ``True``), and labels and names that collide once written
+as text.
 A value Arrow cannot convert is refused by ``pandas_frame_to_arrow``. Both messages name the
 column, index level or column-axis level.
 """
@@ -727,9 +729,9 @@ def _converted(frame: pd.DataFrame) -> pa.Table:
     return pa.Table.from_pandas(frame, preserve_index=True)
 
 
-def _read_back_empty(frame: pd.DataFrame) -> pd.DataFrame:
-    """The zero-row frame storage restores for ``frame``'s Arrow schema."""
-    return _converted(frame).schema.empty_table().to_pandas()
+def _read_back(frame: pd.DataFrame) -> pd.DataFrame:
+    """The frame storage restores for ``frame`` (a zero-row part, see ``_parts``)."""
+    return _converted(frame).to_pandas()
 
 
 def _with_part(part: str | None, message: str) -> str:
@@ -796,7 +798,39 @@ def _require_levels_in_place(index: pd.Index) -> None:
             )
 
 
-def require_restorable(schema: pa.Schema, frame: pd.DataFrame) -> pd.DataFrame:
+def _require_labels_restored(columns: pd.Index, restored: pd.Index) -> None:
+    """Raise if a column label would read back from storage as another label.
+
+    Labels are compared as text, level by level and position by position: storage writes
+    labels of mixed type as text (``0`` beside ``"b"`` reads back ``"0"``), and that is no
+    change. A label whose text changes is: pyarrow restores a bool level by casting the
+    text, so ``False`` reads back ``True``.
+
+    Args:
+        columns: The column axis of the frame.
+        restored: The column axis of the frame storage restores, with as many levels.
+
+    Raises:
+        ValueError: If a label's text changes; the message names the level and the label.
+    """
+    for position in range(columns.nlevels):
+        written = _level_by_position(columns, position)
+        read = _level_by_position(restored, position)
+        for label, back in zip(written, read):
+            if str(label) != str(back):
+                where = (
+                    "column axis"
+                    if columns.nlevels == 1
+                    else f"column axis level {position}"
+                )
+                raise ValueError(
+                    f"{where}: the label {label!r} would read back from storage as "
+                    f"{back!r}. Rename the columns (pyarrow restores a bool label from "
+                    "its text, so False reads back True)."
+                )
+
+
+def require_restorable(table: pa.Table, frame: pd.DataFrame) -> pd.DataFrame:
     """Return the zero-row frame storage restores for ``frame``, refusing what it would not.
 
     The one check, shared by storage (``python_to_storage``) and the value hash, of a value
@@ -808,26 +842,28 @@ def require_restorable(schema: pa.Schema, frame: pd.DataFrame) -> pd.DataFrame:
       level positions, ``names=[1, 0]``): the frame read back would differ, silently.
     - The frame read back cannot be built: a nested, dictionary or fixed-size ``pd.ArrowDtype``
       column or index level; a categorical, period, timedelta, interval, date or
-      ``pd.ArrowDtype`` column axis.
-    - The frame read back would have another number of columns or index levels, or distinct
-      column labels that read back equal (``True`` and ``False`` are written as text).
+      ``pd.ArrowDtype`` column axis; a categorical whose categories cannot be restored
+      (tuples read back as arrays, which cannot be categories).
+    - The frame read back would have another number of columns or index levels, distinct
+      column labels that read back equal, or a column label that reads back as another label
+      (``False`` reads back ``True``).
 
-    No rows are converted: what storage restores is read from the frame it builds for
-    ``schema`` alone.
+    No rows are converted: what storage restores is read from ``table.slice(0, 0)``, which
+    keeps the schema and the dictionary (the categories) of each categorical column.
 
     Args:
-        schema: The schema of ``pandas_frame_to_arrow(frame)``.
+        table: ``pandas_frame_to_arrow(frame)``.
         frame: The frame about to be stored or hashed.
 
     Returns:
-        The zero-row frame storage restores for ``schema``: its axes, labels, names and the
-        dtypes the schema decides.
+        The zero-row frame storage restores for ``table``: its axes, labels, names, the
+        categories and the dtypes the schema decides.
 
     Raises:
         ValueError: If storage would not restore the frame; the message names the column,
             index level or column-axis level and the reason.
     """
-    counts = Counter(schema.names)
+    counts = Counter(table.schema.names)
     repeated = sorted(name for name, count in counts.items() if count > 1)
     if repeated:
         raise ValueError(
@@ -837,9 +873,9 @@ def require_restorable(schema: pa.Schema, frame: pd.DataFrame) -> pd.DataFrame:
         )
     _require_levels_in_place(frame.index)
     try:
-        restored = schema.empty_table().to_pandas()
+        restored = table.slice(0, 0).to_pandas()
     except Exception as exc:  # noqa: BLE001 - pandas and pyarrow raise many kinds here
-        part = _failing_part(frame, 0, _read_back_empty)
+        part = _failing_part(frame, 0, _read_back)
         raise ValueError(
             _with_part(
                 part,
@@ -864,17 +900,18 @@ def require_restorable(schema: pa.Schema, frame: pd.DataFrame) -> pd.DataFrame:
             f"{labels}. Rename the columns (labels of mixed or bool type are written "
             "as text)."
         )
+    _require_labels_restored(frame.columns, restored.columns)
     return restored
 
 
-def _restored_axes(schema: pa.Schema, df: pd.DataFrame) -> _StoredAxes:
-    """Return the axes storage restores for a frame whose Arrow schema is ``schema``.
+def _restored_axes(table: pa.Table, df: pd.DataFrame) -> _StoredAxes:
+    """Return the axes storage restores for a frame whose Arrow table is ``table``.
 
-    They are read from the frame storage builds for the schema (no rows are converted), so
-    the rule is storage's own.
+    They are read from the zero-row frame storage builds for the table (no rows are
+    converted), so the rule is storage's own.
 
     Args:
-        schema: The schema of ``pandas_frame_to_arrow(df)``.
+        table: ``pandas_frame_to_arrow(df)``, or the same for a zero-row ``df``.
         df: The frame.
 
     Returns:
@@ -883,7 +920,7 @@ def _restored_axes(schema: pa.Schema, df: pd.DataFrame) -> _StoredAxes:
     Raises:
         ValueError: If storage would not restore the frame (``require_restorable``).
     """
-    return _axes_of(require_restorable(schema, df))
+    return _axes_of(require_restorable(table, df))
 
 
 def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
@@ -910,7 +947,7 @@ def _values_table(df: pd.DataFrame) -> tuple[pa.Table, _StoredForm]:
                 raise ValueError(f"column {label!r}: {exc}") from exc
     table = pandas_frame_to_arrow(df)
     # Refuses what storage would not restore, with storage's own message (ITL-1054).
-    axes = _restored_axes(table.schema, df)
+    axes = _restored_axes(table, df)
     # The frame's own labels and names must be in the grammar, although the descriptor
     # holds them in the form storage restores: storage writes some as text, and the text of
     # an arbitrary object (its ``repr``, with a memory address) must never reach a hash.
@@ -1044,7 +1081,9 @@ def _in_canonical_column_order(df: pd.DataFrame) -> pd.DataFrame:
     The sort is on the terms of the labels as storage restores them, so a frame and the
     frame read back from storage are sorted alike.
     """
-    labels = _restored_axes(pandas_frame_to_arrow(df).schema, df).column_labels
+    # Only the labels are needed: a zero-row frame has them, and its conversion is cheap.
+    empty = df.iloc[:0]
+    labels = _restored_axes(pandas_frame_to_arrow(empty), empty).column_labels
     keys = [canonical_json(pandas_label_descriptor(label)) for label in labels]
     order = sorted(range(len(keys)), key=keys.__getitem__)
     return df.iloc[:, order]

@@ -1585,7 +1585,13 @@ pyarrow version:
   list, struct, map, dictionary, fixed-size binary or `float16` type; a column axis (any
   level of it) that is categorical, period, timedelta, interval, `datetime.date` objects, or
   a `pd.ArrowDtype` timestamp, duration, bool, date or decimal, which includes a Series
-  named with a `pd.Timedelta`, `pd.Period` or `datetime.date`.
+  named with a `pd.Timedelta`, `pd.Period` or `datetime.date`; a categorical column, Series
+  or index whose categories are tuples (they read back as arrays, which cannot be
+  categories; ITL-1115).
+- **Column labels that would read back as another label.** pyarrow restores a bool label
+  from its text, so the label `False` (a one-column bool axis, a Series named `False`, a
+  `False` in a level of a MultiIndex column axis) reads back `True` (ITL-1116). Labels are
+  compared as text, so mixed-type labels, which storage writes as text, are not a change.
 - **Labels and names that collide once written as text** (the index name `1` with a column
   `"1"`; integer names of MultiIndex levels): two fields of one name, and the value read
   back would have lost its index. Distinct labels that read back equal (the labels `True`
