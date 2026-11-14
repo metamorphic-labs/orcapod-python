@@ -203,8 +203,15 @@ class SyncPipelineOrchestrator:
         """
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
+        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
         if not buf:
-            # Build an empty stream preserving declared field nullability.
+            # The upstream's zero-row table, typed as its rows are (ITL-912).
+            zero_rows = StaticOutputOperatorPod._zero_row_input(upstream_node)
+            if zero_rows is not None:
+                return zero_rows
+            # The upstream cannot say its Arrow types without rows: build an empty
+            # stream from its Python schema, preserving declared field nullability.
             tag_schema, data_schema = upstream_node.output_schema(
                 columns={"system_tags": True, "source": True}
             )
@@ -219,8 +226,6 @@ class SyncPipelineOrchestrator:
                 producer=upstream_node.producer,
                 upstreams=upstream_node.upstreams,
             )
-
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
         # Each row keeps its own system tags and source info.
         full_table, user_tag_keys = StaticOutputOperatorPod._rows_to_table(buf)

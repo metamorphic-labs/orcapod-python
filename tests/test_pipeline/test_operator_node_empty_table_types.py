@@ -165,10 +165,10 @@ def test_zero_row_run_table_has_the_run_types(pipeline: str, orchestrator: str) 
 class _RowsMustNotBeRead(ArrowTableSource):
     """A source whose rows must not be read: reading them raises."""
 
-    def iter_data(self):  # pyright: ignore[reportImplicitOverride]  # test double
+    def iter_data(self):
         raise AssertionError("the source's rows were read")
 
-    def as_table(self, *, columns=None, all_info=False):  # pyright: ignore[reportImplicitOverride]  # test double
+    def as_table(self, *, columns=None, all_info=False):
         raise AssertionError("the source's rows were read")
 
 
@@ -178,7 +178,9 @@ def test_not_yet_run_table_reads_no_source_row() -> None:
     job = PipelineJob(name="itl912", store=InMemoryArrowDatabase())
     with job:
         _ = PIPELINES["select_after_filter"](
-            _RowsMustNotBeRead(_table(WITH_ROWS), tag_columns=["id", "grp"], source_id="a")
+            _RowsMustNotBeRead(
+                _table(WITH_ROWS), tag_columns=["id", "grp"], source_id="a"
+            )
         )
 
     table = _op(job).as_table(all_info=True)

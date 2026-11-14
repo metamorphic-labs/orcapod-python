@@ -15,6 +15,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
+    typed_zero_row_table,
 )
 from orcapod.core.streams.head import (
     STALE_NOTE,
@@ -226,7 +227,6 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
-        from orcapod.system_constants import constants
         from orcapod.utils import arrow_utils
 
         if not rows:
@@ -240,16 +240,65 @@ class StaticOutputOperatorPod(TraceableBase):
         combined_tags = arrow_utils.concat_tables_by_name(tag_tables)
         combined_data = arrow_utils.concat_tables_by_name(data_tables)
 
-        data_schema = combined_data.schema
-        for i, field in enumerate(data_schema):
-            if field.name.startswith(constants.SOURCE_PREFIX):
-                nullable = combined_data.column(i).null_count > 0
-                data_schema = data_schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        # Same arrays, new field flags: no cast, so no value or type can change.
-        combined_data = pa.Table.from_arrays(combined_data.columns, schema=data_schema)
+        combined_data = StaticOutputOperatorPod._flag_source_info_nullability(
+            combined_data
+        )
 
         full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
         return full_table, tuple(rows[0][0].keys())
+
+    @staticmethod
+    def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
+        """Declare each ``_source_*`` field nullable only if some row's token is ``None``.
+
+        The rule ``_rows_to_table`` applies to the rows it concatenates, and that a
+        zero-row input (``_zero_row_input``) applies to no row: there, no token is
+        ``None``, so every source-info field is non-nullable.
+
+        Args:
+            table: A table whose ``_source_*`` columns hold source-info tokens.
+
+        Returns:
+            The same arrays under the new field flags.
+        """
+        from orcapod.system_constants import constants
+
+        schema = table.schema
+        for i, field in enumerate(schema):
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                nullable = table.column(i).null_count > 0
+                schema = schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+        # Same arrays, new field flags: no cast, so no value or type can change.
+        return pa.Table.from_arrays(table.columns, schema=schema)
+
+    @staticmethod
+    def _zero_row_input(upstream: StreamProtocol) -> StreamProtocol | None:
+        """Return ``upstream`` as an operator input with no rows, typed as its rows are.
+
+        The zero-row form of what ``_materialize_input_stream`` and the sync
+        orchestrator build from an upstream's rows: the upstream's zero-row table
+        (``typed_zero_row_table``: user tags, system tags, data and source info, with
+        the Arrow types its rows have), source-info flags as ``_rows_to_table`` sets
+        them, and the upstream's producer and upstreams, so the stream's identity,
+        pipeline hash and system-tag column names are the upstream's (ITL-912).
+
+        Args:
+            upstream: The node or stream an operator reads.
+
+        Returns:
+            The zero-row stream, or ``None`` when ``upstream`` cannot say its Arrow
+            types without rows; the caller then builds its input from the Python
+            output schema.
+        """
+        table = typed_zero_row_table(upstream)
+        if table is None:
+            return None
+        return ArrowTableStream(
+            StaticOutputOperatorPod._flag_source_info_nullability(table),
+            tag_columns=upstream.keys()[0],
+            producer=upstream.producer,
+            upstreams=upstream.upstreams,
+        )
 
     @staticmethod
     def _materialize_to_stream(

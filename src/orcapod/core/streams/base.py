@@ -4,7 +4,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.streams.head import (
@@ -20,6 +20,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -52,6 +53,45 @@ def schema_requires_io(stream: object, config: ColumnConfig) -> bool:
     """
     check = getattr(stream, "_schema_requires_io", None)
     return bool(check(config)) if callable(check) else False
+
+
+ZERO_ROW_INPUT_COLUMNS = ColumnConfig(system_tags=True, source=True)
+"""The column groups of a zero-row table: what a node's rows carry downstream."""
+
+
+def typed_zero_row_table(stream: object) -> pa.Table | None:
+    """Return ``stream``'s table with no rows and the Arrow types its rows would have.
+
+    The table has the user tags, system tags, data and source-info columns
+    (``ZERO_ROW_INPUT_COLUMNS``), with the Arrow types, nullability and logical types
+    the stream's rows have (ITL-912). Getting it never computes, reads or polls a row:
+    an in-memory table is sliced, a source answers from the table or schema it already
+    holds, and an operator node applies its operator to its inputs' zero-row tables, as
+    the sync path applies it to zero-row inputs.
+
+    A stream that does not say (``_typed_zero_row_table``) cannot know its Arrow types
+    without rows. The caller then builds the table from the Python output schema.
+
+    Args:
+        stream: The stream, node or source whose zero-row table is wanted.
+
+    Returns:
+        The zero-row table, or ``None`` when ``stream`` cannot type it without rows:
+        a function pod's stream or node (ITL-985), an unbound input slot, a source
+        that reads, polls or derives its rows later, a pod stream not yet computed.
+    """
+    method = getattr(stream, "_typed_zero_row_table", None)
+    table = method() if callable(method) else None
+    if table is None:
+        return None
+    # The column order of a row-built table (``_rows_to_table``): user tags, system
+    # tags, data, source info.
+    tag_keys, data_keys = cast(StreamProtocol, stream).keys()
+    names = table.column_names
+    system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+    source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
+    ordered = [*tag_keys, *system_tags, *data_keys, *source_info]
+    return table.select(ordered + [n for n in names if n not in ordered])
 
 
 def check_head_size(n: int) -> None:
@@ -565,6 +605,14 @@ class StreamBase(TraceableBase):
         ``config`` asks for a column group known only from rows.
         """
         return any(schema_requires_io(upstream, config) for upstream in self.upstreams)
+
+    def _typed_zero_row_table(self) -> pa.Table | None:
+        """This stream's zero-row table; ``None``: unknown without rows.
+
+        See ``typed_zero_row_table``. A stream whose Arrow types are known only from
+        computed rows (a pod's stream) keeps this default.
+        """
+        return None
 
     def _repr_html_(self) -> str:
         """Render ``head()`` in tag order for a notebook; never computes."""
