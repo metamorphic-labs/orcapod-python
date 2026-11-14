@@ -718,7 +718,7 @@ class _FunctionPodBase(TraceableBase):
                 type is incompatible with its parameter, or (``strict=True``) the
                 input carries a data column that is not a parameter.
         """
-        logger.debug(f"Invoking pod {self} on streams through __call__: {streams}")
+        logger.debug("Invoking pod %s on streams through __call__: %s", self, streams)
         # A function that accepts arbitrary keywords takes every column, so
         # nothing is unused and no select is added (developer, November 12, 2026,
         # ITL-807). No data function kind accepts them today.
@@ -851,7 +851,7 @@ class FunctionPod(_FunctionPodBase):
         Returns:
             A ``FunctionPodStream`` wrapping the computation.
         """
-        logger.debug(f"Invoking kernel {self} on streams: {streams}")
+        logger.debug("Invoking kernel %s on streams: %s", self, streams)
 
         input_stream = self.handle_input_streams(*streams)
 

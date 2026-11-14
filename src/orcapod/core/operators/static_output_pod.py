@@ -154,7 +154,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             A ``DynamicPodStream`` wrapping the computation.
         """
-        logger.debug(f"Invoking kernel {self} on streams: {streams}")
+        logger.debug("Invoking kernel %s on streams: %s", self, streams)
 
         # perform input stream validation
         self.validate_inputs(*streams)
@@ -197,7 +197,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
     def __call__(self, *streams: StreamProtocol, **kwargs) -> DynamicPodStream:
         """Convenience alias for ``process``."""
-        logger.debug(f"Invoking pod {self} on streams through __call__: {streams}")
+        logger.debug("Invoking pod %s on streams through __call__: %s", self, streams)
         # perform input stream validation
         return self.process(*streams, **kwargs)
 

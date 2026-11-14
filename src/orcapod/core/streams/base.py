@@ -759,8 +759,25 @@ class StreamBase(TraceableBase):
         True when an upstream's would: a ``PollingSource`` that has not polled yet
         answers its schema only by polling when it declared no schema, or when
         ``config`` asks for a column group known only from rows.
+
+        Each upstream is visited once, however many paths lead to it (ITL-1111): a
+        stream that answers like this one is passed through to its own upstreams,
+        any other is asked. The answer is not kept, because a source's changes once
+        it has polled.
         """
-        return any(schema_requires_io(upstream, config) for upstream in self.upstreams)
+        seen: set[int] = {id(self)}
+        pending: list[StreamProtocol] = list(self.upstreams)
+        while pending:
+            stream = pending.pop()
+            if id(stream) in seen:
+                continue
+            seen.add(id(stream))
+            hook = getattr(type(stream), "_schema_requires_io", None)
+            if hook is StreamBase._schema_requires_io:
+                pending.extend(stream.upstreams)
+            elif schema_requires_io(stream, config):
+                return True
+        return False
 
     def _repr_html_(self) -> str:
         """Render ``head()`` in tag order for a notebook; never computes."""
