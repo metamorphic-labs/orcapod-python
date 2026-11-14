@@ -23,7 +23,7 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
     schema_requires_io,
-    typed_zero_row_table,
+    typed_zero_row_input,
 )
 from orcapod.core.streams.view import (
     SIDE_EFFECTS_NOTE,
@@ -245,7 +245,7 @@ class SideEffectPodStream(StreamBase):
 
         See ``typed_zero_row_table``; the pod's function is not called (ITL-912).
         """
-        return typed_zero_row_table(self._input_stream)
+        return typed_zero_row_input(self._input_stream)
 
 
 def _table_of_rows(
@@ -978,7 +978,7 @@ class SideEffectNode(StreamBase):
 
         See ``typed_zero_row_table``; the pod's function is not called (ITL-912).
         """
-        return typed_zero_row_table(self._input_stream)
+        return typed_zero_row_input(self._input_stream)
 
     @property
     def node_uri(self) -> tuple[str, ...]:

@@ -739,7 +739,8 @@ class StreamBase(TraceableBase):
 
         The rows are ones the stream already holds, has cached from an earlier
         computation, has stored, or can read with a bounded read of its table. ``head``
-        never computes, reads, polls or delivers a row, never calls user code (a
+        never computes, polls or delivers a row (it reads only what is held or stored,
+        or makes a bounded table read), never calls user code (a
         function, a predicate, a side effect) and never writes. With no rows to show, it
         learns the column types without data (ITL-912): each operator of the stream is
         applied to zero-row inputs, which processes no data, so a chain of ``N``

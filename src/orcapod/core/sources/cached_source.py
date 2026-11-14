@@ -368,7 +368,15 @@ class CachedSource(RootSource):
         )
 
     def _empty_table(self) -> pa.Table:
-        """Build an empty Arrow table matching the source's output schema."""
+        """Build an empty Arrow table matching the source's output schema.
+
+        The wrapped source's zero-row table when it gives one (its Arrow types and
+        system-tag columns, as ``head()`` shows them; ITL-912), otherwise one built
+        from its Python output schema.
+        """
+        typed = self._typed_zero_row_table()
+        if typed is not None:
+            return typed
         tag_schema, data_schema = self._source.output_schema()
         merged = dict(tag_schema)
         merged.update(data_schema)

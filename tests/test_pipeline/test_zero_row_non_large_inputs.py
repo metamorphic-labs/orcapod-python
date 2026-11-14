@@ -139,3 +139,39 @@ def test_zero_row_run_equals_populated() -> None:
     empty = job.nodes["n"].as_table(all_info=True).schema
     _, _, populated = _schemas("filter")
     assert empty.equals(populated, check_metadata=False), (empty, populated)
+
+
+def test_no_op_filter_zero_row_equals_populated() -> None:
+    """A filter with no predicate passes its input through: head matches the table."""
+    stream = PolarsFilter()(_source())
+    zero = stream.head(all_info=True).table.schema
+    populated = stream.as_table(all_info=True).schema
+    assert zero.equals(populated, check_metadata=False), (zero, populated)
+
+
+def test_side_effect_stream_zero_row_equals_populated() -> None:
+    """A side-effect pod's stream over non-large inputs: head matches its table."""
+    from orcapod import SideEffectPod
+
+    def deliver(ctx: object, x: int) -> None:
+        return None
+
+    stream = SideEffectPod(deliver)(SelectDataColumns(["x"])(_source()))
+    zero = stream.head(all_info=True).table.schema
+    populated = stream.as_table(all_info=True).schema
+    assert zero.equals(populated, check_metadata=False), (zero, populated)
+
+
+def test_cached_source_over_an_empty_source_equals_its_head() -> None:
+    """A cache with nothing stored reads with the wrapped source's own Arrow types."""
+    from orcapod.core.sources import CachedSource
+
+    empty = ArrowTableSource(
+        _source().as_table().slice(0, 0),
+        tag_columns=["k", "g", "tb"],
+        source_id="empty",
+    )
+    cached = CachedSource(empty, cache_database=InMemoryArrowDatabase())
+    zero = cached.head(all_info=True).table.schema
+    populated = cached.as_table(all_info=True).schema
+    assert zero.equals(populated, check_metadata=False), (zero, populated)

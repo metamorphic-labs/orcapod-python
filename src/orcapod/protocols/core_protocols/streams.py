@@ -235,7 +235,8 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         The rows are ones the stream already holds, has cached from an earlier
         computation, has stored, or can read with a bounded read. It never computes,
-        reads, polls or delivers a row, never calls user code (a function, a predicate,
+        polls or delivers a row (it reads only what is held or stored, or makes a bounded
+        read), never calls user code (a function, a predicate,
         a side effect) and never writes. With no rows to show, it may apply operators
         to zero-row tables to learn the column types, which processes no data (ITL-912).
 

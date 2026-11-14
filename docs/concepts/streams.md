@@ -106,7 +106,7 @@ In a notebook, a stream, source or job node shown at the end of a cell renders a
 table: its first rows in tag order, with a line saying what they are. That preview is
 `head()` asked for `sort_by_tags` and rendered, and `head(n, columns={"sort_by_tags": True})`
 gives the same rows to work with. Neither ever computes anything: they show
-only what is readily available, never compute, read, poll or deliver a row, never call your
+only what is readily available, never compute, poll or deliver a row (they read only what is held or stored, or make a bounded table read), never call your
 code (a function, a predicate, a side effect) and never write to a database. `run()` computes
 (see "Computing a stream outside a job" below).
 
