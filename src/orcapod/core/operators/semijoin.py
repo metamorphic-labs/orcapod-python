@@ -1,8 +1,8 @@
 import asyncio
 import contextlib
 from collections import deque
-from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, final
 
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.base import BinaryOperator, require_shared_arrow_type
@@ -203,6 +203,7 @@ class SemiJoin(BinaryOperator):
                 their system-tag names, so no column is named after an
                 input's pipeline hash.
         """
+        left_rows: _LeftRows | None = None
         try:
             # Phase 1: Build right-side lookup, reading the left input meanwhile
             right_rows, left_rows = await _collect_right_reading_left(
@@ -269,6 +270,8 @@ class SemiJoin(BinaryOperator):
                     await output.send((tag, data))
         finally:
             await output.close()
+            if left_rows is not None:
+                await left_rows.aclose()
 
     @staticmethod
     def _key_table(tag: TagProtocol, data: DataProtocol, key: str) -> "pa.Table":
@@ -318,13 +321,13 @@ class SemiJoin(BinaryOperator):
         return self.__class__.__name__
 
 
+_Row = tuple[TagProtocol, DataProtocol]
+
+
 async def _collect_right_reading_left(
-    left: ReadableChannel[tuple[TagProtocol, DataProtocol]],
-    right: ReadableChannel[tuple[TagProtocol, DataProtocol]],
-) -> tuple[
-    list[tuple[TagProtocol, DataProtocol]],
-    AsyncIterator[tuple[TagProtocol, DataProtocol]],
-]:
+    left: ReadableChannel[_Row],
+    right: ReadableChannel[_Row],
+) -> tuple[list[_Row], "_LeftRows"]:
     """Collect ``right`` while reading ``left``, so neither input stops being read.
 
     A task collects ``right``; meanwhile the rows of ``left`` are read and kept, until
@@ -333,37 +336,114 @@ async def _collect_right_reading_left(
     input filled, that node could not finish its right-side rows, and the run waited
     forever (ITL-1075).
 
+    Each left receive runs as a task, awaited together with the right one, so the end
+    (or failure) of ``right`` is acted on at once, not when ``left`` next sends or
+    closes. A receive still pending then is handed to the returned rows, which await
+    it in its place: it is never cancelled while its row may still be read.
+
     Args:
         left: The left input channel.
         right: The right input channel.
 
     Returns:
-        The rows of ``right``, and an iterator over every row of ``left`` in arrival
-        order: the rows kept while ``right`` was collected, then the rest of ``left``
-        as it arrives.
+        The rows of ``right``, and every row of ``left`` in arrival order: the rows
+        kept while ``right`` was collected, the pending receive's row, then the rest
+        of ``left`` as it arrives.
+
+    Raises:
+        Exception: Whatever collecting ``right`` raises. A pending left receive is
+            then cancelled, since the left rows are not going to be read.
     """
     right_task = asyncio.create_task(right.collect())
-    kept: deque[tuple[TagProtocol, DataProtocol]] = deque()
+    kept: deque[_Row] = deque()
+    receive: asyncio.Task[_Row] | None = None
     left_ended = False
     try:
         while not right_task.done():
-            try:
-                kept.append(await left.receive())
-            except ChannelClosed:
-                left_ended = True
-                break
+            if receive is None:
+                receive = asyncio.create_task(left.receive())
+            _ = await asyncio.wait(
+                (receive, right_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            if receive.done():
+                finished, receive = receive, None
+                try:
+                    kept.append(finished.result())
+                except ChannelClosed:
+                    left_ended = True
+                    break
         right_rows = await right_task
+    except BaseException:
+        if receive is not None:
+            await _cancel_receive(receive)
+        raise
     finally:
         if not right_task.done():
-            right_task.cancel()
+            _ = right_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await right_task
+    return right_rows, _LeftRows(left, kept, receive, left_ended)
 
-    async def left_rows() -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
-        while kept:
-            yield kept.popleft()
-        if not left_ended:
-            async for row in left:
+
+async def _cancel_receive(receive: "asyncio.Task[_Row]") -> None:
+    """Cancel a left receive whose row is not going to be read, and wait for it to end.
+
+    Args:
+        receive: The receive task; it may already be done.
+    """
+    _ = receive.cancel()
+    _ = await asyncio.wait((receive,))
+    if not receive.cancelled():
+        # Retrieve its outcome (a row, or ``ChannelClosed``) so it is not reported.
+        _ = receive.exception()
+
+
+@final
+class _LeftRows:
+    """Every row of the left input in arrival order, for one pass.
+
+    The rows kept while the right input was collected come first, then the row of
+    the receive that was pending when it ended, then the rest of the left channel.
+    """
+
+    def __init__(
+        self,
+        left: ReadableChannel[_Row],
+        kept: deque[_Row],
+        pending: "asyncio.Task[_Row] | None",
+        left_ended: bool,
+    ) -> None:
+        self._left = left
+        self._kept = kept
+        self._pending = pending
+        self._left_ended = left_ended
+        self._rows = self._iterate()
+
+    def __aiter__(self) -> AsyncIterator[_Row]:
+        return self._rows
+
+    async def _iterate(self) -> AsyncGenerator[_Row, None]:
+        while self._kept:
+            yield self._kept.popleft()
+        if self._pending is not None:
+            try:
+                row = await self._pending
+            except ChannelClosed:
+                return
+            finally:
+                self._pending = None
+            yield row
+        if not self._left_ended:
+            async for row in self._left:
                 yield row
 
-    return right_rows, left_rows()
+    async def aclose(self) -> None:
+        """Release the left input when its rows are not all read.
+
+        A pending receive is cancelled. After a complete pass there is none, so this
+        does nothing.
+        """
+        await self._rows.aclose()
+        if self._pending is not None:
+            pending, self._pending = self._pending, None
+            await _cancel_receive(pending)

@@ -40,7 +40,7 @@ from orcapod.core.operators import (
     SemiJoin,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 
@@ -1039,6 +1039,135 @@ class TestSemiJoinBuildProbe:
         expected_ids = list(range(0, 100, 3))
         result_ids = sorted(t.as_dict()["id"] for t, _ in results)
         assert result_ids == expected_ids
+
+
+# ===================================================================
+# SemiJoin — the right input ends while the left one is still open (ITL-1075)
+# ===================================================================
+
+
+def _id_stream(ids: list[int], column: str) -> ArrowTableStream:
+    """Stream with an ``id`` tag and one int64 data column named ``column``."""
+    table = pa.table(
+        {
+            "id": pa.array(ids, type=pa.int64()),
+            column: pa.array([i * 10 for i in ids], type=pa.int64()),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["id"])
+
+
+_Row = tuple[TagProtocol, DataProtocol]
+
+
+class _FailingChannel:
+    """A readable channel whose reading fails: it stands for a failed right input."""
+
+    async def receive(self) -> _Row:
+        raise RuntimeError("right input failed")
+
+    def __aiter__(self) -> "_FailingChannel":
+        return self
+
+    async def __anext__(self) -> _Row:
+        return await self.receive()
+
+    async def collect(self) -> list[_Row]:
+        return [await self.receive()]
+
+
+# Guards a wait that must end at once; a timeout means the operator hung.
+_HANG_GUARD_SECONDS = 10
+
+
+class TestSemiJoinRightEndsWhileLeftOpen:
+    """The end of the right input is acted on at once, not at the next left row.
+
+    Every step waits on a channel event; ``asyncio.wait_for`` only guards against a hang.
+    """
+
+    @pytest.mark.asyncio
+    async def test_kept_matching_row_is_emitted_while_left_is_open(self):
+        left = _id_stream([2, 7], "a")
+        right = _id_stream([2, 3], "b")
+        left_rows = list(left.iter_data())
+        left_ch, right_ch, output_ch = (
+            Channel[_Row](4),
+            Channel[_Row](4),
+            Channel[_Row](4),
+        )
+        await left_ch.writer.send(left_rows[0])
+        await feed(right, right_ch)
+
+        task = asyncio.create_task(
+            SemiJoin().async_execute(
+                [left_ch.reader, right_ch.reader],
+                output_ch.writer,
+                input_pipeline_hashes=hashes(left, right),
+            )
+        )
+        tag, _ = await asyncio.wait_for(output_ch.reader.receive(), _HANG_GUARD_SECONDS)
+        assert tag.as_dict()["id"] == 2
+        assert not task.done()  # the left input is still open
+
+        await left_ch.writer.send(left_rows[1])
+        await left_ch.writer.close()
+        await asyncio.wait_for(task, _HANG_GUARD_SECONDS)
+        assert await output_ch.reader.collect() == []
+
+    @pytest.mark.asyncio
+    async def test_right_input_error_surfaces_while_left_is_open(self):
+        left = _id_stream([2], "a")
+        left_ch, output_ch = Channel[_Row](4), Channel[_Row](4)
+        await left_ch.writer.send(next(iter(left.iter_data())))
+
+        with pytest.raises(RuntimeError, match="right input failed"):
+            await asyncio.wait_for(
+                SemiJoin().async_execute(
+                    [left_ch.reader, _FailingChannel()],
+                    output_ch.writer,
+                    input_pipeline_hashes=hashes(left, left),
+                ),
+                _HANG_GUARD_SECONDS,
+            )
+        assert await output_ch.reader.collect() == []  # the output is closed
+        # Nothing is left reading the left input.
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    @pytest.mark.asyncio
+    async def test_left_row_in_flight_when_right_ends_is_kept_once_in_order(self):
+        # When the right input ends, a receive on the empty left channel is pending.
+        # The row it then gets is emitted once, after the kept row and before the
+        # rows that follow it.
+        left = _id_stream([2, 3, 9, 4], "a")
+        right = _id_stream([2, 3, 4], "b")
+        left_rows = list(left.iter_data())
+        left_ch, right_ch, output_ch = (
+            Channel[_Row](4),
+            Channel[_Row](4),
+            Channel[_Row](4),
+        )
+        await left_ch.writer.send(left_rows[0])
+        await feed(right, right_ch)
+
+        task = asyncio.create_task(
+            SemiJoin().async_execute(
+                [left_ch.reader, right_ch.reader],
+                output_ch.writer,
+                input_pipeline_hashes=hashes(left, right),
+            )
+        )
+        first, _ = await asyncio.wait_for(
+            output_ch.reader.receive(), _HANG_GUARD_SECONDS
+        )
+        for row in left_rows[1:]:
+            await left_ch.writer.send(row)
+        await left_ch.writer.close()
+        await asyncio.wait_for(task, _HANG_GUARD_SECONDS)
+
+        rest = await output_ch.reader.collect()
+        ids = [first.as_dict()["id"]] + [tag.as_dict()["id"] for tag, _ in rest]
+        assert ids == [2, 3, 4]
 
 
 # ===================================================================
