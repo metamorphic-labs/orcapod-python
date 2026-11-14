@@ -435,3 +435,43 @@ class TestDuplicateInputs:
         received = self._run_async(node)
         assert received == [(0, 6), (2, 8)]
         assert self._held(node) == received
+
+
+class TestRefusedOrFailedRunAfterAGoodRun:
+    """A run that raises after a good run drops that run's rows too (ITL-1093).
+
+    The node then reads as a node with no run in this process: every row stored under
+    its content hash, read from the store, whatever raised. An input refused for its data
+    context is tested in ``test_stored_data_context.py``, which registers a second one.
+    """
+
+    @staticmethod
+    def _job(db: Any) -> PipelineJob:
+        """Return a job applying ``inc`` to a source of 6 rows as ``node``."""
+        return _single(inc.pod, ROWS, db)
+
+    @pytest.mark.parametrize("kind", ORCHESTRATORS)
+    def test_observer_failure_at_node_end_drops_the_rows(self, kind: str) -> None:
+        """An observer raising at the node's end leaves the node with no run's rows."""
+        from orcapod.pipeline.observer import NoOpObserver
+
+        class FailsAtNodeEnd(NoOpObserver):
+            """An observer whose ``on_node_end`` raises."""
+
+            def on_node_end(self, node_label: str, node_hash: str) -> None:
+                """Raise at the function node's end, as a broken observer would."""
+                if node_label == "node":
+                    raise RuntimeError("observer failed")
+
+        db = InMemoryArrowDatabase()
+        job = self._job(db)
+        job.run(orchestrator=_orchestrator(kind))
+        job.bind(sources={"s": _source(ROWS[:3])})
+        job.run(orchestrator=_orchestrator(kind))
+        node = job.nodes["node"]
+        assert _values(node, lambda r: r["k"]) == [0, 1, 2]
+        # The async orchestrator raises its task group's error around it.
+        with pytest.raises((RuntimeError, ExceptionGroup)):
+            job.run(orchestrator=_orchestrator(kind), observer=FailsAtNodeEnd())
+        # Every stored row (the 6-row run's), read from the store.
+        assert _values(node, lambda r: r["k"]) == [0, 1, 2, 3, 4, 5]
