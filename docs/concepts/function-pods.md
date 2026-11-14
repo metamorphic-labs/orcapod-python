@@ -687,7 +687,9 @@ job.run()
 job.save(workdir / "bmi_job.json")
 
 loaded = PipelineJob.load(workdir / "bmi_job.json")
-print(loaded.nodes["bmi"].as_table().sort_by("subject_id").to_pandas())
+print(loaded.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
+# 0
+print(loaded.nodes["bmi"].as_source().as_table().sort_by("subject_id").to_pandas())
 #   subject_id          bmi
 # 0   mouse_01  1756.944444
 # 1   mouse_02  2210.000000
