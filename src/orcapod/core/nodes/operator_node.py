@@ -1255,16 +1255,11 @@ class OperatorJobNode(OperatorNodeBase):
         # table is read.
         operator = cast(StaticOutputOperatorPod, self._operator)
         result = operator.zero_row_result(*inputs)
-        table = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-        # The column order of the node's rows (``_rows_to_table``): user tags, system
-        # tags, data, source info; an operator's own table may order them otherwise
-        # (a join lists its data before its system tags).
-        tag_keys, data_keys = result.keys()
-        names = table.column_names
-        system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
-        source_info = [n for n in names if n.startswith(constants.SOURCE_PREFIX)]
-        data = [n for n in data_keys if n in names]
-        return table.select([*tag_keys, *system_tags, *data, *source_info])
+        # In the column order of the node's rows; an operator's own table may order
+        # them otherwise (a join lists its data before its system tags).
+        return StaticOutputOperatorPod._in_row_order(
+            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()[0]
+        )
 
     def _make_empty_table(self) -> "pa.Table":
         """Build the zero-row table this node reads as when it holds no rows.
@@ -1430,7 +1425,11 @@ class OperatorJobNode(OperatorNodeBase):
                 output
             )
         else:
-            self._cached_output_stream = result_stream
+            # The result with no rows, in the column order of a run with rows
+            # (ITL-1131).
+            self._cached_output_stream = (
+                StaticOutputOperatorPod._zero_rows_in_row_order(result_stream)
+            )
 
         self._update_modified_time()
 
@@ -1908,9 +1907,13 @@ class OperatorJobNode(OperatorNodeBase):
                         for tap, upstream in zip(taps, self._input_streams, strict=True)
                     )
                 )
-                # Computed, as execute() computes it, so the node reads as run.
+                # Computed, as execute() computes it, so the node reads as run, and
+                # kept in the column order of a run with rows, as execute() keeps it
+                # (ITL-1131).
                 _ = list(empty_result.iter_data())
-                self._cached_output_stream = empty_result
+                self._cached_output_stream = (
+                    StaticOutputOperatorPod._zero_rows_in_row_order(empty_result)
+                )
 
             self._update_modified_time()
 
