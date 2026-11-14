@@ -220,3 +220,21 @@ def test_a_failed_commit_clears_only_the_nodes_that_ran(orchestrator: str) -> No
     assert job.nodes["summed"].as_table().num_rows == 0
     assert job.nodes["rowwise"].as_table().num_rows == 6
     assert job.nodes["grouped"].as_table().num_rows == 2
+
+
+@pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_partly_held_run_under_each_error_policy(
+    orchestrator: str, error_policy: str
+) -> None:
+    """Held nodes feed the nodes that run, on both orchestrators and error policies."""
+    job = _build(ROWS, InMemoryArrowDatabase())
+    kind = ORCHESTRATORS[orchestrator]
+    job.run(orchestrator=kind(error_policy=error_policy))
+    CALLS.clear()
+    job.nodes["summed"].clear_cache()
+    summary = job.run(orchestrator=kind(error_policy=error_policy))
+    assert CALLS == []
+    assert summary.nodes["rowwise"].held == 6
+    assert summary.nodes["summed"].reused == 2
+    assert _totals(job) == [(0, 63), (1, 93)]

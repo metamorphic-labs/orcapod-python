@@ -97,6 +97,7 @@ class FunctionNodeProtocol(Protocol):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
     ) -> None: ...

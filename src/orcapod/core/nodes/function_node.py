@@ -65,7 +65,11 @@ from orcapod.contexts.stored import (
     report_rows_of_other_data_contexts,
     report_unexpected_row_count,
 )
-from orcapod.utils.store_errors import commit_best_effort, keep_store_error
+from orcapod.utils.store_errors import (
+    commit_best_effort,
+    keep_store_error,
+    store_error_of,
+)
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
     DataFunctionExecutorProtocol,
@@ -3642,6 +3646,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
     ) -> None:
@@ -3664,12 +3669,20 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             input_channel: Single readable channel of (tag, data) pairs.
             output: Writable channel for output (tag, data) pairs.
             observer: Optional execution observer for hooks.
+            error_policy: ``"continue"`` skips rows whose function raised;
+                ``"fail_fast"`` raises the exception of the first row whose function
+                raised, as ``execute`` does, and cancels the rows still in flight.
+                Rows run concurrently, so that is the first row to fail, not
+                necessarily the first in input order.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
             load_only: As for ``execute``: fill the node with the stored results of
                 its input rows and compute nothing (ITL-1095).
 
         Raises:
+            Exception: Under ``"fail_fast"``, the exception of the first row whose
+                function raised, inside the ``ExceptionGroup`` of the node's task
+                group. *output* is closed first.
             RuntimeError: If the node was loaded by ``PipelineJob.load``: without a
                 store it has nothing to serve, and it has no function pod to
                 compute with. *output* is closed first.
@@ -3719,11 +3732,14 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         obs = observer if observer is not None else NoOpObserver()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
+        # Whether the node has started for the observer and not yet ended.
+        node_open = False
         try:
             tag_schema = self._input_stream.output_schema(
                 columns={"system_tags": True}
             )[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
+            node_open = True
 
             if self._cached_function_pod is not None:
                 # ----------------------------------------------------------
@@ -3949,6 +3965,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                             [compute_channel.reader],
                             result_channel.writer,
                             observer=_NodeLabelObserver(),
+                            error_policy=error_policy,
                             run_id=run_id,
                         )
                     )
@@ -3966,19 +3983,40 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                     [input_channel],
                     _CloseDeferredWriter(output),
                     observer=ctx_obs,
+                    error_policy=error_policy,
                     run_id=run_id,
                 )
 
+            # Ended for the observer here, also when the call raises: not again below.
+            node_open = False
             ctx_obs.on_node_end(node_label, node_hash)
             # The run is complete: stamp the node as the sync execute() does, before
             # the finally closes the output, so every downstream node, which stamps
             # after it has seen that close, is newer than this one (ITL-1042).
             self._update_modified_time()
-        except Exception as run_error:
-            self._commit_after_failure(run_error)
-            # A run that raised defines no rows: the node reads as one with no run,
-            # as on the sync path.
+        except asyncio.CancelledError as cancelled:
+            # Another node's failure cancelled this one: commit what it wrote, as a
+            # failing node does. The job's flush commits neither a node's ephemeral
+            # store nor its result table ahead of its pipeline records.
+            self._commit_after_failure(cancelled)
+            # A cancelled run defines no rows: the node reads as one with no run.
             self.clear_cache()
+            raise
+        except Exception as run_error:
+            try:
+                if node_open:
+                    # The node ends for the observer before it raises, as in execute;
+                    # a failing observer must not replace a store error on its way out.
+                    with keep_store_error(
+                        store_error_of(run_error), "Observer on_node_end"
+                    ):
+                        ctx_obs.on_node_end(node_label, node_hash)
+            finally:
+                # Also when the observer raised instead, as execute commits then.
+                self._commit_after_failure(run_error)
+                # A run that raised defines no rows: the node reads as one with no
+                # run, as on the sync path.
+                self.clear_cache()
             raise
         except BaseException:
             # Cancelled part-way: no rows either.
