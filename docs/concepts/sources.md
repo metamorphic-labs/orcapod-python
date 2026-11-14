@@ -438,6 +438,10 @@ whose sources are unchanged computes nothing. `head()` and the notebook preview 
 | `DerivedSource` | over a source, checks it; over a job node, reads the node's stored rows again once the node ran again; holds the new rows if they changed |
 | `SourceProxy` | checks the source bound to it; its modified time follows that source's, and binding or unbinding moves it |
 
+Rows read again are compared with the rows held in any order and value by value, with a NaN
+equal to a NaN (and -0.0 equal to 0.0), so a table holding a NaN is not a change at every
+check.
+
 A database table has no cheap and exact sign of a change, so each check of a SQLite or
 PostgreSQL source reads the whole table, one full read per run, as building the source did.
 For a large table, build the source over a narrower table or view, or keep the data in a

@@ -321,3 +321,18 @@ def test_a_failed_check_in_a_node_run_is_reported_in_its_summary() -> None:
     last_run = job.nodes["picked"].last_run
     assert last_run is not None
     assert last_run.unchecked_sources == ("s",)
+
+
+def test_a_check_that_keeps_failing_warns_at_every_run() -> None:
+    """Python's default filter shows a warning once per text and line; every run that
+    cannot check a source still says so, at the line that ran it."""
+    source = _source()
+    job = _checked_job(source)
+    source.error = OSError("boom")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        for _ in range(2):
+            _ = _run(job, "sync")
+    failed = [w for w in caught if issubclass(w.category, SourceCheckFailedWarning)]
+    assert len(failed) == 2
+    assert all(w.filename == __file__ for w in failed)

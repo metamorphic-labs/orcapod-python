@@ -140,6 +140,31 @@ def test_delta_new_version_with_the_same_rows_changes_nothing(
     assert source.last_modified == before
 
 
+def test_delta_rows_with_nan_read_again_change_nothing(tmp_path: Path) -> None:
+    """NaN equals NaN when rows are compared: a NaN must not make every run a change."""
+    path = tmp_path / "floats"
+    schema = pa.schema(
+        [pa.field("k", pa.int64(), False), pa.field("x", pa.float64(), False)]
+    )
+    rows = pa.table({"k": [0, 1], "x": [float("nan"), 1.5]}, schema=schema)
+    deltalake.write_deltalake(str(path), rows)
+    # A second file, so that compaction has something to do.
+    deltalake.write_deltalake(
+        str(path), pa.table({"k": [2], "x": [2.5]}, schema=schema), mode="append"
+    )
+    source = DeltaTableSource(path, tag_columns="k", record_id_column="k")
+    before = source.last_modified
+    deltalake.DeltaTable(str(path)).optimize.compact()  # a new version, the same rows
+    assert source.check_for_new_data() is False
+    assert source.last_modified == before
+    deltalake.write_deltalake(
+        str(path),
+        pa.table({"k": [3], "x": [float("nan")]}, schema=schema),
+        mode="append",
+    )
+    assert source.check_for_new_data() is True
+
+
 def test_delta_changed_columns_fail_the_check(delta_path: Path) -> None:
     source = _delta(delta_path)
     wider = _rows([3]).append_column(

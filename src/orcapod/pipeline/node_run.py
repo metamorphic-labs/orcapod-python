@@ -128,7 +128,8 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     source that found new data has moved its modified time, so the nodes below it are
     stale. A check that raises does not stop the run (developer, November 14, 2026:
     "For check that fails, issues a warning"): one ``SourceCheckFailedWarning`` names
-    the source and the error, and the run proceeds with the data the source holds.
+    the source and the error, at the user's line that started the run and at every run,
+    and the run proceeds with the data the source holds.
 
     Args:
         streams: The nodes of the run, or the node whose ``run()`` it is.
@@ -136,9 +137,11 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     Returns:
         The source ids of the sources that could not be checked, in the order met.
     """
+    import sys
     import warnings
 
     from orcapod.errors import SourceCheckFailedWarning
+    from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 
     unchecked: list[str] = []
     for source in run_sources(streams):
@@ -147,12 +150,20 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
         except Exception as exc:
             name = _source_name(source)
             unchecked.append(name)
-            warnings.warn(
+            # Shown at the user's line that started the run, at every run: a fresh
+            # registry each time, as for RowFailuresWarning, so the default filter's
+            # once-per-line rule cannot hide the next run's failure.
+            caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
+            warnings.warn_explicit(
                 f"Source {name!r} could not be checked for new data: "
                 f"{type(exc).__name__}: {str(exc).rstrip('.')}. The run proceeds "
                 "with the data the source already holds.",
                 SourceCheckFailedWarning,
-                stacklevel=2,
+                caller.f_code.co_filename,
+                caller.f_lineno,
+                module=caller.f_globals.get("__name__"),
+                registry=None,
+                module_globals=caller.f_globals,
             )
     return tuple(unchecked)
 

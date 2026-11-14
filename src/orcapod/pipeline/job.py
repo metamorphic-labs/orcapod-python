@@ -1224,11 +1224,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db = self._database.at(*self._name)
         result_db = pipeline_db.at("_result")
 
-        # A store that commits a table by itself at batch_size: commit what it already
-        # holds pending (writes made without a flush, or a failed run's batches) before
-        # this run writes. Those rows would otherwise count towards a table's
-        # batch_size, which could then be reached mid-run and commit this run's pipeline
-        # records ahead of their results (ITL-919).
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())
@@ -1239,6 +1234,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # its tables. Only a run that runs nothing and leaves nothing out lists no store.
         if plan.to_run or excluded_hashes:
             self._report_unclaimed_tables_written_before_v03(excluded_hashes)
+        # A store that commits a table by itself at batch_size: commit what it already
+        # holds pending (writes made without a flush, or a failed run's batches) before
+        # this run writes. Those rows would otherwise count towards a table's
+        # batch_size, which could then be reached mid-run and commit this run's pipeline
+        # records ahead of their results (ITL-919).
         # A load-only run writes nothing, and a run that runs no node touches no store,
         # so neither commits anything, not even pending writes of earlier operations.
         if table_committing is not None and not load_only and plan.to_run:

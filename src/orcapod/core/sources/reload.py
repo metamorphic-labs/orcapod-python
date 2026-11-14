@@ -30,9 +30,13 @@ def same_rows(held: pa.Table, read: pa.Table) -> bool:
 
     The tables are equal as multisets of rows: the same schema (field metadata
     included), the same number of rows, and each row as many times in one as in the
-    other. A difference is never missed: tables in the same order are compared
-    directly; otherwise both are put in the order of a per-row hash and compared
-    exactly, so a hash collision can only report a change that is not there.
+    other. Tables in the same order are compared directly; otherwise both are put in
+    the order of a per-row hash, so a hash collision can only report a change that is
+    not there. Values are compared exactly (Arrow's equality), except that a NaN equals
+    a NaN: Arrow's equality never finds a NaN equal, which would make a table holding
+    one look changed at every check. Where Arrow finds a difference, the rows are
+    compared again with Polars' equality, which takes NaN as equal to NaN, and also
+    -0.0 as equal to 0.0: a value changed only from 0.0 to -0.0 is not a change.
 
     Args:
         held: The rows the source holds.
@@ -45,7 +49,7 @@ def same_rows(held: pa.Table, read: pa.Table) -> bool:
         read.schema, check_metadata=True
     ):
         return False
-    if held.equals(read):
+    if held.equals(read) or _polars_equal(held, read):
         return True
     held_hashes = _row_hashes(held)
     read_hashes = _row_hashes(read)
@@ -53,7 +57,20 @@ def same_rows(held: pa.Table, read: pa.Table) -> bool:
     read_order: pa.Array[Any] = pc.sort_indices(read_hashes)  # pyright: ignore[reportUnknownMemberType]  # pyarrow.compute is untyped
     held_sorted: pa.Table = held.take(held_order)
     read_sorted: pa.Table = read.take(read_order)
-    return bool(held_sorted.equals(read_sorted))
+    return bool(held_sorted.equals(read_sorted)) or _polars_equal(
+        held_sorted, read_sorted
+    )
+
+
+def _polars_equal(held: pa.Table, read: pa.Table) -> bool:
+    """Return whether Polars finds two tables equal, row by row (NaN equals NaN).
+
+    A table Polars cannot hold (a column of a type Polars does not know) is not equal.
+    """
+    try:
+        return bool(pl.from_arrow(held).equals(pl.from_arrow(read)))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportArgumentType]  # a table always gives a DataFrame
+    except Exception:
+        return False
 
 
 def _row_hashes(table: pa.Table) -> "pa.Array[Any]":

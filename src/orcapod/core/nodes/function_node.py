@@ -289,9 +289,9 @@ def run_job_node(
 
     Every source feeding the node is first checked for new data (``check_sources``,
     ITL-1102). Nothing runs when the node then holds a current run
-    (``holds_current_run``). Otherwise
-    a node that depends on job nodes runs with them (``run_with_dependencies``) and one
-    built over streams outside a job runs alone (``run_alone``). The run's summary, if
+    (``holds_current_run``). Otherwise a node that depends on job nodes runs with them
+    (``run_with_dependencies``) and one built over streams outside a job runs alone
+    (``run_alone``). The run's summary, if
     it gives one, is kept as the node's ``last_run``, and failed rows warn at the
     caller's line, as ``job.run()`` warns.
 
@@ -299,8 +299,7 @@ def run_job_node(
         node: The job node (a ``RunHoldingNode``).
         load_only: Whether to load stored results only.
         run_alone: Runs the node over its input when no job node feeds it, given the
-            sources the check could not check; returns its
-            ``RunSummary`` or ``None``.
+            sources the check could not check; returns its ``RunSummary`` or ``None``.
         caller: The frame of the ``run()`` caller.
     """
     from orcapod.pipeline.node_run import (
