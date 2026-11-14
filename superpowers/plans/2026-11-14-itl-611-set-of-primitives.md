@@ -129,3 +129,15 @@ movement are waiting on the developer. **No library code until the coordinator's
 - [ ] Push; CI green on 3.11/3.12/3.13. PR stays DRAFT (never `gh pr ready`).
 - [ ] After the developer marks ready: CodeRabbit rounds (plan via coordinator `ask`).
 - [ ] Reproduce: `hash_object` of a set of datetimes; is it reachable in a row hash via #393?
+
+### Follow-up notes
+
+- Merged origin/main 834ee639 cleanly (merge commit 7c1d48f0). #391 changes only
+  `TypeObjectHandler`/`canonical_annotation_str` (lookups of plain `type` objects) and
+  `SchemaHandler` order; the visitor's container rule reads the element type from a
+  registered Arrow extension, so a lookup is enough there. Targeted suites: 3885 passed,
+  31 skipped, 1 xfailed (3.12). Golden diff vs main: 53 insertions, 0 deletions.
+- `hash_object` has no handler for `datetime` (bare or in a set): pre-existing, untouched.
+  Not reachable in a row hash: `set[datetime]` elements are not a logical type, so the
+  column is hashed as stored (verified: a pod returning an aware `set[datetime]` gives a row
+  hash). Naive datetimes are refused as pod outputs for scalar/list/set alike (existing rule).
