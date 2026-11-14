@@ -139,3 +139,31 @@ Approved fix: `PipelineJob.save` records each `SideEffectJobNode`'s `content_has
 files saved before. `Pipeline.load`'s blueprint node keeps the descriptor hash. The only consumer
 is the run's `pipeline_uri` (hash of the end nodes), now equal to the live job's. Tests: identity
 before bind, after bind and a load-only run, after save and load; the fallback; `pipeline_uri`.
+
+## Follow-up: CodeRabbit round on 51853173 (schema under ColumnConfig)
+
+Finding (thread 4575868248, `loaded_side_effects.py:179`): the loaded side-effect node classes
+return the SAVED DEFAULT schema and keys whatever `columns` / `all_info` ask for. Outside-diff
+finding in the review body: `PipelineJob.load(path).as_pipeline()` builds a plain
+`SideEffectNode` with `_pod=None` and raises `AttributeError` (`None.argument_symmetry`).
+
+Reproduced (public interface; job `s1 -> delivered (SE) -> {fa (fn), joined (Join with s2),
+grouped (GroupBy g), batched (Batch 2)}`, live job from code vs loaded+bound, both load-only):
+
+- `delivered`, `fa`, `joined`, `grouped`, `batched`: schema/keys equal under default, source,
+  meta; differ under system_tags and all_info (loaded lacks the system tags upstream of SE).
+- Sync load-only: the operators below the loaded SE node name system tags with the schema-only
+  hash of s1 (`::07d1…`) instead of the SE node's pipeline hash (`::4888…`); a function node
+  below such a Join loads 0 of 4 stored entries (async: 4 of 4). Cause:
+  `StaticOutputOperatorPod._as_upstream_stream` rebuilds rows as
+  `ArrowTableStream(producer=upstream.producer, upstreams=...)`; producer None -> schema-only
+  pipeline hash. Same on main for any pod-less loaded function node (pre-existing, #380).
+- Loaded pod-less `FunctionJobNode.output_schema(system_tags)` also returns the saved default
+  (pre-existing on main).
+
+Plan (pending coordinator reply):
+1. Failing tests first in `tests/test_pipeline/loaded_job/test_loaded_side_effect_nodes.py`.
+2. Delete the `output_schema` / `keys` overrides in both loaded classes (inherit the live
+   pass-through to the input stream).
+3. (if approved) pin the upstream's pipeline hash in `_as_upstream_stream`.
+4. (if approved) `as_pipeline()` builds a `LoadedSideEffectNode` from the saved descriptor.
