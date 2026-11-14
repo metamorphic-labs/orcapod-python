@@ -18,7 +18,7 @@ from orcapod.core.result_cache import ResultCache
 from orcapod.pipeline.observer import NoOpLogger
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from types import FrameType
 
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -43,6 +43,8 @@ class NodeRunSummary:
         inputs_incomplete: The labels of the function nodes upstream of this one that
             skipped inputs in a load-only run, in run order: this node's inputs lack
             the rows those results would have given (a group may be partial).
+        held: The rows of a node the run did not run because it held a current run
+            from its previous run (ITL-1095): it computed, read and wrote nothing.
     """
 
     label: str
@@ -52,11 +54,12 @@ class NodeRunSummary:
     first_error: BaseException | None
     not_stored: int = 0
     inputs_incomplete: tuple[str, ...] = ()
+    held: int = 0
 
     @property
     def rows(self) -> int:
-        """All rows the node received: computed, reused, failed and not stored."""
-        return self.computed + self.reused + self.failed + self.not_stored
+        """All rows of the node: computed, reused, failed, not stored and held."""
+        return self.computed + self.reused + self.failed + self.not_stored + self.held
 
 
 class RunSummary:
@@ -239,6 +242,8 @@ class RunSummary:
 
 def _counts(node: NodeRunSummary, load_only: bool) -> str:
     """A node's counts as text: what a full run did, or what a load-only run loaded."""
+    if node.held and not (node.computed or node.reused or node.failed):
+        return "held from the previous run"
     if not load_only:
         return (
             f"{node.computed} computed, {node.reused} from store, {node.failed} failed"
@@ -394,7 +399,7 @@ class RunCountingObserver:
 
 
 def run_node_summaries(
-    dag: Any, counter: RunCountingObserver, skip: Collection[Any] = ()
+    dag: Any, counter: RunCountingObserver, held: Mapping[Any, int] | None = None
 ) -> list[NodeRunSummary]:
     """One summary per function node of a finished run, in run order.
 
@@ -405,9 +410,9 @@ def run_node_summaries(
     Args:
         dag: The run's node graph (``topological_sort``, ``predecessors``).
         counter: The observer that counted the run's rows.
-        skip: Nodes of ``dag`` the run did not run (their rows were held): they get no
-            summary, but inputs they skipped in an earlier load-only run still make the
-            nodes below them incomplete.
+        held: Nodes of ``dag`` the run did not run because they hold a current run,
+            with their row counts: reported as held (ITL-1095). Inputs they skipped in
+            an earlier load-only run still make the nodes below them incomplete.
 
     Returns:
         The summaries of the run's function nodes, in run order.
@@ -430,14 +435,25 @@ def run_node_summaries(
             if getattr(upstream, "last_run_not_stored", 0):
                 above.add(id(upstream))
         skipping_above[id(node)] = above
-        if any(node is skipped for skipped in skip):
+        # A stream outside the job (in a node.run() graph) is no node of the run.
+        if getattr(node, "node_type", None) is None:
             continue
         if not (is_function_node(node) or is_side_effect_function_node(node)):
             continue
+        held_rows = next(
+            (count for other, count in (held or {}).items() if other is node), None
+        )
         labels = tuple(
             order[index].label for index in sorted(position[key] for key in above)
         )
         label: str = getattr(node, "label")  # every graph node is labelled
+        if held_rows is not None:
+            summaries.append(
+                NodeRunSummary(
+                    label, 0, 0, 0, None, inputs_incomplete=labels, held=held_rows
+                )
+            )
+            continue
         summaries.append(
             replace(
                 counter.node_summary(label),

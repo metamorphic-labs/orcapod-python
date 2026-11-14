@@ -31,6 +31,9 @@ from orcapod.protocols.node_protocols import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from orcapod.channels import WritableChannel
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -76,6 +79,7 @@ class AsyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Synchronous entry point — runs the async pipeline to completion.
 
@@ -120,6 +124,7 @@ class AsyncPipelineOrchestrator:
                     run_id=run_id,
                     pipeline_uri=pipeline_uri,
                     load_only=load_only,
+                    held_rows=held_rows,
                 )
             )
 
@@ -141,6 +146,7 @@ class AsyncPipelineOrchestrator:
                 run_id=run_id,
                 pipeline_uri=pipeline_uri,
                 load_only=load_only,
+                held_rows=held_rows,
             )
 
         return _run_on_own_thread(make_run, rows_in_flight)
@@ -154,6 +160,7 @@ class AsyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Async entry point for callers already inside an event loop.
 
@@ -165,6 +172,9 @@ class AsyncPipelineOrchestrator:
                 generated automatically.
             pipeline_uri: Opaque URI string identifying this pipeline run.
                 Forwarded verbatim to ``observer.on_run_start``.
+            load_only: As for ``SyncPipelineOrchestrator.run``.
+            held_rows: As for ``SyncPipelineOrchestrator.run``: nodes not run, whose
+                rows feed their successors.
 
         Returns:
             OrchestratorResult with node outputs.
@@ -176,6 +186,7 @@ class AsyncPipelineOrchestrator:
             run_id=run_id,
             pipeline_uri=pipeline_uri,
             load_only=load_only,
+            held_rows=held_rows,
         )
 
     async def _run_async(
@@ -187,6 +198,7 @@ class AsyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
+        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Core async logic: wire channels, launch tasks, collect results."""
         from orcapod.pipeline.observer import NoOpObserver
@@ -246,7 +258,10 @@ class AsyncPipelineOrchestrator:
                         collector = collectors[node]
                         writer = _CollectingWriter(writer, collector)
 
-                    if is_source_node(node):
+                    if held_rows is not None and node in held_rows:
+                        # Not run: the rows of its current run feed its successors.
+                        _start_node(tg, node, _send_held(held_rows[node], writer))
+                    elif is_source_node(node):
                         _start_node(
                             tg,
                             node,
@@ -606,6 +621,18 @@ class _RowsInFlight:
         from orcapod.pipeline.observer import NoOpLogger
 
         return NoOpLogger()
+
+
+async def _send_held(
+    rows: list[tuple[TagProtocol, DataProtocol]],
+    writer: WritableChannel[tuple[TagProtocol, DataProtocol]],
+) -> None:
+    """Send the rows of a node the run holds rather than runs, then close."""
+    try:
+        for row in rows:
+            await writer.send(row)
+    finally:
+        await writer.close()
 
 
 def _start_node(

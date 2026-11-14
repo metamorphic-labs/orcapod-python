@@ -28,7 +28,7 @@ from orcapod.errors import (
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
-from orcapod.pipeline.node_run import clear_run_rows
+from orcapod.pipeline.node_run import RunPlan, clear_run_rows, plan_run
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -851,6 +851,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         After a successful run, ``job.nodes`` returns the execution-ready
         nodes with populated database caches.
 
+        State-driven, as every job node's ``run()`` (developer, November 14, 2026;
+        ITL-1095): a node that holds a current run (completed in this process, not
+        stale, and for a full run not filled by a load-only run) is held, not run; its
+        rows feed the nodes after it, and nothing is computed, read, written or
+        delivered for it. A source is read only for the nodes that run. So a second run
+        of an unchanged job does nothing. To run a node again, call ``clear_cache()`` on
+        it (every node below it runs too), or bind a new source object.
+
         ``job.run(orchestrator=AsyncPipelineOrchestrator())`` works the same in a
         script and inside a running event loop, such as a Jupyter kernel: there the
         run goes on a separate thread while the call waits, and blocks that loop
@@ -930,18 +938,21 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
         prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+        # The state rule (ITL-1095): a node that holds a current run is not run again.
+        plan = plan_run(prepared.exec_dag, load_only=load_only)
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        with self._executing(prepared, commit_every_rows):
+        with self._executing(prepared, plan, commit_every_rows):
             _ = effective_orchestrator.run(
-                prepared.exec_dag,
+                plan.dag,
                 observer=_with_counter(observer, counter),
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
                 load_only=load_only,
+                held_rows=plan.held_rows,
             )
-        summary = self._finish_run(prepared, counter, load_only=load_only)
+        summary = self._finish_run(prepared, counter, plan, load_only=load_only)
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -993,17 +1004,20 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "it."
             )
         prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+        # The state rule (ITL-1095): a node that holds a current run is not run again.
+        plan = plan_run(prepared.exec_dag, load_only=load_only)
         counter = RunCountingObserver()
-        with self._executing(prepared, commit_every_rows):
+        with self._executing(prepared, plan, commit_every_rows):
             _ = await orchestrator.run_async(
-                prepared.exec_dag,
+                plan.dag,
                 observer=_with_counter(observer, counter),
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
                 load_only=load_only,
+                held_rows=plan.held_rows,
             )
-        summary = self._finish_run(prepared, counter, load_only=load_only)
+        summary = self._finish_run(prepared, counter, plan, load_only=load_only)
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1187,7 +1201,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
     @contextlib.contextmanager
     def _executing(
-        self, prepared: "_PreparedRun", commit_every_rows: int
+        self, prepared: "_PreparedRun", plan: RunPlan, commit_every_rows: int
     ) -> Iterator[None]:
         """Hold every function node to the run's commit cadence while the orchestrator runs.
 
@@ -1195,12 +1209,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         Args:
             prepared: The run, from ``_prepare_run``.
+            plan: The nodes the run runs (``plan_run``).
             commit_every_rows: As for ``run``.
         """
         try:
             with contextlib.ExitStack() as batched:
                 # Function nodes commit every commit_every_rows rows (ITL-919).
-                for node in prepared.exec_dag.nodes():
+                for node in plan.to_run:
                     if isinstance(node, FunctionJobNode):
                         batched.enter_context(
                             node._batched_commits(commit_every_rows)  # pyright: ignore[reportPrivateUsage]  # the job owns its nodes' commit cadence
@@ -1216,14 +1231,19 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self,
         prepared: "_PreparedRun",
         counter: RunCountingObserver,
+        plan: RunPlan,
         *,
         load_only: bool = False,
     ) -> RunSummary:
         """Commit the run's last writes, mark the job as run and keep its summary.
 
+        A failed commit clears the nodes the run ran (they hold no completed run);
+        the nodes it held keep the rows of their earlier run.
+
         Args:
             prepared: The run, from ``_prepare_run``.
             counter: The observer that counted the run's rows.
+            plan: The nodes the run ran and held (``plan_run``).
             load_only: Whether the run loaded stored results only.
 
         Returns:
@@ -1249,12 +1269,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             # A stored table could not be read: report the read failure itself.
             exc.add_note(pending_note)
             # A run whose commit failed did not complete: no node holds its rows.
-            clear_run_rows(prepared.exec_dag.nodes())
+            clear_run_rows(plan.to_run)
             raise
         except Exception as exc:
             flush_error = StoreWriteError(pipeline_db.base_path, flush=True)
             flush_error.add_note(pending_note)
-            clear_run_rows(prepared.exec_dag.nodes())
+            clear_run_rows(plan.to_run)
             raise flush_error from exc
 
         # Mutate self in place.
@@ -1263,7 +1283,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self._run_id = prepared.run_id
         self._last_run = RunSummary(
             "/".join(self._name),
-            run_node_summaries(prepared.exec_dag, counter),
+            run_node_summaries(prepared.exec_dag, counter, held=plan.held_counts),
             load_only=load_only,
         )
         return self._last_run

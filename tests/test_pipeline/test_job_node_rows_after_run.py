@@ -465,6 +465,8 @@ class TestRefusedOrFailedRunAfterAGoodRun:
         job.run(orchestrator=_orchestrator(kind))
         node = job.nodes["node"]
         assert _values(node, lambda r: r["k"]) == [0, 1, 2]
+        # A node holding a current run is not run again (ITL-1095): clear it first.
+        node.clear_cache()
         # The async orchestrator raises its task group's error around it.
         with pytest.raises((RuntimeError, ExceptionGroup)):
             job.run(orchestrator=_orchestrator(kind), observer=FailsAtNodeEnd())

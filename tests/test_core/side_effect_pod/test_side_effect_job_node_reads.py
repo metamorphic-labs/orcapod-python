@@ -199,6 +199,11 @@ def test_node_run_without_track_completion_delivers_again_only_after_clear_cache
     view = job.nodes["delivered"].run()
     assert len(sent) == 2 * ROWS
     assert len(view) == ROWS
+    # job.run() follows the same rule: the node holds a current run, so it delivers
+    # nothing; cleared, it delivers every row again.
+    _run(job, orchestrator)
+    assert len(sent) == 2 * ROWS
+    job.nodes["delivered"].clear_cache()
     _run(job, orchestrator)
     assert len(sent) == 3 * ROWS
     # The reads after either kind of run deliver nothing.
@@ -224,6 +229,8 @@ def test_an_async_run_holds_exactly_its_own_rows(track_completion: bool) -> None
     """After two async runs, the node holds the rows of the last run only."""
     job, sent = _job(track_completion=track_completion)
     _run(job, "async")
+    # A node holding a current run is not run again (ITL-1095): clear it first.
+    job.nodes["delivered"].clear_cache()
     _run(job, "async")
     node = job.nodes["delivered"]
     assert len(node.as_table()) == ROWS

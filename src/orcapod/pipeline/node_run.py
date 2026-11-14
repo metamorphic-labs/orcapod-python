@@ -14,7 +14,8 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import StoreError, StoreWriteError
@@ -85,89 +86,172 @@ def clear_run_rows(nodes: Iterable[Any]) -> None:
             node.clear_cache()  # pyright: ignore[reportAttributeAccessIssue]  # every RunHoldingNode is a job node with clear_cache
 
 
+@dataclass(frozen=True)
+class RunPlan:
+    """What a run does with each node of its graph (ITL-1095).
+
+    Attributes:
+        dag: The nodes the run touches: those it runs, and the predecessors that feed
+            them (a source slot is read; any other one is held).
+        held_rows: The rows of each held node of ``dag``: the rows of its current run,
+            or of a stream outside the job; they feed the nodes after it as if it had
+            just run.
+        to_run: The nodes the run runs, in dependency order.
+        held_counts: Every node of the whole graph that holds a current run, with its
+            row count, for the summary.
+    """
+
+    dag: Any
+    held_rows: dict[Any, list[Any]]
+    to_run: list[Any]
+    held_counts: dict[Any, int]
+
+
+def plan_run(graph: Any, *, load_only: bool, outside: Sequence[Any] = ()) -> RunPlan:
+    """Choose the nodes a run runs: the state rule of every job node's run (ITL-1095).
+
+    A node that holds a current run (``holds_current_run``) is not run; a source slot
+    is read only when a node that runs reads it; a stream outside the job
+    (``outside``) is read for the nodes it feeds; every other node runs. The same plan
+    serves ``job.run()`` (its whole graph) and ``node.run()`` (the node and what it
+    depends on).
+
+    Args:
+        graph: The run's node graph (``topological_sort``, ``predecessors``).
+        load_only: Whether the run is load-only (a node filled by a load-only run is
+            current only for one).
+        outside: Streams of ``graph`` that are not job nodes.
+
+    Returns:
+        The plan.
+    """
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.nodes.staleness import RunHoldingNode
+    from orcapod.pipeline.dag import OrcaDAG
+
+    order = list(graph.topological_sort())
+
+    def is_outside(node: Any) -> bool:
+        return any(node is other for other in outside)
+
+    def is_current(node: Any) -> bool:
+        return isinstance(node, RunHoldingNode) and node.holds_current_run(
+            load_only=load_only
+        )
+
+    def is_source(node: Any) -> bool:
+        return isinstance(node, SourceJobNode)
+
+    current = [node for node in order if is_current(node)]
+    to_run = [
+        node
+        for node in order
+        if not is_source(node)
+        and not is_outside(node)
+        and not any(node is c for c in current)
+    ]
+    included: list[Any] = []
+    for node in order:
+        feeds_a_run = any(
+            any(successor is r for r in to_run) for successor in graph.successors(node)
+        )
+        if any(node is r for r in to_run) or feeds_a_run:
+            included.append(node)
+    dag: OrcaDAG[Any] = OrcaDAG()
+    for node in included:
+        dag.add_node(node)
+    for node in to_run:
+        for upstream in graph.predecessors(node):
+            dag.add_edge(upstream, node)
+    held_rows = {
+        node: list(node.iter_data())
+        for node in included
+        if not any(node is r for r in to_run) and not is_source(node)
+    }
+    held_counts = {node: sum(1 for _ in node.iter_data()) for node in current}
+    return RunPlan(dag, held_rows, to_run, held_counts)
+
+
+def commit_run(stores: Sequence[ArrowDatabaseProtocol], ran: Sequence[Any]) -> None:
+    """Commit a run's writes at its end; a failed commit clears the nodes that ran.
+
+    A run whose commit failed did not complete, so no node it ran holds its rows
+    (ITL-1095); nodes it held keep the rows of their earlier run.
+
+    Raises:
+        StoreError: The commit's own store error.
+        StoreWriteError: If committing failed for another reason.
+    """
+    for store in stores:
+        try:
+            store.flush()
+        except StoreError:
+            clear_run_rows(ran)
+            raise
+        except Exception as exc:
+            clear_run_rows(ran)
+            raise StoreWriteError(store.base_path, flush=True) from exc
+
+
 def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
     """Run ``target`` and every job node it depends on that holds no current run.
 
-    The dependencies are found through ``upstreams``. A dependency that holds a current
-    run (``holds_current_run``) is not run: its rows feed the nodes after it. A stream
-    outside the job is read. Every other node runs once, in dependency order, on the
-    ``SyncPipelineOrchestrator`` (error policy ``"continue"``), as ``job.run()`` would
-    run that sub-graph; with ``load_only`` as ``job.run(load_only=True)`` would. The run
-    ends with a commit of every store it wrote to, also, best-effort, when it fails.
+    The dependencies are found through ``upstreams``; the plan (``plan_run``) is the
+    one ``job.run()`` makes over the job: a dependency that holds a current run is not
+    run and its rows feed the nodes after it, a stream outside the job is read, every
+    other node runs once, in dependency order, on the ``SyncPipelineOrchestrator``
+    (error policy ``"continue"``). The run ends with a commit of every store it wrote
+    to, also, best-effort, when it fails.
 
     Args:
         target: The job node whose ``run()`` this is.
         load_only: Whether to load stored results only.
 
     Returns:
-        The run's summary, one entry per function node that ran.
+        The run's summary, one entry per function node of the graph.
 
     Raises:
         StoreWriteError: If committing the run's writes failed.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
-    from orcapod.core.nodes.staleness import RunHoldingNode
     from orcapod.pipeline.dag import OrcaDAG
     from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
-    dag: OrcaDAG[Any] = OrcaDAG()
-    held: dict[Any, list[Any]] = {}
+    graph: OrcaDAG[Any] = OrcaDAG()
     seen: list[Any] = []
-
-    def is_current(node: Any) -> bool:
-        """Whether ``node`` holds a run this run does not redo."""
-        return isinstance(node, RunHoldingNode) and node.holds_current_run(
-            load_only=load_only
-        )
-
-    def is_source(node: Any) -> bool:
-        """Whether ``node`` is a job's source slot: read by the run, never held."""
-        return isinstance(node, SourceJobNode)
+    outside: list[Any] = []
 
     def visit(node: Any) -> None:
-        """Add ``node`` and, unless it is held or a source, what it depends on."""
+        """Add ``node`` and what it depends on, up to the sources of the job."""
         if any(node is other for other in seen):
             return
         seen.append(node)
-        dag.add_node(node)
-        if node is not target and is_current(node):
-            held[node] = list(node.iter_data())
-            return
-        if is_source(node):
+        graph.add_node(node)
+        if isinstance(node, SourceJobNode):
             return
         if not _is_job_node(node):
-            # A stream outside the job: its rows, read as the node's run reads them.
-            held[node] = list(node.iter_data())
+            outside.append(node)
             return
         for upstream in node.upstreams:
             visit(upstream)
-            dag.add_edge(upstream, node)
+            graph.add_edge(upstream, node)
 
     visit(target)
-    run_nodes = [node for node in seen if not any(node is h for h in held)]
-    stores = _stores(run_nodes)
+    plan = plan_run(graph, load_only=load_only, outside=outside)
+    stores = _stores(plan.to_run)
     counter = RunCountingObserver()
     try:
         _ = SyncPipelineOrchestrator().run(
-            dag, observer=counter, load_only=load_only, held_rows=held
+            plan.dag, observer=counter, load_only=load_only, held_rows=plan.held_rows
         )
     except Exception as run_error:
         # Commit the writes that succeeded before the failure, as job.run() does.
         flush_best_effort(run_error, *stores)
         raise
-    for store in stores:
-        try:
-            store.flush()
-        except StoreError:
-            # A run whose commit failed did not complete: no node holds its rows.
-            clear_run_rows(run_nodes)
-            raise
-        except Exception as exc:
-            clear_run_rows(run_nodes)
-            raise StoreWriteError(store.base_path, flush=True) from exc
+    commit_run(stores, plan.to_run)
     return RunSummary(
         _job_name(target),
-        run_node_summaries(dag, counter, skip=list(held)),
+        run_node_summaries(graph, counter, held=plan.held_counts),
         load_only=load_only,
         target=target.label,
     )

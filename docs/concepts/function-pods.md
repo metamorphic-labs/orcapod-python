@@ -578,30 +578,47 @@ incomplete: a group formed after it may lack members, and the result stored for 
 group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
 on the asynchronous orchestrator.
 
-### Running one node: `node.run()`
+### Running again: what a run runs
 
-`job.nodes[label].run()` runs that node as `job.run()` would, together with the job nodes
-it depends on, and returns a view of its rows. What runs depends on each node's state
-(developer, November 13, 2026):
+`job.run()`, `await job.run_async()` and `job.nodes[label].run()` decide what to run from
+each node's state (developer, November 13 and 14, 2026). `node.run()` runs that node
+together with the job nodes it depends on and returns a view of its rows; `job.run()` does
+the same for every node of the job.
 
-| State of a node | What it shows | `run()` | `run(load_only=True)` |
+| State of a node | What it shows | A run | A load-only run |
 |---|---|---|---|
 | Not run in this process (a fresh or loaded job), cleared, or stale | nothing: `head()` says "not run" (`not_computed`) | runs it | loads it |
-| Filled by a load-only run | the rows it loaded: status `loaded_only`, "N loaded, M inputs without a stored result" | runs it, computing what it skipped | nothing: shows what it holds |
-| Filled by a run (`job.run()` or `run()`) | that run's rows (`rows`) | nothing: shows what it holds | nothing: shows what it holds |
+| Filled by a load-only run | the rows it loaded: status `loaded_only`, "N loaded, M inputs without a stored result" | runs it, computing what it skipped | holds it |
+| Filled by a run | that run's rows (`rows`) | holds it | holds it |
 
-A node is stale when anything it depends on changed after its run: an upstream node ran
-again or was cleared, or a source was bound again (`job.bind(sources=...)`). Before a node
-runs, every job node it depends on that is not current for that kind of run runs first,
-each once, in order; the others feed it their rows. A load-only run's rows are never current
-for a full run, nor are the rows of any node below them. `node.last_run` holds the counts,
-as `job.last_run` does for `job.run()`, and the run's writes are committed when it ends.
-Side effects above the node are delivered as `job.run()` delivers them; a node that holds a
-current run is not run again, so to deliver a side effect again (with
-`track_completion=False`), call `clear_cache()` on its node first. Staleness comes from
-modified times only: a source whose rows change without its object changing (a table read
-lazily, a file rewritten in place) is not seen. Build a new source object and bind it, or
-clear the nodes, to run them again.
+A node that is held is not run: its rows feed the nodes after it, and nothing is computed,
+read from the store, written or delivered for it. So running an unchanged job again does
+nothing, also on the asynchronous orchestrator, and the summary says so per node:
+"rowwise: 6 rows: held from the previous run" (`summary.nodes["rowwise"].held`). A load-only
+run's rows are never held by a full run, nor are the rows of any node below them. A source
+is read only when a node that runs reads it.
+
+A node is stale, and runs, when:
+
+- it has not run in this process, its last run raised, or the commit at the end of its run
+  failed;
+- `clear_cache()` was called on it, or on any job node above it;
+- a job node above it ran again;
+- its source was bound again (`job.bind(sources=...)`), or the bound source's own modified
+  time moved (a `CachedSource` that read new rows, a `PollingSource` that polled).
+
+Staleness comes from modified times only. A source whose rows change while its object stays
+the same (a CSV or Delta file rewritten in place, a database table that grew, a list a
+`DictSource` was built from and that was changed afterwards) is not seen: a run holds the
+nodes below it. To read it again, build a new source object and bind it
+(`job.bind(sources=...)`), or call `clear_cache()` on the first node below it. To deliver a
+side effect again (with `track_completion=False`), call `clear_cache()` on its node first.
+
+`node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,
+and a run's writes are committed when it ends; when everything is held there is nothing to
+commit. If that commit fails, the nodes the run ran are cleared (they read as not run); the
+nodes it held keep their rows. A held node fires no observer hook and cannot fail, so the
+orchestrator's `error_policy` has nothing to apply to it.
 
 ### When results are committed
 
@@ -666,6 +683,9 @@ keeps that output in memory and, with the default `cache_mode=OFF`, stores nothi
 `get_all_records()` returns `None` when no matching records exist; records from an earlier
 LOG run remain readable after switching to OFF. Calling `clear_cache()` on it discards the
 output, and it then reads as a zero-row table, as before the first run, until the job runs again.
+An operator node attached in `CacheMode.REPLAY` does not compute: its run replays the rows
+stored under its key by `CacheMode.LOG` runs, every logged run of that key, not only the
+latest; before its run it shows nothing, like every node (a narrower replay is ITL-1098).
 
 ### When the store cannot be written
 
