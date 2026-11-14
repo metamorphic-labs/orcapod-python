@@ -17,6 +17,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -152,7 +153,7 @@ _SCRIPT = textwrap.dedent(
 )
 
 
-def _run(tmp_path: Path, *args: str) -> dict:
+def _run(tmp_path: Path, *args: str) -> dict[str, Any]:
     """Run the script in a fresh interpreter and return the JSON it prints last."""
     result = subprocess.run(
         [sys.executable, str(tmp_path / "script.py"), str(tmp_path), *args],
@@ -169,7 +170,7 @@ def saved_job(tmp_path: Path):
     _ = (tmp_path / "classes.py").write_text(_CLASSES)
     _ = (tmp_path / "script.py").write_text(_SCRIPT)
 
-    def save(class_name: str) -> dict:
+    def save(class_name: str) -> dict[str, Any]:
         return _run(tmp_path, "save", str(tmp_path / "work"), class_name)
 
     return save
