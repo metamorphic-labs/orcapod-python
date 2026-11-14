@@ -215,8 +215,10 @@ ACCEPTED: dict[str, pd.DataFrame | pd.Series] = {
     ),
     "column label True": pd.DataFrame([[7]], columns=pd.Index([True])),
     "series named True": pd.Series([7], name=True),
-    "text and int labels": pd.DataFrame([[1, 2, 3]], columns=["a", "False", 0]),
-    "int column axis": pd.DataFrame([[1, 2]], columns=[0, 1]),
+    "text and int labels": pd.DataFrame(
+        [[1, 2, 3]], columns=pd.Index(["a", "False", 0])
+    ),
+    "int column axis": pd.DataFrame([[1, 2]], columns=pd.Index([0, 1])),
     "string categories": pd.DataFrame({"a": pd.Categorical(["x", "y"])}),
 }
 
