@@ -238,6 +238,16 @@ def test_job_warns_once(run_async: bool) -> None:
     assert_warned_once(record, [("y", "data", "data")])
 
 
+def test_warning_promoted_to_an_error_raises_again_on_retry() -> None:
+    """Under an error filter the warning raises, and a retry raises again."""
+    op = SemiJoin()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        for _ in range(2):
+            with pytest.raises(SemiJoinIgnoredColumnWarning):
+                _ = op(left_source(), right_same_tag_other_y())
+
+
 def test_filter_a_stream_by_a_subset_of_itself() -> None:
     """The commonest use: every data name is shared (and warned about); tags decide."""
     source = left_source()

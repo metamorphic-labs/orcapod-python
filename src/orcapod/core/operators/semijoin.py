@@ -126,8 +126,10 @@ class SemiJoin(BinaryOperator):
             self._warned_ignored: set[tuple[tuple[str, str, str], ...]] = warned
         if ignored in warned:
             return
-        warned.add(ignored)
+        # Recorded only once the warning is issued: under an error filter it
+        # raises, and a retry must raise again.
         self._warn_ignored(ignored)
+        warned.add(ignored)
 
     @staticmethod
     def _warn_ignored(ignored: Sequence[tuple[str, str, str]]) -> None:

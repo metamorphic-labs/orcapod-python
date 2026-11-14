@@ -494,9 +494,10 @@ The rules:
   was). The new hash is the one the row has in a stream that declared the column
   non-nullable from the start.
 
-Tag columns work the same way. A stream whose key column is `str | None` cannot be joined
-with one whose key is `str` (`Join` never reconciles types), so narrow the key first. The
-stream method is `drop_nulls`:
+Tag columns work the same way. A stream whose key column is `str | None` can be joined with
+one whose key is `str`: a null key matches nothing, so the joined key comes out `str` (see
+`Join`). Narrowing still matters wherever a column must be `T` before it is consumed, such
+as a pod parameter typed `str`. The stream method is `drop_nulls`:
 
 ```python
 by_method = recordings.drop_nulls(["session", "start_ms"])
