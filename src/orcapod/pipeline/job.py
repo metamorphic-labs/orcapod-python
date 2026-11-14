@@ -929,7 +929,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
-        prepared = self._prepare_run(commit_every_rows)
+        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         with self._executing(prepared, commit_every_rows):
@@ -992,7 +992,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{type(orchestrator).__name__}. Use job.run(orchestrator=...) to run "
                 "it."
             )
-        prepared = self._prepare_run(commit_every_rows)
+        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
         counter = RunCountingObserver()
         with self._executing(prepared, commit_every_rows):
             _ = await orchestrator.run_async(
@@ -1008,11 +1008,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
 
-    def _prepare_run(self, commit_every_rows: int) -> "_PreparedRun":
+    def _prepare_run(
+        self, commit_every_rows: int, *, load_only: bool = False
+    ) -> "_PreparedRun":
         """Check the job can run and build what a run needs; shared by both run forms.
 
         Args:
             commit_every_rows: As for ``run``.
+            load_only: As for ``run``: a loaded job can run only this way.
 
         Returns:
             The execution DAG, run id, pipeline URI and the store views of the run.
@@ -1039,14 +1042,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "PipelineJob has no compiled pipeline. "
                 "Record invocations inside a 'with job:' block first."
             )
-        # A loaded job reads the results its saved run stored and never runs:
-        # function pods are not saved with it, and even an operator-only loaded
-        # job, whose operators are rebuilt, stays read-only.
-        if self._loaded:
+        # A loaded job never computes: function pods are not saved with it, and even
+        # an operator-only loaded job, whose operators are rebuilt, stays read-only.
+        # A load-only run fills it from the store (ITL-1095).
+        if self._loaded and not load_only:
             raise RuntimeError(
-                "PipelineJob.run() cannot execute a loaded job: PipelineJob.load() "
-                "is for reading stored results only. To run a new computation, "
-                "create a fresh PipelineJob from the original pipeline definition."
+                "PipelineJob.run() cannot execute a loaded job: its function pods are "
+                "not saved with it, so it cannot compute. Fill its nodes from the "
+                "store with run(load_only=True) (bind in-memory sources first), or "
+                "read a node's stored results with node.as_source(). To run a new "
+                "computation, create a fresh PipelineJob from the original pipeline "
+                "definition."
             )
         # Until this run finishes, what the store holds for a node is not certain.
         self._last_run_finished = False
@@ -1087,7 +1093,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 isinstance(node, (FunctionJobNode, OperatorJobNode))
                 and node.load_status == LoadStatus.UNAVAILABLE
             )
-            or (isinstance(node, FunctionJobNode) and node.producer is None)
+            or (
+                not load_only
+                and isinstance(node, FunctionJobNode)
+                and node.producer is None
+            )
         ]
         if unavailable_labels:
             raise RuntimeError(

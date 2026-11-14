@@ -69,6 +69,39 @@ def _rewrite_job_file(
     return str(path)
 
 
+def _loaded_and_filled(saved: pathlib.Path) -> PipelineJob:
+    """Load the saved job, bind its in-memory sources and fill it from the store.
+
+    A loaded node is empty until a load-only run fills it (ITL-1095). The sources bound
+    are those of ``save_job_script.py``; the CSV and Delta sources are rebuilt.
+    """
+    from orcapod.sources import ArrowTableSource, ListSource
+
+    loaded = _load(saved)
+    arrow = ArrowTableSource(
+        pa.table(
+            {"id": [0, 1], "y": [3, 4]},
+            schema=pa.schema(
+                [
+                    pa.field("id", pa.int64(), nullable=False),
+                    pa.field("y", pa.int64(), nullable=False),
+                ]
+            ),
+        ),
+        tag_columns=["id"],
+        source_id="asrc",
+    )
+    loaded.bind(
+        sources={
+            "dsrc": _dict_source(),
+            "asrc": arrow,
+            "lsrc": ListSource("z", [1, 2], source_id="lsrc"),
+        }
+    )
+    _ = loaded.run(load_only=True)
+    return loaded
+
+
 def _dict_source() -> DictSource:
     """Return a two-row in-memory source with tag ``id`` and data ``x``."""
     return DictSource(
@@ -235,22 +268,18 @@ def test_loaded_function_node_as_table_returns_stored_rows(
     assert _sorted(table, TAG_OF[label]).equals(_sorted(expected, TAG_OF[label]))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1095: a loaded node reads empty until loaded.run(load_only=True), "
-    "which reads its entries this way (stage 4)",
-)
 @pytest.mark.parametrize("label", FUNCTION_NODES)
 def test_loaded_function_node_as_table_all_info_has_stream_columns(
     saved: pathlib.Path, label: str
 ) -> None:
-    """With ``all_info``, a loaded node's table has every live column and more."""
+    """With ``all_info``, a loaded node's table, once a load-only run has filled it,
+    has every live column and more."""
     # The loaded table follows the documented stream semantics: every column of the
     # live table, with the same values and types, plus the data context and the
     # source-info columns. (The live FunctionJobNode.as_table() drops those two
     # groups -- a separate, pre-existing bug the loaded node does not copy.)
     expected = pq.read_table(saved / "expected" / f"{label}.all_info.parquet")
-    table = _load(saved).nodes[label].as_source().as_table(all_info=True)
+    table = _loaded_and_filled(saved).nodes[label].as_table(all_info=True)
     data_column = next(iter(_load(saved).nodes[label].output_schema()[1]))
     assert "_context_key" in table.column_names
     assert f"_source_{data_column}" in table.column_names
@@ -388,15 +417,11 @@ def test_other_context_records_do_not_satisfy_saved_expectation(
     assert rows is None or len(rows) == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1095: a loaded node reads empty until loaded.run(load_only=True), "
-    "which reads its entries this way (stage 4)",
-)
 def test_recomputed_entry_is_read_once_with_its_latest_result(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A loaded node reads one row per entry: the greatest recomputation index wins."""
+    """A loaded node's load-only run reads one row per entry: the greatest recomputation
+    index wins."""
     path = _save_small_job(tmp_path, _record_double)
     node = PipelineJob.load(path).nodes["dbl"]
     # A loaded node is empty until it runs (ITL-1095): read its stored view.
@@ -405,7 +430,10 @@ def test_recomputed_entry_is_read_once_with_its_latest_result(
     _append_recomputed_record(node, entry_id, recomputation_index=2, value=222)
     _append_recomputed_record(node, entry_id, recomputation_index=1, value=111)
 
-    reloaded = PipelineJob.load(path).nodes["dbl"].as_source()
+    reloaded_job = PipelineJob.load(path)
+    reloaded_job.bind(sources={"dsrc": _dict_source()})
+    _ = reloaded_job.run(load_only=True)
+    reloaded = reloaded_job.nodes["dbl"]
     table = reloaded.as_table()
     assert table.num_rows == 2
     rows = {row["id"]: row["dbl"] for row in table.to_pylist()}
@@ -442,15 +470,11 @@ def test_live_node_hot_load_reads_the_latest_recomputed_result(
     assert values[entry_id] == 222
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1095: a loaded node reads empty until loaded.run(load_only=True), "
-    "which reads its entries this way (stage 4)",
-)
 def test_loaded_node_with_ephemeral_results_does_not_crash(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Ephemeral results come back as placeholders; the table says why it has none."""
+    """Results kept in an ephemeral store are gone after the run: a load-only run of the
+    loaded job counts them as not stored and shows no rows; it does not crash."""
 
     @function_pod(output_keys="dbl")
     def double(x: int) -> int:
@@ -468,25 +492,14 @@ def test_loaded_node_with_ephemeral_results_does_not_crash(
         node.set_ephemeral_store(InMemoryArrowDatabase())
 
     path = _save_small_job(tmp_path, record, configure=make_ephemeral)
-    node = PipelineJob.load(path).nodes["dbl"]
-    assert [type(data).__name__ for _, data in node.iter_data()] == [
-        "EmptyData",
-        "EmptyData",
-    ]
-    with pytest.raises(RuntimeError) as excinfo:
-        _ = node.as_table()
-    assert str(excinfo.value) == (
-        "FunctionJobNode 'dbl': the saved run kept 2 of its results in an ephemeral "
-        "store, which is not saved with the job, so they cannot be read into a table. "
-        "iter_data() yields them as EmptyData placeholders."
-    )
+    loaded = PipelineJob.load(path)
+    loaded.bind(sources={"dsrc": _dict_source()})
+    summary = loaded.run(load_only=True)
+    assert summary.nodes["dbl"].not_stored == 2
+    assert summary.nodes["dbl"].reused == 0
+    assert loaded.nodes["dbl"].as_table().num_rows == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1095: a loaded node reads empty until loaded.run(load_only=True), "
-    "which reads its entries this way (stage 4)",
-)
 def test_newer_unavailable_result_does_not_expose_old_persistent_result(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -509,10 +522,13 @@ def test_newer_unavailable_result_does_not_expose_old_persistent_result(
         records = records.set_column(index, field, pa.array(values, type=field.type))
     store.add_records(table_path, records, record_id_column="__rid", flush=True)
 
-    node = PipelineJob.load(path).nodes["dbl"]
-    assert [type(data).__name__ for _, data in node.iter_data()] == ["EmptyData"] * 2
-    with pytest.raises(RuntimeError, match="ephemeral store"):
-        node.as_table()
+    # The newest result of each entry is gone with its ephemeral store: a load-only run
+    # counts the entry as not stored and never shows the older persistent result.
+    loaded = PipelineJob.load(path)
+    loaded.bind(sources={"dsrc": _dict_source()})
+    summary = loaded.run(load_only=True)
+    assert summary.nodes["dbl"].not_stored == 2
+    assert loaded.nodes["dbl"].as_table().num_rows == 0
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +817,8 @@ def test_loaded_function_node_cannot_execute(saved: pathlib.Path) -> None:
         _ = job.nodes["dbl"].execute(job.nodes["dsrc"])
     assert str(excinfo.value) == (
         "FunctionJobNode 'dbl' was loaded by PipelineJob.load and has no function "
-        "pod, so it cannot compute; read its stored results with as_source()."
+        "pod, so it cannot compute; fill it from the store with run(load_only=True), "
+        "or read its stored results with as_source()."
     )
 
 

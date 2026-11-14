@@ -1018,7 +1018,9 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         """Describe why this loaded node cannot execute an operator."""
         return RuntimeError(
             f"OperatorJobNode {self.label!r} was loaded by PipelineJob.load and "
-            "cannot compute; create a fresh PipelineJob to run the pipeline again."
+            "cannot compute; fill it from the store with run(load_only=True), read "
+            "its stored results with as_source(), or create a fresh PipelineJob to "
+            "run the pipeline again."
         )
 
     def _filter_by_content_hash(self, table: pa.Table) -> pa.Table:
@@ -1341,7 +1343,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         """
         from orcapod.pipeline.observer import NoOpObserver
 
-        if self._loaded:
+        # A loaded node runs only in a load-only run, with its rebuilt operator.
+        if self._loaded and (not load_only or self._operator is None):
             raise self._cannot_compute_error()
 
         node_label = self.label
@@ -1753,7 +1756,8 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         """
         from orcapod.pipeline.observer import NoOpObserver
 
-        if self._loaded:
+        # A loaded node runs only in a load-only run, with its rebuilt operator.
+        if self._loaded and (not load_only or self._operator is None):
             await output.close()
             raise self._cannot_compute_error()
 

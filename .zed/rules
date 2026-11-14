@@ -793,6 +793,7 @@ data. The rules:
   (pipeline/node_run.py), and the run commits as job.run() does. A failed end-of-run
   commit clears every node of the run. A load-only run's rows have status
   loaded_only. Only job nodes' run() takes an argument (load_only).
+  A loaded job (PipelineJob.load) runs only with load_only=True.
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
 - DerivedSource over a job node with nothing stored → presents zero rows with the origin's columns
   (no computed records; no error), in the plain form and with tags_as_data.

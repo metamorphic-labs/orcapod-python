@@ -1778,8 +1778,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         return RuntimeError(
             f"FunctionJobNode {self.label!r} was loaded by PipelineJob.load and has no "
-            "function pod, so it cannot compute; read its stored results with "
-            "as_source()."
+            "function pod, so it cannot compute; fill it from the store with "
+            "run(load_only=True), or read its stored results with as_source()."
         )
 
     def _stored_record_count(self) -> int:

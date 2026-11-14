@@ -765,10 +765,23 @@ print(loaded.nodes["bmi"].as_source().as_table().sort_by("subject_id").to_pandas
 # 2   mouse_03  2297.520661
 ```
 
-A loaded job is for reading stored results, through each node's stored view,
-`node.as_source()`: its nodes have not run in this process, so they are empty. It cannot be
-run again: function pods are not saved with the job, so `loaded.run()` raises. To compute
-again, build the job from your code as before.
+A loaded job is for reading stored results. Its nodes have not run in this process, so
+they are empty; each node's stored view, `node.as_source()`, reads what the store holds. A
+loaded job cannot compute: function pods are not saved with it, so `loaded.run()` raises.
+`loaded.run(load_only=True)` fills its nodes from the store instead, as for any job (see
+*Loading without computing* above): the sources are read (an in-memory source must be bound
+first, since its data is not saved), the rebuilt operators run, and each function node takes
+the results stored for those inputs. Nodes below a source that is not available stay empty.
+`node.run(load_only=True)` does the same for one node and what it depends on.
+
+```python
+loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], source_id="mice")})
+summary = loaded.run(load_only=True)
+print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
+# 3 0
+```
+
+To compute again, build the job from your code as before.
 
 The store is the source of truth: a loaded job's stored views show what the store holds for
 it. The job file names each run's rows by the content hash the run stored them under, so a
