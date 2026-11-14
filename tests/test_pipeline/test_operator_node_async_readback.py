@@ -488,23 +488,75 @@ def test_operator_node_with_no_rows_reads_back_empty_after_async_run(
     assert list(async_node.iter_data()) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-858/ITL-912: no row reaches the async node, so it reads back the table "
-        "built from the Python output schema: int8 becomes int64, and the system-tag "
-        "and source-info columns are missing"
+ZERO_ROW_CASES = [
+    NO_MATCH,
+    Case(
+        "drop_nulls_drops_every_row",
+        lambda a, b, c: DropNulls(["s"])(
+            PolarsFilter(constraints={"id": 2})(a), label="op"
+        ),
+        0,
     ),
+    Case(
+        "join_no_match",
+        lambda a, b, c: Join()(
+            PolarsFilter(constraints={"id": 1})(a),
+            PolarsFilter(constraints={"id": 2})(b),
+            label="op",
+        ),
+        0,
+    ),
+    Case(
+        "semi_join_no_match",
+        lambda a, b, c: SemiJoin()(
+            PolarsFilter(constraints={"id": 1})(a),
+            PolarsFilter(constraints={"id": 2})(b),
+            label="op",
+        ),
+        0,
+    ),
+    Case(
+        "merge_join_no_match",
+        lambda a, b, c: MergeJoin()(
+            PolarsFilter(constraints={"id": 1})(a),
+            PolarsFilter(constraints={"id": 2})(c),
+            label="op",
+        ),
+        0,
+    ),
+    Case(
+        "filter_after_operator",
+        lambda a, b, c: PolarsFilter(constraints={"grp": "none"})(
+            SelectDataColumns(["x"])(a), label="op"
+        ),
+        0,
+    ),
+    # An input that delivers no row at all: both paths build that input from the
+    # upstream's Python output schema (ITL-912), so they agree with each other.
+    *AFTER_NO_ROWS_CASES[:4],
+]
+
+
+@pytest.mark.parametrize(
+    "case", ZERO_ROW_CASES, ids=[case.name for case in ZERO_ROW_CASES]
 )
 def test_operator_node_with_no_rows_keeps_columns_and_types_after_async_run(
-    tmp_path: Path,
+    case: Case, tmp_path: Path
 ) -> None:
-    """A zero-row async result should keep the sync path's columns and Arrow types."""
-    sync_node, async_node = _sync_and_async_nodes(NO_MATCH, tmp_path)
+    """A zero-row async result keeps the sync path's columns and Arrow types (ITL-1080).
 
-    assert async_node.as_table(all_info=True).schema == (
-        sync_node.as_table(all_info=True).schema
-    )
+    The node has no output row to read a type from; it rebuilds its inputs with no rows,
+    as the sync orchestrator builds them, and keeps the operator's result over those.
+    """
+    sync_node, async_node = _sync_and_async_nodes(case, tmp_path)
+
+    sync_table = sync_node.as_table(all_info=True)
+    async_table = async_node.as_table(all_info=True)
+    assert sync_table.num_rows == async_table.num_rows == 0
+    assert async_table.schema == sync_table.schema
+    assert async_node.as_table().schema == sync_node.as_table().schema
+    assert async_node.keys(all_info=True) == sync_node.keys(all_info=True)
+    assert list(async_node.iter_data()) == []
 
 
 AFTER_OPERATOR_CASES = [
