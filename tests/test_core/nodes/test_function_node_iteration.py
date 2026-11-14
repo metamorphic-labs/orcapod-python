@@ -123,10 +123,10 @@ class TestIterDatasReadOnly:
         assert "id" in table.column_names
         assert "result" in table.column_names
 
-    def test_run_cache_only_is_noop(self):
-        """run() on a CACHE_ONLY node computes nothing and returns the stored rows' view."""
+    def test_run_cache_only_raises_and_points_to_the_stored_view(self):
+        """run() on a CACHE_ONLY node computes nothing: its input is unavailable, so it
+        has nothing to run or look up, and it says to read ``as_source()`` (ITL-1095)."""
         from orcapod.pipeline.serialization import LoadStatus
-        from orcapod.streams import StreamView
 
         node = _make_node()
         # A loaded node whose upstream is unavailable keeps that input stream; only its
@@ -134,9 +134,10 @@ class TestIterDatasReadOnly:
         node._load_status = LoadStatus.CACHE_ONLY
 
         with patch.object(node, "execute") as mock_exec:
-            view = node.run()
+            for load_only in (False, True):
+                with pytest.raises(RuntimeError, match=r"as_source\(\)"):
+                    node.run(load_only=load_only)
             mock_exec.assert_not_called()
-        assert isinstance(view, StreamView)
 
     def test_run_unavailable_raises(self):
         """run() on an UNAVAILABLE node raises RuntimeError."""
