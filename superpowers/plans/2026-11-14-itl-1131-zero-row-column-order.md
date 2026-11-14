@@ -91,3 +91,9 @@ Coordinator decision (2026-11-14): approve a–d; item 4 (direct node) out of sc
   (introduced 2026-11-12, ITL-967). Merged main 0208dca4 (#387): predicted schema order
   equals the row order on every job node.
 - Remaining: full suite, draft PR, CI, CodeRabbit; after PR #380 merges, flip its strict xfail.
+- 2026-11-14: ITL-1135 (DropTagColumns prediction) added as its own commits (fix + golden,
+  developer approved the golden move). PR #390 ready (developer). CodeRabbit round 1 (review
+  5906873847 on 83ddb2c7): no actionable findings; signed reply posted. CI green.
+- Remaining: when #380 merges (coordinator says when), merge main, turn its strict xfail
+  `test_a_join_with_no_input_rows_keeps_its_column_order` into a passing test, push, CI, one
+  signed '@coderabbitai review', worker_done.
