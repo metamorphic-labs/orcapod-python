@@ -285,6 +285,7 @@ def test_an_execute_whose_input_raises_leaves_the_side_effect_node_stale(
     import asyncio
 
     from orcapod.channels import Channel
+
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         rows = inc.pod(_source(), label="rowwise")
