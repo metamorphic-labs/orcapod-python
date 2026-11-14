@@ -101,6 +101,7 @@ class Oracle:
         self.origins: list[Origin] = []
         self.derivations: dict[str, Derivation] = {}
         self.renames: dict[str, str] = {}
+        self.schema_hashes: dict[str, str] = {}
 
     def add_source(
         self,
@@ -108,6 +109,7 @@ class Oracle:
         table: pa.Table,
         *,
         tag_columns: Sequence[str],
+        schema_hash: str,
         record_id_column: str | None = None,
         tokens: Sequence[str] | None = None,
     ) -> None:
@@ -117,11 +119,15 @@ class Oracle:
             source_id: The id the test gave the source.
             table: The table the test gave the source, in its row order.
             tag_columns: The source's tag columns.
+            schema_hash: The schema hash that names the source's system tag columns
+                (``_tag_source_id::<schema hash>``). Every system tag column holding
+                this source's rows, however extended downstream, starts with it.
             record_id_column: The source's record id column, if any.
             tokens: Each row's provenance token, for a source with its own documented
                 token recipe (SpiralDB: the labelled Arrow hash of the row's key),
                 computed by the test from its own rows.
         """
+        self.schema_hashes[source_id] = schema_hash
         data_columns = [c for c in table.column_names if c not in tag_columns]
         for index, values in enumerate(table.to_pylist()):
             if tokens is not None:

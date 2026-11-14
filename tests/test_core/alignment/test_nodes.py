@@ -408,6 +408,7 @@ def test_a_node_read_in_any_pattern_stays_aligned(
             run.sources.oracle,
             node.data_context,
             function_tokens=tokens,
+            expected_rows=expected_rows(view, run.sources.oracle),
         )
     check_every_config(run.job, view, run.sources.oracle, tokens)
 

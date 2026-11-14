@@ -9,8 +9,10 @@ its origin row:
 * ``__output_data_hash`` is the Arrow hash of the record's own ``y``;
 * ``__input_data_hash`` (and its ``_right`` copy) is the Arrow hash of the origin's ``x``,
   built from the table the test wrote;
-* ``_source_y`` names the output datagram ``__data_id``, and ``__data_id`` is the uuid
-  of the node's own output for that record id;
+* ``_source_y`` names the output datagram ``__data_id``, and ``__data_id`` and the whole
+  ``_source_y`` token (function uri included) are those of the node's own output for that
+  record id;
+* every input row is stored once: the record ids are source A's, each exactly once;
 * ``__data_context`` and ``_context_key`` are the data context's key.
 
 The remaining columns are not derived from the row: ``__pod_ts`` is the time the row was
@@ -20,6 +22,8 @@ per-row column fails the check until a rule covers it.
 """
 
 from __future__ import annotations
+
+from collections import Counter
 
 import pyarrow as pa
 
@@ -33,13 +37,14 @@ NOT_ROW_DERIVED_PREFIXES = ("__pf_var_", "__pf_exec_")
 NOT_ROW_DERIVED = {"__pod_ts", "__computed", "__is_ephemeral"}
 
 
-def output_datagram_ids(job: PipelineJob) -> dict[bytes, bytes]:
-    """The uuid of each in-memory output of ``scaled``, keyed by its row's record id.
+def node_outputs(job: PipelineJob) -> dict[bytes, tuple[bytes, str]]:
+    """The uuid and ``y`` token of each in-memory output of ``scaled``, by record id.
 
     Read from the ``Data`` objects the node holds after its run (``iter_data``), a path
-    independent of the stored records: what a record's ``__data_id`` must match.
+    independent of the stored records: what a record's ``__data_id`` and ``_source_y``
+    must match.
     """
-    ids: dict[bytes, bytes] = {}
+    outputs: dict[bytes, tuple[bytes, str]] = {}
     for tag, data in job.nodes["scaled"].iter_data():
         system_tags = tag.as_dict(columns={"system_tags": True})
         (record_id,) = [
@@ -48,8 +53,10 @@ def output_datagram_ids(job: PipelineJob) -> dict[bytes, bytes]:
             if k.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
         ]
         assert isinstance(record_id, bytes)
-        ids[record_id] = data.datagram_uuid.bytes
-    return ids
+        token = data.source_info()["y"]
+        assert isinstance(token, str)
+        outputs[record_id] = (data.datagram_uuid.bytes, token)
+    return outputs
 
 
 def assert_records_aligned(
@@ -67,7 +74,7 @@ def assert_records_aligned(
     if records is None:
         records = node.get_all_records(all_info=True)
     assert records is not None and records.num_rows > 0, "no records stored"
-    datagram_ids = output_datagram_ids(job)
+    outputs = node_outputs(job)
     context = node.data_context
     hasher = context.arrow_hasher
     oracle = sources.oracle
@@ -104,6 +111,18 @@ def assert_records_aligned(
     ]
     assert not unknown, f"no alignment rule covers the record columns {unknown!r}"
 
+    # Every row of the node's input stored once: a record missing, or one valid record
+    # stored twice in place of another, passes every per-record check below.
+    stored: Counter[object] = Counter(records.column(record_id_column).to_pylist())
+    wanted: Counter[object] = Counter(
+        o.record_id for o in oracle.origins if o.source_id == "A"
+    )
+    assert stored == wanted, (
+        f"stored record ids are not the input rows once each: "
+        f"{sum((wanted - stored).values())} missing, "
+        f"{sum((stored - wanted).values())} extra or repeated"
+    )
+
     failures: list[str] = []
     for index, row in enumerate(records.to_pylist()):
 
@@ -127,10 +146,17 @@ def assert_records_aligned(
         _, datagram, column = split_token(row["_source_y"])
         if datagram != row["__data_id"].hex() or column != "y":
             fail("_source_y", f"{row['_source_y']!r} does not name __data_id")
-        # __data_id is made at run time (uuid7): matched by record id with the uuid of
-        # the node's own output for this row.
-        if row["__data_id"] != datagram_ids.get(origin.record_id):
+        # __data_id and the output token are made at run time (uuid7): matched by record
+        # id with the node's own output for this row, the token whole (function uri too).
+        output_id, output_token = outputs.get(origin.record_id, (None, None))
+        if row["__data_id"] != output_id:
             fail("__data_id", f"is not the uuid of row {origin.token!r}'s output")
+        if row["_source_y"] != output_token:
+            fail(
+                "_source_y",
+                f"{row['_source_y']!r}, row {origin.token!r}'s output has "
+                f"{output_token!r}",
+            )
         one_row = records.slice(index, 1)
         output_hash = hasher.hash_table(one_row.select(["y"])).to_prefixed_digest()
         if row["__output_data_hash"] != output_hash:

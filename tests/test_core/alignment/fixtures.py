@@ -21,6 +21,7 @@ from typing import Any
 import pyarrow as pa
 
 from orcapod.sources import ArrowTableSource
+from orcapod.system_constants import constants
 
 from .oracle import Oracle
 
@@ -185,6 +186,18 @@ class Sources:
     expected_source: str | None = None
 
 
+def schema_hash_of(source: Any) -> str:
+    """The schema hash naming the system tag columns of the root ``source``.
+
+    Read from the source's own source-id column, ``_tag_source_id::<schema hash>``: the
+    base every downstream column holding its rows extends.
+    """
+    prefix = constants.SYSTEM_TAG_SOURCE_ID_PREFIX + constants.BLOCK_SEPARATOR
+    tags, _ = source.keys(columns={"system_tags": True})
+    (name,) = [t for t in tags if t.startswith(prefix)]
+    return name[len(prefix) :]
+
+
 def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
     """Build sources A, B and C of ``scenario`` and register their rows in an oracle.
 
@@ -206,7 +219,11 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
             record_id_column=record_id_column,
         )
         oracle.add_source(
-            name, table, tag_columns=TAG_COLUMNS, record_id_column=record_id_column
+            name,
+            table,
+            tag_columns=TAG_COLUMNS,
+            schema_hash=schema_hash_of(built[name]),
+            record_id_column=record_id_column,
         )
         tables[name] = table
     return Sources(

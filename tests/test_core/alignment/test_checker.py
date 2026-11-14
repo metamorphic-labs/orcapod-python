@@ -18,6 +18,7 @@ from orcapod.system_constants import constants
 
 from .checker import (
     Layout,
+    split_token,
     assert_members_cover,
     assert_requested_columns,
     assert_all_columns_checked,
@@ -49,6 +50,7 @@ def source_table() -> tuple[pa.Table, Layout, Oracle, Any]:
 
 
 def test_an_aligned_source_table_passes_and_every_column_is_compared() -> None:
+    """Source A's full table passes, and the checker compares every one of its columns."""
     table, layout, oracle, context = source_table()
     checked = assert_rows_aligned(table, layout, oracle, context)
     assert_all_columns_checked(table, checked)
@@ -65,12 +67,14 @@ def _misalignable_columns() -> list[str]:
 
 @pytest.mark.parametrize("column", _misalignable_columns())
 def test_a_rotated_column_is_named(column: str) -> None:
+    """Rotating one column's values by a row is caught and names that column."""
     table, layout, oracle, context = source_table()
     with pytest.raises(AssertionError, match=rf"column '{column}'"):
         assert_rows_aligned(rotated(table, column), layout, oracle, context)
 
 
 def test_a_wrong_context_key_is_named() -> None:
+    """A context key that is not the data context's key is caught."""
     table, layout, oracle, context = source_table()
     index = table.column_names.index(constants.CONTEXT_KEY)
     wrong = table.set_column(
@@ -83,6 +87,7 @@ def test_a_wrong_context_key_is_named() -> None:
 
 
 def test_a_column_no_rule_covers_fails() -> None:
+    """A column no alignment rule covers fails the check instead of being skipped."""
     table, layout, oracle, context = source_table()
     extra = table.append_column("__unexplained", pa.array(range(table.num_rows)))
     with pytest.raises(AssertionError, match="__unexplained"):
@@ -90,6 +95,7 @@ def test_a_column_no_rule_covers_fails() -> None:
 
 
 def test_rotated_join_record_ids_are_named() -> None:
+    """Either input's record id rotated in a join's table is caught and named."""
     sources = make_sources("unique")
     joined = Join()(sources.a, sources.b)
     table = joined.as_table(all_info=True)
@@ -108,7 +114,44 @@ def test_rotated_join_record_ids_are_named() -> None:
             )
 
 
+def test_join_pairs_exchanged_whole_between_inputs_are_named() -> None:
+    """A's (source id, record id) pair in B's columns and B's in A's fails.
+
+    Each pair still names a row the joined row comes from; only the column a pair is in,
+    which descends from its source's own column, tells the exchange apart.
+    """
+    sources = make_sources("unique")
+    joined = Join()(sources.a, sources.b)
+    table = joined.as_table(all_info=True)
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=joined.keys()[1])
+    assert_rows_aligned(table, layout, sources.oracle, joined.data_context)
+    prefixes = (
+        constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+        constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+    )
+    suffixes = sorted(
+        c[len(constants.SYSTEM_TAG_SOURCE_ID_PREFIX) :]
+        for c in table.column_names
+        if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
+    )
+    assert len(suffixes) == 2
+    first, second = suffixes
+    exchanged = table
+    for prefix in prefixes:
+        one, other = f"{prefix}{first}", f"{prefix}{second}"
+        one_values, other_values = table.column(one), table.column(other)
+        exchanged = exchanged.set_column(
+            exchanged.column_names.index(one), exchanged.field(one), other_values
+        )
+        exchanged = exchanged.set_column(
+            exchanged.column_names.index(other), exchanged.field(other), one_values
+        )
+    with pytest.raises(AssertionError, match="but the column descends from"):
+        assert_rows_aligned(exchanged, layout, sources.oracle, joined.data_context)
+
+
 def test_a_rotated_folded_record_id_is_named() -> None:
+    """A Batch's folded record id moved to another batch is caught."""
     sources = make_sources("unique")
     batched = Batch(2)(sources.a)
     table = batched.as_table(all_info=True)
@@ -130,6 +173,7 @@ def test_a_rotated_folded_record_id_is_named() -> None:
 
 
 def test_identity_comparison_ignores_row_order_but_not_cell_moves() -> None:
+    """Comparison by row identity accepts reordered rows but not a value moved between rows."""
     table, *_ = source_table()
     reversed_rows = table.take(list(reversed(range(table.num_rows))))
     assert_same_rows_by_identity(table, reversed_rows)
@@ -138,6 +182,7 @@ def test_identity_comparison_ignores_row_order_but_not_cell_moves() -> None:
 
 
 def test_a_null_token_beside_a_value_is_named() -> None:
+    """A null source-info token beside a non-null value is caught."""
     table, layout, oracle, context = source_table()
     index = table.column_names.index("_source_x")
     tokens = table.column("_source_x").to_pylist()
@@ -150,6 +195,7 @@ def test_a_null_token_beside_a_value_is_named() -> None:
 
 
 def test_a_system_tag_that_is_no_source_id_or_record_id_fails() -> None:
+    """A system tag column that is neither a source id nor a record id fails the check."""
     table, layout, oracle, context = source_table()
     extra = table.append_column(
         f"{constants.SYSTEM_TAG_PREFIX}unexplained", pa.array(range(table.num_rows))
@@ -200,7 +246,39 @@ def test_stored_records_with_a_swapped_output_id_are_named(tmp_path: Path) -> No
         assert_records_aligned(run.job, run.sources, swapped)
 
 
+def test_stored_records_with_a_wrong_function_uri_are_named(tmp_path: Path) -> None:
+    """A ``_source_y`` token whose uuid is right but whose function uri is not fails."""
+    run = make_run("unique", "shuffled", "sync", None, "in_memory", tmp_path)
+    records = run.job.nodes["scaled"].get_all_records(all_info=True)
+    assert records is not None
+    tokens = records.column("_source_y").to_pylist()
+    _, datagram, column = split_token(tokens[0])
+    sep = constants.BLOCK_SEPARATOR
+    tokens[0] = f"wrong-function{sep}{datagram}{sep}{column}"
+    index = records.column_names.index("_source_y")
+    wrong = records.set_column(
+        index, records.field("_source_y"), pa.array(tokens, type=pa.large_string())
+    )
+    with pytest.raises(AssertionError, match="column '_source_y'"):
+        assert_records_aligned(run.job, run.sources, wrong)
+
+
+def test_stored_records_with_one_record_repeated_are_named(tmp_path: Path) -> None:
+    """A valid record stored twice in place of another fails, though each row is aligned."""
+    run = make_run("unique", "shuffled", "sync", None, "in_memory", tmp_path)
+    records = run.job.nodes["scaled"].get_all_records(all_info=True)
+    assert records is not None and records.num_rows > 1
+    repeated = pa.concat_tables(
+        [records.slice(0, 1), records.slice(0, records.num_rows - 1)]
+    )
+    with pytest.raises(AssertionError, match="1 missing, 1 extra or repeated"):
+        assert_records_aligned(run.job, run.sources, repeated)
+    with pytest.raises(AssertionError, match="1 missing, 0 extra"):
+        assert_records_aligned(run.job, run.sources, records.slice(1))
+
+
 def test_a_table_without_the_requested_provenance_fails() -> None:
+    """A table missing the source-info or system tag columns its configuration asks for fails."""
     table, layout, *_ = source_table()
     with pytest.raises(AssertionError, match="no source-info columns"):
         assert_requested_columns(
@@ -216,6 +294,7 @@ def test_a_table_without_the_requested_provenance_fails() -> None:
 
 
 def test_a_table_asked_sorted_but_not_in_tag_order_fails() -> None:
+    """A table whose configuration asks it sorted by tags fails when its rows are out of tag order."""
     table, layout, *_ = source_table()
     ordered = table.sort_by([("g", "ascending")])
     assert_requested_columns(ordered, {"columns": {"sort_by_tags": True}}, layout)
@@ -225,6 +304,7 @@ def test_a_table_asked_sorted_but_not_in_tag_order_fails() -> None:
 
 
 def test_a_row_replaced_by_a_copy_of_another_fails_the_expected_rows() -> None:
+    """One valid row repeated in place of another fails the expected rows, though each row is aligned."""
     table, layout, oracle, context = source_table()
     expected = rows(oracle, "A")
     assert_rows_aligned(table, layout, oracle, context, expected_rows=expected)
@@ -234,6 +314,7 @@ def test_a_row_replaced_by_a_copy_of_another_fails_the_expected_rows() -> None:
 
 
 def test_an_empty_join_fails_its_expected_rows() -> None:
+    """A join returning no rows fails when the fixtures have matching keys."""
     sources = make_sources("unique")
     joined = Join()(sources.a, sources.b)
     table = joined.as_table(all_info=True)

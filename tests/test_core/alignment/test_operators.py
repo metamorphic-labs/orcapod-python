@@ -410,7 +410,7 @@ def test_operator_nodes_are_aligned_and_async_equals_sync(
     for orchestrator in ORCHESTRATORS:
         node, sources = run_case(case, scenario, input_order, orchestrator)
         nodes[orchestrator] = node
-        failures = check_tables(case, node, sources, with_head=False)
+        failures = check_tables(case, node, sources, with_head=True)
         assert not failures, f"{orchestrator}: " + "\n".join(failures)
     if case.keyed_by_record_ids:
         sync, async_ = nodes["sync"], nodes["async"]

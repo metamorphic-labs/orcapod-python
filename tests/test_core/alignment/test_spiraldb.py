@@ -30,7 +30,7 @@ from .checker import (
     rows_table,
 )
 from .expectations import rows
-from .fixtures import COLUMN_CONFIGS, content_hash_column
+from .fixtures import COLUMN_CONFIGS, content_hash_column, schema_hash_of
 from .oracle import Oracle
 
 PROJECT = "alignment"
@@ -79,16 +79,22 @@ def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
         )
 
 
-def oracle_of(table: pa.Table) -> Oracle:
-    """The oracle of the written rows, with their key-hash tokens."""
+def oracle_of(table: pa.Table, source: Any) -> Oracle:
+    """The oracle of the written rows of ``source``, with their key-hash tokens."""
     oracle = Oracle()
-    oracle.add_source(SOURCE_ID, table, tag_columns=["grp"], tokens=key_tokens(table))
+    oracle.add_source(
+        SOURCE_ID,
+        table,
+        tag_columns=["grp"],
+        schema_hash=schema_hash_of(source),
+        tokens=key_tokens(table),
+    )
     return oracle
 
 
 def test_iterated_rows_are_aligned_across_scan_batches(source: Any) -> None:
     """``iter_data`` and ``async_iter_data`` yield every row once, each its own."""
-    oracle = oracle_of(written_table())
+    oracle = oracle_of(written_table(), source)
     tags, data = source.keys()
     layout = Layout(tag_keys=tuple(tags), data_keys=tuple(data))
 
@@ -109,7 +115,7 @@ def test_iterated_rows_are_aligned_across_scan_batches(source: Any) -> None:
 @pytest.mark.parametrize("config_name", list(COLUMN_CONFIGS))
 def test_tables_are_aligned_across_scan_batches(source: Any, config_name: str) -> None:
     """Every configuration, the sorted ones reordering rows across batch boundaries."""
-    oracle = oracle_of(written_table())
+    oracle = oracle_of(written_table(), source)
     config = COLUMN_CONFIGS[config_name]
     tags, data = source.keys()
     layout = Layout(

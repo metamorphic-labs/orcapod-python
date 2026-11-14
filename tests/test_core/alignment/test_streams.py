@@ -47,6 +47,7 @@ from .fixtures import (
     content_hash_column,
     keys_a,
     make_sources,
+    schema_hash_of,
 )
 from .expectations import member as member_of
 from .expectations import rows
@@ -117,7 +118,11 @@ def derived_tags_as_data(sources: Sources) -> Any:
     )
     oracle = Oracle()
     oracle.add_source(
-        derived.source_id, copied, tag_columns=TAG_COLUMNS, record_id_column="x"
+        derived.source_id,
+        copied,
+        tag_columns=TAG_COLUMNS,
+        schema_hash=schema_hash_of(derived),
+        record_id_column="x",
     )
     sources.oracle = oracle
     sources.expected_source = derived.source_id

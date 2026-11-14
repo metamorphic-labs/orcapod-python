@@ -167,3 +167,10 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   (sync and async) and the grouped job node assert that the dropped tag n is absent from
   keys(), the schema and every table. #363 and #364 needed nothing: the suite has no
   all_info workaround and no warning filter. 6491 pass, no marks.
+* Nov 14: CodeRabbit round on eae2391c. Stored records must be source A's record ids
+  once each, and `_source_y` must equal the node output's whole token (function uri
+  included). Operator nodes check `head` too, and node iterator reads check their
+  expected rows. A system-tag pair's column must descend from its source's own column:
+  its first hash is that source's schema hash, so two sources of one schema cannot be
+  told apart. Three new self-tests. Column order was declined: it is covered by
+  `tests/test_core/operators/test_join_tag_order.py`. 6494 pass, no marks.

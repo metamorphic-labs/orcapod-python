@@ -9,7 +9,10 @@ alone, never by comparing two runs (two wrong runs can agree):
   element for list columns);
 * system tags: a record id is the documented UUID v5 of the origin row the data came from,
   and the source id its source's id; a folded (aggregated) pair is the documented fold of
-  the row's own members;
+  the row's own members; the pair's column descends from its source's own column (its
+  first hash is that source's schema hash), so a pair moved to another input's column
+  fails. Limit: two sources of one schema share that hash (a commutative join then orders
+  their pairs per row), so a pair moved between their columns cannot be told apart;
 * user tags: the origin row's tag values (element by element for the list-valued tags
   of ``Batch``; ``GroupBy`` keeps only its scalar keys);
 * ``_content_hash``: the data context's Arrow hash of the row's data columns;
@@ -95,6 +98,7 @@ class _RowChecker:
         oracle: Oracle,
         function_tokens: Mapping[tuple[str, bytes], str] | None,
     ) -> None:
+        """Prepare to check row ``index`` (its values ``row``) against ``oracle``."""
         self.index = index
         self.row = row
         self.layout = layout
@@ -270,12 +274,38 @@ class _RowChecker:
             self.checked.update((name, record_name))
             source_value = self.row[name]
             record_value = self.row[record_name]
+            # ``::<schema hash>`` first, then one ``::<pipeline hash>[:<position>]`` per
+            # join or fold: the first segment names the schema of the pair's source.
+            lineage = suffix.removeprefix(constants.BLOCK_SEPARATOR).split(
+                constants.BLOCK_SEPARATOR
+            )[0]
             if folded:
-                self._check_folded(name, source_value, record_value)
+                self._check_folded(name, source_value, record_value, lineage)
             else:
-                self._check_scalar(record_name, source_value, record_value)
+                self._check_scalar(record_name, source_value, record_value, lineage)
 
-    def _check_scalar(self, name: str, source_value: Any, record_value: Any) -> None:
+    def _check_lineage(self, name: str, source: str, lineage: str) -> bool:
+        """The column holding a pair of ``source`` must descend from that source's column.
+
+        A pair moved, whole, into the column of another input passes every value check;
+        only the column name, whose first hash is the schema hash of the source whose
+        rows it holds, tells it apart. Two sources of one schema share that hash, so a
+        pair moved between their columns is not caught (by design: a commutative join
+        orders such pairs per row).
+        """
+        expected = self.oracle.schema_hashes.get(source)
+        if expected != lineage:
+            self.fail(
+                name,
+                f"holds a pair of {source!r}, whose system tags are named by schema "
+                f"hash {expected!r}, but the column descends from {lineage!r}",
+            )
+            return False
+        return True
+
+    def _check_scalar(
+        self, name: str, source_value: Any, record_value: Any, lineage: str
+    ) -> None:
         """A scalar record id is the record id of this row's origin row of its source."""
         origin = self.oracle.by_record_id.get(record_value)
         if origin is None:
@@ -288,15 +318,21 @@ class _RowChecker:
                 f"{source_value!r}",
             )
             return
+        if not self._check_lineage(name, origin.source_id, lineage):
+            return
         self._assign(0, name, origin)
 
-    def _check_folded(self, name: str, source_value: Any, record_value: Any) -> None:
+    def _check_folded(
+        self, name: str, source_value: Any, record_value: Any, lineage: str
+    ) -> None:
         """A folded pair is the documented fold of this row's members of one source."""
         sources = {s for member in self.state.members for s in member}
         for source in sorted(sources):
             origins = [member.get(source) for member in self.state.members]
             if fold_values([source] * len(origins)) != source_value:
                 continue
+            if not self._check_lineage(name, source, lineage):
+                return
             if any(o is None for o in origins):
                 self.fail(name, f"members of {source!r} not all known; cannot fold")
                 return
