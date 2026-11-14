@@ -8,7 +8,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterator, Sequence
 from functools import update_wrapper, wraps
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -609,6 +609,7 @@ class _FunctionPodBase(TraceableBase):
         pipeline_config: PipelineConfig | None = None,
         *,
         observer: ExecutionObserverProtocol | None = None,
+        error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
     ) -> None:
         """Streaming async execution with per-data concurrency control.
@@ -630,7 +631,17 @@ class _FunctionPodBase(TraceableBase):
             output: Writable channel for output (tag, data) pairs.
             pipeline_config: Optional pipeline-level concurrency config.
             observer: Optional observer for per-item lifecycle hooks.
+            error_policy: What a row whose function raised does, as for a node's
+                ``execute``: ``"continue"`` skips the row; ``"fail_fast"`` raises its
+                exception, which cancels the rows still in flight. Rows run
+                concurrently, so the row raised is the first to fail, which is the
+                first in input order only with one row at a time.
             run_id: Pipeline run identifier forwarded to per-row processing.
+
+        Raises:
+            Exception: Under ``"fail_fast"``, the exception of the first row whose
+                function raised, inside the ``ExceptionGroup`` of the pod's task group.
+            StoreError: A failed store read or write, whatever ``error_policy`` is.
         """
         from orcapod.pipeline.observer import NoOpObserver
 
@@ -678,6 +689,8 @@ class _FunctionPodBase(TraceableBase):
                         "Data processing failed, skipping: %s", exc, exc_info=True
                     )
                     obs.on_data_crash(pod_label, tag, data, exc)
+                    if error_policy == "fail_fast":
+                        raise
                     return False
                 obs.on_data_end(pod_label, tag, data, result_data, cached=False)
                 if result_data is None:
@@ -696,18 +709,23 @@ class _FunctionPodBase(TraceableBase):
                 """Process one row in a concurrency slot.
 
                 ``computes``: the row is the one computing its input ``key``. When it
-                ends, however it ends (a result, no result, an error, a cancellation),
-                the rows waiting for it go on: after a result each finds it stored;
-                otherwise the first of them computes the input, as the next row with
-                that input does on the sync path.
+                ends, the rows waiting for it go on: after a result each finds it
+                stored; after no result, a skipped failure or the function cancelling
+                itself, the first of them computes the input, as the next row with that
+                input does on the sync path. When an error ends the run (``fail_fast``,
+                a store error), the waiting rows are cancelled with it.
                 """
                 gave_result = False
+                run_failing = False
                 acquired = holds_slot
                 try:
                     if sem is not None and not acquired:
                         _ = await sem.acquire()
                         acquired = True
                     gave_result = await process_one(tag, data)
+                except Exception:
+                    run_failing = True
+                    raise
                 finally:
                     if sem is not None and acquired:
                         sem.release()
@@ -718,6 +736,12 @@ class _FunctionPodBase(TraceableBase):
                             del computing[key]
                             for waiter in waiting:
                                 waiter.set_result(False)
+                        elif run_failing:
+                            # The run stops at this error, as the sync path does: no
+                            # waiting row computes the input again.
+                            del computing[key]
+                            for waiter in waiting:
+                                _ = waiter.cancel()
                         elif waiting:
                             waiting.popleft().set_result(True)
                         else:

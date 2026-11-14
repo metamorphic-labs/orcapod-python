@@ -315,6 +315,22 @@ def test_a_failed_leader_lets_the_next_copy_compute() -> None:
     assert results["async"] == results["sync"]
 
 
+def test_a_failed_leader_stops_a_fail_fast_run_as_on_sync() -> None:
+    """Under ``fail_fast`` the first call's error ends the run; no copy calls again."""
+    for kind in ORCHESTRATORS:
+        outcome = LeaderOutcome(
+            ValueError("first call fails"), concurrent=kind == "async"
+        )
+        db = InMemoryArrowDatabase()
+        job = build(outcome.pod(), same_data_other_tags([0, 0, 0, 1]), db)
+        orchestrator_cls = (
+            SyncPipelineOrchestrator if kind == "sync" else AsyncPipelineOrchestrator
+        )
+        with pytest.raises(ValueError, match="first call fails"):
+            _ = job.run(orchestrator=orchestrator_cls(error_policy="fail_fast"))
+        assert outcome.calls[0] == 1, kind
+
+
 def test_a_leader_cancelled_by_its_function_releases_the_copies() -> None:
     """The first call of an input raises ``CancelledError``: the copies do not hang.
 
