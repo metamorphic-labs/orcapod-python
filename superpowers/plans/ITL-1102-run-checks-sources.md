@@ -210,3 +210,10 @@ Public interface only, both orchestrators (`ORCHESTRATORS` param as in
 - A cache shared through `cache_path` by wrappers over different source objects is not
   followed by the check: documented (docstring, sources.md); comparing on every check is
   ITL-1143 (cost: a full cache read per run).
+
+## Developer decision: row order follows the record id rule (November 14, 2026)
+
+- `reload.same_rows(held, read, *, ordered)`: callers pass `ordered=self._record_id_column is None`
+  (CSV, Delta, DB table, DerivedSource); without a `record_id_column` a reorder is a change
+  and ids follow the new positions (function results reused); with one, only content counts.
+  In doubt, order counts. Fuller design: ITL-1103 / ITL-1104.

@@ -34,7 +34,8 @@ class DeltaTableSource(RootSource):
 
     At the start of every run (``check_for_new_data``, ITL-1102) the source checks the
     table's Delta version. When the version moved, it reads the table again and, if
-    the rows changed (compared in any order: a version that only compacted files or
+    the rows changed (in order without a ``record_id_column``, in any order with one: a
+    version that only compacted files or
     changed metadata changes nothing), holds the new rows and moves its modified time.
     Record ids keep their rule: the ``record_id_column`` value, or the row's position.
     """
@@ -124,7 +125,8 @@ class DeltaTableSource(RootSource):
                 f"the table now has {table.schema}. Build a new DeltaTableSource to "
                 "read it"
             )
-        if same_rows(self._table, table):
+        # Row positions are record ids without a record_id_column: order counts.
+        if same_rows(self._table, table, ordered=self._record_id_column is None):
             self._version = version
             return False
         stream = self._build(table).stream

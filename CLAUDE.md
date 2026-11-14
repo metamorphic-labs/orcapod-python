@@ -905,7 +905,9 @@ data. The rules:
   too; a bare source's `run()` never does. A source over another (`CachedSource`, `DerivedSource`)
   reads it again when its modified time moved since the last read, never on what the
   inner check returned (another wrapper may have taken the change), and records that time
-  only after the read succeeded.
+  only after the read succeeded. Without a `record_id_column` a row's record id is its position: a
+  change of row order is a change; with one, only content counts
+  (`reload.same_rows(..., ordered=)`, decided by the caller; in doubt, order counts).
 - Empty data → `ArrowTableSource` raises `ValueError("Table is empty")`.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   `job.run()`, `node.run()` (state-driven, ITL-1095: a node holding a current run delivers

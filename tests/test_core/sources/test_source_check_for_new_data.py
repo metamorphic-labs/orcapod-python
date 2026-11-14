@@ -886,3 +886,94 @@ def test_shared_cache_deleted_rows_move_neither_wrapper(
     assert _moved(first) is False  # the cache keeps every row it held
     assert _moved(second) is False
     assert _keys(first) == _keys(second) == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Row order (developer, November 14, 2026, ITL-1102): without a record_id_column a
+# row's record id is its position, so a change of row order is a change; with one,
+# only content counts.
+# ---------------------------------------------------------------------------
+
+
+def _record_ids(source: Any) -> dict[int, str]:
+    """Each row's record id (its system tag), by key ``k``."""
+    table = source.as_table(columns={"system_tags": True})
+    (column,) = [n for n in table.column_names if "record_id" in n]
+    return dict(zip(table.column("k").to_pylist(), table.column(column).to_pylist()))
+
+
+def test_csv_positional_ids_a_reorder_is_a_change(csv_path: Path) -> None:
+    source = CSVSource(str(csv_path), tag_columns="k")
+    before = _record_ids(source)
+    _write_csv(csv_path, [2, 0, 1])
+    assert source.check_for_new_data() is True
+    after = _record_ids(source)
+    assert after[2] == before[0]  # the ids follow the new positions
+    assert after[0] == before[1]
+    assert source.check_for_new_data() is False
+
+
+def test_csv_explicit_record_ids_a_reorder_is_no_change(csv_path: Path) -> None:
+    source = _csv(csv_path)  # record_id_column="k"
+    before = source.last_modified
+    _write_csv(csv_path, [2, 0, 1])
+    assert source.check_for_new_data() is False
+    assert source.last_modified == before
+
+
+def _delta_positional(path: Path) -> DeltaTableSource:
+    return DeltaTableSource(path, tag_columns="k")
+
+
+def test_delta_positional_ids_a_reorder_is_a_change(delta_path: Path) -> None:
+    source = _delta_positional(delta_path)
+    before = _record_ids(source)
+    deltalake.write_deltalake(str(delta_path), _rows([2, 0, 1]), mode="overwrite")
+    assert source.check_for_new_data() is True
+    assert _record_ids(source)[2] == before[0]
+
+
+def test_delta_explicit_record_ids_a_reorder_is_no_change(delta_path: Path) -> None:
+    source = _delta(delta_path)  # record_id_column="k"
+    before = source.last_modified
+    deltalake.write_deltalake(str(delta_path), _rows([2, 0, 1]), mode="overwrite")
+    assert source.check_for_new_data() is False
+    assert source.last_modified == before
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@pytest.mark.parametrize("kind", ["csv", "delta"])
+def test_a_reorder_with_positional_ids_reruns_and_reuses_every_result(
+    csv_path: Path, delta_path: Path, kind: str, orchestrator: str
+) -> None:
+    source: Any = (
+        CSVSource(str(csv_path), tag_columns="k")
+        if kind == "csv"
+        else _delta_positional(delta_path)
+    )
+    job = _job(source)
+    _run(job, orchestrator)
+    CALLS.clear()
+    if kind == "csv":
+        _write_csv(csv_path, [2, 0, 1])
+    else:
+        deltalake.write_deltalake(str(delta_path), _rows([2, 0, 1]), mode="overwrite")
+    summary = _run(job, orchestrator)
+    assert summary.nodes["rowwise"].held == 0  # the node ran again
+    assert CALLS == []  # every function result was reused
+    assert _ys(job) == [1, 11, 21]
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@pytest.mark.parametrize("kind", ["csv", "delta"])
+def test_a_reorder_with_explicit_record_ids_keeps_the_job_current(
+    csv_path: Path, delta_path: Path, kind: str, orchestrator: str
+) -> None:
+    source: Any = _csv(csv_path) if kind == "csv" else _delta(delta_path)
+    job = _job(source)
+    _run(job, orchestrator)
+    if kind == "csv":
+        _write_csv(csv_path, [2, 0, 1])
+    else:
+        deltalake.write_deltalake(str(delta_path), _rows([2, 0, 1]), mode="overwrite")
+    assert _run(job, orchestrator).nodes["rowwise"].held == 3

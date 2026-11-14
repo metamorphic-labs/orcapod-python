@@ -486,7 +486,8 @@ class DerivedSource(RootSource):
         its modified time moved since this source last read them: a source origin that
         took in new data, by this check or by a check made through another source over
         it, or a job node that ran again. The rows read are compared with the rows
-        held, in any order; when they differ the source holds the new ones and moves its
+        held (in any order only when a ``record_id_column`` gives the record ids); when
+        they differ the source holds the new ones and moves its
         modified time. A read or comparison that raises leaves everything as it was, so
         the next check reads again. A source that holds nothing (it has not read its
         origin yet, or read none of its rows: a job node that had not run) reads the
@@ -509,7 +510,9 @@ class DerivedSource(RootSource):
             return True
         if self._tags_as_data is not None:
             stream, has_rows = self._build_derived_stream(self._tags_as_data)
-            unchanged = same_rows(held, stream.as_table())
+            unchanged = same_rows(
+                held, stream.as_table(), ordered=self._record_id_column is None
+            )
             self._origin_seen = seen
             if unchanged:
                 return False
@@ -517,7 +520,9 @@ class DerivedSource(RootSource):
         else:
             records = self._origin_records()
             read = self._empty_origin_table() if records is None else records
-            unchanged = same_rows(held, read)
+            # The stored rows' ids may not be theirs to keep in another order: order
+            # counts unless a record_id_column was given (never assume).
+            unchanged = same_rows(held, read, ordered=self._record_id_column is None)
             self._origin_seen = seen
             if unchanged:
                 return False

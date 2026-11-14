@@ -198,7 +198,8 @@ class DBTableSource(RootSource):
 
         A database table has no cheap exact sign of a change, so every check reads the
         whole table, as building the source did, and compares it with the rows held,
-        in any order: a table that returns the same rows in another order (an
+        in any order when a ``record_id_column`` gives the record ids: a table that
+        returns the same rows in another order (an
         unordered ``SELECT``) is unchanged. The rows are compared as read, every column
         included (a ``system_tag_columns`` column too; ``same_rows``).
 
@@ -218,7 +219,8 @@ class DBTableSource(RootSource):
                 f"built with {self._table.schema}, the table now has {table.schema}. "
                 "Build a new source to read it"
             )
-        if same_rows(self._table, table):
+        # Row positions are record ids without a record_id_column: order counts.
+        if same_rows(self._table, table, ordered=self._record_id_column is None):
             return False
         self._stream = self._build(table).stream
         self._table = table

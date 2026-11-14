@@ -37,7 +37,8 @@ class CSVSource(RootSource):
 
     At the start of every run (``check_for_new_data``, ITL-1102) the source looks at
     the file's modification time and size. When either changed, it reads the file
-    again and, if the rows changed (compared in any order), holds the new rows and
+    again and, if the rows changed (in order without a ``record_id_column``: row
+    positions are record ids; in any order with one), holds the new rows and
     moves its modified time. Record ids keep their rule: the ``record_id_column``
     value, or the row's position.
     """
@@ -101,9 +102,11 @@ class CSVSource(RootSource):
         """Take in the file's rows if the file changed and its rows changed.
 
         Only the file's modification time and size are read when neither changed. A
-        file written again with the same rows, in any order, leaves the held rows and
+        file written again with the same rows (in another order too, given a
+        ``record_id_column``) leaves the held rows and
         the modified time as they are. The rows are compared as read from the file,
-        every column included (a ``system_tag_columns`` column too), in any order
+        every column included (a ``system_tag_columns`` column too), in order unless a
+        ``record_id_column`` gives the record ids
         (``same_rows``).
 
         Returns:
@@ -127,7 +130,8 @@ class CSVSource(RootSource):
                 f"built with {self._table.schema}, the file now has {table.schema}. "
                 "Build a new CSVSource to read it"
             )
-        if same_rows(self._table, table):
+        # Row positions are record ids without a record_id_column: order counts.
+        if same_rows(self._table, table, ordered=self._record_id_column is None):
             self._file_state = state
             return False
         stream = self._build(table).stream

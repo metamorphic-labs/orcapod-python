@@ -61,14 +61,21 @@ def keep_nullable_columns(read: pa.Table, held: pa.Schema) -> pa.Table:
     return pa.Table.from_arrays(read.columns, schema=schema)
 
 
-def same_rows(held: pa.Table, read: pa.Table) -> bool:
-    """Return whether two tables hold the same rows, in any order.
+def same_rows(held: pa.Table, read: pa.Table, *, ordered: bool) -> bool:
+    """Return whether two tables hold the same rows, in the same order if ``ordered``.
 
-    The tables are equal as multisets of rows: the same schema (field metadata
-    included), the same number of rows, and each row as many times in one as in the
-    other. Tables in the same order are compared directly; otherwise both are put in
-    the order of a per-row hash, so a hash collision can only report a change that is
-    not there. Values are compared exactly (Arrow's equality), except that a NaN equals
+    The rule for row order (developer, November 14, 2026, ITL-1102): a source whose
+    record ids are row positions (no ``record_id_column``) compares in order, so a
+    change of row order is a change and the ids are given again at once; a source
+    with a ``record_id_column`` compares in any order, so only content counts. A
+    caller that cannot tell which rule applies passes ``ordered=True``: never assume.
+    The model is deliberately simple; a fuller design is ITL-1103 / ITL-1104.
+
+    Unordered, the tables are equal as multisets of rows: the same schema (field
+    metadata included), the same number of rows, and each row as many times in one as
+    in the other. Tables in the same order are compared directly; otherwise both are
+    put in the order of a per-row hash, so a hash collision can only report a change
+    that is not there. Values are compared exactly (Arrow's equality), except that a NaN equals
     a NaN: Arrow's equality never finds a NaN equal, which would make a table holding
     one look changed at every check. Where Arrow finds a difference, the rows are
     compared again with Polars' equality, which takes NaN as equal to NaN, and also
@@ -77,6 +84,8 @@ def same_rows(held: pa.Table, read: pa.Table) -> bool:
     Args:
         held: The rows the source holds.
         read: The rows just read again.
+        ordered: Whether row order counts: ``True`` when record ids are row
+            positions, or when the caller cannot tell.
 
     Returns:
         ``True`` if the rows are the same.
@@ -87,6 +96,8 @@ def same_rows(held: pa.Table, read: pa.Table) -> bool:
         return False
     if held.equals(read) or _polars_equal(held, read):
         return True
+    if ordered:
+        return False
     held_hashes = _row_hashes(held)
     read_hashes = _row_hashes(read)
     held_order: pa.Array[Any] = pc.sort_indices(held_hashes)  # pyright: ignore[reportUnknownMemberType]  # pyarrow.compute is untyped
