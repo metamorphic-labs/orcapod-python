@@ -191,6 +191,17 @@ def _refused() -> dict[str, tuple[pd.DataFrame | pd.Series, str]]:
         pd.DataFrame({"a": pd.Categorical(pd.interval_range(0, 2))}),
         r"column 'a'.*cannot be read back",
     )
+    tuple_level = pd.MultiIndex.from_tuples(
+        [((1, 2), 7), ((3, 4), 8)], names=["x", "y"]
+    )
+    cases["frame, MultiIndex level holding tuples"] = (
+        pd.DataFrame({"a": [1, 2]}, index=tuple_level),
+        r"index level 0 \(name 'x', dtype object\).*cannot be read back",
+    )
+    cases["series, MultiIndex level holding tuples"] = (
+        pd.Series([1, 2], name="s", index=tuple_level),
+        r"index level 0 \(name 'x', dtype object\).*cannot be read back",
+    )
     sub_microsecond = pd.Index(
         pd.arrays.ArrowExtensionArray(
             pa.array([1, 2000], pa.int64()).view(pa.time64("ns"))
@@ -276,6 +287,15 @@ ACCEPTED: dict[str, pd.DataFrame | pd.Series] = {
         {"a": [1]},
         index=pd.MultiIndex.from_tuples(
             [(7, 8, 9)], names=[5, ("a", 1), pd.Timestamp("2020-01-01")]
+        ),
+    ),
+    "MultiIndex levels of bytes and Decimals": pd.DataFrame(
+        {"a": [1, 2]},
+        index=pd.MultiIndex.from_arrays(
+            [
+                pd.Index([b"x", b"y"]),
+                pd.Index([decimal.Decimal("1.5"), decimal.Decimal("2.5")]),
+            ]
         ),
     ),
     "index named like a field, but not generated": pd.DataFrame(

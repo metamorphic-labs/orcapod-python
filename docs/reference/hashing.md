@@ -1590,8 +1590,10 @@ pyarrow version:
   Series or index whose categories are tuples (they read back as arrays, which cannot be
   categories; ITL-1115) or intervals.
 - **Index levels whose values cannot be read back.** A `pd.ArrowDtype` `time64[ns]` index
-  level holding a value that is not a whole number of microseconds (ITL-1118). The failure
-  depends on the values, so each index level is converted once, in full, when a value is
+  level holding a value that is not a whole number of microseconds (ITL-1118), and a
+  MultiIndex level holding tuples or lists, which read back as arrays that cannot be the
+  values of a MultiIndex level (ITL-1120). These failures depend on the values, so each
+  index level is converted once, in full, and a MultiIndex is assembled once, when a value is
   written or hashed; columns are checked without converting any row.
 - **Index level names that would read back as another name.** pyarrow drops a name of the
   form `__index_level_<n>__` (its own name for an unnamed level), so such a level reads back

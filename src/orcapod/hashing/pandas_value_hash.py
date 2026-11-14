@@ -117,7 +117,7 @@ would be written in another order (level names that are also level positions,
 ``names=[1, 0]``), and values storage cannot read back (a nested, dictionary or fixed-size
 ``pd.ArrowDtype`` column or index level; a categorical, period, timedelta, interval, date or
 ``pd.ArrowDtype`` column axis; tuple categories; a ``time64[ns]`` index level holding
-sub-microsecond values), column labels and index level names that would read back as another
+sub-microsecond values; a MultiIndex level holding tuples or lists), column labels and index level names that would read back as another
 label or name (``False`` reads back ``True``; ``"__index_level_0__"`` reads back unnamed), and
 labels and names that collide once written as text.
 A value Arrow cannot convert is refused by ``pandas_frame_to_arrow``. Both messages name the
@@ -882,31 +882,51 @@ def _require_index_names_restored(index: pd.Index, restored: pd.Index) -> None:
 
 
 def _require_index_values_restored(table: pa.Table, frame: pd.DataFrame) -> None:
-    """Raise if an index level's values cannot be converted back to pandas.
+    """Raise if the index cannot be rebuilt from its stored values.
 
-    Storage restores each index level from its Arrow column, and that conversion can fail on
-    the values alone, which a zero-row read never meets: a ``pd.ArrowDtype`` ``time64[ns]``
-    level holding a value that is not a whole number of microseconds raises. So each index
-    level is converted once, in full.
+    Storage converts each index level from its Arrow column and, for a MultiIndex, assembles
+    the levels with ``pd.MultiIndex.from_arrays``. Both steps can fail on the values alone,
+    which a zero-row read never meets: a ``pd.ArrowDtype`` ``time64[ns]`` level holding a
+    value that is not a whole number of microseconds cannot be converted, and a level holding
+    tuples or lists reads back as arrays, which cannot be the values of a MultiIndex level.
+    So each index level is converted once, in full, and a MultiIndex is assembled once.
 
     Args:
         table: ``pandas_frame_to_arrow(frame)``: the columns, then one field per index level.
         frame: The frame.
 
     Raises:
-        ValueError: If an index level cannot be converted; the message names it.
+        ValueError: If an index level cannot be converted or assembled; the message names it.
     """
+
+    def refuse(position: int, exc: Exception) -> ValueError:
+        return ValueError(
+            f"index level {position} (name {frame.index.names[position]!r}, dtype "
+            f"{_level_by_position(frame.index, position).dtype}): storage would write "
+            f"this value but it cannot be read back ({type(exc).__name__}: {exc})."
+        )
+
     width = frame.shape[1]
+    levels: list[Any] = []
     for position in range(frame.index.nlevels):
         try:
-            table.column(width + position).to_pandas()
+            levels.append(table.column(width + position).to_pandas())
         except Exception as exc:  # noqa: BLE001 - pandas and pyarrow raise many kinds here
-            raise ValueError(
-                f"index level {position} (name {frame.index.names[position]!r}, dtype "
-                f"{_level_by_position(frame.index, position).dtype}): storage would write "
-                "this value but it cannot be read back "
-                f"({type(exc).__name__}: {exc})."
-            ) from exc
+            raise refuse(position, exc) from exc
+    if len(levels) < 2:
+        return
+    try:
+        pd.MultiIndex.from_arrays(levels)
+    except Exception as exc:  # noqa: BLE001 - pandas raises many kinds here
+        for position, level in enumerate(levels):
+            try:
+                pd.MultiIndex.from_arrays([level])
+            except Exception as level_exc:  # noqa: BLE001 - locates the level
+                raise refuse(position, level_exc) from exc
+        raise ValueError(
+            "the index: storage would write this value but its MultiIndex cannot be "
+            f"rebuilt ({type(exc).__name__}: {exc})."
+        ) from exc
 
 
 def require_restorable(table: pa.Table, frame: pd.DataFrame) -> pd.DataFrame:
@@ -924,7 +944,8 @@ def require_restorable(table: pa.Table, frame: pd.DataFrame) -> pd.DataFrame:
       ``pd.ArrowDtype`` column axis; a categorical whose categories cannot be restored
       (tuples read back as arrays, which cannot be categories).
     - An index level whose values cannot be converted back (a ``pd.ArrowDtype`` ``time64[ns]``
-      level holding sub-microsecond values).
+      level holding sub-microsecond values) or cannot be a MultiIndex level (tuples or lists,
+      which read back as arrays).
     - The frame read back would have another number of columns or index levels, distinct
       column labels that read back equal, a column label that reads back as another label
       (``False`` reads back ``True``), or an index level name that reads back as another
