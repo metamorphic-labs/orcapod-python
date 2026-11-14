@@ -15,6 +15,8 @@ import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
+from typing_extensions import override
+
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.function_node import _build_record_id_preimage
 from orcapod.core.streams.base import (
@@ -476,7 +478,10 @@ class SideEffectPod(TraceableBase):
     ``SideEffectPodStream`` with no invocation logging.
 
     In pipeline mode, promoted to ``SideEffectJobNode`` at compile time,
-    which adds DB-backed invocation logging and completion tracking.
+    which adds DB-backed invocation logging and completion tracking. A job
+    delivers only when it runs (``job.run()`` or the node's ``run()``); every
+    read of the node returns the rows its last run passed on and delivers
+    nothing (ITL-1091).
 
     Args:
         fn: A callable ``(data, ctx: InvocationContext) -> None``.
@@ -846,9 +851,11 @@ class SideEffectNode(StreamBase):
         """Deliver the side effects for every row and return a ``StreamView`` of the rows.
 
         Does exactly what ``as_table()`` does: every call delivers every side effect
-        again, standalone, with no invocation log, also on a ``SideEffectJobNode`` (a job run logs its deliveries through ``execute``), because the stream keeps no rows. The view holds the rows that call
-        passed on. ``head()`` and the notebook preview never deliver, so they keep showing
-        no rows.
+        again, standalone, with no invocation log, because the node keeps no rows. A
+        blueprint node's input is an unbound slot, so it raises. ``SideEffectJobNode``
+        overrides this: a job's node delivers as ``job.run()`` does and its reads never
+        deliver. The view holds the rows that call passed on. ``head()`` and the notebook
+        preview never deliver, so they keep showing no rows.
 
         Returns:
             A ``StreamView`` of the rows this call delivered for.
@@ -914,7 +921,10 @@ class SideEffectJobNode(SideEffectNode):
     as a call-time keyword argument from the orchestrator.
 
     Extends ``SideEffectNode`` with DB attachment and orchestrated execution
-    methods. Analogous to ``FunctionJobNode`` in the function pod hierarchy.
+    methods. Analogous to ``FunctionJobNode`` in the function pod hierarchy: it
+    holds the rows its last run passed on (in memory), and every read returns
+    them without delivering (ITL-1091). Only ``execute``, ``async_execute`` and
+    ``run()`` deliver.
 
     Args:
         side_effect_pod: The ``SideEffectPod`` this node wraps.
@@ -1088,6 +1098,7 @@ class SideEffectJobNode(SideEffectNode):
     # Reads: never deliver
     # ------------------------------------------------------------------
 
+    @override
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Yield the rows the last run of this node passed on; never delivers.
 
@@ -1099,6 +1110,7 @@ class SideEffectJobNode(SideEffectNode):
         """
         yield from self._current_rows() or ()
 
+    @override
     def head(
         self,
         n: int = 10,
@@ -1127,6 +1139,7 @@ class SideEffectJobNode(SideEffectNode):
             origin="held",
         )
 
+    @override
     def run(self) -> StreamView:
         """Run the node as ``job.run()`` runs it and return a ``StreamView`` of its rows.
 
@@ -1143,7 +1156,7 @@ class SideEffectJobNode(SideEffectNode):
         Raises:
             SideEffectLogDataContextError: As for ``execute``.
         """
-        self.execute(self._input_stream)
+        _ = self.execute(self._input_stream)
         return self._view_of_rows(self.as_table(), "held")
 
     # ------------------------------------------------------------------

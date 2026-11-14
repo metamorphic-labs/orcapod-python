@@ -81,7 +81,8 @@ def _job(
         return x + 100
 
     job = PipelineJob(
-        name="se", database=database if database is not None else InMemoryArrowDatabase()
+        name="se",
+        database=database if database is not None else InMemoryArrowDatabase(),
     )
     pod = SideEffectPod(
         deliver,
@@ -97,16 +98,16 @@ def _job(
             stream = same.pod(stream, label="up")
         delivered = pod(stream, label="delivered")
         if downstream:
-            plus.pod(delivered, label="down")
+            _ = plus.pod(delivered, label="down")
     return job, sent
 
 
 def _run(job: PipelineJob, orchestrator: Orchestrator) -> None:
     """Run ``job`` on the named orchestrator."""
     if orchestrator == "async":
-        job.run(orchestrator=AsyncPipelineOrchestrator())
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator())
     else:
-        job.run()
+        _ = job.run()
 
 
 def _reads(node: Any) -> dict[str, Callable[[], Any]]:
@@ -202,7 +203,7 @@ def test_node_run_on_a_job_never_run_delivers_and_logs_as_a_job_run() -> None:
     assert len(sent) == ROWS
     assert len(view) == ROWS
     assert len(node.as_table()) == ROWS
-    job.run()
+    _ = job.run()
     assert len(sent) == ROWS
 
 
@@ -288,7 +289,7 @@ def test_a_read_before_any_run_delivers_nothing(track_completion: bool) -> None:
     """A fresh job over a store with deliveries recorded returns no rows and delivers nothing."""
     database = InMemoryArrowDatabase()
     first, first_sent = _job(track_completion=track_completion, database=database)
-    first.run()
+    _ = first.run()
     assert len(first_sent) == ROWS
     job, sent = _job(track_completion=track_completion, database=database)
     node = job.nodes["delivered"]
