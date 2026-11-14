@@ -1,7 +1,7 @@
 import logging
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -567,7 +567,7 @@ def _is_meta(name: str) -> bool:
     )
 
 
-class _TagAndDataColumnsOperator(UnaryOperator):
+class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     """Base of the operators that act on named columns, tag or data alike (ITL-1084).
 
     A subclass says only which of a group's columns it removes (``_removed``);
@@ -579,11 +579,11 @@ class _TagAndDataColumnsOperator(UnaryOperator):
     when the operator is called, on both paths.
     """
 
-    _verb: str = ""
+    _verb: ClassVar[str] = ""
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
-        self.columns = _canonical_columns(columns)
-        self.strict = strict
+        self.columns: tuple[str, ...] = _canonical_columns(columns)
+        self.strict: bool = strict
         super().__init__(**kwargs)
 
     @abstractmethod
@@ -767,7 +767,7 @@ class DropColumns(_TagAndDataColumnsOperator):
             be dropped: a stream needs at least one data column.
     """
 
-    _verb = "drop"
+    _verb: ClassVar[str] = "drop"
 
     def _removed(self, columns: Collection[str]) -> list[str]:
         return [c for c in columns if c in self.columns]
@@ -791,7 +791,7 @@ class SelectColumns(_TagAndDataColumnsOperator):
             named: a stream needs at least one data column.
     """
 
-    _verb = "select"
+    _verb: ClassVar[str] = "select"
 
     def _removed(self, columns: Collection[str]) -> list[str]:
         return [c for c in columns if c not in self.columns]

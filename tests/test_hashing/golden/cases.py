@@ -1275,6 +1275,29 @@ def pipeline_column_selection() -> dict[str, Any]:
     return out
 
 
+@case("pipeline", "tag_and_data_columns")
+def pipeline_tag_and_data_columns() -> dict[str, Any]:
+    """``DropColumns`` and ``SelectColumns`` across tag and data columns (ITL-1084)."""
+    from orcapod.operators import DropColumns, SelectColumns
+
+    out = _prefixed(
+        "drop", stream_summary(DropColumns(columns=["subject", "age"])(_subjects()))
+    )
+    out.update(
+        _prefixed(
+            "select",
+            stream_summary(SelectColumns(columns=["cohort", "weight"])(_grouped())),
+        )
+    )
+    out.update(
+        _prefixed(
+            "select_tag_and_data",
+            stream_summary(SelectColumns(columns=["subject", "age"])(_subjects())),
+        )
+    )
+    return out
+
+
 @case("pipeline", "polars_filter")
 def pipeline_polars_filter() -> dict[str, Any]:
     from orcapod.operators import PolarsFilter
