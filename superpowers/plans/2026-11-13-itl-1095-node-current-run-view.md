@@ -1,6 +1,6 @@
 # ITL-1095: a job node shows the current run; load-only run
 
-Status: decisions received (see section 2). Implementing in four stages, one commit (or more) each, pushed to the draft PR.
+Status: all four stages implemented on draft PR #380 (stage 1 da66b836, stage 2 c90eb966, stage 3 b693b50e, stage 4 3610fd20). Next: wait for #378 to merge, merge main, CI, CodeRabbit.
 Base: PR #378 branch head `2e9972e0` (ITL-1093). Branch: `eywalker/itl-1095-design-what-a-job-node-shows-the-current`.
 
 Rule (developer, November 13, 2026): a job node itself (`as_table`, `iter_data`, dataframe
