@@ -1,11 +1,16 @@
 """
-MinIO / S3 integration tests for DeltaTableDatabase.
+S3 integration tests for DeltaTableDatabase.
 
-Requires a running MinIO instance — provided either by the s3_server
-fixture (testcontainers locally, env vars in CI).
+The S3 endpoint comes from the ``s3_server`` fixture in ``conftest.py``: a moto
+server started as a subprocess on a free localhost port (no Docker, nothing to
+install beyond the dev group). Setting ``MINIO_ENDPOINT``, ``MINIO_ACCESS_KEY`` and
+``MINIO_SECRET_KEY`` replaces it with a real S3-compatible endpoint (for example a
+MinIO instance you run yourself); the fixture then creates the test bucket there.
+
+These tests never skip for a missing server: if the moto server cannot start, the
+tests ERROR with the reason.
 
 Run with:  uv run pytest tests/test_databases/test_delta_table_database_s3.py -v
-Skip automatically if Docker is unavailable and MINIO_ENDPOINT is not set.
 """
 
 import pyarrow as pa
