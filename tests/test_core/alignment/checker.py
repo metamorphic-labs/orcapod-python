@@ -10,7 +10,8 @@ alone, never by comparing two runs (two wrong runs can agree):
 * system tags: a record id is the documented UUID v5 of the origin row the data came from,
   and the source id its source's id; a folded (aggregated) pair is the documented fold of
   the row's own members;
-* user tags: the origin row's tag values (element by element for list-valued tags);
+* user tags: the origin row's tag values (element by element for the list-valued tags
+  of ``Batch``; ``GroupBy`` keeps only its scalar keys);
 * ``_content_hash``: the data context's Arrow hash of the row's data columns;
 * ``_context_key``: the stream's data context key.
 
@@ -506,7 +507,7 @@ def assert_requested_columns(
         ]
         assert not missing, f"no source-info columns {missing}"
     if require_sorted and (all_info or columns.get("sort_by_tags")):
-        # Only scalar tags: a list-valued tag (Batch, GroupBy) cannot be sorted by Arrow,
+        # Only scalar tags: a list-valued tag (Batch) cannot be sorted by Arrow,
         # and the table then keeps its order (ArrowTableStream's documented fallback).
         scalar_tags = [k for k in layout.tag_keys if k not in layout.members]
         if len(scalar_tags) == len(layout.tag_keys):

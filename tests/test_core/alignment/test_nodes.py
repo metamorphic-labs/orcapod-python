@@ -42,6 +42,7 @@ from .checker import (
 from .fixtures import COLUMN_CONFIGS, INPUT_ORDERS, SCENARIOS
 from .gate import ORDERS
 from .jobs import (
+    DROPPED_TAGS,
     expected_rows,
     JOB_NAME,
     MODES,
@@ -143,9 +144,15 @@ def check_every_config(
 
     Every configuration must give the rows the default one gives (``head`` at most 100)
     and the per-row columns it asks for, and ``head(100, cfg)`` must be the first rows of
-    ``as_table(cfg)``.
+    ``as_table(cfg)``. A tag the node drops (``DROPPED_TAGS``) is in no table, nor in its
+    keys or schema.
     """
     failures: list[str] = []
+    dropped = DROPPED_TAGS.get(view.node, ())
+    node = job.nodes[view.node]
+    kept = set(node.keys()[0]) | set(node.keys()[1]) | set(node.output_schema()[0])
+    if present := [t for t in dropped if t in kept]:
+        failures.append(f"the dropped tags {present} are in keys() or the schema")
     baseline = produce(job, view, {}).num_rows
     expected_count = min(baseline, 100) if view.call == "head" else baseline
     for name, config in COLUMN_CONFIGS.items():
@@ -153,6 +160,8 @@ def check_every_config(
         view_layout: Layout = layout(job, view, config)
         context = job.nodes[view.node].data_context
         try:
+            present = [t for t in dropped if t in table.column_names]
+            assert not present, f"the dropped tags {present} are in the table"
             assert table.num_rows == expected_count, (
                 f"{table.num_rows} rows, the default configuration gives {expected_count}"
             )

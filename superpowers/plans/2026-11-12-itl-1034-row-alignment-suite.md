@@ -161,3 +161,9 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   --runxfail all 60 ITL-1066 cases passed; marks removed. 6491 pass, no marks. Still to
   come before #346 merges: #363 (ITL-1067), #364 (ITL-1068 warning filter), #365
   (ITL-1070: GroupBy drops non-by tags).
+* Nov 13 (evening): merged main 163e5ddc (#363 ITL-1067, #364 ITL-1068, #365 ITL-1070).
+  The suite passed unchanged. For ITL-1070, group_by_g now has data-only members and
+  the grouped node's members are its data columns; operator streams, operator nodes
+  (sync and async) and the grouped job node assert that the dropped tag n is absent from
+  keys(), the schema and every table. #363 and #364 needed nothing: the suite has no
+  all_info workaround and no warning filter. 6491 pass, no marks.

@@ -2,7 +2,8 @@
 
 The job: source ``A`` feeds the gated function node ``scaled`` (``y = 10 * x``); ``scaled``
 feeds an operator node ``joined`` (``Join`` with source ``B``, cached in the store so it can
-be read back) and an operator node ``grouped`` (``GroupBy`` on ``g``). A run is made with one
+be read back) and an operator node ``grouped`` (``GroupBy`` on ``g``, which drops the tag
+``n``: ``DROPPED_TAGS``). A run is made with one
 of four entry points and, on the async ones, with the gate forcing a completion order.
 """
 
@@ -152,6 +153,10 @@ def function_tokens(job: PipelineJob) -> dict[tuple[str, bytes], str]:
 # ---------------------------------------------------------------------------
 
 
+# The input tags each node drops: GroupBy keeps only its by tags (ITL-1070).
+DROPPED_TAGS: dict[str, tuple[str, ...]] = {"grouped": ("n",)}
+
+
 @dataclass(frozen=True)
 class View:
     """One table-producing call on one node of the job.
@@ -198,7 +203,8 @@ def layout(job: PipelineJob, view: View, config: dict[str, Any]) -> Layout:
     tag_keys, data_keys = job.nodes[view.node].keys()
     members: frozenset[str] = frozenset()
     if view.node == "grouped":
-        members = frozenset(c for c in (*tag_keys, *data_keys) if c != "g")
+        # The key g is scalar; the other tag is dropped (ITL-1070); data are members.
+        members = frozenset(data_keys)
     return Layout(
         tag_keys=tuple(tag_keys),
         data_keys=tuple(data_keys),

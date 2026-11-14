@@ -70,6 +70,8 @@ class OpCase:
         build: The operator's output stream from the sources (called inside a job for
             the job variant, so the streams it makes become job nodes).
         members: Columns that hold one element per member row (``Batch``, ``GroupBy``).
+        dropped_tags: Input tags the output must not have, in its keys, its schema or
+            any table (``GroupBy`` drops every tag not in ``by``, ITL-1070).
         merged: Columns that hold one element per input (``MergeJoin``).
         prepare: Tells the oracle about renamed or derived columns.
         keyed_by_record_ids: Whether sync and async give the same rows, so the two
@@ -92,6 +94,7 @@ class OpCase:
     keyed_by_record_ids: bool = True
     covers: tuple[str, str] | None = None
     expected: Callable[[Sources], list[RowIdentity]] | None = None
+    dropped_tags: tuple[str, ...] = ()
 
 
 def every_column(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
@@ -99,13 +102,9 @@ def every_column(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]
     return frozenset(tags + data)
 
 
-def all_but_g(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
-    """Every column but the ``g`` key holds members (``GroupBy(by=["g"])``)."""
-    return frozenset(c for c in tags + data if c != "g")
-
-
 def data_only(tags: tuple[str, ...], data: tuple[str, ...]) -> frozenset[str]:
-    """Only data columns hold members (``GroupBy`` on every tag)."""
+    """Only data columns hold members (``GroupBy``: its keys are scalar and every
+    other tag is dropped, ITL-1070)."""
     return frozenset(data)
 
 
@@ -156,9 +155,10 @@ CASES = [
     OpCase(
         "group_by_g",
         lambda s: GroupBy(by=["g"])(s.a),
-        members=all_but_g,
+        members=data_only,
         covers=("x", "A"),
         expected=lambda s: groups(s.oracle, "A", ["g"]),
+        dropped_tags=("n",),
     ),
     OpCase(
         "group_by_all_tags",
@@ -267,6 +267,13 @@ def check_tables(
     empty.
     """
     failures = []
+    if case.dropped_tags:
+        tags, data = stream.keys()
+        schema_tags, _ = stream.output_schema()
+        kept = set(tags) | set(data) | set(schema_tags)
+        for tag in case.dropped_tags:
+            if tag in kept:
+                failures.append(f"the dropped tag {tag!r} is in keys() or the schema")
     baseline = stream.as_table().num_rows
     for name, config in COLUMN_CONFIGS.items():
         full = stream.as_table(**config)
@@ -278,6 +285,8 @@ def check_tables(
         for call, table, expected_rows in tables:
             layout = case_layout(case, stream, config)
             try:
+                present = [t for t in case.dropped_tags if t in table.column_names]
+                assert not present, f"the dropped tags {present} are in the table"
                 assert table.num_rows == expected_rows, (
                     f"{table.num_rows} rows, the default configuration gives "
                     f"{expected_rows}"
