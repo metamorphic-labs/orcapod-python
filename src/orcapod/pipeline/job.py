@@ -1124,11 +1124,37 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "original pipeline definition."
             )
 
+        # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
+        hash_dag: OrcaDAG[str] = OrcaDAG()
+        for u, v in self._graph_edges:
+            hash_dag.add_edge(u, v)
+        for node_hash in self._persistent_node_map:
+            if node_hash not in hash_dag:
+                hash_dag.add_node(node_hash)
+
+        # Walk topologically; exclude unbound sources and all their dependents.
+        excluded_hashes: set[str] = set()
+        for node_hash in hash_dag.topological_sort():
+            if node_hash not in self._persistent_node_map:
+                # A node a loaded job did not restore (a kind PipelineJob.load does
+                # not know): below an unbound source it is left out too, so the nodes
+                # below it are as well.
+                if any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
+                    excluded_hashes.add(node_hash)
+                continue
+            node = self._persistent_node_map[node_hash]
+            if isinstance(node, SourceJobNode) and node.bound_source is None:
+                excluded_hashes.add(node_hash)
+            elif any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
+                excluded_hashes.add(node_hash)
+
         # A loaded job whose graph lost a node (the file records a node of a kind
         # PipelineJob.load does not restore) cannot feed the nodes below it: every
         # saved input of a node must be a restored node.
         if self._loaded:
             for node_hash, node in self._persistent_node_map.items():
+                if node_hash in excluded_hashes:
+                    continue  # below an unbound source: not part of this run
                 if not isinstance(node, (FunctionJobNode, OperatorJobNode)):
                     continue
                 if node_hash not in self._hash_graph:
@@ -1146,27 +1172,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         "below it cannot run, not even load-only. Read their stored "
                         "results with node.as_source()."
                     )
-
-        # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
-        hash_dag: OrcaDAG[str] = OrcaDAG()
-        for u, v in self._graph_edges:
-            hash_dag.add_edge(u, v)
-        for node_hash in self._persistent_node_map:
-            if node_hash not in hash_dag:
-                hash_dag.add_node(node_hash)
-
-        # Walk topologically; exclude unbound sources and all their dependents.
-        excluded_hashes: set[str] = set()
-        for node_hash in hash_dag.topological_sort():
-            if node_hash not in self._persistent_node_map:
-                continue
-            node = self._persistent_node_map[node_hash]
-            if isinstance(node, SourceJobNode) and node.bound_source is None:
-                excluded_hashes.add(node_hash)
-            elif any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
-                excluded_hashes.add(node_hash)
-
-        self._report_unclaimed_tables_written_before_v03(excluded_hashes)
 
         # --- Build execution OrcaDAG from existing node objects (no cloning) ---
         exec_dag: OrcaDAG = OrcaDAG()
@@ -1207,6 +1212,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # records ahead of their results (ITL-919).
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(exec_dag, load_only=load_only)
+        # Pre-v0.3 tables are reported for a run that runs something (ITL-954); a run
+        # that runs no node lists no store.
+        if plan.to_run:
+            self._report_unclaimed_tables_written_before_v03(excluded_hashes)
         # A load-only run writes nothing, and a run that runs no node touches no store,
         # so neither commits anything, not even pending writes of earlier operations.
         if table_committing is not None and not load_only and plan.to_run:
