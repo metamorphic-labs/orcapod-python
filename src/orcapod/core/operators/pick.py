@@ -14,7 +14,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -61,6 +61,10 @@ class Pick(UnaryOperator):
     ) -> None:
         self.column = column
         self.key = key
+        # A data column never gets a meta column's name (ITL-1080): refused here,
+        # as ``MapData`` refuses it, so no path can produce one and drop it.
+        if out is not None:
+            schema_utils.require_names_not_meta([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
         self._output_type: type = None  # type: ignore[assignment]

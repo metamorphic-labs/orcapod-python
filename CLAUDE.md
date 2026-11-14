@@ -592,7 +592,8 @@ raw `ArrowTableStream`'s `__` columns and for the meta a cached pod's or functio
 carry. The rule is in one place, `core/operators/meta_columns.py` (sync results through the
 operator base classes, async rows through `WithoutMetaWriter`). A carry-forward mode is ITL-867.
 The meta prefix (`__`) is reserved: `ArrowTableStream` and the source builder refuse a tag named
-with it, and `MapTags` / `MapData` refuse it as a new name (`schema_utils.require_names_not_meta`).
+with it, and `MapTags` / `MapData` (targets) and `Pick` / `Index` (`out`) refuse it as a new name
+(`schema_utils.require_names_not_meta`, at construction).
 
 **Operator or derived source?** (developer, November 11, 2026) The test is: does any data
 element come from a tag value, or from anywhere other than the input's data elements? If yes,
