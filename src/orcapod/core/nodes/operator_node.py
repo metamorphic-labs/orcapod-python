@@ -1410,18 +1410,27 @@ class OperatorJobNode(OperatorNodeBase):
         if self.is_stale:
             self.clear_cache()
 
+        computed = False
         if self._cached_output_stream is None:
             if self._pipeline_database is not None:
                 if self._cache_mode == CacheMode.REPLAY:
                     self._replay_from_cache()
                 else:
                     self._compute_and_store()
+                    computed = True
             else:
                 self._cached_output_stream = self._operator.process(
                     *self._input_streams,
                 )
                 self._update_modified_time()
+                computed = True
         table = self.as_table()
+        if computed:
+            # Without a database and in OFF mode the output stream is lazy: as_table()
+            # computes it, and an uncomputed input finishes only then. Stamp the node
+            # after that, or it would be older than its input and judged stale. A run
+            # that reused the kept result computed nothing and is not stamped.
+            self._update_modified_time()
         # The view names its rows as head() names them afterwards: computed by a live
         # computation, plain rows when replayed from the store or kept by execute().
         kept = self._cached_output_stream

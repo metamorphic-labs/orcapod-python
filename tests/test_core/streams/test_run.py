@@ -526,3 +526,32 @@ def test_function_job_node_run_computes_and_returns_the_view() -> None:
     assert view.as_table().equals(node.as_table())
     _ = node.run()
     assert len(calls) == ROWS
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["no_database", "cache_off"])
+def test_operator_job_node_is_current_after_run_over_a_lazy_input(stored: bool) -> None:
+    """After ``run()`` over an uncomputed pod stream, the node shows its rows and is kept.
+
+    Without a database, and with ``CacheMode.OFF``, the operator's output is computed only
+    when ``run()`` builds its view; the node is current after that, not stale.
+    """
+    calls: list[int] = []
+    database = InMemoryArrowDatabase() if stored else None
+    node = OperatorJobNode(
+        MapData({"y": "z"}),
+        (_counting_pod(calls).pod(_source()),),
+        pipeline_database=database,
+        cache_mode=CacheMode.OFF,
+    )
+    original = MapData.static_process
+    # A spy on the non-public static_process: the test is about whether it runs again.
+    with mock.patch.object(
+        MapData, "static_process", autospec=True, side_effect=original
+    ) as spy:
+        view = node.run()
+        assert not node.is_stale
+        assert node.head(3).status is ViewStatus.ROWS
+        assert node.head(3).table.equals(view.head(3).table)
+        _ = node.run()
+        assert spy.call_count == 1
+    assert len(calls) == ROWS

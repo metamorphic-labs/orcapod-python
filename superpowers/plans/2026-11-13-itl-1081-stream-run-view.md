@@ -143,3 +143,6 @@ approval of the method proposal), each returning a new view with an honest capti
 - 2026-11-14: round 1 approved as planned (coordinator): (b) also a second strict xfail
   (job node run() over a pass-through chain; same cause, different failing path: the job
   node's stale-clear in as_table; XPASSes with f652d737). Fixes committed; replies next.
+- 2026-11-14: round 2 (review of 39dd1433): one Major, OperatorJobNode.run stamped before
+  its lazy output was materialized (no DB / OFF) -> stale after run(). Approved fix: stamp
+  again after as_table() only when this call computed. Test: lazy_input (no DB, OFF).
