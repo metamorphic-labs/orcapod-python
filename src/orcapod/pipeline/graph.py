@@ -473,10 +473,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 up_hashes = upstream_map.get(node_hash, [])
                 upstream_node = reconstructed.get(up_hashes[0]) if up_hashes else None
                 if upstream_node is None:
-                    raise ValueError(
-                        f"The saved side-effect node {descriptor.get('label')!r} has "
-                        "no upstream node in the file."
+                    # Its input is a node this version does not restore: leave it out,
+                    # as that node; the rest of the file still loads.
+                    logger.warning(
+                        "Skipping the saved side-effect node %r: its upstream node was "
+                        "not restored from the file.",
+                        descriptor.get("label"),
                     )
+                    continue
                 # GraphNode predates side-effect nodes; compile() stores them in the
                 # same maps through the untyped side_effect_node_class.
                 reconstructed[node_hash] = LoadedSideEffectNode(  # pyright: ignore[reportArgumentType]

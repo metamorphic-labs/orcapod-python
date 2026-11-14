@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import pathlib
 from collections.abc import Callable
 from typing import Any
@@ -287,3 +288,49 @@ def test_a_load_only_node_run_of_a_loaded_side_effect_node(
     assert loaded.nodes["delivered"].as_table().num_rows == ROWS
     assert loaded.nodes["down"].as_table().num_rows == ROWS
     assert sent == delivered_before
+
+
+def test_a_side_effect_node_below_a_node_not_restored_is_skipped_with_a_warning(
+    saved: tuple[PipelineJob, list[int], pathlib.Path],
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A node of a kind this version does not restore does not fail the whole load.
+
+    The side-effect node below it is left out with a warning naming it; the rest loads.
+    """
+    _, _, path = saved
+    data = json.loads(path.read_text())
+    for descriptor in data["pipeline"]["nodes"].values():
+        if descriptor["label"] == "down":
+            descriptor["node_type"] = "a_kind_this_version_does_not_know"
+    unknown = tmp_path / "unknown_kind.json"
+    unknown.write_text(json.dumps(data))
+
+    with caplog.at_level(logging.WARNING):
+        loaded = PipelineJob.load(unknown)
+    assert set(loaded.nodes) == {"s", "delivered"}
+    assert any("'tail'" in record.getMessage() for record in caplog.records)
+
+
+def test_a_loaded_blueprint_side_effect_node_cannot_become_an_invocation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``to_invocations()`` refuses a loaded side-effect node, as it does a loaded
+    function or operator node: the node has no side-effect pod to hand on."""
+    sent: list[int] = []
+
+    def deliver(ctx: Any, x: int) -> None:
+        """Record ``x``."""
+        sent.append(x)
+
+    job = PipelineJob(name="only", database=DeltaTableDatabase(tmp_path / "store"))
+    with job:
+        _ = SideEffectPod(deliver)(_source(), label="delivered")
+    _ = job.run()
+    blueprint = tmp_path / "pipeline.json"
+    job.pipeline.save(blueprint)
+
+    loaded = Pipeline.load(blueprint)
+    with pytest.raises(RuntimeError, match="SideEffectNode.*no live side-effect pod"):
+        _ = loaded.to_invocations()
