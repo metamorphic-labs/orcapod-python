@@ -842,8 +842,8 @@ rows under that key is an empty result, not an error.
   joined or merged stream (one pair of system-tag columns per input), or one with no
   system-tag columns, is refused too: make the join part of the pipeline, or store the joined
   stream and bind the stored source. A pipeline built directly over a raw `ArrowTableStream`
-  still compiles, for now: its source node's rows carry no system-tag columns, although the
-  slot predicts a pair.
+  is refused the same way: wrap its table as a source,
+  `ArrowTableSource(stream.as_table(), tag_columns=[...])`.
 - The results are read from the store recorded in the file. Pass
   `PipelineJob.load(path, database=...)` if the store has moved.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each

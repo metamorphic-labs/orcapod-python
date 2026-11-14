@@ -693,23 +693,32 @@ def test_a_refused_joined_stream_keeps_the_previous_binding() -> None:
     assert job.nodes["src"].bound_source is before
 
 
-def test_a_pipeline_built_over_a_raw_stream_still_compiles() -> None:
-    """A raw stream as a pipeline's leaf is accepted as before; binding it is refused.
+def test_a_pipeline_built_over_a_raw_stream_is_refused() -> None:
+    """A raw stream as a pipeline's input is refused, telling the user what to do.
 
-    The one exception to ITL-1126, pending the developer's decision: the slot built
-    from the leaf takes the leaf as it is (its rows carry no system tags, although
-    the slot predicts a pair). Binding the same stream to the slot afterwards goes
-    through the bind check and is refused.
+    Developer, November 14, 2026: refuse a pipeline built directly over a stream
+    without system tags until a raw stream is captured into a source (ITL-1127).
     """
     raw = _raw_stream(x_nullable=True)
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with pytest.raises(SourceSpecMismatchError) as raised:
+        with job:
+            _ = MapData({"x": "y"})(raw, label="renamed")
+    message = str(raised.value)
+    assert "exactly one source-id and one record-id" in message
+    assert "ArrowTableSource(stream.as_table(), tag_columns=[...])" in message
+    assert "ITL-1127" in message
+
+
+def test_a_raw_streams_table_wrapped_as_the_error_advises_runs() -> None:
+    """``ArrowTableSource(stream.as_table(), tag_columns=[...])`` builds and runs."""
+    raw = _raw_stream(x_nullable=True)
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
-        _ = MapData({"x": "y"})(raw, label="renamed")
-    (slot,) = [name for name in job.nodes if name != "renamed"]
-    assert job.nodes[slot].bound_source is raw
-    assert job.nodes["renamed"].as_table().num_rows == 0
+        _ = MapData({"x": "y"})(
+            ArrowTableSource(raw.as_table(), tag_columns=["id"]), label="renamed"
+        )
     _ = job.run()
-    assert job.nodes["renamed"].as_table().column("y").to_pylist() == [1]
-    with pytest.raises(SourceSpecMismatchError, match="exactly one source-id"):
-        job.bind(sources={slot: raw})
-    assert job.nodes[slot].bound_source is raw
+    table = job.nodes["renamed"].as_table()
+    assert table.column("y").to_pylist() == [1]
+    assert table.column("w").to_pylist() == ["p"]

@@ -501,7 +501,13 @@ class TestFromStreamNonRootSource:
         """SourceJobNode.from_stream(non-RootSource) builds name as label + full content hash."""
         from orcapod.core.nodes.source_node import SourceJobNode
 
-        stream = self._make_arrow_stream()
+        # A stream derived from a source: not a RootSource, and it carries the one
+        # system-tag pair a bound stream must have (ITL-1126; a raw stream has none).
+        from orcapod.core.operators import MapData
+        from orcapod.core.sources import DictSource
+
+        source = DictSource([{"id": 1, "value": 1.0}], tag_columns=["id"])
+        stream = MapData({"value": "v"})(source)
         job_node = SourceJobNode.from_stream(stream)
 
         expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"

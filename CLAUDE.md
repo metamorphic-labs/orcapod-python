@@ -846,10 +846,10 @@ data. The rules:
   (`int32` against `int64`) is not yet refused (ITL-949). A source whose system-tag columns
   are not exactly one source-id and one record-id column (a joined or merged stream, a raw
   stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);
-  binding one properly is ITL-1127. Never pass a bound stream's own system tags through,
-  with one exception pending the developer: `Pipeline.compile` binds each leaf through
-  `SourceJobNode._accept_pipeline_leaf`, which takes a leaf without exactly one pair (a raw
-  `ArrowTableStream`) as it is, so a pipeline built directly over a raw stream still compiles.
+  binding one properly is ITL-1127. That includes a pipeline's input: `Pipeline.compile`
+  binds each leaf through `SourceJobNode.from_stream`, so a pipeline built directly over a
+  raw `ArrowTableStream` is refused (developer, November 14, 2026; wrap the table as a
+  source). Never pass a bound stream's own system tags through.
 - A source id is the source's name (developer, November 11, 2026; ITL-957). A default id
   built from a hash is `<source kind>:<algorithm label>:<hex>` and is built only by
   `core/sources/source_ids.hash_source_id`: never format one by hand, and never write a label
