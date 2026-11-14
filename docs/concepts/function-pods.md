@@ -610,13 +610,16 @@ A node is stale, and runs, when:
 - its source was bound again (`job.bind(sources=...)`), or the bound source's own modified
   time moved (a `CachedSource` that read new rows, a `PollingSource` that polled).
 
-Staleness comes from modified times only. A source whose rows change while its object stays
-the same (a CSV or Delta file rewritten in place, a database table that grew, a list a
-`DictSource` was built from and that was changed afterwards, a polling source with new
-rows) is not seen: a run holds the nodes below it. To read it again, build a new source
-object and bind it (`job.bind(sources=...)`), which makes every node that reads it stale,
-or call `clear_cache()` on each node that reads it directly (one per branch). (A start-of-run check for new data is planned, ITL-1102.) To deliver a
-side effect again (with `track_completion=False`), call `clear_cache()` on its node first.
+Staleness comes from modified times only, so a re-run does not notice new data in a source
+whose object is unchanged (a start-of-run check for new data is planned, ITL-1102). Most
+sources hold the data they read when they were built: an in-memory source (a `DictSource`
+copies the list it is given), a CSV, Delta or database table source, and a
+`SpiralDBTableSource` pinned to the table version it found. For those, build a new source
+object and bind it (`job.bind(sources=...)`): every node that reads it becomes stale and
+runs; clearing the nodes below would only read the same data again. A `PollingSource` polls
+when it is read, so `clear_cache()` on each node that reads it directly (one per branch)
+makes the next run poll it and process its new rows. To deliver a side effect again (with
+`track_completion=False`), call `clear_cache()` on its node first.
 
 `node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,
 and a run's writes are committed when it ends; when everything is held there is nothing to

@@ -195,6 +195,10 @@ def commit_run(stores: Sequence[ArrowDatabaseProtocol], ran: Sequence[Any]) -> N
         except Exception as exc:
             clear_run_rows(ran)
             raise StoreWriteError(store.base_path, flush=True) from exc
+        except BaseException:
+            # An interruption during the commit leaves its outcome unknown too.
+            clear_run_rows(ran)
+            raise
 
 
 def run_with_dependencies(target: Any, *, load_only: bool) -> RunSummary:
