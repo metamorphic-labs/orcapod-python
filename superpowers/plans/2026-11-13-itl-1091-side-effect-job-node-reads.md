@@ -90,3 +90,5 @@ Downstream `down.run()` after `job.run()` delivered 6 more (track=True).
 ## Progress notes
 
 - 2026-11-13: diagnosis sent, design approved by coordinator.
+- 2026-11-13: implemented (Tasks 1-3 done); draft PR #377 opened (head 1e3d7904);
+  waiting for CI, then ready-for-review, CodeRabbit rounds, worker_done.
