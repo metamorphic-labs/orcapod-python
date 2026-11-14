@@ -253,13 +253,21 @@ def _data_pair() -> tuple[ArrowTableSource, ArrowTableSource]:
     [
         pytest.param(Join, "Type conflict for key .y.", id="join"),
         pytest.param(MergeJoin, "incompatible types", id="merge_join"),
-        pytest.param(SemiJoin, "Type conflict for key 'y'", id="semijoin"),
     ],
 )
 def test_data_column_nullability_difference_behaves_as_before(
     make_op: Callable[[], StaticOutputOperatorPod], message: str
 ) -> None:
-    """A data column is never reconciled: each operator raises as it did."""
+    """A data column is never reconciled: ``Join`` and ``MergeJoin`` raise as they did."""
     left, right = _data_pair()
     with pytest.raises(InputValidationError, match=message):
         _ = make_op()(left, right)
+
+
+def test_semijoin_ignores_a_data_column_that_differs_in_nullability() -> None:
+    """``SemiJoin`` keys on shared tags only (ITL-1088), so a shared data column is
+    neither a key nor checked: the result is every left row whose tag matches."""
+    left, right = _data_pair()
+    result = SemiJoin()(left, right)
+    assert result.output_schema() == left.output_schema()
+    assert result.as_table().column("y").to_pylist() == [1, 2]

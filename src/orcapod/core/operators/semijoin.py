@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -27,16 +27,51 @@ class SemiJoin(BinaryOperator):
     Binary operator that performs a semi-join between two streams.
 
     A semi-join returns only the entries from the left stream that have
-    matching entries in the right stream, based on equality of values
-    in overlapping columns (columns with the same name and compatible types).
+    matching entries in the right stream. The match keys are exactly the
+    columns that are tag columns of both streams (ITL-1088): a row matches
+    when its values in all of them equal a right row's. A name shared as a
+    data column, or a tag on one side and a data column on the other, is not a
+    key and is ignored; the right stream's data columns are never read.
 
-    If there are no overlapping columns between the streams, the entire
-    left stream is returned unchanged.
+    If the streams share no tag column, the entire left stream is returned
+    unchanged.
 
     The output stream preserves the schema of the left stream exactly. A shared
     tag key that is ``T`` in one input and ``T | None`` in the other is accepted
     (a null key matches nothing) and keeps the left input's type (ITL-829).
     """
+
+    @staticmethod
+    def _match_keys(
+        left_tag_keys: Collection[str], right_tag_keys: Collection[str]
+    ) -> tuple[str, ...]:
+        """Return the semi join's match keys: the names that are tags on both sides.
+
+        Args:
+            left_tag_keys: The left input's tag column names.
+            right_tag_keys: The right input's tag column names.
+
+        Returns:
+            The names in both, in the left input's order.
+        """
+        return tuple(name for name in left_tag_keys if name in right_tag_keys)
+
+    def _checked_match_keys(
+        self, left_stream: StreamProtocol, right_stream: StreamProtocol
+    ) -> tuple[str, ...]:
+        """Return the match keys after checking that their types agree.
+
+        Raises:
+            TypeError: If a key's types differ beyond nullability (ITL-829).
+        """
+        left_tag_schema, _ = left_stream.output_schema()
+        right_tag_schema, _ = right_stream.output_schema()
+        # A shared tag key may differ in nullability only (ITL-829); any other
+        # difference raises here.
+        _ = schema_utils.intersection_schemas(
+            *reconcile_key_nullability(left_tag_schema, right_tag_schema)
+        )
+        return self._match_keys(tuple(left_tag_schema), tuple(right_tag_schema))
 
     def binary_static_process(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
@@ -45,30 +80,17 @@ class SemiJoin(BinaryOperator):
         Performs a semi-join between left and right streams.
         Returns entries from left stream that have matching entries in right stream.
         """
-        left_tag_schema, left_data_schema = left_stream.output_schema()
-        right_tag_schema, right_data_schema = right_stream.output_schema()
-        # A shared tag key may differ in nullability only (ITL-829).
-        left_tag_schema, right_tag_schema = reconcile_key_nullability(
-            left_tag_schema, right_tag_schema
-        )
+        left_tag_schema, _ = left_stream.output_schema()
+        common_keys = self._checked_match_keys(left_stream, right_stream)
 
-        # Find overlapping columns across all columns (tags + data)
-        left_all_schema = schema_utils.union_schemas(left_tag_schema, left_data_schema)
-        right_all_schema = schema_utils.union_schemas(
-            right_tag_schema, right_data_schema
-        )
-
-        common_keys = tuple(
-            schema_utils.intersection_schemas(left_all_schema, right_all_schema).keys()
-        )
-
-        # If no overlapping columns, return the left stream unmodified
+        # If no shared tag column, return the left stream unmodified
         if not common_keys:
             return left_stream
 
         # include source info and system tags for left stream
         left_table = left_stream.as_table(columns={"source": True, "system_tags": True})
-        right_table = right_stream.as_table()
+        # Only the right side's keys are read, never its data columns.
+        right_table = right_stream.as_table().select(list(common_keys))
 
         # A key must have one Arrow type on both sides (up to large layouts);
         # otherwise Polars would silently unify, e.g., int8 with int16.
@@ -132,32 +154,16 @@ class SemiJoin(BinaryOperator):
     ) -> None:
         """
         Validates that the input streams are compatible for semi-join.
-        Checks that overlapping columns have compatible types.
+        Checks that the match keys (the shared tag columns) have compatible
+        types; data columns are not keys and are not checked.
 
         Stores the common keys so that ``async_execute`` can use them
         to determine the correct empty-right behavior without data.
         """
         try:
-            left_tag_schema, left_data_schema = left_stream.output_schema()
-            right_tag_schema, right_data_schema = right_stream.output_schema()
-            # A shared tag key may differ in nullability only (ITL-829).
-            left_tag_schema, right_tag_schema = reconcile_key_nullability(
-                left_tag_schema, right_tag_schema
+            self._validated_common_keys: tuple[str, ...] = self._checked_match_keys(
+                left_stream, right_stream
             )
-
-            # Check that overlapping columns have compatible types across all columns
-            left_all_schema = schema_utils.union_schemas(
-                left_tag_schema, left_data_schema
-            )
-            right_all_schema = schema_utils.union_schemas(
-                right_tag_schema, right_data_schema
-            )
-
-            # intersection_schemas will raise an error if types are incompatible
-            common = schema_utils.intersection_schemas(
-                left_all_schema, right_all_schema
-            )
-            self._validated_common_keys: tuple[str, ...] = tuple(common.keys())
 
         except Exception as e:
             raise InputValidationError(
@@ -224,10 +230,8 @@ class SemiJoin(BinaryOperator):
                     await output.send((tag, data))
                 return
 
-            # Determine right-side keys from first row
-            right_tag_keys = set(right_rows[0][0].keys())
-            right_pkt_keys = set(right_rows[0][1].keys())
-            right_all_keys = right_tag_keys | right_pkt_keys
+            # The right side's tag columns, from its first row
+            right_tag_keys = tuple(right_rows[0][0].keys())
 
             # Phase 2: Probe — stream left rows
             common_keys: tuple[str, ...] | None = None
@@ -235,11 +239,9 @@ class SemiJoin(BinaryOperator):
 
             async for tag, data in left_ch:
                 if common_keys is None:
-                    # First left row — determine common keys and build index
-                    left_tag_keys = set(tag.keys())
-                    left_pkt_keys = set(data.keys())
-                    left_all_keys = left_tag_keys | left_pkt_keys
-                    common_keys = tuple(sorted(left_all_keys & right_all_keys))
+                    # First left row — determine common keys (the shared tag
+                    # columns, ITL-1088) and build index
+                    common_keys = self._match_keys(tuple(tag.keys()), right_tag_keys)
 
                     if not common_keys:
                         # No common keys — pass all left rows through

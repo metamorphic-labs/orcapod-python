@@ -170,6 +170,20 @@ def source_nullable_k() -> ArrowTableSource:
     )
 
 
+def source_shared_data() -> ArrowTableSource:
+    """Tag ``k: int16``; data ``i32`` and ``ls`` named as ``source_b``'s, other values and types."""
+    return _source(
+        {
+            "k": pa.array([3, 1], pa.int16()),
+            "i32": pa.array([-1, -2], pa.int64()),
+            "ls": pa.array([None, "x"], pa.string()),
+        },
+        tags=("k",),
+        source_id="shared_data",
+        nullable=("ls",),
+    )
+
+
 def merge_source(source_id: str, offset: int) -> ArrowTableSource:
     """A ``MergeJoin`` input; two of them collide on every data column but one."""
     only = f"only_{source_id}"
@@ -321,6 +335,12 @@ CASES = [
         "semijoin_right_nullable_key",
         SemiJoin,
         lambda: (source_c(), source_nullable_k()),
+    ),
+    # A shared data column name is not a key (ITL-1088): only ``k`` decides.
+    Case(
+        "semijoin_shared_data_column",
+        SemiJoin,
+        lambda: (source_b(nested=False), source_shared_data()),
     ),
     Case("batch_2", lambda: Batch(batch_size=2), lambda: (source_a(),)),
     Case("batch_all", Batch, lambda: (source_a(),)),
