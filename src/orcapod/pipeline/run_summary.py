@@ -152,6 +152,12 @@ class RunSummary:
             if self.target is None
             else f"node {self.target!r} and the nodes it depends on"
         )
+        if self.nodes and all(
+            node.held and not (node.computed or node.reused or node.failed)
+            for node in self.nodes.values()
+        ):
+            run = "Load-only run" if self.load_only else "Run"
+            return f"{run} of {subject}: nothing to do; every node holds a current run."
         if self.load_only:
             skipped = sum(node.not_stored for node in self.nodes.values())
             outcome = (

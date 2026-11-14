@@ -1085,6 +1085,20 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             rows = list(input_stream.iter_data())
             self._hold(rows, load_only=True)
             return rows
+        try:
+            results = self._deliver_rows(input_stream, run_id=run_id)
+        except BaseException:
+            # A run that raised defines no rows: the node is stale, and so is every
+            # node below it (ITL-1095).
+            self.clear_cache()
+            raise
+        self._hold(results)
+        return results
+
+    def _deliver_rows(
+        self, input_stream: StreamProtocol, *, run_id: str | None
+    ) -> list[tuple[TagProtocol, DataProtocol]]:
+        """Deliver every row of ``input_stream``; return the rows passed on."""
         self._refuse_log_of_another_data_context()
         results: list[tuple[TagProtocol, DataProtocol]] = []
         for tag, data in input_stream.iter_data():
@@ -1104,7 +1118,6 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             )
             if result is not None:
                 results.append(result)
-        self._hold(results)
         return results
 
     def _hold(
@@ -1226,7 +1239,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
 
     def _run_alone(self, *, load_only: bool) -> None:
         """Run this node over an input stream that is not a job node; commit its log."""
-        database = self._pipeline_database
+        # A load-only run writes nothing, so it commits nothing (ITL-1095).
+        database = None if load_only else self._pipeline_database
         try:
             _ = self.execute(self._input_stream, load_only=load_only)
         except Exception as run_error:
@@ -1303,8 +1317,11 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                     await output.send(item)
                 # Held and stamped before the output closes (ITL-1042).
                 self._hold(rows, load_only=True)
+            except BaseException:
+                self.clear_cache()
+                raise
             finally:
-                await output.close()
+                await self._close_output(output)
             return
         # This run's rows, in the order they were sent downstream.
         passed_on: list[tuple[TagProtocol, DataProtocol]] = []
@@ -1347,5 +1364,19 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             # Held and stamped before the output closes, so every downstream node, which
             # stamps after it has seen that close, is newer than this one (ITL-1042).
             self._hold(passed_on)
+        except BaseException:
+            # A run that raised or was cancelled defines no rows (ITL-1095).
+            self.clear_cache()
+            raise
         finally:
+            await self._close_output(output)
+
+    async def _close_output(
+        self, output: WritableChannel[tuple[TagProtocol, DataProtocol]]
+    ) -> None:
+        """Close ``output``; a close that fails fails the run, which then holds no rows."""
+        try:
             await output.close()
+        except BaseException:
+            self.clear_cache()
+            raise

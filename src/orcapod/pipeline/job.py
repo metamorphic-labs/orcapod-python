@@ -942,7 +942,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         plan = plan_run(prepared.exec_dag, load_only=load_only)
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        with self._executing(prepared, plan, commit_every_rows):
+        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = effective_orchestrator.run(
                 plan.dag,
                 observer=_with_counter(observer, counter),
@@ -1007,7 +1007,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = plan_run(prepared.exec_dag, load_only=load_only)
         counter = RunCountingObserver()
-        with self._executing(prepared, plan, commit_every_rows):
+        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = await orchestrator.run_async(
                 plan.dag,
                 observer=_with_counter(observer, counter),
@@ -1122,6 +1122,21 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "original pipeline definition."
             )
 
+        # A loaded job whose graph lost a node (PipelineJob.load does not restore
+        # side-effect nodes yet, ITL-1094) cannot feed the node below it.
+        if self._loaded:
+            for node in self._persistent_node_map.values():
+                inputs = getattr(node, "upstreams", ())
+                if isinstance(node, (FunctionJobNode, OperatorJobNode)) and any(
+                    upstream is None for upstream in inputs
+                ):
+                    raise RuntimeError(
+                        f"Node {node.label!r} of the loaded job has lost an input node: "
+                        "PipelineJob.load does not restore side-effect nodes yet "
+                        "(ITL-1094), so the nodes below one cannot run, not even "
+                        "load-only. Read their stored results with node.as_source()."
+                    )
+
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         hash_dag: OrcaDAG[str] = OrcaDAG()
         for u, v in self._graph_edges:
@@ -1180,7 +1195,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # this run writes. Those rows would otherwise count towards a table's
         # batch_size, which could then be reached mid-run and commit this run's pipeline
         # records ahead of their results (ITL-919).
-        if table_committing is not None:
+        # A load-only run writes nothing, so it commits nothing, not even pending writes
+        # of earlier operations (ITL-1095).
+        if table_committing is not None and not load_only:
             try:
                 pipeline_db.flush()
             except StoreError as exc:
@@ -1201,16 +1218,24 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
     @contextlib.contextmanager
     def _executing(
-        self, prepared: "_PreparedRun", plan: RunPlan, commit_every_rows: int
+        self,
+        prepared: "_PreparedRun",
+        plan: RunPlan,
+        commit_every_rows: int,
+        *,
+        load_only: bool = False,
     ) -> Iterator[None]:
         """Hold every function node to the run's commit cadence while the orchestrator runs.
 
-        A failure inside commits the writes that succeeded before it, then propagates.
+        A failure inside commits the writes that succeeded before it (not in a load-only
+        run, which writes nothing), clears every node the run ran (whether their writes
+        were committed is unknown), then propagates.
 
         Args:
             prepared: The run, from ``_prepare_run``.
             plan: The nodes the run runs (``plan_run``).
             commit_every_rows: As for ``run``.
+            load_only: As for ``run``.
         """
         try:
             with contextlib.ExitStack() as batched:
@@ -1224,7 +1249,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         except Exception as run_error:
             # Commit the writes that did succeed before the failure, so their rows
             # do not look dropped, then report the failure itself.
-            flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
+            if not load_only:
+                flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
+            clear_run_rows(plan.to_run)
             raise
 
     def _finish_run(
@@ -1263,8 +1290,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             + "have been stored."
         )
         try:
-            pipeline_db.flush()
-            result_db.flush()
+            if not load_only:
+                # A load-only run writes nothing and commits nothing (ITL-1095).
+                pipeline_db.flush()
+                result_db.flush()
         except StoreReadError as exc:
             # A stored table could not be read: report the read failure itself.
             exc.add_note(pending_note)

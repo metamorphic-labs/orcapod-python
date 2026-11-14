@@ -77,6 +77,12 @@ SIDE_EFFECTS_NOTE = (
     "not run; run() delivers its side effects; displaying never delivers side effects"
 )
 
+# An operator node whose output came from a load-only run: its input may lack rows that a
+# full run computes (ITL-1095).
+LOADED_ONLY_OPERATOR_NOTE = (
+    "loaded only: the output of a load-only run, whose inputs may lack rows"
+)
+
 _DEFAULT_NOTES = {
     ViewStatus.NOT_COMPUTED: NOT_COMPUTED_NOTE,
     ViewStatus.NOTHING_STORED: NOTHING_STORED_NOTE,

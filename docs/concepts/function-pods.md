@@ -609,9 +609,10 @@ A node is stale, and runs, when:
 
 Staleness comes from modified times only. A source whose rows change while its object stays
 the same (a CSV or Delta file rewritten in place, a database table that grew, a list a
-`DictSource` was built from and that was changed afterwards) is not seen: a run holds the
-nodes below it. To read it again, build a new source object and bind it
-(`job.bind(sources=...)`), or call `clear_cache()` on the first node below it. To deliver a
+`DictSource` was built from and that was changed afterwards, a polling source with new
+rows) is not seen: a run holds the nodes below it. To read it again, build a new source
+object and bind it (`job.bind(sources=...)`), or call `clear_cache()` on the first node
+below it. (A start-of-run check for new data is planned, ITL-1102.) To deliver a
 side effect again (with `track_completion=False`), call `clear_cache()` on its node first.
 
 `node.last_run` holds the counts of a `node.run()`, as `job.last_run` does for `job.run()`,

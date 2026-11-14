@@ -40,10 +40,15 @@ class RunHoldingNode:
         True before the node's first run in this process and after ``clear_cache()``
         (no modified time), when an input or its producer was modified after the
         node's run (``StreamBase.is_stale``), or when any job node it depends on is
-        stale (ITL-1095). A stale node reads empty until it runs again.
+        stale (ITL-1095). A stale node reads empty until it runs again. Each node of
+        the ancestry is checked once, however many paths lead to it.
         """
+        return _stale(self, {})
+
+    def _own_staleness(self) -> bool:
+        """``StreamBase.is_stale`` of this node alone: its inputs and producer."""
         own: bool = super().is_stale  # pyright: ignore[reportAttributeAccessIssue]  # the stream base after this mixin in the MRO defines it
-        return own or upstream_job_node_stale(self.upstreams)  # pyright: ignore[reportAttributeAccessIssue]  # every node class this is mixed into has upstreams
+        return own
 
     def holds_current_run(self, *, load_only: bool = False) -> bool:
         """Whether the node holds the rows of a run that ``run()`` would not redo.
@@ -53,7 +58,8 @@ class RunHoldingNode:
         2026, ITL-1095). A node filled by a load-only run is current only for another
         load-only run: a full run computes the inputs it skipped. So is every node
         whose rows came from such a node: a node is current only if every job node
-        above it is current for the same kind of run.
+        above it is current for the same kind of run. Each node of the ancestry is
+        checked once.
 
         Args:
             load_only: Whether the question is for a load-only run.
@@ -61,18 +67,47 @@ class RunHoldingNode:
         Returns:
             ``True`` if the node holds a current run for such a run.
         """
-        if not self._holds_run(load_only=load_only) or self.is_stale:
-            return False
-        upstreams: tuple[Any, ...] = getattr(self, "upstreams", ())
-        return all(
-            upstream.holds_current_run(load_only=load_only)
-            for upstream in upstreams
-            if isinstance(upstream, RunHoldingNode)
-        )
+        return _current(self, load_only, {}, {})
 
     def _holds_run(self, *, load_only: bool) -> bool:
         """Whether the node holds the rows of a completed run good for such a run."""
         raise NotImplementedError
+
+
+def _job_upstreams(node: Any) -> list[RunHoldingNode]:
+    """The direct upstreams of ``node`` that are job nodes holding run rows."""
+    upstreams: tuple[Any, ...] = getattr(node, "upstreams", ())
+    return [upstream for upstream in upstreams if isinstance(upstream, RunHoldingNode)]
+
+
+def _stale(node: RunHoldingNode, memo: dict[int, bool]) -> bool:
+    """Whether ``node`` is stale; ``memo`` keeps each node's answer for one traversal."""
+    key = id(node)
+    if key not in memo:
+        memo[key] = node._own_staleness() or any(  # pyright: ignore[reportPrivateUsage]  # the mixin's own helper
+            _stale(upstream, memo) for upstream in _job_upstreams(node)
+        )
+    return memo[key]
+
+
+def _current(
+    node: RunHoldingNode,
+    load_only: bool,
+    memo: dict[int, bool],
+    stale_memo: dict[int, bool],
+) -> bool:
+    """Whether ``node`` holds a current run; memoized for one traversal."""
+    key = id(node)
+    if key not in memo:
+        memo[key] = (
+            node._holds_run(load_only=load_only)  # pyright: ignore[reportPrivateUsage]  # the mixin's own hook
+            and not _stale(node, stale_memo)
+            and all(
+                _current(upstream, load_only, memo, stale_memo)
+                for upstream in _job_upstreams(node)
+            )
+        )
+    return memo[key]
 
 
 def upstream_job_node_stale(upstreams: Iterable[Any]) -> bool:
@@ -87,7 +122,8 @@ def upstream_job_node_stale(upstreams: Iterable[Any]) -> bool:
     Returns:
         ``True`` if any upstream ``RunHoldingNode`` is stale.
     """
+    memo: dict[int, bool] = {}
     return any(
-        isinstance(upstream, RunHoldingNode) and upstream.is_stale
+        isinstance(upstream, RunHoldingNode) and _stale(upstream, memo)
         for upstream in upstreams
     )

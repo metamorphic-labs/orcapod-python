@@ -628,17 +628,18 @@ class SourceJobNode(SourceNodeBase):
 
         The later of the time the slot was bound and the bound source's own
         ``last_modified`` (a ``CachedSource`` or ``PollingSource`` moves it when it
-        reads new rows). A bound source that does not know its modification time
-        leaves the binding time. A source whose rows change without its modified time
-        moving (a table read lazily, a file rewritten in place) is not seen: build a
-        new source object and bind it, or clear the dependent nodes.
+        reads new rows). A bound source that does not know its modification time makes
+        the slot's unknown too (``None``), so every node below it is stale. A source
+        whose rows change without its modified time moving (a table read lazily, a file
+        rewritten in place) is not seen: build a new source object and bind it, or clear
+        the dependent nodes.
         """
         own = self._modified_time
-        bound = (
-            self._bound_source.last_modified if self._bound_source is not None else None
-        )
-        if own is None or bound is None:
-            return own if bound is None else bound
+        if self._bound_source is None:
+            return own
+        bound = self._bound_source.last_modified
+        if bound is None or own is None:
+            return bound
         return max(own, bound)
 
     # ------------------------------------------------------------------

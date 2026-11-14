@@ -395,7 +395,9 @@ class TestFunctionNodeStaleness:
             input_stream=input_stream,
             pipeline_database=db,
         )
-        list(node.iter_data())
+        node.run()  # a node that has not run is stale already (ITL-1095)
+        assert not node.is_stale
+        assert len(list(node.iter_data())) == 3
 
         time.sleep(0.01)
         input_stream._update_modified_time()
@@ -505,14 +507,20 @@ class TestFunctionNodeStaleness:
 
     def test_no_auto_clear_when_not_stale(self, double_pf):
         node = _make_node(double_pf, n=3)
+        node.run()  # a node that has not run holds nothing (ITL-1095)
+        assert not node.is_stale
         list(node.iter_data())
         cached_count = len(node._cached_output_datas)
+        assert cached_count == 3
 
         list(node.iter_data())
         assert len(node._cached_output_datas) == cached_count
 
     def test_as_table_no_auto_clear_when_not_stale(self, double_pf):
         node = _make_node(double_pf, n=3)
+        node.run()  # a node that has not run holds nothing (ITL-1095)
+        assert not node.is_stale
         table_before = node.as_table()
+        assert table_before.num_rows == 3
         table_after = node.as_table()
         assert table_before.equals(table_after)

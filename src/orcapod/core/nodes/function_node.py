@@ -1695,13 +1695,13 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 loaded_ids.append(entry_id)
                 if entry[1] is not None:
                     output.append((entry[0], entry[1]))
+            self._set_run_rows(loaded_ids, load_only=True, not_stored=not_stored)
+            ctx_obs.on_node_end(node_label, node_hash)
+            self._update_modified_time()
         except BaseException:
-            # A run that raised defines no rows.
+            # A run that raised (an observer at the node's end included) defines no rows.
             self.clear_cache()
             raise
-        self._set_run_rows(loaded_ids, load_only=True, not_stored=not_stored)
-        ctx_obs.on_node_end(node_label, node_hash)
-        self._update_modified_time()
         return output
 
     async def _async_execute_load_only(
@@ -3515,6 +3515,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         from dataclasses import replace
 
+        from orcapod.pipeline.node_run import commit_run
         from orcapod.pipeline.run_summary import RunCountingObserver, RunSummary
         from orcapod.utils.store_errors import flush_best_effort
 
@@ -3534,10 +3535,13 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             _ = self.execute(self._input_stream, observer=counter, load_only=load_only)
         except Exception as run_error:
-            flush_best_effort(run_error, *stores)
+            if not load_only:
+                # Commit what succeeded; a load-only run writes nothing (ITL-1095).
+                flush_best_effort(run_error, *stores)
+            self.clear_cache()
             raise
-        for store in stores:
-            store.flush()
+        if not load_only:
+            commit_run(stores, [self])
         node_summary = replace(
             counter.node_summary(self.label), not_stored=self.last_run_not_stored
         )
