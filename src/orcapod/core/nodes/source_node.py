@@ -12,6 +12,7 @@ import functools
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from orcapod import contexts
@@ -789,14 +790,29 @@ class SourceJobNode(SourceNodeBase):
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
         if bound_source is not None:
-            # Through the setter, which checks the source and, for a narrower one,
-            # records how its rows become rows of the declared schema (ITL-1112).
-            # super().__init__() has initialised the hash caches it invalidates.
-            self.bound_source = bound_source
+            # Checks the source and, for a narrower one, records how its rows become
+            # rows of the declared schema (ITL-1112), as the setter does, but does not
+            # stamp the slot as modified (ITL-1095). super().__init__() has
+            # initialised the hash caches it invalidates.
+            self._bind(bound_source)
 
     # ------------------------------------------------------------------
     # bound_source property — explicit binding with cache invalidation
     # ------------------------------------------------------------------
+
+    def run(self, *, load_only: bool = False) -> StreamView:
+        """Read the bound source's rows and return a ``StreamView`` of all of them.
+
+        A source is read, never computed, so ``load_only`` changes nothing; a job
+        node's ``run()`` takes it (ITL-1095).
+
+        Args:
+            load_only: Accepted for every job node; a source reads its rows either way.
+
+        Raises:
+            UnboundSourceError: When no concrete source is bound.
+        """
+        return super().run()
 
     @property
     def bound_source(self) -> StreamProtocol | None:
@@ -811,6 +827,20 @@ class SourceJobNode(SourceNodeBase):
         one that does not fit is refused before anything changes. A narrower source
         (``x: int`` for a slot declaring ``x: int | None``) is accepted, and the node
         gives its rows as rows of the declared schema (ITL-1112). ``None`` unbinds.
+        Binding stamps the slot as modified, so every job node fed by it is stale and
+        reads empty until it runs again (ITL-1095).
+
+        Raises:
+            SourceSpecMismatchError: If *value* does not fit the declared schema.
+        """
+        self._bind(value)
+        self._update_modified_time()
+
+    def _bind(self, value: StreamProtocol | None) -> None:
+        """Check *value* and bind it, invalidating both hash caches.
+
+        The binding the setter and ``__init__`` share. Only the setter stamps the slot
+        as modified (ITL-1095): a node built with its source is not a rebinding.
 
         Raises:
             SourceSpecMismatchError: If *value* does not fit the declared schema.
@@ -820,6 +850,26 @@ class SourceJobNode(SourceNodeBase):
         self._declared_form = form
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()
+
+    @property
+    def last_modified(self) -> datetime | None:
+        """When the slot's content last changed: its binding or its bound source.
+
+        The later of the time the slot was bound and the bound source's own
+        ``last_modified`` (a ``CachedSource`` or ``PollingSource`` moves it when it
+        reads new rows). A bound source that does not know its modification time makes
+        the slot's unknown too (``None``), so every node below it is stale. A source
+        whose rows change without its modified time moving (a table read lazily, a file
+        rewritten in place) is not seen: build a new source object and bind it, or clear
+        the dependent nodes.
+        """
+        own = self._modified_time
+        if self._bound_source is None:
+            return own
+        bound = self._bound_source.last_modified
+        if bound is None or own is None:
+            return bound
+        return max(own, bound)
 
     def _declared_form_for(self, source: StreamProtocol) -> _DeclaredForm | None:
         """Check *source* and return how its rows become rows of the declared schema.
