@@ -647,3 +647,17 @@ def test_an_async_cache_only_node_holds_the_rows_it_sent() -> None:
     sent = asyncio.run(run())
     assert len(sent) == 2
     assert cached.as_table().num_rows == 2
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_every_node_a_load_only_run_fills_says_so(orchestrator: str) -> None:
+    """Function, operator and side-effect nodes filled by a load-only run show
+    ``loaded_only``; a source node is read as in any run and shows its rows."""
+    db = InMemoryArrowDatabase()
+    _tap_job(db).run()
+    job = _tap_job(db)
+    job.run(orchestrator=ORCHESTRATORS[orchestrator](), load_only=True)
+    for label in ("rows", "tap", "down"):
+        assert job.nodes[label].head().status is ViewStatus.LOADED_ONLY, label
+    assert job.nodes["tap"].run(load_only=True).status is ViewStatus.LOADED_ONLY
+    assert job.nodes["s"].head().status is ViewStatus.ROWS

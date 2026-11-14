@@ -11,7 +11,7 @@ and delivers no side effect.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 from unittest import mock
 
 import pytest
@@ -225,7 +225,7 @@ def test_a_failed_commit_clears_only_the_nodes_that_ran(orchestrator: str) -> No
 @pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 def test_a_partly_held_run_under_each_error_policy(
-    orchestrator: str, error_policy: str
+    orchestrator: str, error_policy: Literal["continue", "fail_fast"]
 ) -> None:
     """Held nodes feed the nodes that run, on both orchestrators and error policies."""
     job = _build(ROWS, InMemoryArrowDatabase())

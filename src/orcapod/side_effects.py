@@ -26,6 +26,7 @@ from orcapod.core.streams.base import (
     schema_requires_io,
 )
 from orcapod.core.streams.view import (
+    LOADED_ONLY_SIDE_EFFECT_NOTE,
     SIDE_EFFECTS_NOTE,
     ViewStatus,
     StreamView,
@@ -1191,12 +1192,22 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             return self._head_without_rows(
                 config, ViewStatus.ROWS, note="its last run passed on no rows"
             )
-        return StreamView.of_rows(
+        view = StreamView.of_rows(
             self,
             self.as_table(columns=config).slice(0, n),
             tag_columns=self.keys(columns=config)[0],
             total_rows=len(rows),
             origin="held",
+        )
+        return self._with_run_status(view)
+
+    def _with_run_status(self, view: StreamView) -> StreamView:
+        """``view`` with the status of the node's last run: ``loaded_only`` after a
+        load-only run, which passed the rows on and delivered nothing (ITL-1095)."""
+        if not self._run_load_only:
+            return view
+        return dataclasses.replace(
+            view, status=ViewStatus.LOADED_ONLY, note=LOADED_ONLY_SIDE_EFFECT_NOTE
         )
 
     @override
@@ -1235,7 +1246,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             run_alone=lambda: self._run_alone(load_only=load_only),
             caller=sys._getframe(1),  # pyright: ignore[reportPrivateUsage]  # the caller's line is where a failure warning is shown
         )
-        return self._view_of_rows(self.as_table(), "held")
+        return self._with_run_status(self._view_of_rows(self.as_table(), "held"))
 
     def _run_alone(self, *, load_only: bool) -> None:
         """Run this node over an input stream that is not a job node; commit its log."""
@@ -1303,12 +1314,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                 f"SideEffectJobNode.async_execute expects exactly 1 input channel; "
                 f"got {len(inputs)}."
             )
-        max_concurrency = self._pod.pod_config.max_concurrency
-        sem = (
-            asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
-        )
-
         self._held_rows = None
+        # A load-only run reads no pod configuration: it delivers nothing.
         if load_only:
             try:
                 rows: list[tuple[TagProtocol, DataProtocol]] = []
@@ -1323,6 +1330,10 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             finally:
                 await self._close_output(output)
             return
+        max_concurrency = self._pod.pod_config.max_concurrency
+        sem = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
+        )
         # This run's rows, in the order they were sent downstream.
         passed_on: list[tuple[TagProtocol, DataProtocol]] = []
         # Makes recording a row and sending it one step: a send blocked by a full channel
