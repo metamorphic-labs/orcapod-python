@@ -33,9 +33,10 @@ class NestedNoneNotRestorableError(ValueError):
 def none_is_restorable(arrow_type: pa.DataType, is_user_class: IsUserClass) -> bool:
     """Whether a read restores a null at a nested position of ``arrow_type`` as None.
 
-    A user class (dataclass, ``orcapod.dataclass``, pydantic model) and every scalar
-    type are restored; a list, struct or map reads as an empty value, and any other
-    logical type fails.
+    A user class (dataclass, ``orcapod.dataclass``, pydantic model), every scalar type
+    and an Arrow map (its decoder passes a null through; a Python ``dict`` is stored as
+    a list of key/value structs, never as a map) are restored; a list or struct reads
+    as an empty value, and any other logical type fails.
 
     Args:
         arrow_type: The Arrow type of the nested position.
@@ -55,7 +56,6 @@ def none_is_restorable(arrow_type: pa.DataType, is_user_class: IsUserClass) -> b
         or pa.types.is_list_view(arrow_type)
         or pa.types.is_large_list_view(arrow_type)
         or pa.types.is_struct(arrow_type)
-        or pa.types.is_map(arrow_type)
     )
 
 

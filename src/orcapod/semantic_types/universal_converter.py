@@ -1735,7 +1735,7 @@ class UniversalTypeConverter:
             def convert_list(value: Any) -> list[Any]:
                 """Convert list storage, preserving set order independence on updates."""
                 if value is None:
-                    return []
+                    raise _none_not_admitted(python_type)
                 elements = [element_converter(item) for item in value]
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
@@ -1748,28 +1748,32 @@ class UniversalTypeConverter:
         elif origin is dict:
             key_converter = self.get_python_to_arrow_converter(args[0])
             value_converter = self.get_python_to_arrow_converter(args[1])
+
             # A dict is order independent: entries are stored in canonical key order
             # so equal dicts store and hash identically (ITL-905).
-            return lambda value: (
-                sort_dict_entries(
+            def convert_dict(value: Any) -> list[dict[str, Any]]:
+                if value is None:
+                    raise _none_not_admitted(python_type)
+                return sort_dict_entries(
                     [
                         {"key": key_converter(k), "value": value_converter(v)}
                         for k, v in value.items()
                     ]
                 )
-                if value is not None
-                else []
-            )
+
+            return convert_dict
 
         elif origin is set:
             # A set has no order: elements are stored sorted, never in iteration
             # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
             element_converter = self.get_python_to_arrow_converter(args[0])
-            return lambda value: (
-                sort_set_elements([element_converter(item) for item in value])
-                if value is not None
-                else []
-            )
+
+            def convert_set(value: Any) -> list[Any]:
+                if value is None:
+                    raise _none_not_admitted(python_type)
+                return sort_set_elements([element_converter(item) for item in value])
+
+            return convert_set
 
         elif origin is tuple:
             if len(set(args)) == 1:
@@ -1995,6 +1999,25 @@ class UniversalTypeConverter:
 
 
 # Public API functions
+def _none_not_admitted(python_type: DataType) -> UnsupportedValueError:
+    """The error for a None given where a container type without None is declared.
+
+    The container converters stored such a None as an empty container, a silent value
+    change (ITL-1144). The caller adds the column name.
+
+    Args:
+        python_type: The declared container type the None was given for.
+
+    Returns:
+        The error to raise.
+    """
+    return UnsupportedValueError(
+        f"a None is given where {python_type} is declared, which does not admit None "
+        f"(it would be stored as an empty container). Give an empty container, or "
+        f"declare the column's own type '| None' if a missing value is meant."
+    )
+
+
 def python_type_to_arrow_type(
     python_type: type, data_context: DataContext | str | None = None
 ) -> pa.DataType:

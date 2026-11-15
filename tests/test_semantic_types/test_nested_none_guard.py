@@ -18,7 +18,9 @@ import pytest
 
 import orcapod as op
 from orcapod.operators import Batch, GroupBy
-from orcapod.sources import ArrowTableSource, DictSource
+from orcapod.core.streams import ArrowTableStream
+from orcapod.errors import OutputTypeError
+from orcapod.sources import ArrowTableSource, DataFrameSource, DictSource, ListSource
 
 U = uuid.UUID(int=1)
 P = Path("/tmp/itl-1144")
@@ -220,3 +222,78 @@ class TestReducingOperators:
 
         with pytest.raises(ValueError, match=r"(?s)Column 'm'.*ITL-1144"):
             op.function_pod(output_keys="n")(consume)
+
+
+@dataclasses.dataclass
+class ListField:
+    xs: list[int]
+
+
+class TestNoneWhereTheTypeDoesNotAllowOne:
+    """A None given at a non-optional container position is refused at write.
+
+    It was stored as an empty container (``[]``, ``set()``, ``{}``): a silent value
+    change (ITL-1144, CodeRabbit on PR #394).
+    """
+
+    @pytest.mark.parametrize(
+        ("annotation", "value"),
+        [
+            (list[list[int]], [None, [1]]),
+            (list[set[int]], [None, {1}]),
+            (list[dict[str, int]], [None]),
+            (dict[str, list[int]], {"k": None}),
+        ],
+        ids=str,
+    )
+    def test_a_dict_source_refuses(self, annotation: Any, value: Any) -> None:
+        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*does not admit None"):
+            _source(value, annotation)
+
+    def test_a_class_field_refuses(self) -> None:
+        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*does not admit None"):
+            _source(ListField(None), ListField)  # pyright: ignore[reportArgumentType]  # the wrong value is the case under test
+
+    def test_a_list_source_refuses(self) -> None:
+        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*does not admit None"):
+            ListSource(
+                name="v",
+                data=[[None, [1]]],
+                data_schema={"element_index": int, "v": list[list[int]]},
+            )
+
+    def test_a_data_frame_source_raises_at_read(self) -> None:
+        # Polars keeps the null inner list; reading it to Python raises.
+        source = DataFrameSource({"id": [1], "v": [[None, [1]]]}, tag_columns=["id"])
+        with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
+            _read_v(source)
+
+    def test_a_function_output_refuses(self) -> None:
+        def produce(n: int) -> list[list[int]]:
+            return [None, [1]]  # pyright: ignore[reportReturnType]  # the wrong value is the case under test
+
+        pod = op.function_pod(output_keys="v")(produce).pod
+        stream = pod(DictSource([{"id": 1, "n": 1}], tag_columns=["id"], source_id="n"))
+        with pytest.raises(OutputTypeError):
+            list(stream.iter_data())
+
+    def test_a_none_at_an_optional_position_is_unchanged(self) -> None:
+        read, _ = _read_v(_source([None, 1], list[int | None]))
+        assert read == [None, 1]
+
+
+def test_a_null_map_element_still_reads_as_none() -> None:
+    """A null Arrow map element is read back as None, as before (CodeRabbit, PR #394).
+
+    A source refuses a map column (the Arrow hasher cannot hash it); a raw
+    ``ArrowTableStream`` holds one as given, and its map decoder passes a null through.
+    """
+    map_type = pa.map_(pa.large_string(), pa.int64())
+    table = pa.table(
+        {
+            "id": pa.array([1], pa.int64()),
+            "v": pa.array([[None, [("a", 1)]]], pa.large_list(map_type)),
+        }
+    )
+    [(_, data)] = list(ArrowTableStream(table, tag_columns=["id"]).iter_data())
+    assert data.as_dict()["v"][0] is None

@@ -1162,6 +1162,11 @@ A column that already holds such a `None` (an Arrow table given to `ArrowTableSo
 returning a wrong value. Drop the nulls
 first (`DropNulls` on that column) or keep the value in a dataclass.
 
+A `None` given where the declared type does not allow one (`[None, [1]]` for
+`list[list[int]]`) is refused when a source is built from it, naming the column: it used to
+be stored as an empty list. A function returning one is refused as described in
+[Return values must match the declared type](#return-values-must-match-the-declared-type).
+
 ## Multiple input streams
 
 If you pass multiple streams to a function pod, they are automatically joined (using
