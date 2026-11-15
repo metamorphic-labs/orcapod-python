@@ -465,6 +465,16 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
             try:
                 assert table.num_rows == len(want), f"{table.num_rows} rows"
                 if not want:
+                    # An empty preview still has the requested columns, and (where
+                    # the stream holds every row) the types of the rows.
+                    assert_requested_columns(
+                        table, config, layout, require_sorted=False
+                    )
+                    if state in ("fresh_source", "complete_pod"):
+                        full = stream.as_table(**config)
+                        assert table.schema.equals(full.schema), (
+                            f"empty preview schema {table.schema} differs from {full.schema}"
+                        )
                     continue
                 if state in ("fresh_source", "complete_pod"):
                     # Every row is held: as_table computes nothing more.

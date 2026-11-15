@@ -182,9 +182,15 @@ class Oracle:
             seen.add(column)
         return column
 
+    def _derivation(self, column: str) -> Derivation | None:
+        """The derivation of ``column``, or of the column it is a rename of."""
+        return self.derivations.get(column) or self.derivations.get(
+            self.base_name(column)
+        )
+
     def origins_for_value(self, column: str, value: Any) -> list[Origin]:
         """Every origin whose value of the output column ``column`` is ``value``."""
-        derivation = self.derivations.get(column)
+        derivation = self._derivation(column)
         if derivation is not None:
             return [
                 o
@@ -197,14 +203,14 @@ class Oracle:
 
     def expected_value(self, column: str, origin: Origin) -> Any:
         """The value the output column ``column`` has for a row whose origin is ``origin``."""
-        derivation = self.derivations.get(column)
+        derivation = self._derivation(column)
         if derivation is not None:
             return derivation.compute(origin)
         return origin.values[self.base_name(column)]
 
     def holds(self, column: str, origin: Origin) -> bool:
         """Whether a row of ``origin``'s source gives the output column ``column``."""
-        derivation = self.derivations.get(column)
+        derivation = self._derivation(column)
         if derivation is not None:
             return derivation.source_id == origin.source_id
         return self.base_name(column) in origin.values

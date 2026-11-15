@@ -723,3 +723,14 @@ def test_a_source_only_the_tags_name_still_needs_a_system_tag_pair() -> None:
     table = table.take(nulls)
     with pytest.raises(AssertionError, match=re.escape("sources ['A']")):
         assert_rows_aligned(table, layout, sources.oracle, joined.data_context)
+
+
+def test_a_renamed_derived_column_resolves_through_its_derivation() -> None:
+    """``y`` derived from A and renamed to ``z``: every lookup of ``z`` finds it."""
+    oracle = make_sources("unique").oracle
+    oracle.derive("y", "A", lambda o: 10 * o.values["x"])
+    oracle.rename("z", "y")
+    origin = next(o for o in oracle.origins if o.source_id == "A")
+    assert oracle.holds("z", origin)
+    assert oracle.expected_value("z", origin) == 10 * origin.values["x"]
+    assert origin in oracle.origins_for_value("z", 10 * origin.values["x"])
