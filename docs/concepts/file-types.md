@@ -35,19 +35,22 @@ as S3. A local `op.UPath` value in a source is treated as a `Path`.
 ## `op.File`
 
 ```python
+import tempfile
 from pathlib import Path
 
 import orcapod as op
 from orcapod import function_pod
 from orcapod.sources import DictSource
 
-Path("recordings").mkdir(exist_ok=True)
-Path("recordings/a.txt").write_text("1\n2\n3\n")
-Path("recordings/b.txt").write_text("4\n5\n")
+workdir = Path(tempfile.mkdtemp())  # a fresh directory, so no file of yours is overwritten
+recordings = workdir / "recordings"
+recordings.mkdir()
+(recordings / "a.txt").write_text("1\n2\n3\n")
+(recordings / "b.txt").write_text("4\n5\n")
 
-recording = op.File("recordings/a.txt")
+recording = op.File(recordings / "a.txt")
 print(recording.name, recording.suffix, str(recording))
-# a.txt .txt recordings/a.txt
+# a.txt .txt .../recordings/a.txt
 print(recording.read_text().split())
 # ['1', '2', '3']
 ```
@@ -66,7 +69,7 @@ An `op.File`:
 
 ```python
 try:
-    op.File("recordings/missing.txt")
+    op.File(recordings / "missing.txt")
 except FileNotFoundError as err:
     print(type(err).__name__)
 # FileNotFoundError
@@ -78,8 +81,8 @@ parameter as `op.File`:
 ```python
 files = DictSource(
     data=[
-        {"name": "a", "recording": op.File("recordings/a.txt")},
-        {"name": "b", "recording": op.File("recordings/b.txt")},
+        {"name": "a", "recording": op.File(recordings / "a.txt")},
+        {"name": "b", "recording": op.File(recordings / "b.txt")},
     ],
     tag_columns=["name"],
     source_id="recordings",
@@ -103,7 +106,7 @@ print(count_lines.pod(files).as_table().to_pylist())
 an existing directory, and its identity is computed from the files inside it, recursively.
 
 ```python
-folder = op.Directory("recordings", ignore=["*.log"])
+folder = op.Directory(recordings, ignore=["*.log"])
 print(sorted(p.name for p in folder.iterdir()))
 # ['a.txt', 'b.txt']
 ```
@@ -121,12 +124,13 @@ A function that produces a file writes it and returns where it is. Annotate the 
 as `Path`:
 
 ```python
-Path("summaries").mkdir(exist_ok=True)
+summaries = workdir / "summaries"
+summaries.mkdir()
 
 
 @function_pod(output_keys="summary")
 def summarize(recording: op.File) -> Path:
-    out_path = Path("summaries") / f"{recording.stem}_summary.txt"
+    out_path = summaries / f"{recording.stem}_summary.txt"
     out_path.write_text(f"{len(recording.read_text().splitlines())} lines\n")
     return out_path
 
