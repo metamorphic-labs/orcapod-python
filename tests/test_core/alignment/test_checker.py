@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -734,3 +734,32 @@ def test_a_renamed_derived_column_resolves_through_its_derivation() -> None:
     assert oracle.holds("z", origin)
     assert oracle.expected_value("z", origin) == 10 * origin.values["x"]
     assert origin in oracle.origins_for_value("z", 10 * origin.values["x"])
+
+
+def test_a_merged_column_whose_elements_both_come_from_one_input_is_named() -> None:
+    """A and C both hold ``x=7``: ``[7, 7]`` with two tokens of A leaves C's out."""
+    sources = make_sources("unique")
+    oracle = sources.oracle
+    a = next(o for o in oracle.origins if o.source_id == "A")
+    c = next(o for o in oracle.origins if o.source_id == "C")
+    c_values = cast("dict[str, Any]", c.values)
+    for name in (*TAG_COLUMNS, "x"):
+        c_values[name] = a.values[name]
+    sep = constants.BLOCK_SEPARATOR
+
+    def table_with(tokens: list[str]) -> pa.Table:
+        return pa.table(
+            {
+                **{n: [a.values[n]] for n in TAG_COLUMNS},
+                "x": [[a.values["x"], a.values["x"]]],
+                "_source_x": [tokens],
+            }
+        )
+
+    token_a = f"A{sep}{a.token}{sep}x"
+    token_c = f"C{sep}{c.token}{sep}x"
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("x",), merged=frozenset({"x"}))
+    context = sources.a.data_context
+    assert_rows_aligned(table_with([token_a, token_c]), layout, oracle, context)
+    with pytest.raises(AssertionError, match="its elements come from the inputs"):
+        assert_rows_aligned(table_with([token_a, token_a]), layout, oracle, context)

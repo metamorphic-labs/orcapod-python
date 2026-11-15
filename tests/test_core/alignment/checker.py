@@ -109,6 +109,8 @@ class _RowChecker:
         self.checked: set[str] = set()
         # The sources whose system tag pair was valid.
         self.paired: set[str] = set()
+        # The origin each resolved element of a merged column came from.
+        self.merged_origins: dict[str, list[Origin]] = {}
         # (member, column, value, token) of every data element no single origin
         # explained.
         self.unresolved: list[tuple[int, str, Any, str | None]] = []
@@ -335,6 +337,7 @@ class _RowChecker:
     def _assign_merged(self, column: str, origin: Origin) -> None:
         """Record the origin of one element of a merged column (one element per input)."""
         self._assign(0, column, origin)
+        self.merged_origins.setdefault(column, []).append(origin)
         self.checked.add(column)
 
     def _token_error(self, column: str, origin: Origin, token: str) -> str | None:
@@ -563,6 +566,22 @@ class _RowChecker:
         actual = self._elements(column)
         if sorted(map(repr, expected)) != sorted(map(repr, actual)):
             self.fail(column, f"holds {actual!r}, its inputs have {expected!r}")
+        resolved = self.merged_origins.get(column, [])
+        if len(resolved) == len(actual):
+            # One element per contributing input: two elements resolving to one
+            # input leave the other's out, though the values may look right.
+            got = Counter(o.source_id for o in resolved)
+            want = Counter(
+                o.source_id
+                for o in self.state.members[0].values()
+                if self.oracle.holds(column, o)
+            )
+            if got != want:
+                self.fail(
+                    column,
+                    f"its elements come from the inputs {dict(got)}, not "
+                    f"one from each of {dict(want)}",
+                )
         self.checked.add(column)
 
 
