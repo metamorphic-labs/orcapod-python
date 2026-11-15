@@ -302,10 +302,10 @@
   "set_bytes.pipeline_hash": "semantic_v1:e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951",
   "set_bytes.row[{\"k\":\"r1\"}]._tag_record_id::e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951": "518dfec57f2c51998591fe459d19d3df",
   "set_bytes.row[{\"k\":\"r1\"}]._tag_source_id::e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951": "golden_set_bytes",
-  "set_bytes.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:000002ebef00311f86221db68f0ba0d3ac6e5f27da0895a8e8c0aa4bd38607958f86d1",
+  "set_bytes.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:00000209b1234d474584dcaba0bf1697326d8a7d17af08e0663849d8e9edd61159dc7c",
   "set_bytes.row[{\"k\":\"r2\"}]._tag_record_id::e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951": "7a4a4d5d3c5c54c5a27390332d0ea93c",
   "set_bytes.row[{\"k\":\"r2\"}]._tag_source_id::e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951": "golden_set_bytes",
-  "set_bytes.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:000002ef16814e8ce9ed31ebed7787fbcac1a2a38a85299e719d3d65fb2aafe40eea35",
+  "set_bytes.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:000002b82f8de0c4d706e1adfab09b0a0721217f99c45992a902dab3dcd87595e89b4e",
   "set_bytes.system_tag_columns": [
     "_tag_source_id::e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951",
     "_tag_record_id::e61a21b4303d9aaaad4bc7acbbcbc232919fae2c9c84f8c61dd166f75607d951"
@@ -314,10 +314,10 @@
   "set_int.pipeline_hash": "semantic_v1:07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a",
   "set_int.row[{\"k\":\"r1\"}]._tag_record_id::07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a": "12fcd3ffe39f510b9d47f7ea2c0fcfa2",
   "set_int.row[{\"k\":\"r1\"}]._tag_source_id::07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a": "golden_set_int",
-  "set_int.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:0000026d5018d7edf30da5500878c8ae6f97b0cda14f6ac6cf07c640998091382250a6",
+  "set_int.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:000002c66e08689c6546e8e2e4c75480f12aeb8fa8f03117cb4bbca20239054da1226d",
   "set_int.row[{\"k\":\"r2\"}]._tag_record_id::07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a": "9f913c859c6a56478883a077d10413de",
   "set_int.row[{\"k\":\"r2\"}]._tag_source_id::07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a": "golden_set_int",
-  "set_int.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:00000255f2f160238ee464d3292a9a0ea1ae5c4797473a662f4dff02586fab4f26b2c6",
+  "set_int.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:00000250eadd1390c914bb77edc5286000569c65c11d01eeb038f5ca657646cb405265",
   "set_int.system_tag_columns": [
     "_tag_source_id::07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a",
     "_tag_record_id::07fc17e5d283de983dbfb456c28dee31905f70b9714038c5f6977ea4f816467a"
@@ -326,10 +326,10 @@
   "set_str.pipeline_hash": "semantic_v1:a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93",
   "set_str.row[{\"k\":\"r1\"}]._tag_record_id::a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93": "1db3719420995abab9ef75a223c5baea",
   "set_str.row[{\"k\":\"r1\"}]._tag_source_id::a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93": "golden_set_str",
-  "set_str.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:0000020420d58c35f4830d949a6e844cb0be834c39370b05309ca944555e78e761be2c",
+  "set_str.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:000002d3577efbb77c8cd29859c39d1ec4540028c928669c3c17817682a657580a915c",
   "set_str.row[{\"k\":\"r2\"}]._tag_record_id::a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93": "107803948e885973a6746072bde16429",
   "set_str.row[{\"k\":\"r2\"}]._tag_source_id::a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93": "golden_set_str",
-  "set_str.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:000002e887edd4898d61012724d36ccf15cbd49156e5b3b9e9798784f3b5918164cf40",
+  "set_str.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:000002ca9566cd0df49261b343372e28e82696239c316519fb1b93883f06ba78696b65",
   "set_str.system_tag_columns": [
     "_tag_source_id::a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93",
     "_tag_record_id::a8da17a17f8cea1f96f383d788cb81caf5424d810c9b5faa28b190502cfe7b93"
