@@ -592,8 +592,15 @@ def assert_rows_aligned(
     for index, row in enumerate(rows):
         checker = _RowChecker(index, row, layout, oracle, function_tokens)
         checker.resolve_data()
-        checker.check_system_tags()
-        checker.resolve_remaining()
+        if layout.members:
+            # A folded pair is checked against the members' origins, which a shared
+            # null member has only once its tags resolve it. A scalar pair assigns its
+            # origin itself, so it goes first.
+            checker.resolve_remaining()
+            checker.check_system_tags()
+        else:
+            checker.check_system_tags()
+            checker.resolve_remaining()
         checker.check_values()
         if hash_column in row:
             data_row = table.slice(index, 1).select(list(layout.data_keys))

@@ -571,3 +571,31 @@ def test_an_empty_batch_table_fails_member_coverage() -> None:
     xs = [o.values["x"] for o in sources.oracle.origins if o.source_id == "A"]
     with pytest.raises(AssertionError, match="are not the input rows"):
         assert_members_cover(table.slice(0, 0), "x", xs)
+
+
+def test_a_folded_row_whose_members_only_the_tags_resolve_passes() -> None:
+    """A null ``m`` several rows share names no origin; the folded pair must still pass.
+
+    The members' origins come from their tags, so they must be resolved before the
+    folded system tags are checked against them (CodeRabbit, ITL-1034).
+    """
+    sources = make_sources("unique")
+    batched = Batch(2)(sources.a)
+    table = batched.as_table(all_info=True)
+    tag_keys, _ = batched.keys()
+    pair = [
+        c
+        for c in table.column_names
+        if c.startswith(
+            (
+                constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+                constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+            )
+        )
+    ]
+    bare = table.select([*tag_keys, "m", *pair])
+    layout = Layout(
+        tag_keys=tag_keys, data_keys=("m",), members=frozenset((*tag_keys, "m"))
+    )
+    assert any(None in (v or []) for v in bare.column("m").to_pylist())
+    assert_rows_aligned(bare, layout, sources.oracle, batched.data_context)
