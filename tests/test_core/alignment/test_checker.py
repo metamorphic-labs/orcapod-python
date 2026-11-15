@@ -431,6 +431,42 @@ def test_exchanged_tokens_of_a_repeated_derived_value_are_named() -> None:
         )
 
 
+def test_a_derived_token_is_checked_against_an_origin_known_from_another_column() -> (
+    None
+):
+    """``x`` names each row's origin; the shared ``p``'s exchanged tokens are named."""
+    sources = make_sources("unique")
+    oracle = sources.oracle
+    oracle.derive("p", "A", lambda o: o.values["x"] % 2)
+    origins = [o for o in oracle.origins if o.source_id == "A"]
+    sep = constants.BLOCK_SEPARATOR
+    tokens = {o.record_id: f"fn{sep}{o.record_id.hex()}{sep}p" for o in origins}
+    table = pa.table(
+        {
+            "g": [o.values["g"] for o in origins],
+            "n": [o.values["n"] for o in origins],
+            "x": [o.values["x"] for o in origins],
+            "p": [o.values["x"] % 2 for o in origins],
+            "_source_p": [tokens[o.record_id] for o in origins],
+        }
+    )
+    layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("x", "p"))
+    function_tokens = {("p", record_id): t for record_id, t in tokens.items()}
+    context = sources.a.data_context
+    assert_rows_aligned(table, layout, oracle, context, function_tokens=function_tokens)
+    p = table.column("p").to_pylist()
+    first, second = [i for i, v in enumerate(p) if v == p[0]][:2]
+    swapped = table.column("_source_p").to_pylist()
+    swapped[first], swapped[second] = swapped[second], swapped[first]
+    exchanged = table.set_column(
+        4, table.field("_source_p"), pa.array(swapped, table.field("_source_p").type)
+    )
+    with pytest.raises(AssertionError, match="column '_source_p': token"):
+        assert_rows_aligned(
+            exchanged, layout, oracle, context, function_tokens=function_tokens
+        )
+
+
 def test_all_info_inside_the_column_config_asks_for_every_group() -> None:
     """``{"columns": {"all_info": True}}`` asks what top-level ``all_info`` asks (#363)."""
     table, layout, *_ = source_table()

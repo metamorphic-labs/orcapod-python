@@ -262,6 +262,17 @@ class _RowChecker:
         """
         for member in sorted({m for m, _, _, _ in self.unresolved}):
             known = self.state.members[member]
+            for _, column, _, token in (e for e in self.unresolved if e[0] == member):
+                # An element whose column a known origin holds is that origin's (its
+                # value is checked by ``check_values``); a derived token is checked
+                # here. Several known origins holding it name no single row.
+                holders = [o for o in known.values() if self.oracle.holds(column, o)]
+                if (
+                    len(holders) == 1
+                    and token is not None
+                    and column in self.oracle.derivations
+                ):
+                    self._check_function_token(column, holders[0], token)
             entries = [
                 (column, value, token)
                 for m, column, value, token in self.unresolved

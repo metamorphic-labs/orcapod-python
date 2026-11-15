@@ -194,3 +194,8 @@ ColumnConfig set: `{}` (default), `sort_by_tags=True`, `content_hash=True`,
   #374, #367, #369, #377). ITL-1091 is fixed by #377, so the strict xfail is gone. A
   side-effect job node's preview after its run now shows the rows the run passed on
   (each aligned under every config) and still delivers nothing. 6530 pass, no marks.
+* Nov 15 (pre-push CodeRabbit CLI review on 62959d9e, 1 finding): a derived element that
+  a known origin holds was skipped without its token being checked. With x present, an
+  exchanged `_source_p` of a shared p passed. resolve_remaining now checks it against
+  that origin; new self-test. #380's load path: bind + run(load_only=True), and grouped
+  joins the load read-backs. 6639 pass, no marks.
