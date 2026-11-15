@@ -64,7 +64,7 @@ with job:
     double.pod(numbers, label="double")
 job.run()
 
-print(job.nodes["double"].as_table().to_pylist())
+print(job.nodes["double"].as_table().sort_by("name").to_pylist())
 # [{'name': 'a', 'doubled': 2}, {'name': 'b', 'doubled': 4}]
 print("Orcapod is working.")
 # Orcapod is working.

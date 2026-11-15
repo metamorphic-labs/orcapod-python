@@ -223,7 +223,10 @@ print(len(list(out_dir.iterdir())))
 Three things to keep in mind when a function writes files:
 
 - **Choose the output name from the inputs**, as above, so that two rows never write to the
-  same file.
+  same file. Two rows whose files have the same content share one stored result, and so
+  one output path; and a changed file's new result overwrites the old output under the same
+  name, while the stored result of the old content still points there. When either matters,
+  put a digest of the file's content into the output name.
 - **The database remembers the path, not the file.** If you delete `spike_summaries/` and
   run again, Orcapod finds the stored results, calls nothing, and hands you paths to files
   that no longer exist. Treat output files as part of the database: delete both or neither.

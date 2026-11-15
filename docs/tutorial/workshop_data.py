@@ -91,6 +91,7 @@ def make_dataset(root: str | Path = "workshop_data") -> Path:
                 f"subject: {subject_id}\nsession: {session}\n"
                 f"genotype: {genotype}\nduration_s: {duration_s}\n",
                 encoding="utf-8",
+                newline="\n",
             )
             for probe in PROBES:
                 spikes: list[tuple[float, int]] = []

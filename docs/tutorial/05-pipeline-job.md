@@ -118,7 +118,7 @@ A node is a stream. Everything from Part 1 works on it:
 means = job.nodes["session_means"]
 print(means.output_schema())
 # (Schema({'subject_id': str, 'session': str}), Schema({'mean_rate_hz': float}))
-print(means.as_pandas_df())
+print(means.as_pandas_df().sort_values(["subject_id", "session"], ignore_index=True))
 #   subject_id session  mean_rate_hz
 # 0   mouse_01      s1      6.033333
 # 1   mouse_01      s2      6.793750
@@ -175,8 +175,11 @@ and the node holds the same 8 rows.
 directory and is what you use for real work:
 
 ```python
+import shutil
+
 from orcapod.databases import DeltaTableDatabase
 
+shutil.rmtree("workshop_db", ignore_errors=True)  # start empty, also when you rerun this page
 job = build_job(DeltaTableDatabase("workshop_db"))
 job.run()
 print(len(calls))

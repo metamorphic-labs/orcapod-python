@@ -19,7 +19,10 @@ can be reused (see [Identity & Hashing](identity.md)).
 
 - With `op.File` and `op.Directory`, editing the file makes it a new input and results
   computed from it are recomputed. Moving or renaming it without changing its content does
-  not.
+  not. The edit is seen when the source is built again, for example by a new job in a new
+  Python session. A job that already ran over a `DictSource` holds its run and does not see
+  the edit: build a new source and bind it (see
+  [Pipelines and Jobs](pipeline-job.md#what-a-re-run-computes)).
 - With `Path`, it is the other way round: moving the file makes it a new input, and editing
   it in place goes unnoticed.
 
@@ -136,6 +139,11 @@ for tag, data in result.iter_data():
 # {'name': 'a'} 3 lines
 # {'name': 'b'} 2 lines
 ```
+
+Rows whose `op.File` inputs have the same content share one stored result, so they get the
+same output path. And if an input file changes, its new result overwrites the old output
+file under the same name, while the stored result of the old content still points there.
+When either matters, put a digest of the input's content into the output name.
 
 When such a function runs inside a [`PipelineJob`](pipeline-job.md):
 

@@ -286,7 +286,7 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
   uri = dt.table_uri if "://" in dt.table_uri else "file://" + dt.table_uri
   fs, root = pyarrow.fs.FileSystem.from_uri(uri)
   dataset = dt.to_pyarrow_dataset(filesystem=pyarrow.fs.SubTreeFileSystem(root, fs))
-  print(dataset.to_table().to_pylist())
+  print(dataset.to_table().sort_by("subject_id").to_pylist())
   # [{'subject_id': 'mouse_01'}, {'subject_id': 'mouse_02'}]
   ```
 
